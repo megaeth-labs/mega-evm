@@ -1,0 +1,228 @@
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+homepage = "https://paradigmxyz.github.io/reth"
+repository = "https://github.com/paradigmxyz/reth"
+exclude = [".github/"]
+
+[workspace]
+members = ["crates/megaeth-evm"]
+default-members = ["crates/megaeth-evm"]
+exclude = []
+
+# Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
+# https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
+resolver = "2"
+
+[workspace.lints]
+rust.missing_debug_implementations = "warn"
+rust.missing_docs = "warn"
+rust.rust_2018_idioms = { level = "deny", priority = -1 }
+rust.unreachable_pub = "warn"
+rust.unused_must_use = "deny"
+rustdoc.all = "warn"
+# rust.unnameable-types = "warn"
+
+
+[workspace.lints.clippy]
+# These are some of clippy's nursery (i.e., experimental) lints that we like.
+# By default, nursery lints are allowed. Some of the lints below have made good
+# suggestions which we fixed. The others didn't have any findings, so we can
+# assume they don't have that many false positives. Let's enable them to
+# prevent future problems.
+borrow_as_ptr = "warn"
+branches_sharing_code = "warn"
+clear_with_drain = "warn"
+cloned_instead_of_copied = "warn"
+collection_is_never_read = "warn"
+dbg_macro = "warn"
+derive_partial_eq_without_eq = "warn"
+doc_markdown = "warn"
+empty_line_after_doc_comments = "warn"
+empty_line_after_outer_attr = "warn"
+enum_glob_use = "warn"
+equatable_if_let = "warn"
+explicit_into_iter_loop = "warn"
+explicit_iter_loop = "warn"
+flat_map_option = "warn"
+from_iter_instead_of_collect = "warn"
+if_not_else = "warn"
+if_then_some_else_none = "warn"
+implicit_clone = "warn"
+imprecise_flops = "warn"
+iter_on_empty_collections = "warn"
+iter_on_single_items = "warn"
+iter_with_drain = "warn"
+iter_without_into_iter = "warn"
+large_stack_frames = "warn"
+manual_assert = "warn"
+manual_clamp = "warn"
+manual_is_variant_and = "warn"
+manual_string_new = "warn"
+match_same_arms = "warn"
+missing-const-for-fn = "allow" # TODO: https://github.com/rust-lang/rust-clippy/issues/14020
+mutex_integer = "warn"
+naive_bytecount = "warn"
+needless_bitwise_bool = "warn"
+needless_continue = "warn"
+needless_for_each = "warn"
+needless_pass_by_ref_mut = "warn"
+nonstandard_macro_braces = "warn"
+option_as_ref_cloned = "warn"
+or_fun_call = "warn"
+path_buf_push_overwrite = "warn"
+read_zero_byte_vec = "warn"
+result_large_err = "allow"
+redundant_clone = "warn"
+redundant_else = "warn"
+single_char_pattern = "warn"
+string_lit_as_bytes = "warn"
+string_lit_chars_any = "warn"
+suboptimal_flops = "warn"
+suspicious_operation_groupings = "warn"
+trailing_empty_array = "warn"
+trait_duplication_in_bounds = "warn"
+transmute_undefined_repr = "warn"
+trivial_regex = "warn"
+tuple_array_conversions = "warn"
+type_repetition_in_bounds = "warn"
+uninhabited_references = "warn"
+unnecessary_self_imports = "warn"
+unnecessary_struct_initialization = "warn"
+unnested_or_patterns = "warn"
+unused_peekable = "warn"
+unused_rounding = "warn"
+use_self = "warn"
+useless_let_if_seq = "warn"
+while_float = "warn"
+zero_sized_map_values = "warn"
+
+# These are nursery lints which have findings. Allow them for now. Some are not
+# quite mature enough for use in our codebase and some we don't really want.
+# Explicitly listing should make it easier to fix in the future.
+as_ptr_cast_mut = "allow"
+cognitive_complexity = "allow"
+debug_assert_with_mut_call = "allow"
+fallible_impl_from = "allow"
+future_not_send = "allow"
+needless_collect = "allow"
+non_send_fields_in_send_ty = "allow"
+redundant_pub_crate = "allow"
+significant_drop_in_scrutinee = "allow"
+significant_drop_tightening = "allow"
+too_long_first_doc_paragraph = "allow"
+
+# Speed up compilation time for dev builds by reducing emitted debug info.
+# NOTE: Debuggers may provide less useful information with this setting.
+# Uncomment this section if you're using a debugger.
+[profile.dev]
+# https://davidlattimore.github.io/posts/2024/02/04/speeding-up-the-rust-edit-build-run-cycle.html
+debug = "full"
+split-debuginfo = "unpacked"
+
+# Speed up tests.
+[profile.dev.package]
+proptest.opt-level = 3
+rand_chacha.opt-level = 3
+rand_xorshift.opt-level = 3
+unarray.opt-level = 3
+
+# Meant for testing - all optimizations, but with debug assertions and overflow checks.
+[profile.hivetests]
+inherits = "test"
+opt-level = 3
+lto = "thin"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = "none"
+strip = "symbols"
+panic = "unwind"
+codegen-units = 16
+
+# Use the `--profile profiling` flag to show symbols in release mode.
+# e.g. `cargo build --profile profiling`
+[profile.profiling]
+inherits = "release"
+debug = "full"
+strip = "none"
+
+[profile.maxperf]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace.dependencies]
+# revm
+revm = { version = "20.0.0-alpha.7", default-features = false }
+revm-bytecode = { version = "1.0.0-alpha.5", default-features = false }
+revm-database = { version = "1.0.0-alpha.5", default-features = false }
+revm-state = { version = "1.0.0-alpha.5", default-features = false }
+revm-primitives = { version = "16.0.0-alpha.5", default-features = false }
+revm-interpreter = { version = "16.0.0-alpha.7", default-features = false }
+revm-inspector = { version = "1.0.0-alpha.7", default-features = false }
+revm-context = { version = "1.0.0-alpha.6", default-features = false }
+revm-context-interface = { version = "1.0.0-alpha.6", default-features = false }
+revm-database-interface = { version = "1.0.0-alpha.5", default-features = false }
+revm-inspectors = "0.17.0-alpha.1"
+
+# alloy
+alloy-chains = { version = "0.1.64", default-features = false }
+alloy-dyn-abi = "0.8.20"
+alloy-json-abi = { version = "0.8.20", default-features = false }
+alloy-eip2124 = { version = "0.1.0", default-features = false }
+alloy-evm = { version = "0.1.0-alpha.3", default-features = false }
+alloy-primitives = { version = "0.8.20", default-features = false, features = ["map-foldhash"] }
+alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
+alloy-sol-types = { version = "0.8.20", default-features = false }
+alloy-trie = { version = "0.7.9", default-features = false }
+
+alloy-hardforks = "0.1"
+
+alloy-consensus = { version = "0.12.6", default-features = false }
+alloy-contract = { version = "0.12.6", default-features = false }
+alloy-eips = { version = "0.12.6", default-features = false }
+alloy-genesis = { version = "0.12.6", default-features = false }
+alloy-json-rpc = { version = "0.12.6", default-features = false }
+alloy-network = { version = "0.12.6", default-features = false }
+alloy-network-primitives = { version = "0.12.6", default-features = false }
+alloy-node-bindings = { version = "0.12.6", default-features = false }
+alloy-provider = { version = "0.12.6", features = ["reqwest"], default-features = false }
+alloy-pubsub = { version = "0.12.6", default-features = false }
+alloy-rpc-client = { version = "0.12.6", default-features = false }
+alloy-rpc-types = { version = "0.12.6", features = ["eth"], default-features = false }
+alloy-rpc-types-admin = { version = "0.12.6", default-features = false }
+alloy-rpc-types-anvil = { version = "0.12.6", default-features = false }
+alloy-rpc-types-beacon = { version = "0.12.6", default-features = false }
+alloy-rpc-types-debug = { version = "0.12.6", default-features = false }
+alloy-rpc-types-engine = { version = "0.12.6", default-features = false }
+alloy-rpc-types-eth = { version = "0.12.6", default-features = false }
+alloy-rpc-types-mev = { version = "0.12.6", default-features = false }
+alloy-rpc-types-trace = { version = "0.12.6", default-features = false }
+alloy-rpc-types-txpool = { version = "0.12.6", default-features = false }
+alloy-serde = { version = "0.12.6", default-features = false }
+alloy-signer = { version = "0.12.6", default-features = false }
+alloy-signer-local = { version = "0.12.6", default-features = false }
+alloy-transport = { version = "0.12.6" }
+alloy-transport-http = { version = "0.12.6", features = ["reqwest-rustls-tls"], default-features = false }
+alloy-transport-ipc = { version = "0.12.6", default-features = false }
+alloy-transport-ws = { version = "0.12.6", default-features = false }
+
+# op
+alloy-op-evm = { version = "0.1.0-alpha.3", default-features = false }
+alloy-op-hardforks = "0.1"
+op-alloy-rpc-types = { version = "0.11.2", default-features = false }
+op-alloy-rpc-types-engine = { version = "0.11.2", default-features = false }
+op-alloy-network = { version = "0.11.2", default-features = false }
+op-alloy-consensus = { version = "0.11.2", default-features = false }
+op-alloy-flz = { version = "0.11.2", default-features = false }
+op-alloy-rpc-jsonrpsee = { version = "0.11.1", default-features = false }
+op-revm = { version = "1.0.0-alpha.6", default-features = false }
+
+# misc
+delegate = "0.13"
+derive_more = { version = "2", default-features = false, features = ["full"] }
+serde = { version = "1.0", default-features = false }
