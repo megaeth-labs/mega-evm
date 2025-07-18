@@ -158,15 +158,7 @@ codegen-units = 1
 [workspace.dependencies]
 # revm
 revm = { version = "20.0.0-alpha.7", default-features = false }
-revm-bytecode = { version = "1.0.0-alpha.5", default-features = false }
-revm-database = { version = "1.0.0-alpha.5", default-features = false }
-revm-state = { version = "1.0.0-alpha.5", default-features = false }
-revm-primitives = { version = "16.0.0-alpha.5", default-features = false }
-revm-interpreter = { version = "16.0.0-alpha.7", default-features = false }
-revm-inspector = { version = "1.0.0-alpha.7", default-features = false }
-revm-context = { version = "1.0.0-alpha.6", default-features = false }
-revm-context-interface = { version = "1.0.0-alpha.6", default-features = false }
-revm-database-interface = { version = "1.0.0-alpha.5", default-features = false }
+op-revm = { version = "1.0.0-alpha.6", default-features = false }
 revm-inspectors = "0.17.0-alpha.1"
 
 # alloy
@@ -220,9 +212,12 @@ op-alloy-network = { version = "0.11.2", default-features = false }
 op-alloy-consensus = { version = "0.11.2", default-features = false }
 op-alloy-flz = { version = "0.11.2", default-features = false }
 op-alloy-rpc-jsonrpsee = { version = "0.11.1", default-features = false }
-op-revm = { version = "1.0.0-alpha.6", default-features = false }
 
 # misc
 delegate = "0.13"
 derive_more = { version = "2", default-features = false, features = ["full"] }
 serde = { version = "1.0", default-features = false }
+
+[patch.crates-io]
+revm = { path = "../mega-revm/crates/revm" }
+op-revm = { path = "../mega-revm/crates/optimism" }

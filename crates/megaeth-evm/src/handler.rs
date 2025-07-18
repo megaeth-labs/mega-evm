@@ -1,42 +1,46 @@
+use alloy_evm::Database;
 use delegate::delegate;
-use op_revm::{
-    api::exec::OpContextTr,
-    handler::{IsTxError, OpHandler},
-};
+use op_revm::handler::{IsTxError, OpHandler};
 use revm::{
-    context::result::{FromStringError, ResultAndState},
+    context::{
+        result::{FromStringError, InvalidTransaction, ResultAndState},
+        Cfg, ContextTr, Transaction,
+    },
     handler::{EvmTr, EvmTrError, Frame, FrameInitOrResult, FrameOrResult, FrameResult, Handler},
     inspector::{InspectorEvmTr, InspectorFrame, InspectorHandler},
     interpreter::{interpreter::EthInterpreter, FrameInput, InitialAndFloorGas},
     Inspector,
 };
 
-use crate::{MegaethHaltReason, MegaethTransactionError};
+use crate::{constants, MegaethContext, MegaethHaltReason, MegaethSpecId, MegaethTransactionError};
 
-/// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits most functionalities from Optimism.
+/// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
+/// most functionalities from Optimism.
 #[allow(missing_debug_implementations)]
 pub struct MegaethHandler<EVM, ERROR, FRAME> {
+    /// The `MegaethEvm` spec id. This field is need because the `EVM` type passed to `OpHandler`
+    /// is `OpContextTr`, which contains `OpSpecId` instead of `MegaethSpecId`. Although the actual
+    /// `MegaethSpecId` exists in the `EVM` type, it is not visible here.
+    spec: MegaethSpecId,
     op: OpHandler<EVM, ERROR, FRAME>,
 }
 
 impl<EVM, ERROR, FRAME> MegaethHandler<EVM, ERROR, FRAME> {
     /// Create a new `MegaethHandler`.
-    pub fn new() -> Self {
-        Self {
-            op: OpHandler::new(),
-        }
+    pub fn new(spec: MegaethSpecId) -> Self {
+        Self { op: OpHandler::new(), spec }
     }
 }
 
 impl<EVM, ERROR, FRAME> Default for MegaethHandler<EVM, ERROR, FRAME> {
     fn default() -> Self {
-        Self::new()
+        Self::new(MegaethSpecId::default())
     }
 }
 
-impl<EVM, ERROR, FRAME> Handler for MegaethHandler<EVM, ERROR, FRAME>
+impl<DB: Database, EVM, ERROR, FRAME> Handler for MegaethHandler<EVM, ERROR, FRAME>
 where
-    EVM: EvmTr<Context: OpContextTr>,
+    EVM: EvmTr<Context = MegaethContext<DB>>,
     ERROR: EvmTrError<EVM> + From<MegaethTransactionError> + FromStringError + IsTxError,
     FRAME: Frame<Evm = EVM, Error = ERROR, FrameResult = FrameResult, FrameInit = FrameInput>,
 {
@@ -50,44 +54,46 @@ where
 
     delegate! {
         to self.op {
-            fn run(&mut self, evm: &mut Self::Evm) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
-            fn run_without_catch_error(&mut self, evm: &mut Self::Evm) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
-            fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error>;
-            fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error>;
-            fn execution(&mut self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> Result<FrameResult, Self::Error>;
-            fn post_execution(&self, evm: &mut Self::Evm, exec_result: FrameResult, init_and_floor_gas: InitialAndFloorGas, eip7702_gas_refund: i64) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
-            fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn validate_initial_tx_gas(&self, evm: &Self::Evm) -> Result<InitialAndFloorGas, Self::Error>;
             fn validate_tx_against_state(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn load_accounts(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn apply_eip7702_auth_list(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error>;
             fn deduct_caller(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn first_frame_input(&mut self, evm: &mut Self::Evm, gas_limit: u64) -> Result<FrameInput, Self::Error>;
             fn last_frame_result(&self, evm: &mut Self::Evm, frame_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
-            fn first_frame_init(&mut self, evm: &mut Self::Evm, frame_input: <Self::Frame as Frame>::FrameInit) -> Result<FrameOrResult<Self::Frame>, Self::Error>;
-            fn frame_init(&mut self, frame: &Self::Frame, evm: &mut Self::Evm, frame_input: <Self::Frame as Frame>::FrameInit) -> Result<FrameOrResult<Self::Frame>, Self::Error>;
-            fn frame_call(&mut self, frame: &mut Self::Frame, evm: &mut Self::Evm) -> Result<FrameInitOrResult<Self::Frame>, Self::Error>;
-            fn frame_return_result(&mut self, frame: &mut Self::Frame, evm: &mut Self::Evm, result: <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
-            fn run_exec_loop(&mut self, evm: &mut Self::Evm, frame: Self::Frame) -> Result<FrameResult, Self::Error>;
-            fn eip7623_check_gas_floor(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult, init_and_floor_gas: InitialAndFloorGas);
-            fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult, eip7702_refund: i64);
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
+            fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult, eip7702_refund: i64);
             fn reward_beneficiary(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
             fn output(&self, evm: &mut Self::Evm, result: <Self::Frame as Frame>::FrameResult) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
             fn catch_error(&self, evm: &mut Self::Evm, error: Self::Error) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
         }
     }
+
+    fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
+        evm.ctx().log_data_size = 0;
+        self.op.pre_execution(evm)
+    }
+
+    fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
+        self.op.validate_env(evm)?;
+        let ctx = evm.ctx_ref();
+
+        if self.spec.is_enabled_in(MegaethSpecId::MINI_RAX) && ctx.tx().kind().is_create() {
+            // additionally, ensure initcode size does not exceed `contract size limit` + 24KB
+            let max_initcode_size =
+                ctx.cfg().max_code_size() + constants::mini_rax::ADDITIONAL_INITCODE_SIZE;
+            if ctx.tx().input().len() > max_initcode_size {
+                return Err(InvalidTransaction::CreateInitCodeSizeLimit.into());
+            }
+        }
+
+        Ok(())
+    }
 }
 
-impl<EVM, ERROR, FRAME> InspectorHandler for MegaethHandler<EVM, ERROR, FRAME>
+impl<DB: Database, EVM, ERROR, FRAME> InspectorHandler for MegaethHandler<EVM, ERROR, FRAME>
 where
     EVM: InspectorEvmTr<
-        Context: OpContextTr,
+        Context = MegaethContext<DB>,
         Inspector: Inspector<<<Self as Handler>::Evm as EvmTr>::Context, EthInterpreter>,
     >,
     ERROR: EvmTrError<EVM> + From<MegaethTransactionError> + FromStringError + IsTxError,
-    // TODO `FrameResult` should be a generic trait.
-    // TODO `FrameInit` should be a generic.
     FRAME: InspectorFrame<
         Evm = EVM,
         Error = ERROR,
@@ -97,4 +103,15 @@ where
     >,
 {
     type IT = EthInterpreter;
+
+    delegate! {
+        to self.op {
+            fn inspect_run(&mut self, evm: &mut Self::Evm) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
+            fn inspect_run_without_catch_error(&mut self, evm: &mut Self::Evm) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
+            fn inspect_execution(&mut self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> Result<FrameResult, Self::Error>;
+            fn inspect_first_frame_init(&mut self, evm: &mut Self::Evm, frame_input: <Self::Frame as Frame>::FrameInit) -> Result<FrameOrResult<Self::Frame>, Self::Error>;
+            fn inspect_frame_call(&mut self, frame: &mut Self::Frame, evm: &mut Self::Evm) -> Result<FrameInitOrResult<Self::Frame>, Self::Error>;
+            fn inspect_run_exec_loop(&mut self, evm: &mut Self::Evm, frame: Self::Frame) -> Result<FrameResult, Self::Error>;
+        }
+    }
 }

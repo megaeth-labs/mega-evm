@@ -7,28 +7,38 @@ use revm::{
     Context, Journal,
 };
 
-use crate::{MegaethSpecId, MegaethTransaction};
+use crate::{constants, MegaethSpecId, MegaethTransaction};
 
 /// `MegaETH` EVM context type.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
 pub struct MegaethContext<DB: Database> {
     #[deref]
     #[deref_mut]
-    inner: OpContext<DB>,
+    pub(crate) inner: OpContext<DB>,
     /// The `MegaETH` spec id.
     /// The `inner` context uses `OpSpecId`, which should be converted from `MegaethSpecId`
     /// when creating the context. The consistency between the spec here and `inner` context
     /// should be maintained and guaranteed by the caller.
     spec: MegaethSpecId,
+
+    /* Internal state variables */
+    /// The total size of all log data.
+    pub(crate) log_data_size: u64,
 }
 
 impl<DB: Database> MegaethContext<DB> {
     /// Create a new `MegaethContext` with the given database.
     pub fn new(db: DB, spec: MegaethSpecId) -> Self {
-        Self {
-            inner: Context::op().with_db(db),
-            spec,
+        let mut inner =
+            Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
+
+        if spec.is_enabled_in(MegaethSpecId::MINI_RAX) &&
+            inner.cfg.limit_contract_code_size.is_none()
+        {
+            inner.cfg.limit_contract_code_size = Some(constants::mini_rax::MAX_CONTRACT_SIZE);
         }
+
+        Self { inner, spec, log_data_size: 0 }
     }
 
     /// Set the database.
@@ -36,44 +46,42 @@ impl<DB: Database> MegaethContext<DB> {
         MegaethContext {
             inner: self.inner.with_db(db),
             spec: self.spec,
+            log_data_size: self.log_data_size,
         }
     }
 
     /// Set the transaction.
-    pub fn with_tx(self, tx: MegaethTransaction) -> Self {
-        Self {
-            inner: self.inner.with_tx(tx),
-            spec: self.spec,
-        }
+    pub fn with_tx(mut self, tx: MegaethTransaction) -> Self {
+        self.inner = self.inner.with_tx(tx);
+        self
     }
 
     /// Set the block.
-    pub fn with_block(self, block: BlockEnv) -> Self {
-        Self {
-            inner: self.inner.with_block(block),
-            spec: self.spec,
-        }
+    pub fn with_block(mut self, block: BlockEnv) -> Self {
+        self.inner = self.inner.with_block(block);
+        self
     }
 
     /// Set the configuration.
-    pub fn with_cfg(self, cfg: CfgEnv<MegaethSpecId>) -> Self {
-        Self {
-            inner: self.inner.with_cfg(cfg.into_op_cfg()),
-            spec: self.spec,
+    pub fn with_cfg(mut self, cfg: CfgEnv<MegaethSpecId>) -> Self {
+        self.inner = self.inner.with_cfg(cfg.into_op_cfg());
+        if self.spec.is_enabled_in(MegaethSpecId::MINI_RAX) &&
+            self.inner.cfg.limit_contract_code_size.is_none()
+        {
+            self.inner.cfg.limit_contract_code_size = Some(constants::mini_rax::MAX_CONTRACT_SIZE);
         }
+        self
     }
 
     /// Set the chain.
-    pub fn with_chain(self, chain: L1BlockInfo) -> Self {
-        Self {
-            inner: self.inner.with_chain(chain),
-            spec: self.spec,
-        }
+    pub fn with_chain(mut self, chain: L1BlockInfo) -> Self {
+        self.inner = self.inner.with_chain(chain);
+        self
     }
 
     /// Get the `MegaETH` spec id. This value should be consistent with the `spec` field by
     /// coverting this value to `OpSpecId`.
-    pub fn spec(&self) -> MegaethSpecId {
+    pub fn megaeth_spec(&self) -> MegaethSpecId {
         self.spec
     }
 

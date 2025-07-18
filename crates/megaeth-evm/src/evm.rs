@@ -68,9 +68,7 @@ pub struct MegaethEvm<DB: Database, INSP> {
 
 impl<DB: Database, INSP> std::fmt::Debug for MegaethEvm<DB, INSP> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MegaethEvm")
-            .field("inspect", &self.inspect)
-            .finish_non_exhaustive()
+        f.debug_struct("MegaethEvm").field("inspect", &self.inspect).finish_non_exhaustive()
     }
 }
 
@@ -92,11 +90,12 @@ impl<DB: Database, INSP> std::ops::DerefMut for MegaethEvm<DB, INSP> {
 impl<DB: Database, INSP> MegaethEvm<DB, INSP> {
     /// Creates a new [`MegaethEvm`] instance.
     pub fn new(context: MegaethContext<DB>, inspect: INSP) -> Self {
+        let spec = context.megaeth_spec();
         Self {
             inner: revm::context::Evm::new_with_inspector(
                 context,
                 inspect,
-                MegaethInstructions::new_mainnet(),
+                MegaethInstructions::new(spec),
                 MegaethPrecompiles::default(),
             ),
             inspect: false,
@@ -111,10 +110,7 @@ impl<DB: Database, INSP> MegaethEvm<DB, INSP> {
             self.inner.instruction,
             self.inner.precompiles,
         );
-        MegaethEvm {
-            inner,
-            inspect: true,
-        }
+        MegaethEvm { inner, inspect: true }
     }
 
     /// Enables inspector at runtime.
@@ -171,9 +167,9 @@ where
         >,
     ) -> <<Self::Instructions as InstructionProvider>::InterpreterTypes as InterpreterTypes>::Output
     {
-        let context = &mut self.inner.data.ctx;
-        let instructions = &mut self.inner.instruction;
-        interpreter.run_plain(instructions.instruction_table(), context)
+        let result = interpreter
+            .run_plain(self.inner.instruction.instruction_table(), &mut self.inner.data.ctx);
+        result
     }
 
     #[inline]
@@ -299,10 +295,7 @@ where
         // disable the base fee check for this call by setting the base fee to zero
         core::mem::swap(&mut self.block_env_mut().basefee, &mut basefee);
         // disable the nonce check
-        core::mem::swap(
-            &mut self.ctx().cfg.disable_nonce_check,
-            &mut disable_nonce_check,
-        );
+        core::mem::swap(&mut self.ctx().cfg.disable_nonce_check, &mut disable_nonce_check);
 
         let mut res = alloy_evm::Evm::transact(self, tx);
 
@@ -311,10 +304,7 @@ where
         // swap back to the previous base fee
         core::mem::swap(&mut self.block_env_mut().basefee, &mut basefee);
         // swap back to the previous nonce check flag
-        core::mem::swap(
-            &mut self.ctx().cfg.disable_nonce_check,
-            &mut disable_nonce_check,
-        );
+        core::mem::swap(&mut self.ctx().cfg.disable_nonce_check, &mut disable_nonce_check);
 
         // NOTE: We assume that only the contract storage is modified. Revm currently marks the
         // caller and block beneficiary accounts as "touched" when we do the above transact calls,
@@ -337,13 +327,9 @@ where
     where
         Self: Sized,
     {
-        let spec = self.inner.data.ctx.spec();
-        let Context {
-            block: block_env,
-            cfg: cfg_env,
-            journaled_state,
-            ..
-        } = self.inner.data.ctx.into_inner();
+        let spec = self.inner.data.ctx.megaeth_spec();
+        let Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
+            self.inner.data.ctx.into_inner();
         let cfg_env = cfg_env.into_megaeth_cfg(spec);
         (journaled_state.database, EvmEnv { block_env, cfg_env })
     }
@@ -373,7 +359,8 @@ where
     }
 
     fn replay(&mut self) -> Self::Output {
-        let mut h = MegaethHandler::<_, _, EthFrame<_, _, _>>::new();
+        let spec = self.ctx().megaeth_spec();
+        let mut h = MegaethHandler::<_, _, EthFrame<_, _, _>>::new(spec);
         h.run(self)
     }
 }
@@ -407,7 +394,8 @@ where
     }
 
     fn inspect_replay(&mut self) -> Self::Output {
-        let mut h = MegaethHandler::<_, _, EthFrame<_, _, _>>::new();
+        let spec = self.ctx().megaeth_spec();
+        let mut h = MegaethHandler::<_, _, EthFrame<_, _, _>>::new(spec);
         h.inspect_run(self)
     }
 }

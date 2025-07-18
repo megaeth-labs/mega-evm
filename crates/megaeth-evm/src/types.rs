@@ -1,9 +1,4 @@
-use revm::{
-    context::TxEnv, handler::instructions::EthInstructions,
-    interpreter::interpreter::EthInterpreter,
-};
-
-use crate::MegaethContext;
+use revm::context::TxEnv;
 
 /// `MegaETH` halt reason type.
 pub type MegaethHaltReason = op_revm::OpHaltReason;
@@ -16,9 +11,6 @@ pub type MegaethTransaction = op_revm::OpTransaction<TxEnv>;
 
 /// `MegaETH` precompiles type.
 pub type MegaethPrecompiles = op_revm::precompiles::OpPrecompiles;
-
-/// `MegaETH` instructions type.
-pub type MegaethInstructions<DB> = EthInstructions<EthInterpreter, MegaethContext<DB>>;
 
 /// `MegaETH` transaction type.
 pub type MegaethTxType = op_alloy_consensus::OpTxType;

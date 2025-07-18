@@ -13,30 +13,41 @@ pub enum MegaethSpecId {
     /// This is the spec of `MegaethEvm` when no harfork is enabled.
     #[default]
     EQUIVALENCE,
-    BURROW,
+    MINI_RAX,
+}
+
+/// Constants for the `MegaethSpecId` spec.
+pub mod constants {
+    /// Constants for the `MINI_RAX` spec.
+    pub mod mini_rax {
+        /// The maximum contract size for the `MINI_RAX` spec.
+        pub const MAX_CONTRACT_SIZE: usize = 512 * 1024;
+        /// The additional initcode size for the `MINI_RAX` spec. The initcode size is limited to
+        /// `MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE`.
+        pub const ADDITIONAL_INITCODE_SIZE: usize = 24 * 1024;
+        /// The maximum initcode size for the `MINI_RAX` spec.
+        pub const MAX_INITCODE_SIZE: usize = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE;
+    }
 }
 
 /// String identifiers for Optimism hardforks
 #[allow(missing_docs)]
 pub mod name {
     pub const EQUIVALENCE: &str = "Equivalence";
-    pub const BURROW: &str = "Burrow";
+    pub const MINI_RAX: &str = "MiniRax";
 }
 
 impl MegaethSpecId {
     /// Converts the [`MegaethSpecId`] into a [`SpecId`].
     pub const fn into_eth_spec(self) -> SpecId {
-        match self {
-            Self::EQUIVALENCE => todo!(),
-            Self::BURROW => todo!(),
-        }
+        self.into_op_spec().into_eth_spec()
     }
 
     /// Converts the [`MegaethSpecId`] into a [`OpSpecId`].
     pub const fn into_op_spec(self) -> OpSpecId {
         match self {
             Self::EQUIVALENCE => OpSpecId::GRANITE,
-            Self::BURROW => OpSpecId::ISTHMUS,
+            Self::MINI_RAX => OpSpecId::ISTHMUS,
         }
     }
 
@@ -53,7 +64,7 @@ impl From<MegaethSpecId> for &'static str {
     fn from(spec_id: MegaethSpecId) -> Self {
         match spec_id {
             MegaethSpecId::EQUIVALENCE => name::EQUIVALENCE,
-            MegaethSpecId::BURROW => name::BURROW,
+            MegaethSpecId::MINI_RAX => name::MINI_RAX,
         }
     }
 }
@@ -64,7 +75,7 @@ impl FromStr for MegaethSpecId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             name::EQUIVALENCE => Ok(Self::EQUIVALENCE),
-            name::BURROW => Ok(Self::BURROW),
+            name::MINI_RAX => Ok(Self::MINI_RAX),
             _ => Err(UnknownHardfork),
         }
     }
