@@ -21,6 +21,11 @@ pub use handler::*;
 mod spec;
 pub use spec::*;
 
+#[cfg(any(test, feature = "test-utils"))]
+mod test_utils;
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::*;
+
 mod types;
 pub use types::*;
 
@@ -31,15 +36,11 @@ mod tests {
     use super::*;
 
     mod contract_size_limit {
-        use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+        use alloy_primitives::{address, Bytes, U256};
         use revm::{
-            bytecode::opcode,
-            context::{
-                result::{EVMError, InvalidTransaction, Output, ResultAndState},
-                TxEnv,
-            },
+            bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
+            context::result::{EVMError, InvalidTransaction, ResultAndState},
             database::{CacheDB, EmptyDB},
-            inspector::NoOpInspector,
         };
         use std::convert::Infallible;
 
@@ -51,69 +52,24 @@ mod tests {
             spec: MegaethSpecId,
         ) -> Result<ResultAndState<MegaethHaltReason>, EVMError<Infallible, MegaethTransactionError>>
         {
-            let mut context = MegaethContext::new(db, spec);
-            context.modify_chain(|chain| {
-                chain.operator_fee_scalar = Some(U256::from(0));
-                chain.operator_fee_constant = Some(U256::from(0));
-            });
-            let mut evm = MegaethEvm::new(context, NoOpInspector);
-            let tx = TxEnv {
-                caller: address!("0000000000000000000000000000000000100000"),
-                kind: TxKind::Create,
-                data: bytecode,
-                gas_limit: 1000000000000000000,
-                ..Default::default()
-            };
-            let mut tx = MegaethTransaction::new(tx);
-            tx.enveloped_tx = Some(Bytes::new());
-            alloy_evm::Evm::transact_raw(&mut evm, tx)
+            transact(
+                spec,
+                db,
+                address!("0000000000000000000000000000000000100000"),
+                None,
+                bytecode,
+                U256::ZERO,
+            )
         }
 
-        fn transact(
-            spec: MegaethSpecId,
-            db: &mut CacheDB<EmptyDB>,
-            caller: Address,
-            kind: TxKind,
-            data: Bytes,
-            value: U256,
-        ) -> Result<ResultAndState<MegaethHaltReason>, EVMError<Infallible, MegaethTransactionError>>
-        {
-            let mut context = MegaethContext::new(db, spec);
-            context.modify_chain(|chain| {
-                chain.operator_fee_scalar = Some(U256::from(0));
-                chain.operator_fee_constant = Some(U256::from(0));
-            });
-            let mut evm = MegaethEvm::new(context, NoOpInspector);
-            let tx = TxEnv { caller, kind, data, value, ..Default::default() };
-            let mut tx = MegaethTransaction::new(tx);
-            tx.enveloped_tx = Some(Bytes::new());
-            alloy_evm::Evm::transact_raw(&mut evm, tx)
-        }
-
-        #[test]
-        fn test_eip3860_initcode_size_limit_success() {
-            let sizes = vec![100 * 1024, constants::mini_rax::MAX_INITCODE_SIZE];
-
-            for size in sizes {
-                let large_bytecode = vec![opcode::STOP; size];
-                let bytecode: Bytes = large_bytecode.into();
-
-                let mut db = CacheDB::<EmptyDB>::default();
-                let result = deploy_contract(&mut db, bytecode.clone(), MegaethSpecId::MINI_RAX);
+        fn initcode_size_limit_test_case(spec: MegaethSpecId, initcode_size: usize, success: bool) {
+            let large_bytecode = vec![STOP; initcode_size];
+            let bytecode: Bytes = large_bytecode.into();
+            let mut db = CacheDB::<EmptyDB>::default();
+            let result = deploy_contract(&mut db, bytecode, spec);
+            if success {
                 assert!(result.is_ok());
-            }
-        }
-
-        #[test]
-        fn test_eip3860_initcode_size_limit_failure() {
-            let sizes = vec![1025 * 1024, 2049 * 1024, constants::mini_rax::MAX_INITCODE_SIZE + 1];
-
-            for size in sizes {
-                let large_bytecode = vec![opcode::STOP; size];
-                let bytecode: Bytes = large_bytecode.into();
-
-                let mut db = CacheDB::<EmptyDB>::default();
-                let result = deploy_contract(&mut db, bytecode, MegaethSpecId::MINI_RAX);
+            } else {
                 assert!(matches!(
                     result,
                     Err(EVMError::Transaction(MegaethTransactionError::Base(
@@ -124,312 +80,233 @@ mod tests {
         }
 
         #[test]
-        fn test_eip3860_initcode_size_limit_failure_pre_mini_rax() {
-            let sizes = vec![constants::mini_rax::MAX_INITCODE_SIZE];
+        fn test_eip3860_initcode_size() {
+            initcode_size_limit_test_case(
+                MegaethSpecId::EQUIVALENCE,
+                revm::primitives::MAX_INITCODE_SIZE,
+                true,
+            );
+            initcode_size_limit_test_case(
+                MegaethSpecId::EQUIVALENCE,
+                constants::mini_rax::MAX_INITCODE_SIZE,
+                false,
+            );
+            initcode_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                revm::primitives::MAX_INITCODE_SIZE,
+                true,
+            );
+            initcode_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                constants::mini_rax::MAX_INITCODE_SIZE,
+                true,
+            );
+            initcode_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                constants::mini_rax::MAX_INITCODE_SIZE + 1,
+                false,
+            );
+            initcode_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                2 * constants::mini_rax::MAX_INITCODE_SIZE,
+                false,
+            );
+        }
 
-            for size in sizes {
-                let large_bytecode = vec![opcode::STOP; size];
-                let bytecode: Bytes = large_bytecode.into();
+        fn constructor_code(contract_size: usize) -> Bytes {
+            let mut init_code = vec![];
+            opcode_gen::push_number(&mut init_code, contract_size as u64);
+            init_code.extend(vec![PUSH1, 0x00]);
+            init_code.push(RETURN);
 
-                let mut db = CacheDB::<EmptyDB>::default();
-                let result = deploy_contract(&mut db, bytecode.clone(), MegaethSpecId::EQUIVALENCE);
+            init_code = right_pad_bytes(init_code, 32);
+            init_code.into()
+        }
+
+        fn contract_size_limit_test_case(spec: MegaethSpecId, contract_size: usize, success: bool) {
+            // Use the simplest method to return a contract code
+            let init_code = constructor_code(contract_size);
+            let mut db = CacheDB::<EmptyDB>::default();
+            let result = deploy_contract(&mut db, init_code, spec);
+            if success {
+                assert!(result.is_ok());
+            } else {
                 assert!(matches!(
                     result,
-                    Err(EVMError::Transaction(MegaethTransactionError::Base(
-                        InvalidTransaction::CreateInitCodeSizeLimit
-                    )))
+                    Ok(ResultAndState {
+                        result: ExecutionResult::Halt {
+                            reason: MegaethHaltReason::Base(HaltReason::CreateContractSizeLimit),
+                            ..
+                        },
+                        ..
+                    })
                 ));
             }
         }
 
         #[test]
-        fn test_eip170_code_size_limit_failure() {
-            // Use the simplest method to return a contract code larger than 512KB
-            // PUSH3 0x080100 (exceeds 512KB) - return size
-            // PUSH1 0x00 - memory position 0
-            // RETURN - return uninitialized memory, will be filled with 0
-            let init_code = vec![
-                0x62, 0x08, 0x01, 0x00, // PUSH3 0x080100 (exceeds 512KB)
-                0x60, 0x00, // PUSH1 0
-                0xf3, // RETURN
-            ];
-
-            let bytecode: Bytes = init_code.into();
-
-            let mut db = CacheDB::<EmptyDB>::default();
-            let result = deploy_contract(&mut db, bytecode, MegaethSpecId::MINI_RAX);
-
-            assert!(matches!(
-                result,
-                Ok(ResultAndState {
-                    result: ExecutionResult::Halt {
-                        reason: MegaethHaltReason::Base(HaltReason::CreateContractSizeLimit),
-                        ..
-                    },
-                    ..
-                })
-            ));
+        fn test_eip170_code_size_limit() {
+            contract_size_limit_test_case(
+                MegaethSpecId::EQUIVALENCE,
+                revm::interpreter::MAX_CODE_SIZE,
+                true,
+            );
+            contract_size_limit_test_case(
+                MegaethSpecId::EQUIVALENCE,
+                constants::mini_rax::MAX_CONTRACT_SIZE,
+                false,
+            );
+            contract_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                revm::interpreter::MAX_CODE_SIZE,
+                true,
+            );
+            contract_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                constants::mini_rax::MAX_CONTRACT_SIZE,
+                true,
+            );
+            contract_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                constants::mini_rax::MAX_CONTRACT_SIZE + 1,
+                false,
+            );
+            contract_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                2 * constants::mini_rax::MAX_CONTRACT_SIZE,
+                false,
+            );
         }
 
-        #[test]
-        fn test_eip170_code_size_limit_success() {
-            // Use the simplest method to return a contract code of size 512KB
-            // PUSH3 0x080000 (512KB) - return size
-            // PUSH1 0x00 - memory position 0
-            // RETURN - return uninitialized memory, will be filled with 0
-            let init_code = vec![
-                0x62, 0x08, 0x00, 0x00, // PUSH3 0x080000 (512KB)
-                0x60, 0x00, // PUSH1 0
-                0xf3, // RETURN
-            ];
-
-            let bytecode: Bytes = init_code.into();
-
-            let mut db = CacheDB::<EmptyDB>::default();
-            let result = deploy_contract(&mut db, bytecode, MegaethSpecId::MINI_RAX);
-            assert!(matches!(
-                result,
-                Ok(ResultAndState { result: ExecutionResult::Success { .. }, .. })
-            ));
-        }
-
-        #[test]
-        fn test_eip170_code_size_limit_failure_pre_mini_rax() {
-            // Use the simplest method to return a contract code of size 512KB
-            // PUSH3 0x080000 (512KB) - return size
-            // PUSH1 0x00 - memory position 0
-            // RETURN - return uninitialized memory, will be filled with 0
-            let init_code = vec![
-                0x62, 0x08, 0x00, 0x00, // PUSH3 0x080000 (512KB)
-                0x60, 0x00, // PUSH1 0
-                0xf3, // RETURN
-            ];
-
-            let bytecode: Bytes = init_code.into();
-
-            let mut db = CacheDB::<EmptyDB>::default();
-            let result = deploy_contract(&mut db, bytecode, MegaethSpecId::EQUIVALENCE);
-            assert!(matches!(
-                result,
-                Ok(ResultAndState {
-                    result: ExecutionResult::Halt {
-                        reason: MegaethHaltReason::Base(HaltReason::CreateContractSizeLimit),
-                        ..
-                    },
-                    ..
-                })
-            ));
-        }
-
-        #[test]
-        fn test_eip170_create_opcode_size_limit_failure() {
+        fn contract_factory_code_size_limit_test_case(
+            spec: MegaethSpecId,
+            contract_size: usize,
+            success: bool,
+        ) {
             // 1. Create a "factory" contract that uses the CREATE opcode to create another large
             //    contract
             // 2. Since the sub-contract exceeds the EIP-170 limit, the CREATE operation should fail
 
-            // The bytecode of the factory contract:
-            // PUSH1 0x01      - value for MSTORE
-            // PUSH1 0x00      - memory position
-            // MSTORE          - store a non-zero value at the beginning of memory
+            let mut factory_code = vec![];
+            // 1. put contract constructor code in memory
+            let init_code = constructor_code(contract_size);
+            opcode_gen::store_memory_bytes(&mut factory_code, 0, &init_code);
 
-            // PUSH3 0x080001  - return size (exceeds 512KB)
-            // PUSH1 0x00      - memory offset
-            // PUSH1 0x00      - amount of sent ETH
-            // CREATE          - create contract opcode (create contract from current memory)
+            // 2. create contract
+            opcode_gen::push_number(&mut factory_code, init_code.len() as u64);
+            opcode_gen::push_number(&mut factory_code, 0u64);
+            opcode_gen::push_number(&mut factory_code, 0u64);
+            factory_code.extend(vec![CREATE]);
 
-            // PUSH1 0x00      - return value storage position
-            // MSTORE          - store the CREATE return address to memory position 0
-            // PUSH1 0x20      - return size (32 bytes)
-            // PUSH1 0x00      - return offset
-            // RETURN          - return result
+            // 3. check if the create is successful, if not, jump to INVALID
+            factory_code.extend(vec![ISZERO]);
+            factory_code.extend(vec![PUSH1, (factory_code.len() + 4) as u8]);
+            factory_code.extend(vec![JUMPI]);
+            factory_code.extend(vec![STOP]);
+            factory_code.extend(vec![JUMPDEST, INVALID]);
 
-            let factory_code = vec![
-                // 1. Store a non-zero value in memory
-                0x60, 0x01, // PUSH1 0x01
-                0x60, 0x00, // PUSH1 0x00
-                0x52, // MSTORE
-                // 2. Prepare to create a large contract
-                0x62, 0x08, 0x00, 0x01, // PUSH3 0x080001 (exceeds 512KB)
-                0x60, 0x00, // PUSH1 0x00 (memory offset)
-                0x60, 0x00, // PUSH1 0x00 (amount of sent ETH)
-                0xf0, // CREATE
-                // 3. Store the CREATE return address to memory position 0
-                // The CREATE return address is on the stack top
-                0x60, 0x00, // PUSH1 0x00
-                0x52, // MSTORE (store the CREATE return address to memory position 0)
-                // 4. Return the contract address in memory
-                0x60, 0x20, // PUSH1 0x20 (32 bytes)
-                0x60, 0x00, // PUSH1 0x00
-                0xf3, // RETURN
-            ];
-
-            // deploy factory contract
-            let factory_bytecode: Bytes = factory_code.into();
-            let mut db = CacheDB::<EmptyDB>::default();
-            let factory_result =
-                deploy_contract(&mut db, factory_bytecode, MegaethSpecId::MINI_RAX);
-
-            // get factory contract address
-            let factory_address = match &factory_result {
-                Ok(result_and_state) => match &result_and_state.result {
-                    ExecutionResult::Success { output, .. } => match output {
-                        Output::Create(bytes, _) | Output::Call(bytes) => {
-                            Address::from_slice(&bytes[..20])
-                        }
-                    },
-                    _ => panic!("factory contract deployment failed"),
-                },
-                _ => panic!("factory contract deployment failed"),
-            };
-
-            // call factory contract to create sub contract
             let caller = address!("0000000000000000000000000000000000100000");
-            let call_result = transact(
-                MegaethSpecId::MINI_RAX,
+            let mut db = CacheDB::<EmptyDB>::default();
+            let factory_address = address!("0000000000000000000000000000000000100001");
+            set_account_code(&mut db, factory_address, factory_code.clone().into());
+            let result = transact(
+                spec,
                 &mut db,
                 caller,
-                TxKind::Call(factory_address),
-                Bytes::new(),
-                U256::from(0),
+                Some(factory_address),
+                Bytes::default(),
+                U256::ZERO,
             );
-            match &call_result {
-                Ok(result_and_state) => {
-                    println!("factory contract call result: {:?}", result_and_state.result);
-                    assert!(matches!(result_and_state.result, ExecutionResult::Success { .. }));
-
-                    match &result_and_state.result {
-                        ExecutionResult::Success { output, .. } => match output {
-                            Output::Call(bytes) => {
-                                if !bytes.is_empty() {
-                                    assert!(
-                                            bytes.iter().all(|&b| b == 0),
-                                            "When CREATE operation failed, it should return all zero address"
-                                        );
-                                }
-                            }
-                            _ => panic!("unexpected output type"),
+            if success {
+                assert!(matches!(
+                    result,
+                    Ok(ResultAndState { result: ExecutionResult::Success { .. }, .. })
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Ok(ResultAndState {
+                        result: ExecutionResult::Halt {
+                            reason: MegaethHaltReason::Base(HaltReason::InvalidFEOpcode),
+                            ..
                         },
-                        _ => panic!("execution result is not Success"),
-                    }
-                }
-                _ => panic!("call factory contract failed"),
+                        ..
+                    })
+                ));
             }
         }
 
         #[test]
-        fn test_eip170_create_opcode_size_limit_success() {
-            // 1. Create a "factory" contract that uses the CREATE opcode to create another contract
-            // 2. The sub-contract generated by this factory contract does not exceed the EIP-170
-            //    limit, so it should be created successfully
-
-            // The bytecode of the factory contract:
-            // PUSH1 0x01      - value for MSTORE
-            // PUSH1 0x00      - memory position
-            // MSTORE          - store a non-zero value at the beginning of memory
-
-            // PUSH3 0x080000  - return size (512KB)
-            // PUSH1 0x00      - memory offset
-            // PUSH1 0x00      - amount of sent ETH
-            // CREATE          - create contract opcode (create contract from current memory)
-
-            // PUSH1 0x00      - return value storage position
-            // MSTORE          - store the CREATE return address to memory position 0
-            // PUSH1 0x20      - return size (32 bytes)
-            // PUSH1 0x00      - return offset
-            // RETURN          - return result
-
-            let factory_code = vec![
-                // 1. Store a non-zero value in memory
-                0x60, 0x01, // PUSH1 0x01
-                0x60, 0x00, // PUSH1 0x00
-                0x52, // MSTORE
-                // 2. Prepare to create a contract
-                0x62, 0x08, 0x00, 0x00, // PUSH3 0x080000 (512KB)
-                0x60, 0x00, // PUSH1 0x00 (memory offset)
-                0x60, 0x00, // PUSH1 0x00 (amount of sent ETH)
-                0xf0, // CREATE
-                // 3. Store the CREATE return address to memory position 0
-                // The CREATE return address is on the stack top
-                0x60, 0x00, // PUSH1 0x00
-                0x52, // MSTORE (store the CREATE return address to memory position 0)
-                // 4. Return the contract address in memory
-                0x60, 0x20, // PUSH1 0x20 (32 bytes)
-                0x60, 0x00, // PUSH1 0x00
-                0xf3, // RETURN
-            ];
-
-            // deploy factory contract
-            let factory_bytecode: Bytes = factory_code.into();
-            let mut db = CacheDB::<EmptyDB>::default();
-            let factory_result =
-                deploy_contract(&mut db, factory_bytecode, MegaethSpecId::MINI_RAX);
-            // get factory contract address
-            let factory_address = match &factory_result {
-                Ok(result_and_state) => match &result_and_state.result {
-                    ExecutionResult::Success { output, .. } => match output {
-                        Output::Create(bytes, _) | Output::Call(bytes) => {
-                            Address::from_slice(&bytes[..20])
-                        }
-                    },
-                    _ => panic!("factory contract deployment failed"),
-                },
-                _ => panic!("factory contract deployment failed"),
-            };
-
-            // call factory contract to create sub contract
-            let tx_caller = address!("0000000000000000000000000000000000100000");
-            let call_result = transact(
-                MegaethSpecId::MINI_RAX,
-                &mut db,
-                tx_caller,
-                TxKind::Call(factory_address),
-                Bytes::new(),
-                U256::from(0),
+        fn test_eip170_create_opcode_size_limit() {
+            contract_factory_code_size_limit_test_case(
+                MegaethSpecId::EQUIVALENCE,
+                revm::interpreter::MAX_CODE_SIZE,
+                true,
             );
-            match &call_result {
-                Ok(result_and_state) => {
-                    println!("factory contract call result: {:?}", result_and_state.result);
-                    match &result_and_state.result {
-                        ExecutionResult::Success { output, .. } => {
-                            match output {
-                                Output::Call(bytes) => {
-                                    println!("call result: {:?}", bytes);
+            contract_factory_code_size_limit_test_case(
+                MegaethSpecId::EQUIVALENCE,
+                revm::interpreter::MAX_CODE_SIZE + 1,
+                false,
+            );
+            contract_factory_code_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                revm::interpreter::MAX_CODE_SIZE,
+                true,
+            );
+            contract_factory_code_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                revm::interpreter::MAX_CODE_SIZE + 1,
+                true,
+            );
+            contract_factory_code_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                constants::mini_rax::MAX_CONTRACT_SIZE,
+                true,
+            );
+            contract_factory_code_size_limit_test_case(
+                MegaethSpecId::MINI_RAX,
+                constants::mini_rax::MAX_CONTRACT_SIZE + 1,
+                false,
+            );
+        }
+    }
 
-                                    // output should contain create contract address, but we cannot
-                                    // determine the format of the return data, so check the state
-                                    // instead
-                                    let state = &result_and_state.state;
+    mod quadratic_log_cost {
+        use alloy_primitives::{address, Bytes, U256};
+        use revm::{
+            bytecode::opcode::LOG0,
+            database::{CacheDB, EmptyDB},
+        };
 
-                                    // state should contain factory contract and caller account
-                                    assert!(
-                                        state.contains_key(&factory_address) &&
-                                            state.contains_key(&tx_caller),
-                                        "factory contract or caller account not found in state"
-                                    );
-                                    // if sub contract created successfully, state should contain at
-                                    // least three accounts
-                                    assert!(
-                                        state.len() >= 2,
-                                        "state account number is not enough, should at least have caller and factory contract"
-                                    );
+        use super::*;
 
-                                    // check if CREATE operation is successful (return non-zero
-                                    // address)
-                                    if !bytes.is_empty() {
-                                        assert!(
-                                            bytes.iter().any(|&b| b != 0),
-                                            "create sub contract failed"
-                                        );
-                                    }
-                                }
-                                _ => panic!("unexpected output type"),
-                            }
-                        }
-                        _ => panic!("execution result is not Success"),
-                    }
-                }
-                _ => panic!("call factory contract failed"),
-            }
+        fn log_cost_test_case(spec: MegaethSpecId, log_size: usize, expected_gas: u64) {
+            let mut contract_code = vec![];
+            opcode_gen::push_number(&mut contract_code, log_size as u64);
+            opcode_gen::push_number(&mut contract_code, 0u64);
+            contract_code.extend(vec![LOG0]);
+
+            let mut db = CacheDB::<EmptyDB>::default();
+            let contract_address = address!("0000000000000000000000000000000000100002");
+            set_account_code(&mut db, contract_address, contract_code.clone().into());
+
+            let caller = address!("0000000000000000000000000000000000100000");
+            let callee = Some(contract_address);
+            let result = transact(spec, &mut db, caller, callee, Bytes::default(), U256::ZERO);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap().result.gas_used(), expected_gas);
+        }
+
+        #[test]
+        fn test_log_cost() {
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 21381);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 21381);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 1024, 29671);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 1024, 29671);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 1025, 29682);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 1025, 29675);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 2048, 37965);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 2048, 1078349);
         }
     }
 }

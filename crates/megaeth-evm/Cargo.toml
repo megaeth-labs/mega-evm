@@ -22,9 +22,12 @@ op-alloy-consensus.workspace = true
 op-revm.workspace = true
 
 # revm
-revm.workspace = true
+revm = { workspace = true, features = ["std"] }
 
 # misc
 delegate.workspace = true
 derive_more.workspace = true
 serde = { workspace = true, features = ["derive"] }
+
+[features]
+test-utils = []

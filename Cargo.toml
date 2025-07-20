@@ -219,5 +219,5 @@ derive_more = { version = "2", default-features = false, features = ["full"] }
 serde = { version = "1.0", default-features = false }
 
 [patch.crates-io]
-revm = { path = "../mega-revm/crates/revm" }
-op-revm = { path = "../mega-revm/crates/optimism" }
+revm = { git = "https://github.com/megaeth-labs/mega-revm.git", branch = "compat/v65" }
+op-revm = { git = "https://github.com/megaeth-labs/mega-revm.git", branch = "compat/v65" }
