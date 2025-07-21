@@ -1,7 +1,12 @@
 //! The evm for the Megaeth
-
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![allow(unused_imports)]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg_attr(not(feature = "std"), macro_use)]
+#[cfg(not(feature = "std"))]
+extern crate alloc;
 
 mod context;
 pub use context::*;
@@ -37,12 +42,12 @@ mod tests {
 
     mod contract_size_limit {
         use alloy_primitives::{address, Bytes, U256};
+        use core::convert::Infallible;
         use revm::{
             bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
             context::result::{EVMError, InvalidTransaction, ResultAndState},
             database::{CacheDB, EmptyDB},
         };
-        use std::convert::Infallible;
 
         use super::*;
 

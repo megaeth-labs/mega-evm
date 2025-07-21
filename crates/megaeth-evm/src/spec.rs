@@ -1,7 +1,7 @@
+use core::str::FromStr;
 use op_revm::OpSpecId;
 use revm::primitives::hardfork::{SpecId, UnknownHardfork};
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 
 /// `MegaETH` spec id type.
 #[repr(u8)]

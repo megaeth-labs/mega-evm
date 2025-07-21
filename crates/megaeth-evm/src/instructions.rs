@@ -22,8 +22,8 @@ pub struct MegaethInstructions<DB: Database> {
     inner: EthInstructions<EthInterpreter, MegaethContext<DB>>,
 }
 
-impl<DB: Database> std::fmt::Debug for MegaethInstructions<DB> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<DB: Database> core::fmt::Debug for MegaethInstructions<DB> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethInstructions").field("spec", &self.spec).finish_non_exhaustive()
     }
 }

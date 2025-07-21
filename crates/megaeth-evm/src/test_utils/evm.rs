@@ -1,6 +1,5 @@
-use std::convert::Infallible;
-
 use alloy_primitives::{Address, Bytes, TxKind, U256};
+use core::convert::Infallible;
 use revm::{
     context::{
         result::{EVMError, ResultAndState},

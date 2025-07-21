@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use alloy_evm::{Database, EvmEnv, EvmFactory};
 use alloy_op_evm as _;
 use alloy_primitives::{Bytes, U256};
@@ -66,13 +67,13 @@ pub struct MegaethEvm<DB: Database, INSP> {
     inspect: bool,
 }
 
-impl<DB: Database, INSP> std::fmt::Debug for MegaethEvm<DB, INSP> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<DB: Database, INSP> core::fmt::Debug for MegaethEvm<DB, INSP> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethEvm").field("inspect", &self.inspect).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, INSP> std::ops::Deref for MegaethEvm<DB, INSP> {
+impl<DB: Database, INSP> core::ops::Deref for MegaethEvm<DB, INSP> {
     type Target =
         revm::context::Evm<MegaethContext<DB>, INSP, MegaethInstructions<DB>, MegaethPrecompiles>;
 
@@ -81,7 +82,7 @@ impl<DB: Database, INSP> std::ops::Deref for MegaethEvm<DB, INSP> {
     }
 }
 
-impl<DB: Database, INSP> std::ops::DerefMut for MegaethEvm<DB, INSP> {
+impl<DB: Database, INSP> core::ops::DerefMut for MegaethEvm<DB, INSP> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }

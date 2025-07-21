@@ -1,5 +1,6 @@
 //! This module provides utility functions to generate EVM bytecode.
 
+use alloc::vec::Vec;
 use revm::bytecode::opcode::{MSTORE, PUSH0};
 
 use crate::right_pad_bytes;
@@ -15,7 +16,7 @@ pub fn push_bytes(code: &mut Vec<u8>, bytes: impl AsRef<[u8]>) {
 /// Generates a PUSH opcode and the bytes to push.
 pub fn push_number<T: Into<u128> + Copy>(code: &mut Vec<u8>, number: T) {
     let num = number.into();
-    let bytes = match std::mem::size_of::<T>() {
+    let bytes = match core::mem::size_of::<T>() {
         1 => (num as u8).to_be_bytes().to_vec(),
         2 => (num as u16).to_be_bytes().to_vec(),
         8 => (num as u64).to_be_bytes().to_vec(),
