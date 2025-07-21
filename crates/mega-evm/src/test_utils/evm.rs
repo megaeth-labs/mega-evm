@@ -10,10 +10,7 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 
-use crate::{
-    MegaethContext, MegaethEvm, MegaethHaltReason, MegaethSpecId, MegaethTransaction,
-    MegaethTransactionError,
-};
+use crate::{Context, Evm, HaltReason, SpecId, Transaction, TransactionError};
 
 /// Sets the code for an account in the database.
 pub fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
@@ -25,19 +22,19 @@ pub fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes
 
 /// Executes a transaction on the EVM.
 pub fn transact(
-    spec: MegaethSpecId,
+    spec: SpecId,
     db: &mut CacheDB<EmptyDB>,
     caller: Address,
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<MegaethHaltReason>, EVMError<Infallible, MegaethTransactionError>> {
-    let mut context = MegaethContext::new(db, spec);
+) -> Result<ResultAndState<HaltReason>, EVMError<Infallible, TransactionError>> {
+    let mut context = Context::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let mut evm = MegaethEvm::new(context, NoOpInspector);
+    let mut evm = Evm::new(context, NoOpInspector);
     let tx = TxEnv {
         caller,
         kind: callee.map_or(TxKind::Create, TxKind::Call),
@@ -46,7 +43,7 @@ pub fn transact(
         gas_limit: 1000000000000000000,
         ..Default::default()
     };
-    let mut tx = MegaethTransaction::new(tx);
+    let mut tx = Transaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

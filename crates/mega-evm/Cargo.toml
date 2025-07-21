@@ -1,12 +1,12 @@
 [package]
-name = "megaeth-evm"
+name = "mega-evm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "The evm and block executor for the Megaeth"
+description = "The evm tailored for the MegaETH"
 
 [lints]
 workspace = true

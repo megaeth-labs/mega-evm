@@ -6,42 +6,42 @@ use revm::{
         result::{FromStringError, InvalidTransaction, ResultAndState},
         Cfg, ContextTr, Transaction,
     },
-    handler::{EvmTr, EvmTrError, Frame, FrameInitOrResult, FrameOrResult, FrameResult, Handler},
+    handler::{EvmTr, EvmTrError, Frame, FrameInitOrResult, FrameOrResult, FrameResult},
     inspector::{InspectorEvmTr, InspectorFrame, InspectorHandler},
     interpreter::{interpreter::EthInterpreter, FrameInput, InitialAndFloorGas},
     Inspector,
 };
 
-use crate::{constants, MegaethContext, MegaethHaltReason, MegaethSpecId, MegaethTransactionError};
+use crate::{constants, Context, HaltReason, SpecId, TransactionError};
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
 /// most functionalities from Optimism.
 #[allow(missing_debug_implementations)]
-pub struct MegaethHandler<EVM, ERROR, FRAME> {
+pub struct Handler<EVM, ERROR, FRAME> {
     /// The `MegaethEvm` spec id. This field is need because the `EVM` type passed to `OpHandler`
     /// is `OpContextTr`, which contains `OpSpecId` instead of `MegaethSpecId`. Although the actual
     /// `MegaethSpecId` exists in the `EVM` type, it is not visible here.
-    spec: MegaethSpecId,
+    spec: SpecId,
     op: OpHandler<EVM, ERROR, FRAME>,
 }
 
-impl<EVM, ERROR, FRAME> MegaethHandler<EVM, ERROR, FRAME> {
+impl<EVM, ERROR, FRAME> Handler<EVM, ERROR, FRAME> {
     /// Create a new `MegaethHandler`.
-    pub fn new(spec: MegaethSpecId) -> Self {
+    pub fn new(spec: SpecId) -> Self {
         Self { op: OpHandler::new(), spec }
     }
 }
 
-impl<EVM, ERROR, FRAME> Default for MegaethHandler<EVM, ERROR, FRAME> {
+impl<EVM, ERROR, FRAME> Default for Handler<EVM, ERROR, FRAME> {
     fn default() -> Self {
-        Self::new(MegaethSpecId::default())
+        Self::new(SpecId::default())
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME> Handler for MegaethHandler<EVM, ERROR, FRAME>
+impl<DB: Database, EVM, ERROR, FRAME> revm::handler::Handler for Handler<EVM, ERROR, FRAME>
 where
-    EVM: EvmTr<Context = MegaethContext<DB>>,
-    ERROR: EvmTrError<EVM> + From<MegaethTransactionError> + FromStringError + IsTxError,
+    EVM: EvmTr<Context = Context<DB>>,
+    ERROR: EvmTrError<EVM> + From<TransactionError> + FromStringError + IsTxError,
     FRAME: Frame<Evm = EVM, Error = ERROR, FrameResult = FrameResult, FrameInit = FrameInput>,
 {
     type Evm = EVM;
@@ -50,7 +50,7 @@ where
 
     type Frame = FRAME;
 
-    type HaltReason = MegaethHaltReason;
+    type HaltReason = HaltReason;
 
     delegate! {
         to self.op {
@@ -74,7 +74,7 @@ where
         self.op.validate_env(evm)?;
         let ctx = evm.ctx_ref();
 
-        if self.spec.is_enabled_in(MegaethSpecId::MINI_RAX) && ctx.tx().kind().is_create() {
+        if self.spec.is_enabled_in(SpecId::MINI_RAX) && ctx.tx().kind().is_create() {
             // additionally, ensure initcode size does not exceed `contract size limit` + 24KB
             let max_initcode_size =
                 ctx.cfg().max_code_size() + constants::mini_rax::ADDITIONAL_INITCODE_SIZE;
@@ -87,13 +87,16 @@ where
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME> InspectorHandler for MegaethHandler<EVM, ERROR, FRAME>
+impl<DB: Database, EVM, ERROR, FRAME> InspectorHandler for Handler<EVM, ERROR, FRAME>
 where
     EVM: InspectorEvmTr<
-        Context = MegaethContext<DB>,
-        Inspector: Inspector<<<Self as Handler>::Evm as EvmTr>::Context, EthInterpreter>,
+        Context = Context<DB>,
+        Inspector: Inspector<
+            <<Self as revm::handler::Handler>::Evm as EvmTr>::Context,
+            EthInterpreter,
+        >,
     >,
-    ERROR: EvmTrError<EVM> + From<MegaethTransactionError> + FromStringError + IsTxError,
+    ERROR: EvmTrError<EVM> + From<TransactionError> + FromStringError + IsTxError,
     FRAME: InspectorFrame<
         Evm = EVM,
         Error = ERROR,

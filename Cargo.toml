@@ -8,8 +8,8 @@ repository = "https://github.com/paradigmxyz/reth"
 exclude = [".github/"]
 
 [workspace]
-members = ["crates/megaeth-evm"]
-default-members = ["crates/megaeth-evm"]
+members = ["crates/mega-evm"]
+default-members = ["crates/mega-evm"]
 exclude = []
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021

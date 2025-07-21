@@ -1,5 +1,6 @@
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use alloy_evm::{Database, EvmEnv, EvmFactory};
+use alloy_evm::{Database, EvmEnv};
 use alloy_op_evm as _;
 use alloy_primitives::{Bytes, U256};
 use op_revm::L1BlockInfo;
@@ -8,31 +9,31 @@ use revm::{
         result::{EVMError, ExecutionResult, ResultAndState},
         BlockEnv, Cfg, ContextSetters, ContextTr, TxEnv,
     },
-    handler::{instructions::InstructionProvider, EthFrame, EvmTr, Handler},
+    handler::{instructions::InstructionProvider, EthFrame, EvmTr},
     inspector::{InspectorHandler, NoOpInspector},
     interpreter::{Interpreter, InterpreterTypes},
     primitives::TxKind,
-    Context, DatabaseCommit, ExecuteEvm, InspectEvm, Inspector, Journal,
+    DatabaseCommit, ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
 use crate::{
-    IntoMegaethCfgEnv, MegaethContext, MegaethHaltReason, MegaethHandler, MegaethInstructions,
-    MegaethPrecompiles, MegaethSpecId, MegaethTransaction, MegaethTransactionError, MegaethTxType,
+    Context, HaltReason, Handler, Instructions, IntoMegaethCfgEnv, Precompiles, SpecId,
+    Transaction, TransactionError, TxType,
 };
 
 /// Factory producing [`MegaethEvm`]s.
 #[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
-pub struct MegaethEvmFactory;
+pub struct EvmFactory;
 
-impl EvmFactory for MegaethEvmFactory {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = MegaethEvm<DB, I>;
-    type Context<DB: Database> = MegaethContext<DB>;
-    type Tx = MegaethTransaction;
+impl alloy_evm::EvmFactory for EvmFactory {
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = Evm<DB, I>;
+    type Context<DB: Database> = Context<DB>;
+    type Tx = Transaction;
     type Error<DBError: core::error::Error + Send + Sync + 'static> =
-        EVMError<DBError, MegaethTransactionError>;
-    type HaltReason = MegaethHaltReason;
-    type Spec = MegaethSpecId;
+        EVMError<DBError, TransactionError>;
+    type HaltReason = HaltReason;
+    type Spec = SpecId;
 
     fn create_evm<DB: Database>(
         &self,
@@ -40,12 +41,12 @@ impl EvmFactory for MegaethEvmFactory {
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
         let spec = evm_env.cfg_env().spec();
-        let ctx = MegaethContext::new(db, spec)
-            .with_tx(MegaethTransaction::default())
+        let ctx = Context::new(db, spec)
+            .with_tx(Transaction::default())
             .with_block(evm_env.block_env)
             .with_cfg(evm_env.cfg_env)
             .with_chain(L1BlockInfo::default());
-        MegaethEvm::new(ctx, NoOpInspector)
+        Evm::new(ctx, NoOpInspector)
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -61,57 +62,55 @@ impl EvmFactory for MegaethEvmFactory {
 /// `MegaethEvm` is the EVM implementation for `MegaETH`.
 /// `MegaethEvm` wraps the `OpEvm` with customizations.
 #[allow(missing_debug_implementations)]
-pub struct MegaethEvm<DB: Database, INSP> {
-    inner:
-        revm::context::Evm<MegaethContext<DB>, INSP, MegaethInstructions<DB>, MegaethPrecompiles>,
+pub struct Evm<DB: Database, INSP> {
+    inner: revm::context::Evm<Context<DB>, INSP, Instructions<DB>, Precompiles>,
     inspect: bool,
 }
 
-impl<DB: Database, INSP> core::fmt::Debug for MegaethEvm<DB, INSP> {
+impl<DB: Database, INSP> core::fmt::Debug for Evm<DB, INSP> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethEvm").field("inspect", &self.inspect).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, INSP> core::ops::Deref for MegaethEvm<DB, INSP> {
-    type Target =
-        revm::context::Evm<MegaethContext<DB>, INSP, MegaethInstructions<DB>, MegaethPrecompiles>;
+impl<DB: Database, INSP> core::ops::Deref for Evm<DB, INSP> {
+    type Target = revm::context::Evm<Context<DB>, INSP, Instructions<DB>, Precompiles>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl<DB: Database, INSP> core::ops::DerefMut for MegaethEvm<DB, INSP> {
+impl<DB: Database, INSP> core::ops::DerefMut for Evm<DB, INSP> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<DB: Database, INSP> MegaethEvm<DB, INSP> {
+impl<DB: Database, INSP> Evm<DB, INSP> {
     /// Creates a new [`MegaethEvm`] instance.
-    pub fn new(context: MegaethContext<DB>, inspect: INSP) -> Self {
+    pub fn new(context: Context<DB>, inspect: INSP) -> Self {
         let spec = context.megaeth_spec();
         Self {
             inner: revm::context::Evm::new_with_inspector(
                 context,
                 inspect,
-                MegaethInstructions::new(spec),
-                MegaethPrecompiles::default(),
+                Instructions::new(spec),
+                Precompiles::default(),
             ),
             inspect: false,
         }
     }
 
     /// Creates a new [`MegaethEvm`] instance with the given inspector enabled at runtime.
-    pub fn with_inspector<I>(self, inspector: I) -> MegaethEvm<DB, I> {
+    pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I> {
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.data.ctx,
             inspector,
             self.inner.instruction,
             self.inner.precompiles,
         );
-        MegaethEvm { inner, inspect: true }
+        Evm { inner, inspect: true }
     }
 
     /// Enables inspector at runtime.
@@ -125,7 +124,7 @@ impl<DB: Database, INSP> MegaethEvm<DB, INSP> {
     }
 }
 
-impl<DB: Database, INSP> MegaethEvm<DB, INSP> {
+impl<DB: Database, INSP> Evm<DB, INSP> {
     /// Provides a reference to the block environment.
     #[inline]
     pub fn block_env_ref(&self) -> &BlockEnv {
@@ -151,15 +150,15 @@ impl<DB: Database, INSP> MegaethEvm<DB, INSP> {
     }
 }
 
-impl<DB, INSP> revm::handler::EvmTr for MegaethEvm<DB, INSP>
+impl<DB, INSP> revm::handler::EvmTr for Evm<DB, INSP>
 where
     DB: Database,
 {
-    type Context = MegaethContext<DB>;
+    type Context = Context<DB>;
 
-    type Instructions = MegaethInstructions<DB>;
+    type Instructions = Instructions<DB>;
 
-    type Precompiles = MegaethPrecompiles;
+    type Precompiles = Precompiles;
 
     fn run_interpreter(
         &mut self,
@@ -194,10 +193,10 @@ where
     }
 }
 
-impl<DB, INSP> revm::inspector::InspectorEvmTr for MegaethEvm<DB, INSP>
+impl<DB, INSP> revm::inspector::InspectorEvmTr for Evm<DB, INSP>
 where
     DB: Database,
-    INSP: Inspector<MegaethContext<DB>>,
+    INSP: Inspector<Context<DB>>,
 {
     type Inspector = INSP;
 
@@ -220,16 +219,16 @@ where
     }
 }
 
-impl<DB, INSP> alloy_evm::Evm for MegaethEvm<DB, INSP>
+impl<DB, INSP> alloy_evm::Evm for Evm<DB, INSP>
 where
     DB: Database,
-    INSP: Inspector<MegaethContext<DB>>,
+    INSP: Inspector<Context<DB>>,
 {
     type DB = DB;
-    type Tx = MegaethTransaction;
-    type Error = EVMError<DB::Error, MegaethTransactionError>;
-    type HaltReason = MegaethHaltReason;
-    type Spec = MegaethSpecId;
+    type Tx = Transaction;
+    type Error = EVMError<DB::Error, TransactionError>;
+    type HaltReason = HaltReason;
+    type Spec = SpecId;
 
     fn block(&self) -> &BlockEnv {
         self.block_env_ref()
@@ -256,7 +255,7 @@ where
         contract: revm::primitives::Address,
         data: revm::primitives::Bytes,
     ) -> Result<revm::context::result::ResultAndState<Self::HaltReason>, Self::Error> {
-        let tx = MegaethTransaction {
+        let tx = Transaction {
             base: TxEnv {
                 caller,
                 kind: TxKind::Call(contract),
@@ -278,7 +277,7 @@ where
                 // blob fields can be None for this tx
                 blob_hashes: Vec::new(),
                 max_fee_per_blob_gas: 0,
-                tx_type: MegaethTxType::Deposit as u8,
+                tx_type: TxType::Deposit as u8,
                 authorization_list: Default::default(),
             },
             // The L1 fee is not charged for the EIP-4788 transaction, submit zero bytes for the
@@ -329,7 +328,7 @@ where
         Self: Sized,
     {
         let spec = self.inner.data.ctx.megaeth_spec();
-        let Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
+        let revm::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
             self.inner.data.ctx.into_inner();
         let cfg_env = cfg_env.into_megaeth_cfg(spec);
         (journaled_state.database, EvmEnv { block_env, cfg_env })
@@ -340,15 +339,15 @@ where
     }
 }
 
-impl<DB, INSP> revm::ExecuteEvm for MegaethEvm<DB, INSP>
+impl<DB, INSP> revm::ExecuteEvm for Evm<DB, INSP>
 where
     DB: Database,
 {
     type Output = Result<
-        ResultAndState<MegaethHaltReason>,
-        EVMError<<DB as revm::Database>::Error, MegaethTransactionError>,
+        ResultAndState<HaltReason>,
+        EVMError<<DB as revm::Database>::Error, TransactionError>,
     >;
-    type Tx = MegaethTransaction;
+    type Tx = Transaction;
     type Block = BlockEnv;
 
     fn set_tx(&mut self, tx: Self::Tx) {
@@ -361,18 +360,18 @@ where
 
     fn replay(&mut self) -> Self::Output {
         let spec = self.ctx().megaeth_spec();
-        let mut h = MegaethHandler::<_, _, EthFrame<_, _, _>>::new(spec);
-        h.run(self)
+        let mut h = Handler::<_, _, EthFrame<_, _, _>>::new(spec);
+        revm::handler::Handler::run(&mut h, self)
     }
 }
 
-impl<DB, INSP> revm::ExecuteCommitEvm for MegaethEvm<DB, INSP>
+impl<DB, INSP> revm::ExecuteCommitEvm for Evm<DB, INSP>
 where
     DB: Database + DatabaseCommit,
 {
     type CommitOutput = Result<
-        ExecutionResult<MegaethHaltReason>,
-        EVMError<<DB as revm::Database>::Error, MegaethTransactionError>,
+        ExecutionResult<HaltReason>,
+        EVMError<<DB as revm::Database>::Error, TransactionError>,
     >;
 
     fn replay_commit(&mut self) -> Self::CommitOutput {
@@ -383,10 +382,10 @@ where
     }
 }
 
-impl<DB, INSP> revm::InspectEvm for MegaethEvm<DB, INSP>
+impl<DB, INSP> revm::InspectEvm for Evm<DB, INSP>
 where
     DB: Database,
-    INSP: Inspector<MegaethContext<DB>>,
+    INSP: Inspector<Context<DB>>,
 {
     type Inspector = INSP;
 
@@ -396,15 +395,15 @@ where
 
     fn inspect_replay(&mut self) -> Self::Output {
         let spec = self.ctx().megaeth_spec();
-        let mut h = MegaethHandler::<_, _, EthFrame<_, _, _>>::new(spec);
+        let mut h = Handler::<_, _, EthFrame<_, _, _>>::new(spec);
         h.inspect_run(self)
     }
 }
 
-impl<DB, INSP> revm::InspectCommitEvm for MegaethEvm<DB, INSP>
+impl<DB, INSP> revm::InspectCommitEvm for Evm<DB, INSP>
 where
     DB: Database + DatabaseCommit,
-    INSP: Inspector<MegaethContext<DB>>,
+    INSP: Inspector<Context<DB>>,
 {
     fn inspect_replay_commit(&mut self) -> Self::CommitOutput {
         self.inspect_replay().map(|r| {

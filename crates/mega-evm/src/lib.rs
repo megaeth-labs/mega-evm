@@ -36,7 +36,7 @@ pub use types::*;
 
 #[cfg(test)]
 mod tests {
-    use revm::context::result::{ExecutionResult, HaltReason};
+    use revm::context::result::ExecutionResult;
 
     use super::*;
 
@@ -54,9 +54,8 @@ mod tests {
         fn deploy_contract(
             db: &mut CacheDB<EmptyDB>,
             bytecode: Bytes,
-            spec: MegaethSpecId,
-        ) -> Result<ResultAndState<MegaethHaltReason>, EVMError<Infallible, MegaethTransactionError>>
-        {
+            spec: SpecId,
+        ) -> Result<ResultAndState<HaltReason>, EVMError<Infallible, TransactionError>> {
             transact(
                 spec,
                 db,
@@ -67,7 +66,7 @@ mod tests {
             )
         }
 
-        fn initcode_size_limit_test_case(spec: MegaethSpecId, initcode_size: usize, success: bool) {
+        fn initcode_size_limit_test_case(spec: SpecId, initcode_size: usize, success: bool) {
             let large_bytecode = vec![STOP; initcode_size];
             let bytecode: Bytes = large_bytecode.into();
             let mut db = CacheDB::<EmptyDB>::default();
@@ -77,7 +76,7 @@ mod tests {
             } else {
                 assert!(matches!(
                     result,
-                    Err(EVMError::Transaction(MegaethTransactionError::Base(
+                    Err(EVMError::Transaction(TransactionError::Base(
                         InvalidTransaction::CreateInitCodeSizeLimit
                     )))
                 ));
@@ -87,32 +86,32 @@ mod tests {
         #[test]
         fn test_eip3860_initcode_size() {
             initcode_size_limit_test_case(
-                MegaethSpecId::EQUIVALENCE,
+                SpecId::EQUIVALENCE,
                 revm::primitives::MAX_INITCODE_SIZE,
                 true,
             );
             initcode_size_limit_test_case(
-                MegaethSpecId::EQUIVALENCE,
+                SpecId::EQUIVALENCE,
                 constants::mini_rax::MAX_INITCODE_SIZE,
                 false,
             );
             initcode_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 revm::primitives::MAX_INITCODE_SIZE,
                 true,
             );
             initcode_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 constants::mini_rax::MAX_INITCODE_SIZE,
                 true,
             );
             initcode_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 constants::mini_rax::MAX_INITCODE_SIZE + 1,
                 false,
             );
             initcode_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 2 * constants::mini_rax::MAX_INITCODE_SIZE,
                 false,
             );
@@ -128,7 +127,7 @@ mod tests {
             init_code.into()
         }
 
-        fn contract_size_limit_test_case(spec: MegaethSpecId, contract_size: usize, success: bool) {
+        fn contract_size_limit_test_case(spec: SpecId, contract_size: usize, success: bool) {
             // Use the simplest method to return a contract code
             let init_code = constructor_code(contract_size);
             let mut db = CacheDB::<EmptyDB>::default();
@@ -140,7 +139,9 @@ mod tests {
                     result,
                     Ok(ResultAndState {
                         result: ExecutionResult::Halt {
-                            reason: MegaethHaltReason::Base(HaltReason::CreateContractSizeLimit),
+                            reason: HaltReason::Base(
+                                revm::context::result::HaltReason::CreateContractSizeLimit
+                            ),
                             ..
                         },
                         ..
@@ -152,39 +153,35 @@ mod tests {
         #[test]
         fn test_eip170_code_size_limit() {
             contract_size_limit_test_case(
-                MegaethSpecId::EQUIVALENCE,
+                SpecId::EQUIVALENCE,
                 revm::interpreter::MAX_CODE_SIZE,
                 true,
             );
             contract_size_limit_test_case(
-                MegaethSpecId::EQUIVALENCE,
+                SpecId::EQUIVALENCE,
                 constants::mini_rax::MAX_CONTRACT_SIZE,
                 false,
             );
+            contract_size_limit_test_case(SpecId::MINI_RAX, revm::interpreter::MAX_CODE_SIZE, true);
             contract_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
-                revm::interpreter::MAX_CODE_SIZE,
-                true,
-            );
-            contract_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 constants::mini_rax::MAX_CONTRACT_SIZE,
                 true,
             );
             contract_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 constants::mini_rax::MAX_CONTRACT_SIZE + 1,
                 false,
             );
             contract_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 2 * constants::mini_rax::MAX_CONTRACT_SIZE,
                 false,
             );
         }
 
         fn contract_factory_code_size_limit_test_case(
-            spec: MegaethSpecId,
+            spec: SpecId,
             contract_size: usize,
             success: bool,
         ) {
@@ -232,7 +229,9 @@ mod tests {
                     result,
                     Ok(ResultAndState {
                         result: ExecutionResult::Halt {
-                            reason: MegaethHaltReason::Base(HaltReason::InvalidFEOpcode),
+                            reason: HaltReason::Base(
+                                revm::context::result::HaltReason::InvalidFEOpcode
+                            ),
                             ..
                         },
                         ..
@@ -244,32 +243,32 @@ mod tests {
         #[test]
         fn test_eip170_create_opcode_size_limit() {
             contract_factory_code_size_limit_test_case(
-                MegaethSpecId::EQUIVALENCE,
+                SpecId::EQUIVALENCE,
                 revm::interpreter::MAX_CODE_SIZE,
                 true,
             );
             contract_factory_code_size_limit_test_case(
-                MegaethSpecId::EQUIVALENCE,
+                SpecId::EQUIVALENCE,
                 revm::interpreter::MAX_CODE_SIZE + 1,
                 false,
             );
             contract_factory_code_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 revm::interpreter::MAX_CODE_SIZE,
                 true,
             );
             contract_factory_code_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 revm::interpreter::MAX_CODE_SIZE + 1,
                 true,
             );
             contract_factory_code_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 constants::mini_rax::MAX_CONTRACT_SIZE,
                 true,
             );
             contract_factory_code_size_limit_test_case(
-                MegaethSpecId::MINI_RAX,
+                SpecId::MINI_RAX,
                 constants::mini_rax::MAX_CONTRACT_SIZE + 1,
                 false,
             );
@@ -286,7 +285,7 @@ mod tests {
         use super::*;
 
         fn log_cost_test_case(
-            spec: MegaethSpecId,
+            spec: SpecId,
             topic_count: usize,
             log_size: usize,
             expected_gas: u64,
@@ -314,26 +313,26 @@ mod tests {
 
         #[test]
         fn test_log_data_cost() {
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 0, 21381);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 0, 21381);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 1024, 29671);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 1024, 29671);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 4096, 54565);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 4096, 54565);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 4097, 54576);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 4097, 54569);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 8192, 87813);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 8192, 16832261);
+            log_cost_test_case(SpecId::EQUIVALENCE, 0, 0, 21381);
+            log_cost_test_case(SpecId::MINI_RAX, 0, 0, 21381);
+            log_cost_test_case(SpecId::EQUIVALENCE, 0, 1024, 29671);
+            log_cost_test_case(SpecId::MINI_RAX, 0, 1024, 29671);
+            log_cost_test_case(SpecId::EQUIVALENCE, 0, 4096, 54565);
+            log_cost_test_case(SpecId::MINI_RAX, 0, 4096, 54565);
+            log_cost_test_case(SpecId::EQUIVALENCE, 0, 4097, 54576);
+            log_cost_test_case(SpecId::MINI_RAX, 0, 4097, 54569);
+            log_cost_test_case(SpecId::EQUIVALENCE, 0, 8192, 87813);
+            log_cost_test_case(SpecId::MINI_RAX, 0, 8192, 16832261);
         }
 
         #[test]
         fn test_log_topic_cost() {
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 0, 21381);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 0, 21381);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 1, 0, 21759);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 1, 0, 31384);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 4, 0, 22893);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 4, 0, 61393);
+            log_cost_test_case(SpecId::EQUIVALENCE, 0, 0, 21381);
+            log_cost_test_case(SpecId::MINI_RAX, 0, 0, 21381);
+            log_cost_test_case(SpecId::EQUIVALENCE, 1, 0, 21759);
+            log_cost_test_case(SpecId::MINI_RAX, 1, 0, 31384);
+            log_cost_test_case(SpecId::EQUIVALENCE, 4, 0, 22893);
+            log_cost_test_case(SpecId::MINI_RAX, 4, 0, 61393);
         }
     }
 }

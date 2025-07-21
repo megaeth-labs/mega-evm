@@ -1,4 +1,4 @@
-use crate::{MegaethContext, MegaethSpecId};
+use crate::{Context, SpecId};
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
@@ -8,7 +8,7 @@ use revm::{
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
 };
 
-impl<DB: Database> Host for MegaethContext<DB> {
+impl<DB: Database> Host for Context<DB> {
     delegate! {
         to self.inner {
             fn basefee(&self) -> U256;
@@ -37,7 +37,7 @@ impl<DB: Database> Host for MegaethContext<DB> {
     }
 
     fn max_initcode_size(&self) -> usize {
-        if self.megaeth_spec().is_enabled_in(MegaethSpecId::MINI_RAX) {
+        if self.megaeth_spec().is_enabled_in(SpecId::MINI_RAX) {
             // (contract size limit) + 24KB
             self.cfg().max_code_size() + 24 * 1024
         } else {
@@ -57,7 +57,7 @@ pub trait HostExt: Host {
     fn log_data_size(&self) -> u64;
 }
 
-impl<DB: Database> HostExt for MegaethContext<DB> {
+impl<DB: Database> HostExt for Context<DB> {
     fn log_data_size(&self) -> u64 {
         self.log_data_size
     }

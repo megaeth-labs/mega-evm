@@ -1,5 +1,6 @@
 //! This module provides utility functions to generate EVM bytecode.
 
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use revm::bytecode::opcode::{MSTORE, PUSH0};
 

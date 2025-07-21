@@ -1,6 +1,6 @@
 use core::str::FromStr;
 use op_revm::OpSpecId;
-use revm::primitives::hardfork::{SpecId, UnknownHardfork};
+use revm::primitives::hardfork::UnknownHardfork;
 use serde::{Deserialize, Serialize};
 
 /// `MegaETH` spec id type.
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
 )]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms, missing_docs)]
-pub enum MegaethSpecId {
+pub enum SpecId {
     /// This is the spec of `MegaethEvm` when no harfork is enabled.
     #[default]
     EQUIVALENCE,
@@ -39,9 +39,9 @@ pub mod name {
     pub const MINI_RAX: &str = "MiniRax";
 }
 
-impl MegaethSpecId {
+impl SpecId {
     /// Converts the [`MegaethSpecId`] into a [`SpecId`].
-    pub const fn into_eth_spec(self) -> SpecId {
+    pub const fn into_eth_spec(self) -> revm::primitives::hardfork::SpecId {
         self.into_op_spec().into_eth_spec()
     }
 
@@ -62,16 +62,16 @@ impl MegaethSpecId {
     }
 }
 
-impl From<MegaethSpecId> for &'static str {
-    fn from(spec_id: MegaethSpecId) -> Self {
+impl From<SpecId> for &'static str {
+    fn from(spec_id: SpecId) -> Self {
         match spec_id {
-            MegaethSpecId::EQUIVALENCE => name::EQUIVALENCE,
-            MegaethSpecId::MINI_RAX => name::MINI_RAX,
+            SpecId::EQUIVALENCE => name::EQUIVALENCE,
+            SpecId::MINI_RAX => name::MINI_RAX,
         }
     }
 }
 
-impl FromStr for MegaethSpecId {
+impl FromStr for SpecId {
     type Err = UnknownHardfork;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -83,14 +83,14 @@ impl FromStr for MegaethSpecId {
     }
 }
 
-impl From<MegaethSpecId> for SpecId {
-    fn from(spec_id: MegaethSpecId) -> Self {
+impl From<SpecId> for revm::primitives::hardfork::SpecId {
+    fn from(spec_id: SpecId) -> Self {
         spec_id.into_eth_spec()
     }
 }
 
-impl From<MegaethSpecId> for OpSpecId {
-    fn from(spec_id: MegaethSpecId) -> Self {
+impl From<SpecId> for OpSpecId {
+    fn from(spec_id: SpecId) -> Self {
         spec_id.into_op_spec()
     }
 }

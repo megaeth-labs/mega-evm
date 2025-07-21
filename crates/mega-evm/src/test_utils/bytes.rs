@@ -1,3 +1,4 @@
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 /// Pads the bytes to the right with 0s to make it a multiple of the length.

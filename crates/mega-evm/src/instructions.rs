@@ -1,4 +1,4 @@
-use crate::{constants, HostExt, MegaethContext, MegaethSpecId};
+use crate::{constants, Context, HostExt, SpecId};
 use alloy_evm::Database;
 use alloy_primitives::{Bytes, Log, LogData, B256};
 use revm::{
@@ -17,26 +17,26 @@ use revm::{
 
 /// `MegaethInstructions` is the instruction table for `MegaETH`.
 #[derive(Clone)]
-pub struct MegaethInstructions<DB: Database> {
-    spec: MegaethSpecId,
-    inner: EthInstructions<EthInterpreter, MegaethContext<DB>>,
+pub struct Instructions<DB: Database> {
+    spec: SpecId,
+    inner: EthInstructions<EthInterpreter, Context<DB>>,
 }
 
-impl<DB: Database> core::fmt::Debug for MegaethInstructions<DB> {
+impl<DB: Database> core::fmt::Debug for Instructions<DB> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethInstructions").field("spec", &self.spec).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database> MegaethInstructions<DB> {
+impl<DB: Database> Instructions<DB> {
     /// Create a new `MegaethInstructions` with the given spec id.
-    pub fn new(spec: MegaethSpecId) -> Self {
+    pub fn new(spec: SpecId) -> Self {
         let this = Self { spec, inner: EthInstructions::new_mainnet() };
         this.with_spec(spec)
     }
 
-    fn with_spec(mut self, spec: MegaethSpecId) -> Self {
-        if spec.is_enabled_in(MegaethSpecId::MINI_RAX) {
+    fn with_spec(mut self, spec: SpecId) -> Self {
+        if spec.is_enabled_in(SpecId::MINI_RAX) {
             // Override the LOG instructions and use our own implementation with quadratic data cost
             self.inner.insert_instruction(LOG0, log_with_quadratic_data_cost::<0, _>);
             self.inner.insert_instruction(LOG1, log_with_quadratic_data_cost::<1, _>);
@@ -48,8 +48,8 @@ impl<DB: Database> MegaethInstructions<DB> {
     }
 }
 
-impl<DB: Database> InstructionProvider for MegaethInstructions<DB> {
-    type Context = MegaethContext<DB>;
+impl<DB: Database> InstructionProvider for Instructions<DB> {
+    type Context = Context<DB>;
     type InterpreterTypes = EthInterpreter;
 
     fn instruction_table(&self) -> &InstructionTable<Self::InterpreterTypes, Self::Context> {

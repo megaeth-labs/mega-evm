@@ -1206,7 +1206,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "megaeth-evm"
+name = "mega-evm"
 version = "0.0.1"
 dependencies = [
  "alloy-evm",
