@@ -215,7 +215,7 @@ op-alloy-rpc-jsonrpsee = { version = "0.11.1", default-features = false }
 
 # misc
 delegate = "0.13"
-derive_more = { version = "2", default-features = false, features = ["full"] }
+derive_more = { version = "2", default-features = false }
 serde = { version = "1.0", default-features = false }
 
 [patch.crates-io]

@@ -1,4 +1,4 @@
-use crate::{HostExt, MegaethContext, MegaethSpecId};
+use crate::{constants, HostExt, MegaethContext, MegaethSpecId};
 use alloy_evm::Database;
 use alloy_primitives::{Bytes, Log, LogData, B256};
 use revm::{
@@ -6,7 +6,7 @@ use revm::{
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
         as_usize_or_fail,
-        gas::{LOG, LOGDATA, LOGTOPIC},
+        gas::{LOG, LOGDATA},
         gas_or_fail,
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
@@ -67,7 +67,10 @@ pub fn log_with_quadratic_data_cost<const N: usize, H: HostExt + ?Sized>(
     popn!([offset, len], interpreter);
     let len = as_usize_or_fail!(interpreter, len);
     let previous_total_log_data_size = host.log_data_size();
-    gas_or_fail!(interpreter, log_cost(N as u8, len as u64, previous_total_log_data_size));
+    gas_or_fail!(
+        interpreter,
+        quadratic_log_cost(N as u8, len as u64, previous_total_log_data_size)
+    );
     let data = if len == 0 {
         Bytes::new()
     } else {
@@ -102,33 +105,33 @@ pub fn log_with_quadratic_data_cost<const N: usize, H: HostExt + ?Sized>(
 /// - `previous_total_data_size`: Total size of all previous log data, excluding current opcode
 #[inline]
 #[allow(unused_variables)]
-pub const fn log_cost(n: u8, len: u64, previous_total_data_size: u64) -> Option<u64> {
+pub const fn quadratic_log_cost(n: u8, len: u64, previous_total_data_size: u64) -> Option<u64> {
     // cost for opcode and topics
-    let base_cost = tri!(LOG.checked_add(LOGTOPIC * n as u64));
+    let base_cost = tri!(LOG.checked_add(constants::mini_rax::LOG_TOPIC_COST * n as u64));
 
     let data_cost = {
         // cost for log data
         // the total cost for the whole transaction (summing up all the logs) would be:
-        // - data_len * LOGDATA, if data_len <= 1024
-        // - 1024 * LOGDATA + (data_len - 1024) ^ 2, if data_len > 1024
+        // - data_len * LOGDATA, if data_len <= 4096
+        // - 4096 * LOGDATA + (data_len - 4096) ^ 2, if data_len > 4096
         // Here we calculate the cost for the current log.
         let total_data_size = previous_total_data_size + len;
-        if total_data_size <= 1024 {
-            // Less than 1KB, linear cost. The cost of current log is linear to its length.
+        if total_data_size <= 4096 {
+            // Less than 4KB, linear cost. The cost of current log is linear to its length.
             tri!(LOGDATA.checked_mul(len))
-        } else if previous_total_data_size <= 1024 {
-            // The previous total log length is less than 1KB, but the current log length is greater
-            // than 1KB. The cost of current log is a combination of linear and
-            // quadratic cost: (1024 - previous_total_data_size) * LOGDATA + (len -
-            // (1024 - previous_total_data_size)) ^ 2
-            let linear_cost_len = 1024 - previous_total_data_size;
+        } else if previous_total_data_size <= 4096 {
+            // The previous total log length is less than 4KB, but the current log length is greater
+            // than 4KB. The cost of current log is a combination of linear and
+            // quadratic cost: (4096 - previous_total_data_size) * LOGDATA + (len -
+            // (4096 - previous_total_data_size)) ^ 2
+            let linear_cost_len = 4096 - previous_total_data_size;
             let linear_cost = tri!(LOGDATA.checked_mul(linear_cost_len));
             let quadratic_cost_len = len - linear_cost_len;
             let quadratic_cost = tri!(quadratic_cost_len.checked_pow(2));
             tri!(linear_cost.checked_add(quadratic_cost))
         } else {
-            // The previous total log length is greater than 1KB, and the current log length is also
-            // greater than 1KB. The cost of current log is quadratic to its length:
+            // The previous total log length is greater than 4KB, and the current log length is also
+            // greater than 4KB. The cost of current log is quadratic to its length:
             // total_data_size ** 2 - previous_total_data_size ** 2 === (total_data_size +
             // previous_total_data_size) * len
             tri!(tri!(total_data_size.checked_add(previous_total_data_size)).checked_mul(len))

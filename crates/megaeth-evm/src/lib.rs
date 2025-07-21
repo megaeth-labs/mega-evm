@@ -280,11 +280,21 @@ mod tests {
 
         use super::*;
 
-        fn log_cost_test_case(spec: MegaethSpecId, log_size: usize, expected_gas: u64) {
+        fn log_cost_test_case(
+            spec: MegaethSpecId,
+            topic_count: usize,
+            log_size: usize,
+            expected_gas: u64,
+        ) {
+            assert!(topic_count <= 4);
+
             let mut contract_code = vec![];
             opcode_gen::push_number(&mut contract_code, log_size as u64);
             opcode_gen::push_number(&mut contract_code, 0u64);
-            contract_code.extend(vec![LOG0]);
+            for _ in 0..topic_count {
+                opcode_gen::push_number(&mut contract_code, 0u64);
+            }
+            contract_code.extend(vec![LOG0 + topic_count as u8]);
 
             let mut db = CacheDB::<EmptyDB>::default();
             let contract_address = address!("0000000000000000000000000000000000100002");
@@ -298,15 +308,27 @@ mod tests {
         }
 
         #[test]
-        fn test_log_cost() {
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 21381);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 21381);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 1024, 29671);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 1024, 29671);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 1025, 29682);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 1025, 29675);
-            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 2048, 37965);
-            log_cost_test_case(MegaethSpecId::MINI_RAX, 2048, 1078349);
+        fn test_log_data_cost() {
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 0, 21381);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 0, 21381);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 1024, 29671);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 1024, 29671);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 4096, 54565);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 4096, 54565);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 4097, 54576);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 4097, 54569);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 8192, 87813);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 8192, 16832261);
+        }
+
+        #[test]
+        fn test_log_topic_cost() {
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 0, 0, 21381);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 0, 0, 21381);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 1, 0, 21759);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 1, 0, 31384);
+            log_cost_test_case(MegaethSpecId::EQUIVALENCE, 4, 0, 22893);
+            log_cost_test_case(MegaethSpecId::MINI_RAX, 4, 0, 61393);
         }
     }
 }

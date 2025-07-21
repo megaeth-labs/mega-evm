@@ -27,6 +27,8 @@ pub mod constants {
         pub const ADDITIONAL_INITCODE_SIZE: usize = 24 * 1024;
         /// The maximum initcode size for the `MINI_RAX` spec.
         pub const MAX_INITCODE_SIZE: usize = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE;
+        /// The cost of a log topic for the `MINI_RAX` spec.
+        pub const LOG_TOPIC_COST: u64 = 10000;
     }
 }
 
