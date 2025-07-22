@@ -1,7 +1,6 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use alloy_evm::{Database, EvmEnv};
-use alloy_op_evm as _;
 use alloy_primitives::{Bytes, U256};
 use op_revm::L1BlockInfo;
 use revm::{

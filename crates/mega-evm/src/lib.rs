@@ -11,6 +11,9 @@ extern crate alloc;
 mod context;
 pub use context::*;
 
+mod block;
+pub use block::*;
+
 mod evm;
 pub use evm::*;
 

@@ -1209,8 +1209,11 @@ dependencies = [
 name = "mega-evm"
 version = "0.0.1"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-evm",
  "alloy-op-evm",
+ "alloy-op-hardforks",
  "alloy-primitives",
  "delegate",
  "derive_more 2.0.1",
