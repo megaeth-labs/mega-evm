@@ -13,17 +13,17 @@ use revm::{database::State, Inspector};
 use crate::EvmFactory;
 
 /// Block execution context for the `MegaETH` chain.
-pub type MegaethBlockExecutionCtx = alloy_op_evm::block::OpBlockExecutionCtx;
+pub type BlockExecutionCtx = alloy_op_evm::block::OpBlockExecutionCtx;
 
 /// `MegaETH` block executor factory.
 #[derive(Debug, Clone)]
-pub struct MegaethBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
+pub struct BlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
     receipt_builder: ReceiptBuilder,
     spec: ChainSpec,
     evm_factory: EvmF,
 }
 
-impl<ChainSpec, EvmF, ReceiptBuilder> MegaethBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
+impl<ChainSpec, EvmF, ReceiptBuilder> BlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
     /// Create a new block executor factory.
     pub fn new(spec: ChainSpec, evm_factory: EvmF, receipt_builder: ReceiptBuilder) -> Self {
         Self { receipt_builder, spec, evm_factory }
@@ -31,7 +31,7 @@ impl<ChainSpec, EvmF, ReceiptBuilder> MegaethBlockExecutorFactory<ChainSpec, Evm
 }
 
 impl<ChainSpec, EvmF, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
-    for MegaethBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>
+    for BlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>
 where
     ReceiptBuilder: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
     ChainSpec: OpHardforks + Clone,
@@ -39,7 +39,7 @@ where
     Self: 'static,
 {
     type EvmFactory = EvmF;
-    type ExecutionCtx<'a> = MegaethBlockExecutionCtx;
+    type ExecutionCtx<'a> = BlockExecutionCtx;
     type Transaction = ReceiptBuilder::Transaction;
     type Receipt = ReceiptBuilder::Receipt;
 
@@ -56,34 +56,34 @@ where
         DB: Database + 'a,
         I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<&'a mut State<DB>>> + 'a,
     {
-        MegaethBlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
+        BlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
     }
 }
 
 /// Block executor for the `MegaETH` chain.
-pub struct MegaethBlockExecutor<C, E, R: OpReceiptBuilder> {
+pub struct BlockExecutor<C, E, R: OpReceiptBuilder> {
     inner: OpBlockExecutor<E, R, C>,
 }
 
-impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaethBlockExecutor<C, E, R> {
+impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for BlockExecutor<C, E, R> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethBlockExecutor").finish_non_exhaustive()
     }
 }
 
-impl<C, E, R> MegaethBlockExecutor<C, E, R>
+impl<C, E, R> BlockExecutor<C, E, R>
 where
     C: OpHardforks + Clone,
     E: alloy_evm::Evm<Tx: FromRecoveredTx<R::Transaction>>,
     R: OpReceiptBuilder,
 {
     /// Create a new block executor.
-    pub fn new(evm: E, ctx: MegaethBlockExecutionCtx, spec: C, receipt_builder: R) -> Self {
+    pub fn new(evm: E, ctx: BlockExecutionCtx, spec: C, receipt_builder: R) -> Self {
         Self { inner: OpBlockExecutor::new(evm, ctx, spec, receipt_builder) }
     }
 }
 
-impl<'db, DB, E, C, R> alloy_evm::block::BlockExecutor for MegaethBlockExecutor<C, E, R>
+impl<'db, DB, E, C, R> alloy_evm::block::BlockExecutor for BlockExecutor<C, E, R>
 where
     DB: Database + 'db,
     C: OpHardforks,
