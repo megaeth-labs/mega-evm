@@ -22,7 +22,7 @@ alloy-primitives.workspace = true
 
 # op
 op-alloy-consensus.workspace = true
-op-revm.workspace = true
+op-revm = { workspace = true, features = ["dev"] }
 
 # revm
 revm.workspace = true

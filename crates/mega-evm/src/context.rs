@@ -141,6 +141,11 @@ impl IntoOpCfgEnv for CfgEnv<SpecId> {
         op_cfg.limit_contract_code_size = self.limit_contract_code_size;
         op_cfg.disable_nonce_check = self.disable_nonce_check;
         op_cfg.blob_target_and_max_count = self.blob_target_and_max_count;
+        op_cfg.memory_limit = self.memory_limit;
+        op_cfg.disable_balance_check = self.disable_balance_check;
+        op_cfg.disable_block_gas_limit = self.disable_block_gas_limit;
+        op_cfg.disable_eip3607 = self.disable_eip3607;
+        op_cfg.disable_base_fee = self.disable_base_fee;
         op_cfg
     }
 }
@@ -152,6 +157,11 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
         cfg.limit_contract_code_size = self.limit_contract_code_size;
         cfg.disable_nonce_check = self.disable_nonce_check;
         cfg.blob_target_and_max_count = self.blob_target_and_max_count;
+        cfg.memory_limit = self.memory_limit;
+        cfg.disable_balance_check = self.disable_balance_check;
+        cfg.disable_block_gas_limit = self.disable_block_gas_limit;
+        cfg.disable_eip3607 = self.disable_eip3607;
+        cfg.disable_base_fee = self.disable_base_fee;
         cfg
     }
 }
