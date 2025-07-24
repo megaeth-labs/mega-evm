@@ -95,27 +95,27 @@ mod tests {
             );
             initcode_size_limit_test_case(
                 SpecId::EQUIVALENCE,
-                constants::mini_rax::MAX_INITCODE_SIZE,
+                constants::mini_rex::MAX_INITCODE_SIZE,
                 false,
             );
             initcode_size_limit_test_case(
-                SpecId::MINI_RAX,
+                SpecId::MINI_REX,
                 revm::primitives::MAX_INITCODE_SIZE,
                 true,
             );
             initcode_size_limit_test_case(
-                SpecId::MINI_RAX,
-                constants::mini_rax::MAX_INITCODE_SIZE,
+                SpecId::MINI_REX,
+                constants::mini_rex::MAX_INITCODE_SIZE,
                 true,
             );
             initcode_size_limit_test_case(
-                SpecId::MINI_RAX,
-                constants::mini_rax::MAX_INITCODE_SIZE + 1,
+                SpecId::MINI_REX,
+                constants::mini_rex::MAX_INITCODE_SIZE + 1,
                 false,
             );
             initcode_size_limit_test_case(
-                SpecId::MINI_RAX,
-                2 * constants::mini_rax::MAX_INITCODE_SIZE,
+                SpecId::MINI_REX,
+                2 * constants::mini_rex::MAX_INITCODE_SIZE,
                 false,
             );
         }
@@ -162,23 +162,23 @@ mod tests {
             );
             contract_size_limit_test_case(
                 SpecId::EQUIVALENCE,
-                constants::mini_rax::MAX_CONTRACT_SIZE,
+                constants::mini_rex::MAX_CONTRACT_SIZE,
                 false,
             );
-            contract_size_limit_test_case(SpecId::MINI_RAX, revm::interpreter::MAX_CODE_SIZE, true);
+            contract_size_limit_test_case(SpecId::MINI_REX, revm::interpreter::MAX_CODE_SIZE, true);
             contract_size_limit_test_case(
-                SpecId::MINI_RAX,
-                constants::mini_rax::MAX_CONTRACT_SIZE,
+                SpecId::MINI_REX,
+                constants::mini_rex::MAX_CONTRACT_SIZE,
                 true,
             );
             contract_size_limit_test_case(
-                SpecId::MINI_RAX,
-                constants::mini_rax::MAX_CONTRACT_SIZE + 1,
+                SpecId::MINI_REX,
+                constants::mini_rex::MAX_CONTRACT_SIZE + 1,
                 false,
             );
             contract_size_limit_test_case(
-                SpecId::MINI_RAX,
-                2 * constants::mini_rax::MAX_CONTRACT_SIZE,
+                SpecId::MINI_REX,
+                2 * constants::mini_rex::MAX_CONTRACT_SIZE,
                 false,
             );
         }
@@ -256,23 +256,23 @@ mod tests {
                 false,
             );
             contract_factory_code_size_limit_test_case(
-                SpecId::MINI_RAX,
+                SpecId::MINI_REX,
                 revm::interpreter::MAX_CODE_SIZE,
                 true,
             );
             contract_factory_code_size_limit_test_case(
-                SpecId::MINI_RAX,
+                SpecId::MINI_REX,
                 revm::interpreter::MAX_CODE_SIZE + 1,
                 true,
             );
             contract_factory_code_size_limit_test_case(
-                SpecId::MINI_RAX,
-                constants::mini_rax::MAX_CONTRACT_SIZE,
+                SpecId::MINI_REX,
+                constants::mini_rex::MAX_CONTRACT_SIZE,
                 true,
             );
             contract_factory_code_size_limit_test_case(
-                SpecId::MINI_RAX,
-                constants::mini_rax::MAX_CONTRACT_SIZE + 1,
+                SpecId::MINI_REX,
+                constants::mini_rex::MAX_CONTRACT_SIZE + 1,
                 false,
             );
         }
@@ -317,25 +317,25 @@ mod tests {
         #[test]
         fn test_log_data_cost() {
             log_cost_test_case(SpecId::EQUIVALENCE, 0, 0, 21381);
-            log_cost_test_case(SpecId::MINI_RAX, 0, 0, 21381);
+            log_cost_test_case(SpecId::MINI_REX, 0, 0, 21381);
             log_cost_test_case(SpecId::EQUIVALENCE, 0, 1024, 29671);
-            log_cost_test_case(SpecId::MINI_RAX, 0, 1024, 29671);
+            log_cost_test_case(SpecId::MINI_REX, 0, 1024, 29671);
             log_cost_test_case(SpecId::EQUIVALENCE, 0, 4096, 54565);
-            log_cost_test_case(SpecId::MINI_RAX, 0, 4096, 54565);
+            log_cost_test_case(SpecId::MINI_REX, 0, 4096, 54565);
             log_cost_test_case(SpecId::EQUIVALENCE, 0, 4097, 54576);
-            log_cost_test_case(SpecId::MINI_RAX, 0, 4097, 54569);
+            log_cost_test_case(SpecId::MINI_REX, 0, 4097, 54569);
             log_cost_test_case(SpecId::EQUIVALENCE, 0, 8192, 87813);
-            log_cost_test_case(SpecId::MINI_RAX, 0, 8192, 16832261);
+            log_cost_test_case(SpecId::MINI_REX, 0, 8192, 16832261);
         }
 
         #[test]
         fn test_log_topic_cost() {
             log_cost_test_case(SpecId::EQUIVALENCE, 0, 0, 21381);
-            log_cost_test_case(SpecId::MINI_RAX, 0, 0, 21381);
+            log_cost_test_case(SpecId::MINI_REX, 0, 0, 21381);
             log_cost_test_case(SpecId::EQUIVALENCE, 1, 0, 21759);
-            log_cost_test_case(SpecId::MINI_RAX, 1, 0, 31384);
+            log_cost_test_case(SpecId::MINI_REX, 1, 0, 31384);
             log_cost_test_case(SpecId::EQUIVALENCE, 4, 0, 22893);
-            log_cost_test_case(SpecId::MINI_RAX, 4, 0, 61393);
+            log_cost_test_case(SpecId::MINI_REX, 4, 0, 61393);
         }
     }
 }

@@ -13,21 +13,21 @@ pub enum SpecId {
     /// This is the spec of `MegaethEvm` when no harfork is enabled.
     #[default]
     EQUIVALENCE,
-    MINI_RAX,
+    MINI_REX,
 }
 
 /// Constants for the `MegaethSpecId` spec.
 pub mod constants {
-    /// Constants for the `MINI_RAX` spec.
-    pub mod mini_rax {
-        /// The maximum contract size for the `MINI_RAX` spec.
+    /// Constants for the `MINI_REX` spec.
+    pub mod mini_rex {
+        /// The maximum contract size for the `MINI_REX` spec.
         pub const MAX_CONTRACT_SIZE: usize = 512 * 1024;
-        /// The additional initcode size for the `MINI_RAX` spec. The initcode size is limited to
+        /// The additional initcode size for the `MINI_REX` spec. The initcode size is limited to
         /// `MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE`.
         pub const ADDITIONAL_INITCODE_SIZE: usize = 24 * 1024;
-        /// The maximum initcode size for the `MINI_RAX` spec.
+        /// The maximum initcode size for the `MINI_REX` spec.
         pub const MAX_INITCODE_SIZE: usize = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE;
-        /// The cost of a log topic for the `MINI_RAX` spec.
+        /// The cost of a log topic for the `MINI_REX` spec.
         pub const LOG_TOPIC_COST: u64 = 10000;
     }
 }
@@ -36,7 +36,7 @@ pub mod constants {
 #[allow(missing_docs)]
 pub mod name {
     pub const EQUIVALENCE: &str = "Equivalence";
-    pub const MINI_RAX: &str = "MiniRax";
+    pub const MINI_REX: &str = "MiniRex";
 }
 
 impl SpecId {
@@ -49,7 +49,7 @@ impl SpecId {
     pub const fn into_op_spec(self) -> OpSpecId {
         match self {
             Self::EQUIVALENCE => OpSpecId::GRANITE,
-            Self::MINI_RAX => OpSpecId::ISTHMUS,
+            Self::MINI_REX => OpSpecId::ISTHMUS,
         }
     }
 
@@ -66,7 +66,7 @@ impl From<SpecId> for &'static str {
     fn from(spec_id: SpecId) -> Self {
         match spec_id {
             SpecId::EQUIVALENCE => name::EQUIVALENCE,
-            SpecId::MINI_RAX => name::MINI_RAX,
+            SpecId::MINI_REX => name::MINI_REX,
         }
     }
 }
@@ -77,7 +77,7 @@ impl FromStr for SpecId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             name::EQUIVALENCE => Ok(Self::EQUIVALENCE),
-            name::MINI_RAX => Ok(Self::MINI_RAX),
+            name::MINI_REX => Ok(Self::MINI_REX),
             _ => Err(UnknownHardfork),
         }
     }

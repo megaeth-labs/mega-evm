@@ -37,7 +37,7 @@ impl<DB: Database> Host for Context<DB> {
     }
 
     fn max_initcode_size(&self) -> usize {
-        if self.megaeth_spec().is_enabled_in(SpecId::MINI_RAX) {
+        if self.megaeth_spec().is_enabled_in(SpecId::MINI_REX) {
             // (contract size limit) + 24KB
             self.cfg().max_code_size() + 24 * 1024
         } else {

@@ -32,8 +32,8 @@ impl<DB: Database> Context<DB> {
         let mut inner =
             revm::Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
 
-        if spec.is_enabled_in(SpecId::MINI_RAX) && inner.cfg.limit_contract_code_size.is_none() {
-            inner.cfg.limit_contract_code_size = Some(constants::mini_rax::MAX_CONTRACT_SIZE);
+        if spec.is_enabled_in(SpecId::MINI_REX) && inner.cfg.limit_contract_code_size.is_none() {
+            inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
         }
 
         Self { inner, spec, log_data_size: 0 }
@@ -63,10 +63,10 @@ impl<DB: Database> Context<DB> {
     /// Set the configuration.
     pub fn with_cfg(mut self, cfg: CfgEnv<SpecId>) -> Self {
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
-        if self.spec.is_enabled_in(SpecId::MINI_RAX) &&
+        if self.spec.is_enabled_in(SpecId::MINI_REX) &&
             self.inner.cfg.limit_contract_code_size.is_none()
         {
-            self.inner.cfg.limit_contract_code_size = Some(constants::mini_rax::MAX_CONTRACT_SIZE);
+            self.inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
         }
         self
     }

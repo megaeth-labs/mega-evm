@@ -74,10 +74,10 @@ where
         self.op.validate_env(evm)?;
         let ctx = evm.ctx_ref();
 
-        if self.spec.is_enabled_in(SpecId::MINI_RAX) && ctx.tx().kind().is_create() {
+        if self.spec.is_enabled_in(SpecId::MINI_REX) && ctx.tx().kind().is_create() {
             // additionally, ensure initcode size does not exceed `contract size limit` + 24KB
             let max_initcode_size =
-                ctx.cfg().max_code_size() + constants::mini_rax::ADDITIONAL_INITCODE_SIZE;
+                ctx.cfg().max_code_size() + constants::mini_rex::ADDITIONAL_INITCODE_SIZE;
             if ctx.tx().input().len() > max_initcode_size {
                 return Err(InvalidTransaction::CreateInitCodeSizeLimit.into());
             }

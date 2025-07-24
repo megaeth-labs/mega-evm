@@ -36,7 +36,7 @@ impl<DB: Database> Instructions<DB> {
     }
 
     fn with_spec(mut self, spec: SpecId) -> Self {
-        if spec.is_enabled_in(SpecId::MINI_RAX) {
+        if spec.is_enabled_in(SpecId::MINI_REX) {
             // Override the LOG instructions and use our own implementation with quadratic data cost
             self.inner.insert_instruction(LOG0, log_with_quadratic_data_cost::<0, _>);
             self.inner.insert_instruction(LOG1, log_with_quadratic_data_cost::<1, _>);
@@ -107,7 +107,7 @@ pub fn log_with_quadratic_data_cost<const N: usize, H: HostExt + ?Sized>(
 #[allow(unused_variables)]
 pub const fn quadratic_log_cost(n: u8, len: u64, previous_total_data_size: u64) -> Option<u64> {
     // cost for opcode and topics
-    let base_cost = tri!(LOG.checked_add(constants::mini_rax::LOG_TOPIC_COST * n as u64));
+    let base_cost = tri!(LOG.checked_add(constants::mini_rex::LOG_TOPIC_COST * n as u64));
 
     let data_cost = {
         // cost for log data
