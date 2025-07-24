@@ -31,6 +31,7 @@ revm.workspace = true
 delegate.workspace = true
 derive_more.workspace = true
 serde = { workspace = true, features = ["derive"] }
+tracing.workspace = true
 
 [features]
 std = ["revm/std"]

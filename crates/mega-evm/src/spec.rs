@@ -48,8 +48,7 @@ impl SpecId {
     /// Converts the [`MegaethSpecId`] into a [`OpSpecId`].
     pub const fn into_op_spec(self) -> OpSpecId {
         match self {
-            Self::EQUIVALENCE => OpSpecId::GRANITE,
-            Self::MINI_REX => OpSpecId::ISTHMUS,
+            Self::MINI_REX | Self::EQUIVALENCE => OpSpecId::ISTHMUS,
         }
     }
 
