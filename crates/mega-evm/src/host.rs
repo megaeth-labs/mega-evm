@@ -23,6 +23,7 @@ impl<DB: Database> Host for Context<DB> {
             fn effective_gas_price(&self) -> U256;
             fn caller(&self) -> Address;
             fn blob_hash(&self, number: usize) -> Option<U256>;
+            fn initcode_by_hash(&mut self, hash: B256) -> Option<Bytes>;
             fn block_hash(&mut self, number: u64) -> Option<B256>;
             fn selfdestruct(&mut self, address: Address, target: Address) -> Option<StateLoad<SelfDestructResult>>;
             fn sstore(&mut self, address: Address, key: U256, value: U256) -> Option<StateLoad<SStoreResult>>;

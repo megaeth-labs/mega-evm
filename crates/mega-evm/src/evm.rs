@@ -33,6 +33,7 @@ impl alloy_evm::EvmFactory for EvmFactory {
         EVMError<DBError, TransactionError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
+    type Precompiles = Precompiles;
 
     fn create_evm<DB: Database>(
         &self,
@@ -104,7 +105,7 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     /// Creates a new [`MegaethEvm`] instance with the given inspector enabled at runtime.
     pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I> {
         let inner = revm::context::Evm::new_with_inspector(
-            self.inner.data.ctx,
+            self.inner.ctx,
             inspector,
             self.inner.instruction,
             self.inner.precompiles,
@@ -166,29 +167,29 @@ where
         >,
     ) -> <<Self::Instructions as InstructionProvider>::InterpreterTypes as InterpreterTypes>::Output
     {
-        let result = interpreter
-            .run_plain(self.inner.instruction.instruction_table(), &mut self.inner.data.ctx);
+        let result =
+            interpreter.run_plain(self.inner.instruction.instruction_table(), &mut self.inner.ctx);
         result
     }
 
     #[inline]
     fn ctx(&mut self) -> &mut Self::Context {
-        &mut self.inner.data.ctx
+        self.inner.ctx()
     }
 
     #[inline]
     fn ctx_ref(&self) -> &Self::Context {
-        &self.inner.data.ctx
+        self.inner.ctx_ref()
     }
 
     #[inline]
     fn ctx_instructions(&mut self) -> (&mut Self::Context, &mut Self::Instructions) {
-        (&mut self.inner.data.ctx, &mut self.inner.instruction)
+        (&mut self.inner.ctx, &mut self.inner.instruction)
     }
 
     #[inline]
     fn ctx_precompiles(&mut self) -> (&mut Self::Context, &mut Self::Precompiles) {
-        (&mut self.inner.data.ctx, &mut self.inner.precompiles)
+        (&mut self.inner.ctx, &mut self.inner.precompiles)
     }
 }
 
@@ -200,11 +201,11 @@ where
     type Inspector = INSP;
 
     fn inspector(&mut self) -> &mut Self::Inspector {
-        &mut self.inner.data.inspector
+        &mut self.inner.inspector
     }
 
     fn ctx_inspector(&mut self) -> (&mut Self::Context, &mut Self::Inspector) {
-        (&mut self.inner.data.ctx, &mut self.inner.data.inspector)
+        (&mut self.inner.ctx, &mut self.inner.inspector)
     }
 
     fn run_inspect_interpreter(
@@ -228,6 +229,8 @@ where
     type Error = EVMError<DB::Error, TransactionError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
+    type Precompiles = Precompiles;
+    type Inspector = INSP;
 
     fn block(&self) -> &BlockEnv {
         self.block_env_ref()
@@ -326,15 +329,35 @@ where
     where
         Self: Sized,
     {
-        let spec = self.inner.data.ctx.megaeth_spec();
+        let spec = self.inner.ctx.megaeth_spec();
         let revm::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
-            self.inner.data.ctx.into_inner();
+            self.inner.ctx.into_inner();
         let cfg_env = cfg_env.into_megaeth_cfg(spec);
         (journaled_state.database, EvmEnv { block_env, cfg_env })
     }
 
     fn set_inspector_enabled(&mut self, enabled: bool) {
         self.inspect = enabled;
+    }
+
+    fn chain_id(&self) -> u64 {
+        self.cfg.chain_id
+    }
+
+    fn precompiles(&self) -> &Self::Precompiles {
+        &self.inner.precompiles
+    }
+
+    fn precompiles_mut(&mut self) -> &mut Self::Precompiles {
+        &mut self.inner.precompiles
+    }
+
+    fn inspector(&self) -> &Self::Inspector {
+        &self.inner.inspector
+    }
+
+    fn inspector_mut(&mut self) -> &mut Self::Inspector {
+        &mut self.inner.inspector
     }
 }
 
@@ -350,11 +373,11 @@ where
     type Block = BlockEnv;
 
     fn set_tx(&mut self, tx: Self::Tx) {
-        self.inner.data.ctx.set_tx(tx);
+        self.inner.ctx.set_tx(tx);
     }
 
     fn set_block(&mut self, block: Self::Block) {
-        self.inner.data.ctx.set_block(block);
+        self.inner.ctx.set_block(block);
     }
 
     fn replay(&mut self) -> Self::Output {
@@ -389,7 +412,7 @@ where
     type Inspector = INSP;
 
     fn set_inspector(&mut self, inspector: Self::Inspector) {
-        self.inner.data.inspector = inspector;
+        self.inner.inspector = inspector;
     }
 
     fn inspect_replay(&mut self) -> Self::Output {

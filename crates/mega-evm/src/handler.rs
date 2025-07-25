@@ -54,9 +54,8 @@ where
 
     delegate! {
         to self.op {
-            fn validate_tx_against_state(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn deduct_caller(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn last_frame_result(&self, evm: &mut Self::Evm, frame_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
+            fn validate_against_state_and_deduct_caller(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
+            fn last_frame_result(&mut self, evm: &mut Self::Evm, frame_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult, eip7702_refund: i64);
             fn reward_beneficiary(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;

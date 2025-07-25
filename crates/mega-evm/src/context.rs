@@ -2,7 +2,7 @@ use alloy_evm::Database;
 use delegate::delegate;
 use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
 use revm::{
-    context::{BlockEnv, CfgEnv, ContextSetters, ContextTr},
+    context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
     context_interface::context::ContextError,
     Journal,
 };
@@ -96,6 +96,7 @@ impl<DB: Database> ContextTr for Context<DB> {
     type Db = DB;
     type Journal = Journal<DB>;
     type Chain = L1BlockInfo;
+    type Local = LocalContext;
 
     delegate! {
         to self.inner {
@@ -107,8 +108,11 @@ impl<DB: Database> ContextTr for Context<DB> {
             fn db(&mut self) -> &mut Self::Db;
             fn db_ref(&self) -> &Self::Db;
             fn chain(&mut self) -> &mut Self::Chain;
+            fn chain_ref(&self) -> &Self::Chain;
+            fn local(&mut self) -> &mut Self::Local;
             fn error(&mut self) -> &mut Result<(), ContextError<<Self::Db as revm::Database>::Error>>;
-            fn tx_journal(&mut self) -> (&mut Self::Tx, &mut Self::Journal);
+            fn tx_journal(&mut self) -> (&Self::Tx, &mut Self::Journal);
+            fn tx_local(&mut self) -> (&Self::Tx, &mut Self::Local);
         }
     }
 }
@@ -140,7 +144,7 @@ impl IntoOpCfgEnv for CfgEnv<SpecId> {
         op_cfg.chain_id = self.chain_id;
         op_cfg.limit_contract_code_size = self.limit_contract_code_size;
         op_cfg.disable_nonce_check = self.disable_nonce_check;
-        op_cfg.blob_target_and_max_count = self.blob_target_and_max_count;
+        op_cfg.blob_max_count = self.blob_max_count;
         op_cfg.memory_limit = self.memory_limit;
         op_cfg.disable_balance_check = self.disable_balance_check;
         op_cfg.disable_block_gas_limit = self.disable_block_gas_limit;
@@ -156,7 +160,7 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
         cfg.chain_id = self.chain_id;
         cfg.limit_contract_code_size = self.limit_contract_code_size;
         cfg.disable_nonce_check = self.disable_nonce_check;
-        cfg.blob_target_and_max_count = self.blob_target_and_max_count;
+        cfg.blob_max_count = self.blob_max_count;
         cfg.memory_limit = self.memory_limit;
         cfg.disable_balance_check = self.disable_balance_check;
         cfg.disable_block_gas_limit = self.disable_block_gas_limit;

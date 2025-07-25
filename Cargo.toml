@@ -157,16 +157,16 @@ codegen-units = 1
 
 [workspace.dependencies]
 # revm
-revm = { version = "20.0.0-alpha.7", default-features = false }
-op-revm = { version = "1.0.0-alpha.6", default-features = false }
+revm = { version = "24.0.1", default-features = false }
+op-revm = { version = "5.0.1", default-features = false }
 
 # alloy
-alloy-consensus = { version = "0.12.6", default-features = false }
-alloy-eips = { version = "0.12.6", default-features = false }
-alloy-evm = { version = "0.1.0-alpha.3", default-features = false }
-alloy-op-evm = { version = "0.1.0-alpha.3", default-features = false }
-alloy-op-hardforks = "0.1"
-alloy-primitives = { version = "0.8.20", default-features = false, features = ["map-foldhash"] }
+alloy-consensus = { version = "1.0.6", default-features = false }
+alloy-eips = { version = "1.0.0", default-features = false }
+alloy-evm = { version = "0.10.0", default-features = false }
+alloy-op-evm = { version = "0.10.0", default-features = false }
+alloy-op-hardforks = "0.2.6"
+alloy-primitives = { version = "1.1.2", default-features = false, features = ["map-foldhash"] }
 op-alloy-consensus = { version = "0.11.2", default-features = false }
 
 # misc
@@ -175,5 +175,5 @@ derive_more = { version = "2", default-features = false }
 serde = { version = "1.0", default-features = false }
 
 [patch.crates-io]
-revm = { git = "https://github.com/megaeth-labs/mega-revm.git", branch = "compat/v65" }
-op-revm = { git = "https://github.com/megaeth-labs/mega-revm.git", branch = "compat/v65" }
+revm = { git = "https://github.com/megaeth-labs/mega-revm.git", branch = "compat/v75" }
+op-revm = { git = "https://github.com/megaeth-labs/mega-revm.git", branch = "compat/v75" }
