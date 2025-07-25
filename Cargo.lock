@@ -1221,7 +1221,6 @@ dependencies = [
  "op-revm",
  "revm",
  "serde",
- "tracing",
 ]
 
 [[package]]

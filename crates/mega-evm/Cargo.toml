@@ -19,19 +19,16 @@ alloy-evm.workspace = true
 alloy-op-evm.workspace = true
 alloy-op-hardforks.workspace = true
 alloy-primitives.workspace = true
-
-# op
 op-alloy-consensus.workspace = true
-op-revm = { workspace = true, features = ["dev"] }
 
 # revm
 revm.workspace = true
+op-revm = { workspace = true, features = ["dev"] }
 
 # misc
 delegate.workspace = true
 derive_more.workspace = true
 serde = { workspace = true, features = ["derive"] }
-tracing.workspace = true
 
 [features]
 std = ["revm/std"]
