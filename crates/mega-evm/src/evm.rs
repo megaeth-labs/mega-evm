@@ -64,6 +64,8 @@ impl alloy_evm::EvmFactory for EvmFactory {
 pub struct Evm<DB: Database, INSP> {
     inner: revm::context::Evm<Context<DB>, INSP, Instructions<DB>, Precompiles>,
     inspect: bool,
+    /// Whether to disable the post-transaction reward to beneficiary in the [`Handler`].
+    disable_beneficiary: bool,
 }
 
 impl<DB: Database, INSP> core::fmt::Debug for Evm<DB, INSP> {
@@ -98,18 +100,20 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
                 Precompiles::default(),
             ),
             inspect: false,
+            disable_beneficiary: false,
         }
     }
 
     /// Creates a new [`MegaethEvm`] instance with the given inspector enabled at runtime.
     pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I> {
+        let disable_beneficiary = self.disable_beneficiary;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.data.ctx,
             inspector,
             self.inner.instruction,
             self.inner.precompiles,
         );
-        Evm { inner, inspect: true }
+        Evm { inner, inspect: true, disable_beneficiary }
     }
 
     /// Enables inspector at runtime.
@@ -120,6 +124,11 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     /// Disables inspector at runtime.
     pub fn disable_inspect(&mut self) {
         self.inspect = false;
+    }
+
+    /// Disables the beneficiary reward.
+    pub fn disable_beneficiary(&mut self) {
+        self.disable_beneficiary = true;
     }
 }
 
@@ -359,7 +368,7 @@ where
 
     fn replay(&mut self) -> Self::Output {
         let spec = self.ctx().megaeth_spec();
-        let mut h = Handler::<_, _, EthFrame<_, _, _>>::new(spec);
+        let mut h = Handler::<_, _, EthFrame<_, _, _>>::new(spec, self.disable_beneficiary);
         revm::handler::Handler::run(&mut h, self)
     }
 }
@@ -394,7 +403,7 @@ where
 
     fn inspect_replay(&mut self) -> Self::Output {
         let spec = self.ctx().megaeth_spec();
-        let mut h = Handler::<_, _, EthFrame<_, _, _>>::new(spec);
+        let mut h = Handler::<_, _, EthFrame<_, _, _>>::new(spec, self.disable_beneficiary);
         h.inspect_run(self)
     }
 }
