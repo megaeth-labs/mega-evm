@@ -39,6 +39,17 @@ impl<DB: Database> Context<DB> {
         Self { inner, spec, log_data_size: 0 }
     }
 
+    /// Create a new `MegaethContext` with the given `revm::Context`.
+    pub fn new_with_context(context: OpContext<DB>, spec: SpecId) -> Self {
+        let mut inner = context;
+
+        if spec.is_enabled_in(SpecId::MINI_REX) && inner.cfg.limit_contract_code_size.is_none() {
+            inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
+        }
+
+        Self { inner, spec, log_data_size: 0 }
+    }
+
     /// Set the database.
     pub fn with_db<ODB: Database>(self, db: ODB) -> Context<ODB> {
         Context {
