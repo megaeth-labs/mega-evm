@@ -64,6 +64,7 @@ impl alloy_evm::EvmFactory for EvmFactory {
 pub struct Evm<DB: Database, INSP> {
     inner: revm::context::Evm<Context<DB>, INSP, Instructions<DB>, Precompiles>,
     inspect: bool,
+    /// Whether to disable the post-transaction reward to beneficiary in the [`Handler`].
     disable_beneficiary: bool,
 }
 
@@ -105,13 +106,14 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
 
     /// Creates a new [`MegaethEvm`] instance with the given inspector enabled at runtime.
     pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I> {
+        let disable_beneficiary = self.disable_beneficiary;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.data.ctx,
             inspector,
             self.inner.instruction,
             self.inner.precompiles,
         );
-        Evm { inner, inspect: true, disable_beneficiary: false }
+        Evm { inner, inspect: true, disable_beneficiary }
     }
 
     /// Enables inspector at runtime.

@@ -12,13 +12,14 @@ use crate::{constants, SpecId, Transaction};
 /// `MegaETH` EVM context type.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
 pub struct Context<DB: Database> {
+    /// The inner context. The inner context contains the `OpSpecId`, which should be kept
+    /// consistent with the `spec` field using [`SpecId::into_op_spec()`].
     #[deref]
     #[deref_mut]
     pub(crate) inner: OpContext<DB>,
     /// The `MegaETH` spec id.
-    /// The `inner` context uses `OpSpecId`, which should be converted from `MegaethSpecId`
-    /// when creating the context. The consistency between the spec here and `inner` context
-    /// should be maintained and guaranteed by the caller.
+    /// The consistency between the spec here and `inner` context should be maintained and
+    /// guaranteed by the caller.
     spec: SpecId,
 
     /* Internal state variables */
@@ -43,6 +44,7 @@ impl<DB: Database> Context<DB> {
     pub fn new_with_context(context: OpContext<DB>, spec: SpecId) -> Self {
         let mut inner = context;
 
+        inner.cfg.spec = spec.into_op_spec();
         if spec.is_enabled_in(SpecId::MINI_REX) && inner.cfg.limit_contract_code_size.is_none() {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
         }

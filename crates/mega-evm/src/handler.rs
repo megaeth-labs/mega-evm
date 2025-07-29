@@ -23,6 +23,7 @@ pub struct Handler<EVM, ERROR, FRAME> {
     /// `MegaethSpecId` exists in the `EVM` type, it is not visible here.
     spec: SpecId,
     op: OpHandler<EVM, ERROR, FRAME>,
+    /// Whether to disable the post-transaction reward to beneficiary.
     disable_beneficiary: bool,
 }
 
