@@ -175,5 +175,6 @@ derive_more = { version = "2", default-features = false }
 serde = { version = "1.0", default-features = false }
 
 [patch.crates-io]
-revm = { git = "https://github.com/megaeth-labs/mega-revm.git", branch = "compat/v75" }
-op-revm = { git = "https://github.com/megaeth-labs/mega-revm.git", branch = "compat/v75" }
+# tracking mega-revm/compat/v75
+revm = { git = "https://github.com/megaeth-labs/mega-revm.git", rev = "f9301bfc7889592fce6abd2cfec5cbaee8e70a28" }
+op-revm = { git = "https://github.com/megaeth-labs/mega-revm.git", rev = "f9301bfc7889592fce6abd2cfec5cbaee8e70a28" }
