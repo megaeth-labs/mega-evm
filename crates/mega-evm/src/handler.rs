@@ -23,18 +23,19 @@ pub struct Handler<EVM, ERROR, FRAME> {
     /// `MegaethSpecId` exists in the `EVM` type, it is not visible here.
     spec: SpecId,
     op: OpHandler<EVM, ERROR, FRAME>,
+    disable_beneficiary: bool,
 }
 
 impl<EVM, ERROR, FRAME> Handler<EVM, ERROR, FRAME> {
     /// Create a new `MegaethHandler`.
-    pub fn new(spec: SpecId) -> Self {
-        Self { op: OpHandler::new(), spec }
+    pub fn new(spec: SpecId, disable_beneficiary: bool) -> Self {
+        Self { op: OpHandler::new(), spec, disable_beneficiary }
     }
 }
 
 impl<EVM, ERROR, FRAME> Default for Handler<EVM, ERROR, FRAME> {
     fn default() -> Self {
-        Self::new(SpecId::default())
+        Self::new(SpecId::default(), false)
     }
 }
 
@@ -59,7 +60,6 @@ where
             fn last_frame_result(&self, evm: &mut Self::Evm, frame_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult, eip7702_refund: i64);
-            fn reward_beneficiary(&self, evm: &mut Self::Evm, exec_result: &mut <Self::Frame as Frame>::FrameResult) -> Result<(), Self::Error>;
             fn output(&self, evm: &mut Self::Evm, result: <Self::Frame as Frame>::FrameResult) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
             fn catch_error(&self, evm: &mut Self::Evm, error: Self::Error) -> Result<ResultAndState<Self::HaltReason>, Self::Error>;
         }
@@ -84,6 +84,18 @@ where
         }
 
         Ok(())
+    }
+
+    fn reward_beneficiary(
+        &self,
+        evm: &mut Self::Evm,
+        exec_result: &mut <Self::Frame as Frame>::FrameResult,
+    ) -> Result<(), Self::Error> {
+        if self.disable_beneficiary {
+            Ok(())
+        } else {
+            self.op.reward_beneficiary(evm, exec_result)
+        }
     }
 }
 
