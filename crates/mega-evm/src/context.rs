@@ -41,11 +41,10 @@ impl<DB: Database> Context<DB> {
     }
 
     /// Create a new `MegaethContext` with the given `revm::Context`.
-    pub fn new_with_context(mut context: OpContext<DB>, spec: SpecId) -> Self {
-        // spec in context must keep the same with parameter `spec`
-        context.cfg.spec = spec.into_op_spec();
+    pub fn new_with_context(context: OpContext<DB>, spec: SpecId) -> Self {
         let mut inner = context;
 
+        // spec in context must keep the same with parameter `spec`
         inner.cfg.spec = spec.into_op_spec();
         if spec.is_enabled_in(SpecId::MINI_REX) && inner.cfg.limit_contract_code_size.is_none() {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);

@@ -156,6 +156,12 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     pub fn journaled_state_mut(&mut self) -> &mut Journal<DB> {
         &mut self.ctx().journaled_state
     }
+
+    /// Consumes self and returns the journaled state.
+    #[inline]
+    pub fn into_journaled_state(self) -> Journal<DB> {
+        self.inner.data.ctx.inner.journaled_state
+    }
 }
 
 impl<DB, INSP> revm::handler::EvmTr for Evm<DB, INSP>
