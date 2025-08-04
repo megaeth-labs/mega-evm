@@ -31,5 +31,5 @@ derive_more.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
 [features]
-std = ["revm/std"]
+std = ["revm/std", "op-revm/std"]
 test-utils = []
