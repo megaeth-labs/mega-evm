@@ -1,3 +1,4 @@
+#[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 use alloy_consensus::{transaction::Recovered, Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
