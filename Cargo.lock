@@ -1820,6 +1820,7 @@ version = "17.0.0-alpha.7"
 source = "git+https://github.com/megaeth-labs/mega-revm.git?rev=1733c03544caa7611be30626da85cc0ec96b4e6f#1733c03544caa7611be30626da85cc0ec96b4e6f"
 dependencies = [
  "aurora-engine-modexp",
+ "blst",
  "c-kzg",
  "cfg-if",
  "k256",

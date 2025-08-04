@@ -31,5 +31,6 @@ derive_more.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
 [features]
+default = ["std", "revm/default", "op-revm/default"]
 std = ["revm/std", "op-revm/std"]
 test-utils = []
