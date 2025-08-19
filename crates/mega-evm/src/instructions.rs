@@ -10,8 +10,8 @@ use revm::{
         gas_or_fail,
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
-        popn, require_non_staticcall, resize_memory, tri, InstructionResult, InstructionTable,
-        Interpreter, InterpreterTypes,
+        popn, require_non_staticcall, resize_memory, tri, InstructionContext, InstructionResult,
+        InstructionTable, Interpreter, InterpreterTypes,
     },
 };
 
@@ -59,41 +59,40 @@ impl<DB: Database> InstructionProvider for Instructions<DB> {
 
 /// `LOG` opcode implementation modified from `revm` to support quadratic data cost.
 pub fn log_with_quadratic_data_cost<const N: usize, H: HostExt + ?Sized>(
-    interpreter: &mut Interpreter<impl InterpreterTypes>,
-    host: &mut H,
+    context: InstructionContext<'_, H, impl InterpreterTypes>,
 ) {
-    require_non_staticcall!(interpreter);
+    require_non_staticcall!(context.interpreter);
 
-    popn!([offset, len], interpreter);
-    let len = as_usize_or_fail!(interpreter, len);
-    let previous_total_log_data_size = host.log_data_size();
+    popn!([offset, len], context.interpreter);
+    let len = as_usize_or_fail!(context.interpreter, len);
+    let previous_total_log_data_size = context.host.log_data_size();
     gas_or_fail!(
-        interpreter,
+        context.interpreter,
         quadratic_log_cost(N as u8, len as u64, previous_total_log_data_size)
     );
     let data = if len == 0 {
         Bytes::new()
     } else {
-        let offset = as_usize_or_fail!(interpreter, offset);
-        resize_memory!(interpreter, offset, len);
-        Bytes::copy_from_slice(interpreter.memory.slice_len(offset, len).as_ref())
+        let offset = as_usize_or_fail!(context.interpreter, offset);
+        resize_memory!(context.interpreter, offset, len);
+        Bytes::copy_from_slice(context.interpreter.memory.slice_len(offset, len).as_ref())
     };
-    if interpreter.stack.len() < N {
-        interpreter.control.set_instruction_result(InstructionResult::StackUnderflow);
+    if context.interpreter.stack.len() < N {
+        context.interpreter.halt(InstructionResult::StackUnderflow);
         return;
     }
-    let Some(topics) = interpreter.stack.popn::<N>() else {
-        interpreter.control.set_instruction_result(InstructionResult::StackUnderflow);
+    let Some(topics) = context.interpreter.stack.popn::<N>() else {
+        context.interpreter.halt(InstructionResult::StackUnderflow);
         return;
     };
 
     let log = Log {
-        address: interpreter.input.target_address(),
+        address: context.interpreter.input.target_address(),
         data: LogData::new(topics.into_iter().map(B256::from).collect(), data)
             .expect("LogData should have <=4 topics"),
     };
 
-    host.log(log);
+    context.host.log(log);
 }
 
 /// `LOG` opcode cost calculation.

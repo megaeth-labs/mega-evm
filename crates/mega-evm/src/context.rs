@@ -2,8 +2,9 @@ use alloy_evm::Database;
 use delegate::delegate;
 use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
 use revm::{
-    context::{BlockEnv, CfgEnv, ContextSetters, ContextTr},
+    context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
     context_interface::context::ContextError,
+    inspector::JournalExt,
     Journal,
 };
 
@@ -33,8 +34,9 @@ impl<DB: Database> Context<DB> {
         let mut inner =
             revm::Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
 
-        if spec.is_enabled_in(SpecId::MINI_REX) && inner.cfg.limit_contract_code_size.is_none() {
+        if spec.is_enabled_in(SpecId::MINI_REX) {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
+            inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
         }
 
         Self { inner, spec, log_data_size: 0 }
@@ -77,10 +79,15 @@ impl<DB: Database> Context<DB> {
     /// Set the configuration.
     pub fn with_cfg(mut self, cfg: CfgEnv<SpecId>) -> Self {
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
-        if self.spec.is_enabled_in(SpecId::MINI_REX) &&
-            self.inner.cfg.limit_contract_code_size.is_none()
-        {
-            self.inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
+        if self.spec.is_enabled_in(SpecId::MINI_REX) {
+            if self.inner.cfg.limit_contract_code_size.is_none() {
+                self.inner.cfg.limit_contract_code_size =
+                    Some(constants::mini_rex::MAX_CONTRACT_SIZE);
+            }
+            if self.inner.cfg.limit_contract_initcode_size.is_none() {
+                self.inner.cfg.limit_contract_initcode_size =
+                    Some(constants::mini_rex::MAX_INITCODE_SIZE);
+            }
         }
         self
     }
@@ -110,19 +117,25 @@ impl<DB: Database> ContextTr for Context<DB> {
     type Db = DB;
     type Journal = Journal<DB>;
     type Chain = L1BlockInfo;
+    type Local = LocalContext;
 
     delegate! {
         to self.inner {
             fn tx(&self) -> &Self::Tx;
             fn block(&self) -> &Self::Block;
             fn cfg(&self) -> &Self::Cfg;
-            fn journal(&mut self) -> &mut Self::Journal;
+            fn journal(&self) -> &Self::Journal;
+            fn journal_mut(&mut self) -> &mut Self::Journal;
             fn journal_ref(&self) -> &Self::Journal;
-            fn db(&mut self) -> &mut Self::Db;
-            fn db_ref(&self) -> &Self::Db;
-            fn chain(&mut self) -> &mut Self::Chain;
+            fn db(&self) -> &Self::Db;
+            fn db_mut(&mut self) -> &mut Self::Db;
+            fn chain(&self) -> &Self::Chain;
+            fn chain_mut(&mut self) -> &mut Self::Chain;
+            fn local(&self) -> &Self::Local;
+            fn local_mut(&mut self) -> &mut Self::Local;
             fn error(&mut self) -> &mut Result<(), ContextError<<Self::Db as revm::Database>::Error>>;
-            fn tx_journal(&mut self) -> (&mut Self::Tx, &mut Self::Journal);
+            fn tx_journal_mut(&mut self) -> (&Self::Tx, &mut Self::Journal);
+            fn tx_local_mut(&mut self) -> (&Self::Tx, &mut Self::Local);
         }
     }
 }
@@ -149,15 +162,23 @@ pub trait IntoOpCfgEnv {
 }
 
 impl IntoOpCfgEnv for CfgEnv<SpecId> {
+    /// Convert to `CfgEnv<OpSpecId>`.
+    ///
+    /// DEV: when the fields of [`CfgEnv`] changes, you need to update this function.
     fn into_op_cfg(self) -> CfgEnv<OpSpecId> {
         let mut op_cfg = CfgEnv::new_with_spec(OpSpecId::from(self.spec));
         op_cfg.chain_id = self.chain_id;
+        op_cfg.tx_chain_id_check = self.tx_chain_id_check;
         op_cfg.limit_contract_code_size = self.limit_contract_code_size;
+        op_cfg.limit_contract_initcode_size = self.limit_contract_initcode_size;
         op_cfg.disable_nonce_check = self.disable_nonce_check;
-        op_cfg.blob_target_and_max_count = self.blob_target_and_max_count;
+        op_cfg.max_blobs_per_tx = self.max_blobs_per_tx;
+        op_cfg.blob_base_fee_update_fraction = self.blob_base_fee_update_fraction;
+        op_cfg.tx_gas_limit_cap = self.tx_gas_limit_cap;
         op_cfg.memory_limit = self.memory_limit;
         op_cfg.disable_balance_check = self.disable_balance_check;
         op_cfg.disable_block_gas_limit = self.disable_block_gas_limit;
+        op_cfg.disable_eip3541 = self.disable_eip3541;
         op_cfg.disable_eip3607 = self.disable_eip3607;
         op_cfg.disable_base_fee = self.disable_base_fee;
         op_cfg
@@ -165,15 +186,23 @@ impl IntoOpCfgEnv for CfgEnv<SpecId> {
 }
 
 impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
+    /// Convert to `CfgEnv<MegaethSpecId>`.
+    ///
+    /// DEV: when the fields of [`CfgEnv`] changes, you need to update this function.
     fn into_megaeth_cfg(self, spec: SpecId) -> CfgEnv<SpecId> {
         let mut cfg = CfgEnv::new_with_spec(spec);
         cfg.chain_id = self.chain_id;
+        cfg.tx_chain_id_check = self.tx_chain_id_check;
         cfg.limit_contract_code_size = self.limit_contract_code_size;
+        cfg.limit_contract_initcode_size = self.limit_contract_initcode_size;
         cfg.disable_nonce_check = self.disable_nonce_check;
-        cfg.blob_target_and_max_count = self.blob_target_and_max_count;
+        cfg.max_blobs_per_tx = self.max_blobs_per_tx;
+        cfg.blob_base_fee_update_fraction = self.blob_base_fee_update_fraction;
+        cfg.tx_gas_limit_cap = self.tx_gas_limit_cap;
         cfg.memory_limit = self.memory_limit;
         cfg.disable_balance_check = self.disable_balance_check;
         cfg.disable_block_gas_limit = self.disable_block_gas_limit;
+        cfg.disable_eip3541 = self.disable_eip3541;
         cfg.disable_eip3607 = self.disable_eip3607;
         cfg.disable_base_fee = self.disable_base_fee;
         cfg

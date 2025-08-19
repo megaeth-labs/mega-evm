@@ -5,14 +5,19 @@ use alloy_primitives::{Bytes, U256};
 use op_revm::L1BlockInfo;
 use revm::{
     context::{
-        result::{EVMError, ExecutionResult, ResultAndState},
-        BlockEnv, Cfg, ContextSetters, ContextTr, TxEnv,
+        result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
+        BlockEnv, Cfg, ContextSetters, ContextTr, FrameStack, TxEnv,
     },
-    handler::{instructions::InstructionProvider, EthFrame, EvmTr},
+    handler::{
+        evm::{ContextDbError, FrameInitResult},
+        instructions::InstructionProvider,
+        EthFrame, EvmTr, FrameInitOrResult, SystemCallTx,
+    },
     inspector::{InspectorHandler, NoOpInspector},
-    interpreter::{Interpreter, InterpreterTypes},
-    primitives::TxKind,
-    DatabaseCommit, ExecuteEvm, InspectEvm, Inspector, Journal,
+    interpreter::{interpreter::EthInterpreter, Interpreter, InterpreterTypes},
+    primitives::{Address, TxKind},
+    state::EvmState,
+    DatabaseCommit, ExecuteEvm, InspectEvm, Inspector, Journal, SystemCallEvm,
 };
 
 use crate::{
@@ -33,6 +38,7 @@ impl alloy_evm::EvmFactory for EvmFactory {
         EVMError<DBError, TransactionError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
+    type Precompiles = Precompiles;
 
     fn create_evm<DB: Database>(
         &self,
@@ -62,7 +68,13 @@ impl alloy_evm::EvmFactory for EvmFactory {
 /// `MegaethEvm` wraps the `OpEvm` with customizations.
 #[allow(missing_debug_implementations)]
 pub struct Evm<DB: Database, INSP> {
-    inner: revm::context::Evm<Context<DB>, INSP, Instructions<DB>, Precompiles>,
+    inner: revm::context::Evm<
+        Context<DB>,
+        INSP,
+        Instructions<DB>,
+        Precompiles,
+        EthFrame<EthInterpreter>,
+    >,
     inspect: bool,
     /// Whether to disable the post-transaction reward to beneficiary in the [`Handler`].
     disable_beneficiary: bool,
@@ -75,7 +87,13 @@ impl<DB: Database, INSP> core::fmt::Debug for Evm<DB, INSP> {
 }
 
 impl<DB: Database, INSP> core::ops::Deref for Evm<DB, INSP> {
-    type Target = revm::context::Evm<Context<DB>, INSP, Instructions<DB>, Precompiles>;
+    type Target = revm::context::Evm<
+        Context<DB>,
+        INSP,
+        Instructions<DB>,
+        Precompiles,
+        EthFrame<EthInterpreter>,
+    >;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -108,7 +126,7 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I> {
         let disable_beneficiary = self.disable_beneficiary;
         let inner = revm::context::Evm::new_with_inspector(
-            self.inner.data.ctx,
+            self.inner.ctx,
             inspector,
             self.inner.instruction,
             self.inner.precompiles,
@@ -160,7 +178,7 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     /// Consumes self and returns the journaled state.
     #[inline]
     pub fn into_journaled_state(self) -> Journal<DB> {
-        self.inner.data.ctx.inner.journaled_state
+        self.inner.ctx.inner.journaled_state
     }
 }
 
@@ -174,36 +192,53 @@ where
 
     type Precompiles = Precompiles;
 
-    fn run_interpreter(
-        &mut self,
-        interpreter: &mut Interpreter<
-            <Self::Instructions as InstructionProvider>::InterpreterTypes,
-        >,
-    ) -> <<Self::Instructions as InstructionProvider>::InterpreterTypes as InterpreterTypes>::Output
-    {
-        let result = interpreter
-            .run_plain(self.inner.instruction.instruction_table(), &mut self.inner.data.ctx);
-        result
-    }
+    type Frame = EthFrame<EthInterpreter>;
 
     #[inline]
     fn ctx(&mut self) -> &mut Self::Context {
-        &mut self.inner.data.ctx
+        &mut self.inner.ctx
     }
 
     #[inline]
     fn ctx_ref(&self) -> &Self::Context {
-        &self.inner.data.ctx
+        &self.inner.ctx
     }
 
     #[inline]
     fn ctx_instructions(&mut self) -> (&mut Self::Context, &mut Self::Instructions) {
-        (&mut self.inner.data.ctx, &mut self.inner.instruction)
+        (&mut self.inner.ctx, &mut self.inner.instruction)
     }
 
     #[inline]
     fn ctx_precompiles(&mut self) -> (&mut Self::Context, &mut Self::Precompiles) {
-        (&mut self.inner.data.ctx, &mut self.inner.precompiles)
+        (&mut self.inner.ctx, &mut self.inner.precompiles)
+    }
+
+    fn frame_stack(&mut self) -> &mut FrameStack<Self::Frame> {
+        &mut self.inner.frame_stack
+    }
+
+    fn frame_init(
+        &mut self,
+        frame_input: <Self::Frame as revm::handler::FrameTr>::FrameInit,
+    ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        self.inner.frame_init(frame_input)
+    }
+
+    fn frame_run(
+        &mut self,
+    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
+        self.inner.frame_run()
+    }
+
+    fn frame_return_result(
+        &mut self,
+        result: <Self::Frame as revm::handler::FrameTr>::FrameResult,
+    ) -> Result<
+        Option<<Self::Frame as revm::handler::FrameTr>::FrameResult>,
+        ContextDbError<Self::Context>,
+    > {
+        self.inner.frame_return_result(result)
     }
 }
 
@@ -215,21 +250,28 @@ where
     type Inspector = INSP;
 
     fn inspector(&mut self) -> &mut Self::Inspector {
-        &mut self.inner.data.inspector
+        &mut self.inner.inspector
     }
 
     fn ctx_inspector(&mut self) -> (&mut Self::Context, &mut Self::Inspector) {
-        (&mut self.inner.data.ctx, &mut self.inner.data.inspector)
+        (&mut self.inner.ctx, &mut self.inner.inspector)
     }
 
-    fn run_inspect_interpreter(
+    fn ctx_inspector_frame(
         &mut self,
-        interpreter: &mut Interpreter<
-            <Self::Instructions as InstructionProvider>::InterpreterTypes,
-        >,
-    ) -> <<Self::Instructions as InstructionProvider>::InterpreterTypes as InterpreterTypes>::Output
-    {
-        self.inner.run_inspect_interpreter(interpreter)
+    ) -> (&mut Self::Context, &mut Self::Inspector, &mut Self::Frame) {
+        (&mut self.inner.ctx, &mut self.inner.inspector, self.inner.frame_stack.get())
+    }
+
+    fn ctx_inspector_frame_instructions(
+        &mut self,
+    ) -> (&mut Self::Context, &mut Self::Inspector, &mut Self::Frame, &mut Self::Instructions) {
+        (
+            &mut self.inner.ctx,
+            &mut self.inner.inspector,
+            self.inner.frame_stack.get(),
+            &mut self.inner.instruction,
+        )
     }
 }
 
@@ -243,18 +285,23 @@ where
     type Error = EVMError<DB::Error, TransactionError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
+    type Precompiles = Precompiles;
+    type Inspector = INSP;
 
     fn block(&self) -> &BlockEnv {
         self.block_env_ref()
     }
 
+    fn chain_id(&self) -> u64 {
+        self.ctx_ref().cfg.chain_id
+    }
+
     fn transact_raw(
         &mut self,
         tx: Self::Tx,
-    ) -> Result<revm::context::result::ResultAndState<Self::HaltReason>, Self::Error> {
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         if self.inspect {
-            self.set_tx(tx);
-            self.inspect_replay()
+            InspectEvm::inspect_tx(self, tx)
         } else {
             revm::ExecuteEvm::transact(self, tx)
         }
@@ -265,85 +312,20 @@ where
     /// Note: this funtion copies the logic in `alloy_op_evm::OpEvm::transact_system_call`.
     fn transact_system_call(
         &mut self,
-        caller: revm::primitives::Address,
-        contract: revm::primitives::Address,
-        data: revm::primitives::Bytes,
-    ) -> Result<revm::context::result::ResultAndState<Self::HaltReason>, Self::Error> {
-        let tx = Transaction {
-            base: TxEnv {
-                caller,
-                kind: TxKind::Call(contract),
-                // Explicitly set nonce to 0 so revm does not do any nonce checks
-                nonce: 0,
-                gas_limit: 30_000_000,
-                value: U256::ZERO,
-                data,
-                // Setting the gas price to zero enforces that no value is transferred as part of
-                // the call, and that the call will not count against the block's
-                // gas limit
-                gas_price: 0,
-                // The chain ID check is not relevant here and is disabled if set to None
-                chain_id: None,
-                // Setting the gas priority fee to None ensures the effective gas price is derived
-                // from the `gas_price` field, which we need to be zero
-                gas_priority_fee: None,
-                access_list: Default::default(),
-                // blob fields can be None for this tx
-                blob_hashes: Vec::new(),
-                max_fee_per_blob_gas: 0,
-                tx_type: TxType::Deposit as u8,
-                authorization_list: Default::default(),
-            },
-            // The L1 fee is not charged for the EIP-4788 transaction, submit zero bytes for the
-            // enveloped tx size.
-            enveloped_tx: Some(Bytes::default()),
-            deposit: Default::default(),
-        };
-
-        let mut gas_limit = tx.base.gas_limit;
-        let mut basefee = 0;
-        let mut disable_nonce_check = true;
-
-        // ensure the block gas limit is >= the tx
-        core::mem::swap(&mut self.block_env_mut().gas_limit, &mut gas_limit);
-        // disable the base fee check for this call by setting the base fee to zero
-        core::mem::swap(&mut self.block_env_mut().basefee, &mut basefee);
-        // disable the nonce check
-        core::mem::swap(&mut self.ctx().cfg.disable_nonce_check, &mut disable_nonce_check);
-
-        let mut res = alloy_evm::Evm::transact(self, tx);
-
-        // swap back to the previous gas limit
-        core::mem::swap(&mut self.block_env_mut().gas_limit, &mut gas_limit);
-        // swap back to the previous base fee
-        core::mem::swap(&mut self.block_env_mut().basefee, &mut basefee);
-        // swap back to the previous nonce check flag
-        core::mem::swap(&mut self.ctx().cfg.disable_nonce_check, &mut disable_nonce_check);
-
-        // NOTE: We assume that only the contract storage is modified. Revm currently marks the
-        // caller and block beneficiary accounts as "touched" when we do the above transact calls,
-        // and includes them in the result.
-        //
-        // We're doing this state cleanup to make sure that changeset only includes the changed
-        // contract storage.
-        if let Ok(res) = &mut res {
-            res.state.retain(|addr, _| *addr == contract);
-        }
-
-        res
-    }
-
-    fn db_mut(&mut self) -> &mut Self::DB {
-        &mut self.journaled_state_mut().database
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        self.transact_system_call_with_caller_finalize(caller, contract, data)
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>)
     where
         Self: Sized,
     {
-        let spec = self.inner.data.ctx.megaeth_spec();
+        let spec = self.inner.ctx.megaeth_spec();
         let revm::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
-            self.inner.data.ctx.into_inner();
+            self.inner.ctx.into_inner();
         let cfg_env = cfg_env.into_megaeth_cfg(spec);
         (journaled_state.database, EvmEnv { block_env, cfg_env })
     }
@@ -351,31 +333,52 @@ where
     fn set_inspector_enabled(&mut self, enabled: bool) {
         self.inspect = enabled;
     }
+
+    fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
+        (&self.inner.ctx.journaled_state.database, &self.inner.inspector, &self.inner.precompiles)
+    }
+
+    fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
+        (
+            &mut self.inner.ctx.journaled_state.database,
+            &mut self.inner.inspector,
+            &mut self.inner.precompiles,
+        )
+    }
 }
 
 impl<DB, INSP> revm::ExecuteEvm for Evm<DB, INSP>
 where
     DB: Database,
 {
-    type Output = Result<
-        ResultAndState<HaltReason>,
-        EVMError<<DB as revm::Database>::Error, TransactionError>,
-    >;
     type Tx = Transaction;
     type Block = BlockEnv;
-
-    fn set_tx(&mut self, tx: Self::Tx) {
-        self.inner.data.ctx.set_tx(tx);
-    }
+    type State = EvmState;
+    type Error = EVMError<DB::Error, TransactionError>;
+    type ExecutionResult = ExecutionResult<HaltReason>;
 
     fn set_block(&mut self, block: Self::Block) {
-        self.inner.data.ctx.set_block(block);
+        self.inner.ctx.set_block(block);
     }
 
-    fn replay(&mut self) -> Self::Output {
-        let spec = self.ctx().megaeth_spec();
-        let mut h = Handler::<_, _, EthFrame<_, _, _>>::new(spec, self.disable_beneficiary);
+    fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        self.ctx().set_tx(tx);
+        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
         revm::handler::Handler::run(&mut h, self)
+    }
+
+    fn finalize(&mut self) -> Self::State {
+        self.inner.ctx.journal_mut().finalize()
+    }
+
+    fn replay(
+        &mut self,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
+        revm::handler::Handler::run(&mut h, self).map(|result| {
+            let state = self.finalize();
+            ExecResultAndState::new(result, state)
+        })
     }
 }
 
@@ -383,16 +386,8 @@ impl<DB, INSP> revm::ExecuteCommitEvm for Evm<DB, INSP>
 where
     DB: Database + DatabaseCommit,
 {
-    type CommitOutput = Result<
-        ExecutionResult<HaltReason>,
-        EVMError<<DB as revm::Database>::Error, TransactionError>,
-    >;
-
-    fn replay_commit(&mut self) -> Self::CommitOutput {
-        self.replay().map(|r| {
-            self.ctx().db().commit(r.state);
-            r.result
-        })
+    fn commit(&mut self, state: Self::State) {
+        self.ctx().db_mut().commit(state);
     }
 }
 
@@ -404,13 +399,13 @@ where
     type Inspector = INSP;
 
     fn set_inspector(&mut self, inspector: Self::Inspector) {
-        self.inner.data.inspector = inspector;
+        self.inner.inspector = inspector;
     }
 
-    fn inspect_replay(&mut self) -> Self::Output {
-        let spec = self.ctx().megaeth_spec();
-        let mut h = Handler::<_, _, EthFrame<_, _, _>>::new(spec, self.disable_beneficiary);
-        h.inspect_run(self)
+    fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        self.ctx().set_tx(tx);
+        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
+        revm::inspector::InspectorHandler::inspect_run(&mut h, self)
     }
 }
 
@@ -419,10 +414,22 @@ where
     DB: Database + DatabaseCommit,
     INSP: Inspector<Context<DB>>,
 {
-    fn inspect_replay_commit(&mut self) -> Self::CommitOutput {
-        self.inspect_replay().map(|r| {
-            self.ctx().db().commit(r.state);
-            r.result
-        })
+}
+
+impl<DB, INSP> revm::SystemCallEvm for Evm<DB, INSP>
+where
+    DB: Database,
+{
+    fn transact_system_call_with_caller(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+    ) -> Result<Self::ExecutionResult, Self::Error> {
+        self.ctx().set_tx(<Transaction as SystemCallTx>::new_system_tx_with_caller(
+            caller, contract, data,
+        ));
+        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
+        revm::handler::Handler::run(&mut h, self)
     }
 }

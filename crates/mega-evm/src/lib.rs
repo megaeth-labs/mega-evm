@@ -90,7 +90,7 @@ mod tests {
         fn test_eip3860_initcode_size() {
             initcode_size_limit_test_case(
                 SpecId::EQUIVALENCE,
-                revm::primitives::MAX_INITCODE_SIZE,
+                revm::primitives::eip3860::MAX_INITCODE_SIZE,
                 true,
             );
             initcode_size_limit_test_case(
@@ -100,7 +100,7 @@ mod tests {
             );
             initcode_size_limit_test_case(
                 SpecId::MINI_REX,
-                revm::primitives::MAX_INITCODE_SIZE,
+                revm::primitives::eip3860::MAX_INITCODE_SIZE,
                 true,
             );
             initcode_size_limit_test_case(
@@ -157,7 +157,7 @@ mod tests {
         fn test_eip170_code_size_limit() {
             contract_size_limit_test_case(
                 SpecId::EQUIVALENCE,
-                revm::interpreter::MAX_CODE_SIZE,
+                revm::primitives::eip170::MAX_CODE_SIZE,
                 true,
             );
             contract_size_limit_test_case(
@@ -165,7 +165,11 @@ mod tests {
                 constants::mini_rex::MAX_CONTRACT_SIZE,
                 false,
             );
-            contract_size_limit_test_case(SpecId::MINI_REX, revm::interpreter::MAX_CODE_SIZE, true);
+            contract_size_limit_test_case(
+                SpecId::MINI_REX,
+                revm::primitives::eip170::MAX_CODE_SIZE,
+                true,
+            );
             contract_size_limit_test_case(
                 SpecId::MINI_REX,
                 constants::mini_rex::MAX_CONTRACT_SIZE,
@@ -247,22 +251,22 @@ mod tests {
         fn test_eip170_create_opcode_size_limit() {
             contract_factory_code_size_limit_test_case(
                 SpecId::EQUIVALENCE,
-                revm::interpreter::MAX_CODE_SIZE,
+                revm::primitives::eip170::MAX_CODE_SIZE,
                 true,
             );
             contract_factory_code_size_limit_test_case(
                 SpecId::EQUIVALENCE,
-                revm::interpreter::MAX_CODE_SIZE + 1,
+                revm::primitives::eip170::MAX_CODE_SIZE + 1,
                 false,
             );
             contract_factory_code_size_limit_test_case(
                 SpecId::MINI_REX,
-                revm::interpreter::MAX_CODE_SIZE,
+                revm::primitives::eip170::MAX_CODE_SIZE,
                 true,
             );
             contract_factory_code_size_limit_test_case(
                 SpecId::MINI_REX,
-                revm::interpreter::MAX_CODE_SIZE + 1,
+                revm::primitives::eip170::MAX_CODE_SIZE + 1,
                 true,
             );
             contract_factory_code_size_limit_test_case(

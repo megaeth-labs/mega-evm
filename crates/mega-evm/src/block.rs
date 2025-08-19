@@ -3,13 +3,15 @@ use alloc::boxed::Box;
 use alloy_consensus::{transaction::Recovered, Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
 use alloy_evm::{
-    block::{BlockExecutionError, BlockExecutionResult, BlockExecutorFor},
-    Database, FromRecoveredTx,
+    block::{
+        BlockExecutionError, BlockExecutionResult, BlockExecutorFor, CommitChanges, ExecutableTx,
+    },
+    Database, FromRecoveredTx, FromTxWithEncoded,
 };
 use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, OpBlockExecutor};
 use alloy_op_hardforks::OpHardforks;
 use delegate::delegate;
-use revm::{database::State, Inspector};
+use revm::{context::result::ExecutionResult, database::State, Inspector};
 
 use crate::EvmFactory;
 
@@ -36,7 +38,10 @@ impl<ChainSpec, EvmF, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
 where
     ReceiptBuilder: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
     ChainSpec: OpHardforks + Clone,
-    EvmF: alloy_evm::EvmFactory<Tx: FromRecoveredTx<ReceiptBuilder::Transaction>>,
+    EvmF: alloy_evm::EvmFactory<
+        Tx: FromRecoveredTx<ReceiptBuilder::Transaction>
+                + FromTxWithEncoded<ReceiptBuilder::Transaction>,
+    >,
     Self: 'static,
 {
     type EvmFactory = EvmF;
@@ -88,7 +93,10 @@ impl<'db, DB, E, C, R> alloy_evm::block::BlockExecutor for BlockExecutor<C, E, R
 where
     DB: Database + 'db,
     C: OpHardforks,
-    E: alloy_evm::Evm<DB = &'db mut State<DB>, Tx: FromRecoveredTx<R::Transaction>>,
+    E: alloy_evm::Evm<
+        DB = &'db mut State<DB>,
+        Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
+    >,
     R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
 {
     type Transaction = R::Transaction;
@@ -100,14 +108,15 @@ where
     delegate! {
         to self.inner {
             fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError>;
-            fn execute_transaction_with_result_closure(
+            fn execute_transaction_with_commit_condition(
                 &mut self,
-                tx: Recovered<&Self::Transaction>,
-                f: impl FnOnce(&revm::context::result::ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>),
-            ) -> Result<u64, BlockExecutionError>;
+                tx: impl ExecutableTx<Self>,
+                f: impl FnOnce(&ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>) -> CommitChanges,
+            ) -> Result<Option<u64>, BlockExecutionError>;
             fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError>;
             fn set_state_hook(&mut self, hook: Option<Box<dyn alloy_evm::block::OnStateHook>>);
             fn evm_mut(&mut self) -> &mut Self::Evm;
+            fn evm(&self) -> &Self::Evm;
         }
     }
 }
