@@ -1,8 +1,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use alloy_evm::{Database, EvmEnv};
+use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
 use alloy_primitives::{Bytes, U256};
-use op_revm::L1BlockInfo;
+use op_revm::{L1BlockInfo, OpContext, OpSpecId};
 use revm::{
     context::{
         result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
@@ -11,10 +11,12 @@ use revm::{
     handler::{
         evm::{ContextDbError, FrameInitResult},
         instructions::InstructionProvider,
-        EthFrame, EvmTr, FrameInitOrResult, SystemCallTx,
+        EthFrame, EvmTr, FrameInitOrResult, PrecompileProvider, SystemCallTx,
     },
     inspector::{InspectorHandler, NoOpInspector},
-    interpreter::{interpreter::EthInterpreter, Interpreter, InterpreterTypes},
+    interpreter::{
+        interpreter::EthInterpreter, InputsImpl, Interpreter, InterpreterResult, InterpreterTypes,
+    },
     primitives::{Address, TxKind},
     state::EvmState,
     DatabaseCommit, ExecuteEvm, InspectEvm, Inspector, Journal, SystemCallEvm,
@@ -38,7 +40,7 @@ impl alloy_evm::EvmFactory for EvmFactory {
         EVMError<DBError, TransactionError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
-    type Precompiles = Precompiles;
+    type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(
         &self,
@@ -72,7 +74,7 @@ pub struct Evm<DB: Database, INSP> {
         Context<DB>,
         INSP,
         Instructions<DB>,
-        Precompiles,
+        PrecompilesMap,
         EthFrame<EthInterpreter>,
     >,
     inspect: bool,
@@ -91,7 +93,7 @@ impl<DB: Database, INSP> core::ops::Deref for Evm<DB, INSP> {
         Context<DB>,
         INSP,
         Instructions<DB>,
-        Precompiles,
+        PrecompilesMap,
         EthFrame<EthInterpreter>,
     >;
 
@@ -110,12 +112,13 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     /// Creates a new [`MegaethEvm`] instance.
     pub fn new(context: Context<DB>, inspect: INSP) -> Self {
         let spec = context.megaeth_spec();
+        let op_spec = context.cfg().spec();
         Self {
             inner: revm::context::Evm::new_with_inspector(
                 context,
                 inspect,
                 Instructions::new(spec),
-                Precompiles::default(),
+                PrecompilesMap::from_static(Precompiles::new_with_spec(op_spec).precompiles()),
             ),
             inspect: false,
             disable_beneficiary: false,
@@ -182,6 +185,39 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     }
 }
 
+impl<DB: Database> PrecompileProvider<Context<DB>> for PrecompilesMap {
+    type Output = InterpreterResult;
+
+    #[inline]
+    fn set_spec(&mut self, spec: OpSpecId) -> bool {
+        PrecompileProvider::<OpContext<DB>>::set_spec(self, spec)
+    }
+
+    #[inline]
+    fn run(
+        &mut self,
+        context: &mut Context<DB>,
+        address: &Address,
+        inputs: &InputsImpl,
+        is_static: bool,
+        gas_limit: u64,
+    ) -> Result<Option<Self::Output>, String> {
+        PrecompileProvider::<OpContext<DB>>::run(
+            self, context, address, inputs, is_static, gas_limit,
+        )
+    }
+
+    #[inline]
+    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
+        PrecompileProvider::<OpContext<DB>>::warm_addresses(self)
+    }
+
+    #[inline]
+    fn contains(&self, address: &Address) -> bool {
+        PrecompileProvider::<OpContext<DB>>::contains(self, address)
+    }
+}
+
 impl<DB, INSP> revm::handler::EvmTr for Evm<DB, INSP>
 where
     DB: Database,
@@ -190,7 +226,7 @@ where
 
     type Instructions = Instructions<DB>;
 
-    type Precompiles = Precompiles;
+    type Precompiles = PrecompilesMap;
 
     type Frame = EthFrame<EthInterpreter>;
 
@@ -285,7 +321,7 @@ where
     type Error = EVMError<DB::Error, TransactionError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
-    type Precompiles = Precompiles;
+    type Precompiles = PrecompilesMap;
     type Inspector = INSP;
 
     fn block(&self) -> &BlockEnv {
