@@ -466,6 +466,6 @@ where
             caller, contract, data,
         ));
         let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
-        revm::handler::Handler::run(&mut h, self)
+        revm::handler::Handler::run_system_call(&mut h, self)
     }
 }
