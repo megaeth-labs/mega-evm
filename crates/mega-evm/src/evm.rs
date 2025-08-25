@@ -23,7 +23,7 @@ use revm::{
 };
 
 use crate::{
-    BlockEnvAccess, BlockEnvAccessVec, Context, HaltReason, Handler, Instructions,
+    BlockEnvAccess, BlockEnvAccessBitmap, Context, HaltReason, Handler, Instructions,
     IntoMegaethCfgEnv, Precompiles, SpecId, Transaction, TransactionError, TxType,
 };
 
@@ -184,22 +184,10 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
         self.inner.ctx.inner.journaled_state
     }
 
-    /// Returns whether the current transaction has accessed any block environment data.
+    /// Returns the bitmap of block environment data accessed during transaction execution.
     #[inline]
-    pub fn has_accessed_block_env(&self) -> bool {
-        self.ctx_ref().has_accessed_block_env()
-    }
-
-    /// Returns the vec of block environment data accessed during transaction execution.
-    #[inline]
-    pub fn get_block_env_accesses(&self) -> BlockEnvAccessVec {
+    pub fn get_block_env_accesses(&self) -> BlockEnvAccessBitmap {
         self.ctx_ref().get_block_env_accesses()
-    }
-
-    /// Returns whether a specific type of block environment data was accessed.
-    #[inline]
-    pub fn has_accessed(&self, access_type: BlockEnvAccess) -> bool {
-        self.ctx_ref().has_accessed(access_type)
     }
 
     /// Resets the block environment access vec for a new transaction.

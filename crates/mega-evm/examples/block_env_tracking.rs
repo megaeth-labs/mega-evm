@@ -58,7 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing Contract 1 (uses NUMBER opcode):");
 
     // Ensure clean state
-    assert!(!evm.has_accessed_block_env(), "Should start with no block env access");
+    assert!(
+        !evm.get_block_env_accesses().has_any_access(),
+        "Should start with no block env access"
+    );
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 1
@@ -76,25 +79,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1)?;
     println!("  Transaction result: {:?}", result1.result.is_success());
-    println!("  Block env accessed: {}", evm.has_accessed_block_env());
+
+    let accesses1 = evm.get_block_env_accesses();
+    println!("  Block env accessed: {}", accesses1.has_any_access());
 
     // Show detailed access information
-    let accesses1 = evm.get_block_env_accesses();
-    println!("  Detailed accesses: {:?}", accesses1);
-    println!("  Has accessed BlockNumber: {}", evm.has_accessed(BlockEnvAccess::BlockNumber));
+    println!("  Access count: {}", accesses1.count_accessed());
+    println!("  Has accessed BlockNumber: {}", accesses1.has_accessed(BlockEnvAccess::BlockNumber));
 
-    assert_eq!(accesses1.len(), 1);
-    assert!(evm.has_accessed(BlockEnvAccess::BlockNumber));
-    assert!(evm.has_accessed_block_env(), "Contract 1 should have accessed block env");
+    assert_eq!(accesses1.count_accessed(), 1);
+    assert!(accesses1.has_accessed(BlockEnvAccess::BlockNumber));
+    assert!(accesses1.has_any_access(), "Contract 1 should have accessed block env");
 
     // Reset for next transaction
     evm.reset_block_env_access();
-    println!("  After reset: {}\n", evm.has_accessed_block_env());
+    println!("  After reset: {}\n", evm.get_block_env_accesses().has_any_access());
 
     // Test Contract 2 (multiple block env accesses)
     println!("Testing Contract 2 (uses NUMBER, TIMESTAMP, BASEFEE opcodes):");
 
-    assert!(!evm.has_accessed_block_env(), "Should start with no block env access");
+    assert!(
+        !evm.get_block_env_accesses().has_any_access(),
+        "Should start with no block env access"
+    );
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 2
@@ -113,30 +120,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result2 = alloy_evm::Evm::transact_raw(&mut evm, tx2)?;
     println!("  Transaction result: {:?}", result2.result.is_success());
-    println!("  Block env accessed: {}", evm.has_accessed_block_env());
+
+    let accesses2 = evm.get_block_env_accesses();
+    println!("  Block env accessed: {}", accesses2.has_any_access());
 
     // Show detailed access information
-    let accesses2 = evm.get_block_env_accesses();
-    println!("  Detailed accesses: {:?}", accesses2);
-    println!("  Number of accesses: {}", accesses2.len());
-    println!("  Has accessed BlockNumber: {}", evm.has_accessed(BlockEnvAccess::BlockNumber));
-    println!("  Has accessed Timestamp: {}", evm.has_accessed(BlockEnvAccess::Timestamp));
-    println!("  Has accessed BaseFee: {}", evm.has_accessed(BlockEnvAccess::BaseFee));
+    println!("  Access count: {}", accesses2.count_accessed());
+    println!("  Has accessed BlockNumber: {}", accesses2.has_accessed(BlockEnvAccess::BlockNumber));
+    println!("  Has accessed Timestamp: {}", accesses2.has_accessed(BlockEnvAccess::Timestamp));
+    println!("  Has accessed BaseFee: {}", accesses2.has_accessed(BlockEnvAccess::BaseFee));
 
-    assert_eq!(accesses2.len(), 3);
-    assert!(evm.has_accessed(BlockEnvAccess::BlockNumber));
-    assert!(evm.has_accessed(BlockEnvAccess::Timestamp));
-    assert!(evm.has_accessed(BlockEnvAccess::BaseFee));
-    assert!(evm.has_accessed_block_env(), "Contract 2 should have accessed block env");
+    assert_eq!(accesses2.count_accessed(), 3);
+    assert!(accesses2.has_accessed(BlockEnvAccess::BlockNumber));
+    assert!(accesses2.has_accessed(BlockEnvAccess::Timestamp));
+    assert!(accesses2.has_accessed(BlockEnvAccess::BaseFee));
+    assert!(accesses2.has_any_access(), "Contract 2 should have accessed block env");
 
     // Reset for next transaction
     evm.reset_block_env_access();
-    println!("  After reset: {}\n", evm.has_accessed_block_env());
+    println!("  After reset: {}\n", evm.get_block_env_accesses().has_any_access());
 
     // Test Contract 3 (does NOT access block env)
     println!("Testing Contract 3 (uses CALLER opcode):");
 
-    assert!(!evm.has_accessed_block_env(), "Should start with no block env access");
+    assert!(
+        !evm.get_block_env_accesses().has_any_access(),
+        "Should start with no block env access"
+    );
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 3
@@ -155,13 +165,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result3 = alloy_evm::Evm::transact_raw(&mut evm, tx3)?;
     println!("  Transaction result: {:?}", result3.result.is_success());
-    println!("  Block env accessed: {}", evm.has_accessed_block_env());
 
     let accesses3 = evm.get_block_env_accesses();
-    println!("  Detailed accesses: {:?}", accesses3);
+    println!("  Block env accessed: {}", accesses3.has_any_access());
 
-    assert_eq!(accesses3.len(), 0);
-    assert!(!evm.has_accessed_block_env(), "Contract 3 should NOT have accessed block env");
+    println!("  Access count: {}", accesses3.count_accessed());
+
+    assert_eq!(accesses3.count_accessed(), 0);
+    assert!(!accesses3.has_any_access(), "Contract 3 should NOT have accessed block env");
 
     println!("  Demo finished");
 

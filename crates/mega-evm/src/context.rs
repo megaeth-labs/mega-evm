@@ -9,7 +9,7 @@ use revm::{
 };
 use std::cell::RefCell;
 
-use crate::{constants, BlockEnvAccess, BlockEnvAccessVec, SpecId, Transaction};
+use crate::{constants, BlockEnvAccess, BlockEnvAccessBitmap, SpecId, Transaction};
 
 /// `MegaETH` EVM context type.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
@@ -27,8 +27,8 @@ pub struct Context<DB: Database> {
     /* Internal state variables */
     /// The total size of all log data.
     pub(crate) log_data_size: u64,
-    /// Vec of block environment data accessed during transaction execution.
-    pub(crate) block_env_accessed: RefCell<BlockEnvAccessVec>,
+    /// Bitmap of block environment data accessed during transaction execution.
+    pub(crate) block_env_accessed: RefCell<BlockEnvAccessBitmap>,
 }
 
 impl<DB: Database> Context<DB> {
@@ -42,7 +42,12 @@ impl<DB: Database> Context<DB> {
             inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
         }
 
-        Self { inner, spec, log_data_size: 0, block_env_accessed: RefCell::new(Vec::new()) }
+        Self {
+            inner,
+            spec,
+            log_data_size: 0,
+            block_env_accessed: RefCell::new(BlockEnvAccessBitmap::new()),
+        }
     }
 
     /// Create a new `MegaethContext` with the given `revm::Context`.
@@ -55,7 +60,12 @@ impl<DB: Database> Context<DB> {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
         }
 
-        Self { inner, spec, log_data_size: 0, block_env_accessed: RefCell::new(Vec::new()) }
+        Self {
+            inner,
+            spec,
+            log_data_size: 0,
+            block_env_accessed: RefCell::new(BlockEnvAccessBitmap::new()),
+        }
     }
 
     /// Set the database.
@@ -115,29 +125,19 @@ impl<DB: Database> Context<DB> {
         self.inner
     }
 
-    /// Returns true if the transaction has accessed any block environment data.
-    pub fn has_accessed_block_env(&self) -> bool {
-        !self.block_env_accessed.borrow().is_empty()
+    /// Returns the bitmap of block environment data accessed during transaction execution.
+    pub fn get_block_env_accesses(&self) -> BlockEnvAccessBitmap {
+        *self.block_env_accessed.borrow()
     }
 
-    /// Returns the vec of block environment data accessed during transaction execution.
-    pub fn get_block_env_accesses(&self) -> BlockEnvAccessVec {
-        self.block_env_accessed.borrow().clone()
-    }
-
-    /// Returns true if a specific type of block environment data was accessed.
-    pub fn has_accessed(&self, access_type: BlockEnvAccess) -> bool {
-        self.block_env_accessed.borrow().contains(&access_type)
-    }
-
-    /// Resets the block environment access vec (for new transactions).
+    /// Resets the block environment access bitmap (for new transactions).
     pub fn reset_block_env_access(&mut self) {
         self.block_env_accessed.borrow_mut().clear();
     }
 
     /// Marks that a specific type of block environment has been accessed.
     pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
-        self.block_env_accessed.borrow_mut().push(access_type);
+        self.block_env_accessed.borrow_mut().mark(access_type);
     }
 }
 

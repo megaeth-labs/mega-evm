@@ -335,13 +335,14 @@ mod tests {
 
                 // Ensure we start with no block env access
                 assert!(
-                    !evm.has_accessed_block_env(),
+                    !evm.get_block_env_accesses().has_any_access(),
                     "EVM should start with no block env access for {}",
                     opcode_name
                 );
-                assert!(
-                    evm.get_block_env_accesses().is_empty(),
-                    "EVM should start with empty access list for {}",
+                assert_eq!(
+                    evm.get_block_env_accesses().count_accessed(),
+                    0,
+                    "EVM should start with no access count for {}",
                     opcode_name
                 );
 
@@ -366,41 +367,39 @@ mod tests {
                 match expected_access_type {
                     Some(access_type) => {
                         assert!(
-                            evm.has_accessed_block_env(),
+                            evm.get_block_env_accesses().has_any_access(),
                             "Transaction should have accessed block env for {}",
                             opcode_name
                         );
                         assert!(
-                            evm.has_accessed(access_type),
+                            evm.get_block_env_accesses().has_accessed(access_type),
                             "Transaction should have accessed {:?} for {}",
                             access_type,
                             opcode_name
                         );
 
                         let accesses = evm.get_block_env_accesses();
-
                         if opcode_name == "BLOCKHASH" {
                             // BLOCKHASH accesses both BlockNumber (to validate range) and BlockHash
-                            assert_eq!(accesses.len(), 2,  "BLOCKHASH should access exactly two items: BlockNumber and BlockHash. Got: {:?}", accesses);
+                            assert_eq!(accesses.count_accessed(), 2,  "BLOCKHASH should access exactly two items: BlockNumber and BlockHash");
                             assert!(
-                                accesses.contains(&BlockEnvAccess::BlockNumber),
+                                accesses.has_accessed(BlockEnvAccess::BlockNumber),
                                 "BLOCKHASH should access BlockNumber for validation"
                             );
                             assert!(
-                                accesses.contains(&access_type),
+                                accesses.has_accessed(access_type),
                                 "BLOCKHASH should access BlockHash"
                             );
                         } else {
                             assert_eq!(
-                                accesses.len(),
+                                accesses.count_accessed(),
                                 1,
-                                "Should have exactly one access for {}. Got: {:?}",
-                                opcode_name,
-                                accesses
+                                "Should have exactly one access for {}",
+                                opcode_name
                             );
                             assert!(
-                                accesses.contains(&access_type),
-                                "Access list should contain {:?} for {}",
+                                accesses.has_accessed(access_type),
+                                "Should have accessed {:?} for {}",
                                 access_type,
                                 opcode_name
                             );
@@ -408,13 +407,14 @@ mod tests {
                     }
                     None => {
                         assert!(
-                            !evm.has_accessed_block_env(),
+                            !evm.get_block_env_accesses().has_any_access(),
                             "Transaction should NOT have accessed block env for {}",
                             opcode_name
                         );
-                        assert!(
-                            evm.get_block_env_accesses().is_empty(),
-                            "Access list should be empty for {}",
+                        assert_eq!(
+                            evm.get_block_env_accesses().count_accessed(),
+                            0,
+                            "Access count should be zero for {}",
                             opcode_name
                         );
                     }
@@ -423,13 +423,14 @@ mod tests {
                 // Test reset functionality
                 evm.reset_block_env_access();
                 assert!(
-                    !evm.has_accessed_block_env(),
+                    !evm.get_block_env_accesses().has_any_access(),
                     "Block env access should be reset for {}",
                     opcode_name
                 );
-                assert!(
-                    evm.get_block_env_accesses().is_empty(),
-                    "Access list should be empty after reset for {}",
+                assert_eq!(
+                    evm.get_block_env_accesses().count_accessed(),
+                    0,
+                    "Access count should be zero after reset for {}",
                     opcode_name
                 );
             }
@@ -473,19 +474,18 @@ mod tests {
             assert!(result.is_ok());
 
             // Should have accessed 3 different types
-            assert!(evm.has_accessed_block_env());
             let accesses = evm.get_block_env_accesses();
-            assert_eq!(accesses.len(), 3, "Should have accessed 3 different block env types");
+            assert!(accesses.has_any_access());
+            assert_eq!(
+                accesses.count_accessed(),
+                3,
+                "Should have accessed 3 different block env types"
+            );
 
             // Check specific accesses
-            assert!(evm.has_accessed(BlockEnvAccess::BlockNumber));
-            assert!(evm.has_accessed(BlockEnvAccess::Timestamp));
-            assert!(evm.has_accessed(BlockEnvAccess::BaseFee));
-
-            // Verify the vec contains all expected accesses
-            assert!(accesses.contains(&BlockEnvAccess::BlockNumber));
-            assert!(accesses.contains(&BlockEnvAccess::Timestamp));
-            assert!(accesses.contains(&BlockEnvAccess::BaseFee));
+            assert!(accesses.has_accessed(BlockEnvAccess::BlockNumber));
+            assert!(accesses.has_accessed(BlockEnvAccess::Timestamp));
+            assert!(accesses.has_accessed(BlockEnvAccess::BaseFee));
         }
 
         /// Test that access list is reset between transactions
@@ -516,7 +516,10 @@ mod tests {
 
             let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1);
             assert!(result1.is_ok());
-            assert!(evm.has_accessed_block_env(), "First transaction should access block env");
+            assert!(
+                evm.get_block_env_accesses().has_any_access(),
+                "First transaction should access block env"
+            );
 
             // Simulate setting up for a new transaction
             let tx2_env = revm::context::TxEnv {
@@ -538,7 +541,7 @@ mod tests {
             // After setting new transaction, flag should be reset automatically
             // But since we executed the same contract (NUMBER opcode), it should be accessed again
             assert!(
-                evm.has_accessed_block_env(),
+                evm.get_block_env_accesses().has_any_access(),
                 "Block env should be accessed again for second transaction"
             );
         }
