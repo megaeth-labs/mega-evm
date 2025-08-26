@@ -354,7 +354,7 @@ mod tests {
 
         use crate::{set_account_code, transact, HaltReason, SpecId, TransactionError};
 
-        /// SELFDESTRUCT is allowed before mini-rex
+        /// Test that SELFDESTRUCT opcode works normally before Mini-Rex
         #[test]
         fn test_selfdestruct_allowed_before_mini_rex() {
             let mut db = CacheDB::<EmptyDB>::default();
@@ -376,7 +376,8 @@ mod tests {
             assert_eq!(result.unwrap().result.gas_used(), 26004);
         }
 
-        /// SELFDESTRUCT is disallowed and treated as INVALID after mini-rex
+        /// Test that SELFDESTRUCT opcode is disabled and returns `InvalidFEOpcode` after Mini-Rex
+        /// hardfork
         #[test]
         fn test_selfdestruct_disallowed_after_mini_rex() {
             let mut db = CacheDB::<EmptyDB>::default();

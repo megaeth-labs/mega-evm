@@ -17,6 +17,10 @@ use revm::{
 };
 
 /// `MegaethInstructions` is the instruction table for `MegaETH`.
+///
+/// This instruction table customizes certain opcodes for `MegaETH` specifications:
+/// - LOG opcodes with quadratic data cost after Mini-Rex
+/// - SELFDESTRUCT opcode disabled after Mini-Rex to prevent contract destruction
 #[derive(Clone)]
 pub struct Instructions<DB: Database> {
     spec: SpecId,
@@ -44,7 +48,9 @@ impl<DB: Database> Instructions<DB> {
             self.inner.insert_instruction(LOG2, log_with_quadratic_data_cost::<2, _>);
             self.inner.insert_instruction(LOG3, log_with_quadratic_data_cost::<3, _>);
             self.inner.insert_instruction(LOG4, log_with_quadratic_data_cost::<4, _>);
-            // Disallow SELFDESTRUCT opcode
+            // Disallow SELFDESTRUCT opcode in Mini-Rex spec
+            // This prevents contracts from being permanently destroyed
+            // When executed, it will halt with InvalidFEOpcode
             self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
         }
         self
