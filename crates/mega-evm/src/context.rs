@@ -56,8 +56,14 @@ impl<DB: Database> Context<DB> {
 
         // spec in context must keep the same with parameter `spec`
         inner.cfg.spec = spec.into_op_spec();
-        if spec.is_enabled_in(SpecId::MINI_REX) && inner.cfg.limit_contract_code_size.is_none() {
-            inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
+        if spec.is_enabled_in(SpecId::MINI_REX) {
+            if inner.cfg.limit_contract_code_size.is_none() {
+                inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
+            }
+            if inner.cfg.limit_contract_initcode_size.is_none() {
+                inner.cfg.limit_contract_initcode_size =
+                    Some(constants::mini_rex::MAX_INITCODE_SIZE);
+            }
         }
 
         Self {
