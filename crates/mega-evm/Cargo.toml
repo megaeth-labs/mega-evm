@@ -26,6 +26,7 @@ revm.workspace = true
 op-revm = { workspace = true, features = ["dev"] }
 
 # misc
+bitflags = "2.6"
 delegate.workspace = true
 derive_more.workspace = true
 serde = { workspace = true, features = ["derive"] }

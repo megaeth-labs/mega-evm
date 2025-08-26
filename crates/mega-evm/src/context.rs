@@ -7,8 +7,9 @@ use revm::{
     inspector::JournalExt,
     Journal,
 };
+use std::cell::RefCell;
 
-use crate::{constants, SpecId, Transaction};
+use crate::{constants, BlockEnvAccess, SpecId, Transaction};
 
 /// `MegaETH` EVM context type.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
@@ -26,6 +27,8 @@ pub struct Context<DB: Database> {
     /* Internal state variables */
     /// The total size of all log data.
     pub(crate) log_data_size: u64,
+    /// Bitmap of block environment data accessed during transaction execution.
+    pub(crate) block_env_accessed: RefCell<BlockEnvAccess>,
 }
 
 impl<DB: Database> Context<DB> {
@@ -39,7 +42,12 @@ impl<DB: Database> Context<DB> {
             inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
         }
 
-        Self { inner, spec, log_data_size: 0 }
+        Self {
+            inner,
+            spec,
+            log_data_size: 0,
+            block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
+        }
     }
 
     /// Create a new `MegaethContext` with the given `revm::Context`.
@@ -48,11 +56,22 @@ impl<DB: Database> Context<DB> {
 
         // spec in context must keep the same with parameter `spec`
         inner.cfg.spec = spec.into_op_spec();
-        if spec.is_enabled_in(SpecId::MINI_REX) && inner.cfg.limit_contract_code_size.is_none() {
-            inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
+        if spec.is_enabled_in(SpecId::MINI_REX) {
+            if inner.cfg.limit_contract_code_size.is_none() {
+                inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
+            }
+            if inner.cfg.limit_contract_initcode_size.is_none() {
+                inner.cfg.limit_contract_initcode_size =
+                    Some(constants::mini_rex::MAX_INITCODE_SIZE);
+            }
         }
 
-        Self { inner, spec, log_data_size: 0 }
+        Self {
+            inner,
+            spec,
+            log_data_size: 0,
+            block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
+        }
     }
 
     /// Set the database.
@@ -61,12 +80,15 @@ impl<DB: Database> Context<DB> {
             inner: self.inner.with_db(db),
             spec: self.spec,
             log_data_size: self.log_data_size,
+            block_env_accessed: self.block_env_accessed,
         }
     }
 
     /// Set the transaction.
     pub fn with_tx(mut self, tx: Transaction) -> Self {
         self.inner = self.inner.with_tx(tx);
+        // Reset block env access for new transaction
+        self.reset_block_env_access();
         self
     }
 
@@ -108,6 +130,21 @@ impl<DB: Database> Context<DB> {
     pub fn into_inner(self) -> OpContext<DB> {
         self.inner
     }
+
+    /// Returns the bitmap of block environment data accessed during transaction execution.
+    pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
+        *self.block_env_accessed.borrow()
+    }
+
+    /// Resets the block environment access bitmap (for new transactions).
+    pub fn reset_block_env_access(&mut self) {
+        *self.block_env_accessed.borrow_mut() = BlockEnvAccess::empty();
+    }
+
+    /// Marks that a specific type of block environment has been accessed.
+    pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
+        self.block_env_accessed.borrow_mut().insert(access_type);
+    }
 }
 
 impl<DB: Database> ContextTr for Context<DB> {
@@ -141,9 +178,14 @@ impl<DB: Database> ContextTr for Context<DB> {
 }
 
 impl<DB: Database> ContextSetters for Context<DB> {
+    fn set_tx(&mut self, tx: Self::Tx) {
+        // Reset block env access when setting new transaction
+        self.reset_block_env_access();
+        self.inner.set_tx(tx);
+    }
+
     delegate! {
         to self.inner {
-            fn set_tx(&mut self, tx: Self::Tx);
             fn set_block(&mut self, block: Self::Block);
         }
     }
