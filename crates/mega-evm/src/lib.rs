@@ -342,4 +342,64 @@ mod tests {
             log_cost_test_case(SpecId::MINI_REX, 4, 0, 61393);
         }
     }
+
+    mod disallow_selfdestruct {
+        use alloy_primitives::{address, Bytes, U256};
+        use revm::{
+            bytecode::opcode::{PUSH0, SELFDESTRUCT},
+            context::result::{EVMError, ExecutionResult, InvalidTransaction, ResultAndState},
+            database::{CacheDB, EmptyDB},
+            state::AccountInfo,
+        };
+
+        use crate::{set_account_code, transact, HaltReason, SpecId, TransactionError};
+
+        /// SELFDESTRUCT is allowed before mini-rex
+        #[test]
+        fn test_selfdestruct_allowed_before_mini_rex() {
+            let mut db = CacheDB::<EmptyDB>::default();
+            let contract_address = address!("0000000000000000000000000000000000100001");
+            let code = vec![PUSH0, PUSH0, SELFDESTRUCT];
+            set_account_code(&mut db, contract_address, code.into());
+
+            let caller = address!("0000000000000000000000000000000000100000");
+            let callee = Some(contract_address);
+            let result = transact(
+                SpecId::EQUIVALENCE,
+                &mut db,
+                caller,
+                callee,
+                Bytes::default(),
+                U256::ZERO,
+            );
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap().result.gas_used(), 26004);
+        }
+
+        /// SELFDESTRUCT is disallowed and treated as INVALID after mini-rex
+        #[test]
+        fn test_selfdestruct_disallowed_after_mini_rex() {
+            let mut db = CacheDB::<EmptyDB>::default();
+            let contract_address = address!("0000000000000000000000000000000000100001");
+            let code = vec![PUSH0, PUSH0, SELFDESTRUCT];
+            set_account_code(&mut db, contract_address, code.into());
+
+            let caller = address!("0000000000000000000000000000000000100000");
+            let callee = Some(contract_address);
+            let result =
+                transact(SpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO);
+            assert!(matches!(
+                result,
+                Ok(ResultAndState {
+                    result: ExecutionResult::Halt {
+                        reason: HaltReason::Base(
+                            revm::context::result::HaltReason::InvalidFEOpcode
+                        ),
+                        ..
+                    },
+                    ..
+                })
+            ));
+        }
+    }
 }

@@ -2,12 +2,13 @@ use crate::{constants, Context, HostExt, SpecId};
 use alloy_evm::Database;
 use alloy_primitives::{Bytes, Log, LogData, B256};
 use revm::{
-    bytecode::opcode::{LOG0, LOG1, LOG2, LOG3, LOG4},
+    bytecode::opcode::{LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT},
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
         as_usize_or_fail,
         gas::{LOG, LOGDATA},
         gas_or_fail,
+        instructions::control,
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
         popn, require_non_staticcall, resize_memory, tri, InstructionContext, InstructionResult,
@@ -43,6 +44,8 @@ impl<DB: Database> Instructions<DB> {
             self.inner.insert_instruction(LOG2, log_with_quadratic_data_cost::<2, _>);
             self.inner.insert_instruction(LOG3, log_with_quadratic_data_cost::<3, _>);
             self.inner.insert_instruction(LOG4, log_with_quadratic_data_cost::<4, _>);
+            // Disallow SELFDESTRUCT opcode
+            self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
         }
         self
     }
