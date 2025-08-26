@@ -9,7 +9,7 @@ use revm::{
 };
 use std::cell::RefCell;
 
-use crate::{constants, BlockEnvAccess, BlockEnvAccessBitmap, SpecId, Transaction};
+use crate::{constants, BlockEnvAccess, SpecId, Transaction};
 
 /// `MegaETH` EVM context type.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
@@ -28,7 +28,7 @@ pub struct Context<DB: Database> {
     /// The total size of all log data.
     pub(crate) log_data_size: u64,
     /// Bitmap of block environment data accessed during transaction execution.
-    pub(crate) block_env_accessed: RefCell<BlockEnvAccessBitmap>,
+    pub(crate) block_env_accessed: RefCell<BlockEnvAccess>,
 }
 
 impl<DB: Database> Context<DB> {
@@ -46,7 +46,7 @@ impl<DB: Database> Context<DB> {
             inner,
             spec,
             log_data_size: 0,
-            block_env_accessed: RefCell::new(BlockEnvAccessBitmap::new()),
+            block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
         }
     }
 
@@ -64,7 +64,7 @@ impl<DB: Database> Context<DB> {
             inner,
             spec,
             log_data_size: 0,
-            block_env_accessed: RefCell::new(BlockEnvAccessBitmap::new()),
+            block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
         }
     }
 
@@ -126,18 +126,18 @@ impl<DB: Database> Context<DB> {
     }
 
     /// Returns the bitmap of block environment data accessed during transaction execution.
-    pub fn get_block_env_accesses(&self) -> BlockEnvAccessBitmap {
+    pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
         *self.block_env_accessed.borrow()
     }
 
     /// Resets the block environment access bitmap (for new transactions).
     pub fn reset_block_env_access(&mut self) {
-        self.block_env_accessed.borrow_mut().clear();
+        *self.block_env_accessed.borrow_mut() = BlockEnvAccess::empty();
     }
 
     /// Marks that a specific type of block environment has been accessed.
     pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
-        self.block_env_accessed.borrow_mut().mark(access_type);
+        self.block_env_accessed.borrow_mut().insert(access_type);
     }
 }
 

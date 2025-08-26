@@ -11,53 +11,53 @@ use revm::{
 impl<DB: Database> Host for Context<DB> {
     // Block environment related methods - with tracking
     fn basefee(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::BaseFee);
+        self.mark_block_env_accessed(BlockEnvAccess::BASE_FEE);
         self.inner.basefee()
     }
 
     fn gas_limit(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::GasLimit);
+        self.mark_block_env_accessed(BlockEnvAccess::GAS_LIMIT);
         self.inner.gas_limit()
     }
 
     fn difficulty(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::Difficulty);
+        self.mark_block_env_accessed(BlockEnvAccess::DIFFICULTY);
         self.inner.difficulty()
     }
 
     fn prevrandao(&self) -> Option<U256> {
-        self.mark_block_env_accessed(BlockEnvAccess::PrevRandao);
+        self.mark_block_env_accessed(BlockEnvAccess::PREV_RANDAO);
         self.inner.prevrandao()
     }
 
     fn block_number(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::BlockNumber);
+        self.mark_block_env_accessed(BlockEnvAccess::BLOCK_NUMBER);
         self.inner.block_number()
     }
 
     fn timestamp(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::Timestamp);
+        self.mark_block_env_accessed(BlockEnvAccess::TIMESTAMP);
         self.inner.timestamp()
     }
 
     fn beneficiary(&self) -> Address {
-        self.mark_block_env_accessed(BlockEnvAccess::Coinbase);
+        self.mark_block_env_accessed(BlockEnvAccess::COINBASE);
         self.inner.beneficiary()
     }
 
     fn block_hash(&mut self, number: u64) -> Option<B256> {
-        self.mark_block_env_accessed(BlockEnvAccess::BlockHash);
+        self.mark_block_env_accessed(BlockEnvAccess::BLOCK_HASH);
         self.inner.block_hash(number)
     }
 
     // Blob-related block environment methods - with tracking
     fn blob_gasprice(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::BlobBaseFee);
+        self.mark_block_env_accessed(BlockEnvAccess::BLOB_BASE_FEE);
         self.inner.blob_gasprice()
     }
 
     fn blob_hash(&self, number: usize) -> Option<U256> {
-        self.mark_block_env_accessed(BlockEnvAccess::BlobHash);
+        self.mark_block_env_accessed(BlockEnvAccess::BLOB_HASH);
         self.inner.blob_hash(number)
     }
 

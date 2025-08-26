@@ -1486,6 +1486,7 @@ dependencies = [
  "alloy-op-evm",
  "alloy-op-hardforks",
  "alloy-primitives",
+ "bitflags",
  "delegate",
  "derive_more",
  "op-alloy-consensus",

@@ -23,8 +23,8 @@ use revm::{
 };
 
 use crate::{
-    BlockEnvAccess, BlockEnvAccessBitmap, Context, HaltReason, Handler, Instructions,
-    IntoMegaethCfgEnv, Precompiles, SpecId, Transaction, TransactionError, TxType,
+    BlockEnvAccess, Context, HaltReason, Handler, Instructions, IntoMegaethCfgEnv, Precompiles,
+    SpecId, Transaction, TransactionError, TxType,
 };
 
 /// Factory producing [`MegaethEvm`]s.
@@ -186,7 +186,7 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
 
     /// Returns the bitmap of block environment data accessed during transaction execution.
     #[inline]
-    pub fn get_block_env_accesses(&self) -> BlockEnvAccessBitmap {
+    pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
         self.ctx_ref().get_block_env_accesses()
     }
 

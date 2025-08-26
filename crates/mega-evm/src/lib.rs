@@ -300,13 +300,13 @@ mod tests {
         #[test]
         fn test_block_env_tracking_with_evm() {
             let test_cases = vec![
-                ("NUMBER", vec![NUMBER, STOP], Some(BlockEnvAccess::BlockNumber)),
-                ("TIMESTAMP", vec![TIMESTAMP, STOP], Some(BlockEnvAccess::Timestamp)),
-                ("COINBASE", vec![COINBASE, STOP], Some(BlockEnvAccess::Coinbase)),
-                ("DIFFICULTY", vec![DIFFICULTY, STOP], Some(BlockEnvAccess::PrevRandao)),
-                ("GASLIMIT", vec![GASLIMIT, STOP], Some(BlockEnvAccess::GasLimit)),
-                ("BASEFEE", vec![BASEFEE, STOP], Some(BlockEnvAccess::BaseFee)),
-                ("BLOCKHASH", vec![PUSH1, 0x05, BLOCKHASH, STOP], Some(BlockEnvAccess::BlockHash)),
+                ("NUMBER", vec![NUMBER, STOP], Some(BlockEnvAccess::BLOCK_NUMBER)),
+                ("TIMESTAMP", vec![TIMESTAMP, STOP], Some(BlockEnvAccess::TIMESTAMP)),
+                ("COINBASE", vec![COINBASE, STOP], Some(BlockEnvAccess::COINBASE)),
+                ("DIFFICULTY", vec![DIFFICULTY, STOP], Some(BlockEnvAccess::PREV_RANDAO)),
+                ("GASLIMIT", vec![GASLIMIT, STOP], Some(BlockEnvAccess::GAS_LIMIT)),
+                ("BASEFEE", vec![BASEFEE, STOP], Some(BlockEnvAccess::BASE_FEE)),
+                ("BLOCKHASH", vec![PUSH1, 0x05, BLOCKHASH, STOP], Some(BlockEnvAccess::BLOCK_HASH)),
                 // Non-block env opcodes
                 ("CALLER", vec![CALLER, STOP], None),
                 ("ORIGIN", vec![ORIGIN, STOP], None),
@@ -335,7 +335,7 @@ mod tests {
 
                 // Ensure we start with no block env access
                 assert!(
-                    !evm.get_block_env_accesses().has_any_access(),
+                    evm.get_block_env_accesses().is_empty(),
                     "EVM should start with no block env access for {}",
                     opcode_name
                 );
@@ -367,12 +367,12 @@ mod tests {
                 match expected_access_type {
                     Some(access_type) => {
                         assert!(
-                            evm.get_block_env_accesses().has_any_access(),
+                            !evm.get_block_env_accesses().is_empty(),
                             "Transaction should have accessed block env for {}",
                             opcode_name
                         );
                         assert!(
-                            evm.get_block_env_accesses().has_accessed(access_type),
+                            evm.get_block_env_accesses().contains(access_type),
                             "Transaction should have accessed {:?} for {}",
                             access_type,
                             opcode_name
@@ -383,11 +383,11 @@ mod tests {
                             // BLOCKHASH accesses both BlockNumber (to validate range) and BlockHash
                             assert_eq!(accesses.count_accessed(), 2,  "BLOCKHASH should access exactly two items: BlockNumber and BlockHash");
                             assert!(
-                                accesses.has_accessed(BlockEnvAccess::BlockNumber),
+                                accesses.contains(BlockEnvAccess::BLOCK_NUMBER),
                                 "BLOCKHASH should access BlockNumber for validation"
                             );
                             assert!(
-                                accesses.has_accessed(access_type),
+                                accesses.contains(access_type),
                                 "BLOCKHASH should access BlockHash"
                             );
                         } else {
@@ -398,7 +398,7 @@ mod tests {
                                 opcode_name
                             );
                             assert!(
-                                accesses.has_accessed(access_type),
+                                accesses.contains(access_type),
                                 "Should have accessed {:?} for {}",
                                 access_type,
                                 opcode_name
@@ -407,7 +407,7 @@ mod tests {
                     }
                     None => {
                         assert!(
-                            !evm.get_block_env_accesses().has_any_access(),
+                            evm.get_block_env_accesses().is_empty(),
                             "Transaction should NOT have accessed block env for {}",
                             opcode_name
                         );
@@ -423,7 +423,7 @@ mod tests {
                 // Test reset functionality
                 evm.reset_block_env_access();
                 assert!(
-                    !evm.get_block_env_accesses().has_any_access(),
+                    evm.get_block_env_accesses().is_empty(),
                     "Block env access should be reset for {}",
                     opcode_name
                 );
@@ -475,7 +475,7 @@ mod tests {
 
             // Should have accessed 3 different types
             let accesses = evm.get_block_env_accesses();
-            assert!(accesses.has_any_access());
+            assert!(!accesses.is_empty());
             assert_eq!(
                 accesses.count_accessed(),
                 3,
@@ -483,9 +483,9 @@ mod tests {
             );
 
             // Check specific accesses
-            assert!(accesses.has_accessed(BlockEnvAccess::BlockNumber));
-            assert!(accesses.has_accessed(BlockEnvAccess::Timestamp));
-            assert!(accesses.has_accessed(BlockEnvAccess::BaseFee));
+            assert!(accesses.contains(BlockEnvAccess::BLOCK_NUMBER));
+            assert!(accesses.contains(BlockEnvAccess::TIMESTAMP));
+            assert!(accesses.contains(BlockEnvAccess::BASE_FEE));
         }
 
         /// Test that access list is reset between transactions
@@ -517,7 +517,7 @@ mod tests {
             let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1);
             assert!(result1.is_ok());
             assert!(
-                evm.get_block_env_accesses().has_any_access(),
+                !evm.get_block_env_accesses().is_empty(),
                 "First transaction should access block env"
             );
 
@@ -541,7 +541,7 @@ mod tests {
             // After setting new transaction, flag should be reset automatically
             // But since we executed the same contract (NUMBER opcode), it should be accessed again
             assert!(
-                evm.get_block_env_accesses().has_any_access(),
+                !evm.get_block_env_accesses().is_empty(),
                 "Block env should be accessed again for second transaction"
             );
         }
