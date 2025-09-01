@@ -61,7 +61,6 @@ impl<DB: Database> Host for Context<DB> {
         self.inner.blob_hash(number)
     }
 
-    // Non-block environment methods - no tracking needed
     delegate! {
         to self.inner {
             fn chain_id(&self) -> U256;
@@ -69,15 +68,45 @@ impl<DB: Database> Host for Context<DB> {
             fn caller(&self) -> Address;
             fn max_initcode_size(&self) -> usize;
             fn selfdestruct(&mut self, address: Address, target: Address) -> Option<StateLoad<SelfDestructResult>>;
-            fn sstore(&mut self, address: Address, key: U256, value: U256) -> Option<StateLoad<SStoreResult>>;
-            fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>>;
-            fn tstore(&mut self, address: Address, key: U256, value: U256);
-            fn tload(&mut self, address: Address, key: U256) -> U256;
-            fn balance(&mut self, address: Address) -> Option<StateLoad<U256>>;
-            fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>>;
             fn load_account_code(&mut self, address: Address) -> Option<StateLoad<Bytes>>;
             fn load_account_code_hash(&mut self, address: Address) -> Option<StateLoad<B256>>;
+
         }
+    }
+
+    fn sstore(
+        &mut self,
+        address: Address,
+        key: U256,
+        value: U256,
+    ) -> Option<StateLoad<SStoreResult>> {
+        self.check_and_mark_beneficiary_access(&address);
+        self.inner.sstore(address, key, value)
+    }
+
+    fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
+        self.check_and_mark_beneficiary_access(&address);
+        self.inner.sload(address, key)
+    }
+
+    fn tstore(&mut self, address: Address, key: U256, value: U256) {
+        self.check_and_mark_beneficiary_access(&address);
+        self.inner.tstore(address, key, value)
+    }
+
+    fn tload(&mut self, address: Address, key: U256) -> U256 {
+        self.check_and_mark_beneficiary_access(&address);
+        self.inner.tload(address, key)
+    }
+
+    fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
+        self.check_and_mark_beneficiary_access(&address);
+        self.inner.balance(address)
+    }
+
+    fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>> {
+        self.check_and_mark_beneficiary_access(&address);
+        self.inner.load_account_delegated(address)
     }
 
     fn log(&mut self, log: Log) {
