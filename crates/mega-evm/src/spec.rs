@@ -29,6 +29,8 @@ pub mod constants {
         pub const MAX_INITCODE_SIZE: usize = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE;
         /// The cost of a log topic for the `MINI_REX` spec.
         pub const LOG_TOPIC_COST: u64 = 10000;
+        /// The default gas limit for beneficiary access enforcement.
+        pub const BENEFICIARY_GAS_LIMIT: u64 = 50_000;
     }
 }
 

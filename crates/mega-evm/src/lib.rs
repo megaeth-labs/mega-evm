@@ -23,6 +23,9 @@ pub use host::*;
 mod instructions;
 pub use instructions::*;
 
+mod gas_limit_enforcement_inspector;
+pub use gas_limit_enforcement_inspector::*;
+
 mod handler;
 pub use handler::*;
 
@@ -42,6 +45,8 @@ mod tests {
     use revm::context::result::ExecutionResult;
 
     use super::*;
+
+    mod gas_limit_enforcement_test;
 
     mod contract_size_limit {
         use alloy_primitives::{address, Bytes, U256};
