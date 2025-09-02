@@ -3,7 +3,10 @@ use delegate::delegate;
 use op_revm::handler::{IsTxError, OpHandler};
 use revm::{
     context::{
-        result::{ExecutionResult, FromStringError, InvalidTransaction, ResultAndState},
+        result::{
+            ExecutionResult, FromStringError, HaltReason as BaseHaltReason, InvalidTransaction,
+            OutOfGasError, ResultAndState,
+        },
         Cfg, ContextTr, Transaction,
     },
     handler::{EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr},
@@ -57,9 +60,43 @@ where
             fn last_frame_result(&mut self, evm: &mut Self::Evm, frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
-            fn execution_result(&mut self, evm: &mut Self::Evm, result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<ExecutionResult<Self::HaltReason>, Self::Error>;
             fn catch_error(&self, evm: &mut Self::Evm, error: Self::Error) -> Result<ExecutionResult<Self::HaltReason>, Self::Error>;
         }
+    }
+
+    fn execution_result(
+        &mut self,
+        evm: &mut Self::Evm,
+        result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        let mut exec_result = self.op.execution_result(evm, result)?;
+
+        // Apply gas limit enforcement for transactions that accessed beneficiary
+        if evm.ctx().has_accessed_beneficiary_balance() {
+            if let ExecutionResult::Halt {
+                reason: HaltReason::Base(BaseHaltReason::OutOfGas(OutOfGasError::Basic)),
+                ..
+            } = &exec_result
+            {
+                // Determine if OutOfGas was due to enforcement or natural gas limit
+                let tx_gas_limit = evm.ctx().tx().gas_limit();
+
+                if tx_gas_limit <= constants::mini_rex::BENEFICIARY_GAS_LIMIT {
+                    // Natural OutOfGas - transaction had low gas limit, keep original
+                } else {
+                    // Enforcement OutOfGas - use InvalidOperand to distinguish from natural
+                    // OutOfGas
+                    exec_result = ExecutionResult::Halt {
+                        reason: HaltReason::Base(BaseHaltReason::OutOfGas(
+                            OutOfGasError::InvalidOperand,
+                        )),
+                        gas_used: constants::mini_rex::BENEFICIARY_GAS_LIMIT,
+                    };
+                }
+            }
+        }
+
+        Ok(exec_result)
     }
 
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {

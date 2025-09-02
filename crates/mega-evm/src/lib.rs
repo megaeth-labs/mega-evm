@@ -23,6 +23,9 @@ pub use host::*;
 mod instructions;
 pub use instructions::*;
 
+mod gas_limit_enforcement_inspector;
+pub use gas_limit_enforcement_inspector::*;
+
 mod handler;
 pub use handler::*;
 

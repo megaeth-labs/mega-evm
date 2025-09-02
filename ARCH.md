@@ -153,3 +153,49 @@ evm.ctx_mut().reset_block_env_access();
 
 **Benefits**:
 - Enables parallel execution optimization by identifying transactions that access the beneficiary, which can block other transactions and cause longer execution times
+
+## Gas Limit Enforcement for Beneficiary Access
+
+**Files**: `crates/mega-evm/src/gas_limit_enforcement_inspector.rs`
+
+**Purpose**: Enforces a gas limit of 50,000 for transactions that access the block beneficiary to prevent resource exhaustion attacks and ensure fair resource allocation.
+
+**Implementation Details**:
+- Uses the `GasLimitEnforcementInspector` to wrap other inspectors
+- Monitors gas consumption during execution
+- Immediately halts execution when gas limit is exceeded for beneficiary-accessing transactions
+
+**Gas Limit Constant**:
+```rust
+pub const BENEFICIARY_GAS_LIMIT: u64 = 1_000_000;
+```
+
+**Key Functionality**:
+- Detects beneficiary access through existing tracking mechanisms
+- Enforces the 50,000 gas limit specifically for transactions accessing the beneficiary
+- Halts execution with `InstructionResult::OutOfGas` when limit is exceeded
+- Allows normal gas limits for transactions that don't access the beneficiary
+
+**Usage Example**:
+```rust
+use mega_evm::GasLimitEnforcementInspector;
+use revm::NoOpInspector;
+
+// Wrap any inspector with gas limit enforcement
+let inspector = GasLimitEnforcementInspector(NoOpInspector);
+
+// Create EVM with the enforcing inspector
+let mut evm = Evm::builder()
+    .with_context(context)
+    .with_inspector(inspector)
+    .build();
+
+// Execute transaction - will be limited to 50,000 gas if beneficiary is accessed
+let result = evm.transact_raw(tx)?;
+```
+
+**Benefits**:
+- Prevents resource exhaustion attacks on the beneficiary
+- Ensures predictable gas costs for beneficiary-accessing transactions
+- Maintains fair resource allocation across all transactions
+- Compatible with existing inspector patterns through delegation
