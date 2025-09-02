@@ -1,5 +1,6 @@
-//! Simplified tests for beneficiary balance access detection functionality
-//! Any action which cause `ResultAndState` to contain the beneficiary should mark beneficiary access.
+//! Simplified tests for beneficiary balance access tracking functionality
+//! Any action which cause `ResultAndState` to contain the beneficiary should mark beneficiary
+//! access.
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{Context, Evm, HaltReason, SpecId, Transaction};

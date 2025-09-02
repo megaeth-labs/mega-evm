@@ -20,7 +20,7 @@ use revm::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Beneficiary Access Detection Demo ===\n");
+    println!("=== Beneficiary Access Tracking Demo ===\n");
 
     // Create database and EVM context
     let mut db = CacheDB::<EmptyDB>::default();
@@ -178,14 +178,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(result3.result.is_success(), "Contract 3 transaction should succeed");
 
-    println!("\n=== Detection Summary ===");
-    println!("✅ Beneficiary access detection is working correctly!");
-    println!("✅ Contract 1 (balance read): Access detected = true");
-    println!("✅ Contract 2 (no access): Access detected = false");
-    println!("✅ Contract 3 (balance read): Access detected = true");
-    println!("✅ All detection tests passed!");
+    println!("\n=== Tracking Summary ===");
+    println!("✅ Beneficiary access tracking is working correctly!");
+    println!("✅ Contract 1 (balance read): Access tracked = true");
+    println!("✅ Contract 2 (no access): Access tracked = false");
+    println!("✅ Contract 3 (balance read): Access tracked = true");
+    println!("✅ All tracking tests passed!");
     println!(
-        "\nThe system can accurately detect when transactions access beneficiary account data."
+        "\nThe system can accurately track when transactions access beneficiary account data."
     );
     println!(
         "This detection mechanism can be used for monitoring, analytics, or enforcement purposes."
