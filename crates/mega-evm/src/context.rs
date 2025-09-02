@@ -10,7 +10,7 @@ use revm::{
 use std::cell::RefCell;
 
 use crate::{constants, BlockEnvAccess, SpecId, Transaction};
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, Bytes, Log, B256, U256};
 
 /// `MegaETH` EVM context type.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
@@ -93,9 +93,25 @@ impl<DB: Database> Context<DB> {
     /// Set the transaction.
     pub fn with_tx(mut self, tx: Transaction) -> Self {
         self.inner = self.inner.with_tx(tx);
-        // Reset block env access for new transaction
-        self.reset_block_env_access();
         self
+    }
+
+    /// Check if the transaction caller or recipient is the beneficiary
+    pub(crate) fn check_tx_beneficiary_access(&self) {
+        let tx = &self.inner.tx;
+        let beneficiary = self.inner.block.beneficiary;
+        
+        // Check if caller is beneficiary
+        if tx.base.caller == beneficiary {
+            *self.beneficiary_balance_accessed.borrow_mut() = true;
+        }
+        
+        // Check if recipient is beneficiary (for calls)
+        if let revm::primitives::TxKind::Call(recipient) = tx.base.kind {
+            if recipient == beneficiary {
+                *self.beneficiary_balance_accessed.borrow_mut() = true;
+            }
+        }
     }
 
     /// Set the block.
@@ -202,8 +218,6 @@ impl<DB: Database> ContextTr for Context<DB> {
 
 impl<DB: Database> ContextSetters for Context<DB> {
     fn set_tx(&mut self, tx: Self::Tx) {
-        // Reset block env access when setting new transaction
-        self.reset_block_env_access();
         self.inner.set_tx(tx);
     }
 
