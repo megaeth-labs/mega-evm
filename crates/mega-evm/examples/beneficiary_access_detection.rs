@@ -74,7 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test Contract 1 (reads beneficiary balance)
     println!("Testing Contract 1 (reads beneficiary balance):");
 
-    assert!(!evm.ctx_ref().has_accessed_beneficiary(), "Should start with no beneficiary access");
+    assert!(
+        !evm.ctx_ref().has_accessed_beneficiary_balance(),
+        "Should start with no beneficiary access"
+    );
     println!("  Initial state: no beneficiary access detected");
 
     let tx1 = Transaction {
@@ -94,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Gas used: {}", result1.result.gas_used());
 
     // Verify that beneficiary access was detected
-    let beneficiary_accessed = evm.ctx_ref().has_accessed_beneficiary();
+    let beneficiary_accessed = evm.ctx_ref().has_accessed_beneficiary_balance();
     println!("  Beneficiary access detected: {}", beneficiary_accessed);
     assert!(
         beneficiary_accessed,
@@ -109,7 +112,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test Contract 2 (does NOT access beneficiary)
     println!("Testing Contract 2 (does NOT access beneficiary):");
 
-    assert!(!evm.ctx_ref().has_accessed_beneficiary(), "Should start with no beneficiary access");
+    assert!(
+        !evm.ctx_ref().has_accessed_beneficiary_balance(),
+        "Should start with no beneficiary access"
+    );
     println!("  Initial state: no beneficiary access detected");
 
     let tx2 = Transaction {
@@ -129,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Gas used: {}", result2.result.gas_used());
 
     // Verify that beneficiary was NOT accessed
-    let beneficiary_accessed = evm.ctx_ref().has_accessed_beneficiary();
+    let beneficiary_accessed = evm.ctx_ref().has_accessed_beneficiary_balance();
     println!("  Beneficiary access detected: {}", beneficiary_accessed);
     assert!(!beneficiary_accessed, "Contract 2 should NOT have detected beneficiary access!");
     assert!(result2.result.is_success(), "Contract 2 transaction should succeed");
@@ -141,7 +147,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test Contract 3 (accesses beneficiary balance)
     println!("Testing Contract 3 (accesses beneficiary balance):");
 
-    assert!(!evm.ctx_ref().has_accessed_beneficiary(), "Should start with no beneficiary access");
+    assert!(
+        !evm.ctx_ref().has_accessed_beneficiary_balance(),
+        "Should start with no beneficiary access"
+    );
     println!("  Initial state: no beneficiary access detected");
 
     let tx3 = Transaction {
@@ -161,7 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Gas used: {}", result3.result.gas_used());
 
     // Verify that beneficiary access was detected
-    let beneficiary_accessed = evm.ctx_ref().has_accessed_beneficiary();
+    let beneficiary_accessed = evm.ctx_ref().has_accessed_beneficiary_balance();
     println!("  Beneficiary access detected: {}", beneficiary_accessed);
     assert!(
         beneficiary_accessed,

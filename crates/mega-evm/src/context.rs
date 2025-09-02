@@ -31,7 +31,7 @@ pub struct Context<DB: Database> {
     /// Bitmap of block environment data accessed during transaction execution.
     pub(crate) block_env_accessed: RefCell<BlockEnvAccess>,
     /// Whether beneficiary data has been accessed in current transaction
-    pub(crate) beneficiary_accessed: RefCell<bool>,
+    pub(crate) beneficiary_balance_accessed: RefCell<bool>,
 }
 
 impl<DB: Database> Context<DB> {
@@ -50,7 +50,7 @@ impl<DB: Database> Context<DB> {
             spec,
             log_data_size: 0,
             block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
-            beneficiary_accessed: RefCell::new(false),
+            beneficiary_balance_accessed: RefCell::new(false),
         }
     }
 
@@ -75,7 +75,7 @@ impl<DB: Database> Context<DB> {
             spec,
             log_data_size: 0,
             block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
-            beneficiary_accessed: RefCell::new(false),
+            beneficiary_balance_accessed: RefCell::new(false),
         }
     }
 
@@ -86,7 +86,7 @@ impl<DB: Database> Context<DB> {
             spec: self.spec,
             log_data_size: self.log_data_size,
             block_env_accessed: self.block_env_accessed,
-            beneficiary_accessed: self.beneficiary_accessed,
+            beneficiary_balance_accessed: self.beneficiary_balance_accessed,
         }
     }
 
@@ -145,7 +145,7 @@ impl<DB: Database> Context<DB> {
     /// Resets the block environment access bitmap (for new transactions).
     pub fn reset_block_env_access(&mut self) {
         *self.block_env_accessed.borrow_mut() = BlockEnvAccess::empty();
-        *self.beneficiary_accessed.borrow_mut() = false;
+        *self.beneficiary_balance_accessed.borrow_mut() = false;
     }
 
     /// Marks that a specific type of block environment has been accessed.
@@ -154,15 +154,15 @@ impl<DB: Database> Context<DB> {
     }
 
     /// Check if beneficiary data has been accessed in current transaction
-    pub fn has_accessed_beneficiary(&self) -> bool {
-        *self.beneficiary_accessed.borrow()
+    pub fn has_accessed_beneficiary_balance(&self) -> bool {
+        *self.beneficiary_balance_accessed.borrow()
     }
 
     /// Check if address is beneficiary and mark access if so. Returns true if beneficiary was
     /// accessed.
-    pub(crate) fn check_and_mark_beneficiary_access(&self, address: &Address) -> bool {
+    pub(crate) fn check_and_mark_beneficiary_balance_access(&self, address: &Address) -> bool {
         if self.inner.block.beneficiary == *address {
-            *self.beneficiary_accessed.borrow_mut() = true;
+            *self.beneficiary_balance_accessed.borrow_mut() = true;
             true
         } else {
             false
