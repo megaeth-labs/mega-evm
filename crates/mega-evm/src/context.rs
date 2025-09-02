@@ -100,12 +100,12 @@ impl<DB: Database> Context<DB> {
     pub(crate) fn check_tx_beneficiary_access(&self) {
         let tx = &self.inner.tx;
         let beneficiary = self.inner.block.beneficiary;
-        
+
         // Check if caller is beneficiary
         if tx.base.caller == beneficiary {
             *self.beneficiary_balance_accessed.borrow_mut() = true;
         }
-        
+
         // Check if recipient is beneficiary (for calls)
         if let revm::primitives::TxKind::Call(recipient) = tx.base.kind {
             if recipient == beneficiary {
