@@ -128,3 +128,28 @@ evm.reset_block_env_access();
 - Enables selective block data fetching
 - Reduces unnecessary data access
 - Improves performance for contracts that don't use block data
+
+## Beneficiary Access Tracking
+
+**Files**: `crates/mega-evm/src/context.rs`, `crates/mega-evm/src/host.rs`
+
+**Purpose**: Tracks when a transaction accesses the block beneficiary's balance or account state. Any action that causes `ResultAndState` to contain the beneficiary will be marked as beneficiary access.
+
+**Tracked Operations**:
+- Balance queries (`BALANCE` opcode)
+- Code access (`EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`)
+- Beneficiary as transaction caller or recipient
+
+**Usage Example**:
+```rust
+// Check if beneficiary was accessed
+if evm.ctx_ref().has_accessed_beneficiary_balance() {
+    println!("Transaction accessed block beneficiary");
+}
+
+// Reset for next transaction
+evm.ctx_mut().reset_block_env_access();
+```
+
+**Benefits**:
+- Enables parallel execution optimization by identifying transactions that access the beneficiary, which can block other transactions and cause longer execution times

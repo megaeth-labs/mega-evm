@@ -61,7 +61,6 @@ impl<DB: Database> Host for Context<DB> {
         self.inner.blob_hash(number)
     }
 
-    // Non-block environment methods - no tracking needed
     delegate! {
         to self.inner {
             fn chain_id(&self) -> U256;
@@ -73,11 +72,27 @@ impl<DB: Database> Host for Context<DB> {
             fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>>;
             fn tstore(&mut self, address: Address, key: U256, value: U256);
             fn tload(&mut self, address: Address, key: U256) -> U256;
-            fn balance(&mut self, address: Address) -> Option<StateLoad<U256>>;
-            fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>>;
-            fn load_account_code(&mut self, address: Address) -> Option<StateLoad<Bytes>>;
-            fn load_account_code_hash(&mut self, address: Address) -> Option<StateLoad<B256>>;
         }
+    }
+
+    fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
+        self.check_and_mark_beneficiary_balance_access(&address);
+        self.inner.balance(address)
+    }
+
+    fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>> {
+        self.check_and_mark_beneficiary_balance_access(&address);
+        self.inner.load_account_delegated(address)
+    }
+
+    fn load_account_code(&mut self, address: Address) -> Option<StateLoad<Bytes>> {
+        self.check_and_mark_beneficiary_balance_access(&address);
+        self.inner.load_account_code(address)
+    }
+
+    fn load_account_code_hash(&mut self, address: Address) -> Option<StateLoad<B256>> {
+        self.check_and_mark_beneficiary_balance_access(&address);
+        self.inner.load_account_code_hash(address)
     }
 
     fn log(&mut self, log: Log) {

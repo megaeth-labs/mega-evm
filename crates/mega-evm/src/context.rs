@@ -10,6 +10,7 @@ use revm::{
 use std::cell::RefCell;
 
 use crate::{constants, BlockEnvAccess, SpecId, Transaction};
+use alloy_primitives::{Address, Bytes, Log, B256, U256};
 
 /// `MegaETH` EVM context type.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
@@ -29,6 +30,8 @@ pub struct Context<DB: Database> {
     pub(crate) log_data_size: u64,
     /// Bitmap of block environment data accessed during transaction execution.
     pub(crate) block_env_accessed: RefCell<BlockEnvAccess>,
+    /// Whether beneficiary data has been accessed in current transaction
+    pub(crate) beneficiary_balance_accessed: RefCell<bool>,
 }
 
 impl<DB: Database> Context<DB> {
@@ -47,6 +50,7 @@ impl<DB: Database> Context<DB> {
             spec,
             log_data_size: 0,
             block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
+            beneficiary_balance_accessed: RefCell::new(false),
         }
     }
 
@@ -71,6 +75,7 @@ impl<DB: Database> Context<DB> {
             spec,
             log_data_size: 0,
             block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
+            beneficiary_balance_accessed: RefCell::new(false),
         }
     }
 
@@ -81,15 +86,32 @@ impl<DB: Database> Context<DB> {
             spec: self.spec,
             log_data_size: self.log_data_size,
             block_env_accessed: self.block_env_accessed,
+            beneficiary_balance_accessed: self.beneficiary_balance_accessed,
         }
     }
 
     /// Set the transaction.
     pub fn with_tx(mut self, tx: Transaction) -> Self {
         self.inner = self.inner.with_tx(tx);
-        // Reset block env access for new transaction
-        self.reset_block_env_access();
         self
+    }
+
+    /// Check if the transaction caller or recipient is the beneficiary
+    pub(crate) fn check_tx_beneficiary_access(&self) {
+        let tx = &self.inner.tx;
+        let beneficiary = self.inner.block.beneficiary;
+
+        // Check if caller is beneficiary
+        if tx.base.caller == beneficiary {
+            *self.beneficiary_balance_accessed.borrow_mut() = true;
+        }
+
+        // Check if recipient is beneficiary (for calls)
+        if let revm::primitives::TxKind::Call(recipient) = tx.base.kind {
+            if recipient == beneficiary {
+                *self.beneficiary_balance_accessed.borrow_mut() = true;
+            }
+        }
     }
 
     /// Set the block.
@@ -139,11 +161,28 @@ impl<DB: Database> Context<DB> {
     /// Resets the block environment access bitmap (for new transactions).
     pub fn reset_block_env_access(&mut self) {
         *self.block_env_accessed.borrow_mut() = BlockEnvAccess::empty();
+        *self.beneficiary_balance_accessed.borrow_mut() = false;
     }
 
     /// Marks that a specific type of block environment has been accessed.
     pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
         self.block_env_accessed.borrow_mut().insert(access_type);
+    }
+
+    /// Check if beneficiary data has been accessed in current transaction
+    pub fn has_accessed_beneficiary_balance(&self) -> bool {
+        *self.beneficiary_balance_accessed.borrow()
+    }
+
+    /// Check if address is beneficiary and mark access if so. Returns true if beneficiary was
+    /// accessed.
+    pub(crate) fn check_and_mark_beneficiary_balance_access(&self, address: &Address) -> bool {
+        if self.inner.block.beneficiary == *address {
+            *self.beneficiary_balance_accessed.borrow_mut() = true;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -179,8 +218,6 @@ impl<DB: Database> ContextTr for Context<DB> {
 
 impl<DB: Database> ContextSetters for Context<DB> {
     fn set_tx(&mut self, tx: Self::Tx) {
-        // Reset block env access when setting new transaction
-        self.reset_block_env_access();
         self.inner.set_tx(tx);
     }
 

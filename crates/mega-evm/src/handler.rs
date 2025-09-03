@@ -64,6 +64,10 @@ where
 
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
         evm.ctx().log_data_size = 0;
+        // Reset block env access for new transaction execution
+        evm.ctx().reset_block_env_access();
+        // Check beneficiary access for the current transaction
+        evm.ctx().check_tx_beneficiary_access();
         self.op.pre_execution(evm)
     }
 
