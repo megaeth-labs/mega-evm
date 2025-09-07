@@ -1,4 +1,7 @@
-use crate::{BlockEnvAccess, Context, SpecId};
+use core::cell::RefCell;
+use std::rc::Rc;
+
+use crate::{constants, AdditionalLimit, BlockEnvAccess, Context, ExternalEnvOracle, SpecId};
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
@@ -8,7 +11,7 @@ use revm::{
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
 };
 
-impl<DB: Database> Host for Context<DB> {
+impl<DB: Database, Oracle: ExternalEnvOracle> Host for Context<DB, Oracle> {
     // Block environment related methods - with tracking
     fn basefee(&self) -> U256 {
         self.mark_block_env_accessed(BlockEnvAccess::BASE_FEE);
@@ -65,10 +68,16 @@ impl<DB: Database> Host for Context<DB> {
         to self.inner {
             fn chain_id(&self) -> U256;
             fn effective_gas_price(&self) -> U256;
+            fn log(&mut self, log: Log);
             fn caller(&self) -> Address;
             fn max_initcode_size(&self) -> usize;
             fn selfdestruct(&mut self, address: Address, target: Address) -> Option<StateLoad<SelfDestructResult>>;
-            fn sstore(&mut self, address: Address, key: U256, value: U256) -> Option<StateLoad<SStoreResult>>;
+            fn sstore(
+                &mut self,
+                address: Address,
+                key: U256,
+                value: U256,
+            ) -> Option<StateLoad<SStoreResult>>;
             fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>>;
             fn tstore(&mut self, address: Address, key: U256, value: U256);
             fn tload(&mut self, address: Address, key: U256) -> U256;
@@ -94,21 +103,33 @@ impl<DB: Database> Host for Context<DB> {
         self.check_and_mark_beneficiary_balance_access(&address);
         self.inner.load_account_code_hash(address)
     }
-
-    fn log(&mut self, log: Log) {
-        self.log_data_size += log.data.data.len() as u64;
-        self.inner.log(log);
-    }
 }
 
 /// Extension trait for the `Host` trait that provides additional functionality for `MegaETH`.
 pub trait HostExt: Host {
-    /// Get the total size of all previous log data, excluding current opcode.
-    fn log_data_size(&self) -> u64;
+    /// Gets the `AdditionalLimit` instance.
+    fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>>;
+
+    /// Gets the gas cost for setting a storage slot to a non-zero value.
+    fn sstore_set_gas(&self, address: Address, key: U256) -> u64;
+
+    /// Gets the gas cost for creating a new account.
+    fn new_account_gas(&self, address: Address) -> u64;
 }
 
-impl<DB: Database> HostExt for Context<DB> {
-    fn log_data_size(&self) -> u64 {
-        self.log_data_size
+impl<DB: Database, Oracle: ExternalEnvOracle> HostExt for Context<DB, Oracle> {
+    #[inline]
+    fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>> {
+        &self.additional_limit
+    }
+
+    #[inline]
+    fn sstore_set_gas(&self, address: Address, key: U256) -> u64 {
+        self.gas_cost_oracle.borrow_mut().sstore_set_gas(address, key)
+    }
+
+    #[inline]
+    fn new_account_gas(&self, address: Address) -> u64 {
+        self.gas_cost_oracle.borrow_mut().new_account_gas(address)
     }
 }

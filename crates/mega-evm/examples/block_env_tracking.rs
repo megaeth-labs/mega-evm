@@ -8,7 +8,7 @@
 //! 3. Contract 3: Does NOT use block environment (CALLER opcode)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{BlockEnvAccess, Context, Evm, SpecId, Transaction};
+use mega_evm::{BlockEnvAccess, Context, Evm, NoOpOracle, SpecId, Transaction};
 use revm::{
     bytecode::opcode::{BASEFEE, CALLER, NUMBER, POP, STOP, TIMESTAMP},
     context::{ContextTr, TxEnv},
@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_account_code(&mut db, contract3_address, contract3_code.into());
 
     // Create EVM instance with properly configured L1BlockInfo
-    let mut context = Context::new(db, spec);
+    let mut context = Context::new(db, spec, NoOpOracle);
     // Set operator fee fields to zero to avoid panic in MINI_REX (ISTHMUS) spec
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));

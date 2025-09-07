@@ -1,66 +1,143 @@
+//! # `MegaETH` EVM Context
+//!
+//! This module provides the core context implementation for the `MegaETH` EVM.
+//! The [`Context`] struct wraps the underlying `OpStack` context and provides
+//! additional MegaETH-specific functionality including gas cost oracles,
+//! additional limits, and block environment access tracking.
+//!
+//! ## Key Features
+//!
+//! - **Gas Cost Oracle**: Tracks and manages gas costs during transaction execution
+//! - **Additional Limits**: Enforces data and KV update limits beyond standard EVM limits
+//! - **Block Environment Access Tracking**: Monitors which block environment data is accessed
+//! - **Spec Management**: Handles different `MegaETH` specification versions
+//!
+//! ## Usage
+//!
+//! ```rust
+//! use alloy_evm::Database;
+//! use mega_evm::{Context, SpecId};
+//!
+//! // Create a new context
+//! let context = Context::new(database, SpecId::LATEST, oracle);
+//!
+//! // Configure with transaction and block
+//! let context = context.with_tx(transaction).with_block(block_env).with_data_limit(1_000_000);
+//! ```
+
 use alloy_evm::Database;
+use alloy_primitives::{Address, BlockNumber, U256};
 use delegate::delegate;
+use hyperloglog::HyperLogLog;
 use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
 use revm::{
-    context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
+    context::{
+        BlockEnv, CfgEnv, ContextSetters, ContextTr, CreateScheme, LocalContext, Transaction,
+    },
     context_interface::context::ContextError,
+    handler::{evm::FrameInitResult, EthFrame, FrameResult, FrameTr},
     inspector::JournalExt,
+    interpreter::{interpreter::EthInterpreter, FrameInput},
+    primitives::{HashMap, STACK_LIMIT},
     Journal,
 };
-use std::cell::RefCell;
+use salt::BucketId;
+use std::{cell::RefCell, collections::hash_map::Entry, rc::Rc};
 
-use crate::{constants, BlockEnvAccess, SpecId, Transaction};
-use alloy_primitives::{Address, Bytes, Log, B256, U256};
+use crate::{
+    constants, slot_to_bucket_id, AdditionalLimit, BlockEnvAccess, ExternalEnvOracle,
+    GasCostOracle, SpecId,
+};
 
-/// `MegaETH` EVM context type.
+/// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
+/// trait to be used as the context for the [`crate::Evm`].
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
-pub struct Context<DB: Database> {
-    /// The inner context. The inner context contains the `OpSpecId`, which should be kept
-    /// consistent with the `spec` field using [`SpecId::into_op_spec()`].
+pub struct Context<DB: Database, Oracle: ExternalEnvOracle> {
+    /// The inner context.
     #[deref]
     #[deref_mut]
     pub(crate) inner: OpContext<DB>,
-    /// The `MegaETH` spec id.
-    /// The consistency between the spec here and `inner` context should be maintained and
-    /// guaranteed by the caller.
-    spec: SpecId,
+    /// The `MegaETH` spec id. The inner context contains the `OpSpecId`.
+    /// The `OpSpec` in the `inner` context should be the corresponding [`OpSpecId`] for the
+    /// [`SpecId`].
+    pub(crate) spec: SpecId,
+
+    /// Additional limits for the EVM.
+    pub(crate) additional_limit: Rc<RefCell<AdditionalLimit>>,
+
+    /// An oracle for the gas cost during the transaction execution.
+    pub(crate) gas_cost_oracle: Rc<RefCell<GasCostOracle<Oracle>>>,
 
     /* Internal state variables */
-    /// The total size of all log data.
-    pub(crate) log_data_size: u64,
     /// Bitmap of block environment data accessed during transaction execution.
     pub(crate) block_env_accessed: RefCell<BlockEnvAccess>,
     /// Whether beneficiary data has been accessed in current transaction
     pub(crate) beneficiary_balance_accessed: RefCell<bool>,
 }
 
-impl<DB: Database> Context<DB> {
-    /// Create a new `MegaethContext` with the given database.
-    pub fn new(db: DB, spec: SpecId) -> Self {
+impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
+    /// Creates a new `Context` with the given database, specification, and oracle.
+    ///
+    /// This constructor initializes a new `MegaETH` EVM context with default settings.
+    /// For the `MINI_REX` specification, it automatically configures appropriate
+    /// contract size and initcode size limits.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - The database implementation to use for state storage
+    /// * `spec` - The `MegaETH` specification version to use
+    /// * `oracle` - The external environment oracle for gas cost calculations
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `Context` instance with default configuration.
+    pub fn new(db: DB, spec: SpecId, oracle: Oracle) -> Self {
         let mut inner =
             revm::Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
 
-        if spec.is_enabled_in(SpecId::MINI_REX) {
+        // For the `MINI_REX` spec, we override the contract size and initcode size limits.
+        if spec.is_enabled(SpecId::MINI_REX) {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
             inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
         }
 
         Self {
-            inner,
             spec,
-            log_data_size: 0,
+            additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
+            gas_cost_oracle: Rc::new(RefCell::new(GasCostOracle::new(
+                oracle,
+                inner.block.number.to::<u64>().saturating_sub(1),
+            ))),
             block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
             beneficiary_balance_accessed: RefCell::new(false),
+            inner,
         }
     }
 
-    /// Create a new `MegaethContext` with the given `revm::Context`.
-    pub fn new_with_context(context: OpContext<DB>, spec: SpecId) -> Self {
+    /// Creates a new `Context` from an existing `OpContext`.
+    ///
+    /// This constructor is useful when you already have a configured `OpContext`
+    /// and want to wrap it with MegaETH-specific functionality. The specification
+    /// in the provided context must match the `spec` parameter.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The existing `OpStack` context to wrap
+    /// * `spec` - The `MegaETH` specification version (must match context spec)
+    /// * `oracle` - The external environment oracle for gas cost calculations
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `Context` instance wrapping the provided context.
+    pub fn new_with_context(context: OpContext<DB>, spec: SpecId, oracle: Oracle) -> Self {
         let mut inner = context;
 
         // spec in context must keep the same with parameter `spec`
         inner.cfg.spec = spec.into_op_spec();
-        if spec.is_enabled_in(SpecId::MINI_REX) {
+
+        // For the `MINI_REX` spec, we override the contract size and initcode size limits if they
+        // not set in the given `OpContext`.
+        if spec.is_enabled(SpecId::MINI_REX) {
             if inner.cfg.limit_contract_code_size.is_none() {
                 inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
             }
@@ -71,59 +148,94 @@ impl<DB: Database> Context<DB> {
         }
 
         Self {
-            inner,
             spec,
-            log_data_size: 0,
+            additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
+            gas_cost_oracle: Rc::new(RefCell::new(GasCostOracle::new(
+                oracle,
+                inner.block.number.to::<u64>() - 1,
+            ))),
             block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
             beneficiary_balance_accessed: RefCell::new(false),
+            inner,
         }
     }
 
-    /// Set the database.
-    pub fn with_db<ODB: Database>(self, db: ODB) -> Context<ODB> {
+    /// Sets the [`Database`] used by the EVM.
+    ///
+    /// This method allows changing the underlying database implementation
+    /// while preserving all other context configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - The new database implementation
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `Context` with the updated database type.
+    pub fn with_db<ODB: Database>(self, db: ODB) -> Context<ODB, Oracle> {
         Context {
             inner: self.inner.with_db(db),
             spec: self.spec,
-            log_data_size: self.log_data_size,
+            additional_limit: self.additional_limit,
             block_env_accessed: self.block_env_accessed,
             beneficiary_balance_accessed: self.beneficiary_balance_accessed,
+            gas_cost_oracle: self.gas_cost_oracle,
         }
     }
 
-    /// Set the transaction.
-    pub fn with_tx(mut self, tx: Transaction) -> Self {
+    /// Sets the [`Transaction`] to be executed by the EVM.
+    ///
+    /// This method configures the transaction to be executed and automatically
+    /// resets internal state for the new transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction to execute
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
+    pub fn with_tx(mut self, tx: crate::Transaction) -> Self {
         self.inner = self.inner.with_tx(tx);
+        self.on_new_tx();
         self
     }
 
-    /// Check if the transaction caller or recipient is the beneficiary
-    pub(crate) fn check_tx_beneficiary_access(&self) {
-        let tx = &self.inner.tx;
-        let beneficiary = self.inner.block.beneficiary;
-
-        // Check if caller is beneficiary
-        if tx.base.caller == beneficiary {
-            *self.beneficiary_balance_accessed.borrow_mut() = true;
-        }
-
-        // Check if recipient is beneficiary (for calls)
-        if let revm::primitives::TxKind::Call(recipient) = tx.base.kind {
-            if recipient == beneficiary {
-                *self.beneficiary_balance_accessed.borrow_mut() = true;
-            }
-        }
-    }
-
-    /// Set the block.
+    /// Sets the [`BlockEnv`] for the EVM.
+    ///
+    /// This method configures the block environment and automatically
+    /// resets internal state for the new block.
+    ///
+    /// # Arguments
+    ///
+    /// * `block` - The block environment configuration
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
     pub fn with_block(mut self, block: BlockEnv) -> Self {
         self.inner = self.inner.with_block(block);
+        // Reset internal state for new block
+        self.on_new_block();
         self
     }
 
-    /// Set the configuration.
+    /// Sets the [`CfgEnv`] for the EVM.
+    ///
+    /// This method configures the EVM environment settings. For the `MINI_REX`
+    /// specification, it automatically applies appropriate contract size limits
+    /// if they are not already set in the configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `cfg` - The configuration environment
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
     pub fn with_cfg(mut self, cfg: CfgEnv<SpecId>) -> Self {
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
-        if self.spec.is_enabled_in(SpecId::MINI_REX) {
+        if self.spec.is_enabled(SpecId::MINI_REX) {
             if self.inner.cfg.limit_contract_code_size.is_none() {
                 self.inner.cfg.limit_contract_code_size =
                     Some(constants::mini_rex::MAX_CONTRACT_SIZE);
@@ -136,35 +248,112 @@ impl<DB: Database> Context<DB> {
         self
     }
 
-    /// Set the chain.
+    /// Sets the Op Stack's [`L1BlockInfo`] for the EVM.
+    ///
+    /// This method configures the L1 block information used by the `OpStack`
+    /// for cross-layer communication and state management.
+    ///
+    /// # Arguments
+    ///
+    /// * `chain` - The L1 block information
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
     pub fn with_chain(mut self, chain: L1BlockInfo) -> Self {
         self.inner = self.inner.with_chain(chain);
         self
     }
 
-    /// Get the `MegaETH` spec id. This value should be consistent with the `spec` field by
-    /// coverting this value to `OpSpecId`.
+    /// Sets the data limit for the EVM.
+    ///
+    /// When the data limit is reached, the transaction will error and halt
+    /// (consuming all remaining gas). This limit controls the maximum amount
+    /// of data that can be processed during transaction execution.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_limit` - The maximum amount of data allowed (in bytes)
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
+    pub fn with_data_limit(self, data_limit: u64) -> Self {
+        self.additional_limit.borrow_mut().data_limit = data_limit;
+        self
+    }
+
+    /// Sets the KV update limit for the EVM. When the KV update limit is reached,
+    /// the transaction will error and halt (consuming all remaining gas).
+    ///
+    /// This limit controls the maximum number of key-value storage operations
+    /// (reads, writes, deletes) that can be performed during transaction execution.
+    ///
+    /// # Arguments
+    ///
+    /// * `kv_update_limit` - The maximum number of KV operations allowed
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
+    pub fn with_kv_update_limit(self, kv_update_limit: u64) -> Self {
+        self.additional_limit.borrow_mut().kv_update_limit = kv_update_limit;
+        self
+    }
+
+    /// Gets the `MegaETH` specification ID.
+    ///
+    /// Returns the specification version currently configured for this context.
+    ///
+    /// # Returns
+    ///
+    /// Returns the [`SpecId`] representing the current `MegaETH` specification.
     pub fn megaeth_spec(&self) -> SpecId {
         self.spec
     }
 
-    /// Convert the `MegaethContext` into the inner `OpContext`.
+    /// Consumes the context and converts it into the inner `OpContext`.
+    ///
+    /// This method extracts the underlying `OpStack` context, discarding
+    /// all MegaETH-specific state and configuration.
+    ///
+    /// # Returns
+    ///
+    /// Returns the inner `OpContext<DB>`.
     pub fn into_inner(self) -> OpContext<DB> {
         self.inner
     }
 
     /// Returns the bitmap of block environment data accessed during transaction execution.
+    ///
+    /// This method provides information about which block environment fields
+    /// have been accessed during the current transaction, which is useful for
+    /// optimization and analysis purposes.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`BlockEnvAccess`] bitmap indicating accessed fields.
     pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
         *self.block_env_accessed.borrow()
     }
 
-    /// Resets the block environment access bitmap (for new transactions).
+    /// Resets the block environment access bitmap for new transactions.
+    ///
+    /// This method clears the tracking of which block environment fields
+    /// have been accessed, preparing the context for a new transaction.
     pub fn reset_block_env_access(&mut self) {
         *self.block_env_accessed.borrow_mut() = BlockEnvAccess::empty();
         *self.beneficiary_balance_accessed.borrow_mut() = false;
     }
 
     /// Marks that a specific type of block environment has been accessed.
+    ///
+    /// This internal method is used to track which block environment fields
+    /// are being accessed during transaction execution.
+    ///
+    /// # Arguments
+    ///
+    /// * `access_type` - The type of block environment access to record
     pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
         self.block_env_accessed.borrow_mut().insert(access_type);
     }
@@ -184,11 +373,57 @@ impl<DB: Database> Context<DB> {
             false
         }
     }
+
+    /// Check if the transaction caller or recipient is the beneficiary
+    pub(crate) fn check_tx_beneficiary_access(&self) {
+        let tx = &self.inner.tx;
+        let beneficiary = self.inner.block.beneficiary;
+
+        // Check if caller is beneficiary
+        if tx.base.caller == beneficiary {
+            *self.beneficiary_balance_accessed.borrow_mut() = true;
+        }
+
+        // Check if recipient is beneficiary (for calls)
+        if let revm::primitives::TxKind::Call(recipient) = tx.base.kind {
+            if recipient == beneficiary {
+                *self.beneficiary_balance_accessed.borrow_mut() = true;
+            }
+        }
+    }
 }
 
-impl<DB: Database> ContextTr for Context<DB> {
+/* Hooks */
+impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
+    /// Resets the internal state for a new block.
+    ///
+    /// This method is called when transitioning to a new block and updates
+    /// the gas cost oracle and additional limits accordingly.
+    pub(crate) fn on_new_block(&self) {
+        self.gas_cost_oracle.borrow_mut().on_new_block(&self.inner.block);
+        self.additional_limit.borrow_mut().on_new_block();
+    }
+
+    /// Resets the internal state for a new transaction.
+    ///
+    /// This method is called when starting a new transaction and resets
+    /// block environment access tracking and additional limits.
+    pub(crate) fn on_new_tx(&mut self) {
+        self.reset_block_env_access();
+        self.additional_limit.borrow_mut().on_new_tx(&self.inner.tx);
+        self.check_tx_beneficiary_access();
+    }
+}
+
+/// Implementation of the `ContextTr` trait for `Context`.
+///
+/// This implementation delegates most methods to the inner `OpContext` while
+/// maintaining the MegaETH-specific functionality. The trait provides access
+/// to the core EVM context components like transaction, block, configuration,
+/// database, journal, and chain information.
+impl<DB: Database, Oracle: ExternalEnvOracle> ContextTr for Context<DB, Oracle> {
     type Block = BlockEnv;
-    type Tx = Transaction;
+    type Tx = crate::Transaction;
     type Cfg = CfgEnv<OpSpecId>;
     type Db = DB;
     type Journal = Journal<DB>;
@@ -216,8 +451,13 @@ impl<DB: Database> ContextTr for Context<DB> {
     }
 }
 
-impl<DB: Database> ContextSetters for Context<DB> {
+/// Implementation of the `ContextSetters` trait for `Context`.
+///
+/// This implementation provides methods to update the context state, with
+/// special handling for transaction updates to reset internal state.
+impl<DB: Database, Oracle: ExternalEnvOracle> ContextSetters for Context<DB, Oracle> {
     fn set_tx(&mut self, tx: Self::Tx) {
+        self.on_new_tx();
         self.inner.set_tx(tx);
     }
 
@@ -228,22 +468,44 @@ impl<DB: Database> ContextSetters for Context<DB> {
     }
 }
 
-/// A convenient trait to convert a `CfgEnv<OpSpecId>` into a `CfgEnv<MegaethSpecId>`.
+/// A convenient trait to convert a `CfgEnv<OpSpecId>` into a `CfgEnv<SpecId>`.
+///
+/// This trait provides a conversion method for `OpStack` configuration environments
+/// to `MegaETH` configuration environments, preserving all configuration fields
+/// while changing the specification type.
 pub trait IntoMegaethCfgEnv {
-    /// Convert to `CfgEnv<MegaethSpecId>`.
+    /// Converts to `CfgEnv<MegaethSpecId>`.
     fn into_megaeth_cfg(self, spec: SpecId) -> CfgEnv<SpecId>;
 }
 
-/// A convenient trait to convert a `CfgEnv<MegaethSpecId>` into a `CfgEnv<OpSpecId>`.
+/// A convenient trait to convert a `CfgEnv<SpecId>` into a `CfgEnv<OpSpecId>`.
+///
+/// This trait provides a conversion method for `MegaETH` configuration environments
+/// to `OpStack` configuration environments, preserving all configuration fields
+/// while changing the specification type.
 pub trait IntoOpCfgEnv {
-    /// Convert to `CfgEnv<OpSpecId>`.
+    /// Converts to `CfgEnv<OpSpecId>`.
     fn into_op_cfg(self) -> CfgEnv<OpSpecId>;
 }
 
+/// Implementation of `IntoOpCfgEnv` for `CfgEnv<SpecId>`.
+///
+/// This implementation converts a `MegaETH` configuration environment to an
+/// `OpStack` configuration environment by copying all relevant fields.
 impl IntoOpCfgEnv for CfgEnv<SpecId> {
-    /// Convert to `CfgEnv<OpSpecId>`.
+    /// Converts to `CfgEnv<OpSpecId>`.
     ///
-    /// DEV: when the fields of [`CfgEnv`] changes, you need to update this function.
+    /// This method creates a new `OpStack` configuration environment with the
+    /// same settings as the `MegaETH` configuration, converting the specification ID.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `CfgEnv<OpSpecId>` with all fields copied from `self`.
+    ///
+    /// # Note
+    ///
+    /// When the fields of [`CfgEnv`] change, this function needs to be updated
+    /// to include the new fields.
     fn into_op_cfg(self) -> CfgEnv<OpSpecId> {
         let mut op_cfg = CfgEnv::new_with_spec(OpSpecId::from(self.spec));
         op_cfg.chain_id = self.chain_id;
@@ -264,10 +526,28 @@ impl IntoOpCfgEnv for CfgEnv<SpecId> {
     }
 }
 
+/// Implementation of `IntoMegaethCfgEnv` for `CfgEnv<OpSpecId>`.
+///
+/// This implementation converts an `OpStack` configuration environment to a
+/// `MegaETH` configuration environment by copying all relevant fields.
 impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
-    /// Convert to `CfgEnv<MegaethSpecId>`.
+    /// Converts to `CfgEnv<SpecId>`.
     ///
-    /// DEV: when the fields of [`CfgEnv`] changes, you need to update this function.
+    /// This method creates a new `MegaETH` configuration environment with the
+    /// same settings as the `OpStack` configuration, using the provided specification ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The `MegaETH` specification ID to use in the new configuration
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `CfgEnv<SpecId>` with all fields copied from `self`.
+    ///
+    /// # Note
+    ///
+    /// When the fields of [`CfgEnv`] change, this function needs to be updated
+    /// to include the new fields.
     fn into_megaeth_cfg(self, spec: SpecId) -> CfgEnv<SpecId> {
         let mut cfg = CfgEnv::new_with_spec(spec);
         cfg.chain_id = self.chain_id;

@@ -156,6 +156,9 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.dependencies]
+# megaeth 
+salt = { git = "https://github.com/megaeth-labs/salt.git", branch = "feature/mega-reth-v2" }
+
 # revm
 revm = { version = "27.1.0", default-features = false }
 op-revm = { version = "8.1.0", default-features = false }
@@ -170,6 +173,8 @@ alloy-primitives = { version = "1.3.0", default-features = false, features = ["m
 op-alloy-consensus = { version = "0.18.12", default-features = false }
 
 # misc
+auto_impl = "1.3"
 delegate = "0.13"
 derive_more = { version = "2", default-features = false }
+hyperloglog = "1.0"
 serde = { version = "1.0", default-features = false }

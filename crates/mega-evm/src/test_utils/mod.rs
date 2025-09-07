@@ -1,3 +1,5 @@
+//! Test utilities for the `MegaETH` EVM.
+
 mod bytes;
 pub use bytes::*;
 

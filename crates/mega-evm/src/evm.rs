@@ -11,11 +11,13 @@ use revm::{
     handler::{
         evm::{ContextDbError, FrameInitResult},
         instructions::InstructionProvider,
-        EthFrame, EvmTr, FrameInitOrResult, PrecompileProvider, SystemCallTx,
+        EthFrame, EvmTr, FrameInitOrResult, FrameResult, PrecompileProvider, SystemCallTx,
     },
     inspector::{InspectorHandler, NoOpInspector},
     interpreter::{
-        interpreter::EthInterpreter, InputsImpl, Interpreter, InterpreterResult, InterpreterTypes,
+        interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, CreateOutcome,
+        FrameInput, Gas, InputsImpl, InstructionResult, Interpreter, InterpreterResult,
+        InterpreterTypes,
     },
     primitives::{Address, TxKind},
     state::EvmState,
@@ -23,18 +25,44 @@ use revm::{
 };
 
 use crate::{
-    BlockEnvAccess, Context, HaltReason, Handler, Instructions, IntoMegaethCfgEnv, Precompiles,
-    SpecId, Transaction, TransactionError, TxType,
+    exceeding_limit_frame_result, mark_frame_result_as_exceeding_limit, AdditionalLimit,
+    BlockEnvAccess, Context, ExternalEnvOracle, HaltReason, Handler, HostExt, Instructions,
+    IntoMegaethCfgEnv, NoOpOracle, Precompiles, SpecId, Transaction, TransactionError, TxType,
 };
 
-/// Factory producing [`MegaethEvm`]s.
-#[derive(Debug, Default, Clone, Copy)]
+/// The Factory producing [`Evm`] instances.
+///
+/// # Type Parameters
+///
+/// * `Oracle` - The oracle service to provide deterministic information during EVM execution. It
+///   should implement the [`ExternalEnvOracle`] and [`Clone`] traits.
+#[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub struct EvmFactory;
+pub struct EvmFactory<Oracle> {
+    /// The oracle service to provide deterministic information during EVM execution.
+    oracle: Oracle,
+}
 
-impl alloy_evm::EvmFactory for EvmFactory {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = Evm<DB, I>;
-    type Context<DB: Database> = Context<DB>;
+impl Default for EvmFactory<NoOpOracle> {
+    /// Creates a new [`EvmFactory`] instance with the default [`NoOpOracle`].
+    fn default() -> Self {
+        Self::new(NoOpOracle)
+    }
+}
+
+impl<Oracle> EvmFactory<Oracle> {
+    /// Creates a new [`EvmFactory`] instance with the given oracle.
+    pub fn new(oracle: Oracle) -> Self {
+        Self { oracle }
+    }
+}
+
+impl<Oracle> alloy_evm::EvmFactory for EvmFactory<Oracle>
+where
+    Oracle: ExternalEnvOracle + Clone,
+{
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = Evm<DB, I, Oracle>;
+    type Context<DB: Database> = Context<DB, Oracle>;
     type Tx = Transaction;
     type Error<DBError: core::error::Error + Send + Sync + 'static> =
         EVMError<DBError, TransactionError>;
@@ -48,7 +76,7 @@ impl alloy_evm::EvmFactory for EvmFactory {
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
         let spec = evm_env.cfg_env().spec();
-        let ctx = Context::new(db, spec)
+        let ctx = Context::new(db, spec, self.oracle.clone())
             .with_tx(Transaction::default())
             .with_block(evm_env.block_env)
             .with_cfg(evm_env.cfg_env)
@@ -69,30 +97,32 @@ impl alloy_evm::EvmFactory for EvmFactory {
 /// `MegaethEvm` is the EVM implementation for `MegaETH`.
 /// `MegaethEvm` wraps the `OpEvm` with customizations.
 #[allow(missing_debug_implementations)]
-pub struct Evm<DB: Database, INSP> {
+#[allow(clippy::type_complexity)]
+pub struct Evm<DB: Database, INSP, Oracle: ExternalEnvOracle> {
     inner: revm::context::Evm<
-        Context<DB>,
+        Context<DB, Oracle>,
         INSP,
-        Instructions<DB>,
+        Instructions<DB, Oracle>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     >,
+    /// Whether to enable the inspector at runtime.
     inspect: bool,
     /// Whether to disable the post-transaction reward to beneficiary in the [`Handler`].
     disable_beneficiary: bool,
 }
 
-impl<DB: Database, INSP> core::fmt::Debug for Evm<DB, INSP> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::fmt::Debug for Evm<DB, INSP, Oracle> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethEvm").field("inspect", &self.inspect).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, INSP> core::ops::Deref for Evm<DB, INSP> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::Deref for Evm<DB, INSP, Oracle> {
     type Target = revm::context::Evm<
-        Context<DB>,
+        Context<DB, Oracle>,
         INSP,
-        Instructions<DB>,
+        Instructions<DB, Oracle>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     >;
@@ -102,15 +132,15 @@ impl<DB: Database, INSP> core::ops::Deref for Evm<DB, INSP> {
     }
 }
 
-impl<DB: Database, INSP> core::ops::DerefMut for Evm<DB, INSP> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::DerefMut for Evm<DB, INSP, Oracle> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<DB: Database, INSP> Evm<DB, INSP> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
     /// Creates a new [`MegaethEvm`] instance.
-    pub fn new(context: Context<DB>, inspect: INSP) -> Self {
+    pub fn new(context: Context<DB, Oracle>, inspect: INSP) -> Self {
         let spec = context.megaeth_spec();
         let op_spec = context.cfg().spec();
         Self {
@@ -126,7 +156,7 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     }
 
     /// Creates a new [`MegaethEvm`] instance with the given inspector enabled at runtime.
-    pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I> {
+    pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I, Oracle> {
         let disable_beneficiary = self.disable_beneficiary;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
@@ -153,7 +183,7 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     }
 }
 
-impl<DB: Database, INSP> Evm<DB, INSP> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
     /// Provides a reference to the block environment.
     #[inline]
     pub fn block_env_ref(&self) -> &BlockEnv {
@@ -197,7 +227,9 @@ impl<DB: Database, INSP> Evm<DB, INSP> {
     }
 }
 
-impl<DB: Database> PrecompileProvider<Context<DB>> for PrecompilesMap {
+impl<DB: Database, Oracle: ExternalEnvOracle> PrecompileProvider<Context<DB, Oracle>>
+    for PrecompilesMap
+{
     type Output = InterpreterResult;
 
     #[inline]
@@ -208,7 +240,7 @@ impl<DB: Database> PrecompileProvider<Context<DB>> for PrecompilesMap {
     #[inline]
     fn run(
         &mut self,
-        context: &mut Context<DB>,
+        context: &mut Context<DB, Oracle>,
         address: &Address,
         inputs: &InputsImpl,
         is_static: bool,
@@ -230,13 +262,13 @@ impl<DB: Database> PrecompileProvider<Context<DB>> for PrecompilesMap {
     }
 }
 
-impl<DB, INSP> revm::handler::EvmTr for Evm<DB, INSP>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::handler::EvmTr for Evm<DB, INSP, Oracle>
 where
     DB: Database,
 {
-    type Context = Context<DB>;
+    type Context = Context<DB, Oracle>;
 
-    type Instructions = Instructions<DB>;
+    type Instructions = Instructions<DB, Oracle>;
 
     type Precompiles = PrecompilesMap;
 
@@ -270,7 +302,35 @@ where
         &mut self,
         frame_input: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        self.inner.frame_init(frame_input)
+        // we need to first get a reference to the `AdditionalLimit` before
+        // calling frame_init to avoid borrowing issues
+        let additional_limit = self.ctx().additional_limit.clone();
+
+        // call the inner frame_init function to initialize the frame
+        let init_result = self.inner.frame_init(frame_input)?;
+
+        // call the `on_frame_init` function to update the `AdditionalLimit`, if the limit is
+        // exceeded, return the error frame result
+        if additional_limit.borrow_mut().on_frame_init(&init_result).exceeded_limit() {
+            let frame_result = match init_result {
+                revm::handler::ItemOrResult::Item(frame) => {
+                    let (gas_limit, return_memory_offset) = match &frame.input {
+                        FrameInput::Create(inputs) => (inputs.gas_limit, None),
+                        FrameInput::Call(inputs) => {
+                            (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
+                        }
+                        FrameInput::Empty => unreachable!(),
+                    };
+                    exceeding_limit_frame_result(gas_limit, return_memory_offset)
+                }
+                revm::handler::ItemOrResult::Result(frame_result) => {
+                    mark_frame_result_as_exceeding_limit(frame_result)
+                }
+            };
+            return Ok(FrameInitResult::Result(frame_result));
+        }
+
+        Ok(init_result)
     }
 
     fn frame_run(
@@ -281,19 +341,38 @@ where
 
     fn frame_return_result(
         &mut self,
-        result: <Self::Frame as revm::handler::FrameTr>::FrameResult,
+        mut result: <Self::Frame as revm::handler::FrameTr>::FrameResult,
     ) -> Result<
         Option<<Self::Frame as revm::handler::FrameTr>::FrameResult>,
         ContextDbError<Self::Context>,
     > {
+        if self.ctx_ref().additional_limit.borrow().is_exceeding_limit_result(&result) {
+            return Ok(Some(result));
+        }
+
+        // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
+        // exceeded, return the error frame result
+        if self.ctx_ref().additional_limit.borrow_mut().on_frame_return(&result).exceeded_limit() {
+            match &mut result {
+                FrameResult::Call(outcome) => {
+                    outcome.result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
+                }
+                FrameResult::Create(outcome) => {
+                    outcome.result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
+                }
+            }
+            return Ok(Some(result));
+        }
+
+        // call the inner frame_return_result function to return the frame result
         self.inner.frame_return_result(result)
     }
 }
 
-impl<DB, INSP> revm::inspector::InspectorEvmTr for Evm<DB, INSP>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::inspector::InspectorEvmTr for Evm<DB, INSP, Oracle>
 where
     DB: Database,
-    INSP: Inspector<Context<DB>>,
+    INSP: Inspector<Context<DB, Oracle>>,
 {
     type Inspector = INSP;
 
@@ -323,10 +402,10 @@ where
     }
 }
 
-impl<DB, INSP> alloy_evm::Evm for Evm<DB, INSP>
+impl<DB, INSP, Oracle: ExternalEnvOracle> alloy_evm::Evm for Evm<DB, INSP, Oracle>
 where
     DB: Database,
-    INSP: Inspector<Context<DB>>,
+    INSP: Inspector<Context<DB, Oracle>>,
 {
     type DB = DB;
     type Tx = Transaction;
@@ -395,7 +474,7 @@ where
     }
 }
 
-impl<DB, INSP> revm::ExecuteEvm for Evm<DB, INSP>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::ExecuteEvm for Evm<DB, INSP, Oracle>
 where
     DB: Database,
 {
@@ -430,7 +509,7 @@ where
     }
 }
 
-impl<DB, INSP> revm::ExecuteCommitEvm for Evm<DB, INSP>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::ExecuteCommitEvm for Evm<DB, INSP, Oracle>
 where
     DB: Database + DatabaseCommit,
 {
@@ -439,10 +518,10 @@ where
     }
 }
 
-impl<DB, INSP> revm::InspectEvm for Evm<DB, INSP>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::InspectEvm for Evm<DB, INSP, Oracle>
 where
     DB: Database,
-    INSP: Inspector<Context<DB>>,
+    INSP: Inspector<Context<DB, Oracle>>,
 {
     type Inspector = INSP;
 
@@ -457,14 +536,14 @@ where
     }
 }
 
-impl<DB, INSP> revm::InspectCommitEvm for Evm<DB, INSP>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::InspectCommitEvm for Evm<DB, INSP, Oracle>
 where
     DB: Database + DatabaseCommit,
-    INSP: Inspector<Context<DB>>,
+    INSP: Inspector<Context<DB, Oracle>>,
 {
 }
 
-impl<DB, INSP> revm::SystemCallEvm for Evm<DB, INSP>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::SystemCallEvm for Evm<DB, INSP, Oracle>
 where
     DB: Database,
 {

@@ -1,3 +1,5 @@
+//! Common type definitions for the `MegaETH` EVM.
+
 use bitflags::bitflags;
 use revm::context::TxEnv;
 use serde::{Deserialize, Serialize};
@@ -19,7 +21,6 @@ pub type TxType = op_alloy_consensus::OpTxType;
 
 bitflags! {
     /// Bitmap-based tracking of block environment accesses.
-    /// More efficient than Vec for frequent access checks.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct BlockEnvAccess: u16 {
         /// Block number (NUMBER opcode)
@@ -52,12 +53,12 @@ impl Default for BlockEnvAccess {
 }
 
 impl BlockEnvAccess {
-    /// Count the number of accessed block environment types.
+    /// Counts the number of accessed block environment types.
     pub fn count_accessed(self) -> usize {
         self.bits().count_ones() as usize
     }
 
-    /// Get the raw bitmap value.
+    /// Gets the raw bitmap value.
     pub const fn raw(self) -> u16 {
         self.bits()
     }

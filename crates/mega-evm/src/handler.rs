@@ -14,7 +14,7 @@ use revm::{
     Inspector, Journal,
 };
 
-use crate::{constants, Context, HaltReason, SpecId, TransactionError};
+use crate::{constants, Context, ExternalEnvOracle, HaltReason, SpecId, TransactionError};
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
 /// most functionalities from Optimism.
@@ -38,9 +38,10 @@ impl<EVM, ERROR, FRAME> Default for Handler<EVM, ERROR, FRAME> {
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME> revm::handler::Handler for Handler<EVM, ERROR, FRAME>
+impl<DB: Database, EVM, ERROR, FRAME, Oracle: ExternalEnvOracle> revm::handler::Handler
+    for Handler<EVM, ERROR, FRAME>
 where
-    EVM: EvmTr<Context = Context<DB>, Frame = FRAME>,
+    EVM: EvmTr<Context = Context<DB, Oracle>, Frame = FRAME>,
     ERROR: EvmTrError<EVM> + From<TransactionError> + FromStringError + IsTxError,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
@@ -63,11 +64,8 @@ where
     }
 
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
-        evm.ctx().log_data_size = 0;
-        // Reset block env access for new transaction execution
-        evm.ctx().reset_block_env_access();
-        // Check beneficiary access for the current transaction
-        evm.ctx().check_tx_beneficiary_access();
+        evm.ctx().on_new_tx();
+
         self.op.pre_execution(evm)
     }
 
@@ -84,13 +82,14 @@ where
     }
 }
 
-impl<DB, EVM, ERROR> InspectorHandler for Handler<EVM, ERROR, EthFrame<EthInterpreter>>
+impl<DB, EVM, ERROR, Oracle: ExternalEnvOracle> InspectorHandler
+    for Handler<EVM, ERROR, EthFrame<EthInterpreter>>
 where
     DB: Database,
-    Context<DB>: ContextTr<Journal = Journal<DB>>,
+    Context<DB, Oracle>: ContextTr<Journal = Journal<DB>>,
     Journal<DB>: revm::inspector::JournalExt,
     EVM: InspectorEvmTr<
-        Context = Context<DB>,
+        Context = Context<DB, Oracle>,
         Frame = EthFrame<EthInterpreter>,
         Inspector: Inspector<
             <<Self as revm::handler::Handler>::Evm as EvmTr>::Context,

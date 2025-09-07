@@ -1,4 +1,4 @@
-//! The evm for the Megaeth
+//! The EVM implementation for the `MegaETH`.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![allow(unused_imports)]
@@ -7,6 +7,8 @@
 #[cfg_attr(not(feature = "std"), macro_use)]
 #[cfg(not(feature = "std"))]
 extern crate alloc;
+
+pub mod constants;
 
 mod context;
 pub use context::*;
@@ -17,8 +19,14 @@ pub use block::*;
 mod evm;
 pub use evm::*;
 
+mod gas;
+pub use gas::*;
+
 mod host;
 pub use host::*;
+
+mod limit;
+pub use limit::*;
 
 mod instructions;
 pub use instructions::*;
@@ -30,18 +38,22 @@ mod spec;
 pub use spec::*;
 
 #[cfg(any(test, feature = "test-utils"))]
-mod test_utils;
-#[cfg(any(test, feature = "test-utils"))]
-pub use test_utils::*;
+pub mod test_utils;
 
 mod types;
 pub use types::*;
 
 #[cfg(test)]
 mod tests {
-    use revm::context::result::ExecutionResult;
+    use alloy_primitives::{address, Bytes, U256};
+    use revm::{
+        bytecode::opcode::PUSH0,
+        context::result::ExecutionResult,
+        database::{CacheDB, EmptyDB},
+    };
 
     use super::*;
+    use crate::test_utils::*;
 
     mod contract_size_limit {
         use alloy_primitives::{address, Bytes, U256};
@@ -321,7 +333,7 @@ mod tests {
                 let contract_address = address!("0000000000000000000000000000000000100001");
                 set_account_code(&mut db, contract_address, bytecode.into());
 
-                let mut context = Context::new(db, SpecId::MINI_REX);
+                let mut context = Context::new(db, SpecId::MINI_REX, NoOpOracle);
                 // Configure L1BlockInfo to avoid operator fee scalar panic
                 context.chain_mut().operator_fee_scalar = Some(U256::from(0));
                 context.chain_mut().operator_fee_constant = Some(U256::from(0));
@@ -451,7 +463,7 @@ mod tests {
             ];
             set_account_code(&mut db, contract_address, contract_code.into());
 
-            let mut context = Context::new(db, SpecId::MINI_REX);
+            let mut context = Context::new(db, SpecId::MINI_REX, NoOpOracle);
             // Configure L1BlockInfo to avoid operator fee scalar panic
             context.chain_mut().operator_fee_scalar = Some(U256::from(0));
             context.chain_mut().operator_fee_constant = Some(U256::from(0));
@@ -495,7 +507,7 @@ mod tests {
             let contract_address = address!("0000000000000000000000000000000000100001");
             set_account_code(&mut db, contract_address, vec![NUMBER, STOP].into());
 
-            let mut context = Context::new(db, SpecId::MINI_REX);
+            let mut context = Context::new(db, SpecId::MINI_REX, NoOpOracle);
             // Configure L1BlockInfo to avoid operator fee scalar panic
             context.chain_mut().operator_fee_scalar = Some(U256::from(0));
             context.chain_mut().operator_fee_constant = Some(U256::from(0));
@@ -617,7 +629,10 @@ mod tests {
             state::AccountInfo,
         };
 
-        use crate::{set_account_code, transact, HaltReason, SpecId, TransactionError};
+        use crate::{
+            test_utils::{set_account_code, transact},
+            HaltReason, SpecId, TransactionError,
+        };
 
         /// Test that SELFDESTRUCT opcode works normally before Mini-Rex
         #[test]
@@ -667,5 +682,24 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn test_evm_state_zero_storage() {
+        let mut db = CacheDB::<EmptyDB>::default();
+        let contract_address = address!("0000000000000000000000000000000000100001");
+        let code = vec![PUSH0, revm::bytecode::opcode::SLOAD];
+        set_account_code(&mut db, contract_address, code.into());
+
+        let caller = address!("0000000000000000000000000000000000100000");
+        let callee = Some(contract_address);
+        let result =
+            transact(SpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO)
+                .unwrap();
+        let state = result.state;
+        let contract = state.get(&contract_address).unwrap();
+        // the non-existent storage slot will present in the state
+        assert_eq!(contract.storage.len(), 1);
+        assert!(contract.storage.contains_key(&U256::ZERO));
     }
 }

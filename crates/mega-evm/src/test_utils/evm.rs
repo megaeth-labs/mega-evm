@@ -10,7 +10,7 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 
-use crate::{Context, Evm, HaltReason, SpecId, Transaction, TransactionError};
+use crate::{Context, Evm, HaltReason, NoOpOracle, SpecId, Transaction, TransactionError};
 
 /// Sets the code for an account in the database.
 pub fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
@@ -29,7 +29,7 @@ pub fn transact(
     data: Bytes,
     value: U256,
 ) -> Result<ResultAndState<HaltReason>, EVMError<Infallible, TransactionError>> {
-    let mut context = Context::new(db, spec);
+    let mut context = Context::new(db, spec, NoOpOracle).with_data_limit(20000);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

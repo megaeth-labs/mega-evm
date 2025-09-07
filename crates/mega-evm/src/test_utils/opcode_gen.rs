@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 use revm::bytecode::opcode::{MSTORE, PUSH0};
 
-use crate::right_pad_bytes;
+use crate::test_utils::right_pad_bytes;
 
 /// Generates a PUSH opcode and the bytes to push.
 pub fn push_bytes(code: &mut Vec<u8>, bytes: impl AsRef<[u8]>) {
