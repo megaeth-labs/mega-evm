@@ -3,7 +3,7 @@
 //! access.
 
 use alloy_primitives::{address, Address, Bytes, U256};
-use mega_evm::{Context, Evm, HaltReason, NoOpOracle, SpecId, Transaction};
+use mega_evm::{MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, NoOpOracle};
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODESIZE, POP, PUSH20, STOP},
     context::{result::ResultAndState, BlockEnv, ContextSetters, ContextTr, TxEnv},
@@ -18,9 +18,9 @@ const BENEFICIARY: Address = address!("0000000000000000000000000000000000BEEF01"
 const CALLER_ADDR: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT_ADDR: Address = address!("0000000000000000000000000000000000100001");
 
-fn create_evm() -> Evm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle> {
+fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle> {
     let db = CacheDB::<EmptyDB>::default();
-    let mut context = Context::new(db, SpecId::MINI_REX, NoOpOracle);
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle);
 
     let block_env =
         BlockEnv { beneficiary: BENEFICIARY, number: U256::from(10), ..Default::default() };
@@ -29,7 +29,7 @@ fn create_evm() -> Evm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle> {
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
 
-    Evm::new(context, NoOpInspector)
+    MegaEvm::new(context, NoOpInspector)
 }
 
 fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
@@ -40,17 +40,17 @@ fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
 }
 
 fn execute_tx(
-    evm: &mut Evm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle>,
+    evm: &mut MegaEvm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle>,
     caller: Address,
     to: Option<Address>,
     value: U256,
     disable_beneficiary: bool,
-) -> ResultAndState<HaltReason> {
+) -> ResultAndState<MegaHaltReason> {
     if disable_beneficiary {
         evm.disable_beneficiary();
     }
 
-    let tx = Transaction {
+    let tx = MegaTransaction {
         base: TxEnv {
             caller,
             kind: match to {
@@ -69,8 +69,8 @@ fn execute_tx(
 }
 
 fn assert_beneficiary_detection(
-    evm: &Evm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle>,
-    result_and_state: &ResultAndState<HaltReason>,
+    evm: &MegaEvm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle>,
+    result_and_state: &ResultAndState<MegaHaltReason>,
 ) {
     // Transaction should succeed
     assert!(result_and_state.result.is_success());

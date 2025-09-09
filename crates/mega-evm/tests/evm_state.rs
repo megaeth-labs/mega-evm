@@ -17,7 +17,8 @@ fn test_evm_state_zero_storage() {
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);
     let result =
-        transact(SpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO).unwrap();
+        transact(MegaSpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO)
+            .unwrap();
     let state = result.state;
     let contract = state.get(&contract_address).unwrap();
     // the non-existent storage slot will present in the state

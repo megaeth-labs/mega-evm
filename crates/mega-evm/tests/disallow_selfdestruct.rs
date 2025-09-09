@@ -19,7 +19,7 @@ fn test_selfdestruct_allowed_before_mini_rex() {
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);
     let result =
-        transact(SpecId::EQUIVALENCE, &mut db, caller, callee, Bytes::default(), U256::ZERO);
+        transact(MegaSpecId::EQUIVALENCE, &mut db, caller, callee, Bytes::default(), U256::ZERO);
     assert!(result.is_ok());
     assert_eq!(result.unwrap().result.gas_used(), 26004);
 }
@@ -35,12 +35,13 @@ fn test_selfdestruct_disallowed_after_mini_rex() {
 
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);
-    let result = transact(SpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO);
+    let result =
+        transact(MegaSpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO);
     assert!(matches!(
         result,
         Ok(ResultAndState {
             result: ExecutionResult::Halt {
-                reason: HaltReason::Base(revm::context::result::HaltReason::InvalidFEOpcode),
+                reason: MegaHaltReason::Base(OpHaltReason::Base(EthHaltReason::InvalidFEOpcode)),
                 ..
             },
             ..

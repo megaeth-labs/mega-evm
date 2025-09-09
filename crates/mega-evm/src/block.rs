@@ -66,7 +66,7 @@ use alloy_op_hardforks::OpHardforks;
 use delegate::delegate;
 use revm::{context::result::ExecutionResult, database::State, Inspector};
 
-use crate::EvmFactory;
+use crate::MegaEvmFactory;
 
 /// Block execution context for the `MegaETH` chain, aliasing the Optimism block execution
 /// context.
@@ -108,13 +108,13 @@ pub type BlockExecutionCtx = alloy_op_evm::block::OpBlockExecutionCtx;
 /// to the underlying Optimism EVM implementation while providing MegaETH-specific
 /// customizations through the configured chain specification and EVM factory.
 #[derive(Debug, Clone)]
-pub struct BlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
+pub struct MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
     receipt_builder: ReceiptBuilder,
     spec: ChainSpec,
     evm_factory: EvmF,
 }
 
-impl<ChainSpec, EvmF, ReceiptBuilder> BlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
+impl<ChainSpec, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
     /// Create a new block executor factory.
     ///
     /// # Parameters
@@ -144,7 +144,7 @@ impl<ChainSpec, EvmF, ReceiptBuilder> BlockExecutorFactory<ChainSpec, EvmF, Rece
 }
 
 impl<ChainSpec, EvmF, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
-    for BlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>
+    for MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>
 where
     ReceiptBuilder: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
     ChainSpec: OpHardforks + Clone,
@@ -172,7 +172,7 @@ where
         DB: Database + 'a,
         I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<&'a mut State<DB>>> + 'a,
     {
-        BlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
+        MegaBlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
     }
 }
 
@@ -195,17 +195,17 @@ where
 /// block executor (`OpBlockExecutor`) while providing MegaETH-specific customizations.
 /// The delegation ensures minimal overhead while maintaining full compatibility with
 /// the Optimism EVM infrastructure.
-pub struct BlockExecutor<C, E, R: OpReceiptBuilder> {
+pub struct MegaBlockExecutor<C, E, R: OpReceiptBuilder> {
     inner: OpBlockExecutor<E, R, C>,
 }
 
-impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for BlockExecutor<C, E, R> {
+impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethBlockExecutor").finish_non_exhaustive()
     }
 }
 
-impl<C, E, R> BlockExecutor<C, E, R>
+impl<C, E, R> MegaBlockExecutor<C, E, R>
 where
     C: OpHardforks + Clone,
     E: alloy_evm::Evm<Tx: FromRecoveredTx<R::Transaction>>,
@@ -249,7 +249,7 @@ where
 /// This implementation delegates all block execution operations to the underlying
 /// Optimism block executor while providing MegaETH-specific customizations through
 /// the configured chain specification and EVM factory.
-impl<'db, DB, E, C, R> alloy_evm::block::BlockExecutor for BlockExecutor<C, E, R>
+impl<'db, DB, E, C, R> alloy_evm::block::BlockExecutor for MegaBlockExecutor<C, E, R>
 where
     DB: Database + 'db,
     C: OpHardforks,

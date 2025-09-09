@@ -12,8 +12,8 @@ use revm::{
 fn deploy_contract(
     db: &mut CacheDB<EmptyDB>,
     bytecode: Bytes,
-    spec: SpecId,
-) -> Result<ResultAndState<HaltReason>, EVMError<Infallible, TransactionError>> {
+    spec: MegaSpecId,
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, TransactionError>> {
     transact(
         spec,
         db,
@@ -24,7 +24,7 @@ fn deploy_contract(
     )
 }
 
-fn initcode_size_limit_test_case(spec: SpecId, initcode_size: usize, success: bool) {
+fn initcode_size_limit_test_case(spec: MegaSpecId, initcode_size: usize, success: bool) {
     let large_bytecode = vec![STOP; initcode_size];
     let bytecode: Bytes = large_bytecode.into();
     let mut db = CacheDB::<EmptyDB>::default();
@@ -44,28 +44,32 @@ fn initcode_size_limit_test_case(spec: SpecId, initcode_size: usize, success: bo
 #[test]
 fn test_eip3860_initcode_size() {
     initcode_size_limit_test_case(
-        SpecId::EQUIVALENCE,
+        MegaSpecId::EQUIVALENCE,
         revm::primitives::eip3860::MAX_INITCODE_SIZE,
         true,
     );
     initcode_size_limit_test_case(
-        SpecId::EQUIVALENCE,
+        MegaSpecId::EQUIVALENCE,
         constants::mini_rex::MAX_INITCODE_SIZE,
         false,
     );
     initcode_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
         revm::primitives::eip3860::MAX_INITCODE_SIZE,
         true,
     );
-    initcode_size_limit_test_case(SpecId::MINI_REX, constants::mini_rex::MAX_INITCODE_SIZE, true);
     initcode_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
+        constants::mini_rex::MAX_INITCODE_SIZE,
+        true,
+    );
+    initcode_size_limit_test_case(
+        MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_INITCODE_SIZE + 1,
         false,
     );
     initcode_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
         2 * constants::mini_rex::MAX_INITCODE_SIZE,
         false,
     );
@@ -81,7 +85,7 @@ fn constructor_code(contract_size: usize) -> Bytes {
     init_code.into()
 }
 
-fn contract_size_limit_test_case(spec: SpecId, contract_size: usize, success: bool) {
+fn contract_size_limit_test_case(spec: MegaSpecId, contract_size: usize, success: bool) {
     // Use the simplest method to return a contract code
     let init_code = constructor_code(contract_size);
     let mut db = CacheDB::<EmptyDB>::default();
@@ -93,9 +97,9 @@ fn contract_size_limit_test_case(spec: SpecId, contract_size: usize, success: bo
             result,
             Ok(ResultAndState {
                 result: ExecutionResult::Halt {
-                    reason: HaltReason::Base(
-                        revm::context::result::HaltReason::CreateContractSizeLimit
-                    ),
+                    reason: MegaHaltReason::Base(OpHaltReason::Base(
+                        EthHaltReason::CreateContractSizeLimit
+                    ),),
                     ..
                 },
                 ..
@@ -107,30 +111,42 @@ fn contract_size_limit_test_case(spec: SpecId, contract_size: usize, success: bo
 #[test]
 fn test_eip170_code_size_limit() {
     contract_size_limit_test_case(
-        SpecId::EQUIVALENCE,
+        MegaSpecId::EQUIVALENCE,
         revm::primitives::eip170::MAX_CODE_SIZE,
         true,
     );
     contract_size_limit_test_case(
-        SpecId::EQUIVALENCE,
+        MegaSpecId::EQUIVALENCE,
         constants::mini_rex::MAX_CONTRACT_SIZE,
         false,
     );
-    contract_size_limit_test_case(SpecId::MINI_REX, revm::primitives::eip170::MAX_CODE_SIZE, true);
-    contract_size_limit_test_case(SpecId::MINI_REX, constants::mini_rex::MAX_CONTRACT_SIZE, true);
     contract_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
+        revm::primitives::eip170::MAX_CODE_SIZE,
+        true,
+    );
+    contract_size_limit_test_case(
+        MegaSpecId::MINI_REX,
+        constants::mini_rex::MAX_CONTRACT_SIZE,
+        true,
+    );
+    contract_size_limit_test_case(
+        MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_CONTRACT_SIZE + 1,
         false,
     );
     contract_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
         2 * constants::mini_rex::MAX_CONTRACT_SIZE,
         false,
     );
 }
 
-fn contract_factory_code_size_limit_test_case(spec: SpecId, contract_size: usize, success: bool) {
+fn contract_factory_code_size_limit_test_case(
+    spec: MegaSpecId,
+    contract_size: usize,
+    success: bool,
+) {
     // 1. Create a "factory" contract that uses the CREATE opcode to create another large contract
     // 2. Since the sub-contract exceeds the EIP-170 limit, the CREATE operation should fail
 
@@ -168,7 +184,9 @@ fn contract_factory_code_size_limit_test_case(spec: SpecId, contract_size: usize
             result,
             Ok(ResultAndState {
                 result: ExecutionResult::Halt {
-                    reason: HaltReason::Base(revm::context::result::HaltReason::InvalidFEOpcode),
+                    reason: MegaHaltReason::Base(OpHaltReason::Base(
+                        EthHaltReason::InvalidFEOpcode
+                    )),
                     ..
                 },
                 ..
@@ -180,32 +198,32 @@ fn contract_factory_code_size_limit_test_case(spec: SpecId, contract_size: usize
 #[test]
 fn test_eip170_create_opcode_size_limit() {
     contract_factory_code_size_limit_test_case(
-        SpecId::EQUIVALENCE,
+        MegaSpecId::EQUIVALENCE,
         revm::primitives::eip170::MAX_CODE_SIZE,
         true,
     );
     contract_factory_code_size_limit_test_case(
-        SpecId::EQUIVALENCE,
+        MegaSpecId::EQUIVALENCE,
         revm::primitives::eip170::MAX_CODE_SIZE + 1,
         false,
     );
     contract_factory_code_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
         revm::primitives::eip170::MAX_CODE_SIZE,
         true,
     );
     contract_factory_code_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
         revm::primitives::eip170::MAX_CODE_SIZE + 1,
         true,
     );
     contract_factory_code_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_CONTRACT_SIZE,
         true,
     );
     contract_factory_code_size_limit_test_case(
-        SpecId::MINI_REX,
+        MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_CONTRACT_SIZE + 1,
         false,
     );

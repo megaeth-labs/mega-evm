@@ -22,17 +22,20 @@ pub use evm::*;
 mod gas;
 pub use gas::*;
 
+mod handler;
+pub use handler::*;
+
 mod host;
 pub use host::*;
-
-mod limit;
-pub use limit::*;
 
 mod instructions;
 pub use instructions::*;
 
-mod handler;
-pub use handler::*;
+mod limit;
+pub use limit::*;
+
+mod result;
+pub use result::*;
 
 mod spec;
 pub use spec::*;
@@ -42,3 +45,30 @@ pub mod test_utils;
 
 mod types;
 pub use types::*;
+
+/* We alias the mega-evm types */
+/// Alias for [`MegaTransaction`]
+pub type Transaction = MegaTransaction;
+/// Alias for [`MegaSpecId`]
+pub type SpecId = MegaSpecId;
+/// Alias for [`MegaHaltReason`]
+pub type HaltReason = MegaHaltReason;
+/// Alias for [`MegaPrecompiles`]
+pub type Precompiles = MegaPrecompiles;
+/// Alias for [`MegaTxType`]
+pub type TxType = MegaTxType;
+/// Alias for [`MegaInstructions`]
+pub type Instructions<DB, Oracle> = MegaInstructions<DB, Oracle>;
+/// Alias for [`MegaHandler`]
+pub type Handler<EVM, ERROR, FRAME> = MegaHandler<EVM, ERROR, FRAME>;
+/// Alias for [`MegaEvm`]
+pub type Evm<DB, INSP, Oracle> = MegaEvm<DB, INSP, Oracle>;
+/// Alias for [`MegaEvmFactory`]
+pub type EvmFactory<Oracle> = MegaEvmFactory<Oracle>;
+/// Alias for [`MegaContext`]
+pub type Context<DB, Oracle> = MegaContext<DB, Oracle>;
+/// Alias for [`MegaBlockExecutor`]
+pub type BlockExecutor<C, E, R> = MegaBlockExecutor<C, E, R>;
+/// Alias for [`MegaBlockExecutorFactory`]
+pub type BlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> =
+    MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>;

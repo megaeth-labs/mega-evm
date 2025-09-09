@@ -1,9 +1,14 @@
 use alloy_evm::Database;
 use delegate::delegate;
-use op_revm::handler::{IsTxError, OpHandler};
+use op_revm::{
+    handler::{IsTxError, OpHandler},
+    OpHaltReason, OpTransactionError,
+};
 use revm::{
     context::{
-        result::{ExecutionResult, FromStringError, InvalidTransaction, ResultAndState},
+        result::{
+            ExecutionResult, FromStringError, InvalidTransaction, OutOfGasError, ResultAndState,
+        },
         Cfg, ContextTr, Transaction,
     },
     handler::{EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr},
@@ -14,40 +19,43 @@ use revm::{
     Inspector, Journal,
 };
 
-use crate::{constants, Context, ExternalEnvOracle, HaltReason, SpecId, TransactionError};
+use crate::{
+    constants, MegaContext, EthHaltReason, ExternalEnvOracle, MegaHaltReason, MegaSpecId,
+    TransactionError,
+};
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
 /// most functionalities from Optimism.
 #[allow(missing_debug_implementations)]
-pub struct Handler<EVM, ERROR, FRAME> {
+pub struct MegaHandler<EVM, ERROR, FRAME> {
     op: OpHandler<EVM, ERROR, FRAME>,
 }
 
-impl<EVM, ERROR, FRAME> Handler<EVM, ERROR, FRAME> {
+impl<EVM, ERROR, FRAME> MegaHandler<EVM, ERROR, FRAME> {
     /// Create a new `MegaethHandler`.
     pub fn new() -> Self {
         Self { op: OpHandler::new() }
     }
 }
 
-impl<EVM, ERROR, FRAME> Default for Handler<EVM, ERROR, FRAME> {
+impl<EVM, ERROR, FRAME> Default for MegaHandler<EVM, ERROR, FRAME> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<DB: Database, EVM, ERROR, FRAME, Oracle: ExternalEnvOracle> revm::handler::Handler
-    for Handler<EVM, ERROR, FRAME>
+    for MegaHandler<EVM, ERROR, FRAME>
 where
-    EVM: EvmTr<Context = Context<DB, Oracle>, Frame = FRAME>,
-    ERROR: EvmTrError<EVM> + From<TransactionError> + FromStringError + IsTxError,
+    EVM: EvmTr<Context = MegaContext<DB, Oracle>, Frame = FRAME>,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     type Evm = EVM;
 
     type Error = ERROR;
 
-    type HaltReason = HaltReason;
+    type HaltReason = MegaHaltReason;
 
     delegate! {
         to self.op {
@@ -56,8 +64,6 @@ where
             fn last_frame_result(&mut self, evm: &mut Self::Evm, frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
-            fn execution_result(&mut self, evm: &mut Self::Evm, result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<ExecutionResult<Self::HaltReason>, Self::Error>;
-            fn catch_error(&self, evm: &mut Self::Evm, error: Self::Error) -> Result<ExecutionResult<Self::HaltReason>, Self::Error>;
         }
     }
 
@@ -78,23 +84,55 @@ where
             self.op.reward_beneficiary(evm, exec_result)
         }
     }
+
+    fn execution_result(
+        &mut self,
+        evm: &mut Self::Evm,
+        result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        let result = self.op.execution_result(evm, result)?;
+        Ok(result.map_haltreason(|reason| match reason {
+            OpHaltReason::Base(EthHaltReason::OutOfGas(OutOfGasError::Basic)) => {
+                let additional_limit = evm.ctx().additional_limit.borrow();
+                // if it halts due to OOG, we further check if the data or kv update limit is
+                // exceeded
+                if additional_limit.data_size_tracker.exceeds_limit() {
+                    MegaHaltReason::DataLimitExceeded
+                } else if additional_limit.kv_update_counter.exceeds_limit() {
+                    MegaHaltReason::KVUpdateLimitExceeded
+                } else {
+                    MegaHaltReason::Base(reason)
+                }
+            }
+            _ => MegaHaltReason::Base(reason),
+        }))
+    }
+
+    fn catch_error(
+        &self,
+        evm: &mut Self::Evm,
+        error: Self::Error,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        let result = self.op.catch_error(evm, error)?;
+        Ok(result.map_haltreason(MegaHaltReason::Base))
+    }
 }
 
 impl<DB, EVM, ERROR, Oracle: ExternalEnvOracle> InspectorHandler
-    for Handler<EVM, ERROR, EthFrame<EthInterpreter>>
+    for MegaHandler<EVM, ERROR, EthFrame<EthInterpreter>>
 where
     DB: Database,
-    Context<DB, Oracle>: ContextTr<Journal = Journal<DB>>,
+    MegaContext<DB, Oracle>: ContextTr<Journal = Journal<DB>>,
     Journal<DB>: revm::inspector::JournalExt,
     EVM: InspectorEvmTr<
-        Context = Context<DB, Oracle>,
+        Context = MegaContext<DB, Oracle>,
         Frame = EthFrame<EthInterpreter>,
         Inspector: Inspector<
             <<Self as revm::handler::Handler>::Evm as EvmTr>::Context,
             EthInterpreter,
         >,
     >,
-    ERROR: EvmTrError<EVM> + From<TransactionError> + FromStringError + IsTxError,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
 {
     type IT = EthInterpreter;
 }

@@ -4,8 +4,8 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, hex, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    test_utils::set_account_code, Context, Evm, HaltReason, NoOpOracle, SpecId, Transaction,
-    TransactionError,
+    test_utils::set_account_code, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, NoOpOracle, TransactionError,
 };
 use revm::{
     context::{
@@ -17,21 +17,21 @@ use revm::{
 };
 
 /// Executes a transaction on the EVM.
-pub fn transact(
-    spec: SpecId,
+fn transact(
+    spec: MegaSpecId,
     db: &mut CacheDB<EmptyDB>,
     caller: Address,
     callee: Option<Address>,
     data: Bytes,
     value: U256,
     data_limit: u64,
-) -> Result<ResultAndState<HaltReason>, EVMError<Infallible, TransactionError>> {
-    let mut context = Context::new(db, spec, NoOpOracle).with_data_limit(data_limit);
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, TransactionError>> {
+    let mut context = MegaContext::new(db, spec, NoOpOracle).with_data_limit(data_limit);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let mut evm = Evm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context, NoOpInspector);
     let tx = TxEnv {
         caller,
         kind: callee.map_or(TxKind::Create, TxKind::Call),
@@ -40,7 +40,7 @@ pub fn transact(
         gas_limit: 1000000000000000000,
         ..Default::default()
     };
-    let mut tx = Transaction::new(tx);
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -55,7 +55,7 @@ fn test_data_limit() {
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);
     let result =
-        transact(SpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO, 600)
+        transact(MegaSpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO, 600)
             .unwrap();
     println!("result: {:?}", result);
     assert!(result.result.is_halt());

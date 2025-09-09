@@ -10,7 +10,7 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 
-use crate::{Context, Evm, HaltReason, NoOpOracle, SpecId, Transaction, TransactionError};
+use crate::{MegaContext, MegaEvm, MegaHaltReason, NoOpOracle, MegaSpecId, MegaTransaction, TransactionError};
 
 /// Sets the code for an account in the database.
 pub fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
@@ -22,19 +22,19 @@ pub fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes
 
 /// Executes a transaction on the EVM.
 pub fn transact(
-    spec: SpecId,
+    spec: MegaSpecId,
     db: &mut CacheDB<EmptyDB>,
     caller: Address,
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<HaltReason>, EVMError<Infallible, TransactionError>> {
-    let mut context = Context::new(db, spec, NoOpOracle).with_data_limit(20000);
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, TransactionError>> {
+    let mut context = MegaContext::new(db, spec, NoOpOracle).with_data_limit(20000);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let mut evm = Evm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context, NoOpInspector);
     let tx = TxEnv {
         caller,
         kind: callee.map_or(TxKind::Create, TxKind::Call),
@@ -43,7 +43,7 @@ pub fn transact(
         gas_limit: 1000000000000000000,
         ..Default::default()
     };
-    let mut tx = Transaction::new(tx);
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

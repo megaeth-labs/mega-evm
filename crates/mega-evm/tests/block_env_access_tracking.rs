@@ -37,7 +37,7 @@ fn test_block_env_tracking_with_evm() {
         let contract_address = address!("0000000000000000000000000000000000100001");
         set_account_code(&mut db, contract_address, bytecode.into());
 
-        let mut context = Context::new(db, SpecId::MINI_REX, NoOpOracle);
+        let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle);
         // Configure L1BlockInfo to avoid operator fee scalar panic
         context.chain_mut().operator_fee_scalar = Some(U256::from(0));
         context.chain_mut().operator_fee_constant = Some(U256::from(0));
@@ -47,7 +47,7 @@ fn test_block_env_tracking_with_evm() {
         let block_env = BlockEnv { number: U256::from(10), ..Default::default() };
         context.set_block(block_env);
 
-        let mut evm = Evm::new(context, NoOpInspector);
+        let mut evm = MegaEvm::new(context, NoOpInspector);
 
         // Ensure we start with no block env access
         assert!(
@@ -63,7 +63,7 @@ fn test_block_env_tracking_with_evm() {
         );
 
         // Create transaction
-        let tx = Transaction {
+        let tx = MegaTransaction {
             base: revm::context::TxEnv {
                 caller: address!("0000000000000000000000000000000000100000"),
                 kind: revm::primitives::TxKind::Call(contract_address),
@@ -168,14 +168,14 @@ fn test_multiple_block_env_accesses() {
     ];
     set_account_code(&mut db, contract_address, contract_code.into());
 
-    let mut context = Context::new(db, SpecId::MINI_REX, NoOpOracle);
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle);
     // Configure L1BlockInfo to avoid operator fee scalar panic
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
-    let mut evm = Evm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context, NoOpInspector);
 
     // Execute transaction
-    let tx = Transaction {
+    let tx = MegaTransaction {
         base: revm::context::TxEnv {
             caller: address!("0000000000000000000000000000000000100000"),
             kind: revm::primitives::TxKind::Call(contract_address),
@@ -208,14 +208,14 @@ fn test_block_env_reset_between_transactions() {
     let contract_address = address!("0000000000000000000000000000000000100001");
     set_account_code(&mut db, contract_address, vec![NUMBER, STOP].into());
 
-    let mut context = Context::new(db, SpecId::MINI_REX, NoOpOracle);
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle);
     // Configure L1BlockInfo to avoid operator fee scalar panic
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
-    let mut evm = Evm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context, NoOpInspector);
 
     // First transaction - accesses block env
-    let tx1 = Transaction {
+    let tx1 = MegaTransaction {
         base: revm::context::TxEnv {
             caller: address!("0000000000000000000000000000000000100000"),
             kind: revm::primitives::TxKind::Call(contract_address),
@@ -241,7 +241,7 @@ fn test_block_env_reset_between_transactions() {
         nonce: 0, // Same account should continue with correct nonce
         ..Default::default()
     };
-    let tx2 = Transaction { base: tx2_env, ..Default::default() };
+    let tx2 = MegaTransaction { base: tx2_env, ..Default::default() };
 
     // This simulates how the EVM would be used for a new transaction
     // Setting tx should automatically reset the block env access

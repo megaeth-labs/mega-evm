@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{constants, AdditionalLimit, BlockEnvAccess, Context, ExternalEnvOracle, SpecId};
+use crate::{constants, AdditionalLimit, BlockEnvAccess, MegaContext, ExternalEnvOracle, MegaSpecId};
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
@@ -11,7 +11,7 @@ use revm::{
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
 };
 
-impl<DB: Database, Oracle: ExternalEnvOracle> Host for Context<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> Host for MegaContext<DB, Oracle> {
     // Block environment related methods - with tracking
     fn basefee(&self) -> U256 {
         self.mark_block_env_accessed(BlockEnvAccess::BASE_FEE);
@@ -117,7 +117,7 @@ pub trait HostExt: Host {
     fn new_account_gas(&self, address: Address) -> u64;
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> HostExt for Context<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> HostExt for MegaContext<DB, Oracle> {
     #[inline]
     fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>> {
         &self.additional_limit

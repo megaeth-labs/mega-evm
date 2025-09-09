@@ -104,8 +104,7 @@ impl AdditionalLimit {
     ///
     /// This constant is used to signal that either the data limit or KV update limit
     /// has been exceeded during transaction execution.
-    pub const EXCEEDING_LIMIT_INSTRUCTION_RESULT: InstructionResult =
-        InstructionResult::MemoryLimitOOG;
+    pub const EXCEEDING_LIMIT_INSTRUCTION_RESULT: InstructionResult = InstructionResult::OutOfGas;
 
     /// Resets the internal state for a new transaction or block.
     ///
@@ -178,7 +177,7 @@ impl AdditionalLimit {
     /// # Returns
     ///
     /// Returns the result of the initial limit check.
-    pub(crate) fn on_new_tx(&mut self, tx: &crate::Transaction) -> AdditionalLimitResult {
+    pub(crate) fn on_new_tx(&mut self, tx: &crate::MegaTransaction) -> AdditionalLimitResult {
         // reset the tx data size tracker and kv update counter
         self.reset();
 
@@ -632,7 +631,7 @@ impl DataSizeTracker {
     /// # Arguments
     ///
     /// * `tx` - The transaction being executed
-    pub(crate) fn on_tx_start(&mut self, tx: &crate::Transaction) {
+    pub(crate) fn on_tx_start(&mut self, tx: &crate::MegaTransaction) {
         // 110 bytes for the intrinsic data of a transaction, including the gas limit, value,
         // signature, gas price, etc.
         let mut size = 110;

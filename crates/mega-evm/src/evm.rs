@@ -73,8 +73,9 @@ use revm::{
 
 use crate::{
     exceeding_limit_frame_result, mark_frame_result_as_exceeding_limit, AdditionalLimit,
-    BlockEnvAccess, Context, ExternalEnvOracle, HaltReason, Handler, HostExt, Instructions,
-    IntoMegaethCfgEnv, NoOpOracle, Precompiles, SpecId, Transaction, TransactionError, TxType,
+    BlockEnvAccess, ExternalEnvOracle, HostExt, IntoMegaethCfgEnv, MegaContext, MegaHaltReason,
+    MegaHandler, MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTxType,
+    NoOpOracle, TransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -109,12 +110,12 @@ use crate::{
 /// customizations through the configured oracle service and chain specifications.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub struct EvmFactory<Oracle> {
+pub struct MegaEvmFactory<Oracle> {
     /// The oracle service to provide deterministic external information during EVM execution.
     oracle: Oracle,
 }
 
-impl Default for EvmFactory<NoOpOracle> {
+impl Default for MegaEvmFactory<NoOpOracle> {
     /// Creates a new [`EvmFactory`] instance with the default [`NoOpOracle`].
     ///
     /// This is the recommended way to create a factory when no custom oracle is needed.
@@ -125,7 +126,7 @@ impl Default for EvmFactory<NoOpOracle> {
     }
 }
 
-impl<Oracle> EvmFactory<Oracle> {
+impl<Oracle> MegaEvmFactory<Oracle> {
     /// Creates a new [`EvmFactory`] instance with the given oracle.
     ///
     /// # Parameters
@@ -141,17 +142,17 @@ impl<Oracle> EvmFactory<Oracle> {
     }
 }
 
-impl<Oracle> alloy_evm::EvmFactory for EvmFactory<Oracle>
+impl<Oracle> alloy_evm::EvmFactory for MegaEvmFactory<Oracle>
 where
     Oracle: ExternalEnvOracle + Clone,
 {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = Evm<DB, I, Oracle>;
-    type Context<DB: Database> = Context<DB, Oracle>;
-    type Tx = Transaction;
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = MegaEvm<DB, I, Oracle>;
+    type Context<DB: Database> = MegaContext<DB, Oracle>;
+    type Tx = MegaTransaction;
     type Error<DBError: core::error::Error + Send + Sync + 'static> =
         EVMError<DBError, TransactionError>;
-    type HaltReason = HaltReason;
-    type Spec = SpecId;
+    type HaltReason = MegaHaltReason;
+    type Spec = MegaSpecId;
     type Precompiles = PrecompilesMap;
 
     /// Creates a new `Evm` instance with the provided database and EVM environment.
@@ -175,12 +176,12 @@ where
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
         let spec = evm_env.cfg_env().spec();
-        let ctx = Context::new(db, spec, self.oracle.clone())
-            .with_tx(Transaction::default())
+        let ctx = MegaContext::new(db, spec, self.oracle.clone())
+            .with_tx(MegaTransaction::default())
             .with_block(evm_env.block_env)
             .with_cfg(evm_env.cfg_env)
             .with_chain(L1BlockInfo::default());
-        Evm::new(ctx, NoOpInspector)
+        MegaEvm::new(ctx, NoOpInspector)
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -223,11 +224,11 @@ where
 /// `MegaETH`-specific customizations through the configured context, instructions, and precompiles.
 #[allow(missing_debug_implementations)]
 #[allow(clippy::type_complexity)]
-pub struct Evm<DB: Database, INSP, Oracle: ExternalEnvOracle> {
+pub struct MegaEvm<DB: Database, INSP, Oracle: ExternalEnvOracle> {
     inner: revm::context::Evm<
-        Context<DB, Oracle>,
+        MegaContext<DB, Oracle>,
         INSP,
-        Instructions<DB, Oracle>,
+        MegaInstructions<DB, Oracle>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     >,
@@ -235,17 +236,17 @@ pub struct Evm<DB: Database, INSP, Oracle: ExternalEnvOracle> {
     inspect: bool,
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::fmt::Debug for Evm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::fmt::Debug for MegaEvm<DB, INSP, Oracle> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethEvm").field("inspect", &self.inspect).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::Deref for Evm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::Deref for MegaEvm<DB, INSP, Oracle> {
     type Target = revm::context::Evm<
-        Context<DB, Oracle>,
+        MegaContext<DB, Oracle>,
         INSP,
-        Instructions<DB, Oracle>,
+        MegaInstructions<DB, Oracle>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     >;
@@ -255,13 +256,15 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::Deref for Evm<DB,
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::DerefMut for Evm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::DerefMut
+    for MegaEvm<DB, INSP, Oracle>
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
     /// Creates a new `MegaETH` EVM instance.
     ///
     /// # Parameters
@@ -272,15 +275,15 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
     /// # Returns
     ///
     /// A new `Evm` instance configured with the provided context and inspector.
-    pub fn new(context: Context<DB, Oracle>, inspect: INSP) -> Self {
+    pub fn new(context: MegaContext<DB, Oracle>, inspect: INSP) -> Self {
         let spec = context.megaeth_spec();
         let op_spec = context.cfg().spec();
         Self {
             inner: revm::context::Evm::new_with_inspector(
                 context,
                 inspect,
-                Instructions::new(spec),
-                PrecompilesMap::from_static(Precompiles::new_with_spec(op_spec).precompiles()),
+                MegaInstructions::new(spec),
+                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(op_spec).precompiles()),
             ),
             inspect: false,
         }
@@ -295,14 +298,14 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
     /// # Returns
     ///
     /// A new `Evm` instance with the specified inspector enabled.
-    pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I, Oracle> {
+    pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, Oracle> {
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
             inspector,
             self.inner.instruction,
             self.inner.precompiles,
         );
-        Evm { inner, inspect: true }
+        MegaEvm { inner, inspect: true }
     }
 
     /// Enables inspector at runtime.
@@ -322,7 +325,7 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
     /// Provides a reference to the block environment.
     ///
     /// The block environment contains information about the current block being processed,
@@ -369,7 +372,7 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
     }
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> PrecompileProvider<Context<DB, Oracle>>
+impl<DB: Database, Oracle: ExternalEnvOracle> PrecompileProvider<MegaContext<DB, Oracle>>
     for PrecompilesMap
 {
     type Output = InterpreterResult;
@@ -382,7 +385,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> PrecompileProvider<Context<DB, Ora
     #[inline]
     fn run(
         &mut self,
-        context: &mut Context<DB, Oracle>,
+        context: &mut MegaContext<DB, Oracle>,
         address: &Address,
         inputs: &InputsImpl,
         is_static: bool,
@@ -404,13 +407,13 @@ impl<DB: Database, Oracle: ExternalEnvOracle> PrecompileProvider<Context<DB, Ora
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::handler::EvmTr for Evm<DB, INSP, Oracle>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::handler::EvmTr for MegaEvm<DB, INSP, Oracle>
 where
     DB: Database,
 {
-    type Context = Context<DB, Oracle>;
+    type Context = MegaContext<DB, Oracle>;
 
-    type Instructions = Instructions<DB, Oracle>;
+    type Instructions = MegaInstructions<DB, Oracle>;
 
     type Precompiles = PrecompilesMap;
 
@@ -511,10 +514,11 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::inspector::InspectorEvmTr for Evm<DB, INSP, Oracle>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::inspector::InspectorEvmTr
+    for MegaEvm<DB, INSP, Oracle>
 where
     DB: Database,
-    INSP: Inspector<Context<DB, Oracle>>,
+    INSP: Inspector<MegaContext<DB, Oracle>>,
 {
     type Inspector = INSP;
 
@@ -549,16 +553,16 @@ where
 /// This implementation provides the core EVM interface required by the Alloy EVM framework,
 /// enabling seamless integration with Alloy-based applications while providing `MegaETH`-specific
 /// customizations and optimizations.
-impl<DB, INSP, Oracle: ExternalEnvOracle> alloy_evm::Evm for Evm<DB, INSP, Oracle>
+impl<DB, INSP, Oracle: ExternalEnvOracle> alloy_evm::Evm for MegaEvm<DB, INSP, Oracle>
 where
     DB: Database,
-    INSP: Inspector<Context<DB, Oracle>>,
+    INSP: Inspector<MegaContext<DB, Oracle>>,
 {
     type DB = DB;
-    type Tx = Transaction;
+    type Tx = MegaTransaction;
     type Error = EVMError<DB::Error, TransactionError>;
-    type HaltReason = HaltReason;
-    type Spec = SpecId;
+    type HaltReason = MegaHaltReason;
+    type Spec = MegaSpecId;
     type Precompiles = PrecompilesMap;
     type Inspector = INSP;
 
@@ -639,15 +643,15 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::ExecuteEvm for Evm<DB, INSP, Oracle>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::ExecuteEvm for MegaEvm<DB, INSP, Oracle>
 where
     DB: Database,
 {
-    type Tx = Transaction;
+    type Tx = MegaTransaction;
     type Block = BlockEnv;
     type State = EvmState;
     type Error = EVMError<DB::Error, TransactionError>;
-    type ExecutionResult = ExecutionResult<HaltReason>;
+    type ExecutionResult = ExecutionResult<MegaHaltReason>;
 
     fn set_block(&mut self, block: Self::Block) {
         self.inner.ctx.set_block(block);
@@ -655,7 +659,7 @@ where
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.ctx().set_tx(tx);
-        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new();
+        let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run(&mut h, self)
     }
 
@@ -666,7 +670,7 @@ where
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new();
+        let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run(&mut h, self).map(|result| {
             let state = self.finalize();
             ExecResultAndState::new(result, state)
@@ -674,7 +678,7 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::ExecuteCommitEvm for Evm<DB, INSP, Oracle>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::ExecuteCommitEvm for MegaEvm<DB, INSP, Oracle>
 where
     DB: Database + DatabaseCommit,
 {
@@ -683,10 +687,10 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::InspectEvm for Evm<DB, INSP, Oracle>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::InspectEvm for MegaEvm<DB, INSP, Oracle>
 where
     DB: Database,
-    INSP: Inspector<Context<DB, Oracle>>,
+    INSP: Inspector<MegaContext<DB, Oracle>>,
 {
     type Inspector = INSP;
 
@@ -696,19 +700,19 @@ where
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.ctx().set_tx(tx);
-        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new();
+        let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::inspector::InspectorHandler::inspect_run(&mut h, self)
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::InspectCommitEvm for Evm<DB, INSP, Oracle>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::InspectCommitEvm for MegaEvm<DB, INSP, Oracle>
 where
     DB: Database + DatabaseCommit,
-    INSP: Inspector<Context<DB, Oracle>>,
+    INSP: Inspector<MegaContext<DB, Oracle>>,
 {
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::SystemCallEvm for Evm<DB, INSP, Oracle>
+impl<DB, INSP, Oracle: ExternalEnvOracle> revm::SystemCallEvm for MegaEvm<DB, INSP, Oracle>
 where
     DB: Database,
 {
@@ -718,10 +722,10 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<Self::ExecutionResult, Self::Error> {
-        self.ctx().set_tx(<Transaction as SystemCallTx>::new_system_tx_with_caller(
+        self.ctx().set_tx(<MegaTransaction as SystemCallTx>::new_system_tx_with_caller(
             caller, contract, data,
         ));
-        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new();
+        let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run_system_call(&mut h, self)
     }
 }

@@ -1,8 +1,8 @@
 //! Definitions of the `MegaETH` EVM versions (`SpecId`).
 
 use core::str::FromStr;
-use op_revm::OpSpecId;
-use revm::primitives::hardfork::{SpecId as EthSpecId, UnknownHardfork};
+pub use op_revm::OpSpecId;
+pub use revm::primitives::hardfork::{SpecId as EthSpecId, UnknownHardfork};
 use serde::{Deserialize, Serialize};
 
 /// `MegaETH` spec id, defining different versions of the `MegaETH` EVM.
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
 )]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms, missing_docs)]
-pub enum SpecId {
+pub enum MegaSpecId {
     /// The EVM version when no `MegaETH` harfork is enabled. The behavior of the EVM
     /// should be equivalent to the [`OpSpecId::ISTHMUS`] of the Optimism EVM.
     #[default]
@@ -36,7 +36,7 @@ pub mod name {
     pub const MINI_REX: &str = "MiniRex";
 }
 
-impl SpecId {
+impl MegaSpecId {
     /// Converts the [`SpecId`] into its corresponding [`EthSpecId`].
     pub const fn into_eth_spec(self) -> EthSpecId {
         self.into_op_spec().into_eth_spec()
@@ -58,17 +58,17 @@ impl SpecId {
     }
 }
 
-impl From<SpecId> for &'static str {
+impl From<MegaSpecId> for &'static str {
     /// Converts the [`SpecId`] into its corresponding string identifier.
-    fn from(spec_id: SpecId) -> Self {
+    fn from(spec_id: MegaSpecId) -> Self {
         match spec_id {
-            SpecId::EQUIVALENCE => name::EQUIVALENCE,
-            SpecId::MINI_REX => name::MINI_REX,
+            MegaSpecId::EQUIVALENCE => name::EQUIVALENCE,
+            MegaSpecId::MINI_REX => name::MINI_REX,
         }
     }
 }
 
-impl FromStr for SpecId {
+impl FromStr for MegaSpecId {
     type Err = UnknownHardfork;
 
     /// Converts the string identifier into its corresponding [`SpecId`].
@@ -81,16 +81,16 @@ impl FromStr for SpecId {
     }
 }
 
-impl From<SpecId> for revm::primitives::hardfork::SpecId {
+impl From<MegaSpecId> for revm::primitives::hardfork::SpecId {
     /// Converts the [`SpecId`] into its corresponding [`EthSpecId`].
-    fn from(spec_id: SpecId) -> Self {
+    fn from(spec_id: MegaSpecId) -> Self {
         spec_id.into_eth_spec()
     }
 }
 
-impl From<SpecId> for OpSpecId {
+impl From<MegaSpecId> for OpSpecId {
     /// Converts the [`SpecId`] into its corresponding [`OpSpecId`].
-    fn from(spec_id: SpecId) -> Self {
+    fn from(spec_id: MegaSpecId) -> Self {
         spec_id.into_op_spec()
     }
 }

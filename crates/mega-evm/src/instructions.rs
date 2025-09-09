@@ -7,8 +7,8 @@ use crate::{
         equivalence::{CALL_STIPEND, LOG, LOGDATA, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST},
         mini_rex::SSTORE_SET_GAS,
     },
-    slot_to_bucket_id, AdditionalLimit, Context, DataSizeTracker, ExternalEnvOracle, HostExt,
-    KVUpdateCounter, SpecId,
+    slot_to_bucket_id, AdditionalLimit, DataSizeTracker, ExternalEnvOracle, HostExt,
+    KVUpdateCounter, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, BlockNumber, Bytes, Log, LogData, B256, U256};
@@ -51,26 +51,26 @@ use salt::{constant::MIN_BUCKET_SIZE, BucketId};
 /// In Mega-EVM, we fork the standard EVM at Prague, so we can safely assume that all features
 /// before and including Prague are enabled.
 #[derive(Clone)]
-pub struct Instructions<DB: Database, Oracle: ExternalEnvOracle> {
-    spec: SpecId,
-    inner: EthInstructions<EthInterpreter, Context<DB, Oracle>>,
+pub struct MegaInstructions<DB: Database, Oracle: ExternalEnvOracle> {
+    spec: MegaSpecId,
+    inner: EthInstructions<EthInterpreter, MegaContext<DB, Oracle>>,
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> core::fmt::Debug for Instructions<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> core::fmt::Debug for MegaInstructions<DB, Oracle> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethInstructions").field("spec", &self.spec).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> Instructions<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> MegaInstructions<DB, Oracle> {
     /// Create a new `MegaethInstructions` with the given spec id.
-    pub fn new(spec: SpecId) -> Self {
+    pub fn new(spec: MegaSpecId) -> Self {
         let this = Self { spec, inner: EthInstructions::new_mainnet() };
         this.with_spec(spec)
     }
 
-    fn with_spec(mut self, spec: SpecId) -> Self {
-        if spec.is_enabled(SpecId::MINI_REX) {
+    fn with_spec(mut self, spec: MegaSpecId) -> Self {
+        if spec.is_enabled(MegaSpecId::MINI_REX) {
             // Override the LOG instructions and use our own implementation with quadratic data cost
             self.inner.insert_instruction(LOG0, log_with_data_bomb::<0, _>);
             self.inner.insert_instruction(LOG1, log_with_data_bomb::<1, _>);
@@ -100,8 +100,8 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Instructions<DB, Oracle> {
     }
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> InstructionProvider for Instructions<DB, Oracle> {
-    type Context = Context<DB, Oracle>;
+impl<DB: Database, Oracle: ExternalEnvOracle> InstructionProvider for MegaInstructions<DB, Oracle> {
+    type Context = MegaContext<DB, Oracle>;
     type InterpreterTypes = EthInterpreter;
 
     fn instruction_table(&self) -> &InstructionTable<Self::InterpreterTypes, Self::Context> {

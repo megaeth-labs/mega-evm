@@ -46,13 +46,13 @@ use std::{cell::RefCell, collections::hash_map::Entry, rc::Rc};
 
 use crate::{
     constants, slot_to_bucket_id, AdditionalLimit, BlockEnvAccess, ExternalEnvOracle,
-    GasCostOracle, SpecId,
+    GasCostOracle, MegaSpecId,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
 /// trait to be used as the context for the [`crate::Evm`].
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
-pub struct Context<DB: Database, Oracle: ExternalEnvOracle> {
+pub struct MegaContext<DB: Database, Oracle: ExternalEnvOracle> {
     /// The inner context.
     #[deref]
     #[deref_mut]
@@ -60,7 +60,7 @@ pub struct Context<DB: Database, Oracle: ExternalEnvOracle> {
     /// The `MegaETH` spec id. The inner context contains the `OpSpecId`.
     /// The `OpSpec` in the `inner` context should be the corresponding [`OpSpecId`] for the
     /// [`SpecId`].
-    pub(crate) spec: SpecId,
+    pub(crate) spec: MegaSpecId,
 
     /// Whether to disable the post-transaction reward to beneficiary.
     pub(crate) disable_beneficiary: bool,
@@ -78,7 +78,7 @@ pub struct Context<DB: Database, Oracle: ExternalEnvOracle> {
     pub(crate) beneficiary_balance_accessed: RefCell<bool>,
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// Creates a new `Context` with the given database, specification, and oracle.
     ///
     /// This constructor initializes a new `MegaETH` EVM context with default settings.
@@ -94,12 +94,12 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// # Returns
     ///
     /// Returns a new `Context` instance with default configuration.
-    pub fn new(db: DB, spec: SpecId, oracle: Oracle) -> Self {
+    pub fn new(db: DB, spec: MegaSpecId, oracle: Oracle) -> Self {
         let mut inner =
             revm::Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
 
         // For the `MINI_REX` spec, we override the contract size and initcode size limits.
-        if spec.is_enabled(SpecId::MINI_REX) {
+        if spec.is_enabled(MegaSpecId::MINI_REX) {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
             inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
         }
@@ -133,7 +133,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// # Returns
     ///
     /// Returns a new `Context` instance wrapping the provided context.
-    pub fn new_with_context(context: OpContext<DB>, spec: SpecId, oracle: Oracle) -> Self {
+    pub fn new_with_context(context: OpContext<DB>, spec: MegaSpecId, oracle: Oracle) -> Self {
         let mut inner = context;
 
         // spec in context must keep the same with parameter `spec`
@@ -141,7 +141,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
 
         // For the `MINI_REX` spec, we override the contract size and initcode size limits if they
         // not set in the given `OpContext`.
-        if spec.is_enabled(SpecId::MINI_REX) {
+        if spec.is_enabled(MegaSpecId::MINI_REX) {
             if inner.cfg.limit_contract_code_size.is_none() {
                 inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
             }
@@ -177,8 +177,8 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// # Returns
     ///
     /// Returns a new `Context` with the updated database type.
-    pub fn with_db<ODB: Database>(self, db: ODB) -> Context<ODB, Oracle> {
-        Context {
+    pub fn with_db<ODB: Database>(self, db: ODB) -> MegaContext<ODB, Oracle> {
+        MegaContext {
             inner: self.inner.with_db(db),
             spec: self.spec,
             disable_beneficiary: self.disable_beneficiary,
@@ -201,7 +201,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// # Returns
     ///
     /// Returns `self` for method chaining.
-    pub fn with_tx(mut self, tx: crate::Transaction) -> Self {
+    pub fn with_tx(mut self, tx: crate::MegaTransaction) -> Self {
         self.inner = self.inner.with_tx(tx);
         self
     }
@@ -238,9 +238,9 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// # Returns
     ///
     /// Returns `self` for method chaining.
-    pub fn with_cfg(mut self, cfg: CfgEnv<SpecId>) -> Self {
+    pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
-        if self.spec.is_enabled(SpecId::MINI_REX) {
+        if self.spec.is_enabled(MegaSpecId::MINI_REX) {
             if self.inner.cfg.limit_contract_code_size.is_none() {
                 self.inner.cfg.limit_contract_code_size =
                     Some(constants::mini_rex::MAX_CONTRACT_SIZE);
@@ -313,7 +313,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// # Returns
     ///
     /// Returns the [`SpecId`] representing the current `MegaETH` specification.
-    pub fn megaeth_spec(&self) -> SpecId {
+    pub fn megaeth_spec(&self) -> MegaSpecId {
         self.spec
     }
 
@@ -331,7 +331,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
 }
 
 /* Block Environment Access Tracking */
-impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// Returns the bitmap of block environment data accessed during transaction execution.
     ///
     /// This method provides information about which block environment fields
@@ -368,7 +368,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
 }
 
 /* Beneficiary Access Tracking */
-impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// Disables the beneficiary reward.
     pub fn disable_beneficiary(&mut self) {
         self.disable_beneficiary = true;
@@ -410,7 +410,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
 }
 
 /* Hooks */
-impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// Resets the internal state for a new block.
     ///
     /// This method is called when transitioning to a new block and updates
@@ -436,9 +436,9 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
 /// maintaining the MegaETH-specific functionality. The trait provides access
 /// to the core EVM context components like transaction, block, configuration,
 /// database, journal, and chain information.
-impl<DB: Database, Oracle: ExternalEnvOracle> ContextTr for Context<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> ContextTr for MegaContext<DB, Oracle> {
     type Block = BlockEnv;
-    type Tx = crate::Transaction;
+    type Tx = crate::MegaTransaction;
     type Cfg = CfgEnv<OpSpecId>;
     type Db = DB;
     type Journal = Journal<DB>;
@@ -470,7 +470,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> ContextTr for Context<DB, Oracle> 
 ///
 /// This implementation provides methods to update the context state, with
 /// special handling for transaction updates to reset internal state.
-impl<DB: Database, Oracle: ExternalEnvOracle> ContextSetters for Context<DB, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> ContextSetters for MegaContext<DB, Oracle> {
     delegate! {
         to self.inner {
             fn set_block(&mut self, block: Self::Block);
@@ -486,7 +486,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> ContextSetters for Context<DB, Ora
 /// while changing the specification type.
 pub trait IntoMegaethCfgEnv {
     /// Converts to `CfgEnv<MegaethSpecId>`.
-    fn into_megaeth_cfg(self, spec: SpecId) -> CfgEnv<SpecId>;
+    fn into_megaeth_cfg(self, spec: MegaSpecId) -> CfgEnv<MegaSpecId>;
 }
 
 /// A convenient trait to convert a `CfgEnv<SpecId>` into a `CfgEnv<OpSpecId>`.
@@ -503,7 +503,7 @@ pub trait IntoOpCfgEnv {
 ///
 /// This implementation converts a `MegaETH` configuration environment to an
 /// `OpStack` configuration environment by copying all relevant fields.
-impl IntoOpCfgEnv for CfgEnv<SpecId> {
+impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
     /// Converts to `CfgEnv<OpSpecId>`.
     ///
     /// This method creates a new `OpStack` configuration environment with the
@@ -559,7 +559,7 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
     ///
     /// When the fields of [`CfgEnv`] change, this function needs to be updated
     /// to include the new fields.
-    fn into_megaeth_cfg(self, spec: SpecId) -> CfgEnv<SpecId> {
+    fn into_megaeth_cfg(self, spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
         let mut cfg = CfgEnv::new_with_spec(spec);
         cfg.chain_id = self.chain_id;
         cfg.tx_chain_id_check = self.tx_chain_id_check;
