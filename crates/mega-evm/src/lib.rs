@@ -46,7 +46,7 @@ pub mod test_utils;
 mod types;
 pub use types::*;
 
-/* We alias the mega-evm types */
+/* Alias of the mega-evm types */
 /// Alias for [`MegaTransaction`]
 pub type Transaction = MegaTransaction;
 /// Alias for [`MegaSpecId`]

@@ -78,6 +78,7 @@ pub struct MegaContext<DB: Database, Oracle: ExternalEnvOracle> {
     pub(crate) beneficiary_balance_accessed: RefCell<bool>,
 }
 
+/* Constructors */
 impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// Creates a new `Context` with the given database, specification, and oracle.
     ///
@@ -305,7 +306,10 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
         self.additional_limit.borrow_mut().kv_update_limit = kv_update_limit;
         self
     }
+}
 
+/* Getters */
+impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// Gets the `MegaETH` specification ID.
     ///
     /// Returns the specification version currently configured for this context.
@@ -313,8 +317,28 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// # Returns
     ///
     /// Returns the [`SpecId`] representing the current `MegaETH` specification.
-    pub fn megaeth_spec(&self) -> MegaSpecId {
+    pub fn mega_spec(&self) -> MegaSpecId {
         self.spec
+    }
+
+    /// Gets the current total data size generated from transaction execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns the current total data size in bytes generated so far. The data size is reset at the
+    /// beginning of each transaction.
+    pub fn generated_data_size(&self) -> u64 {
+        self.additional_limit.borrow().data_size_tracker.current_size()
+    }
+
+    /// Gets the current total number of key-value updates performed during transaction execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns the current total number of KV operations performed so far. The count is reset at
+    /// the beginning of each transaction.
+    pub fn kv_update_count(&self) -> u64 {
+        self.additional_limit.borrow().kv_update_counter.current_count()
     }
 
     /// Consumes the context and converts it into the inner `OpContext`.
@@ -416,7 +440,10 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// This method is called when transitioning to a new block and updates
     /// the gas cost oracle and additional limits accordingly.
     pub(crate) fn on_new_block(&self) {
-        self.gas_cost_oracle.borrow_mut().on_new_block(&self.inner.block);
+        // The gas cost oracle is only enabled when the `MINI_REX` spec is enabled.
+        if self.spec.is_enabled(MegaSpecId::MINI_REX) {
+            self.gas_cost_oracle.borrow_mut().on_new_block(&self.inner.block);
+        }
     }
 
     /// Resets the internal state for a new transaction.
@@ -425,8 +452,12 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// block environment access tracking and additional limits.
     pub(crate) fn on_new_tx(&mut self) {
         self.reset_block_env_access();
-        self.additional_limit.borrow_mut().on_new_tx(&self.inner.tx);
         self.check_tx_beneficiary_access();
+
+        // Apply the additional limits only when the `MINI_REX` spec is enabled.
+        if self.spec.is_enabled(MegaSpecId::MINI_REX) {
+            self.additional_limit.borrow_mut().on_new_tx(&self.inner.tx);
+        }
     }
 }
 

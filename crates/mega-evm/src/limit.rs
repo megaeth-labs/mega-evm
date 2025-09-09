@@ -705,7 +705,6 @@ impl DataSizeTracker {
     /// * `num_topics` - Number of log topics
     /// * `data_size` - Size of log data in bytes
     pub(crate) fn on_log(&mut self, num_topics: u64, data_size: u64) {
-        println!("topic {num_topics}, data_size {data_size}");
         let size = num_topics * 32 + data_size;
         self.total_size += size;
         self.update_current_frame_discardable_size(size);
@@ -795,8 +794,13 @@ impl DataSizeTracker {
     /// * `size` - The size of the created contract code in bytes
     fn record_created_contract_code(&mut self, size: u64) {
         self.total_size += size;
-        // the created contract code should be discarded when the frame is reverted
-        self.update_current_frame_discardable_size(size);
+        // if the last frame creates a contract, we don't need to record the data size for future
+        // discard. This is because at this point the transaction execution ends and we know the
+        // transaction didn't revert.
+        if !self.frame_size_stack.is_empty() {
+            // the created contract code should be discarded when the frame is reverted
+            self.update_current_frame_discardable_size(size);
+        }
     }
 
     /// Updates the current frame's discardable data size.

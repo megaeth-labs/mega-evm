@@ -1,7 +1,9 @@
 use core::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{constants, AdditionalLimit, BlockEnvAccess, MegaContext, ExternalEnvOracle, MegaSpecId};
+use crate::{
+    constants, AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, MegaContext, MegaSpecId,
+};
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
@@ -107,29 +109,33 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Host for MegaContext<DB, Oracle> {
 
 /// Extension trait for the `Host` trait that provides additional functionality for `MegaETH`.
 pub trait HostExt: Host {
-    /// Gets the `AdditionalLimit` instance.
+    /// Gets the `AdditionalLimit` instance. Only used when the `MINI_REX` spec is enabled.
     fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>>;
 
-    /// Gets the gas cost for setting a storage slot to a non-zero value.
+    /// Gets the gas cost for setting a storage slot to a non-zero value. Only used when the
+    /// `MINI_REX` spec is enabled.
     fn sstore_set_gas(&self, address: Address, key: U256) -> u64;
 
-    /// Gets the gas cost for creating a new account.
+    /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
     fn new_account_gas(&self, address: Address) -> u64;
 }
 
 impl<DB: Database, Oracle: ExternalEnvOracle> HostExt for MegaContext<DB, Oracle> {
     #[inline]
     fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>> {
+        debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
         &self.additional_limit
     }
 
     #[inline]
     fn sstore_set_gas(&self, address: Address, key: U256) -> u64 {
+        debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
         self.gas_cost_oracle.borrow_mut().sstore_set_gas(address, key)
     }
 
     #[inline]
     fn new_account_gas(&self, address: Address) -> u64 {
+        debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
         self.gas_cost_oracle.borrow_mut().new_account_gas(address)
     }
 }

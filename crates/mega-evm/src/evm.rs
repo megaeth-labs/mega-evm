@@ -276,7 +276,7 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
     ///
     /// A new `Evm` instance configured with the provided context and inspector.
     pub fn new(context: MegaContext<DB, Oracle>, inspect: INSP) -> Self {
-        let spec = context.megaeth_spec();
+        let spec = context.mega_spec();
         let op_spec = context.cfg().spec();
         Self {
             inner: revm::context::Evm::new_with_inspector(
@@ -450,29 +450,33 @@ where
         // we need to first get a reference to the `AdditionalLimit` before
         // calling frame_init to avoid borrowing issues
         let additional_limit = self.ctx().additional_limit.clone();
+        let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
 
         // call the inner frame_init function to initialize the frame
         let init_result = self.inner.frame_init(frame_input)?;
 
-        // call the `on_frame_init` function to update the `AdditionalLimit`, if the limit is
-        // exceeded, return the error frame result
-        if additional_limit.borrow_mut().on_frame_init(&init_result).exceeded_limit() {
-            let frame_result = match init_result {
-                revm::handler::ItemOrResult::Item(frame) => {
-                    let (gas_limit, return_memory_offset) = match &frame.input {
-                        FrameInput::Create(inputs) => (inputs.gas_limit, None),
-                        FrameInput::Call(inputs) => {
-                            (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
-                        }
-                        FrameInput::Empty => unreachable!(),
-                    };
-                    exceeding_limit_frame_result(gas_limit, return_memory_offset)
-                }
-                revm::handler::ItemOrResult::Result(frame_result) => {
-                    mark_frame_result_as_exceeding_limit(frame_result)
-                }
-            };
-            return Ok(FrameInitResult::Result(frame_result));
+        // Apply the additional limits only when the `MINI_REX` spec is enabled.
+        if is_mini_rex_enabled {
+            // call the `on_frame_init` function to update the `AdditionalLimit`, if the limit is
+            // exceeded, return the error frame result
+            if additional_limit.borrow_mut().on_frame_init(&init_result).exceeded_limit() {
+                let frame_result = match init_result {
+                    revm::handler::ItemOrResult::Item(frame) => {
+                        let (gas_limit, return_memory_offset) = match &frame.input {
+                            FrameInput::Create(inputs) => (inputs.gas_limit, None),
+                            FrameInput::Call(inputs) => {
+                                (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
+                            }
+                            FrameInput::Empty => unreachable!(),
+                        };
+                        exceeding_limit_frame_result(gas_limit, return_memory_offset)
+                    }
+                    revm::handler::ItemOrResult::Result(frame_result) => {
+                        mark_frame_result_as_exceeding_limit(frame_result)
+                    }
+                };
+                return Ok(FrameInitResult::Result(frame_result));
+            }
         }
 
         Ok(init_result)
@@ -491,22 +495,32 @@ where
         Option<<Self::Frame as revm::handler::FrameTr>::FrameResult>,
         ContextDbError<Self::Context>,
     > {
-        if self.ctx_ref().additional_limit.borrow().is_exceeding_limit_result(&result) {
-            return Ok(Some(result));
-        }
-
-        // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
-        // exceeded, return the error frame result
-        if self.ctx_ref().additional_limit.borrow_mut().on_frame_return(&result).exceeded_limit() {
-            match &mut result {
-                FrameResult::Call(outcome) => {
-                    outcome.result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
-                }
-                FrameResult::Create(outcome) => {
-                    outcome.result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
-                }
+        // Apply the additional limits only when the `MINI_REX` spec is enabled.
+        if self.ctx_ref().spec.is_enabled(MegaSpecId::MINI_REX) {
+            // Return early if the limit is already exceeded before processing the child frame return result.
+            if self.ctx_ref().additional_limit.borrow().is_exceeding_limit_result(&result) {
+                return Ok(Some(result));
             }
-            return Ok(Some(result));
+
+            // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
+            // exceeded, return the error frame result
+            if self
+                .ctx_ref()
+                .additional_limit
+                .borrow_mut()
+                .on_frame_return(&result)
+                .exceeded_limit()
+            {
+                match &mut result {
+                    FrameResult::Call(outcome) => {
+                        outcome.result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
+                    }
+                    FrameResult::Create(outcome) => {
+                        outcome.result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
+                    }
+                }
+                return Ok(Some(result));
+            }
         }
 
         // call the inner frame_return_result function to return the frame result
@@ -619,7 +633,7 @@ where
     where
         Self: Sized,
     {
-        let spec = self.inner.ctx.megaeth_spec();
+        let spec = self.inner.ctx.mega_spec();
         let revm::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
             self.inner.ctx.into_inner();
         let cfg_env = cfg_env.into_megaeth_cfg(spec);

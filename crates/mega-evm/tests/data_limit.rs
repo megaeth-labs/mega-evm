@@ -9,14 +9,20 @@ use mega_evm::{
 };
 use revm::{
     context::{
-        result::{EVMError, ResultAndState},
+        result::{EVMError, ExecutionResult, ResultAndState},
         TxEnv,
     },
     database::{CacheDB, EmptyDB},
+    handler::EvmTr,
     inspector::NoOpInspector,
+    ExecuteEvm,
 };
 
 /// Executes a transaction on the EVM.
+///
+/// # Returns
+///
+/// Returns the execution result, the generated data size and the number of key-value updates.
 fn transact(
     spec: MegaSpecId,
     db: &mut CacheDB<EmptyDB>,
@@ -25,7 +31,7 @@ fn transact(
     data: Bytes,
     value: U256,
     data_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, TransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, TransactionError>> {
     let mut context = MegaContext::new(db, spec, NoOpOracle).with_data_limit(data_limit);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -42,7 +48,26 @@ fn transact(
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+
+    let ctx = evm.ctx_ref();
+    Ok((r, ctx.generated_data_size(), ctx.kv_update_count()))
+}
+
+/// Returns true if the result is a halt due to data limit exceeded.
+fn is_data_limit_exceeded(result: ResultAndState<MegaHaltReason>) -> bool {
+    match result.result {
+        ExecutionResult::Halt { reason, .. } => reason == MegaHaltReason::DataLimitExceeded,
+        _ => false,
+    }
+}
+
+/// Returns true if the result is a halt due to KV update limit exceeded.
+fn is_kv_update_limit_exceeded(result: ResultAndState<MegaHaltReason>) -> bool {
+    match result.result {
+        ExecutionResult::Halt { reason, .. } => reason == MegaHaltReason::KVUpdateLimitExceeded,
+        _ => false,
+    }
 }
 
 #[test]
@@ -54,9 +79,8 @@ fn test_data_limit() {
 
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);
-    let result =
+    let (res, _, _) =
         transact(MegaSpecId::MINI_REX, &mut db, caller, callee, Bytes::default(), U256::ZERO, 600)
             .unwrap();
-    println!("result: {:?}", result);
-    assert!(result.result.is_halt());
+    assert!(res.result.is_halt());
 }
