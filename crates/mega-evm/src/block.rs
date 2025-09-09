@@ -19,29 +19,6 @@
 //! - **`EQUIVALENCE`**: Maintains equivalence with Optimism Isthmus EVM (default)
 //! - **`MINI_REX`**: Enhanced version with quadratic LOG costs and disabled SELFDESTRUCT
 //!
-//! # Usage Example
-//!
-//! ```rust
-//! use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-//! use mega_evm::{BlockExecutorFactory, Context, Evm, SpecId};
-//! use revm::{database::CacheDB, primitives::EmptyDB};
-//!
-//! // Create a block executor factory for MINI_REX spec
-//! let spec = SpecId::MINI_REX;
-//! let receipt_builder = OpReceiptBuilder::default();
-//! let evm_factory = EvmFactory::new(spec);
-//! let factory = BlockExecutorFactory::new(spec, evm_factory, receipt_builder);
-//!
-//! // Create execution context with block environment tracking
-//! let mut db = CacheDB::<EmptyDB>::default();
-//! let mut context = Context::new(db, spec);
-//! let mut evm = Evm::new(context, NoOpInspector);
-//! let execution_ctx = BlockExecutionCtx::default();
-//!
-//! // Create block executor
-//! let mut executor = factory.create_executor(evm, execution_ctx);
-//! ```
-//!
 //! # Performance Considerations
 //!
 //! The `MegaETH` block executor is optimized for high-performance blockchain operations:
@@ -86,22 +63,6 @@ pub type BlockExecutionCtx = alloy_op_evm::block::OpBlockExecutionCtx;
 /// - `ReceiptBuilder`: The receipt builder implementing [`OpReceiptBuilder`] to build op-stack
 ///   receipts
 ///
-/// # Usage
-///
-/// ```rust
-/// use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-/// use mega_evm::{BlockExecutorFactory, EvmFactory, SpecId};
-///
-/// // Create a factory for MINI_REX specification
-/// let spec = SpecId::MINI_REX;
-/// let evm_factory = EvmFactory::new(spec);
-/// let receipt_builder = OpReceiptBuilder::default();
-/// let factory = BlockExecutorFactory::new(spec, evm_factory, receipt_builder);
-///
-/// // Use the factory to create block executors
-/// // let executor = factory.create_executor(evm, execution_ctx);
-/// ```
-///
 /// # Implementation Details
 ///
 /// The factory implements `alloy_evm::block::BlockExecutorFactory` and delegates
@@ -126,18 +87,6 @@ impl<ChainSpec, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<ChainSpec, EvmF, 
     /// # Returns
     ///
     /// A new `BlockExecutorFactory` instance configured with the provided parameters.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-    /// use mega_evm::{BlockExecutorFactory, EvmFactory, SpecId};
-    ///
-    /// let spec = SpecId::MINI_REX;
-    /// let evm_factory = EvmFactory::new(spec);
-    /// let receipt_builder = OpReceiptBuilder::default();
-    /// let factory = BlockExecutorFactory::new(spec, evm_factory, receipt_builder);
-    /// ```
     pub fn new(spec: ChainSpec, evm_factory: EvmF, receipt_builder: ReceiptBuilder) -> Self {
         Self { receipt_builder, spec, evm_factory }
     }
@@ -223,22 +172,6 @@ where
     /// # Returns
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use mega_evm::{BlockExecutionCtx, BlockExecutor, Evm, SpecId};
-    /// use revm::{database::CacheDB, inspector::NoOpInspector, primitives::EmptyDB};
-    ///
-    /// let spec = SpecId::MINI_REX;
-    /// let mut db = CacheDB::<EmptyDB>::default();
-    /// let mut context = Context::new(db, spec);
-    /// let mut evm = Evm::new(context, NoOpInspector);
-    /// let ctx = BlockExecutionCtx::default();
-    /// let receipt_builder = OpReceiptBuilder::default();
-    ///
-    /// let executor = BlockExecutor::new(evm, ctx, spec, receipt_builder);
-    /// ```
     pub fn new(evm: E, ctx: BlockExecutionCtx, spec: C, receipt_builder: R) -> Self {
         Self { inner: OpBlockExecutor::new(evm, ctx, spec, receipt_builder) }
     }

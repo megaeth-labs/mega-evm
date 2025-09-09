@@ -20,7 +20,7 @@ use revm::{
 };
 
 use crate::{
-    constants, MegaContext, EthHaltReason, ExternalEnvOracle, MegaHaltReason, MegaSpecId,
+    constants, EthHaltReason, ExternalEnvOracle, MegaContext, MegaHaltReason, MegaSpecId,
     TransactionError,
 };
 
@@ -69,7 +69,6 @@ where
 
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
         evm.ctx().on_new_tx();
-
         self.op.pre_execution(evm)
     }
 
@@ -96,13 +95,10 @@ where
                 let additional_limit = evm.ctx().additional_limit.borrow();
                 // if it halts due to OOG, we further check if the data or kv update limit is
                 // exceeded
-                if additional_limit.data_size_tracker.exceeds_limit() {
-                    MegaHaltReason::DataLimitExceeded
-                } else if additional_limit.kv_update_counter.exceeds_limit() {
-                    MegaHaltReason::KVUpdateLimitExceeded
-                } else {
-                    MegaHaltReason::Base(reason)
-                }
+                additional_limit
+                    .check_limit()
+                    .maybe_halt_reason()
+                    .unwrap_or(MegaHaltReason::Base(reason))
             }
             _ => MegaHaltReason::Base(reason),
         }))

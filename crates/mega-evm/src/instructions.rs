@@ -282,12 +282,6 @@ pub fn sload_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
 ///   [`CREATE_GAS`](constants::mini_rex::CREATE_GAS) initially, and doubles as the corresponding
 ///   SALT bucket capacity doubles. The actual gas cost is provided by
 ///   [`crate::GasCostOracle::new_account_gas`].
-/// - The data bomb. This opcode creates a new account and generates contract code, so more data is
-///   resulted as the result of transaction execution. If the total data size exceeds the limit, the
-///   transaction will error and halt (consuming all remaining gas).
-/// - The kv update bomb. This opcode creates a new account, so more unique key-value updates are
-///   generated as the result of transaction execution. If the number of unique key-value updates
-///   exceeds the limit, the transaction will error and halt (consuming all remaining gas).
 ///
 /// # Assumptions
 ///
@@ -359,12 +353,6 @@ pub fn create_with_bomb<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostE
             gas_limit,
         }),
     )));
-
-    // The kv update bomb and data bomb: check if the number of unique key-value updates or the
-    // total data size will exceed the limit, if so, halt.
-    if context.host.additional_limit().borrow_mut().on_create(target_address).exceeded_limit() {
-        context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
-    }
 }
 
 /// `CALL` opcode implementation modified from `revm` to support data bomb and kv update bomb.
@@ -375,12 +363,6 @@ pub fn create_with_bomb<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostE
 ///   increased to [`NEW_ACCOUNT_GAS`](constants::mini_rex::NEW_ACCOUNT_GAS) initially, and doubles
 ///   as the corresponding SALT bucket capacity doubles. The actual gas cost is provided by
 ///   [`crate::GasCostOracle::new_account_gas`].
-/// - The data bomb. This opcode creates a new account and generates contract code, so more data is
-///   resulted as the result of transaction execution. If the total data size exceeds the limit, the
-///   transaction will error and halt (consuming all remaining gas).
-/// - The kv update bomb. This opcode creates a new account, so more unique key-value updates are
-///   generated as the result of transaction execution. If the number of unique key-value updates
-///   exceeds the limit, the transaction will error and halt (consuming all remaining gas).
 ///
 /// # Assumptions
 ///
@@ -458,10 +440,4 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
             return_memory_offset,
         }),
     )));
-
-    // The kv update bomb and data bomb: check if the number of unique key-value updates or the
-    // total data size will exceed the limit, if so, halt.
-    if context.host.additional_limit().borrow_mut().on_call(to, has_transfer).exceeded_limit() {
-        context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
-    }
 }

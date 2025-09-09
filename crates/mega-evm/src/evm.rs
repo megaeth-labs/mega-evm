@@ -17,33 +17,6 @@
 //!
 //! - **`EQUIVALENCE`**: Maintains equivalence with Optimism Isthmus EVM (default)
 //! - **`MINI_REX`**: Enhanced version with quadratic LOG costs and disabled SELFDESTRUCT
-//!
-//! # Usage Example
-//!
-//! ```rust
-//! use mega_evm::{Context, Evm, SpecId, Transaction};
-//! use revm::{
-//!     context::TxEnv,
-//!     database::{CacheDB, EmptyDB},
-//!     inspector::NoOpInspector,
-//!     primitives::TxKind,
-//! };
-//!
-//! // Create EVM instance with MINI_REX spec
-//! let mut db = CacheDB::<EmptyDB>::default();
-//! let spec = SpecId::MINI_REX;
-//! let mut context = Context::new(db, spec);
-//! let mut evm = Evm::new(context, NoOpInspector);
-//!
-//! // Execute transaction
-//! let tx = Transaction {
-//!     base: TxEnv {
-//!         caller: address!("..."),
-//!         // ... other fields
-//!     },
-//! };
-//! let result = evm.transact_raw(tx);
-//! ```
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -72,7 +45,7 @@ use revm::{
 };
 
 use crate::{
-    exceeding_limit_frame_result, mark_frame_result_as_exceeding_limit, AdditionalLimit,
+    create_exceeding_limit_frame_result, mark_frame_result_as_exceeding_limit, AdditionalLimit,
     BlockEnvAccess, ExternalEnvOracle, HostExt, IntoMegaethCfgEnv, MegaContext, MegaHaltReason,
     MegaHandler, MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTxType,
     NoOpOracle, TransactionError,
@@ -92,11 +65,12 @@ use crate::{
 /// # Usage
 ///
 /// ```rust
-/// use mega_evm::{EvmFactory, NoOpOracle, SpecId};
-/// use revm::{database::CacheDB, primitives::EmptyDB};
+/// use alloy_evm::{EvmEnv, EvmFactory};
+/// use mega_evm::{MegaEvmFactory, MegaSpecId, NoOpOracle};
+/// use revm::database::{CacheDB, EmptyDB};
 ///
 /// // Create a factory with default oracle
-/// let factory = EvmFactory::default();
+/// let factory = MegaEvmFactory::default();
 ///
 /// // Create EVM instance
 /// let db = CacheDB::<EmptyDB>::default();
@@ -205,18 +179,6 @@ where
 /// - `DB`: The database type implementing [`Database`]
 /// - `INSP`: The inspector type implementing [`Inspector`]
 /// - `Oracle`: The oracle type implementing [`ExternalEnvOracle`]
-///
-/// # Usage
-///
-/// ```rust
-/// use mega_evm::{Context, Evm, SpecId};
-/// use revm::{database::CacheDB, inspector::NoOpInspector, primitives::EmptyDB};
-///
-/// let mut db = CacheDB::<EmptyDB>::default();
-/// let spec = SpecId::MINI_REX;
-/// let context = Context::new(db, spec);
-/// let evm = Evm::new(context, NoOpInspector);
-/// ```
 ///
 /// # Implementation Details
 ///
@@ -445,21 +407,35 @@ where
 
     fn frame_init(
         &mut self,
-        frame_input: <Self::Frame as revm::handler::FrameTr>::FrameInit,
+        frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         // we need to first get a reference to the `AdditionalLimit` before
         // calling frame_init to avoid borrowing issues
         let additional_limit = self.ctx().additional_limit.clone();
+        let (target_address, has_transfer) = match &frame_init.frame_input {
+            FrameInput::Call(inputs) => (
+                Some(inputs.target_address),
+                inputs.value.transfer().is_some_and(|x| x > U256::ZERO),
+            ),
+            FrameInput::Create(inputs) => (None, inputs.value > U256::ZERO),
+            FrameInput::Empty => unreachable!(),
+        };
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
 
         // call the inner frame_init function to initialize the frame
-        let init_result = self.inner.frame_init(frame_input)?;
+        let init_result = self.inner.frame_init(frame_init)?;
 
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if is_mini_rex_enabled {
             // call the `on_frame_init` function to update the `AdditionalLimit`, if the limit is
             // exceeded, return the error frame result
-            if additional_limit.borrow_mut().on_frame_init(&init_result).exceeded_limit() {
+            let limit_result = match &init_result {
+                FrameInitResult::Item(frame) => additional_limit.borrow_mut().on_frame_init(frame),
+                FrameInitResult::Result(frame_result) => additional_limit
+                    .borrow_mut()
+                    .on_transient_frame(target_address, has_transfer, frame_result),
+            };
+            if limit_result.exceeded_limit() {
                 let frame_result = match init_result {
                     revm::handler::ItemOrResult::Item(frame) => {
                         let (gas_limit, return_memory_offset) = match &frame.input {
@@ -469,7 +445,7 @@ where
                             }
                             FrameInput::Empty => unreachable!(),
                         };
-                        exceeding_limit_frame_result(gas_limit, return_memory_offset)
+                        create_exceeding_limit_frame_result(gas_limit, return_memory_offset)
                     }
                     revm::handler::ItemOrResult::Result(frame_result) => {
                         mark_frame_result_as_exceeding_limit(frame_result)
@@ -497,7 +473,8 @@ where
     > {
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if self.ctx_ref().spec.is_enabled(MegaSpecId::MINI_REX) {
-            // Return early if the limit is already exceeded before processing the child frame return result.
+            // Return early if the limit is already exceeded before processing the child frame
+            // return result.
             if self.ctx_ref().additional_limit.borrow().is_exceeding_limit_result(&result) {
                 return Ok(Some(result));
             }

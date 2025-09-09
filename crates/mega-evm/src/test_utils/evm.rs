@@ -5,19 +5,39 @@ use revm::{
         result::{EVMError, ResultAndState},
         TxEnv,
     },
-    database::{CacheDB, EmptyDB},
+    database::{AccountState, CacheDB, EmptyDB},
     inspector::NoOpInspector,
     state::{AccountInfo, Bytecode},
 };
 
-use crate::{MegaContext, MegaEvm, MegaHaltReason, NoOpOracle, MegaSpecId, MegaTransaction, TransactionError};
+use crate::{
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, NoOpOracle, TransactionError,
+};
 
-/// Sets the code for an account in the database.
+/// Sets the code for an account in the database. The account state is set to `None`, as if the
+/// account originally had the code.
 pub fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
     let bytecode = Bytecode::new_legacy(code);
     let code_hash = bytecode.hash_slow();
-    let account_info = AccountInfo { code: Some(bytecode), code_hash, ..Default::default() };
-    db.insert_account_info(address, account_info);
+    let account_info = db.load_account(address).unwrap();
+    account_info.info.code = Some(bytecode);
+    account_info.info.code_hash = code_hash;
+    account_info.account_state = AccountState::None;
+}
+
+/// Sets the balance for an account in the database. The account state is set to `None`, as if the
+/// account originally had the balance.
+pub fn set_account_balance(db: &mut CacheDB<EmptyDB>, address: Address, balance: U256) {
+    let account_info = db.load_account(address).unwrap();
+    account_info.info.balance = balance;
+    account_info.account_state = AccountState::None;
+}
+
+/// Sets the nonce for an account in the database. The account state is set to `None`, as if the
+/// account originally had the nonce.
+pub fn set_account_nonce(db: &mut CacheDB<EmptyDB>, address: Address, nonce: u64) {
+    let account_info = db.load_account(address).unwrap();
+    account_info.info.nonce = nonce;
 }
 
 /// Executes a transaction on the EVM.
@@ -29,7 +49,7 @@ pub fn transact(
     data: Bytes,
     value: U256,
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, TransactionError>> {
-    let mut context = MegaContext::new(db, spec, NoOpOracle).with_data_limit(20000);
+    let mut context = MegaContext::new(db, spec, NoOpOracle);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

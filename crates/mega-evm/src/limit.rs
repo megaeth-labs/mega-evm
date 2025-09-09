@@ -39,7 +39,7 @@ use revm::{
     },
 };
 
-use crate::{constants, GasCostOracle};
+use crate::{constants, GasCostOracle, MegaHaltReason};
 
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
 ///
@@ -126,12 +126,12 @@ impl AdditionalLimit {
     /// and which specific limit was exceeded if any.
     #[inline]
     pub fn check_limit(&self) -> AdditionalLimitResult {
-        if self.data_size_tracker.exceeds_limit() {
+        if self.data_size_tracker.exceeds_limit(self.data_limit) {
             AdditionalLimitResult::ExceedsDataLimit {
                 limit: self.data_limit,
                 used: self.data_size_tracker.current_size(),
             }
-        } else if self.kv_update_counter.exceeds_limit() {
+        } else if self.kv_update_counter.exceeds_limit(self.kv_update_limit) {
             AdditionalLimitResult::ExceedsKVUpdateLimit {
                 limit: self.kv_update_limit,
                 used: self.kv_update_counter.current_count(),
@@ -181,13 +181,14 @@ impl AdditionalLimit {
         // reset the tx data size tracker and kv update counter
         self.reset();
 
-        // record the transaction data size
+        // record the transaction data size and kv update count
         self.data_size_tracker.on_tx_start(tx);
+        self.kv_update_counter.on_tx_start(tx);
 
         self.check_limit()
     }
 
-    /// Hook called when a new execution frame is initialized.
+    /// Hook called when a new execution frame to be run is initialized.
     ///
     /// This method sets up tracking for a new execution frame, allowing
     /// proper handling of nested calls and reverts.
@@ -201,10 +202,40 @@ impl AdditionalLimit {
     /// Returns the result of the limit check after frame initialization.
     pub(crate) fn on_frame_init(
         &mut self,
-        init_result: &FrameInitResult<'_, EthFrame<EthInterpreter>>,
+        frame: &EthFrame<EthInterpreter>,
     ) -> AdditionalLimitResult {
-        self.data_size_tracker.on_frame_init(init_result);
-        self.kv_update_counter.on_frame_init(init_result);
+        self.data_size_tracker.on_frame_init(frame);
+        self.kv_update_counter.on_frame_init(frame);
+
+        self.check_limit()
+    }
+
+    /// Hook called when a transient frame is executed. Transient frame is a frame that does not
+    /// require any code execution (e.g., call to an EOA). It is called when the frame
+    /// initialization result is directly a `FrameResult`.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_address` - The target address of the transient frame
+    /// * `has_transfer` - Whether the transient frame has a transfer
+    /// * `frame_result` - The frame execution result
+    ///
+    /// # Returns
+    ///
+    /// Returns the result of the limit check after recording the transient frame.
+    pub(crate) fn on_transient_frame(
+        &mut self,
+        target_address: Option<Address>,
+        has_transfer: bool,
+        frame_result: &FrameResult,
+    ) -> AdditionalLimitResult {
+        // if the frame result is not ok, meaning that no changes are made in this frame, so we
+        // just return.
+        if !frame_result.interpreter_result().is_ok() {
+            return self.check_limit();
+        }
+        self.data_size_tracker.on_transient_frame(target_address, has_transfer, frame_result);
+        self.kv_update_counter.on_transient_frame(target_address, has_transfer, frame_result);
 
         self.check_limit()
     }
@@ -284,49 +315,6 @@ impl AdditionalLimit {
 
         self.check_limit()
     }
-
-    /// Hook called when a CREATE or CREATE2 operation is executed.
-    ///
-    /// This method tracks both data size and KV update count for contract
-    /// creation operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `created_address` - The address of the created contract
-    ///
-    /// # Returns
-    ///
-    /// Returns the result of the limit check after recording the contract creation.
-    pub(crate) fn on_create(&mut self, created_address: Address) -> AdditionalLimitResult {
-        self.data_size_tracker.on_create(created_address);
-        self.kv_update_counter.on_create(created_address);
-
-        self.check_limit()
-    }
-
-    /// Hook called when a CALL operation is executed.
-    ///
-    /// This method tracks both data size and KV update count for call operations,
-    /// but only when there is a value transfer involved.
-    ///
-    /// # Arguments
-    ///
-    /// * `target_address` - The address being called
-    /// * `has_transfer` - Whether the call involves a value transfer
-    ///
-    /// # Returns
-    ///
-    /// Returns the result of the limit check after recording the call operation.
-    pub(crate) fn on_call(
-        &mut self,
-        target_address: Address,
-        has_transfer: bool,
-    ) -> AdditionalLimitResult {
-        self.data_size_tracker.on_call(target_address, has_transfer);
-        self.kv_update_counter.on_call(target_address, has_transfer);
-
-        self.check_limit()
-    }
 }
 
 /// Result type indicating whether additional limits have been exceeded.
@@ -357,6 +345,17 @@ pub enum AdditionalLimitResult {
     /// * `limit` - The configured KV update limit
     /// * `used` - The current KV update count
     ExceedsKVUpdateLimit { limit: u64, used: u64 },
+}
+
+impl AdditionalLimitResult {
+    /// Returns the [`MegaHaltReason`] if the limit has been exceeded, otherwise returns `None`.
+    pub fn maybe_halt_reason(&self) -> Option<MegaHaltReason> {
+        match self {
+            Self::ExceedsDataLimit { .. } => Some(MegaHaltReason::DataLimitExceeded),
+            Self::ExceedsKVUpdateLimit { .. } => Some(MegaHaltReason::KVUpdateLimitExceeded),
+            Self::WithinLimit => None,
+        }
+    }
 }
 
 /// Implementation of utility methods for `AdditionalLimitResult`.
@@ -446,30 +445,99 @@ impl KVUpdateCounter {
 
     /// Checks if the current KV update count exceeds the configured limit.
     ///
+    /// # Arguments
+    ///
+    /// * `limit` - The KV update limit to check
+    ///
     /// # Returns
     ///
-    /// Returns `true` if the current count exceeds the `MINI_REX` KV update limit.
+    /// Returns `true` if the current count exceeds the KV update limit.
     #[inline]
-    pub fn exceeds_limit(&self) -> bool {
-        self.total_count > constants::mini_rex::TX_KV_UPDATE_LIMIT
+    pub fn exceeds_limit(&self, limit: u64) -> bool {
+        self.total_count > limit
+    }
+
+    /// Records the KV update originated from the transaction.
+    ///
+    /// This method records the KV update originated from the transaction, including the caller
+    /// and the 7702 authorization of each account. Here we do an over estimation by assuming all
+    /// 7702 authorizations are valid.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The transaction
+    pub(crate) fn on_tx_start(&mut self, tx: &crate::MegaTransaction) {
+        // the caller itself needs one update on its account info
+        self.record_account_info_update(tx.caller());
+        for authorization in tx.authorization_list() {
+            // the 7702 authorization of each account needs one update on its account info
+            self.record_account_info_update(*authorization.address());
+        }
     }
 
     /// Hook called when a new execution frame is initialized.
     ///
     /// This method creates a new frame entry in the KV update stack if the frame
     /// is successfully initialized, allowing proper tracking of nested calls.
+    /// It also records the KV update originated from the call or create frame.
     ///
     /// # Arguments
     ///
-    /// * `init_frame_result` - The frame initialization result
-    pub(crate) fn on_frame_init(
+    /// * `init_frame` - The initialized frame
+    pub(crate) fn on_frame_init(&mut self, init_frame: &EthFrame<EthInterpreter>) {
+        // the frame is successfully initialized, so we push a new frame to the kv update
+        // stack.
+        self.kv_update_stack.push(0);
+        match &init_frame.input {
+            FrameInput::Empty => unreachable!(),
+            FrameInput::Call(call_inputs) => {
+                self.on_call(
+                    call_inputs.target_address,
+                    call_inputs.value.transfer().is_some_and(|x| x > U256::ZERO),
+                );
+            }
+            FrameInput::Create(_) => {
+                self.on_create(init_frame.data.created_address().expect("created address is none"));
+            }
+        }
+    }
+
+    /// Hook called when a transient frame is executed. Transient frame is a frame that does not
+    /// require any code execution (e.g., call to an EOA). It is called when the frame
+    /// initialization result is directly a `FrameResult`.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_address` - The target address of the transient frame
+    /// * `has_transfer` - Whether the transient frame has a transfer
+    /// * `frame_result` - The frame execution result
+    ///
+    /// # Returns
+    ///
+    /// Returns the result of the limit check after recording the transient frame.
+    pub(crate) fn on_transient_frame(
         &mut self,
-        init_frame_result: &FrameInitResult<'_, EthFrame<EthInterpreter>>,
+        target_address: Option<Address>,
+        has_transfer: bool,
+        frame_result: &FrameResult,
     ) {
-        if let FrameInitResult::Item(_) = init_frame_result {
-            // the frame is successfully initialized, so we push a new frame to the kv update
-            // stack.
-            self.kv_update_stack.push(0);
+        // if the frame result is not ok, meaning that no changes are made in this frame, so we
+        // just return.
+        if !frame_result.interpreter_result().is_ok() {
+            return;
+        }
+        // if the frame result is ok, meaning that some changes are made in this frame, so we need
+        // to record the changes.
+        match &frame_result {
+            FrameResult::Call(_) => {
+                self.on_call(
+                    target_address.expect("target address is none for call frame"),
+                    has_transfer,
+                );
+            }
+            FrameResult::Create(outcome) => {
+                self.on_create(outcome.address.expect("created address is none for create frame"));
+            }
         }
     }
 
@@ -488,11 +556,8 @@ impl KVUpdateCounter {
             // discard the current frame's kv update
             self.total_count -= size_to_discard;
         } else {
-            // merge the current frame's kv update into the previous frame or do nothing if the
-            // current frame is the last frame.
-            if let Some(previous_count) = self.kv_update_stack.last_mut() {
-                *previous_count += size_to_discard;
-            }
+            // merge the current frame's kv update into the previous frame
+            self.update_current_frame_count(size_to_discard);
         }
     }
 
@@ -526,9 +591,21 @@ impl KVUpdateCounter {
         self.update_current_frame_count(1);
     }
 
+    /// Updates the current frame's KV update count.
+    ///
+    /// This internal method adds the specified number of KV updates to the current frame's
+    /// KV update count in the stack. If there is no current frame, meaning that we are at the
+    /// beginning of the transaction or the end of the transaction, the changes will not be
+    /// reverted (e.g., the caller's nonce will still be updated, even if the transaction is
+    /// reverted).
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The number of KV updates to add
     fn update_current_frame_count(&mut self, n: u64) {
-        let count = self.kv_update_stack.last_mut().expect("kv update stack is empty");
-        *count += n;
+        if let Some(count) = self.kv_update_stack.last_mut() {
+            *count += n;
+        }
     }
 }
 
@@ -615,18 +692,24 @@ impl DataSizeTracker {
 
     /// Checks if the current data size exceeds the configured limit.
     ///
+    /// # Arguments
+    ///
+    /// * `limit` - The data limit to check
+    ///
     /// # Returns
     ///
-    /// Returns `true` if the current size exceeds the `MINI_REX` data limit.
+    /// Returns `true` if the current size exceeds the data limit.
     #[inline]
-    pub fn exceeds_limit(&self) -> bool {
-        self.total_size > constants::mini_rex::TX_DATA_LIMIT
+    pub fn exceeds_limit(&self, limit: u64) -> bool {
+        self.total_size > limit
     }
 
     /// Records the data size of a transaction at the start of execution.
     ///
     /// This method calculates and records the total data size of the transaction,
-    /// including intrinsic data, calldata, access list, and authorization list.
+    /// including intrinsic data, calldata, access list, and authorization list. Here we do an over
+    /// estimation by assuming all 7702 authorizations are valid, and each of them will result in an
+    /// account info update.
     ///
     /// # Arguments
     ///
@@ -644,6 +727,12 @@ impl DataSizeTracker {
             .unwrap_or_default();
         // bytes for the EIP-7702 authorization list of a transaction (101 bytes per authorization)
         size += tx.authorization_list_len() as u64 * 101;
+        // the caller itself needs one update on its account info
+        self.record_account_info_update(tx.caller());
+        // the 7702 authorization of each account needs one update on its account info
+        for authorization in tx.authorization_list() {
+            self.record_account_info_update(*authorization.address());
+        }
         self.total_size += size;
         // the transaction data is non-discardable when the frame (or the transaction) is reverted
     }
@@ -652,17 +741,64 @@ impl DataSizeTracker {
     ///
     /// This method creates a new frame entry in the data size stack if the frame
     /// is successfully initialized, allowing proper tracking of nested calls.
+    /// It also records the data size originated from the call or create frame.
     ///
     /// # Arguments
     ///
     /// * `init_frame_result` - The frame initialization result
-    pub(crate) fn on_frame_init(
+    pub(crate) fn on_frame_init(&mut self, init_frame: &EthFrame<EthInterpreter>) {
+        // the frame is successfully initialized, so we push a new frame to the frame size stack
+        self.frame_size_stack.push(0);
+        match &init_frame.input {
+            FrameInput::Empty => unreachable!(),
+            FrameInput::Call(call_inputs) => {
+                self.on_call(
+                    call_inputs.target_address,
+                    call_inputs.value.transfer().is_some_and(|x| x > U256::ZERO),
+                );
+            }
+            FrameInput::Create(_) => {
+                self.on_create(init_frame.data.created_address().expect("created address is none"));
+            }
+        }
+    }
+
+    /// Hook called when a transient frame is executed. Transient frame is a frame that does not
+    /// require any code execution (e.g., call to an EOA). It is called when the frame
+    /// initialization result is directly a `FrameResult`.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_address` - The target address of the transient frame
+    /// * `has_transfer` - Whether the transient frame has a transfer
+    /// * `frame_result` - The frame execution result
+    ///
+    /// # Returns
+    ///
+    /// Returns the result of the limit check after recording the transient frame.
+    pub(crate) fn on_transient_frame(
         &mut self,
-        init_frame_result: &FrameInitResult<'_, EthFrame<EthInterpreter>>,
+        target_address: Option<Address>,
+        has_transfer: bool,
+        frame_result: &FrameResult,
     ) {
-        if let FrameInitResult::Item(_) = init_frame_result {
-            // the frame is successfully initialized, so we push a new frame to the frame size stack
-            self.frame_size_stack.push(0);
+        // if the frame result is not ok, meaning that no changes are made in this frame, so we
+        // just return.
+        if !frame_result.interpreter_result().is_ok() {
+            return;
+        }
+        // if the frame result is ok, meaning that some changes are made in this frame, so we need
+        // to record the changes.
+        match &frame_result {
+            FrameResult::Call(_) => {
+                self.on_call(
+                    target_address.expect("target address is none for call frame"),
+                    has_transfer,
+                );
+            }
+            FrameResult::Create(outcome) => {
+                self.on_create(outcome.address.expect("created address is none for create frame"));
+            }
         }
     }
 
@@ -806,14 +942,18 @@ impl DataSizeTracker {
     /// Updates the current frame's discardable data size.
     ///
     /// This internal method adds the specified size to the current frame's
-    /// discardable data size in the stack.
+    /// discardable data size in the stack. If there is no current frame, meaning that we are at the
+    /// beginning of the transaction or the end of the transaction, the changes will not be
+    /// reverted (e.g., the caller's nonce will still be updated, even if the transaction is
+    /// reverted).
     ///
     /// # Arguments
     ///
     /// * `size` - The data size to add to the current frame
     fn update_current_frame_discardable_size(&mut self, size: u64) {
-        let discarded = self.frame_size_stack.last_mut().expect("frame size stack is empty");
-        *discarded += size;
+        if let Some(discarded) = self.frame_size_stack.last_mut() {
+            *discarded += size;
+        }
     }
 }
 
@@ -832,7 +972,7 @@ impl DataSizeTracker {
 ///
 /// A `FrameResult` indicating that the limit is exceeded with
 /// [`AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT`] instruction result.
-pub(crate) fn exceeding_limit_frame_result(
+pub(crate) fn create_exceeding_limit_frame_result(
     gas_limit: u64,
     return_memory_offset: Option<Range<usize>>,
 ) -> FrameResult {
