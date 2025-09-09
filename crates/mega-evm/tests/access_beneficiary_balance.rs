@@ -81,7 +81,9 @@ fn assert_beneficiary_detection(
     }
 }
 
-/// Test: beneficiary as caller - should always detect access
+/// Test that verifies beneficiary balance access detection when the beneficiary is the transaction
+/// caller. This test ensures that when the beneficiary address is used as the caller in a
+/// transaction, the system correctly detects and tracks beneficiary balance access.
 #[test]
 fn test_beneficiary_caller() {
     let mut evm = create_evm();
@@ -92,7 +94,9 @@ fn test_beneficiary_caller() {
     assert_beneficiary_detection(&evm, &result_and_state);
 }
 
-/// Test: beneficiary as recipient - should always detect access
+/// Test that verifies beneficiary balance access detection when the beneficiary is the transaction
+/// recipient. This test ensures that when a transaction sends value to the beneficiary address,
+/// the system correctly detects and tracks beneficiary balance access.
 #[test]
 fn test_beneficiary_recipient() {
     let mut evm = create_evm();
@@ -113,7 +117,10 @@ fn test_beneficiary_recipient() {
     assert_beneficiary_detection(&evm, &result_and_state);
 }
 
-/// Test: contract reads beneficiary balance
+/// Test that verifies beneficiary balance access detection when a contract uses the BALANCE opcode
+/// on the beneficiary address. This test ensures that when a contract reads the balance of the
+/// beneficiary address using the BALANCE opcode, the system correctly detects and tracks
+/// beneficiary balance access.
 #[test]
 fn test_balance_opcode() {
     let mut evm = create_evm();
@@ -133,7 +140,10 @@ fn test_balance_opcode() {
     assert_beneficiary_detection(&evm, &result_and_state);
 }
 
-/// Test: contract uses EXTCODESIZE on beneficiary
+/// Test that verifies beneficiary balance access detection when a contract uses the EXTCODESIZE
+/// opcode on the beneficiary address. This test ensures that when a contract checks the code size
+/// of the beneficiary address using the EXTCODESIZE opcode, the system correctly detects and tracks
+/// beneficiary balance access.
 #[test]
 fn test_extcodesize_opcode() {
     let mut evm = create_evm();

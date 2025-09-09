@@ -7,6 +7,11 @@ use revm::{
     database::{CacheDB, EmptyDB},
 };
 
+/// Test that verifies the EVM state correctly tracks storage access for non-existent storage slots.
+/// This test ensures that when a contract performs an SLOAD operation on a storage slot that
+/// doesn't exist (storage slot 0), the EVM state properly records this access and includes
+/// the storage slot in the contract's storage map, even though the slot was previously
+/// uninitialized.
 #[test]
 fn test_evm_state_zero_storage() {
     let mut db = CacheDB::<EmptyDB>::default();

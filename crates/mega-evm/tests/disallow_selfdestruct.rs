@@ -8,7 +8,9 @@ use revm::{
     database::{CacheDB, EmptyDB},
 };
 
-/// Test that SELFDESTRUCT opcode works normally before Mini-Rex
+/// Test that verifies the SELFDESTRUCT opcode works normally before the Mini-Rex hardfork.
+/// This test ensures that contracts using the SELFDESTRUCT opcode execute successfully
+/// and consume the expected amount of gas when using the `EQUIVALENCE` spec.
 #[test]
 fn test_selfdestruct_allowed_before_mini_rex() {
     let mut db = CacheDB::<EmptyDB>::default();
@@ -24,8 +26,9 @@ fn test_selfdestruct_allowed_before_mini_rex() {
     assert_eq!(result.unwrap().result.gas_used(), 26004);
 }
 
-/// Test that SELFDESTRUCT opcode is disabled and returns `InvalidFEOpcode` after Mini-Rex
-/// hardfork
+/// Test that verifies the SELFDESTRUCT opcode is disabled and returns `InvalidFEOpcode` after
+/// the Mini-Rex hardfork. This test ensures that contracts attempting to use the SELFDESTRUCT
+/// opcode are properly rejected with the correct halt reason when using the `MINI_REX` spec.
 #[test]
 fn test_selfdestruct_disallowed_after_mini_rex() {
     let mut db = CacheDB::<EmptyDB>::default();

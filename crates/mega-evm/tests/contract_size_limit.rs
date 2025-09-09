@@ -41,33 +41,59 @@ fn initcode_size_limit_test_case(spec: MegaSpecId, initcode_size: usize, success
     }
 }
 
+/// Test that verifies `EQUIVALENCE` spec allows deployment with EIP-3860 max initcode size.
 #[test]
-fn test_eip3860_initcode_size() {
+fn test_equivalence_eip3860_max_initcode_size() {
     initcode_size_limit_test_case(
         MegaSpecId::EQUIVALENCE,
         revm::primitives::eip3860::MAX_INITCODE_SIZE,
         true,
     );
+}
+
+/// Test that verifies `EQUIVALENCE` spec rejects deployment with `MiniRex` max initcode size.
+#[test]
+fn test_equivalence_minirex_max_initcode_size() {
     initcode_size_limit_test_case(
         MegaSpecId::EQUIVALENCE,
         constants::mini_rex::MAX_INITCODE_SIZE,
         false,
     );
+}
+
+/// Test that verifies `MINI_REX` spec allows deployment with EIP-3860 max initcode size.
+#[test]
+fn test_minirex_eip3860_max_initcode_size() {
     initcode_size_limit_test_case(
         MegaSpecId::MINI_REX,
         revm::primitives::eip3860::MAX_INITCODE_SIZE,
         true,
     );
+}
+
+/// Test that verifies `MINI_REX` spec allows deployment with `MiniRex` max initcode size.
+#[test]
+fn test_minirex_minirex_max_initcode_size() {
     initcode_size_limit_test_case(
         MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_INITCODE_SIZE,
         true,
     );
+}
+
+/// Test that verifies `MINI_REX` spec rejects deployment with `MiniRex` max initcode size + 1.
+#[test]
+fn test_minirex_minirex_max_initcode_size_plus_one() {
     initcode_size_limit_test_case(
         MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_INITCODE_SIZE + 1,
         false,
     );
+}
+
+/// Test that verifies `MINI_REX` spec rejects deployment with double `MiniRex` max initcode size.
+#[test]
+fn test_minirex_double_minirex_max_initcode_size() {
     initcode_size_limit_test_case(
         MegaSpecId::MINI_REX,
         2 * constants::mini_rex::MAX_INITCODE_SIZE,
@@ -108,33 +134,59 @@ fn contract_size_limit_test_case(spec: MegaSpecId, contract_size: usize, success
     }
 }
 
+/// Test that verifies `EQUIVALENCE` spec allows deployment with EIP-170 max code size.
 #[test]
-fn test_eip170_code_size_limit() {
+fn test_equivalence_eip170_max_code_size() {
     contract_size_limit_test_case(
         MegaSpecId::EQUIVALENCE,
         revm::primitives::eip170::MAX_CODE_SIZE,
         true,
     );
+}
+
+/// Test that verifies `EQUIVALENCE` spec rejects deployment with `MiniRex` max contract size.
+#[test]
+fn test_equivalence_minirex_max_contract_size() {
     contract_size_limit_test_case(
         MegaSpecId::EQUIVALENCE,
         constants::mini_rex::MAX_CONTRACT_SIZE,
         false,
     );
+}
+
+/// Test that verifies `MINI_REX` spec allows deployment with EIP-170 max code size.
+#[test]
+fn test_minirex_eip170_max_code_size() {
     contract_size_limit_test_case(
         MegaSpecId::MINI_REX,
         revm::primitives::eip170::MAX_CODE_SIZE,
         true,
     );
+}
+
+/// Test that verifies `MINI_REX` spec allows deployment with `MiniRex` max contract size.
+#[test]
+fn test_minirex_minirex_max_contract_size() {
     contract_size_limit_test_case(
         MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_CONTRACT_SIZE,
         true,
     );
+}
+
+/// Test that verifies `MINI_REX` spec rejects deployment with `MiniRex` max contract size + 1.
+#[test]
+fn test_minirex_minirex_max_contract_size_plus_one() {
     contract_size_limit_test_case(
         MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_CONTRACT_SIZE + 1,
         false,
     );
+}
+
+/// Test that verifies `MINI_REX` spec rejects deployment with double `MiniRex` max contract size.
+#[test]
+fn test_minirex_double_minirex_max_contract_size() {
     contract_size_limit_test_case(
         MegaSpecId::MINI_REX,
         2 * constants::mini_rex::MAX_CONTRACT_SIZE,
@@ -195,33 +247,59 @@ fn contract_factory_code_size_limit_test_case(
     }
 }
 
+/// Test that verifies `EQUIVALENCE` spec allows CREATE opcode with EIP-170 max code size.
 #[test]
-fn test_eip170_create_opcode_size_limit() {
+fn test_equivalence_create_eip170_max_code_size() {
     contract_factory_code_size_limit_test_case(
         MegaSpecId::EQUIVALENCE,
         revm::primitives::eip170::MAX_CODE_SIZE,
         true,
     );
+}
+
+/// Test that verifies `EQUIVALENCE` spec rejects CREATE opcode with EIP-170 max code size + 1.
+#[test]
+fn test_equivalence_create_eip170_max_code_size_plus_one() {
     contract_factory_code_size_limit_test_case(
         MegaSpecId::EQUIVALENCE,
         revm::primitives::eip170::MAX_CODE_SIZE + 1,
         false,
     );
+}
+
+/// Test that verifies `MINI_REX` spec allows CREATE opcode with EIP-170 max code size.
+#[test]
+fn test_minirex_create_eip170_max_code_size() {
     contract_factory_code_size_limit_test_case(
         MegaSpecId::MINI_REX,
         revm::primitives::eip170::MAX_CODE_SIZE,
         true,
     );
+}
+
+/// Test that verifies `MINI_REX` spec allows CREATE opcode with EIP-170 max code size + 1.
+#[test]
+fn test_minirex_create_eip170_max_code_size_plus_one() {
     contract_factory_code_size_limit_test_case(
         MegaSpecId::MINI_REX,
         revm::primitives::eip170::MAX_CODE_SIZE + 1,
         true,
     );
+}
+
+/// Test that verifies `MINI_REX` spec allows CREATE opcode with `MiniRex` max contract size.
+#[test]
+fn test_minirex_create_minirex_max_contract_size() {
     contract_factory_code_size_limit_test_case(
         MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_CONTRACT_SIZE,
         true,
     );
+}
+
+/// Test that verifies `MINI_REX` spec rejects CREATE opcode with `MiniRex` max contract size + 1.
+#[test]
+fn test_minirex_create_minirex_max_contract_size_plus_one() {
     contract_factory_code_size_limit_test_case(
         MegaSpecId::MINI_REX,
         constants::mini_rex::MAX_CONTRACT_SIZE + 1,

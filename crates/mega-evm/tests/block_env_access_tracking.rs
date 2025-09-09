@@ -12,7 +12,11 @@ use revm::{
     inspector::NoOpInspector,
 };
 
-/// Test that EVM correctly tracks block environment access
+/// Test that verifies the EVM correctly tracks block environment access for various opcodes.
+/// This comprehensive test checks that the system properly detects and tracks access to different
+/// block environment values (NUMBER, TIMESTAMP, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, BLOCKHASH)
+/// while correctly ignoring non-block environment opcodes (CALLER, ORIGIN, GASPRICE, CHAINID).
+/// It also verifies the reset functionality works correctly.
 #[test]
 fn test_block_env_tracking_with_evm() {
     let test_cases = vec![
@@ -153,7 +157,10 @@ fn test_block_env_tracking_with_evm() {
     }
 }
 
-/// Test multiple block env accesses in a single transaction
+/// Test that verifies the EVM correctly tracks multiple block environment accesses within a single
+/// transaction. This test ensures that when a contract accesses multiple different block
+/// environment values (NUMBER, TIMESTAMP, BASEFEE) in one execution, the system correctly tracks
+/// all of them and maintains an accurate count of accessed block environment types.
 #[test]
 fn test_multiple_block_env_accesses() {
     let mut db = CacheDB::<EmptyDB>::default();
@@ -201,7 +208,10 @@ fn test_multiple_block_env_accesses() {
     assert!(accesses.contains(BlockEnvAccess::BASE_FEE));
 }
 
-/// Test that access list is reset between transactions
+/// Test that verifies the block environment access tracking is properly reset between transactions.
+/// This test ensures that when a new transaction is executed, the block environment access tracking
+/// is correctly reset and can track new accesses for the subsequent transaction, maintaining proper
+/// isolation between different transaction executions.
 #[test]
 fn test_block_env_reset_between_transactions() {
     let mut db = CacheDB::<EmptyDB>::default();
