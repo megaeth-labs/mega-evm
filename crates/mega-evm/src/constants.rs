@@ -24,9 +24,6 @@ pub mod mini_rex {
     /// The maximum initcode size for the `MINI_REX` spec.
     pub const MAX_INITCODE_SIZE: usize = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE;
 
-    /// The cost of a log topic for the `MINI_REX` spec.
-    pub const LOG_TOPIC_COST: u64 = 10000;
-
     /// The gas cost for setting a storage slot to a non-zero value for the `MINI_REX` spec.
     pub const SSTORE_SET_GAS: u64 = 2_000_000;
     /// The gas cost for creating a new account for the `MINI_REX` spec.

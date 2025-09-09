@@ -21,20 +21,18 @@ use crate::{constants, Context, ExternalEnvOracle, HaltReason, SpecId, Transacti
 #[allow(missing_debug_implementations)]
 pub struct Handler<EVM, ERROR, FRAME> {
     op: OpHandler<EVM, ERROR, FRAME>,
-    /// Whether to disable the post-transaction reward to beneficiary.
-    disable_beneficiary: bool,
 }
 
 impl<EVM, ERROR, FRAME> Handler<EVM, ERROR, FRAME> {
     /// Create a new `MegaethHandler`.
-    pub fn new(disable_beneficiary: bool) -> Self {
-        Self { op: OpHandler::new(), disable_beneficiary }
+    pub fn new() -> Self {
+        Self { op: OpHandler::new() }
     }
 }
 
 impl<EVM, ERROR, FRAME> Default for Handler<EVM, ERROR, FRAME> {
     fn default() -> Self {
-        Self::new(false)
+        Self::new()
     }
 }
 
@@ -74,7 +72,7 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        if self.disable_beneficiary {
+        if evm.ctx().disable_beneficiary {
             Ok(())
         } else {
             self.op.reward_beneficiary(evm, exec_result)

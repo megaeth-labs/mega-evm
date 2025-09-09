@@ -166,19 +166,6 @@ impl AdditionalLimit {
 /// operations and enforce limits. They provide integration points with the
 /// EVM execution engine.
 impl AdditionalLimit {
-    /// Hook called when transitioning to a new block.
-    ///
-    /// This method resets all internal state and prepares the limit system
-    /// for a new block execution.
-    ///
-    /// # Returns
-    ///
-    /// Always returns [`AdditionalLimitResult::WithinLimit`] after reset.
-    pub(crate) fn on_new_block(&mut self) -> AdditionalLimitResult {
-        self.reset();
-        AdditionalLimitResult::WithinLimit
-    }
-
     /// Hook called when starting a new transaction.
     ///
     /// This method initializes the data size tracker with transaction data
@@ -192,6 +179,10 @@ impl AdditionalLimit {
     ///
     /// Returns the result of the initial limit check.
     pub(crate) fn on_new_tx(&mut self, tx: &crate::Transaction) -> AdditionalLimitResult {
+        // reset the tx data size tracker and kv update counter
+        self.reset();
+
+        // record the transaction data size
         self.data_size_tracker.on_tx_start(tx);
 
         self.check_limit()

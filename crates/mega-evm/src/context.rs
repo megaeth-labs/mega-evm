@@ -62,6 +62,9 @@ pub struct Context<DB: Database, Oracle: ExternalEnvOracle> {
     /// [`SpecId`].
     pub(crate) spec: SpecId,
 
+    /// Whether to disable the post-transaction reward to beneficiary.
+    pub(crate) disable_beneficiary: bool,
+
     /// Additional limits for the EVM.
     pub(crate) additional_limit: Rc<RefCell<AdditionalLimit>>,
 
@@ -103,6 +106,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
 
         Self {
             spec,
+            disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
             gas_cost_oracle: Rc::new(RefCell::new(GasCostOracle::new(
                 oracle,
@@ -149,6 +153,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
 
         Self {
             spec,
+            disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
             gas_cost_oracle: Rc::new(RefCell::new(GasCostOracle::new(
                 oracle,
@@ -176,6 +181,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
         Context {
             inner: self.inner.with_db(db),
             spec: self.spec,
+            disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
             block_env_accessed: self.block_env_accessed,
             beneficiary_balance_accessed: self.beneficiary_balance_accessed,
@@ -197,7 +203,6 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// Returns `self` for method chaining.
     pub fn with_tx(mut self, tx: crate::Transaction) -> Self {
         self.inner = self.inner.with_tx(tx);
-        self.on_new_tx();
         self
     }
 
@@ -323,7 +328,10 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     pub fn into_inner(self) -> OpContext<DB> {
         self.inner
     }
+}
 
+/* Block Environment Access Tracking */
+impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// Returns the bitmap of block environment data accessed during transaction execution.
     ///
     /// This method provides information about which block environment fields
@@ -356,6 +364,14 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// * `access_type` - The type of block environment access to record
     pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
         self.block_env_accessed.borrow_mut().insert(access_type);
+    }
+}
+
+/* Beneficiary Access Tracking */
+impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
+    /// Disables the beneficiary reward.
+    pub fn disable_beneficiary(&mut self) {
+        self.disable_beneficiary = true;
     }
 
     /// Check if beneficiary data has been accessed in current transaction
@@ -401,7 +417,6 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Context<DB, Oracle> {
     /// the gas cost oracle and additional limits accordingly.
     pub(crate) fn on_new_block(&self) {
         self.gas_cost_oracle.borrow_mut().on_new_block(&self.inner.block);
-        self.additional_limit.borrow_mut().on_new_block();
     }
 
     /// Resets the internal state for a new transaction.
@@ -456,14 +471,10 @@ impl<DB: Database, Oracle: ExternalEnvOracle> ContextTr for Context<DB, Oracle> 
 /// This implementation provides methods to update the context state, with
 /// special handling for transaction updates to reset internal state.
 impl<DB: Database, Oracle: ExternalEnvOracle> ContextSetters for Context<DB, Oracle> {
-    fn set_tx(&mut self, tx: Self::Tx) {
-        self.on_new_tx();
-        self.inner.set_tx(tx);
-    }
-
     delegate! {
         to self.inner {
             fn set_block(&mut self, block: Self::Block);
+            fn set_tx(&mut self, tx: Self::Tx);
         }
     }
 }

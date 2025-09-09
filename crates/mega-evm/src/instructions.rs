@@ -40,7 +40,6 @@ use salt::{constant::MIN_BUCKET_SIZE, BucketId};
 /// `MegaethInstructions` is the instruction table for `MegaETH`.
 ///
 /// This instruction table customizes certain opcodes for `MegaETH` specifications:
-/// - LOG opcodes with quadratic data cost after Mini-Rex
 /// - SELFDESTRUCT opcode disabled after Mini-Rex to prevent contract destruction
 /// - SSTORE opcode with increased gas cost and data bomb
 /// - SLOAD opcode with data bomb

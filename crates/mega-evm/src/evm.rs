@@ -1,3 +1,50 @@
+//! EVM implementation for the `MegaETH` chain.
+//!
+//! This module provides the core EVM implementation specifically tailored for the `MegaETH`
+//! chain, built on top of the Optimism EVM (`op-revm`) with MegaETH-specific customizations
+//! and optimizations.
+//!
+//! # Architecture
+//!
+//! The EVM implementation consists of two main components:
+//!
+//! 1. **`EvmFactory`**: Factory for creating EVM instances with `MegaETH` specifications
+//! 2. **`Evm`**: The main EVM instance that wraps the Optimism EVM with `MegaETH` customizations
+//!
+//! # EVM Specifications
+//!
+//! `MegaETH` supports two EVM specifications:
+//!
+//! - **`EQUIVALENCE`**: Maintains equivalence with Optimism Isthmus EVM (default)
+//! - **`MINI_REX`**: Enhanced version with quadratic LOG costs and disabled SELFDESTRUCT
+//!
+//! # Usage Example
+//!
+//! ```rust
+//! use mega_evm::{Context, Evm, SpecId, Transaction};
+//! use revm::{
+//!     context::TxEnv,
+//!     database::{CacheDB, EmptyDB},
+//!     inspector::NoOpInspector,
+//!     primitives::TxKind,
+//! };
+//!
+//! // Create EVM instance with MINI_REX spec
+//! let mut db = CacheDB::<EmptyDB>::default();
+//! let spec = SpecId::MINI_REX;
+//! let mut context = Context::new(db, spec);
+//! let mut evm = Evm::new(context, NoOpInspector);
+//!
+//! // Execute transaction
+//! let tx = Transaction {
+//!     base: TxEnv {
+//!         caller: address!("..."),
+//!         // ... other fields
+//!     },
+//! };
+//! let result = evm.transact_raw(tx);
+//! ```
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
@@ -30,21 +77,49 @@ use crate::{
     IntoMegaethCfgEnv, NoOpOracle, Precompiles, SpecId, Transaction, TransactionError, TxType,
 };
 
-/// The Factory producing [`Evm`] instances.
+/// Factory for creating `MegaETH` EVM instances.
+///
+/// The `EvmFactory` is responsible for creating EVM instances configured with `MegaETH`-specific
+/// specifications and optimizations. It encapsulates the oracle service and provides methods
+/// to create EVM instances with different configurations.
 ///
 /// # Type Parameters
 ///
-/// * `Oracle` - The oracle service to provide deterministic information during EVM execution. It
-///   should implement the [`ExternalEnvOracle`] and [`Clone`] traits.
+/// - `Oracle`: The oracle service to provide deterministic external information during EVM
+///   execution. Must implement [`ExternalEnvOracle`] and [`Clone`] traits.
+///
+/// # Usage
+///
+/// ```rust
+/// use mega_evm::{EvmFactory, NoOpOracle, SpecId};
+/// use revm::{database::CacheDB, primitives::EmptyDB};
+///
+/// // Create a factory with default oracle
+/// let factory = EvmFactory::default();
+///
+/// // Create EVM instance
+/// let db = CacheDB::<EmptyDB>::default();
+/// let evm_env = EvmEnv::default();
+/// let evm = factory.create_evm(db, evm_env);
+/// ```
+///
+/// # Implementation Details
+///
+/// The factory implements [`alloy_evm::EvmFactory`] and provides `MegaETH`-specific
+/// customizations through the configured oracle service and chain specifications.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct EvmFactory<Oracle> {
-    /// The oracle service to provide deterministic information during EVM execution.
+    /// The oracle service to provide deterministic external information during EVM execution.
     oracle: Oracle,
 }
 
 impl Default for EvmFactory<NoOpOracle> {
     /// Creates a new [`EvmFactory`] instance with the default [`NoOpOracle`].
+    ///
+    /// This is the recommended way to create a factory when no custom oracle is needed.
+    /// The `NoOpOracle` provides a no-operation implementation that doesn't perform
+    /// any external environment queries.
     fn default() -> Self {
         Self::new(NoOpOracle)
     }
@@ -52,6 +127,15 @@ impl Default for EvmFactory<NoOpOracle> {
 
 impl<Oracle> EvmFactory<Oracle> {
     /// Creates a new [`EvmFactory`] instance with the given oracle.
+    ///
+    /// # Parameters
+    ///
+    /// - `oracle`: The oracle service to provide deterministic external information during EVM
+    ///   execution
+    ///
+    /// # Returns
+    ///
+    /// A new `EvmFactory` instance configured with the provided oracle.
     pub fn new(oracle: Oracle) -> Self {
         Self { oracle }
     }
@@ -70,6 +154,21 @@ where
     type Spec = SpecId;
     type Precompiles = PrecompilesMap;
 
+    /// Creates a new `Evm` instance with the provided database and EVM environment.
+    ///
+    /// This method constructs a new `Context` using the given database, the specification from the
+    /// EVM environment, and the factory's oracle. It then sets up the transaction, block, config,
+    /// and chain environment for the context, and finally returns a new `Evm` instance using the
+    /// [`NoOpInspector`] as the default inspector.
+    ///
+    /// # Parameters
+    ///
+    /// - `db`: The database to use for EVM state.
+    /// - `evm_env`: The EVM environment, including block and config environments.
+    ///
+    /// # Returns
+    ///
+    /// A new [`Evm`] instance configured with the provided database and environment.
     fn create_evm<DB: Database>(
         &self,
         db: DB,
@@ -94,8 +193,34 @@ where
     }
 }
 
-/// `MegaethEvm` is the EVM implementation for `MegaETH`.
-/// `MegaethEvm` wraps the `OpEvm` with customizations.
+/// The main EVM implementation for the `MegaETH` chain.
+///
+/// This struct wraps the underlying Optimism EVM (`OpEvm`) with `MegaETH`-specific customizations
+/// and optimizations. It provides access to enhanced security features, increased limits, and
+/// block environment access tracking capabilities.
+///
+/// # Type Parameters
+///
+/// - `DB`: The database type implementing [`Database`]
+/// - `INSP`: The inspector type implementing [`Inspector`]
+/// - `Oracle`: The oracle type implementing [`ExternalEnvOracle`]
+///
+/// # Usage
+///
+/// ```rust
+/// use mega_evm::{Context, Evm, SpecId};
+/// use revm::{database::CacheDB, inspector::NoOpInspector, primitives::EmptyDB};
+///
+/// let mut db = CacheDB::<EmptyDB>::default();
+/// let spec = SpecId::MINI_REX;
+/// let context = Context::new(db, spec);
+/// let evm = Evm::new(context, NoOpInspector);
+/// ```
+///
+/// # Implementation Details
+///
+/// The EVM uses delegation to efficiently wrap the underlying Optimism EVM while providing
+/// `MegaETH`-specific customizations through the configured context, instructions, and precompiles.
 #[allow(missing_debug_implementations)]
 #[allow(clippy::type_complexity)]
 pub struct Evm<DB: Database, INSP, Oracle: ExternalEnvOracle> {
@@ -108,8 +233,6 @@ pub struct Evm<DB: Database, INSP, Oracle: ExternalEnvOracle> {
     >,
     /// Whether to enable the inspector at runtime.
     inspect: bool,
-    /// Whether to disable the post-transaction reward to beneficiary in the [`Handler`].
-    disable_beneficiary: bool,
 }
 
 impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::fmt::Debug for Evm<DB, INSP, Oracle> {
@@ -139,7 +262,16 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::DerefMut for Evm<
 }
 
 impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
-    /// Creates a new [`MegaethEvm`] instance.
+    /// Creates a new `MegaETH` EVM instance.
+    ///
+    /// # Parameters
+    ///
+    /// - `context`: The `MegaETH` context containing database, configuration, and oracle
+    /// - `inspect`: The inspector to use for debugging and monitoring
+    ///
+    /// # Returns
+    ///
+    /// A new `Evm` instance configured with the provided context and inspector.
     pub fn new(context: Context<DB, Oracle>, inspect: INSP) -> Self {
         let spec = context.megaeth_spec();
         let op_spec = context.cfg().spec();
@@ -151,79 +283,89 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
                 PrecompilesMap::from_static(Precompiles::new_with_spec(op_spec).precompiles()),
             ),
             inspect: false,
-            disable_beneficiary: false,
         }
     }
 
-    /// Creates a new [`MegaethEvm`] instance with the given inspector enabled at runtime.
+    /// Creates a new `MegaETH` EVM instance with the given inspector enabled at runtime.
+    ///
+    /// # Parameters
+    ///
+    /// - `inspector`: The new inspector to use for debugging and monitoring
+    ///
+    /// # Returns
+    ///
+    /// A new `Evm` instance with the specified inspector enabled.
     pub fn with_inspector<I>(self, inspector: I) -> Evm<DB, I, Oracle> {
-        let disable_beneficiary = self.disable_beneficiary;
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
             inspector,
             self.inner.instruction,
             self.inner.precompiles,
         );
-        Evm { inner, inspect: true, disable_beneficiary }
+        Evm { inner, inspect: true }
     }
 
     /// Enables inspector at runtime.
+    ///
+    /// This allows the inspector to be activated during EVM execution for debugging
+    /// and monitoring purposes without recreating the EVM instance.
     pub fn enable_inspect(&mut self) {
         self.inspect = true;
     }
 
     /// Disables inspector at runtime.
+    ///
+    /// This deactivates the inspector during EVM execution to improve performance
+    /// when debugging is not needed.
     pub fn disable_inspect(&mut self) {
         self.inspect = false;
-    }
-
-    /// Disables the beneficiary reward.
-    pub fn disable_beneficiary(&mut self) {
-        self.disable_beneficiary = true;
     }
 }
 
 impl<DB: Database, INSP, Oracle: ExternalEnvOracle> Evm<DB, INSP, Oracle> {
     /// Provides a reference to the block environment.
+    ///
+    /// The block environment contains information about the current block being processed,
+    /// including block number, timestamp, gas limit, and other block-specific data.
     #[inline]
     pub fn block_env_ref(&self) -> &BlockEnv {
         &self.ctx_ref().block
     }
 
     /// Provides a mutable reference to the block environment.
+    ///
+    /// This allows modification of block environment data during EVM execution,
+    /// which is useful for testing and simulation scenarios.
     #[inline]
     pub fn block_env_mut(&mut self) -> &mut BlockEnv {
         &mut self.ctx().block
     }
 
     /// Provides a reference to the journaled state.
+    ///
+    /// The journaled state tracks all state changes during transaction execution,
+    /// enabling rollback capabilities and state management.
     #[inline]
     pub fn journaled_state(&self) -> &Journal<DB> {
         &self.ctx_ref().journaled_state
     }
 
     /// Provides a mutable reference to the journaled state.
+    ///
+    /// This allows direct manipulation of the journaled state for advanced
+    /// use cases and testing scenarios.
     #[inline]
     pub fn journaled_state_mut(&mut self) -> &mut Journal<DB> {
         &mut self.ctx().journaled_state
     }
 
     /// Consumes self and returns the journaled state.
+    ///
+    /// This is useful when you need to extract the final state after EVM execution
+    /// and no longer need the EVM instance.
     #[inline]
     pub fn into_journaled_state(self) -> Journal<DB> {
         self.inner.ctx.inner.journaled_state
-    }
-
-    /// Returns the bitmap of block environment data accessed during transaction execution.
-    #[inline]
-    pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
-        self.ctx_ref().get_block_env_accesses()
-    }
-
-    /// Resets the block environment access vec for a new transaction.
-    #[inline]
-    pub fn reset_block_env_access(&mut self) {
-        self.ctx().reset_block_env_access();
     }
 }
 
@@ -402,6 +544,11 @@ where
     }
 }
 
+/// Implementation of [`alloy_evm::Evm`] for `MegaETH` EVM.
+///
+/// This implementation provides the core EVM interface required by the Alloy EVM framework,
+/// enabling seamless integration with Alloy-based applications while providing `MegaETH`-specific
+/// customizations and optimizations.
 impl<DB, INSP, Oracle: ExternalEnvOracle> alloy_evm::Evm for Evm<DB, INSP, Oracle>
 where
     DB: Database,
@@ -436,7 +583,25 @@ where
 
     /// Transact a system call.
     ///
-    /// Note: this funtion copies the logic in `alloy_op_evm::OpEvm::transact_system_call`.
+    /// This method enables system calls within the `MegaETH` EVM, following the same
+    /// pattern as the Optimism EVM. System calls are special transactions that can
+    /// interact with the underlying system without going through the normal transaction
+    /// validation process.
+    ///
+    /// # Parameters
+    ///
+    /// - `caller`: The address making the system call
+    /// - `contract`: The target contract address
+    /// - `data`: The call data to execute
+    ///
+    /// # Returns
+    ///
+    /// The execution result and state changes from the system call.
+    ///
+    /// # Note
+    ///
+    /// This function copies the logic from `alloy_op_evm::OpEvm::transact_system_call`
+    /// to maintain compatibility with the Optimism EVM system call interface.
     fn transact_system_call(
         &mut self,
         caller: Address,
@@ -490,7 +655,7 @@ where
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.ctx().set_tx(tx);
-        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
+        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run(&mut h, self)
     }
 
@@ -501,7 +666,7 @@ where
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
+        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run(&mut h, self).map(|result| {
             let state = self.finalize();
             ExecResultAndState::new(result, state)
@@ -531,7 +696,7 @@ where
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.ctx().set_tx(tx);
-        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
+        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::inspector::InspectorHandler::inspect_run(&mut h, self)
     }
 }
@@ -556,7 +721,7 @@ where
         self.ctx().set_tx(<Transaction as SystemCallTx>::new_system_tx_with_caller(
             caller, contract, data,
         ));
-        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new(self.disable_beneficiary);
+        let mut h = Handler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run_system_call(&mut h, self)
     }
 }
