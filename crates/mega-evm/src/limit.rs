@@ -1,32 +1,31 @@
 //! # `MegaETH` EVM Additional Limits
 //!
-//! This module provides additional limit enforcement for the `MegaETH` EVM beyond the standard
-//! EVM limits. It implements two key types of limits:
+//! This module provides additional hard limit enforcement for the `MegaETH` EVM beyond the standard
+//! EVM gas limit. It implements two types of hard limits:
 //!
 //! ## Key Features
 //!
 //! - **Data Size Limits**: Tracks and enforces limits on the total data size generated during
 //!   transaction execution, including transaction data, logs, storage operations, and account
-//!   updates
-//! - **KV Update Limits**: Tracks and enforces limits on the number of key-value storage operations
-//!   performed during transaction execution
-//! - **Frame-aware Tracking**: Properly handles nested calls and reverts by maintaining frame
-//!   stacks for both data size and KV update tracking
-//! - **Hook-based Integration**: Provides hooks that are called during EVM execution to track
-//!   operations and enforce limits
+//!   updates. These data will eventually become the data of the block payload, so it is necessary
+//!   to limit the data size.
+//! - **KV Update Limits**: Tracks and enforces limits on the number of key-value write operations
+//!   performed during transaction execution. Too many key-value write operations will cause the the
+//!   block slow to be written in database, so it is necessary to limit the number.
 //!
 //! ## Components
 //!
-//! - [`AdditionalLimit`]: Main struct that coordinates both data size and KV update limits
-//! - [`DataSizeTracker`]: Tracks the total data size generated from transaction execution
-//! - [`KVUpdateCounter`]: Counts the number of key-value storage operations
-//! - [`AdditionalLimitResult`]: Result type indicating whether limits have been exceeded
+//! - [`AdditionalLimit`]: Main struct that coordinates both data size and KV update limits, which
+//!   contains two sub-components:
+//!     - [`DataSizeTracker`]: Tracks the total data size generated from transaction execution
+//!     - [`KVUpdateCounter`]: Counts the number of key-value storage operations
 //!
 //! ## Usage
 //!
 //! The limits are automatically enforced during EVM execution through hooks that are called
 //! at various points in the execution lifecycle. When limits are exceeded, the transaction
-//! will halt with an appropriate error.
+//! should halt with [`AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT`] instruction result, and
+//! the EVM should halt in a similar way as OOG, consuming all remaining gas.
 
 use core::ops::Range;
 
@@ -57,8 +56,8 @@ use crate::{constants, GasCostOracle};
 /// # Default Values
 ///
 /// By default, uses the `MINI_REX` specification limits:
-/// - Data limit: `constants::mini_rex::TX_DATA_LIMIT`
-/// - KV update limit: `constants::mini_rex::TX_KV_UPDATE_LIMIT`
+/// - Data limit: [`constants::mini_rex::TX_DATA_LIMIT`]
+/// - KV update limit: [`constants::mini_rex::TX_KV_UPDATE_LIMIT`]
 #[derive(Debug)]
 pub struct AdditionalLimit {
     /// The data limit for the EVM. When the data limit is reached, the transaction will error and

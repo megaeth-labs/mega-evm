@@ -8,7 +8,7 @@
 //! 3. Contract 3: Accesses beneficiary via different operations (should trigger detection)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{Context, Evm, SpecId, Transaction};
+use mega_evm::{Context, Evm, NoOpOracle, SpecId, Transaction};
 use revm::{
     bytecode::opcode::{BALANCE, CALLER, POP, PUSH20, STOP},
     context::{BlockEnv, ContextSetters, ContextTr, TxEnv},
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_account_code(&mut db, contract3_address, contract3_code.into());
 
     // Create EVM instance with properly configured context
-    let mut context = Context::new(db, spec);
+    let mut context = Context::new(db, spec, NoOpOracle);
 
     // Set the beneficiary in the block environment
     let block_env = BlockEnv { beneficiary, ..Default::default() };

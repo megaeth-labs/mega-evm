@@ -3,7 +3,7 @@
 //! access.
 
 use alloy_primitives::{address, Address, Bytes, U256};
-use mega_evm::{Context, Evm, HaltReason, SpecId, Transaction};
+use mega_evm::{Context, Evm, HaltReason, NoOpOracle, SpecId, Transaction};
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODESIZE, POP, PUSH20, STOP},
     context::{result::ResultAndState, BlockEnv, ContextSetters, ContextTr, TxEnv},
@@ -18,9 +18,9 @@ const BENEFICIARY: Address = address!("0000000000000000000000000000000000BEEF01"
 const CALLER_ADDR: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT_ADDR: Address = address!("0000000000000000000000000000000000100001");
 
-fn create_evm() -> Evm<CacheDB<EmptyDB>, NoOpInspector> {
+fn create_evm() -> Evm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle> {
     let db = CacheDB::<EmptyDB>::default();
-    let mut context = Context::new(db, SpecId::MINI_REX);
+    let mut context = Context::new(db, SpecId::MINI_REX, NoOpOracle);
 
     let block_env =
         BlockEnv { beneficiary: BENEFICIARY, number: U256::from(10), ..Default::default() };
@@ -40,7 +40,7 @@ fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
 }
 
 fn execute_tx(
-    evm: &mut Evm<CacheDB<EmptyDB>, NoOpInspector>,
+    evm: &mut Evm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle>,
     caller: Address,
     to: Option<Address>,
     value: U256,
@@ -69,7 +69,7 @@ fn execute_tx(
 }
 
 fn assert_beneficiary_detection(
-    evm: &Evm<CacheDB<EmptyDB>, NoOpInspector>,
+    evm: &Evm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle>,
     result_and_state: &ResultAndState<HaltReason>,
 ) {
     // Transaction should succeed

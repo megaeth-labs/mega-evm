@@ -1,4 +1,4 @@
-//! Tests for the data limit feature of the MegaETH EVM.
+//! Tests for the data limit feature of the `MegaETH` EVM.
 
 use std::convert::Infallible;
 
