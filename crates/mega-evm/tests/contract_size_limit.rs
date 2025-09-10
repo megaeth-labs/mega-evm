@@ -2,7 +2,10 @@
 
 use alloy_primitives::{address, Bytes, U256};
 use core::convert::Infallible;
-use mega_evm::{test_utils::*, *};
+use mega_evm::{
+    test_utils::{opcode_gen::BytecodeBuilder, *},
+    *,
+};
 use revm::{
     bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
     context::result::{EVMError, ExecutionResult, InvalidTransaction, ResultAndState},
@@ -13,7 +16,7 @@ fn deploy_contract(
     db: &mut CacheDB<EmptyDB>,
     bytecode: Bytes,
     spec: MegaSpecId,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, TransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
     transact(
         spec,
         db,
@@ -34,7 +37,7 @@ fn initcode_size_limit_test_case(spec: MegaSpecId, initcode_size: usize, success
     } else {
         assert!(matches!(
             result,
-            Err(EVMError::Transaction(TransactionError::Base(
+            Err(EVMError::Transaction(MegaTransactionError::Base(
                 InvalidTransaction::CreateInitCodeSizeLimit
             )))
         ));
@@ -102,10 +105,11 @@ fn test_minirex_double_minirex_max_initcode_size() {
 }
 
 fn constructor_code(contract_size: usize) -> Bytes {
-    let mut init_code = vec![];
-    opcode_gen::push_number(&mut init_code, contract_size as u64);
-    init_code.extend(vec![PUSH1, 0x00]);
-    init_code.push(RETURN);
+    let mut init_code = BytecodeBuilder::default()
+        .push_number(contract_size as u64)
+        .append_many(vec![PUSH1, 0x00])
+        .append(RETURN)
+        .build_vec();
 
     init_code = right_pad_bytes(init_code, 32);
     init_code.into()
@@ -202,28 +206,30 @@ fn contract_factory_code_size_limit_test_case(
     // 1. Create a "factory" contract that uses the CREATE opcode to create another large contract
     // 2. Since the sub-contract exceeds the EIP-170 limit, the CREATE operation should fail
 
-    let mut factory_code = vec![];
-    // 1. put contract constructor code in memory
     let init_code = constructor_code(contract_size);
-    opcode_gen::store_memory_bytes(&mut factory_code, 0, &init_code);
-
-    // 2. create contract
-    opcode_gen::push_number(&mut factory_code, init_code.len() as u64);
-    opcode_gen::push_number(&mut factory_code, 0u64);
-    opcode_gen::push_number(&mut factory_code, 0u64);
-    factory_code.extend(vec![CREATE]);
-
+    let factory_code = BytecodeBuilder::default()
+        // 1. put contract constructor code in memory
+        .mstore(0, &init_code)
+        // 2. create contract
+        .push_number(init_code.len() as u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .append(CREATE);
     // 3. check if the create is successful, if not, jump to INVALID
-    factory_code.extend(vec![ISZERO]);
-    factory_code.extend(vec![PUSH1, (factory_code.len() + 4) as u8]);
-    factory_code.extend(vec![JUMPI]);
-    factory_code.extend(vec![STOP]);
-    factory_code.extend(vec![JUMPDEST, INVALID]);
+    let factory_code = factory_code.append(ISZERO);
+    let factory_code_len = factory_code.len();
+    let factory_code = factory_code
+        .push_number(factory_code_len as u8 + 4)
+        .append(JUMPI)
+        .append(STOP)
+        .append(JUMPDEST)
+        .append(INVALID)
+        .build_vec();
 
     let caller = address!("0000000000000000000000000000000000100000");
     let mut db = CacheDB::<EmptyDB>::default();
     let factory_address = address!("0000000000000000000000000000000000100001");
-    set_account_code(&mut db, factory_address, factory_code.clone().into());
+    set_account_code(&mut db, factory_address, factory_code.into());
     let result =
         transact(spec, &mut db, caller, Some(factory_address), Bytes::default(), U256::ZERO);
     if success {

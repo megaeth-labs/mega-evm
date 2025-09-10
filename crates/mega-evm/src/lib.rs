@@ -53,6 +53,8 @@ pub type Transaction = MegaTransaction;
 pub type SpecId = MegaSpecId;
 /// Alias for [`MegaHaltReason`]
 pub type HaltReason = MegaHaltReason;
+/// Alias for [`MegaTransactionError`]
+pub type TransactionError = MegaTransactionError;
 /// Alias for [`MegaPrecompiles`]
 pub type Precompiles = MegaPrecompiles;
 /// Alias for [`MegaTxType`]

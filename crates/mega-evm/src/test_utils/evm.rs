@@ -11,7 +11,8 @@ use revm::{
 };
 
 use crate::{
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, NoOpOracle, TransactionError,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
+    NoOpOracle,
 };
 
 /// Sets the code for an account in the database. The account state is set to `None`, as if the
@@ -48,13 +49,13 @@ pub fn transact(
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, TransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
     let mut context = MegaContext::new(db, spec, NoOpOracle);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let mut evm = MegaEvm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context);
     let tx = TxEnv {
         caller,
         kind: callee.map_or(TxKind::Create, TxKind::Call),

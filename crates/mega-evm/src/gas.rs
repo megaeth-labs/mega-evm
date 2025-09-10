@@ -4,7 +4,7 @@ use std::{collections::hash_map::Entry, rc::Rc, sync::Arc};
 use alloy_primitives::{Address, BlockNumber, B256, U256};
 use auto_impl::auto_impl;
 use revm::{context::BlockEnv, primitives::HashMap};
-use salt::{BucketId, BucketMeta};
+pub use salt::{BucketId, BucketMeta};
 
 use crate::constants;
 

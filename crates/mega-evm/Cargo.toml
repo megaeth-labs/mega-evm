@@ -26,7 +26,7 @@ salt.workspace = true
 
 # revm
 revm.workspace = true
-op-revm = { workspace = true, features = ["dev"] }
+op-revm = { workspace = true, features = ["dev", "serde"] }
 
 # misc
 auto_impl.workspace = true
@@ -38,6 +38,7 @@ serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 mega-evm = { path = ".", features = ["test-utils"] }
+revm-inspectors.workspace = true
 
 [features]
 default = ["std", "revm/default", "op-revm/default"]

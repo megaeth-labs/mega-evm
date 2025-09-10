@@ -31,7 +31,7 @@ use core::ops::Range;
 
 use alloy_primitives::{Address, Bytes, U256};
 use revm::{
-    context::Transaction,
+    context::{transaction::AuthorizationTr, Transaction},
     handler::{evm::FrameInitResult, EthFrame, FrameResult},
     interpreter::{
         interpreter::EthInterpreter, CallOutcome, CreateOutcome, FrameInput, Gas,
@@ -471,7 +471,9 @@ impl KVUpdateCounter {
         self.record_account_info_update(tx.caller());
         for authorization in tx.authorization_list() {
             // the 7702 authorization of each account needs one update on its account info
-            self.record_account_info_update(*authorization.address());
+            if let Some(authority) = authorization.authority() {
+                self.record_account_info_update(authority);
+            }
         }
     }
 
@@ -552,12 +554,12 @@ impl KVUpdateCounter {
     /// * `result` - The frame execution result
     pub(crate) fn on_frame_return(&mut self, result: &FrameResult) {
         let size_to_discard = self.kv_update_stack.pop().expect("kv update stack is empty");
-        if result.interpreter_result().is_revert() {
-            // discard the current frame's kv update
-            self.total_count -= size_to_discard;
-        } else {
+        if result.interpreter_result().is_ok() {
             // merge the current frame's kv update into the previous frame
             self.update_current_frame_count(size_to_discard);
+        } else {
+            // discard the current frame's kv update
+            self.total_count -= size_to_discard;
         }
     }
 
@@ -727,13 +729,16 @@ impl DataSizeTracker {
             .unwrap_or_default();
         // bytes for the EIP-7702 authorization list of a transaction (101 bytes per authorization)
         size += tx.authorization_list_len() as u64 * 101;
+        self.total_size += size;
         // the caller itself needs one update on its account info
         self.record_account_info_update(tx.caller());
         // the 7702 authorization of each account needs one update on its account info
         for authorization in tx.authorization_list() {
-            self.record_account_info_update(*authorization.address());
+            let authority = authorization.authority();
+            if let Some(authority) = authority {
+                self.record_account_info_update(authority);
+            }
         }
-        self.total_size += size;
         // the transaction data is non-discardable when the frame (or the transaction) is reverted
     }
 
@@ -813,10 +818,7 @@ impl DataSizeTracker {
     /// * `result` - The frame execution result
     pub(crate) fn on_frame_return(&mut self, result: &FrameResult) {
         let size_to_discard = self.frame_size_stack.pop().expect("frame size stack is empty");
-        if result.interpreter_result().is_revert() {
-            // discard the current frame's discardable data
-            self.total_size -= size_to_discard;
-        } else {
+        if result.interpreter_result().is_ok() {
             // record the created contract code in `DataSizeTracker` if the frame result is a
             // `CreateOutcome`.
             if let FrameResult::Create(outcome) = result {
@@ -828,6 +830,9 @@ impl DataSizeTracker {
             if let Some(previous_size) = self.frame_size_stack.last_mut() {
                 *previous_size += size_to_discard;
             }
+        } else {
+            // discard the current frame's discardable data
+            self.total_size -= size_to_discard;
         }
     }
 

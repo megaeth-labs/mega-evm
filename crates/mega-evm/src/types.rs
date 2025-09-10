@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 /// `MegaETH` transaction type used in revm.
 pub type MegaTransaction = op_revm::OpTransaction<TxEnv>;
+/// `MegaETH` transaction builder type used in revm.
+pub type MegaTransactionBuilder = op_revm::transaction::abstraction::OpTransactionBuilder;
 
 /// `MegaETH` precompiles type.
 pub type MegaPrecompiles = op_revm::precompiles::OpPrecompiles;

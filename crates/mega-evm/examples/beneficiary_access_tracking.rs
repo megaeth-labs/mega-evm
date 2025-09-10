@@ -14,7 +14,6 @@ use revm::{
     context::{BlockEnv, ContextSetters, ContextTr, TxEnv},
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
-    inspector::NoOpInspector,
     primitives::TxKind,
     state::{AccountInfo, Bytecode},
 };
@@ -67,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
 
-    let mut evm = MegaEvm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context);
 
     let caller = address!("0000000000000000000000000000000000100000");
 

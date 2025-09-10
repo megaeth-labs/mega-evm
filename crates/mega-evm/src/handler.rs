@@ -21,7 +21,7 @@ use revm::{
 
 use crate::{
     constants, EthHaltReason, ExternalEnvOracle, MegaContext, MegaHaltReason, MegaSpecId,
-    TransactionError,
+    MegaTransactionError,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits

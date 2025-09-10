@@ -47,8 +47,8 @@ use revm::{
 use crate::{
     create_exceeding_limit_frame_result, mark_frame_result_as_exceeding_limit, AdditionalLimit,
     BlockEnvAccess, ExternalEnvOracle, HostExt, IntoMegaethCfgEnv, MegaContext, MegaHaltReason,
-    MegaHandler, MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTxType,
-    NoOpOracle, TransactionError,
+    MegaHandler, MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction,
+    MegaTransactionError, MegaTxType, NoOpOracle,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -124,7 +124,7 @@ where
     type Context<DB: Database> = MegaContext<DB, Oracle>;
     type Tx = MegaTransaction;
     type Error<DBError: core::error::Error + Send + Sync + 'static> =
-        EVMError<DBError, TransactionError>;
+        EVMError<DBError, MegaTransactionError>;
     type HaltReason = MegaHaltReason;
     type Spec = MegaSpecId;
     type Precompiles = PrecompilesMap;
@@ -155,7 +155,7 @@ where
             .with_block(evm_env.block_env)
             .with_cfg(evm_env.cfg_env)
             .with_chain(L1BlockInfo::default());
-        MegaEvm::new(ctx, NoOpInspector)
+        MegaEvm::new(ctx)
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -226,7 +226,7 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::DerefMut
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
+impl<DB: Database, Oracle: ExternalEnvOracle> MegaEvm<DB, NoOpInspector, Oracle> {
     /// Creates a new `MegaETH` EVM instance.
     ///
     /// # Parameters
@@ -237,20 +237,22 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
     /// # Returns
     ///
     /// A new `Evm` instance configured with the provided context and inspector.
-    pub fn new(context: MegaContext<DB, Oracle>, inspect: INSP) -> Self {
+    pub fn new(context: MegaContext<DB, Oracle>) -> Self {
         let spec = context.mega_spec();
         let op_spec = context.cfg().spec();
         Self {
             inner: revm::context::Evm::new_with_inspector(
                 context,
-                inspect,
+                NoOpInspector,
                 MegaInstructions::new(spec),
                 PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(op_spec).precompiles()),
             ),
             inspect: false,
         }
     }
+}
 
+impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
     /// Creates a new `MegaETH` EVM instance with the given inspector enabled at runtime.
     ///
     /// # Parameters
@@ -551,7 +553,7 @@ where
 {
     type DB = DB;
     type Tx = MegaTransaction;
-    type Error = EVMError<DB::Error, TransactionError>;
+    type Error = EVMError<DB::Error, MegaTransactionError>;
     type HaltReason = MegaHaltReason;
     type Spec = MegaSpecId;
     type Precompiles = PrecompilesMap;
@@ -641,7 +643,7 @@ where
     type Tx = MegaTransaction;
     type Block = BlockEnv;
     type State = EvmState;
-    type Error = EVMError<DB::Error, TransactionError>;
+    type Error = EVMError<DB::Error, MegaTransactionError>;
     type ExecutionResult = ExecutionResult<MegaHaltReason>;
 
     fn set_block(&mut self, block: Self::Block) {

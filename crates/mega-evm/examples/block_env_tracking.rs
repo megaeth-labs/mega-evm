@@ -8,12 +8,11 @@
 //! 3. Contract 3: Does NOT use block environment (CALLER opcode)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{BlockEnvAccess, MegaContext, MegaEvm, NoOpOracle, MegaSpecId, MegaTransaction};
+use mega_evm::{BlockEnvAccess, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, NoOpOracle};
 use revm::{
     bytecode::opcode::{BASEFEE, CALLER, NUMBER, POP, STOP, TIMESTAMP},
     context::{ContextTr, TxEnv},
     database::{CacheDB, EmptyDB},
-    inspector::NoOpInspector,
     primitives::TxKind,
     state::{AccountInfo, Bytecode},
 };
@@ -48,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set operator fee fields to zero to avoid panic in MINI_REX (ISTHMUS) spec
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
-    let mut evm = MegaEvm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context);
 
     let caller = address!("0000000000000000000000000000000000100000");
 

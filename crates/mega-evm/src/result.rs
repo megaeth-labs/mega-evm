@@ -8,14 +8,15 @@ pub use revm::{
         result::HaltReason as EthHaltReason, transaction::TransactionError as TransactionErrorTr,
     },
 };
+use serde::{Deserialize, Serialize};
 
 /// `MegaETH` transaction validation error type.
-pub type TransactionError = OpTransactionError;
+pub type MegaTransactionError = OpTransactionError;
 
 /// `MegaETH` halt reason type, with additional MegaETH-specific halt reasons.
 ///
 /// It is a wrapper around `OpHaltReason`, which internally wraps `EthHaltReason`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::From)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::From, Serialize, Deserialize)]
 pub enum MegaHaltReason {
     /// Base [`OpHaltReason`]
     Base(#[from] OpHaltReason),

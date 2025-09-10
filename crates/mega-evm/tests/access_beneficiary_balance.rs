@@ -29,7 +29,7 @@ fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle> {
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
 
-    MegaEvm::new(context, NoOpInspector)
+    MegaEvm::new(context)
 }
 
 fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
