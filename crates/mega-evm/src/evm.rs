@@ -415,15 +415,18 @@ where
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         // we need to first get a reference to the `AdditionalLimit` before
         // calling frame_init to avoid borrowing issues
+        let is_first_frame = frame_init.depth == 0;
         let additional_limit = self.ctx().additional_limit.clone();
-        let (target_address, has_transfer) = match &frame_init.frame_input {
-            FrameInput::Call(inputs) => (
-                Some(inputs.target_address),
-                inputs.value.transfer().is_some_and(|x| x > U256::ZERO),
-            ),
-            FrameInput::Create(inputs) => (None, inputs.value > U256::ZERO),
-            FrameInput::Empty => unreachable!(),
-        };
+        let (call_target_address, call_bytecode_address, transfer_or_create) =
+            match &frame_init.frame_input {
+                FrameInput::Call(inputs) => (
+                    Some(inputs.target_address),
+                    Some(inputs.bytecode_address),
+                    inputs.value.transfer().is_some_and(|x| x > U256::ZERO),
+                ),
+                FrameInput::Create(_) => (None, None, true),
+                FrameInput::Empty => unreachable!(),
+            };
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
 
         // call the inner frame_init function to initialize the frame
@@ -431,13 +434,35 @@ where
 
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if is_mini_rex_enabled {
+            let target_address = call_target_address
+                .or_else(|| try_extract_target_address_from_frame_init_result(&init_result));
             // call the `on_frame_init` function to update the `AdditionalLimit`, if the limit is
             // exceeded, return the error frame result
             let limit_result = match &init_result {
-                FrameInitResult::Item(frame) => additional_limit.borrow_mut().on_frame_init(frame),
-                FrameInitResult::Result(frame_result) => additional_limit
-                    .borrow_mut()
-                    .on_transient_frame(target_address, has_transfer, frame_result),
+                FrameInitResult::Result(frame_result) => {
+                    if is_first_frame {
+                        // the first frame is transient, its result will not be processed by
+                        // `frame_return_result`, so we need to handle it differently.
+                        additional_limit.borrow_mut().on_transient_first_frame(
+                            target_address,
+                            transfer_or_create,
+                            frame_result,
+                        )
+                    } else {
+                        additional_limit.borrow_mut().on_frame_init(
+                            target_address,
+                            call_bytecode_address,
+                            transfer_or_create,
+                            &init_result,
+                        )
+                    }
+                }
+                FrameInitResult::Item(_) => additional_limit.borrow_mut().on_frame_init(
+                    target_address,
+                    call_bytecode_address,
+                    transfer_or_create,
+                    &init_result,
+                ),
             };
             if limit_result.exceeded_limit() {
                 let frame_result = match init_result {
@@ -722,5 +747,30 @@ where
         ));
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run_system_call(&mut h, self)
+    }
+}
+
+/// Tries to extract the target address from the frame initialization result.
+///
+/// # Arguments
+///
+/// * `frame_init_result` - The frame initialization result
+///
+/// # Returns
+///
+/// Returns the target address if it contains, otherwise returns `None`.
+pub(crate) fn try_extract_target_address_from_frame_init_result(
+    frame_init_result: &FrameInitResult<'_, EthFrame<EthInterpreter>>,
+) -> Option<Address> {
+    match frame_init_result {
+        FrameInitResult::Item(frame) => match &frame.input {
+            FrameInput::Empty => unreachable!(),
+            FrameInput::Call(call_inputs) => Some(call_inputs.target_address),
+            FrameInput::Create(_) => frame.data.created_address(),
+        },
+        FrameInitResult::Result(frame_result) => match frame_result {
+            FrameResult::Call(_) => None,
+            FrameResult::Create(create_outcome) => create_outcome.address,
+        },
     }
 }

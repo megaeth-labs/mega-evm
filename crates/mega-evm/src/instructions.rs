@@ -224,14 +224,15 @@ pub fn sstore_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         .gas
         .record_refund(gas::sstore_refund(context.interpreter.runtime_flag.spec_id(), loaded_data));
 
-    // KV update bomb and data bomb: check if the number of key-value updates or the total data size
-    // will exceed the limit, if so, halt.
-    if context
-        .host
-        .additional_limit()
-        .borrow_mut()
-        .on_sstore(target_address, index)
-        .exceeded_limit()
+    // KV update bomb and data bomb (only when cold write): check if the number of key-value updates
+    // or the total data size will exceed the limit, if so, halt.
+    if state_load.is_cold &&
+        context
+            .host
+            .additional_limit()
+            .borrow_mut()
+            .on_cold_sstore(target_address, index)
+            .exceeded_limit()
     {
         context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
     }
@@ -265,13 +266,15 @@ pub fn sload_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     );
     *index = value.data;
 
-    // The data bomb: check if the total data size exceeds the limit, if so, halt.
-    if context
-        .host
-        .additional_limit()
-        .borrow_mut()
-        .on_sload(target_address, *index)
-        .exceeded_limit()
+    // The data bomb (only when code load): check if the total data size exceeds the limit, if so,
+    // halt.
+    if value.is_cold &&
+        context
+            .host
+            .additional_limit()
+            .borrow_mut()
+            .on_cold_sload(target_address, *index)
+            .exceeded_limit()
     {
         context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
     }
