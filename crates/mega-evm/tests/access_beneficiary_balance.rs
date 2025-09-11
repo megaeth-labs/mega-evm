@@ -20,7 +20,7 @@ const CONTRACT_ADDR: Address = address!("000000000000000000000000000000000010000
 
 fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle> {
     let db = CacheDB::<EmptyDB>::default();
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle);
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
 
     let block_env =
         BlockEnv { beneficiary: BENEFICIARY, number: U256::from(10), ..Default::default() };

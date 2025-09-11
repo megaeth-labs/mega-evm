@@ -109,18 +109,23 @@ impl<DB: Database, Oracle: ExternalEnvOracle> Host for MegaContext<DB, Oracle> {
 
 /// Extension trait for the `Host` trait that provides additional functionality for `MegaETH`.
 pub trait HostExt: Host {
+    /// The error type for the oracle.
+    type Error;
+
     /// Gets the `AdditionalLimit` instance. Only used when the `MINI_REX` spec is enabled.
     fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>>;
 
     /// Gets the gas cost for setting a storage slot to a non-zero value. Only used when the
     /// `MINI_REX` spec is enabled.
-    fn sstore_set_gas(&self, address: Address, key: U256) -> u64;
+    fn sstore_set_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error>;
 
     /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
-    fn new_account_gas(&self, address: Address) -> u64;
+    fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error>;
 }
 
 impl<DB: Database, Oracle: ExternalEnvOracle> HostExt for MegaContext<DB, Oracle> {
+    type Error = Oracle::Error;
+
     #[inline]
     fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
@@ -128,13 +133,13 @@ impl<DB: Database, Oracle: ExternalEnvOracle> HostExt for MegaContext<DB, Oracle
     }
 
     #[inline]
-    fn sstore_set_gas(&self, address: Address, key: U256) -> u64 {
+    fn sstore_set_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
         self.gas_cost_oracle.borrow_mut().sstore_set_gas(address, key)
     }
 
     #[inline]
-    fn new_account_gas(&self, address: Address) -> u64 {
+    fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
         self.gas_cost_oracle.borrow_mut().new_account_gas(address)
     }

@@ -40,7 +40,7 @@ fn transact(
     tx: TxEnv,
 ) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
 {
-    let mut context = MegaContext::new(db, spec, NoOpOracle).with_data_limit(data_limit);
+    let mut context = MegaContext::new(db, spec, NoOpOracle::default()).with_data_limit(data_limit);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

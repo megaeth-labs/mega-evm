@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_account_code(&mut db, contract3_address, contract3_code.into());
 
     // Create EVM instance with properly configured context
-    let mut context = MegaContext::new(db, spec, NoOpOracle);
+    let mut context = MegaContext::new(db, spec, NoOpOracle::default());
 
     // Set the beneficiary in the block environment
     let block_env = BlockEnv { beneficiary, ..Default::default() };

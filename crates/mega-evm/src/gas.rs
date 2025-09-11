@@ -1,4 +1,4 @@
-use core::{cell::RefCell, fmt::Debug};
+use core::{cell::RefCell, convert::Infallible, fmt::Debug};
 use std::{collections::hash_map::Entry, rc::Rc, sync::Arc};
 
 use alloy_primitives::{Address, BlockNumber, B256, U256};
@@ -34,39 +34,43 @@ impl<Oracle: ExternalEnvOracle> GasCostOracle<Oracle> {
 
     /// Calculates the gas cost for setting a storage slot to a non-zero value. This overrides the
     /// [`SSTORE_SET`](revm::interpreter::gas::SSTORE_SET) gas cost in the original EVM.
-    pub(crate) fn sstore_set_gas(&mut self, address: Address, key: U256) -> u64 {
+    pub(crate) fn sstore_set_gas(
+        &mut self,
+        address: Address,
+        key: U256,
+    ) -> Result<u64, Oracle::Error> {
         let mut gas = constants::mini_rex::SSTORE_SET_GAS;
 
         // increase the gas cost according to the bucket capacity
         let bucket_id = slot_to_bucket_id(address, key);
-        let multiplier = self.load_bucket_cost_multiplier(bucket_id);
+        let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
         gas *= multiplier;
 
-        gas
+        Ok(gas)
     }
 
     /// Calculates the gas cost for creating a new account. This overrides the
     /// [`NEWACCOUNT`](revm::interpreter::gas::NEWACCOUNT) gas cost in the original EVM.
-    pub(crate) fn new_account_gas(&mut self, address: Address) -> u64 {
+    pub(crate) fn new_account_gas(&mut self, address: Address) -> Result<u64, Oracle::Error> {
         let mut gas = constants::mini_rex::NEW_ACCOUNT_GAS;
 
         // increase the gas cost according to the bucket capacity
         let bucket_id = address_to_bucket_id(address);
-        let multiplier = self.load_bucket_cost_multiplier(bucket_id);
+        let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
         gas *= multiplier;
 
-        gas
+        Ok(gas)
     }
 
     /// Loads the bucket cost multiplier for a given bucket Id.
-    fn load_bucket_cost_multiplier(&mut self, bucket_id: BucketId) -> u64 {
+    fn load_bucket_cost_multiplier(&mut self, bucket_id: BucketId) -> Result<u64, Oracle::Error> {
         match self.bucket_cost_mulitipers.entry(bucket_id) {
-            Entry::Occupied(occupied_entry) => *occupied_entry.get(),
+            Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
             Entry::Vacant(vacant_entry) => {
-                let meta = self.oracle.get_bucket_meta(bucket_id, self.parent_block);
+                let meta = self.oracle.get_bucket_meta(bucket_id, self.parent_block)?;
                 let multiplier = meta.capacity / salt::constant::MIN_BUCKET_SIZE as u64;
                 vacant_entry.insert(multiplier);
-                multiplier
+                Ok(multiplier)
             }
         }
     }
@@ -87,12 +91,12 @@ const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 
 /// Convert an address to a bucket id.
 pub(crate) fn address_to_bucket_id(address: Address) -> BucketId {
-    salt::pk_hasher::bucket_id(address.as_slice())
+    salt::state::hasher::bucket_id(address.as_slice())
 }
 
 /// Convert an address and a storage slot key to a bucket id.
 pub(crate) fn slot_to_bucket_id(address: Address, key: U256) -> BucketId {
-    salt::pk_hasher::bucket_id(
+    salt::state::hasher::bucket_id(
         address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
     )
 }
@@ -105,6 +109,9 @@ pub(crate) fn slot_to_bucket_id(address: Address, key: U256) -> BucketId {
 /// execution.
 #[auto_impl(&, Box, Arc)]
 pub trait ExternalEnvOracle: Debug + Send + Sync + Unpin {
+    /// The error type for the oracle.
+    type Error;
+
     /// Gets the metadata of the SALT bucket for a given bucket ID at a specific block (according
     /// to its post-execution state).
     ///
@@ -116,30 +123,54 @@ pub trait ExternalEnvOracle: Debug + Send + Sync + Unpin {
     /// # Returns
     ///
     /// The metadata of the SALT bucket for the given bucket ID at the given block.
-    fn get_bucket_meta(&self, bucket_id: BucketId, at_block: BlockNumber) -> BucketMeta;
+    fn get_bucket_meta(
+        &self,
+        bucket_id: BucketId,
+        at_block: BlockNumber,
+    ) -> Result<BucketMeta, Self::Error>;
 }
 
 /// A no-op implementation of the [`ExternalEnvOracle`] trait. It is useful when the EVM does not
 /// need to access any additional information from an external environment.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoOpOracle;
+#[derive(Clone, Copy, derive_more::Debug)]
+pub struct NoOpOracle<Error = Infallible> {
+    #[debug(ignore)]
+    _phantom: core::marker::PhantomData<Error>,
+}
 
-impl NoOpOracle {
+impl Default for NoOpOracle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Error: 'static + Unpin + Send + Sync> NoOpOracle<Error> {
+    /// Creates a new [`NoOpOracle`].
+    pub fn new() -> Self {
+        Self { _phantom: core::marker::PhantomData }
+    }
+
     /// Consumes and wraps `self` into an Arc-wrapped boxed instance of the [`ExternalEnvOracle`]
     /// trait.
-    pub fn boxed_arc(self) -> Arc<Box<dyn ExternalEnvOracle>> {
+    pub fn boxed_arc(self) -> Arc<Box<dyn ExternalEnvOracle<Error = Error>>> {
         Arc::new(self.boxed())
     }
 
     /// Consumes and wraps `self` into a boxed instance of the [`ExternalEnvOracle`] trait.
-    pub fn boxed(self) -> Box<dyn ExternalEnvOracle> {
+    pub fn boxed(self) -> Box<dyn ExternalEnvOracle<Error = Error>> {
         Box::new(self)
     }
 }
 
-impl ExternalEnvOracle for NoOpOracle {
-    fn get_bucket_meta(&self, _bucket_id: BucketId, _at_block: BlockNumber) -> BucketMeta {
+impl<Error: Unpin + Send + Sync + 'static> ExternalEnvOracle for NoOpOracle<Error> {
+    type Error = Error;
+
+    fn get_bucket_meta(
+        &self,
+        _bucket_id: BucketId,
+        _at_block: BlockNumber,
+    ) -> Result<BucketMeta, Self::Error> {
         // By default, return a default BucketMeta with maximum capacity
-        BucketMeta::default()
+        Ok(BucketMeta::default())
     }
 }

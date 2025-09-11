@@ -207,7 +207,11 @@ pub fn sstore_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         WARM_STORAGE_READ_COST
     } else if loaded_data.is_original_eq_present() && loaded_data.is_original_zero() {
         // dynamically calculate the gas cost based on the SALT bucket capacity
-        context.host.sstore_set_gas(target_address, index)
+        let Ok(sstore_set_gas) = context.host.sstore_set_gas(target_address, index) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        sstore_set_gas
     } else if loaded_data.is_original_eq_present() {
         WARM_SSTORE_RESET
     } else {
@@ -324,13 +328,19 @@ pub fn create_with_bomb<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostE
     // corresponding SALT bucket capacity doubles.
     let scheme = if IS_CREATE2 {
         popn!([salt], context.interpreter);
-        let create_gas = context.host.new_account_gas(target_address);
+        let Ok(create_gas) = context.host.new_account_gas(target_address) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
         let create2_cost = cost_per_word(len, constants::equivalence::KECCAK256WORD)
             .and_then(|cost| create_gas.checked_add(cost));
         gas_or_fail!(context.interpreter, create2_cost);
         CreateScheme::Create2 { salt }
     } else {
-        let create_gas = context.host.new_account_gas(target_address);
+        let Ok(create_gas) = context.host.new_account_gas(target_address) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
         revm::interpreter::gas!(context.interpreter, create_gas);
         CreateScheme::Create
     };
@@ -407,7 +417,11 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
             // EIP-161: State trie clearing (invariant-preserving alternative)
             // Account only if there is value transferred.
             if has_transfer {
-                gas += context.host.new_account_gas(to);
+                let Ok(new_account_gas) = context.host.new_account_gas(to) else {
+                    context.interpreter.halt(InstructionResult::FatalExternalError);
+                    return;
+                };
+                gas += new_account_gas;
             }
         }
 

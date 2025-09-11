@@ -50,7 +50,7 @@ pub fn transact(
     data: Bytes,
     value: U256,
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
-    let mut context = MegaContext::new(db, spec, NoOpOracle);
+    let mut context = MegaContext::new(db, spec, NoOpOracle::default());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

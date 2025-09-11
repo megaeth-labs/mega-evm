@@ -18,6 +18,8 @@
 //! - **`EQUIVALENCE`**: Maintains equivalence with Optimism Isthmus EVM (default)
 //! - **`MINI_REX`**: Enhanced version with quadratic LOG costs and disabled SELFDESTRUCT
 
+use core::convert::Infallible;
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
@@ -89,14 +91,14 @@ pub struct MegaEvmFactory<Oracle> {
     oracle: Oracle,
 }
 
-impl Default for MegaEvmFactory<NoOpOracle> {
+impl Default for MegaEvmFactory<NoOpOracle<Infallible>> {
     /// Creates a new [`EvmFactory`] instance with the default [`NoOpOracle`].
     ///
     /// This is the recommended way to create a factory when no custom oracle is needed.
     /// The `NoOpOracle` provides a no-operation implementation that doesn't perform
     /// any external environment queries.
     fn default() -> Self {
-        Self::new(NoOpOracle)
+        Self::new(NoOpOracle::<Infallible>::new())
     }
 }
 
