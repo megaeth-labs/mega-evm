@@ -11,22 +11,6 @@
 //! - **Additional Limits**: Enforces data and KV update limits beyond standard EVM limits
 //! - **Block Environment Access Tracking**: Monitors which block environment data is accessed
 //! - **Spec Management**: Handles different `MegaETH` specification versions
-//!
-//! ## Usage
-//!
-//! ```rust
-//! use alloy_evm::Database;
-//! use mega_evm::{MegaContext, MegaSpecId, NoOpOracle};
-//! use revm::database::EmptyDB;
-//!
-//! // Create a new context
-//! let database = EmptyDB::default();
-//! let oracle = NoOpOracle;
-//! let context = MegaContext::new(database, MegaSpecId::MINI_REX, oracle);
-//!
-//! // Configure with transaction and block
-//! let context = context.with_data_limit(1_000_000);
-//! ```
 
 use alloy_evm::Database;
 use alloy_primitives::{Address, BlockNumber, U256};
