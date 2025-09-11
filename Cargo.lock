@@ -4,18 +4,6 @@ version = 4
 
 [[package]]
 name = "ahash"
-version = "0.8.11"
-source = "git+https://github.com/megaeth-labs/ahash.git?tag=fallback-ahash#f7ec5e4aa13c998d9dc733ca181189d1a3d02824"
-dependencies = [
- "cfg-if",
- "getrandom 0.2.16",
- "once_cell",
- "version_check",
- "zerocopy 0.7.35",
-]
-
-[[package]]
-name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
@@ -480,7 +468,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43d68f2d516162846c1238e755a7c4d131b892b70cc70c471a8e3ca3ed818fce"
 dependencies = [
- "ahash 0.8.12",
+ "ahash",
  "ark-ff 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ark-poly 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ark-serialize 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -500,7 +488,7 @@ name = "ark-ec"
 version = "0.5.0"
 source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
 dependencies = [
- "ahash 0.8.12",
+ "ahash",
  "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
  "ark-poly 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
  "ark-serialize 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
@@ -700,7 +688,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "579305839da207f02b89cd1679e50e67b4331e2f9294a57693e5051b7703fe27"
 dependencies = [
- "ahash 0.8.12",
+ "ahash",
  "ark-ff 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ark-serialize 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ark-std 0.5.0",
@@ -714,7 +702,7 @@ name = "ark-poly"
 version = "0.5.0"
 source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
 dependencies = [
- "ahash 0.8.12",
+ "ahash",
  "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
  "ark-serialize 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
  "ark-std 0.5.0",
@@ -902,7 +890,7 @@ checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
 [[package]]
 name = "banderwagon"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/salt.git?branch=compat%2Fmega-reth#5d08e9cb623b36b0e2fc301ae6df8fdf2c0e6372"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=main#f12460cd5776478d0e4ce237a6277aae2b39ac02"
 dependencies = [
  "ark-ec 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
  "ark-ed-on-bls12-381-bandersnatch",
@@ -1767,7 +1755,7 @@ dependencies = [
 [[package]]
 name = "ipa-multipoint"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/salt.git?branch=compat%2Fmega-reth#5d08e9cb623b36b0e2fc301ae6df8fdf2c0e6372"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=main#f12460cd5776478d0e4ce237a6277aae2b39ac02"
 dependencies = [
  "banderwagon",
  "hex",
@@ -2860,14 +2848,11 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 [[package]]
 name = "salt"
 version = "1.0.0"
-source = "git+https://github.com/megaeth-labs/salt.git?branch=compat%2Fmega-reth#5d08e9cb623b36b0e2fc301ae6df8fdf2c0e6372"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=main#f12460cd5776478d0e4ce237a6277aae2b39ac02"
 dependencies = [
- "ahash 0.8.11",
  "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "auto_impl",
  "banderwagon",
  "blake3",
- "bytes",
  "derive_more",
  "hex",
  "ipa-multipoint",
@@ -2877,9 +2862,9 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_arrays",
- "serde_with",
  "thiserror",
  "tracing",
+ "zerocopy 0.7.35",
 ]
 
 [[package]]
@@ -3759,6 +3744,7 @@ version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
 dependencies = [
+ "byteorder",
  "zerocopy-derive 0.7.35",
 ]
 

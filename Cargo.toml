@@ -157,7 +157,7 @@ codegen-units = 1
 
 [workspace.dependencies]
 # megaeth 
-salt = { git = "https://github.com/megaeth-labs/salt.git", branch = "compat/mega-reth" }
+salt = { git = "https://github.com/megaeth-labs/salt.git", branch = "main" }
 
 # revm
 revm = { version = "27.1.0", default-features = false }
