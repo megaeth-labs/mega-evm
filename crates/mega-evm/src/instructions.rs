@@ -7,8 +7,7 @@ use crate::{
         equivalence::{CALL_STIPEND, LOG, LOGDATA, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST},
         mini_rex::SSTORE_SET_GAS,
     },
-    slot_to_bucket_id, AdditionalLimit, DataSizeTracker, ExternalEnvOracle, HostExt,
-    KVUpdateCounter, MegaContext, MegaSpecId,
+    slot_to_bucket_id, AdditionalLimit, ExternalEnvOracle, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, BlockNumber, Bytes, Log, LogData, B256, U256};
@@ -43,7 +42,6 @@ use salt::{constant::MIN_BUCKET_SIZE, BucketId};
 /// - LOG opcode with data bomb
 /// - SELFDESTRUCT opcode disabled after Mini-Rex to prevent contract destruction
 /// - SSTORE opcode with increased gas cost and data bomb
-/// - SLOAD opcode with data bomb
 /// - CREATE and CREATE2 opcode with increased gas cost, data bomb, and kv update bomb
 /// - CALL opcode with data bomb and kv update bomb
 ///
@@ -87,9 +85,6 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaInstructions<DB, Oracle> {
             // Override the SSTORE instruction
             self.inner.insert_instruction(SSTORE, sstore_with_bomb);
 
-            // Override the SLOAD instruction
-            self.inner.insert_instruction(SLOAD, sload_with_bomb);
-
             // Override the CREATE and CREATE2 instructions
             self.inner.insert_instruction(CREATE, create_with_bomb::<_, false, _>);
             self.inner.insert_instruction(CREATE2, create_with_bomb::<_, true, _>);
@@ -128,7 +123,15 @@ pub fn log_with_data_bomb<const N: usize, H: HostExt + ?Sized>(
 
     popn!([offset, len], context.interpreter);
     let len = as_usize_or_fail!(context.interpreter, len);
-    gas_or_fail!(context.interpreter, gas::log_cost(N as u8, len as u64));
+    // MegaETH modification: calculate the increased gas cost for log topics and data
+    let log_cost = {
+        let topic_cost = constants::mini_rex::LOG_TOPIC_GAS.checked_mul(N as u64);
+        let data_cost = constants::mini_rex::LOG_DATA_GAS.checked_mul(len as u64);
+        topic_cost
+            .and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
+            .and_then(|cost| cost.checked_add(constants::equivalence::LOG))
+    };
+    gas_or_fail!(context.interpreter, log_cost);
     let data = if len == 0 {
         Bytes::new()
     } else {
@@ -224,57 +227,15 @@ pub fn sstore_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         .gas
         .record_refund(gas::sstore_refund(context.interpreter.runtime_flag.spec_id(), loaded_data));
 
-    // KV update bomb and data bomb (only when cold write): check if the number of key-value updates
-    // or the total data size will exceed the limit, if so, halt.
-    if state_load.is_cold &&
-        context
-            .host
-            .additional_limit()
-            .borrow_mut()
-            .on_cold_sstore(target_address, index)
-            .exceeded_limit()
-    {
-        context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
-    }
-}
-
-/// `SLOAD` opcode implementation modified from `revm` to support data bomb.
-///
-/// # Difference from the standard EVM
-///
-/// The difference from the standard EVM is that we additionally check if the total data size
-/// exceeds the limit.
-///
-/// # Assumptions
-///
-/// This alternative implementation of `SLOAD` is only used when the `MINI_REX` spec is enabled.
-pub fn sload_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
-    context: InstructionContext<'_, H, WIRE>,
-) {
-    popn_top!([], index, context.interpreter);
-
-    let target_address = context.interpreter.input.target_address();
-
-    let Some(value) = context.host.sload(target_address, *index) else {
-        context.interpreter.halt(InstructionResult::FatalExternalError);
-        return;
-    };
-
-    revm::interpreter::gas!(
-        context.interpreter,
-        gas::sload_cost(context.interpreter.runtime_flag.spec_id(), value.is_cold)
-    );
-    *index = value.data;
-
-    // The data bomb (only when code load): check if the total data size exceeds the limit, if so,
-    // halt.
-    if value.is_cold &&
-        context
-            .host
-            .additional_limit()
-            .borrow_mut()
-            .on_cold_sload(target_address, *index)
-            .exceeded_limit()
+    // KV update bomb and data bomb (only when first writing non-zero value to originally zero
+    // slot): check if the number of key-value updates or the total data size will exceed the
+    // limit, if so, halt.
+    if context
+        .host
+        .additional_limit()
+        .borrow_mut()
+        .on_sstore(target_address, index, loaded_data)
+        .exceeded_limit()
     {
         context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
     }
@@ -307,22 +268,23 @@ pub fn create_with_bomb<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostE
     }
 
     popn!([value, code_offset, len], context.interpreter);
-    let len = as_usize_or_fail!(context.interpreter, len);
+    let initcode_len = as_usize_or_fail!(context.interpreter, len);
 
     let mut code = Bytes::new();
-    if len != 0 {
+    if initcode_len != 0 {
         // EIP-3860: Limit and meter initcode
         // Limit is set as double of max contract bytecode size
-        if len > context.host.max_initcode_size() {
+        if initcode_len > context.host.max_initcode_size() {
             context.interpreter.halt(InstructionResult::CreateInitCodeSizeLimit);
             return;
         }
-        revm::interpreter::gas!(context.interpreter, gas::initcode_cost(len));
+        revm::interpreter::gas!(context.interpreter, gas::initcode_cost(initcode_len));
 
         let code_offset = as_usize_or_fail!(context.interpreter, code_offset);
-        resize_memory!(context.interpreter, code_offset, len);
-        code =
-            Bytes::copy_from_slice(context.interpreter.memory.slice_len(code_offset, len).as_ref());
+        resize_memory!(context.interpreter, code_offset, initcode_len);
+        code = Bytes::copy_from_slice(
+            context.interpreter.memory.slice_len(code_offset, initcode_len).as_ref(),
+        );
     }
 
     // EIP-1014: Skinny CREATE2
@@ -331,28 +293,34 @@ pub fn create_with_bomb<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostE
     // corresponding SALT bucket capacity doubles.
     let scheme = if IS_CREATE2 {
         popn!([salt], context.interpreter);
-        let Ok(create_gas) = context.host.new_account_gas(target_address) else {
+        // MegaETH modification: gas cost for creating a new account
+        let Ok(new_account_gas) = context.host.new_account_gas(target_address) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
-        let create2_cost = cost_per_word(len, constants::equivalence::KECCAK256WORD)
-            .and_then(|cost| create_gas.checked_add(cost));
+        let create2_cost = cost_per_word(initcode_len, constants::equivalence::KECCAK256WORD)
+            .and_then(|cost| new_account_gas.checked_add(cost))
+            // MegaETH modification: add additional gas cost for creating a new contract
+            .and_then(|cost| cost.checked_add(constants::mini_rex::CREATE_GAS));
         gas_or_fail!(context.interpreter, create2_cost);
         CreateScheme::Create2 { salt }
     } else {
-        let Ok(create_gas) = context.host.new_account_gas(target_address) else {
+        // MegaETH modification: gas cost for creating a new account
+        let Ok(new_account_gas) = context.host.new_account_gas(target_address) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
-        revm::interpreter::gas!(context.interpreter, create_gas);
+        // MegaETH modification: add additional gas cost for creating a new contract
+        let create_cost = new_account_gas.checked_add(constants::mini_rex::CREATE_GAS);
+        gas_or_fail!(context.interpreter, create_cost);
         CreateScheme::Create
     };
 
     let mut gas_limit = context.interpreter.gas.remaining();
 
     // EIP-150: Gas cost changes for IO-heavy operations
-    // Take remaining gas and deduce l64 part of it.
-    gas_limit -= gas_limit / 64;
+    // MegaETH modification: Take remaining gas and deduce l32 part of it.
+    gas_limit -= gas_limit / 32;
 
     revm::interpreter::gas!(context.interpreter, gas_limit);
 
@@ -433,8 +401,10 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     revm::interpreter::gas!(context.interpreter, call_cost);
 
     // EIP-150: Gas cost changes for IO-heavy operations
-    // Take l64 part of gas_limit
-    let mut gas_limit = min(context.interpreter.gas.remaining_63_of_64_parts(), local_gas_limit);
+    // MegaETH modification: replace 63/64 rule with 31/32 rule (take l32 part of gas limit)
+    let remaining_gas =
+        context.interpreter.gas.remaining() - context.interpreter.gas.remaining() / 32;
+    let mut gas_limit = min(remaining_gas, local_gas_limit);
 
     revm::interpreter::gas!(context.interpreter, gas_limit);
 

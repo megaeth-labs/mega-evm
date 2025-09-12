@@ -153,8 +153,8 @@ impl AdditionalLimit {
     /// # Returns
     ///
     /// Returns `true` if the result indicates limit exceeded, `false` otherwise.
-    pub fn is_exceeding_limit_result(&self, result: &FrameResult) -> bool {
-        result.instruction_result() == Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT &&
+    pub fn is_exceeding_limit_result(&self, instruction_result: InstructionResult) -> bool {
+        instruction_result == Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT &&
             self.check_limit().exceeded_limit()
     }
 }
@@ -182,10 +182,19 @@ impl AdditionalLimit {
         self.reset();
 
         // record the transaction data size and kv update count
-        self.data_size_tracker.on_tx_start(tx);
+        self.data_size_tracker.record_tx_data(tx);
+        self.data_size_tracker.record_eip7702_account_info_update(tx);
+        self.data_size_tracker.record_tx_sender_info_update(tx.caller());
         self.kv_update_counter.on_tx_start(tx);
 
         self.check_limit()
+    }
+
+    pub(crate) fn on_new_frame_initialized(
+        &mut self,
+        target_address: Option<Address>,
+        transfer_or_create: bool,
+    ) {
     }
 
     /// Hook called when a new execution frame to be run is initialized.
@@ -210,15 +219,94 @@ impl AdditionalLimit {
         target_address: Option<Address>,
         call_bytecode_address: Option<Address>,
         transfer_or_create: bool,
-        frame: &FrameInitResult<'_, EthFrame<EthInterpreter>>,
+        frame_init: &FrameInitResult<'_, EthFrame<EthInterpreter>>,
     ) -> AdditionalLimitResult {
-        self.data_size_tracker.on_frame_init(
-            target_address,
-            call_bytecode_address,
-            transfer_or_create,
-            frame,
-        );
-        self.kv_update_counter.on_frame_init(target_address, transfer_or_create, frame);
+        match &frame_init {
+            FrameInitResult::Item(frame) => match &frame.input {
+                FrameInput::Empty => unreachable!(),
+                FrameInput::Call(call_inputs) => {
+                    // only if the call transfers value, we need to record the account info update
+                    // induced by the call
+                    if call_inputs.transfers_value() {
+                        self.data_size_tracker
+                            .record_transfer_call_account_info_update(call_inputs.target_address);
+                    }
+                }
+                FrameInput::Create(create_inputs) => {
+                    let created_address = frame
+                        .data
+                        .created_address()
+                        .expect("created address is none for create frame");
+                    self.data_size_tracker.record_account_info_update(created_address);
+                }
+            },
+            FrameInitResult::Result(frame_result) => {
+                if !frame_result.interpreter_result().is_ok() {
+                    // if frame result is not ok, indicating the nested call reverts, so we just
+                    // return. The `frame_size_stack` will be popped in `on_frame_return`.
+                    return AdditionalLimitResult::WithinLimit;
+                }
+                match frame_result {
+                    FrameResult::Call(call_outcome) => {
+                        self.data_size_tracker.on_call(
+                            target_address.expect("target address is none for call frame"),
+                            transfer_or_create,
+                        );
+                    }
+                    FrameResult::Create(_) => {
+                        self.data_size_tracker.on_create(
+                            target_address.expect("target address is none for create frame"),
+                        );
+                    }
+                }
+            }
+        }
+
+        {
+            // a new frame starts, we push a new frame to the frame size stack.
+            self.data_size_tracker.frame_size_stack.push((
+                0,
+                target_address.unwrap_or_default(),
+                transfer_or_create,
+            ));
+            match &frame_init {
+                FrameInitResult::Item(frame) => match &frame.input {
+                    FrameInput::Empty => unreachable!(),
+                    FrameInput::Call(_) => {
+                        self.data_size_tracker.on_call(
+                            target_address.expect("target address is none for call frame"),
+                            transfer_or_create,
+                        );
+                    }
+                    FrameInput::Create(_) => {
+                        this.on_create(
+                            target_address.expect("target address is none for create frame"),
+                        );
+                    }
+                },
+                FrameInitResult::Result(frame_result) => {
+                    if !frame_result.interpreter_result().is_ok() {
+                        // if frame result is not ok, indicating the nested call reverts, so we just
+                        // return. The `frame_size_stack` will be popped in `on_frame_return`.
+                        return;
+                    }
+                    match frame_result {
+                        FrameResult::Call(_) => {
+                            this.on_call(
+                                target_address.expect("target address is none for call frame"),
+                                transfer_or_create,
+                            );
+                        }
+                        FrameResult::Create(_) => {
+                            this.on_create(
+                                target_address.expect("target address is none for create frame"),
+                            );
+                        }
+                    }
+                }
+            }
+        };
+        self.kv_update_counter.on_frame_init(target_address, transfer_or_create, frame_init);
 
         self.check_limit()
     }
@@ -260,6 +348,29 @@ impl AdditionalLimit {
             transfer_or_create,
             frame_result,
         );
+
+        self.check_limit()
+    }
+
+    /// Hook called when the create frame returns a result.
+    ///
+    /// # Arguments
+    ///
+    /// * `interpreter_result` - The interpreter result of the create frame
+    ///
+    /// # Returns
+    ///
+    /// Returns the result of the limit check after recording the create frame result.
+    pub(crate) fn on_create_frame_result(
+        &mut self,
+        interpreter_result: &InterpreterResult,
+    ) -> AdditionalLimitResult {
+        // do nothing if the create frame result is not ok
+        if interpreter_result.is_ok() {
+            // record the data size for the created contract code
+            self.data_size_tracker
+                .record_created_contract_code(interpreter_result.output.len() as u64);
+        }
 
         self.check_limit()
     }
@@ -729,6 +840,48 @@ impl Default for DataSizeTracker {
     }
 }
 
+/* data size constants */
+#[allow(clippy::doc_markdown)]
+#[allow(unused)]
+impl DataSizeTracker {
+    /// The number of bytes for the salt key.
+    pub(crate) const SALT_KEY: u64 = 8;
+    /// The number of bytes for the address.
+    pub(crate) const ADDRESS: u64 = 20;
+    /// The number of bytes for the nonce.
+    pub(crate) const NONCE: u64 = 8;
+    /// The number of bytes for the balance.
+    pub(crate) const BALANCE: u64 = 32;
+    /// The number of bytes for the code hash.
+    pub(crate) const CODE_HASH: u64 = 32;
+    /// The number of bytes for the storage slot key.
+    pub(crate) const SLOT_KEY: u64 = 32;
+    /// The number of bytes for the storage slot value.
+    pub(crate) const SLOT_VALUE: u64 = 32;
+    /// The number of bytes for the witness of one key-value pair.
+    pub(crate) const WITNESS_OVERHEAD: u64 = 3 * (32 + 8);
+    /// The number of bytes for the salt value of the account info.
+    pub(crate) const SALT_VALUE_ACCOUNT_INFO: u64 = Self::ADDRESS + Self::NONCE + Self::BALANCE;
+    /// The number of bytes for the salt value of the storage slot.
+    pub(crate) const SALT_VALUE_STORAGE_SLOT: u64 =
+        Self::ADDRESS + Self::SLOT_KEY + Self::SLOT_VALUE;
+    /// The number of bytes for the salt value delta of the account info. We assume the XOR delta
+    /// of address, nonce, and code hash is very small, so we can ignore them. The only significant
+    /// delta is the balance. We over-estimate it to 32 bytes.
+    pub(crate) const SALT_VALUE_DELTA_ACCOUNT_INFO: u64 = 32;
+    /// The number of bytes for the salt value XOR delta of the storage slot. We over-estimate it to
+    /// 32 bytes.
+    pub(crate) const SALT_VALUE_DELTA_STORAGE_SLOT: u64 = 32;
+    /// The originated data size for reading an account info.
+    pub(crate) const ACCOUNT_INFO_WRITE: u64 = Self::SALT_KEY + Self::SALT_VALUE_DELTA_ACCOUNT_INFO;
+    /// The originated data size for writing a storage slot.
+    pub(crate) const STORAGE_SLOT_WRITE: u64 = Self::SALT_KEY + Self::SALT_VALUE_DELTA_STORAGE_SLOT;
+    /// The number of bytes for the each EIP-7702 authorization.
+    pub(crate) const AUTHORIZATION: u64 = 101;
+    /// The number of bytes for the base transaction data.
+    pub(crate) const BASE_TX: u64 = 110;
+}
+
 impl DataSizeTracker {
     /// Creates a new `DataSizeTracker` with zero initial data size.
     ///
@@ -779,19 +932,10 @@ impl DataSizeTracker {
     }
 
     /// Records the data size of a transaction at the start of execution.
-    ///
-    /// This method calculates and records the total data size of the transaction,
-    /// including intrinsic data, calldata, access list, and authorization list. Here we do an over
-    /// estimation by assuming all 7702 authorizations are valid, and each of them will result in an
-    /// account info update.
-    ///
-    /// # Arguments
-    ///
-    /// * `tx` - The transaction being executed
-    pub(crate) fn on_tx_start(&mut self, tx: &crate::MegaTransaction) {
+    pub(crate) fn record_tx_data(&mut self, tx: &crate::MegaTransaction) {
         // 110 bytes for the intrinsic data of a transaction, including the gas limit, value,
         // signature, gas price, etc.
-        let mut size = 110;
+        let mut size = Self::BASE_TX;
         // bytes for the calldata of a transaction
         size += tx.input().len() as u64;
         // bytes for the access list of a transaction
@@ -800,21 +944,26 @@ impl DataSizeTracker {
             .map(|item| item.map(|access| access.size() as u64).sum::<u64>())
             .unwrap_or_default();
         // bytes for the EIP-7702 authorization list of a transaction (101 bytes per authorization)
-        size += tx.authorization_list_len() as u64 * 101;
+        size += tx.authorization_list_len() as u64 * Self::AUTHORIZATION;
         self.total_size += size;
+        // tx data are non-discardable when the frame (or the transaction) is reverted
+    }
+
+    /// Records the data size generated by the EIP-7702 authority account info update.
+    pub(crate) fn record_eip7702_account_info_update(&mut self, tx: &crate::MegaTransaction) {
         // the 7702 authorization of each account needs one update on its account info
         for authorization in tx.authorization_list() {
             let authority = authorization.authority();
             if let Some(authority) = authority {
-                self.record_account_info_read(authority);
                 self.record_account_info_update(authority);
             }
         }
-        // the caller's account info needs to be read
-        self.record_account_info_read(tx.caller());
-        // the caller itself needs one update on its account info
-        self.record_account_info_update(tx.caller());
-        // the transaction data is non-discardable when the frame (or the transaction) is reverted
+    }
+
+    /// Records the data size generated by the caller's account info update.
+    pub(crate) fn record_tx_sender_info_update(&mut self, sender: Address) {
+        // the caller itself needs one update on its account info, e.g., nonce, balance, etc.
+        self.record_account_info_update(sender);
     }
 
     /// Hook called when a new execution frame is initialized.
@@ -839,16 +988,6 @@ impl DataSizeTracker {
         transfer_or_create: bool,
         frame_init_result: &FrameInitResult<'_, EthFrame<EthInterpreter>>,
     ) {
-        // the target address's account info is always read to check if it has code.
-        // FIXME: if the create frame failed to initialize, the target address is `None`, but we
-        // still need to record an account info read. We pass an default zero address here, it
-        // should be ok since the target address is not used in `record_account_info_read`.
-        self.record_account_info_read(target_address.unwrap_or_default());
-        if call_bytecode_address.is_some() && call_bytecode_address != target_address {
-            // if bytecode is loaded from another address, we record a read from that account too.
-            #[allow(clippy::unnecessary_unwrap)]
-            self.record_account_info_read(call_bytecode_address.unwrap());
-        }
         // a new frame starts, we push a new frame to the frame size stack.
         self.frame_size_stack.push((0, target_address.unwrap_or_default(), transfer_or_create));
         match &frame_init_result {
@@ -939,9 +1078,8 @@ impl DataSizeTracker {
 
     /// Hook called when an execution frame returns.
     ///
-    /// This method handles the completion of an execution frame, including
-    /// recording created contract code and properly managing the data size stack
-    /// based on whether the frame was reverted or completed successfully.
+    /// This method handles the completion of an execution frame, properly managing the data size
+    /// stack based on whether the frame was reverted or completed successfully.
     ///
     /// # Arguments
     ///
@@ -950,12 +1088,6 @@ impl DataSizeTracker {
         let (size_to_discard, _, _) =
             self.frame_size_stack.pop().expect("frame size stack is empty");
         if result.interpreter_result().is_ok() {
-            // record the created contract code in `DataSizeTracker` if the frame result is a
-            // `CreateOutcome`.
-            if let FrameResult::Create(outcome) = result {
-                self.record_created_contract_code(outcome.result.output.len() as u64);
-            }
-
             // merge the current frame's discardable data into the previous frame or do nothing if
             // the current frame is the last frame.
             if let Some((previous_size, _, _)) = self.frame_size_stack.last_mut() {
@@ -1030,8 +1162,25 @@ impl DataSizeTracker {
         self.record_account_info_update(created_address);
     }
 
+    /// Records the account info update induced by a transfer call (i.e., non-zero transfer value).
+    ///
+    /// # Arguments
+    ///
+    /// * `target_address` - The target address of the call.
+    pub(crate) fn record_transfer_call_account_info_update(&mut self, target_address: Address) {
+        // we also need to update the caller if the current frame's target address (i.e., the
+        // caller) is not updated
+        if let Some((_, caller, updated)) = self.frame_size_stack.last() {
+            if !updated {
+                self.record_account_info_update(*caller);
+            }
+        }
+        self.record_account_info_update(target_address);
+    }
+
     /// Records the bytes originated from the `CALL` opcodes. We do an estimation here by counting
     /// every account info update regardless of whether the account is warm or cold.
+    #[deprecated]
     pub(crate) fn on_call(&mut self, target_address: Address, transfer_or_create: bool) {
         if transfer_or_create {
             // we also need to update the caller if the current frame's target address (i.e., the
@@ -1061,22 +1210,6 @@ impl DataSizeTracker {
         self.total_size += size;
         // the account info should be discarded when the frame is reverted
         self.update_current_frame_discardable_size(size);
-    }
-
-    /// Records the data size generated by account information reads.
-    ///
-    /// This internal method calculates and records the estimated data size for
-    /// account reads, including address, nonce, balance, code hash, and witness data.
-    ///
-    /// # Arguments
-    ///
-    /// * `_address` - The account address (unused but kept for interface consistency)
-    fn record_account_info_read(&mut self, _address: Address) {
-        // address (20 bytes) + nonce (8 bytes) + balance (32 bytes) + code hash (32 bytes) + salt
-        // key (8 bytes) witness multipler (3) * internal trie node (32 + 8 bytes)
-        let size = 20 + 8 + 32 + 32 + 8 + 3 * (32 + 8);
-        self.total_size += size;
-        // read data is not discardable
     }
 
     /// Records the data size of created contract code.

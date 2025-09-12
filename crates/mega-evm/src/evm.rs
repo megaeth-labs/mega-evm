@@ -33,13 +33,14 @@ use revm::{
     handler::{
         evm::{ContextDbError, FrameInitResult},
         instructions::InstructionProvider,
-        EthFrame, EvmTr, FrameInitOrResult, FrameResult, PrecompileProvider, SystemCallTx,
+        EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult, PrecompileProvider,
+        SystemCallTx,
     },
     inspector::{InspectorHandler, NoOpInspector},
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, CreateOutcome,
-        FrameInput, Gas, InputsImpl, InstructionResult, Interpreter, InterpreterResult,
-        InterpreterTypes,
+        FrameInput, Gas, InputsImpl, InstructionResult, Interpreter, InterpreterAction,
+        InterpreterResult, InterpreterTypes,
     },
     primitives::{Address, TxKind},
     state::EvmState,
@@ -47,9 +48,9 @@ use revm::{
 };
 
 use crate::{
-    create_exceeding_limit_frame_result, mark_frame_result_as_exceeding_limit, AdditionalLimit,
-    BlockEnvAccess, ExternalEnvOracle, HostExt, IntoMegaethCfgEnv, MegaContext, MegaHaltReason,
-    MegaHandler, MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction,
+    constants, create_exceeding_limit_frame_result, mark_interpreter_result_as_exceeding_limit,
+    AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, HostExt, IntoMegaethCfgEnv, MegaContext,
+    MegaHaltReason, MegaHandler, MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction,
     MegaTransactionError, MegaTxType, NoOpOracle,
 };
 
@@ -413,84 +414,84 @@ where
         &mut self,
         frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        // we need to first get a reference to the `AdditionalLimit` before
-        // calling frame_init to avoid borrowing issues
-        let is_first_frame = frame_init.depth == 0;
+        let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         let additional_limit = self.ctx().additional_limit.clone();
-        let (call_target_address, call_bytecode_address, transfer_or_create) =
-            match &frame_init.frame_input {
-                FrameInput::Call(inputs) => (
-                    Some(inputs.target_address),
-                    Some(inputs.bytecode_address),
-                    inputs.value.transfer().is_some_and(|x| x > U256::ZERO),
-                ),
-                FrameInput::Create(_) => (None, None, true),
+        if is_mini_rex_enabled &&
+            additional_limit.borrow_mut().before_frame_init(&frame_init).exceeded_limit()
+        {
+            // if the limit is exceeded, create an error frame result and return it directly
+            let (gas_limit, return_memory_offset) = match &frame_init.frame_input {
+                FrameInput::Create(inputs) => (inputs.gas_limit, None),
+                FrameInput::Call(inputs) => {
+                    (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
+                }
                 FrameInput::Empty => unreachable!(),
             };
-        let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
+            return Ok(FrameInitResult::Result(create_exceeding_limit_frame_result(
+                gas_limit,
+                return_memory_offset,
+            )));
+        }
 
         // call the inner frame_init function to initialize the frame
         let init_result = self.inner.frame_init(frame_init)?;
 
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if is_mini_rex_enabled {
-            let target_address = call_target_address
-                .or_else(|| try_extract_target_address_from_frame_init_result(&init_result));
-            // call the `on_frame_init` function to update the `AdditionalLimit`, if the limit is
-            // exceeded, return the error frame result
-            let limit_result = match &init_result {
-                FrameInitResult::Result(frame_result) => {
-                    if is_first_frame {
-                        // the first frame is transient, its result will not be processed by
-                        // `frame_return_result`, so we need to handle it differently.
-                        additional_limit.borrow_mut().on_transient_first_frame(
-                            target_address,
-                            transfer_or_create,
-                            frame_result,
-                        )
-                    } else {
-                        additional_limit.borrow_mut().on_frame_init(
-                            target_address,
-                            call_bytecode_address,
-                            transfer_or_create,
-                            &init_result,
-                        )
-                    }
-                }
-                FrameInitResult::Item(_) => additional_limit.borrow_mut().on_frame_init(
-                    target_address,
-                    call_bytecode_address,
-                    transfer_or_create,
-                    &init_result,
-                ),
-            };
-            if limit_result.exceeded_limit() {
-                let frame_result = match init_result {
-                    revm::handler::ItemOrResult::Item(frame) => {
-                        let (gas_limit, return_memory_offset) = match &frame.input {
-                            FrameInput::Create(inputs) => (inputs.gas_limit, None),
-                            FrameInput::Call(inputs) => {
-                                (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
-                            }
-                            FrameInput::Empty => unreachable!(),
-                        };
-                        create_exceeding_limit_frame_result(gas_limit, return_memory_offset)
-                    }
-                    revm::handler::ItemOrResult::Result(frame_result) => {
-                        mark_frame_result_as_exceeding_limit(frame_result)
-                    }
-                };
-                return Ok(FrameInitResult::Result(frame_result));
+            if let ItemOrResult::Item(frame) = &init_result {
+                additional_limit.borrow_mut().after_frame_init_on_frame(frame);
             }
         }
 
         Ok(init_result)
     }
 
+    /// This method copies the logic from `revm::handler::EvmTr::frame_run` to and add additional
+    /// logic before `process_next_action` to handle the additional limit.
+    #[inline]
     fn frame_run(
         &mut self,
     ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
-        self.inner.frame_run()
+        let frame = self.inner.frame_stack.get();
+        let context = &mut self.inner.ctx;
+        let instructions = &mut self.inner.instruction;
+
+        let mut action = frame.interpreter.run_plain(instructions.instruction_table(), context);
+
+        // Apply the additional limits and gas cost only when the `MINI_REX` spec is enabled.
+        if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+            if let InterpreterAction::Return(interpreter_result) = &mut action {
+                // charge additional gas cost for the number of bytes
+                if frame.data.is_create() && interpreter_result.is_ok() {
+                    // if the creation is successful, charge the additional gas cost for the
+                    // number of bytes. The EVM's original `CODEDEPOSIT` gas cost will be
+                    // charged later in `process_next_action`. We only charge the difference
+                    // here.
+                    let additional_code_deposit_gas =
+                        constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS *
+                            interpreter_result.output.len() as u64;
+                    if !interpreter_result.gas.record_cost(additional_code_deposit_gas) {
+                        // if out of gas, set the instruction result to OOG
+                        interpreter_result.result = InstructionResult::OutOfGas;
+                    }
+                }
+
+                // update additional limits
+                let mut additional_limit = context.additional_limit.borrow_mut();
+                if frame.data.is_create() &&
+                    additional_limit.after_create_frame_run(interpreter_result).exceeded_limit()
+                {
+                    // if exceeded the limit, set the instruction result
+                    mark_interpreter_result_as_exceeding_limit(interpreter_result);
+                }
+            }
+        }
+
+        frame.process_next_action(context, action).inspect(|i| {
+            if i.is_result() {
+                frame.set_finished(true);
+            }
+        })
     }
 
     fn frame_return_result(
@@ -504,7 +505,12 @@ where
         if self.ctx_ref().spec.is_enabled(MegaSpecId::MINI_REX) {
             // Return early if the limit is already exceeded before processing the child frame
             // return result.
-            if self.ctx_ref().additional_limit.borrow().is_exceeding_limit_result(&result) {
+            if self
+                .ctx_ref()
+                .additional_limit
+                .borrow_mut()
+                .is_exceeding_limit_result(result.instruction_result())
+            {
                 return Ok(Some(result));
             }
 
@@ -514,15 +520,15 @@ where
                 .ctx_ref()
                 .additional_limit
                 .borrow_mut()
-                .on_frame_return(&result)
+                .before_frame_return_result(&result, false)
                 .exceeded_limit()
             {
                 match &mut result {
-                    FrameResult::Call(outcome) => {
-                        outcome.result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
+                    FrameResult::Call(call_outcome) => {
+                        mark_interpreter_result_as_exceeding_limit(&mut call_outcome.result)
                     }
-                    FrameResult::Create(outcome) => {
-                        outcome.result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
+                    FrameResult::Create(create_outcome) => {
+                        mark_interpreter_result_as_exceeding_limit(&mut create_outcome.result)
                     }
                 }
                 return Ok(Some(result));
@@ -747,30 +753,5 @@ where
         ));
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run_system_call(&mut h, self)
-    }
-}
-
-/// Tries to extract the target address from the frame initialization result.
-///
-/// # Arguments
-///
-/// * `frame_init_result` - The frame initialization result
-///
-/// # Returns
-///
-/// Returns the target address if it contains, otherwise returns `None`.
-pub(crate) fn try_extract_target_address_from_frame_init_result(
-    frame_init_result: &FrameInitResult<'_, EthFrame<EthInterpreter>>,
-) -> Option<Address> {
-    match frame_init_result {
-        FrameInitResult::Item(frame) => match &frame.input {
-            FrameInput::Empty => unreachable!(),
-            FrameInput::Call(call_inputs) => Some(call_inputs.target_address),
-            FrameInput::Create(_) => frame.data.created_address(),
-        },
-        FrameInitResult::Result(frame_result) => match frame_result {
-            FrameResult::Call(_) => None,
-            FrameResult::Create(create_outcome) => create_outcome.address,
-        },
     }
 }

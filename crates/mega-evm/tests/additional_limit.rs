@@ -13,10 +13,12 @@ use alloy_primitives::{address, bytes, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::{opcode_gen::BytecodeBuilder, set_account_code, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
-    NoOpOracle,
+    NoOpOracle, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, GAS, INVALID, PUSH0, SLOAD, SSTORE, STOP},
+    bytecode::opcode::{
+        CALL, CREATE, DELEGATECALL, GAS, INVALID, PUSH0, PUSH1, SLOAD, SSTORE, STOP,
+    },
     context::{
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
@@ -55,28 +57,21 @@ fn transact(
 
 /// Checks if the execution result indicates that the data limit was exceeded.
 #[allow(unused)]
-fn is_data_limit_exceeded(result: ResultAndState<MegaHaltReason>) -> bool {
-    match result.result {
-        ExecutionResult::Halt { reason, .. } => reason == MegaHaltReason::DataLimitExceeded,
+fn is_data_limit_exceeded(result: &ResultAndState<MegaHaltReason>) -> bool {
+    match &result.result {
+        ExecutionResult::Halt { reason, .. } => reason == &MegaHaltReason::DataLimitExceeded,
         _ => false,
     }
 }
 
 /// Checks if the execution result indicates that the KV update limit was exceeded.
 #[allow(unused)]
-fn is_kv_update_limit_exceeded(result: ResultAndState<MegaHaltReason>) -> bool {
-    match result.result {
-        ExecutionResult::Halt { reason, .. } => reason == MegaHaltReason::KVUpdateLimitExceeded,
+fn is_kv_update_limit_exceeded(result: &ResultAndState<MegaHaltReason>) -> bool {
+    match &result.result {
+        ExecutionResult::Halt { reason, .. } => reason == &MegaHaltReason::KVUpdateLimitExceeded,
         _ => false,
     }
 }
-
-/* The common data size constants */
-const ACCOUNT_INFO_READ: u64 = 220;
-const ACCOUNT_INFO_WRITE: u64 = 312;
-const STORAGE_READ: u64 = 212;
-const STORAGE_WRITE: u64 = 296;
-const BASE_TX: u64 = 110;
 
 const FACTORY: Address = address!("0000000000000000000000000000000000200001");
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
@@ -188,7 +183,16 @@ fn gen_log_factory_input(num_topics: u64, data_length: u64) -> Bytes {
     input.into()
 }
 
-/// Test the data size and kv update count for empty transaction execution.
+// ============================================================================
+// BASIC TRANSACTION TESTS
+// ============================================================================
+
+/// Test data size and KV update count for empty transaction execution.
+///
+/// This test verifies the baseline data size and KV update counts for the simplest
+/// possible transaction - a call to an existing account with no value or data.
+/// It establishes the minimum data size (base transaction + sender account write)
+/// and KV update count (sender nonce increment) for all transactions.
 #[test]
 fn test_empty_tx() {
     let mut db = CacheDB::<EmptyDB>::default();
@@ -202,58 +206,8 @@ fn test_empty_tx() {
     // update
     assert_eq!(
         data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-    );
-}
-
-/// Test ether transfer between existing accounts and verify data size/KV update counts.
-///
-/// This test verifies that a simple ether transfer from one existing account to another
-/// works correctly and generates the expected amount of data and key-value updates.
-/// It sets up two accounts with initial balances and transfers 1 wei from caller to callee.
-#[test]
-fn test_ether_transfer_to_existing_account() {
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1000))
-        .account_balance(CALLEE, U256::from(100));
-    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).value(U256::from(1)).build_fill();
-    let (res, data_size, kv_update_count) =
-        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
-    assert!(res.result.is_success());
-    // 1 kv update for the caller account (nonce increase), and one for the callee account (balance
-    // increase)
-    assert_eq!(kv_update_count, 2);
-    assert_eq!(
-        data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + ACCOUNT_INFO_WRITE // callee write
-    );
-}
-
-/// Test ether transfer to a non-existing account and verify data size/KV update counts.
-///
-/// This test verifies that transferring ether to an account that doesn't exist yet
-/// works correctly and generates the expected amount of data and key-value updates.
-/// It creates a new account for the callee during the transfer operation.
-#[test]
-fn test_ether_transfer_to_non_existing_account() {
-    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
-    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).value(U256::from(1)).build_fill();
-    let (res, data_size, kv_update_count) =
-        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
-    assert!(res.result.is_success());
-    // 2 kv updates for the caller and callee account info updates
-    assert_eq!(kv_update_count, 2);
-    assert_eq!(
-        data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + ACCOUNT_INFO_WRITE // callee write
+        BASE_TX_SIZE // base tx
+        +ACCOUNT_INFO_WRITE_SIZE // sender write
     );
 }
 
@@ -261,7 +215,8 @@ fn test_ether_transfer_to_non_existing_account() {
 ///
 /// This test verifies that making a call to an account that doesn't exist yet
 /// works correctly and generates the expected amount of data and key-value updates.
-/// Unlike ether transfers, this call doesn't create the account since no value is transferred.
+/// Unlike ether transfers, this call doesn't create the account since no value is transferred,
+/// resulting in fewer KV updates and data size compared to value transfers.
 #[test]
 fn test_call_non_existing_account() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
@@ -274,9 +229,8 @@ fn test_call_non_existing_account() {
     // base tx + sender account info read + sender account info write
     assert_eq!(
         data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
     );
 }
 
@@ -285,7 +239,8 @@ fn test_call_non_existing_account() {
 /// This test verifies that a call transaction with additional data components
 /// (call data, access list, and EIP-7702 authorization list) works correctly
 /// and generates the expected amount of data and key-value updates. It tests
-/// the data limit functionality with more complex transaction structures.
+/// the data limit functionality with more complex transaction structures,
+/// including EIP-7702 delegation which requires additional account updates.
 #[test]
 fn test_call_with_data() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
@@ -311,20 +266,79 @@ fn test_call_with_data() {
     assert_eq!(kv_update_count, 2);
     assert_eq!(
         data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + 101 + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // 7702 authorization & account read & write
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        + 101 + ACCOUNT_INFO_WRITE_SIZE // 7702 authorization & account read & write
         + 4 + 52 // call data & access list
     );
 }
+
+// ============================================================================
+// ETHER TRANSFER TESTS
+// ============================================================================
+
+/// Test ether transfer between existing accounts and verify data size/KV update counts.
+///
+/// This test verifies that a simple ether transfer from one existing account to another
+/// works correctly and generates the expected amount of data and key-value updates.
+/// It sets up two accounts with initial balances and transfers 1 wei from caller to callee.
+/// The test verifies that both accounts are updated (sender nonce, receiver balance)
+/// and that the data size includes both account writes.
+#[test]
+fn test_ether_transfer_to_existing_account() {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1000))
+        .account_balance(CALLEE, U256::from(100));
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).value(U256::from(1)).build_fill();
+    let (res, data_size, kv_update_count) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+    assert!(res.result.is_success());
+    // 1 kv update for the caller account (nonce increase), and one for the callee account (balance
+    // increase)
+    assert_eq!(kv_update_count, 2);
+    assert_eq!(
+        data_size,
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        + ACCOUNT_INFO_WRITE_SIZE // callee write
+    );
+}
+
+/// Test ether transfer to a non-existing account and verify data size/KV update counts.
+///
+/// This test verifies that transferring ether to an account that doesn't exist yet
+/// works correctly and generates the expected amount of data and key-value updates.
+/// It creates a new account for the callee during the transfer operation, which
+/// results in the same data size and KV update counts as transferring to an existing
+/// account since both require updating the receiver's balance.
+#[test]
+fn test_ether_transfer_to_non_existing_account() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).value(U256::from(1)).build_fill();
+    let (res, data_size, kv_update_count) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+    assert!(res.result.is_success());
+    // 2 kv updates for the caller and callee account info updates
+    assert_eq!(kv_update_count, 2);
+    assert_eq!(
+        data_size,
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        + ACCOUNT_INFO_WRITE_SIZE // callee write
+    );
+}
+
+// ============================================================================
+// CONTRACT CREATION TESTS
+// ============================================================================
 
 /// Test contract creation and verify data size/KV update counts.
 ///
 /// This test verifies that creating a new contract works correctly and generates
 /// the expected amount of data and key-value updates. It creates a contract with
 /// 10 bytes of code and verifies the data size includes the transaction data,
-/// account updates, and the created contract code.
+/// account updates, and the created contract code. The test ensures that both
+/// the sender and the newly created contract account are properly tracked.
 #[test]
 fn test_create_contract() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
@@ -341,10 +355,9 @@ fn test_create_contract() {
     // input data
     assert_eq!(
         data_size,
-        BASE_TX // base tx 
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + ACCOUNT_INFO_WRITE // callee write
+        BASE_TX_SIZE // base tx 
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        + ACCOUNT_INFO_WRITE_SIZE // callee write
         + 10 // created contract code
         + input_len // input data
     );
@@ -355,7 +368,8 @@ fn test_create_contract() {
 /// This test verifies that creating a contract through a factory contract works correctly
 /// and generates the expected amount of data and key-value updates. It uses a factory
 /// contract that creates another contract with 10 bytes of code, testing the data limit
-/// functionality in a more complex contract creation scenario.
+/// functionality in a more complex contract creation scenario. The test ensures that
+/// all three accounts (sender, factory, created contract) are properly tracked.
 #[test]
 fn test_create_contract_with_factory() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
@@ -367,58 +381,34 @@ fn test_create_contract_with_factory() {
         transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
     assert!(res.result.is_success());
     // 1 kv update for the caller account (tx nonce increase), 1 kv update for the created account
-    assert_eq!(kv_update_count, 2);
+    assert_eq!(kv_update_count, 3);
     assert_eq!(
         data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + ACCOUNT_INFO_READ // created contract read
-        + ACCOUNT_INFO_WRITE // created contract write
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        + ACCOUNT_INFO_WRITE_SIZE // factory nonce change
+        + ACCOUNT_INFO_WRITE_SIZE // created contract write
         + 10 // contract code
         + input_len // input data
     );
 }
 
-/// Test log data generation and verify data size/KV update counts.
-///
-/// This test verifies that generating log data works correctly and generates
-/// the expected amount of data and key-value updates. It uses a log factory
-/// contract that creates logs with 1 topic and 10 bytes of data, testing
-/// the data limit functionality for log operations.
-#[test]
-fn test_log_data() {
-    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
-    set_account_code(&mut db, CALLEE, LOG_FACTORY_CODE);
-    let input = gen_log_factory_input(1, 10);
-    let input_len = input.len() as u64;
-    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).data(input).build_fill();
-    let (res, data_size, kv_update_count) =
-        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
-    assert!(res.result.is_success());
-    // 1 kv update for the caller account (tx nonce increase)
-    assert_eq!(kv_update_count, 1);
-    assert_eq!(
-        data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + 32 + 10 // log topics and data
-        + input_len // input data
-    );
-}
+// ============================================================================
+// STORAGE OPERATION TESTS
+// ============================================================================
 
 /// Test storage write operations and verify data size/KV update counts.
 ///
 /// This test verifies that storage write operations (SSTORE) work correctly and generate
 /// the expected amount of data and key-value updates. It uses a simple contract that
-/// stores 0x0 to storage slot 0, testing the data limit functionality for storage
-/// operations.
+/// stores 0x1 to storage slot 0, testing the data limit functionality for storage
+/// operations. Storage writes create both data size and KV update counts.
 #[test]
 fn test_sstore_data() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
     // a simple contract that stores 0x0 to slot 0
-    let code: Bytes = BytecodeBuilder::default().append_many([PUSH0, PUSH0, SSTORE, STOP]).build();
+    let code: Bytes =
+        BytecodeBuilder::default().append_many([PUSH1, 0x1u8, PUSH0, SSTORE, STOP]).build();
     set_account_code(&mut db, CALLEE, code);
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
     let (res, data_size, kv_update_count) =
@@ -428,10 +418,9 @@ fn test_sstore_data() {
     assert_eq!(kv_update_count, 2);
     assert_eq!(
         data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + STORAGE_WRITE // storage write
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        + STORAGE_SLOT_WRITE_SIZE // storage write
     );
 }
 
@@ -440,7 +429,8 @@ fn test_sstore_data() {
 /// This test verifies that storage read operations (SLOAD) work correctly and generate
 /// the expected amount of data and key-value updates. It uses a simple contract that
 /// loads from storage slot 0, testing the data limit functionality for storage
-/// read operations.
+/// read operations. Storage reads contribute to data size but don't create KV updates
+/// since they don't modify state.
 #[test]
 fn test_sload_data() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
@@ -455,12 +445,114 @@ fn test_sload_data() {
     assert_eq!(kv_update_count, 1);
     assert_eq!(
         data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + STORAGE_READ // storage read
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
     );
 }
+
+// ============================================================================
+// LOG OPERATION TESTS
+// ============================================================================
+
+/// Test log data generation and verify data size/KV update counts.
+///
+/// This test verifies that generating log data works correctly and generates
+/// the expected amount of data and key-value updates. It uses a log factory
+/// contract that creates logs with 1 topic and 10 bytes of data, testing
+/// the data limit functionality for log operations. Log data contributes to
+/// the total data size but doesn't create additional KV updates.
+#[test]
+fn test_log_data() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
+    set_account_code(&mut db, CALLEE, LOG_FACTORY_CODE);
+    let input = gen_log_factory_input(1, 10);
+    let input_len = input.len() as u64;
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).data(input).build_fill();
+    let (res, data_size, kv_update_count) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+    assert!(res.result.is_success());
+    // 1 kv update for the caller account (tx nonce increase)
+    assert_eq!(kv_update_count, 1);
+    assert_eq!(
+        data_size,
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        + 32 + 10 // log topics and data
+        + input_len // input data
+    );
+}
+
+// ============================================================================
+// CALL OPERATION TESTS
+// ============================================================================
+
+/// Test delegated call operations and verify data size/KV update counts.
+///
+/// This test verifies that delegated call operations work correctly and generate
+/// the expected amount of data and key-value updates. It uses a contract that
+/// performs a delegated call to a library contract, testing the data limit
+/// functionality for delegated calls. Delegated calls don't create additional
+/// account updates since they execute in the caller's context.
+#[test]
+fn test_delegated_call() {
+    let mut db = MemoryDatabase::default();
+    // a contract that calls a library contract
+    let code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // argOffset, argLen, returnOffset, returnLen
+        .push_address(LIBRARY) // callee address
+        .append(GAS) // gas to forward
+        .append(DELEGATECALL)
+        .build();
+    db.set_account_code(CALLEE, code);
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
+    let (res, data_size, kv_updates) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+    assert!(res.result.is_success());
+    // 1 kv update for the caller account (tx nonce increase)
+    assert_eq!(kv_updates, 1);
+    assert_eq!(data_size, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE); // no update on either contract
+                                                                   // or library
+}
+
+/// Test that caller account updates are not double-counted in nested transfers.
+///
+/// This test verifies that when a contract performs a nested call with value transfer,
+/// the caller account is not double-counted for data size and KV update purposes.
+/// It uses a contract that transfers value to a library contract, ensuring that
+/// account updates are properly deduplicated across call boundaries.
+#[test]
+fn test_updated_caller_should_not_be_double_counted_for_nested_transfer() {
+    let mut db = MemoryDatabase::default();
+    // a contract that transfers value to a library contract
+    let code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // argOffset, argLen, returnOffset, returnLen
+        .push_number(1u8) // value to transfer
+        .push_address(LIBRARY) // callee address
+        .append(GAS) // gas to forward
+        .append(CALL)
+        .build();
+    db.set_account_code(CALLEE, code);
+    db.set_account_balance(CALLEE, U256::from(10000));
+    db.set_account_balance(CALLER, U256::from(10000));
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).value(U256::from(100)).build_fill();
+    let (res, data_size, kv_updates) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+    assert!(res.result.is_success());
+    // 1 kv update for the caller account (tx nonce increase), 1 kv update for the callee account
+    // (balance increase and decrease), 1 kv update for the library account (balance increase)
+    // (balance decrease)
+    assert_eq!(kv_updates, 3);
+    assert_eq!(
+        data_size,
+        BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE // base tx + sender write
+        + ACCOUNT_INFO_WRITE_SIZE // callee write (count only once)
+        + ACCOUNT_INFO_WRITE_SIZE // library write
+    );
+}
+
+// ============================================================================
+// NESTED CALL TESTS
+// ============================================================================
 
 /// Test that data size tracking correctly handles reverted nested calls.
 ///
@@ -468,7 +560,8 @@ fn test_sload_data() {
 /// tracking still correctly accounts for storage reads that occurred before the
 /// revert. It uses a contract that calls a library contract, where the library
 /// performs storage operations and then reverts, ensuring that storage reads
-/// are still included in the witness data even when the call fails.
+/// are still included in the witness data even when the call fails. The test
+/// demonstrates that read operations are tracked even in failed calls.
 #[test]
 fn test_nested_call_data_size_are_reverted_on_failure() {
     let mut db = MemoryDatabase::default();
@@ -494,11 +587,8 @@ fn test_nested_call_data_size_are_reverted_on_failure() {
     assert_eq!(kv_update_count, 1);
     assert_eq!(
         data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + ACCOUNT_INFO_READ // library read
-        + STORAGE_READ // library storage read
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
     );
 }
 
@@ -533,12 +623,14 @@ fn test_nested_creation_revert() {
     assert_eq!(kv_update_count, 1);
     assert_eq!(
         data_size,
-        BASE_TX // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ // callee read
-        + ACCOUNT_INFO_READ // created contract read
+        BASE_TX_SIZE // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
     );
 }
+
+// ============================================================================
+// SPEC COMPARISON TESTS
+// ============================================================================
 
 /// Test that data size and KV update counts are not measured in EQUIVALENCE spec.
 ///
@@ -557,12 +649,16 @@ fn test_data_size_and_kv_update_count_are_not_measured_in_equivalence_spec() {
     assert_eq!(data_size, 0);
 }
 
+// ============================================================================
+// LIMIT ENFORCEMENT TESTS
+// ============================================================================
+
 /// Test that data limit enforcement works correctly when the limit is not exceeded.
 ///
 /// This test verifies that transactions succeed when the generated data size is exactly
 /// at the data limit threshold. It uses a simple call transaction that generates
-/// exactly 422 bytes (110 + 312) and sets the data limit to that amount, ensuring
-/// the transaction completes successfully.
+/// the minimum data size (base transaction + sender account write) and sets the data
+/// limit to that exact amount, ensuring the transaction completes successfully.
 #[test]
 fn test_data_limit_just_not_exceed() {
     let mut db = MemoryDatabase::default();
@@ -572,9 +668,8 @@ fn test_data_limit_just_not_exceed() {
     let (res, _, _) = transact(
         MegaSpecId::MINI_REX,
         &mut db,
-        BASE_TX  // base tx
-        + ACCOUNT_INFO_READ + ACCOUNT_INFO_WRITE // sender read & write
-        + ACCOUNT_INFO_READ, // callee read
+        BASE_TX_SIZE  // base tx
+        + ACCOUNT_INFO_WRITE_SIZE, // sender write
         u64::MAX,
         tx,
     )
@@ -586,7 +681,7 @@ fn test_data_limit_just_not_exceed() {
 ///
 /// This test verifies that transactions are halted when the generated data size exceeds
 /// the data limit threshold. It uses a simple call transaction that generates
-/// 422 bytes (110 + 312) but sets the data limit to 421 bytes, ensuring
+/// the minimum data size but sets the data limit to one byte less, ensuring
 /// the transaction is halted with a `DataLimitExceeded` reason.
 #[test]
 fn test_data_limit_just_exceed() {
@@ -594,9 +689,18 @@ fn test_data_limit_just_exceed() {
     // the data size is 110 bytes for the intrinsic data of a transaction, 312 bytes for the caller
     // account info update
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
-    let (res, _, _) = transact(MegaSpecId::MINI_REX, &mut db, 110 + 312 - 1, u64::MAX, tx).unwrap();
+    let (res, _, _) = transact(
+        MegaSpecId::MINI_REX,
+        &mut db,
+        BASE_TX_SIZE  // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        -1, // minus one byte data size
+        u64::MAX,
+        tx,
+    )
+    .unwrap();
     assert!(res.result.is_halt());
-    assert!(is_data_limit_exceeded(res));
+    assert!(is_data_limit_exceeded(&res));
 }
 
 /// Test that KV update limit enforcement works correctly when the limit is not exceeded.
@@ -627,7 +731,7 @@ fn test_kv_update_limit_just_exceed() {
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).value(U256::from(1)).build_fill();
     let (res, _, _) = transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, 2 - 1, tx).unwrap();
     assert!(res.result.is_halt());
-    assert!(is_kv_update_limit_exceeded(res));
+    assert!(is_kv_update_limit_exceeded(&res));
 }
 
 /// Test that data limit enforcement correctly halts transactions in nested calls.
@@ -636,6 +740,7 @@ fn test_kv_update_limit_just_exceed() {
 /// is properly halted with a `DataLimitExceeded` reason. It uses a contract that calls a
 /// library contract, where the library performs storage operations that would exceed the
 /// data limit, ensuring that the limit enforcement works correctly across call boundaries.
+/// The test demonstrates that limits are enforced even in complex call scenarios.
 #[test]
 fn test_data_limit_exceed_in_nested_call() {
     let mut db = MemoryDatabase::default();
@@ -649,18 +754,21 @@ fn test_data_limit_exceed_in_nested_call() {
     db.set_account_code(CALLEE, contract_code);
     // a library that sload and sstore and then revert
     let library_code =
-        BytecodeBuilder::default().append_many([PUSH0, PUSH0, SLOAD, SSTORE, INVALID]).build();
+        BytecodeBuilder::default().append_many([PUSH1, 0x1u8, PUSH0, SLOAD, SSTORE, STOP]).build();
     db.set_account_code(LIBRARY, library_code);
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
-    // The data size of the root call takes 110 bytes for the intrinsic data of a transaction, 312
-    // bytes for the caller account info update. The nested call takes 212 bytes for the library
-    // storage read and 296 bytes for the library storage write. We set the data limit to 110 + 312
-    // + 100, so that the transaction is halted in the nested call with a `DataLimitExceeded`
-    //   reason.
-    let (res, _, _) =
-        transact(MegaSpecId::MINI_REX, &mut db, 110 + 312 + 100, u64::MAX, tx).unwrap();
+    let (res, _, _) = transact(
+        MegaSpecId::MINI_REX,
+        &mut db,
+        BASE_TX_SIZE  // base tx
+        + ACCOUNT_INFO_WRITE_SIZE // sender write
+        + 1, // one additional data size
+        u64::MAX,
+        tx,
+    )
+    .unwrap();
     assert!(res.result.is_halt());
-    assert!(is_data_limit_exceeded(res));
+    assert!(is_data_limit_exceeded(&res));
 }
 
 /// Test that KV update limit enforcement correctly halts transactions in nested calls.
@@ -669,7 +777,8 @@ fn test_data_limit_exceed_in_nested_call() {
 /// is properly halted with a `KVUpdateLimitExceeded` reason. It uses a contract that calls a
 /// library contract with value transfer, where the combined KV updates from the root call,
 /// nested call, and library operations exceed the limit, ensuring that the limit enforcement
-/// works correctly across call boundaries.
+/// works correctly across call boundaries. The test demonstrates that KV update limits
+/// are enforced even in complex nested call scenarios.
 #[test]
 fn test_kv_update_limit_exceed_in_nested_call() {
     let mut db = MemoryDatabase::default();
@@ -685,7 +794,7 @@ fn test_kv_update_limit_exceed_in_nested_call() {
     db.set_account_balance(CALLEE, U256::from(10000));
     // a library that sstore and then revert
     let library_code =
-        BytecodeBuilder::default().append_many([PUSH0, PUSH0, SSTORE, INVALID]).build();
+        BytecodeBuilder::default().append_many([PUSH1, 0x1u8, PUSH0, SSTORE, INVALID]).build();
     db.set_account_code(LIBRARY, library_code);
     // The tx makes 1 kv update in the root call for the caller account info update, 1 kv update in
     // the nested call for value transfer, and 1 kv update in the library for storage write. We set
@@ -694,11 +803,122 @@ fn test_kv_update_limit_exceed_in_nested_call() {
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
     let (res, _, _) = transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, 3 - 1, tx).unwrap();
     assert!(res.result.is_halt());
-    assert!(is_kv_update_limit_exceeded(res));
+    assert!(is_kv_update_limit_exceeded(&res));
 }
 
-// TODO: read account info of delegated contract
-// TODO: updated caller should not be double counted for both kv update and data size.
-// TODO: warn sload and sstore should not be counted.
-// TODO: tests for data/kv update limit is disable in EQUIVALENCE Spec
-// TODO: tests for doubled gas cost for sstore and call when bucket capacity doubles
+// ============================================================================
+// STORAGE DEDUPLICATION TESTS
+// ============================================================================
+
+/// Test that writing zero to a storage slot should not be counted for data size/KV updates.
+///
+/// This test verifies that writing zero to a storage slot (which effectively deletes
+/// the slot) is not counted towards data size or KV update limits. This is important
+/// for gas optimization and ensures that storage cleanup operations don't consume
+/// unnecessary resources. The test writes 0x0 to slot 0 and verifies that only
+/// the base transaction and sender account update are counted.
+#[test]
+fn test_writing_zero_to_slot_should_not_be_counted() {
+    let mut db = MemoryDatabase::default();
+    // a contract writing 0x0 to slot 0
+    let code: Bytes = BytecodeBuilder::default().append_many([PUSH0, PUSH0, SSTORE, STOP]).build();
+    db.set_account_code(CALLEE, code);
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
+    let (res, data_size, kv_updates) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+    assert!(res.result.is_success());
+    assert_eq!(kv_updates, 1);
+    assert_eq!(data_size, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE); // no storage slot write
+}
+
+/// Test that writing twice to the same storage slot should be counted only once.
+///
+/// This test verifies that multiple writes to the same storage slot within a single
+/// transaction are deduplicated and counted only once for data size and KV update
+/// purposes. This prevents abuse where contracts could write to the same slot
+/// multiple times to artificially inflate their data usage. The test writes 0x1
+/// then 0x2 to slot 0 and verifies that only one storage write is counted.
+#[test]
+fn test_writing_twice_to_same_slot_should_be_counted_once() {
+    let mut db = MemoryDatabase::default();
+    // a contract writing 0x1 to slot 0 and then 0x2 to slot 0
+    let code: Bytes =
+        BytecodeBuilder::default().sstore(0, U256::from(1)).sstore(0, U256::from(2)).build();
+    db.set_account_code(CALLEE, code);
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
+    let (res, data_size, kv_updates) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+    assert!(res.result.is_success());
+    // 1 kv update for the caller account (tx nonce increase), 1 kv update for the storage slot
+    // write
+    assert_eq!(kv_updates, 2);
+    assert_eq!(
+        data_size,
+        BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE // base tx + sender write
+         + STORAGE_SLOT_WRITE_SIZE // only one storage slot write
+    );
+}
+
+/// Test that eventually no change to a storage slot should not be counted.
+///
+/// This test verifies that when a storage slot is modified and then reset to its
+/// original value within the same transaction, the net effect is no change and
+/// therefore no data size or KV update should be counted. This prevents contracts
+/// from artificially inflating their resource usage by performing operations that
+/// ultimately cancel out. The test writes 0x1 then 0x0 to slot 0 and verifies
+/// that no storage write is counted since the final state is unchanged.
+#[test]
+fn test_eventually_no_change_to_slot_should_not_be_counted() {
+    let mut db = MemoryDatabase::default();
+    // a contract writing 0x1 to slot 0 and then reset slot 0 to 0x0
+    let code: Bytes =
+        BytecodeBuilder::default().sstore(0, U256::from(1)).sstore(0, U256::from(0)).build();
+    db.set_account_code(CALLEE, code);
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
+    let (res, data_size, kv_updates) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+    assert!(res.result.is_success());
+    // 1 kv update for the caller account (tx nonce increase)
+    assert_eq!(kv_updates, 1);
+    assert_eq!(data_size, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE); // no storage slot write
+}
+
+// ============================================================================
+// STATE REVERT TESTS
+// ============================================================================
+
+/// Test that state is properly reverted when data limit is exceeded.
+///
+/// This test verifies that when a transaction exceeds the data limit, the entire
+/// state is properly reverted to its original state before the transaction.
+/// It uses a contract that performs storage operations and value transfers,
+/// ensuring that all changes are rolled back when the limit is exceeded.
+#[test]
+fn test_state_revert_when_exceeding_limit() {
+    let mut db = MemoryDatabase::default();
+    // a contract that writes 0x1 to slot 0
+    let code = BytecodeBuilder::default().sstore(0, U256::from(1)).build();
+    db.set_account_code(CALLEE, code);
+    db.set_account_balance(CALLER, U256::from(10000));
+    // the tx also transfers value to the callee
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).value(U256::from(100)).build_fill();
+    let (res, data_size, kv_updates) = transact(
+        MegaSpecId::MINI_REX,
+        &mut db,
+        BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE // base tx + sender write
+         + 1, // one additional data size
+        u64::MAX,
+        tx,
+    )
+    .unwrap();
+    // the tx should be halted with a `DataLimitExceeded` reason, and the state should be reverted
+    assert!(res.result.is_halt());
+    assert!(is_data_limit_exceeded(&res));
+    assert_eq!(kv_updates, 1); // only 1 kv update for the caller account (tx nonce increase)
+                               // base tx + sender write, no update on the contract
+    assert_eq!(data_size, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE);
+    // the contract should not be changed (touched)
+    assert!(res.state.get(&CALLEE).is_none_or(|contract| !contract.is_touched()));
+    // the caller balance should not be changed (tx reverts)
+    assert!(res.state.get(&CALLER).is_some_and(|caller| caller.info.balance == U256::from(10000)));
+}

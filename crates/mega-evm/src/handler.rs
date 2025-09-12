@@ -61,7 +61,6 @@ where
         to self.op {
             fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
             fn validate_against_state_and_deduct_caller(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn last_frame_result(&mut self, evm: &mut Self::Evm, frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
         }
@@ -70,6 +69,31 @@ where
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
         evm.ctx().on_new_tx();
         self.op.pre_execution(evm)
+    }
+
+    /// This function copies the logic from `revm::handler::Handler::execution` to and add
+    /// additional gas cost for calldata.
+    fn execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+
+        // MegaETH modification: additional gas cost for calldata
+        let additional_calldata_gas =
+            constants::mini_rex::CALLDATA_ADDITIONAL_GAS * evm.ctx().tx().input().len() as u64;
+        gas_limit -= additional_calldata_gas;
+
+        // Create first frame action
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+
+        // Run execution loop
+        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
+
+        // Handle last frame result
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
     }
 
     fn reward_beneficiary(
@@ -84,6 +108,24 @@ where
         }
     }
 
+    fn last_frame_result(
+        &mut self,
+        evm: &mut Self::Evm,
+        frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+    ) -> Result<(), Self::Error> {
+        if evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX) &&
+            evm.ctx()
+                .additional_limit
+                .borrow_mut()
+                .before_frame_return_result(frame_result, true)
+                .exceeded_limit()
+        {
+            return Ok(());
+        }
+
+        self.op.last_frame_result(evm, frame_result)
+    }
+
     fn execution_result(
         &mut self,
         evm: &mut Self::Evm,
@@ -92,10 +134,11 @@ where
         let result = self.op.execution_result(evm, result)?;
         Ok(result.map_haltreason(|reason| match reason {
             OpHaltReason::Base(EthHaltReason::OutOfGas(OutOfGasError::Basic)) => {
-                let additional_limit = evm.ctx().additional_limit.borrow();
                 // if it halts due to OOG, we further check if the data or kv update limit is
                 // exceeded
-                additional_limit
+                evm.ctx()
+                    .additional_limit
+                    .borrow_mut()
                     .check_limit()
                     .maybe_halt_reason()
                     .unwrap_or(MegaHaltReason::Base(reason))
