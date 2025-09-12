@@ -11,7 +11,7 @@ use revm::{
         },
         Cfg, ContextTr, Transaction,
     },
-    handler::{EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr},
+    handler::{validation, EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr},
     inspector::{InspectorEvmTr, InspectorFrame, InspectorHandler, JournalExt},
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, InitialAndFloorGas,
@@ -71,29 +71,20 @@ where
         self.op.pre_execution(evm)
     }
 
-    /// This function copies the logic from `revm::handler::Handler::execution` to and add
-    /// additional gas cost for calldata.
-    fn execution(
-        &mut self,
-        evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
-        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+    /// This function copies the logic from `revm::handler::Handler::validate_initial_tx_gas` to and
+    /// add additional gas cost for calldata.
+    fn validate_initial_tx_gas(&self, evm: &Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
+        let ctx = evm.ctx_ref();
+
+        let mut initial_and_floor_gas =
+            validation::validate_initial_tx_gas(ctx.tx(), ctx.cfg().spec().into())?;
 
         // MegaETH modification: additional gas cost for calldata
         let additional_calldata_gas =
-            constants::mini_rex::CALLDATA_ADDITIONAL_GAS * evm.ctx().tx().input().len() as u64;
-        gas_limit -= additional_calldata_gas;
+            constants::mini_rex::CALLDATA_ADDITIONAL_GAS * ctx.tx().input().len() as u64;
+        initial_and_floor_gas.initial_gas += additional_calldata_gas;
 
-        // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
-
-        // Run execution loop
-        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
-
-        // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
-        Ok(frame_result)
+        Ok(initial_and_floor_gas)
     }
 
     fn reward_beneficiary(
