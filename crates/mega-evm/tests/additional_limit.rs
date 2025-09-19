@@ -842,8 +842,10 @@ fn test_writing_zero_to_slot_should_not_be_counted() {
 fn test_writing_twice_to_same_slot_should_be_counted_once() {
     let mut db = MemoryDatabase::default();
     // a contract writing 0x1 to slot 0 and then 0x2 to slot 0
-    let code: Bytes =
-        BytecodeBuilder::default().sstore(0, U256::from(1)).sstore(0, U256::from(2)).build();
+    let code: Bytes = BytecodeBuilder::default()
+        .sstore(U256::from(0), U256::from(1))
+        .sstore(U256::from(0), U256::from(2))
+        .build();
     db.set_account_code(CALLEE, code);
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
     let (res, data_size, kv_updates) =
@@ -871,8 +873,10 @@ fn test_writing_twice_to_same_slot_should_be_counted_once() {
 fn test_eventually_no_change_to_slot_should_not_be_counted() {
     let mut db = MemoryDatabase::default();
     // a contract writing 0x1 to slot 0 and then reset slot 0 to 0x0
-    let code: Bytes =
-        BytecodeBuilder::default().sstore(0, U256::from(1)).sstore(0, U256::from(0)).build();
+    let code: Bytes = BytecodeBuilder::default()
+        .sstore(U256::from(0), U256::from(1))
+        .sstore(U256::from(0), U256::from(0))
+        .build();
     db.set_account_code(CALLEE, code);
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
     let (res, data_size, kv_updates) =
@@ -897,7 +901,7 @@ fn test_eventually_no_change_to_slot_should_not_be_counted() {
 fn test_state_revert_when_exceeding_limit() {
     let mut db = MemoryDatabase::default();
     // a contract that writes 0x1 to slot 0
-    let code = BytecodeBuilder::default().sstore(0, U256::from(1)).build();
+    let code = BytecodeBuilder::default().sstore(U256::from(0), U256::from(1)).build();
     db.set_account_code(CALLEE, code);
     db.set_account_balance(CALLER, U256::from(10000));
     // the tx also transfers value to the callee

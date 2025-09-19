@@ -1,4 +1,5 @@
 use alloy_evm::Database;
+use alloy_primitives::TxKind;
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -14,14 +15,15 @@ use revm::{
     handler::{validation, EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr},
     inspector::{InspectorEvmTr, InspectorFrame, InspectorHandler, JournalExt},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, InitialAndFloorGas,
+        gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
+        FrameInput, InitialAndFloorGas,
     },
     Inspector, Journal,
 };
 
 use crate::{
-    constants, is_mega_system_address_transaction, EthHaltReason, ExternalEnvOracle, MegaContext,
-    MegaHaltReason, MegaSpecId, MegaTransactionError,
+    constants, is_mega_system_address_transaction, EthHaltReason, ExternalEnvOracle, HostExt,
+    MegaContext, MegaHaltReason, MegaSpecId, MegaTransactionError,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
@@ -87,18 +89,52 @@ where
         self.op.pre_execution(evm)
     }
 
-    /// This function copies the logic from `revm::handler::Handler::validate_initial_tx_gas` to and
+    /// This function copies the logic from `revm::handler::Handler::validate` to and
     /// add additional gas cost for calldata.
-    fn validate_initial_tx_gas(&self, evm: &Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
-        let ctx = evm.ctx_ref();
+    fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
+        self.validate_env(evm)?;
+        let mut initial_and_floor_gas = self.validate_initial_tx_gas(evm)?;
 
-        let mut initial_and_floor_gas =
-            validation::validate_initial_tx_gas(ctx.tx(), ctx.cfg().spec().into())?;
+        let ctx = evm.ctx_mut();
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            // MegaETH modification: additional gas cost for creating account
+            let kind = ctx.tx().kind();
+            let new_account = match kind {
+                TxKind::Create => true,
+                TxKind::Call(address) => {
+                    !ctx.tx().value().is_zero() &&
+                        match ctx.db_mut().basic(address)? {
+                            Some(account) => account.is_empty(),
+                            None => true,
+                        }
+                }
+            };
+            if new_account {
+                let callee_address = match kind {
+                    TxKind::Create => {
+                        let tx = ctx.tx();
+                        let caller = tx.caller();
+                        let nonce = tx.nonce();
+                        caller.create(nonce)
+                    }
+                    TxKind::Call(address) => address,
+                };
+                initial_and_floor_gas.initial_gas +=
+                    ctx.new_account_gas(callee_address).map_err(|_| {
+                        let err_str = format!(
+                            "Failed to get new account gas for callee address: {callee_address}",
+                        );
+                        Self::Error::from_string(err_str)
+                    })?;
+            }
 
-        // MegaETH modification: additional gas cost for calldata
-        let additional_calldata_gas =
-            constants::mini_rex::CALLDATA_ADDITIONAL_GAS * ctx.tx().input().len() as u64;
-        initial_and_floor_gas.initial_gas += additional_calldata_gas;
+            // MegaETH modification: additional gas cost for calldata (Istanbul hardfork must be
+            // enabled)
+            let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
+            let additional_calldata_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * tokens_in_calldata;
+            initial_and_floor_gas.initial_gas += additional_calldata_gas;
+        }
 
         Ok(initial_and_floor_gas)
     }

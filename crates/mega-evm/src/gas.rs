@@ -90,12 +90,12 @@ const PLAIN_ACCOUNT_KEY_LEN: usize = Address::len_bytes();
 const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 
 /// Convert an address to a bucket id.
-pub(crate) fn address_to_bucket_id(address: Address) -> BucketId {
+pub fn address_to_bucket_id(address: Address) -> BucketId {
     salt::state::hasher::bucket_id(address.as_slice())
 }
 
 /// Convert an address and a storage slot key to a bucket id.
-pub(crate) fn slot_to_bucket_id(address: Address, key: U256) -> BucketId {
+pub fn slot_to_bucket_id(address: Address, key: U256) -> BucketId {
     salt::state::hasher::bucket_id(
         address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
     )

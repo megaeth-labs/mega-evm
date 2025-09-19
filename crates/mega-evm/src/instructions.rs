@@ -10,12 +10,12 @@ use crate::{
     slot_to_bucket_id, AdditionalLimit, ExternalEnvOracle, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
-use alloy_primitives::{Address, BlockNumber, Bytes, Log, LogData, B256, U256};
+use alloy_primitives::{keccak256, Address, BlockNumber, Bytes, Log, LogData, B256, U256};
 use revm::{
     bytecode::opcode::{
         CALL, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SLOAD, SSTORE,
     },
-    context::{CreateScheme, Host},
+    context::{ContextTr, CreateScheme, Host, JournalTr},
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
         _count, as_usize_or_fail, check,
@@ -255,7 +255,11 @@ pub fn sstore_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
 ///
 /// This alternative implementation of `CREATE`/`CREATE2` is only used when the `MINI_REX` spec is
 /// enabled, so we can safely assume that all features before and including `MINI_REX` are enabled.
-pub fn create_with_bomb<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + ?Sized>(
+pub fn create_with_bomb<
+    WIRE: InterpreterTypes,
+    const IS_CREATE2: bool,
+    H: HostExt + ContextTr + ?Sized,
+>(
     context: InstructionContext<'_, H, WIRE>,
 ) {
     require_non_staticcall!(context.interpreter);
@@ -293,8 +297,12 @@ pub fn create_with_bomb<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostE
     // corresponding SALT bucket capacity doubles.
     let scheme = if IS_CREATE2 {
         popn!([salt], context.interpreter);
+
+        // calculate the created address
+        let init_code_hash = keccak256(&code);
+        let created_address = target_address.create2(salt.to_be_bytes(), init_code_hash);
         // MegaETH modification: gas cost for creating a new account
-        let Ok(new_account_gas) = context.host.new_account_gas(target_address) else {
+        let Ok(new_account_gas) = context.host.new_account_gas(created_address) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
@@ -305,8 +313,14 @@ pub fn create_with_bomb<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostE
         gas_or_fail!(context.interpreter, create2_cost);
         CreateScheme::Create2 { salt }
     } else {
+        // calculate the created address
+        let Ok(creater) = context.host.journal_mut().load_account(target_address) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let created_address = target_address.create(creater.data.info.nonce);
         // MegaETH modification: gas cost for creating a new account
-        let Ok(new_account_gas) = context.host.new_account_gas(target_address) else {
+        let Ok(new_account_gas) = context.host.new_account_gas(created_address) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };

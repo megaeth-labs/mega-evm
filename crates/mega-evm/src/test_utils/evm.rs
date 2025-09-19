@@ -1,5 +1,5 @@
 use alloy_primitives::{Address, Bytes, TxKind, U256};
-use core::convert::Infallible;
+use core::{convert::Infallible, fmt::Debug};
 use revm::{
     context::{
         result::{EVMError, ResultAndState},
@@ -8,6 +8,7 @@ use revm::{
     database::{AccountState, CacheDB, EmptyDB},
     inspector::NoOpInspector,
     state::{AccountInfo, Bytecode},
+    Database,
 };
 
 use crate::{
@@ -42,14 +43,18 @@ pub fn set_account_nonce(db: &mut CacheDB<EmptyDB>, address: Address, nonce: u64
 }
 
 /// Executes a transaction on the EVM.
-pub fn transact(
+pub fn transact<DB>(
     spec: MegaSpecId,
-    db: &mut CacheDB<EmptyDB>,
+    db: DB,
     caller: Address,
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<DB::Error, MegaTransactionError>>
+where
+    DB: Database + Debug,
+    DB::Error: Send + Sync + Debug + 'static,
+{
     let mut context = MegaContext::new(db, spec, NoOpOracle::default());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));

@@ -58,6 +58,29 @@ impl MemoryDatabase {
         self.set_account_nonce(address, nonce);
         self
     }
+
+    /// Sets the storage for an account in the database.
+    pub fn set_account_storage(
+        &mut self,
+        address: Address,
+        storage_key: StorageKey,
+        value: StorageValue,
+    ) {
+        let account_info = self.db.load_account(address).unwrap();
+        account_info.storage.insert(storage_key, value);
+        account_info.account_state = AccountState::None;
+    }
+
+    /// Sets the storage for an account in the database.
+    pub fn account_storage(
+        mut self,
+        address: Address,
+        storage_key: StorageKey,
+        value: StorageValue,
+    ) -> Self {
+        self.set_account_storage(address, storage_key, value);
+        self
+    }
 }
 
 impl revm::Database for MemoryDatabase {

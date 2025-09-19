@@ -8,7 +8,7 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
 use revm::{
-    context::{Cfg, ContextTr},
+    context::{Cfg, ContextTr, JournalTr},
     context_interface::journaled_state::AccountLoad,
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
 };

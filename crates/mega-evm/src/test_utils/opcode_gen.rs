@@ -5,7 +5,7 @@ use std::io::Read;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use alloy_primitives::{aliases::U224, Address, Bytes, U256};
-use revm::bytecode::opcode::{MSTORE, PUSH0, RETURN, REVERT, SSTORE};
+use revm::bytecode::opcode::{MSTORE, PUSH0, RETURN, REVERT, SSTORE, STOP};
 
 use crate::test_utils::right_pad_bytes;
 
@@ -94,9 +94,9 @@ impl BytecodeBuilder {
     }
 
     /// Append a SSTORE opcode to store the given value at the given slot.
-    pub fn sstore(mut self, slot: usize, value: U256) -> Self {
+    pub fn sstore(mut self, slot: U256, value: U256) -> Self {
         self = self.push_u256(value);
-        self = self.push_number(slot as u128);
+        self = self.push_u256(slot);
         self.code.push(SSTORE);
         self
     }
@@ -128,6 +128,12 @@ impl BytecodeBuilder {
         self = self.push_number(data_len as u64);
         self = self.push_number(0x0_u64);
         self = self.append(RETURN);
+        self
+    }
+
+    /// Append a STOP opcode.
+    pub fn stop(mut self) -> Self {
+        self = self.append(STOP);
         self
     }
 }
