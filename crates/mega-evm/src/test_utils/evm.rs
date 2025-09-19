@@ -16,32 +16,6 @@ use crate::{
     NoOpOracle,
 };
 
-/// Sets the code for an account in the database. The account state is set to `None`, as if the
-/// account originally had the code.
-pub fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
-    let bytecode = Bytecode::new_legacy(code);
-    let code_hash = bytecode.hash_slow();
-    let account_info = db.load_account(address).unwrap();
-    account_info.info.code = Some(bytecode);
-    account_info.info.code_hash = code_hash;
-    account_info.account_state = AccountState::None;
-}
-
-/// Sets the balance for an account in the database. The account state is set to `None`, as if the
-/// account originally had the balance.
-pub fn set_account_balance(db: &mut CacheDB<EmptyDB>, address: Address, balance: U256) {
-    let account_info = db.load_account(address).unwrap();
-    account_info.info.balance = balance;
-    account_info.account_state = AccountState::None;
-}
-
-/// Sets the nonce for an account in the database. The account state is set to `None`, as if the
-/// account originally had the nonce.
-pub fn set_account_nonce(db: &mut CacheDB<EmptyDB>, address: Address, nonce: u64) {
-    let account_info = db.load_account(address).unwrap();
-    account_info.info.nonce = nonce;
-}
-
 /// Executes a transaction on the EVM.
 pub fn transact<DB>(
     spec: MegaSpecId,

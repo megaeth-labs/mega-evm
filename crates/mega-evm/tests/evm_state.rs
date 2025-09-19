@@ -1,10 +1,9 @@
 //! Tests for the EVM state.
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{test_utils::*, *};
+use mega_evm::{test_utils::{MemoryDatabase, transact}, *};
 use revm::{
     bytecode::opcode::{INVALID, PUSH0, SLOAD},
-    database::{CacheDB, EmptyDB},
 };
 
 /// Test that verifies the EVM state correctly tracks storage access for non-existent storage slots.
@@ -14,10 +13,10 @@ use revm::{
 /// uninitialized.
 #[test]
 fn test_evm_state_zero_storage() {
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let contract_address = address!("0000000000000000000000000000000000100001");
     let code = vec![PUSH0, revm::bytecode::opcode::SLOAD];
-    set_account_code(&mut db, contract_address, code.into());
+    db.set_account_code(contract_address, code.into());
 
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);
@@ -39,10 +38,10 @@ fn test_evm_state_zero_storage() {
 /// but the storage access should still be tracked in the resulting state.
 #[test]
 fn test_evm_state_include_failed_tx_reads() {
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let contract_address = address!("0000000000000000000000000000000000100001");
     let code = vec![PUSH0, SLOAD, INVALID]; // read slot 0 and then revert
-    set_account_code(&mut db, contract_address, code.into());
+    db.set_account_code(contract_address, code.into());
 
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);

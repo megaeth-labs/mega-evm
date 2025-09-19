@@ -1,14 +1,13 @@
 //! Tests for the block environment access tracking functionality.
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{test_utils::*, *};
+use mega_evm::{test_utils::MemoryDatabase, *};
 use revm::{
     bytecode::opcode::{
         BASEFEE, BLOCKHASH, CALLER, CHAINID, COINBASE, DIFFICULTY, GASLIMIT, GASPRICE, NUMBER,
         ORIGIN, POP, PUSH1, STOP, TIMESTAMP,
     },
     context::ContextTr,
-    database::{CacheDB, EmptyDB},
 };
 
 /// Test that verifies the EVM correctly tracks block environment access for various opcodes.
@@ -36,9 +35,9 @@ fn test_block_env_tracking_with_evm() {
     for (opcode_name, bytecode, expected_access_type) in test_cases {
         println!("Testing opcode: {}", opcode_name);
 
-        let mut db = CacheDB::<EmptyDB>::default();
+        let mut db = MemoryDatabase::default();
         let contract_address = address!("0000000000000000000000000000000000100001");
-        set_account_code(&mut db, contract_address, bytecode.into());
+        db.set_account_code(contract_address, bytecode.into());
 
         let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
         // Configure L1BlockInfo to avoid operator fee scalar panic
@@ -162,7 +161,7 @@ fn test_block_env_tracking_with_evm() {
 /// all of them and maintains an accurate count of accessed block environment types.
 #[test]
 fn test_multiple_block_env_accesses() {
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let contract_address = address!("0000000000000000000000000000000000100001");
 
     // Contract that accesses multiple block env values: NUMBER, TIMESTAMP, BASEFEE
@@ -172,7 +171,7 @@ fn test_multiple_block_env_accesses() {
         BASEFEE, POP, // Access basefee, then pop
         STOP,
     ];
-    set_account_code(&mut db, contract_address, contract_code.into());
+    db.set_account_code(contract_address, contract_code.into());
 
     let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
     // Configure L1BlockInfo to avoid operator fee scalar panic
@@ -213,9 +212,9 @@ fn test_multiple_block_env_accesses() {
 /// isolation between different transaction executions.
 #[test]
 fn test_block_env_reset_between_transactions() {
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let contract_address = address!("0000000000000000000000000000000000100001");
-    set_account_code(&mut db, contract_address, vec![NUMBER, STOP].into());
+    db.set_account_code(contract_address, vec![NUMBER, STOP].into());
 
     let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
     // Configure L1BlockInfo to avoid operator fee scalar panic

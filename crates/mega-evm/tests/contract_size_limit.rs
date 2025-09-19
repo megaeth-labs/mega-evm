@@ -3,17 +3,16 @@
 use alloy_primitives::{address, Bytes, U256};
 use core::convert::Infallible;
 use mega_evm::{
-    test_utils::{opcode_gen::BytecodeBuilder, *},
+    test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase, transact, right_pad_bytes},
     *,
 };
 use revm::{
     bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
     context::result::{EVMError, ExecutionResult, InvalidTransaction, ResultAndState},
-    database::{CacheDB, EmptyDB},
 };
 
 fn deploy_contract(
-    db: &mut CacheDB<EmptyDB>,
+    db: &mut MemoryDatabase,
     bytecode: Bytes,
     spec: MegaSpecId,
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
@@ -30,7 +29,7 @@ fn deploy_contract(
 fn initcode_size_limit_test_case(spec: MegaSpecId, initcode_size: usize, success: bool) {
     let large_bytecode = vec![STOP; initcode_size];
     let bytecode: Bytes = large_bytecode.into();
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let result = deploy_contract(&mut db, bytecode, spec);
     if success {
         assert!(result.is_ok());
@@ -118,7 +117,7 @@ fn constructor_code(contract_size: usize) -> Bytes {
 fn contract_size_limit_test_case(spec: MegaSpecId, contract_size: usize, success: bool) {
     // Use the simplest method to return a contract code
     let init_code = constructor_code(contract_size);
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let result = deploy_contract(&mut db, init_code, spec);
     if success {
         assert!(result.is_ok());
@@ -227,9 +226,9 @@ fn contract_factory_code_size_limit_test_case(
         .build_vec();
 
     let caller = address!("0000000000000000000000000000000000100000");
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let factory_address = address!("0000000000000000000000000000000000100001");
-    set_account_code(&mut db, factory_address, factory_code.into());
+    db.set_account_code(factory_address, factory_code.into());
     let result =
         transact(spec, &mut db, caller, Some(factory_address), Bytes::default(), U256::ZERO);
     if success {

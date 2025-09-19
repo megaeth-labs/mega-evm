@@ -416,6 +416,8 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
 
     // constructor code
     let constructor_code = BytecodeBuilder::default().return_with_data([0x00]).build();
+    // let tokens = revm::interpreter::gas::get_tokens_in_calldata(&constructor_code, true);
+    // println!("calldata_tokens: {:?}", tokens);
 
     // create contract
     let res = transact(spec, &mut db, &oracle, CALLER, None, constructor_code, U256::ZERO).unwrap();
@@ -432,7 +434,8 @@ fn test_create_contract_to_non_existent_account() {
         0,
         53_554 +
             constants::mini_rex::NEW_ACCOUNT_GAS +
-            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS,
+            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS +
+            constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * 83,
     );
 }
 
@@ -444,7 +447,8 @@ fn test_create_contract_to_non_existent_account_with_bucket_expansion() {
         1,
         53_554 +
             constants::mini_rex::NEW_ACCOUNT_GAS * 2 +
-            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS,
+            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS +
+            constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * 83,
     );
 }
 

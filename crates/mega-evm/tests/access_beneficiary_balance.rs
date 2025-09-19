@@ -59,7 +59,7 @@ fn execute_tx(
             },
             data: Bytes::default(),
             value,
-            gas_limit: 100000,
+            gas_limit: 10000000,
             ..Default::default()
         },
         ..Default::default()

@@ -1,11 +1,10 @@
 //! Tests for the disabled SELFDESTRUCT opcode after Mini-Rex hardfork.
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{test_utils::*, *};
+use mega_evm::{test_utils::{MemoryDatabase, transact}, *};
 use revm::{
     bytecode::opcode::{PUSH0, SELFDESTRUCT},
     context::result::{ExecutionResult, ResultAndState},
-    database::{CacheDB, EmptyDB},
 };
 
 /// Test that verifies the SELFDESTRUCT opcode works normally before the Mini-Rex hardfork.
@@ -13,10 +12,10 @@ use revm::{
 /// and consume the expected amount of gas when using the `EQUIVALENCE` spec.
 #[test]
 fn test_selfdestruct_allowed_before_mini_rex() {
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let contract_address = address!("0000000000000000000000000000000000100001");
     let code = vec![PUSH0, PUSH0, SELFDESTRUCT];
-    set_account_code(&mut db, contract_address, code.into());
+    db.set_account_code(contract_address, code.into());
 
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);
@@ -31,10 +30,10 @@ fn test_selfdestruct_allowed_before_mini_rex() {
 /// opcode are properly rejected with the correct halt reason when using the `MINI_REX` spec.
 #[test]
 fn test_selfdestruct_disallowed_after_mini_rex() {
-    let mut db = CacheDB::<EmptyDB>::default();
+    let mut db = MemoryDatabase::default();
     let contract_address = address!("0000000000000000000000000000000000100001");
     let code = vec![PUSH0, PUSH0, SELFDESTRUCT];
-    set_account_code(&mut db, contract_address, code.into());
+    db.set_account_code(contract_address, code.into());
 
     let caller = address!("0000000000000000000000000000000000100000");
     let callee = Some(contract_address);

@@ -11,7 +11,7 @@ use alloy_eips::{
 };
 use alloy_primitives::{address, bytes, Address, Bytes, B256, U256};
 use mega_evm::{
-    test_utils::{opcode_gen::BytecodeBuilder, set_account_code, MemoryDatabase},
+    test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
     NoOpOracle, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, STORAGE_SLOT_WRITE_SIZE,
 };
@@ -373,7 +373,7 @@ fn test_create_contract() {
 #[test]
 fn test_create_contract_with_factory() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
-    set_account_code(&mut db, FACTORY, CONTRACT_FACTORY_CODE);
+    db.set_account_code(FACTORY, CONTRACT_FACTORY_CODE);
     let input = gen_contract_factory_input(10);
     let input_len = input.len() as u64;
     let tx = TxEnvBuilder::new().caller(CALLER).call(FACTORY).data(input).build_fill();
@@ -409,7 +409,7 @@ fn test_sstore_data() {
     // a simple contract that stores 0x0 to slot 0
     let code: Bytes =
         BytecodeBuilder::default().append_many([PUSH1, 0x1u8, PUSH0, SSTORE, STOP]).build();
-    set_account_code(&mut db, CALLEE, code);
+    db.set_account_code(CALLEE, code);
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
     let (res, data_size, kv_update_count) =
         transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
@@ -436,7 +436,7 @@ fn test_sload_data() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
     // a simple contract that loads slot 0
     let code: Bytes = BytecodeBuilder::default().append_many([PUSH0, SLOAD, STOP]).build();
-    set_account_code(&mut db, CALLEE, code);
+    db.set_account_code(CALLEE, code);
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
     let (res, data_size, kv_update_count) =
         transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
@@ -464,7 +464,7 @@ fn test_sload_data() {
 #[test]
 fn test_log_data() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1000));
-    set_account_code(&mut db, CALLEE, LOG_FACTORY_CODE);
+    db.set_account_code(CALLEE, LOG_FACTORY_CODE);
     let input = gen_log_factory_input(1, 10);
     let input_len = input.len() as u64;
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).data(input).build_fill();
