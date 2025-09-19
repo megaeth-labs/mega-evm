@@ -59,7 +59,9 @@ fn transact(
 #[allow(unused)]
 fn is_data_limit_exceeded(result: &ResultAndState<MegaHaltReason>) -> bool {
     match &result.result {
-        ExecutionResult::Halt { reason, .. } => reason == &MegaHaltReason::DataLimitExceeded,
+        ExecutionResult::Halt { reason, .. } => {
+            matches!(reason, MegaHaltReason::DataLimitExceeded { .. })
+        }
         _ => false,
     }
 }
@@ -68,7 +70,9 @@ fn is_data_limit_exceeded(result: &ResultAndState<MegaHaltReason>) -> bool {
 #[allow(unused)]
 fn is_kv_update_limit_exceeded(result: &ResultAndState<MegaHaltReason>) -> bool {
     match &result.result {
-        ExecutionResult::Halt { reason, .. } => reason == &MegaHaltReason::KVUpdateLimitExceeded,
+        ExecutionResult::Halt { reason, .. } => {
+            matches!(reason, MegaHaltReason::KVUpdateLimitExceeded { .. })
+        }
         _ => false,
     }
 }

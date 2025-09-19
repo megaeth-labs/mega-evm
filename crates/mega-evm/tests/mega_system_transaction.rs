@@ -6,8 +6,10 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::{MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH},
-    is_deposit_like_transaction, is_mega_system_address_transaction,
+    system_tx::{
+        is_deposit_like_transaction, is_mega_system_address_transaction, MEGA_SYSTEM_ADDRESS,
+        MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    },
     test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, NoOpOracle,
 };
@@ -24,6 +26,10 @@ use revm::{
 const REGULAR_CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT_ADDR: Address = address!("0000000000000000000000000000000000100001");
 const BENEFICIARY: Address = address!("0000000000000000000000000000000000BEEF01");
+const NON_WHITELISTED_ADDR: Address = address!("0000000000000000000000000000000000DEAD01");
+
+// Whitelisted address from MEGA_SYSTEM_TX_WHITELIST
+const WHITELISTED_ADDR: Address = address!("4200000000000000000000000000000000000101");
 
 /// Creates a test EVM instance with the provided database.
 fn create_evm(db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector, NoOpOracle> {
@@ -82,6 +88,14 @@ fn execute_transaction(
     alloy_evm::Evm::transact_raw(evm, tx).expect("Transaction should execute")
 }
 
+/// Tests the utility functions for detecting mega system address transactions and deposit-like
+/// transactions.
+///
+/// This test verifies that:
+/// - `is_mega_system_address_transaction` correctly identifies transactions from
+///   `MEGA_SYSTEM_ADDRESS`
+/// - `is_deposit_like_transaction` correctly identifies both actual deposit transactions and mega
+///   system transactions
 #[test]
 fn test_utility_functions() {
     // Test is_mega_system_address_transaction
@@ -111,17 +125,29 @@ fn test_utility_functions() {
     assert!(!is_deposit_like_transaction(&regular_tx));
 }
 
+/// Tests that mega system transactions execute successfully and behave as deposit-like
+/// transactions.
+///
+/// This test verifies that:
+/// - Transactions from `MEGA_SYSTEM_ADDRESS` to whitelisted addresses execute successfully
+/// - The contract receives `MEGA_SYSTEM_ADDRESS` as the caller (no address manipulation)
+/// - The transaction follows deposit-like execution path
 #[test]
 fn test_mega_system_transaction_execution() {
     // Create database and set up contract
     let mut db = MemoryDatabase::default();
-    db.set_account_code(CONTRACT_ADDR, create_simple_contract());
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
 
     let mut evm = create_evm(db);
 
     // Execute transaction from mega system address
-    let result =
-        execute_transaction(&mut evm, MEGA_SYSTEM_ADDRESS, CONTRACT_ADDR, U256::ZERO, Bytes::new());
+    let result = execute_transaction(
+        &mut evm,
+        MEGA_SYSTEM_ADDRESS,
+        WHITELISTED_ADDR,
+        U256::ZERO,
+        Bytes::new(),
+    );
 
     // Transaction should succeed
     assert!(result.result.is_success(), "Mega system transaction should succeed");
@@ -143,18 +169,26 @@ fn test_mega_system_transaction_execution() {
     }
 }
 
+/// Tests that regular transactions continue to work normally and are not affected by mega system
+/// transaction handling.
+///
+/// This test verifies that:
+/// - Regular transactions to whitelisted addresses execute successfully
+/// - Regular transactions follow normal execution path (not deposit-like)
+/// - The contract receives the actual caller address
+/// - Regular transactions are not processed as system transactions
 #[test]
 fn test_regular_transaction_still_works() {
     // Create database and set up accounts and contract
     let mut db = MemoryDatabase::default();
     db.set_account_balance(REGULAR_CALLER, U256::from(1_000_000_000u64)); // Give it some balance
-    db.set_account_code(CONTRACT_ADDR, create_simple_contract());
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
 
     let mut evm = create_evm(db);
 
     // Execute transaction from regular address
     let result =
-        execute_transaction(&mut evm, REGULAR_CALLER, CONTRACT_ADDR, U256::ZERO, Bytes::new());
+        execute_transaction(&mut evm, REGULAR_CALLER, WHITELISTED_ADDR, U256::ZERO, Bytes::new());
 
     // Transaction should succeed
     assert!(result.result.is_success(), "Regular transaction should succeed");
@@ -175,12 +209,20 @@ fn test_regular_transaction_still_works() {
     }
 }
 
+/// Tests that mega system transactions bypass balance checks and execute without sufficient
+/// balance.
+///
+/// This test verifies that:
+/// - `MEGA_SYSTEM_ADDRESS` transactions execute successfully even without any balance
+/// - The transaction bypasses normal balance validation for gas fees
+/// - This demonstrates deposit-like behavior where balance checks are skipped
+/// - The contract execution proceeds normally despite insufficient balance
 #[test]
 fn test_mega_system_transaction_bypasses_balance_check() {
     // Create database and set up contract
     // Note: We don't set any balance for MEGA_SYSTEM_ADDRESS
     let mut db = MemoryDatabase::default();
-    db.set_account_code(CONTRACT_ADDR, create_simple_contract());
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
 
     let mut evm = create_evm(db);
 
@@ -191,7 +233,7 @@ fn test_mega_system_transaction_bypasses_balance_check() {
     let result = execute_transaction(
         &mut evm,
         MEGA_SYSTEM_ADDRESS,
-        CONTRACT_ADDR,
+        WHITELISTED_ADDR,
         U256::ZERO, // No value transfer to avoid deposit validation complexities
         Bytes::new(),
     );
@@ -204,6 +246,13 @@ fn test_mega_system_transaction_bypasses_balance_check() {
     );
 }
 
+/// Tests that mega system transactions correctly set the deposit source hash.
+///
+/// This test verifies that:
+/// - Mega system transactions automatically set the `MEGA_SYSTEM_TRANSACTION_SOURCE_HASH`
+/// - The source hash is properly configured in the transaction's deposit info
+/// - This enables the transaction to be processed as a deposit-like transaction
+/// - The source hash matches the expected constant value
 #[test]
 fn test_mega_system_transaction_sets_source_hash() {
     let db = MemoryDatabase::default();
@@ -213,7 +262,7 @@ fn test_mega_system_transaction_sets_source_hash() {
     let tx = MegaTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
-            kind: TxKind::Call(CONTRACT_ADDR),
+            kind: TxKind::Call(WHITELISTED_ADDR),
             gas_limit: 1_000_000,
             gas_price: 1000,
             ..Default::default()
@@ -240,13 +289,21 @@ fn test_mega_system_transaction_sets_source_hash() {
     );
 }
 
+/// Tests that existing deposit transaction behavior is preserved and not affected by mega system
+/// transaction logic.
+///
+/// This test verifies that:
+/// - Actual deposit transactions (with `DEPOSIT_TRANSACTION_TYPE`) still work correctly
+/// - Deposit transactions are detected as deposit-like but not as mega system transactions
+/// - The mega system transaction detection doesn't interfere with existing deposit logic
+/// - Both transaction types can coexist without conflicts
 #[test]
 fn test_deposit_transaction_behavior_preserved() {
     // Create a transaction that looks like a deposit transaction
     let mut deposit_tx = MegaTransaction {
         base: TxEnv {
             caller: REGULAR_CALLER,
-            kind: TxKind::Call(CONTRACT_ADDR),
+            kind: TxKind::Call(WHITELISTED_ADDR),
             ..Default::default()
         },
         ..Default::default()
@@ -263,13 +320,20 @@ fn test_deposit_transaction_behavior_preserved() {
     assert!(!is_mega_system_address_transaction(&deposit_tx));
 }
 
+/// Tests that mega system transactions do not deduct gas fees from the system address balance.
+///
+/// This test verifies that:
+/// - `MEGA_SYSTEM_ADDRESS` balance remains unchanged after transaction execution
+/// - Gas fees are not deducted from the system address (deposit-like behavior)
+/// - The transaction executes successfully despite gas costs
+/// - This demonstrates the fee bypass mechanism for system transactions
 #[test]
 fn test_mega_system_transaction_no_fee_deduction() {
     // Create database and set up contract with an initial balance for the mega system address
     let mut db = MemoryDatabase::default();
     let initial_balance = U256::from(1_000_000u64);
     db.set_account_balance(MEGA_SYSTEM_ADDRESS, initial_balance);
-    db.set_account_code(CONTRACT_ADDR, create_simple_contract());
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
 
     let mut evm = create_evm(db);
 
@@ -278,8 +342,13 @@ fn test_mega_system_transaction_no_fee_deduction() {
     assert_eq!(balance_before, initial_balance, "Initial balance should be set correctly");
 
     // Execute transaction from mega system address with high gas price
-    let result =
-        execute_transaction(&mut evm, MEGA_SYSTEM_ADDRESS, CONTRACT_ADDR, U256::ZERO, Bytes::new());
+    let result = execute_transaction(
+        &mut evm,
+        MEGA_SYSTEM_ADDRESS,
+        WHITELISTED_ADDR,
+        U256::ZERO,
+        Bytes::new(),
+    );
 
     // Transaction should succeed
     assert!(result.result.is_success(), "Mega system transaction should succeed");
@@ -292,13 +361,20 @@ fn test_mega_system_transaction_no_fee_deduction() {
     );
 }
 
+/// Tests that regular transactions correctly deduct gas fees from the caller's balance.
+///
+/// This test verifies that:
+/// - Regular transactions deduct gas fees from the caller's balance
+/// - The balance reduction reflects the actual gas cost of the transaction
+/// - This confirms normal transaction processing is unaffected
+/// - Provides a contrast to mega system transactions which bypass fee deduction
 #[test]
 fn test_regular_transaction_fee_deduction() {
     // Create database and set up contract with an initial balance for the regular caller
     let mut db = MemoryDatabase::default();
     let initial_balance = U256::from(1_000_000_000_000u64);
     db.set_account_balance(REGULAR_CALLER, initial_balance);
-    db.set_account_code(CONTRACT_ADDR, create_simple_contract());
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
 
     let mut evm = create_evm(db);
 
@@ -308,7 +384,7 @@ fn test_regular_transaction_fee_deduction() {
 
     // Execute transaction from regular caller
     let result =
-        execute_transaction(&mut evm, REGULAR_CALLER, CONTRACT_ADDR, U256::ZERO, Bytes::new());
+        execute_transaction(&mut evm, REGULAR_CALLER, WHITELISTED_ADDR, U256::ZERO, Bytes::new());
 
     // Transaction should succeed
     assert!(result.result.is_success(), "Regular transaction should succeed");
@@ -332,13 +408,206 @@ fn test_regular_transaction_fee_deduction() {
     );
 }
 
+/// Tests that mega system transactions to whitelisted addresses execute successfully.
+///
+/// This test verifies that:
+/// - Transactions from `MEGA_SYSTEM_ADDRESS` to whitelisted addresses are allowed
+/// - The transaction executes successfully and returns expected results
+/// - The contract receives `MEGA_SYSTEM_ADDRESS` as the caller
+/// - Whitelist enforcement allows legitimate system transactions
 #[test]
-fn test_mega_system_address_constant() {
-    // Verify the mega system address is correctly defined
-    assert_eq!(MEGA_SYSTEM_ADDRESS, address!("0xdeaddeaddeaddeaddeaddeaddeaddeaddead0002"));
+fn test_mega_system_transaction_to_whitelisted_address_succeeds() {
+    // Create database and set up the whitelisted contract
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
 
-    // Verify it's different from other known addresses
-    assert_ne!(MEGA_SYSTEM_ADDRESS, Address::ZERO);
-    assert_ne!(MEGA_SYSTEM_ADDRESS, REGULAR_CALLER);
-    assert_ne!(MEGA_SYSTEM_ADDRESS, CONTRACT_ADDR);
+    let mut evm = create_evm(db);
+
+    // Execute transaction from mega system address to whitelisted address
+    let result = execute_transaction(
+        &mut evm,
+        MEGA_SYSTEM_ADDRESS,
+        WHITELISTED_ADDR,
+        U256::ZERO,
+        Bytes::new(),
+    );
+
+    // Transaction should succeed since the address is whitelisted
+    assert!(
+        result.result.is_success(),
+        "Mega system transaction to whitelisted address should succeed"
+    );
+
+    // The contract should return the caller address (MEGA_SYSTEM_ADDRESS)
+    if let Some(output) = result.result.output() {
+        let expected_caller = MEGA_SYSTEM_ADDRESS;
+        let mut expected_output = [0u8; 32];
+        expected_output[12..].copy_from_slice(expected_caller.as_slice());
+
+        assert_eq!(
+            output.as_ref(),
+            &expected_output,
+            "Whitelisted contract should receive MEGA_SYSTEM_ADDRESS as caller"
+        );
+    } else {
+        panic!("Expected output from whitelisted contract");
+    }
+}
+
+/// Tests that mega system transactions to non-whitelisted addresses are rejected.
+///
+/// This test verifies that:
+/// - Transactions from `MEGA_SYSTEM_ADDRESS` to non-whitelisted addresses fail
+/// - The error message indicates whitelist violation
+/// - Whitelist enforcement prevents unauthorized system transactions
+/// - Security mechanism correctly blocks non-approved destinations
+#[test]
+fn test_mega_system_transaction_to_non_whitelisted_address_fails() {
+    // Create database and set up the non-whitelisted contract
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(NON_WHITELISTED_ADDR, create_simple_contract());
+
+    let mut evm = create_evm(db);
+
+    // Attempt to execute transaction from mega system address to non-whitelisted address
+    let tx = MegaTransaction {
+        base: TxEnv {
+            caller: MEGA_SYSTEM_ADDRESS,
+            kind: TxKind::Call(NON_WHITELISTED_ADDR),
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_limit: 1_000_000,
+            gas_price: 1000,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    // Transaction should fail due to whitelist check
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    assert!(result.is_err(), "Mega system transaction to non-whitelisted address should fail");
+
+    // Check that the error message contains whitelist-related text
+    let error_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        error_msg.contains("whitelist") || error_msg.contains("Whitelist"),
+        "Error should mention whitelist: {}",
+        error_msg
+    );
+}
+
+/// Tests that mega system transactions with CREATE operations are rejected.
+///
+/// This test verifies that:
+/// - CREATE transactions from `MEGA_SYSTEM_ADDRESS` are not supported
+/// - The error message indicates CREATE is not allowed for system transactions
+/// - Security measure prevents system transactions from deploying arbitrary contracts
+/// - Only CALL operations are supported for system transactions
+#[test]
+fn test_mega_system_transaction_create_fails() {
+    // Create database
+    let db = MemoryDatabase::default();
+    let mut evm = create_evm(db);
+
+    // Attempt to execute CREATE transaction from mega system address
+    let tx = MegaTransaction {
+        base: TxEnv {
+            caller: MEGA_SYSTEM_ADDRESS,
+            kind: TxKind::Create,
+            value: U256::ZERO,
+            data: Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xf3]), // Simple contract bytecode
+            gas_limit: 10_000_000,
+            gas_price: 1000,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    // Transaction should fail since CREATE is not supported for system transactions
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    assert!(result.is_err(), "Mega system CREATE transaction should fail");
+
+    // Check that the error message mentions CREATE not being supported
+    let error_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        error_msg.contains("create") ||
+            error_msg.contains("Create") ||
+            error_msg.contains("CREATE"),
+        "Error should mention CREATE not being supported: {}",
+        error_msg
+    );
+}
+
+/// Tests that regular transactions to non-whitelisted addresses work normally.
+///
+/// This test verifies that:
+/// - Regular transactions (non-system) can call any address regardless of whitelist
+/// - Whitelist restrictions only apply to mega system transactions
+/// - Normal transaction processing is unaffected by whitelist implementation
+/// - Backward compatibility is maintained for existing transactions
+#[test]
+fn test_regular_transaction_to_non_whitelisted_address_succeeds() {
+    // Create database and set up accounts and contract
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(REGULAR_CALLER, U256::from(1_000_000_000u64));
+    db.set_account_code(NON_WHITELISTED_ADDR, create_simple_contract());
+
+    let mut evm = create_evm(db);
+
+    // Execute transaction from regular address to non-whitelisted address
+    let result = execute_transaction(
+        &mut evm,
+        REGULAR_CALLER,
+        NON_WHITELISTED_ADDR,
+        U256::ZERO,
+        Bytes::new(),
+    );
+
+    // Transaction should succeed since whitelist only applies to system transactions
+    assert!(
+        result.result.is_success(),
+        "Regular transaction to non-whitelisted address should succeed"
+    );
+
+    // The contract should return the caller address (REGULAR_CALLER)
+    if let Some(output) = result.result.output() {
+        let expected_caller = REGULAR_CALLER;
+        let mut expected_output = [0u8; 32];
+        expected_output[12..].copy_from_slice(expected_caller.as_slice());
+
+        assert_eq!(
+            output.as_ref(),
+            &expected_output,
+            "Contract should receive REGULAR_CALLER as caller"
+        );
+    } else {
+        panic!("Expected output from contract");
+    }
+}
+
+/// Tests that mega system transactions to whitelisted addresses work with call data.
+///
+/// This test verifies that:
+/// - System transactions can include arbitrary call data
+/// - Whitelisted addresses can receive complex function calls from system transactions
+/// - Call data does not affect whitelist validation
+/// - Full contract interaction is supported for whitelisted addresses
+#[test]
+fn test_mega_system_transaction_whitelist_with_data() {
+    // Create database and set up the whitelisted contract
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
+
+    let mut evm = create_evm(db);
+
+    // Execute transaction from mega system address to whitelisted address with data
+    let call_data = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]);
+    let result =
+        execute_transaction(&mut evm, MEGA_SYSTEM_ADDRESS, WHITELISTED_ADDR, U256::ZERO, call_data);
+
+    // Transaction should succeed even with call data
+    assert!(
+        result.result.is_success(),
+        "Mega system transaction with data to whitelisted address should succeed"
+    );
 }

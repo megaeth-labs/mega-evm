@@ -180,8 +180,12 @@ impl AdditionalLimitResult {
     /// Returns the [`MegaHaltReason`] if the limit has been exceeded, otherwise returns `None`.
     pub fn maybe_halt_reason(&self) -> Option<MegaHaltReason> {
         match self {
-            Self::ExceedsDataLimit { .. } => Some(MegaHaltReason::DataLimitExceeded),
-            Self::ExceedsKVUpdateLimit { .. } => Some(MegaHaltReason::KVUpdateLimitExceeded),
+            Self::ExceedsDataLimit { limit, used } => {
+                Some(MegaHaltReason::DataLimitExceeded { limit: *limit, actual: *used })
+            }
+            Self::ExceedsKVUpdateLimit { limit, used } => {
+                Some(MegaHaltReason::KVUpdateLimitExceeded { limit: *limit, actual: *used })
+            }
             Self::WithinLimit => None,
         }
     }

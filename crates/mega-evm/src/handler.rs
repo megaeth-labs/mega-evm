@@ -22,8 +22,10 @@ use revm::{
 };
 
 use crate::{
-    constants, is_mega_system_address_transaction, EthHaltReason, ExternalEnvOracle, HostExt,
-    MegaContext, MegaHaltReason, MegaSpecId, MegaTransactionError,
+    constants,
+    system_tx::{is_mega_system_address_transaction, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH},
+    EthHaltReason, ExternalEnvOracle, HostExt, MegaContext, MegaHaltReason, MegaSpecId,
+    MegaTransactionError, MEGA_SYSTEM_TX_WHITELIST,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
@@ -72,18 +74,37 @@ where
         evm.ctx().on_new_tx();
 
         // Check if this is a mega system address transaction
-        if is_mega_system_address_transaction(evm.ctx().tx()) {
+        if evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX) &&
+            is_mega_system_address_transaction(evm.ctx().tx())
+        {
             // Modify the transaction to make it appear as a deposit transaction
             // This will cause the OpHandler to automatically bypass signature validation,
             // nonce verification, and fee deduction during validation
 
-            // Set the deposit source hash of the transaction to mark it as a deposit transaction
-            // for `OpHandler`.
+            // Check if the callee is in the whitelist
+            match evm.ctx().tx().kind() {
+                TxKind::Call(callee) => {
+                    if !MEGA_SYSTEM_TX_WHITELIST.contains(&callee) {
+                        // TODO: define MegaTransactionError
+                        return Err(Self::Error::from_string(
+                            "System transaction callee is not in the whitelist".to_string(),
+                        ));
+                    }
+                }
+                TxKind::Create => {
+                    // TODO: define MegaTransactionError
+                    return Err(Self::Error::from_string(
+                        "System transaction create is not supported".to_string(),
+                    ));
+                }
+            }
+
+            // Set the deposit source hash of the transaction to mark it as a deposit
+            // transaction for `OpHandler`.
             // The implementation of `revm::context_interface::Transaction` trait for
             // `MegaTransaction` determines the tx type by the existence of the source
             // hash.
-            evm.ctx_mut().inner.tx.deposit.source_hash =
-                constants::MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+            evm.ctx_mut().inner.tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
         }
 
         self.op.pre_execution(evm)
