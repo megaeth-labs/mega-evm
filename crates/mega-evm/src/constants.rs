@@ -2,6 +2,20 @@
 //!
 //! It groups the constants for different EVM specs as sub-modules.
 
+use alloy_primitives::{address, b256, Address, B256};
+
+/// The `MegaETH` system address for deposit-like transaction processing.
+/// Normal transactions sent from this address are processed as deposit transactions,
+/// bypassing signature validation, nonce verification, and fee deduction.
+///
+/// TODO: change this address to one account that we have private key.
+pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xdeaddeaddeaddeaddeaddeaddeaddeaddead0002");
+
+/// The source hash of the `MegaETH` system transaction, used to set the `source_hash` field of the
+/// op deposit info. The value is `keccak256("MEGA_SYSTEM_TRANSACTION")`.
+pub const MEGA_SYSTEM_TRANSACTION_SOURCE_HASH: B256 =
+    b256!("852c082c0faff590c6300c2c34815d1f79882552fa95ba413cd5aeb1dba84957");
+
 /// Constants for the `EQUIVALENCE` spec.
 pub mod equivalence {
     use revm::interpreter::gas;

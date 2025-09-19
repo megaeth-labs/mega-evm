@@ -1,8 +1,11 @@
 //! Common type definitions for the `MegaETH` EVM.
 
 use bitflags::bitflags;
-use revm::context::TxEnv;
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+use revm::context::{Transaction, TxEnv};
 use serde::{Deserialize, Serialize};
+
+use crate::constants::MEGA_SYSTEM_ADDRESS;
 
 /// `MegaETH` transaction type used in revm.
 pub type MegaTransaction = op_revm::OpTransaction<TxEnv>;
@@ -58,4 +61,43 @@ impl BlockEnvAccess {
     pub const fn raw(self) -> u16 {
         self.bits()
     }
+}
+
+/// Checks if a transaction is from the `MegaETH` system address.
+///
+/// Transactions from the mega system address are processed as deposit-like transactions,
+/// bypassing signature validation, nonce verification, and fee deduction.
+/// This is distinct from op system transactions.
+///
+/// # Arguments
+///
+/// * `tx` - The transaction to check
+///
+/// # Returns
+///
+/// Returns `true` if the transaction is from the mega system address, `false` otherwise.
+pub fn is_mega_system_address_transaction(tx: &MegaTransaction) -> bool {
+    tx.base.caller == MEGA_SYSTEM_ADDRESS
+}
+
+/// Checks if a transaction should be processed as a deposit-like transaction.
+///
+/// This includes both actual deposit transactions (`DEPOSIT_TRANSACTION_TYPE`) and normal
+/// transactions from the `MegaETH` system address (mega system transactions).
+///
+/// # Arguments
+///
+/// * `tx` - The transaction to check
+///
+/// # Returns
+///
+/// Returns `true` if the transaction should be processed as deposit-like, `false` otherwise.
+pub fn is_deposit_like_transaction(tx: &MegaTransaction) -> bool {
+    // Check if it's an actual deposit transaction
+    if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
+        return true;
+    }
+
+    // Check if it's from the mega system address
+    is_mega_system_address_transaction(tx)
 }

@@ -9,7 +9,7 @@ use revm::{
         result::{
             ExecutionResult, FromStringError, InvalidTransaction, OutOfGasError, ResultAndState,
         },
-        Cfg, ContextTr, Transaction,
+        Cfg, ContextSetters, ContextTr, Transaction,
     },
     handler::{validation, EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr},
     inspector::{InspectorEvmTr, InspectorFrame, InspectorHandler, JournalExt},
@@ -20,9 +20,10 @@ use revm::{
 };
 
 use crate::{
-    constants, EthHaltReason, ExternalEnvOracle, MegaContext, MegaHaltReason, MegaSpecId,
-    MegaTransactionError,
+    constants, is_mega_system_address_transaction, EthHaltReason, ExternalEnvOracle, MegaContext,
+    MegaHaltReason, MegaSpecId, MegaTransactionError,
 };
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
 /// most functionalities from Optimism.
@@ -60,7 +61,6 @@ where
     delegate! {
         to self.op {
             fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn validate_against_state_and_deduct_caller(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
         }
@@ -68,6 +68,22 @@ where
 
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
         evm.ctx().on_new_tx();
+
+        // Check if this is a mega system address transaction
+        if is_mega_system_address_transaction(evm.ctx().tx()) {
+            // Modify the transaction to make it appear as a deposit transaction
+            // This will cause the OpHandler to automatically bypass signature validation,
+            // nonce verification, and fee deduction during validation
+
+            // Set the deposit source hash of the transaction to mark it as a deposit transaction
+            // for `OpHandler`.
+            // The implementation of `revm::context_interface::Transaction` trait for
+            // `MegaTransaction` determines the tx type by the existence of the source
+            // hash.
+            evm.ctx_mut().inner.tx.deposit.source_hash =
+                constants::MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+        }
+
         self.op.pre_execution(evm)
     }
 
