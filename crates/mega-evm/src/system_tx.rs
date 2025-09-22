@@ -12,8 +12,8 @@ use crate::types::MegaTransaction;
 /// Normal transactions sent from this address are processed as deposit transactions,
 /// bypassing signature validation, nonce verification, and fee deduction.
 ///
-/// TODO: change this address to one account that we have private key.
-pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xdeaddeaddeaddeaddeaddeaddeaddeaddead0002");
+/// The mega system address is held by the sequencer and can only call whitelisted addresses.
+pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The whitelist of addresses that are allowed to be called by the `MegaETH` system address.
 pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[

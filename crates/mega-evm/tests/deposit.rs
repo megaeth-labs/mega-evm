@@ -51,12 +51,12 @@ fn create_evm(db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector, NoOp
 /// Creates a contract that reports the gas available at the start of execution.
 fn create_gas_reporter_contract() -> Bytes {
     BytecodeBuilder::default()
-        .append(GAS)        // Get gas
-        .append(PUSH0)      // Push 0 for memory position
-        .append(MSTORE)     // Store gas at memory position 0
-        .push_number(32u8)  // Return size
-        .append(PUSH0)      // Return offset
-        .append(RETURN)     // Return the gas value
+        .append(GAS) // Get gas
+        .append(PUSH0) // Push 0 for memory position
+        .append(MSTORE) // Store gas at memory position 0
+        .push_number(32u8) // Return size
+        .append(PUSH0) // Return offset
+        .append(RETURN) // Return the gas value
         .build()
 }
 
@@ -126,10 +126,7 @@ fn test_deposit_tx_gas_stipend_for_l1_block() {
     let contract_code = create_gas_reporter_contract();
     db.insert_account_info(
         L1_BLOCK_ADDR,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(contract_code)),
-            ..Default::default()
-        },
+        AccountInfo { code: Some(Bytecode::new_raw(contract_code)), ..Default::default() },
     );
 
     let mut evm = create_evm(db);
@@ -154,10 +151,7 @@ fn test_deposit_tx_gas_stipend_for_gas_price_oracle() {
     let contract_code = create_gas_reporter_contract();
     db.insert_account_info(
         GAS_PRICE_ORACLE_ADDR,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(contract_code)),
-            ..Default::default()
-        },
+        AccountInfo { code: Some(Bytecode::new_raw(contract_code)), ..Default::default() },
     );
 
     let mut evm = create_evm(db);
@@ -179,10 +173,7 @@ fn test_deposit_tx_gas_stipend_for_operator_fee_vault() {
     let contract_code = create_gas_reporter_contract();
     db.insert_account_info(
         OPERATOR_FEE_VAULT_ADDR,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(contract_code)),
-            ..Default::default()
-        },
+        AccountInfo { code: Some(Bytecode::new_raw(contract_code)), ..Default::default() },
     );
 
     let mut evm = create_evm(db);
@@ -204,10 +195,7 @@ fn test_deposit_tx_no_gas_stipend_for_non_whitelisted_address() {
     let contract_code = create_gas_reporter_contract();
     db.insert_account_info(
         NON_WHITELISTED_ADDR,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(contract_code)),
-            ..Default::default()
-        },
+        AccountInfo { code: Some(Bytecode::new_raw(contract_code)), ..Default::default() },
     );
 
     let mut evm = create_evm(db);
@@ -250,7 +238,8 @@ fn test_deposit_tx_gas_stipend_for_contract_creation() {
     assert!(gas_used > 0);
     // Contract creation typically uses more gas, but should still be within reasonable bounds
     // and much less than what the stipend would allow
-    assert!(gas_used < 100000 * DEPOSIT_TX_GAS_STIPEND_MULTIPLIER / 2); // Should use original limit, not full stipend
+    assert!(gas_used < 100000 * DEPOSIT_TX_GAS_STIPEND_MULTIPLIER / 2); // Should use original
+                                                                        // limit, not full stipend
 }
 
 #[test]
@@ -281,10 +270,7 @@ fn test_normal_transaction_no_gas_stipend() {
     let contract_code = create_gas_reporter_contract();
     db.insert_account_info(
         L1_BLOCK_ADDR,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(contract_code)),
-            ..Default::default()
-        },
+        AccountInfo { code: Some(Bytecode::new_raw(contract_code)), ..Default::default() },
     );
 
     let mut evm = create_evm(db);
@@ -307,25 +293,22 @@ fn test_deposit_tx_gas_limit_multiplication() {
 
     // Create a more gas-intensive contract to better test the stipend effect
     let expensive_contract = BytecodeBuilder::default()
-        .append(GAS)        // Get initial gas
-        .append(PUSH0)      // Push 0 for memory position
-        .append(MSTORE)     // Store gas at memory position 0
+        .append(GAS) // Get initial gas
+        .append(PUSH0) // Push 0 for memory position
+        .append(MSTORE) // Store gas at memory position 0
         // Add some expensive operations
         .push_number(1000u16) // Loop counter
-        .push_number(0u8)     // Start position
+        .push_number(0u8) // Start position
         // Simple loop to consume more gas
-        .append(GAS)          // Get gas again after operations
-        .push_number(32u8)    // Return size
-        .append(PUSH0)        // Return offset
-        .append(RETURN)       // Return the final gas value
+        .append(GAS) // Get gas again after operations
+        .push_number(32u8) // Return size
+        .append(PUSH0) // Return offset
+        .append(RETURN) // Return the final gas value
         .build();
 
     db.insert_account_info(
         L1_BLOCK_ADDR,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(expensive_contract)),
-            ..Default::default()
-        },
+        AccountInfo { code: Some(Bytecode::new_raw(expensive_contract)), ..Default::default() },
     );
 
     let mut evm = create_evm(db);
@@ -342,8 +325,12 @@ fn test_deposit_tx_gas_limit_multiplication() {
 
     // The fact that it executed successfully with complex operations suggests
     // that the gas stipend was applied
-    println!("Gas used: {}, Base limit: {}, With stipend: {}",
-             gas_used, base_gas_limit, base_gas_limit * DEPOSIT_TX_GAS_STIPEND_MULTIPLIER);
+    println!(
+        "Gas used: {}, Base limit: {}, With stipend: {}",
+        gas_used,
+        base_gas_limit,
+        base_gas_limit * DEPOSIT_TX_GAS_STIPEND_MULTIPLIER
+    );
 }
 
 #[test]
@@ -355,10 +342,7 @@ fn test_deposit_tx_reports_gas_stipend() {
     let contract_code = create_gas_reporter_contract();
     db.insert_account_info(
         L1_BLOCK_ADDR,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(contract_code)),
-            ..Default::default()
-        },
+        AccountInfo { code: Some(Bytecode::new_raw(contract_code)), ..Default::default() },
     );
 
     let mut evm = create_evm(db);
@@ -387,7 +371,7 @@ fn test_deposit_tx_reports_gas_stipend() {
     assert_eq!(output.len(), 32, "Contract should return 32 bytes (U256)");
 
     // Convert the returned bytes to U256 to get the gas value
-    let reported_gas = U256::from_be_slice(&output);
+    let reported_gas = U256::from_be_slice(output);
     println!("Contract reported gas: {}", reported_gas);
     println!("Base gas limit: {}", base_gas_limit);
     println!("Expected with stipend: {}", base_gas_limit * DEPOSIT_TX_GAS_STIPEND_MULTIPLIER);
@@ -397,9 +381,12 @@ fn test_deposit_tx_reports_gas_stipend() {
     let expected_enhanced_limit = base_gas_limit * DEPOSIT_TX_GAS_STIPEND_MULTIPLIER;
 
     // The contract should see much more gas than the original limit
-    assert!(reported_gas > U256::from(base_gas_limit),
-           "Contract should see more gas than base limit. Reported: {}, Base: {}",
-           reported_gas, base_gas_limit);
+    assert!(
+        reported_gas > U256::from(base_gas_limit),
+        "Contract should see more gas than base limit. Reported: {}, Base: {}",
+        reported_gas,
+        base_gas_limit
+    );
 
     // But less than the full enhanced amount due to intrinsic costs
     assert!(reported_gas < U256::from(expected_enhanced_limit),
@@ -408,9 +395,12 @@ fn test_deposit_tx_reports_gas_stipend() {
 
     // The reported gas should be at least 50% of the enhanced limit to confirm stipend was applied
     let minimum_expected = expected_enhanced_limit / 2;
-    assert!(reported_gas > U256::from(minimum_expected),
-           "Contract should see at least 50% of enhanced limit. Reported: {}, Minimum expected: {}",
-           reported_gas, minimum_expected);
+    assert!(
+        reported_gas > U256::from(minimum_expected),
+        "Contract should see at least 50% of enhanced limit. Reported: {}, Minimum expected: {}",
+        reported_gas,
+        minimum_expected
+    );
 }
 
 #[test]
@@ -422,10 +412,7 @@ fn test_regular_tx_reports_no_gas_stipend() {
     let contract_code = create_gas_reporter_contract();
     db.insert_account_info(
         L1_BLOCK_ADDR,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(contract_code)),
-            ..Default::default()
-        },
+        AccountInfo { code: Some(Bytecode::new_raw(contract_code)), ..Default::default() },
     );
 
     let mut evm = create_evm(db);
@@ -460,16 +447,19 @@ fn test_regular_tx_reports_no_gas_stipend() {
     assert_eq!(output.len(), 32, "Contract should return 32 bytes (U256)");
 
     // Convert the returned bytes to U256 to get the gas value
-    let reported_gas = U256::from_be_slice(&output);
+    let reported_gas = U256::from_be_slice(output);
     println!("Regular tx contract reported gas: {}", reported_gas);
     println!("Base gas limit: {}", base_gas_limit);
 
-    // For regular transactions, the reported gas should be close to the base limit (minus intrinsic costs)
-    // It should NOT be enhanced by the stipend multiplier
+    // For regular transactions, the reported gas should be close to the base limit (minus intrinsic
+    // costs) It should NOT be enhanced by the stipend multiplier
     let expected_enhanced_limit = base_gas_limit * DEPOSIT_TX_GAS_STIPEND_MULTIPLIER;
 
     // Regular transaction should see much less gas than what stipend would provide
-    assert!(reported_gas < U256::from(expected_enhanced_limit / 2),
-           "Regular transaction should not see enhanced gas. Reported: {}, Half of enhanced: {}",
-           reported_gas, expected_enhanced_limit / 2);
+    assert!(
+        reported_gas < U256::from(expected_enhanced_limit / 2),
+        "Regular transaction should not see enhanced gas. Reported: {}, Half of enhanced: {}",
+        reported_gas,
+        expected_enhanced_limit / 2
+    );
 }
