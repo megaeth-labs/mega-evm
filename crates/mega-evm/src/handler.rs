@@ -63,6 +63,10 @@ where
     delegate! {
         to self.op {
             fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
+            fn validate_against_state_and_deduct_caller(
+                &self,
+                evm: &mut Self::Evm,
+            ) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
         }

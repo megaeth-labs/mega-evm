@@ -19,12 +19,14 @@ use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
 use revm::{
     context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
     context_interface::context::ContextError,
+    database::EmptyDB,
     Journal,
 };
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     constants, AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, GasCostOracle, MegaSpecId,
+    NoOpOracle,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -54,6 +56,12 @@ pub struct MegaContext<DB: Database, Oracle: ExternalEnvOracle> {
     pub(crate) block_env_accessed: RefCell<BlockEnvAccess>,
     /// Whether beneficiary data has been accessed in current transaction
     pub(crate) beneficiary_balance_accessed: RefCell<bool>,
+}
+
+impl Default for MegaContext<EmptyDB, NoOpOracle> {
+    fn default() -> Self {
+        Self::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, NoOpOracle::default())
+    }
 }
 
 /* Constructors */

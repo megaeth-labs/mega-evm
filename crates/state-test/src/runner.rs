@@ -4,12 +4,15 @@ use crate::{
     types::{SpecName, Test, TestSuite, TestUnit},
     utils::{compute_test_roots, TestValidationResult},
 };
-use alloy_primitives::U256;
+use alloy_primitives::{address, U256};
 use indicatif::{ProgressBar, ProgressDrawTarget};
+use mega_evm::{
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
+};
 use revm::{
     context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
     context_interface::{
-        result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction},
+        result::{EVMError, ExecutionResult},
         Cfg,
     },
     database,
@@ -17,7 +20,7 @@ use revm::{
     database_interface::EmptyDB,
     inspector::{inspectors::TracerEip3155, InspectCommitEvm},
     primitives::{hardfork::SpecId, Bytes, B256},
-    Context, ExecuteCommitEvm, MainBuilder, MainContext,
+    ExecuteCommitEvm,
 };
 use serde_json::json;
 use std::{
@@ -124,7 +127,7 @@ struct TestExecutionContext<'a> {
     name: &'a str,
     unit: &'a TestUnit,
     test: &'a Test,
-    cfg: &'a CfgEnv,
+    cfg: &'a CfgEnv<MegaSpecId>,
     block: &'a BlockEnv,
     tx: &'a TxEnv,
     cache_state: &'a database::CacheState,
@@ -138,7 +141,7 @@ struct DebugContext<'a> {
     path: &'a str,
     index: usize,
     test: &'a Test,
-    cfg: &'a CfgEnv,
+    cfg: &'a CfgEnv<MegaSpecId>,
     block: &'a BlockEnv,
     tx: &'a TxEnv,
     cache_state: &'a database::CacheState,
@@ -148,9 +151,12 @@ struct DebugContext<'a> {
 fn build_json_output(
     test: &Test,
     test_name: &str,
-    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
     validation: &TestValidationResult,
-    spec: SpecId,
+    spec: MegaSpecId,
     error: Option<String>,
 ) -> serde_json::Value {
     json!({
@@ -171,7 +177,10 @@ fn build_json_output(
 }
 
 fn format_evm_result(
-    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
 ) -> String {
     match exec_result {
         Ok(r) => match r {
@@ -185,7 +194,10 @@ fn format_evm_result(
 
 fn validate_exception(
     test: &Test,
-    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
 ) -> Result<bool, TestErrorKind> {
     match (&test.expect_exception, exec_result) {
         (None, Ok(_)) => Ok(false), // No exception expected, execution succeeded
@@ -199,7 +211,7 @@ fn validate_exception(
 
 fn validate_output(
     expected_output: Option<&Bytes>,
-    actual_result: &ExecutionResult<HaltReason>,
+    actual_result: &ExecutionResult<MegaHaltReason>,
 ) -> Result<(), TestErrorKind> {
     if let Some((expected, actual)) = expected_output.zip(actual_result.output()) {
         if expected != actual {
@@ -216,9 +228,12 @@ fn check_evm_execution(
     test: &Test,
     expected_output: Option<&Bytes>,
     test_name: &str,
-    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
-    db: &mut State<EmptyDB>,
-    spec: SpecId,
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
+    db: &State<EmptyDB>,
+    spec: MegaSpecId,
     print_json_outcome: bool,
 ) -> Result<(), TestErrorKind> {
     let validation = compute_test_roots(exec_result, db);
@@ -306,7 +321,12 @@ pub fn execute_test_suite(
 
         // Setup base configuration
         let mut cfg = CfgEnv::default();
-        cfg.chain_id = unit.env.current_chain_id.unwrap_or(U256::ONE).try_into().unwrap_or(1);
+        cfg.chain_id = unit
+            .env
+            .current_chain_id
+            .unwrap_or_else(|| U256::from(6342))
+            .try_into()
+            .unwrap_or(6342);
 
         // Post and execution
         for (spec_name, tests) in &unit.post {
@@ -318,9 +338,9 @@ pub fn execute_test_suite(
             cfg.spec = spec_name.to_spec_id();
 
             // Configure max blobs per spec
-            if cfg.spec.is_enabled_in(SpecId::OSAKA) {
+            if cfg.spec.into_eth_spec().is_enabled_in(SpecId::OSAKA) {
                 cfg.set_max_blobs_per_tx(6);
-            } else if cfg.spec.is_enabled_in(SpecId::PRAGUE) {
+            } else if cfg.spec.into_eth_spec().is_enabled_in(SpecId::PRAGUE) {
                 cfg.set_max_blobs_per_tx(9);
             } else {
                 cfg.set_max_blobs_per_tx(6);
@@ -388,31 +408,35 @@ pub fn execute_test_suite(
 fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErrorKind> {
     // Prepare state
     let mut cache = ctx.cache_state.clone();
-    cache.set_state_clear_flag(ctx.cfg.spec.is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    cache.set_state_clear_flag(ctx.cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
 
-    let evm_context = Context::mainnet()
-        .with_block(ctx.block)
-        .with_tx(ctx.tx)
-        .with_cfg(ctx.cfg)
-        .with_db(&mut state);
+    let evm_context = MegaContext::default()
+        .with_db(&mut state)
+        .with_cfg(ctx.cfg.clone())
+        .with_block(ctx.block.clone());
+    let mut tx = MegaTransaction::new(ctx.tx.clone());
+    tx.enveloped_tx = Some(Bytes::default());
 
     // Execute
     let timer = Instant::now();
     let (db, exec_result) = if ctx.trace {
-        let mut evm = evm_context
-            .build_mainnet_with_inspector(TracerEip3155::buffered(stderr()).without_summary());
-        let res = evm.inspect_tx_commit(ctx.tx);
-        let db = evm.ctx.journaled_state.database;
+        let mut evm = MegaEvm::new(evm_context)
+            .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
+        let res = evm.inspect_tx_commit(tx);
+        let db = evm.into_journaled_state().database;
         (db, res)
     } else {
-        let mut evm = evm_context.build_mainnet();
-        let res = evm.transact_commit(ctx.tx);
-        let db = evm.ctx.journaled_state.database;
+        let mut evm = MegaEvm::new(evm_context);
+        let res = evm.transact_commit(tx);
+        let db = evm.into_journaled_state().database;
         (db, res)
     };
     *ctx.elapsed.lock().unwrap() += timer.elapsed();
+
+    // Optimism special handling: prune the changes to BaseFeeVault
+    prune_base_fee_vault_changes(db);
 
     // Check results
     check_evm_execution(
@@ -426,28 +450,38 @@ fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErro
     )
 }
 
+fn prune_base_fee_vault_changes(db: &mut State<EmptyDB>) {
+    let base_fee_vault = address!("0x4200000000000000000000000000000000000019");
+    db.cache.accounts.remove(&base_fee_vault);
+}
+
 fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
     println!("\nTraces:");
 
     // Re-run with tracing
     let mut cache = ctx.cache_state.clone();
-    cache.set_state_clear_flag(ctx.cfg.spec.is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    cache.set_state_clear_flag(ctx.cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
 
-    let mut evm = Context::mainnet()
+    let evm_context = MegaContext::default()
         .with_db(&mut state)
-        .with_block(ctx.block)
-        .with_tx(ctx.tx)
-        .with_cfg(ctx.cfg)
-        .build_mainnet_with_inspector(TracerEip3155::buffered(stderr()).without_summary());
+        .with_cfg(ctx.cfg.clone())
+        .with_block(ctx.block.clone());
+    let mut tx = MegaTransaction::new(ctx.tx.clone());
+    tx.enveloped_tx = Some(Bytes::default());
+    let mut evm = MegaEvm::new(evm_context)
+        .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
 
-    let exec_result = evm.inspect_tx_commit(ctx.tx);
+    let exec_result = evm.inspect_tx_commit(tx);
+
+    let state_after = evm.into_journaled_state().database;
+    prune_base_fee_vault_changes(state_after);
 
     println!("\nExecution result: {exec_result:#?}");
     println!("\nExpected exception: {:?}", ctx.test.expect_exception);
     println!("\nState before: {:#?}", ctx.cache_state);
-    println!("\nState after: {:#?}", evm.ctx.journaled_state.database.cache);
+    println!("\nState after: {:#?}", state_after);
     println!("\nSpecification: {:?}", ctx.cfg.spec);
     println!("\nTx: {:#?}", ctx.tx);
     println!("Block: {:#?}", ctx.block);

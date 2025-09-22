@@ -1,5 +1,4 @@
 use mega_evm::MegaSpecId;
-use revm::primitives::hardfork::SpecId;
 use serde::Deserialize;
 
 /// Ethereum specification names
@@ -51,7 +50,7 @@ pub enum SpecName {
     Prague,
     /// Osaka hardfork (skipped)
     Osaka, // SKIPPED
-    /// MegaETH MiniRex hardfork
+    /// `MegaETH` `MiniRex` hardfork
     MiniRex,
     /// Unknown or unsupported specification
     #[serde(other)]

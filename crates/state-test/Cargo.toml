@@ -11,6 +11,10 @@ description = "The utility to run Ethereum State Tests for mega-evm"
 [lints]
 workspace = true
 
+[[bin]]
+name = "state-test"
+path = "src/main.rs"
+
 [dependencies]
 mega-evm.workspace = true
 

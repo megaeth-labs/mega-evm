@@ -1,3 +1,4 @@
+use mega_evm::MegaSpecId;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
@@ -99,7 +100,7 @@ impl TestUnit {
     /// # Returns
     ///
     /// A configured [`BlockEnv`] ready for execution
-    pub fn block_env(&self, cfg: &CfgEnv) -> BlockEnv {
+    pub fn block_env(&self, cfg: &CfgEnv<MegaSpecId>) -> BlockEnv {
         let mut block = BlockEnv {
             number: self.env.current_number,
             beneficiary: self.env.current_coinbase,
@@ -134,7 +135,7 @@ impl TestUnit {
         }
 
         // Set default prevrandao for merge
-        if cfg.spec.is_enabled_in(SpecId::MERGE) && block.prevrandao.is_none() {
+        if cfg.spec.into_eth_spec().is_enabled_in(SpecId::MERGE) && block.prevrandao.is_none() {
             block.prevrandao = Some(B256::default());
         }
 

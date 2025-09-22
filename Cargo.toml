@@ -9,7 +9,7 @@ exclude = [".github/"]
 
 [workspace]
 members = ["crates/mega-evm", "crates/state-test"]
-default-members = ["crates/mega-evm", "crates/mega-evm"]
+default-members = ["crates/mega-evm", "crates/state-test"]
 exclude = []
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021

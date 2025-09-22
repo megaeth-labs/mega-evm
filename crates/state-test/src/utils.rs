@@ -3,9 +3,10 @@
 use alloy_rlp::{RlpEncodable, RlpMaxEncodedLen};
 use hash_db::Hasher;
 use k256::ecdsa::SigningKey;
+use mega_evm::{MegaHaltReason, MegaTransactionError};
 use plain_hasher::PlainHasher;
 use revm::{
-    context::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction},
+    context::result::{EVMError, ExecutionResult},
     database::{EmptyDB, PlainAccount, State},
     primitives::{keccak256, Address, Log, B256, U256},
 };
@@ -19,7 +20,10 @@ pub struct TestValidationResult {
 }
 
 pub fn compute_test_roots(
-    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
     db: &State<EmptyDB>,
 ) -> TestValidationResult {
     TestValidationResult {
