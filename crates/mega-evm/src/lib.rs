@@ -1,7 +1,6 @@
 //! The EVM implementation for the `MegaETH`.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![allow(unused_imports)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg_attr(not(feature = "std"), macro_use)]

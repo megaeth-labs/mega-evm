@@ -1,40 +1,31 @@
-use core::{cell::RefCell, cmp::min};
-use std::{collections::hash_map::Entry, rc::Rc, sync::Arc};
+use core::cmp::min;
 
 use crate::{
     constants::{
         self,
-        equivalence::{CALL_STIPEND, LOG, LOGDATA, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST},
-        mini_rex::SSTORE_SET_GAS,
+        equivalence::{CALL_STIPEND, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST},
     },
-    slot_to_bucket_id, AdditionalLimit, ExternalEnvOracle, HostExt, MegaContext, MegaSpecId,
+    AdditionalLimit, ExternalEnvOracle, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
-use alloy_primitives::{keccak256, Address, BlockNumber, Bytes, Log, LogData, B256, U256};
+use alloy_primitives::{keccak256, Bytes, Log, LogData, B256};
 use revm::{
-    bytecode::opcode::{
-        CALL, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SLOAD, SSTORE,
-    },
+    bytecode::opcode::{CALL, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE},
     context::{ContextTr, CreateScheme, Host, JournalTr},
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
-        _count, as_usize_or_fail, check,
-        gas::{self, cost_per_word, warm_cold_cost_with_delegation, KECCAK256WORD},
+        as_usize_or_fail, check,
+        gas::{self, cost_per_word, warm_cold_cost_with_delegation},
         gas_or_fail,
-        instructions::{
-            contract::{calc_call_gas, get_memory_input_and_out_ranges},
-            control,
-            utility::IntoAddress,
-        },
+        instructions::{contract::get_memory_input_and_out_ranges, control, utility::IntoAddress},
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
-        popn, popn_top, require_non_staticcall, resize_memory, tri, CallInput, CallInputs,
-        CallScheme, CallValue, CreateInputs, FrameInput, InstructionContext, InstructionResult,
-        InstructionTable, Interpreter, InterpreterAction, InterpreterTypes,
+        popn, require_non_staticcall, resize_memory, CallInput, CallInputs, CallScheme, CallValue,
+        CreateInputs, FrameInput, InstructionContext, InstructionResult, InstructionTable,
+        InterpreterAction, InterpreterTypes,
     },
-    primitives::{self, HashMap},
+    primitives::{self},
 };
-use salt::{constant::MIN_BUCKET_SIZE, BucketId};
 
 /// `MegaethInstructions` is the instruction table for `MegaETH`.
 ///

@@ -30,7 +30,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
-use alloy_consensus::{transaction::Recovered, Transaction, TxReceipt};
+use alloy_consensus::{Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
 use alloy_evm::{
     block::{
@@ -42,8 +42,6 @@ use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, OpBlockExecutor};
 use alloy_op_hardforks::OpHardforks;
 use delegate::delegate;
 use revm::{context::result::ExecutionResult, database::State, Inspector};
-
-use crate::MegaEvmFactory;
 
 /// Block execution context for the `MegaETH` chain, aliasing the Optimism block execution
 /// context.

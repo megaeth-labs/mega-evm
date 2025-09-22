@@ -1,5 +1,3 @@
-use core::fmt::Display;
-
 pub use alloy_evm::InvalidTxError;
 use alloy_primitives::Address;
 pub use op_revm::{OpHaltReason, OpTransactionError};

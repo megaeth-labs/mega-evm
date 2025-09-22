@@ -1,5 +1,5 @@
-use core::{cell::RefCell, convert::Infallible, fmt::Debug};
-use std::{collections::hash_map::Entry, rc::Rc, sync::Arc};
+use core::{convert::Infallible, fmt::Debug};
+use std::{collections::hash_map::Entry, sync::Arc};
 
 use alloy_primitives::{Address, BlockNumber, B256, U256};
 use auto_impl::auto_impl;

@@ -23,12 +23,12 @@ use core::convert::Infallible;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::Bytes;
 use op_revm::{L1BlockInfo, OpContext, OpSpecId};
 use revm::{
     context::{
         result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
-        BlockEnv, Cfg, ContextSetters, ContextTr, FrameStack, TxEnv,
+        BlockEnv, Cfg, ContextSetters, ContextTr, FrameStack,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
@@ -36,22 +36,21 @@ use revm::{
         EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult, PrecompileProvider,
         SystemCallTx,
     },
-    inspector::{InspectorHandler, NoOpInspector},
+    inspector::NoOpInspector,
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, CreateOutcome,
-        FrameInput, Gas, InputsImpl, InstructionResult, Interpreter, InterpreterAction,
-        InterpreterResult, InterpreterTypes,
+        interpreter::EthInterpreter, FrameInput, InputsImpl, InstructionResult, InterpreterAction,
+        InterpreterResult,
     },
-    primitives::{Address, TxKind},
+    primitives::Address,
     state::EvmState,
-    DatabaseCommit, ExecuteEvm, InspectEvm, Inspector, Journal, SystemCallEvm,
+    DatabaseCommit, InspectEvm, Inspector, Journal, SystemCallEvm,
 };
 
 use crate::{
     constants, create_exceeding_limit_frame_result, mark_interpreter_result_as_exceeding_limit,
-    AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, HostExt, IntoMegaethCfgEnv, MegaContext,
-    MegaHaltReason, MegaHandler, MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction,
-    MegaTransactionError, MegaTxType, NoOpOracle,
+    ExternalEnvOracle, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
+    MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
+    NoOpOracle,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -152,7 +151,7 @@ where
         db: DB,
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
-        let spec = evm_env.cfg_env().spec();
+        let spec = evm_env.cfg_env().spec;
         let ctx = MegaContext::new(db, spec, self.oracle.clone())
             .with_tx(MegaTransaction::default())
             .with_block(evm_env.block_env)

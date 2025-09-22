@@ -1,8 +1,7 @@
 //! Common type definitions for the `MegaETH` EVM.
 
 use bitflags::bitflags;
-use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
-use revm::context::{Transaction, TxEnv};
+use revm::context::TxEnv;
 use serde::{Deserialize, Serialize};
 
 /// `MegaETH` transaction type used in revm.
@@ -60,4 +59,3 @@ impl BlockEnvAccess {
         self.bits()
     }
 }
-

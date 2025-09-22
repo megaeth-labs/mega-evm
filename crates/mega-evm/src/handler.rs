@@ -7,16 +7,14 @@ use op_revm::{
 };
 use revm::{
     context::{
-        result::{
-            ExecutionResult, FromStringError, InvalidTransaction, OutOfGasError, ResultAndState,
-        },
-        Cfg, ContextSetters, ContextTr, Transaction,
+        result::{ExecutionResult, FromStringError, InvalidTransaction, OutOfGasError},
+        ContextTr, Transaction,
     },
-    handler::{validation, EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr},
-    inspector::{InspectorEvmTr, InspectorFrame, InspectorHandler, JournalExt},
+    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, FrameTr},
+    inspector::{InspectorEvmTr, InspectorHandler},
     interpreter::{
         gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
-        FrameInput, InitialAndFloorGas,
+        InitialAndFloorGas,
     },
     Inspector, Journal,
 };
@@ -25,8 +23,7 @@ use crate::{
     constants,
     system_tx::{is_mega_system_address_transaction, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH},
     EthHaltReason, ExternalEnvOracle, HostExt, MegaContext, MegaHaltReason, MegaSpecId,
-    MegaTransactionError, DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
-    MEGA_SYSTEM_TX_WHITELIST,
+    DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST, MEGA_SYSTEM_TX_WHITELIST,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 

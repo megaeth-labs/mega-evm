@@ -13,27 +13,18 @@
 //! - **Spec Management**: Handles different `MegaETH` specification versions
 
 use alloy_evm::Database;
-use alloy_primitives::{Address, BlockNumber, U256};
+use alloy_primitives::Address;
 use delegate::delegate;
-use hyperloglog::HyperLogLog;
 use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
 use revm::{
-    context::{
-        BlockEnv, CfgEnv, ContextSetters, ContextTr, CreateScheme, LocalContext, Transaction,
-    },
+    context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
     context_interface::context::ContextError,
-    handler::{evm::FrameInitResult, EthFrame, FrameResult, FrameTr},
-    inspector::JournalExt,
-    interpreter::{interpreter::EthInterpreter, FrameInput},
-    primitives::{HashMap, STACK_LIMIT},
     Journal,
 };
-use salt::BucketId;
-use std::{cell::RefCell, collections::hash_map::Entry, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    constants, slot_to_bucket_id, AdditionalLimit, BlockEnvAccess, ExternalEnvOracle,
-    GasCostOracle, MegaSpecId,
+    constants, AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, GasCostOracle, MegaSpecId,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]

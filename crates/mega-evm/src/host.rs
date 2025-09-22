@@ -1,14 +1,11 @@
 use core::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{
-    constants, AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, MegaContext, MegaSpecId,
-};
+use crate::{AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, MegaContext, MegaSpecId};
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
 use revm::{
-    context::{Cfg, ContextTr, JournalTr},
     context_interface::journaled_state::AccountLoad,
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
 };
