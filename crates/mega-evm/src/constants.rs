@@ -2,7 +2,6 @@
 //!
 //! It groups the constants for different EVM specs as sub-modules.
 
-
 /// Constants for the `EQUIVALENCE` spec.
 pub mod equivalence {
     use revm::interpreter::gas;
@@ -10,8 +9,8 @@ pub mod equivalence {
     /// Constants inherited from `revm`.
     pub use gas::{
         CALLVALUE, CALL_STIPEND, CODEDEPOSIT, COLD_SLOAD_COST, CREATE, KECCAK256WORD, LOG, LOGDATA,
-        LOGTOPIC, SSTORE_RESET, SSTORE_SET, STANDARD_TOKEN_COST, WARM_SSTORE_RESET,
-        WARM_STORAGE_READ_COST,
+        LOGTOPIC, SSTORE_RESET, SSTORE_SET, STANDARD_TOKEN_COST, TOTAL_COST_FLOOR_PER_TOKEN,
+        WARM_SSTORE_RESET, WARM_STORAGE_READ_COST,
     };
     pub use revm::primitives::STACK_LIMIT;
 }
@@ -45,6 +44,11 @@ pub mod mini_rex {
     /// (one byte) for call data. This is charged on top of the calldata cost of standard EVM.
     pub const CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS: u64 =
         super::equivalence::STANDARD_TOKEN_COST * 100 - super::equivalence::STANDARD_TOKEN_COST;
+    /// The additional gas cost for EIP-7623 floor gas cost, i.e., gas cost per token (one byte)
+    /// for call data. This is charged on top of the floor cost of standard EVM.
+    pub const CALLDATA_STANDARD_TOKEN_ADDITIONAL_FLOOR_GAS: u64 =
+        super::equivalence::TOTAL_COST_FLOOR_PER_TOKEN * 100 -
+            super::equivalence::TOTAL_COST_FLOOR_PER_TOKEN;
 
     /// The maximum amount of data allowed to generate from a block for the `MINI_REX` spec.
     pub const BLOCK_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024; // 12.5 MB

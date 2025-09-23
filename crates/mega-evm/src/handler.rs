@@ -172,6 +172,10 @@ where
             let additional_calldata_gas =
                 constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * tokens_in_calldata;
             initial_and_floor_gas.initial_gas += additional_calldata_gas;
+            let additional_floor_calldata_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_FLOOR_GAS *
+                    tokens_in_calldata;
+            initial_and_floor_gas.floor_gas += additional_floor_calldata_gas;
 
             // If the initial_gas exceeds the tx gas limit, return an error
             if initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
