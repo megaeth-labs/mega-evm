@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, U256};
 use revm::{
     context::{transaction::AuthorizationTr, Transaction},
-    interpreter::{InstructionResult, InterpreterResult, SStoreResult},
+    interpreter::{InstructionResult, SStoreResult},
 };
 
 /// The number of bytes for the base transaction data.

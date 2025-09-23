@@ -1,10 +1,8 @@
 //! This module provides utility functions to generate EVM bytecode.
 
-use std::io::Read;
-
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use alloy_primitives::{aliases::U224, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use revm::bytecode::opcode::{MSTORE, PUSH0, RETURN, REVERT, SSTORE, STOP};
 
 use crate::test_utils::right_pad_bytes;

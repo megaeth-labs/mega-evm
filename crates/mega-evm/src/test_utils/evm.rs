@@ -1,13 +1,10 @@
 use alloy_primitives::{Address, Bytes, TxKind, U256};
-use core::{convert::Infallible, fmt::Debug};
+use core::fmt::Debug;
 use revm::{
     context::{
         result::{EVMError, ResultAndState},
         TxEnv,
     },
-    database::{AccountState, CacheDB, EmptyDB},
-    inspector::NoOpInspector,
-    state::{AccountInfo, Bytecode},
     Database,
 };
 
