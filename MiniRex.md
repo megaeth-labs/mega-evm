@@ -75,9 +75,10 @@ The MiniRex hardfork significantly increases gas costs for various operations to
 
 ### 4. Data and KV Update Limits
 
-**Block-Level Data Limit:**
+**Block-Level Limits:**
 
 - **Maximum Block Data**: 12.5 MB (`BLOCK_DATA_LIMIT = 12 * 1024 * 1024 + 512 * 1024`)
+- **Maximum Block KV Updates**: 500,000 operations (`BLOCK_KV_UPDATE_LIMIT = 500_000`)
 
 **Transaction-Level Limits:**
 
