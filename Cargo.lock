@@ -946,7 +946,7 @@ checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
 [[package]]
 name = "banderwagon"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/salt.git?branch=compat%2Fmega-reth#5d08e9cb623b36b0e2fc301ae6df8fdf2c0e6372"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=deep_narrow_bucket#22fa7013d0daac747314f11d57fac25cefb9ec63"
 dependencies = [
  "ark-ec 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
  "ark-ed-on-bls12-381-bandersnatch",
@@ -1872,7 +1872,7 @@ dependencies = [
 [[package]]
 name = "ipa-multipoint"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/salt.git?branch=compat%2Fmega-reth#5d08e9cb623b36b0e2fc301ae6df8fdf2c0e6372"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=deep_narrow_bucket#22fa7013d0daac747314f11d57fac25cefb9ec63"
 dependencies = [
  "banderwagon",
  "hex",
@@ -2997,7 +2997,7 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 [[package]]
 name = "salt"
 version = "1.0.0"
-source = "git+https://github.com/megaeth-labs/salt.git?branch=compat%2Fmega-reth#5d08e9cb623b36b0e2fc301ae6df8fdf2c0e6372"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=deep_narrow_bucket#22fa7013d0daac747314f11d57fac25cefb9ec63"
 dependencies = [
  "ahash 0.8.11",
  "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",

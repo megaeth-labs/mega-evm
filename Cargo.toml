@@ -158,7 +158,7 @@ codegen-units = 1
 [workspace.dependencies]
 # megaeth 
 mega-evm = { path = "./crates/mega-evm" }
-salt = { git = "https://github.com/megaeth-labs/salt.git", branch = "compat/mega-reth" }
+salt = { git = "https://github.com/megaeth-labs/salt.git", branch = "deep_narrow_bucket" }
 
 # revm
 revm = { version = "27.1.0", default-features = false }
