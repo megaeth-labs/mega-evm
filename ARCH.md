@@ -23,41 +23,39 @@ Default spec that maintains equivalence with Optimism Isthmus EVM.
 
 ### MINI_REX
 
-The EVM version used for `Mini-Rex` hardfork of MegaETH.
+The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./MiniRex.md) for complete specification.**
 
-- **Features**: 
-  - Quadratic LOG data cost, increased LOG topic cost.
-  - Disabled SELFDESTRUCT
-  - Increased contract size limits
+**Major Features**:
+- **Dynamic Gas Costs**: SALT bucket-based scaling for storage and account operations
+- **100x Gas Increases**: LOG operations, calldata costs dramatically increased
+- **SELFDESTRUCT Prohibition**: Complete disabling of SELFDESTRUCT opcode
+- **Contract Size Increases**: 512 KB contracts, 536 KB initcode
+- **Data/KV Limits**: Transaction limits of 3.125 MB data and 1,000 KV updates
 
-#### LOG Opcodes with Quadratic Data Cost
+#### Dynamic Gas Cost System
+
+**Files**: `crates/mega-evm/src/gas.rs`, `crates/mega-evm/src/instructions.rs`
+
+**Purpose**: Prevents state bloat by scaling gas costs based on SALT bucket capacity.
+
+**Implementation**:
+- **Storage Operations**: `SSTORE_SET_GAS × (bucket_capacity / MIN_BUCKET_SIZE)`
+- **Account Creation**: `NEW_ACCOUNT_GAS × (bucket_capacity / MIN_BUCKET_SIZE)`
+- **Bucket Mapping**: Storage uses `address || slot_key`, accounts use `address`
+
+**Affected Operations**: SSTORE, CREATE, CREATE2, CALL (to new accounts), transaction validation
+
+#### LOG Opcodes with 100x Gas Cost Increase
 
 **Files**: `crates/mega-evm/src/instructions.rs`
 
-**Purpose**: Prevents spam attacks through expensive log operations by implementing quadratic cost scaling.
+**Purpose**: Prevents spam attacks through dramatically increased log costs and data limit enforcement.
 
 **Implementation Details**:
-- **Linear Cost** (data ≤ 4KB): `data_length * LOGDATA`
-- **Quadratic Cost** (data > 4KB): `4096 * LOGDATA + (data_length - 4096)²`
-
-**Formula Breakdown**:
-```rust
-let total_data_size = previous_total_data_size + len;
-if total_data_size <= 4096 {
-    // Linear cost
-    LOGDATA * len
-} else if previous_total_data_size <= 4096 {
-    // Mixed linear + quadratic cost
-    let linear_cost_len = 4096 - previous_total_data_size;
-    let linear_cost = LOGDATA * linear_cost_len;
-    let quadratic_cost_len = len - linear_cost_len;
-    let quadratic_cost = quadratic_cost_len²;
-    linear_cost + quadratic_cost
-} else {
-    // Pure quadratic cost
-    (total_data_size + previous_total_data_size) * len
-}
-```
+- **LOG Topics**: 37,500 gas per topic (vs 375) - 100x increase
+- **LOG Data**: 800 gas per byte (vs 8) - 100x increase
+- **Data Limit**: Enforces 3.125 MB transaction data limit
+- **Enforcement**: Halts with OutOfGas when limit exceeded
 
 **Affected Opcodes**: LOG0, LOG1, LOG2, LOG3, LOG4
 
@@ -77,23 +75,40 @@ if total_data_size <= 4096 {
 self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
 ```
 
+#### Enhanced Transaction Processing
+
+**Files**: `crates/mega-evm/src/handler.rs`, `crates/mega-evm/src/limit/`
+
+**Features**:
+- **Calldata Gas**: 400 gas per token (vs 4) - 100x increase
+- **Data Size Tracking**: Comprehensive tracking of transaction data generation
+- **KV Update Tracking**: Sophisticated counting of state changes with refund logic
+- **Limit Enforcement**: Halts with OutOfGas when limits exceeded
+
 #### Contract Size Limits
 
-**Files**: `crates/mega-evm/src/spec.rs`
+**Files**: `crates/mega-evm/src/constants.rs`, `crates/mega-evm/src/spec.rs`
 
-**Change**: Increased contract size limits for MINI_REX spec to support larger, more complex contracts.
+**Change**: Dramatically increased contract size limits for MINI_REX spec.
 
 **Limits**:
-- `MAX_CONTRACT_SIZE`: 512 KB (vs standard 24 KB)
-- `MAX_INITCODE_SIZE`: 536 KB (512 KB + 24 KB additional)
-- `ADDITIONAL_INITCODE_SIZE`: 24 KB
+- `MAX_CONTRACT_SIZE`: 512 KB (vs standard 24 KB) - ~21x increase
+- `MAX_INITCODE_SIZE`: 536 KB (512 KB + 24 KB buffer) - ~11x increase
+- `CODEDEPOSIT_COST`: ~62,500 gas per byte (vs 200) - ~312x increase
 
-**Constants**:
-```rust
-pub const MAX_CONTRACT_SIZE: usize = 512 * 1024;
-pub const ADDITIONAL_INITCODE_SIZE: usize = 24 * 1024;
-pub const MAX_INITCODE_SIZE: usize = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE;
-```
+#### Data and KV Update Limits
+
+**Files**: `crates/mega-evm/src/limit/`
+
+**Limits**:
+- **Transaction Data**: 3.125 MB maximum
+- **KV Updates**: 1,000 operations maximum
+- **Block Data**: 12.5 MB maximum
+
+**Tracking**:
+- Frame-aware tracking for proper revert handling
+- Sophisticated logic tracks net changes, not all operations
+- Separate discardable vs non-discardable data categories
 
 ## General Features
 

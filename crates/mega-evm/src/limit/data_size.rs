@@ -32,15 +32,19 @@ pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAG
 ///
 /// ## Tracked Data Types
 ///
-/// The tracker monitors the following types of data:
-/// - Intrinsic transaction data (gas limit, value, signature, etc.)
-/// - Transaction calldata
-/// - Access list data
-/// - EIP-7702 authorization list data
-/// - Log topics and data
-/// - Storage slot keys and values
-/// - Updated account information
-/// - Created contract code
+/// **Non-discardable (permanent):**
+/// - Transaction base data: 110 bytes
+/// - Calldata: actual byte length
+/// - Access lists: sum of access entry sizes
+/// - EIP-7702 authorizations: 101 bytes per authorization
+/// - Transaction caller account update: 40 bytes
+/// - EIP-7702 authority account updates: 40 bytes each
+///
+/// **Discardable (reverted on frame revert):**
+/// - Log data: 32 bytes per topic + data length
+/// - Storage writes: 40 bytes (only when original ≠ new value, refunded when reset to original)
+/// - Account updates from calls/creates: 40 bytes each
+/// - Contract code: actual deployed bytecode size
 ///
 /// ## Frame Management
 ///

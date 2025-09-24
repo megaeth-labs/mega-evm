@@ -166,8 +166,9 @@ where
                     })?;
             }
 
-            // MegaETH modification: additional gas cost for calldata (Istanbul hardfork must be
-            // enabled)
+            // MegaETH MiniRex modification: 100x increase in calldata gas costs
+            // - Standard tokens: 400 gas per token (vs 4)
+            // - EIP-7623 floor: 100x increase for transaction data floor cost
             let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
             let additional_calldata_gas =
                 constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * tokens_in_calldata;

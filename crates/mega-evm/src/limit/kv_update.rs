@@ -9,8 +9,19 @@ use crate::MegaTransaction;
 /// A counter for tracking key-value storage operations during transaction execution.
 ///
 /// This struct provides frame-aware counting of storage operations, properly handling
-/// nested calls and reverts. It tracks both storage writes (SSTORE) and account updates
-/// (CREATE, CALL with transfers).
+/// nested calls and reverts. Uses sophisticated logic to track net state changes rather
+/// than all operations.
+///
+/// ## Tracked Operations
+///
+/// **Non-discardable (permanent):**
+/// - Transaction caller account update: 1 KV update
+/// - EIP-7702 authority account updates: 1 KV update each
+///
+/// **Discardable (reverted on frame revert):**
+/// - Storage writes: 1 KV update (only when original ≠ new value, refunded when reset to original)
+/// - Account updates from CREATE: 1 KV update for created account
+/// - Account updates from CALL with transfer: 2 KV updates (caller + callee)
 #[derive(Debug, Default)]
 pub struct KVUpdateCounter {
     /// The total number of key-value updates performed during execution.

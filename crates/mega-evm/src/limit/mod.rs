@@ -20,20 +20,22 @@ pub use kv_update::*;
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
 ///
 /// This struct coordinates both data size and key-value update limits, providing
-/// a unified interface for limit enforcement during transaction execution.
+/// a unified interface for limit enforcement during transaction execution. When
+/// limits are exceeded, transactions halt with `OutOfGas`, consuming all remaining gas.
 ///
-/// # Fields
+/// # Tracking Details
 ///
-/// - `data_limit`: Maximum total data size allowed during transaction execution
-/// - `kv_update_limit`: Maximum number of key-value storage operations allowed
-/// - `data_size_tracker`: Tracks the current data size usage
-/// - `kv_update_counter`: Counts the current number of KV operations
+/// - **Data Size**: Tracks transaction data (110 bytes base + calldata + access lists +
+///   authorizations), caller/authority account updates (40 bytes each), log data, storage writes
+///   (40 bytes when original ≠ new), account updates from calls/creates (40 bytes), and contract
+///   code size
+/// - **KV Updates**: Tracks transaction caller + authority updates, storage writes (when original ≠
+///   new), and account updates from value transfers and creates
 ///
-/// # Default Values
+/// # Default Limits (`MINI_REX`)
 ///
-/// By default, uses the `MINI_REX` specification limits:
-/// - Data limit: [`constants::mini_rex::TX_DATA_LIMIT`]
-/// - KV update limit: [`constants::mini_rex::TX_KV_UPDATE_LIMIT`]
+/// - Data limit: 3.125 MB (25% of 12.5 MB block limit)
+/// - KV update limit: 1,000 operations
 #[derive(Debug)]
 pub struct AdditionalLimit {
     /// A flag to indicate if the limit has been exceeded, set when the limit is exceeded. Once
