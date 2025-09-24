@@ -1,74 +1,194 @@
 use alloy_evm::Database;
+use alloy_primitives::TxKind;
 use delegate::delegate;
-use op_revm::handler::{IsTxError, OpHandler};
+use op_revm::{
+    handler::{IsTxError, OpHandler},
+    OpHaltReason, OpTransactionError,
+};
 use revm::{
     context::{
-        result::{ExecutionResult, FromStringError, InvalidTransaction, ResultAndState},
-        Cfg, ContextTr, Transaction,
+        result::{ExecutionResult, FromStringError, InvalidTransaction, OutOfGasError},
+        ContextTr, Transaction,
     },
-    handler::{EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr},
-    inspector::{InspectorEvmTr, InspectorFrame, InspectorHandler, JournalExt},
+    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, FrameTr},
+    inspector::{InspectorEvmTr, InspectorHandler},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, InitialAndFloorGas,
+        gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
+        InitialAndFloorGas,
     },
     Inspector, Journal,
 };
 
-use crate::{constants, Context, HaltReason, SpecId, TransactionError};
+use crate::{
+    constants,
+    system_tx::{is_mega_system_address_transaction, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH},
+    EthHaltReason, ExternalEnvOracle, HostExt, MegaContext, MegaHaltReason, MegaSpecId,
+    DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST, MEGA_SYSTEM_TX_WHITELIST,
+};
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
 /// most functionalities from Optimism.
 #[allow(missing_debug_implementations)]
-pub struct Handler<EVM, ERROR, FRAME> {
+pub struct MegaHandler<EVM, ERROR, FRAME> {
     op: OpHandler<EVM, ERROR, FRAME>,
-    /// Whether to disable the post-transaction reward to beneficiary.
-    disable_beneficiary: bool,
 }
 
-impl<EVM, ERROR, FRAME> Handler<EVM, ERROR, FRAME> {
+impl<EVM, ERROR, FRAME> MegaHandler<EVM, ERROR, FRAME> {
     /// Create a new `MegaethHandler`.
-    pub fn new(disable_beneficiary: bool) -> Self {
-        Self { op: OpHandler::new(), disable_beneficiary }
+    pub fn new() -> Self {
+        Self { op: OpHandler::new() }
     }
 }
 
-impl<EVM, ERROR, FRAME> Default for Handler<EVM, ERROR, FRAME> {
+impl<EVM, ERROR, FRAME> Default for MegaHandler<EVM, ERROR, FRAME> {
     fn default() -> Self {
-        Self::new(false)
+        Self::new()
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME> revm::handler::Handler for Handler<EVM, ERROR, FRAME>
+impl<DB: Database, EVM, ERROR, FRAME, Oracle: ExternalEnvOracle> revm::handler::Handler
+    for MegaHandler<EVM, ERROR, FRAME>
 where
-    EVM: EvmTr<Context = Context<DB>, Frame = FRAME>,
-    ERROR: EvmTrError<EVM> + From<TransactionError> + FromStringError + IsTxError,
+    EVM: EvmTr<Context = MegaContext<DB, Oracle>, Frame = FRAME>,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     type Evm = EVM;
 
     type Error = ERROR;
 
-    type HaltReason = HaltReason;
+    type HaltReason = MegaHaltReason;
 
     delegate! {
         to self.op {
             fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn validate_against_state_and_deduct_caller(&self, evm: &mut Self::Evm) -> Result<(), Self::Error>;
-            fn last_frame_result(&mut self, evm: &mut Self::Evm, frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
+            fn validate_against_state_and_deduct_caller(
+                &self,
+                evm: &mut Self::Evm,
+            ) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
-            fn execution_result(&mut self, evm: &mut Self::Evm, result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<ExecutionResult<Self::HaltReason>, Self::Error>;
-            fn catch_error(&self, evm: &mut Self::Evm, error: Self::Error) -> Result<ExecutionResult<Self::HaltReason>, Self::Error>;
         }
     }
 
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
-        evm.ctx().log_data_size = 0;
-        // Reset block env access for new transaction execution
-        evm.ctx().reset_block_env_access();
-        // Check beneficiary access for the current transaction
-        evm.ctx().check_tx_beneficiary_access();
+        let ctx = evm.ctx_mut();
+        ctx.on_new_tx();
+
+        // Check if this is a mega system address transaction
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            let tx = ctx.tx();
+            if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
+                // If the deposit tx calls a whitelisted address, we apply gas stipend to the tx
+                match tx.kind() {
+                    TxKind::Create => {}
+                    TxKind::Call(address) => {
+                        if DEPOSIT_TX_GAS_STIPEND_WHITELIST.contains(&address) {
+                            ctx.inner.tx.base.gas_limit *= DEPOSIT_TX_GAS_STIPEND_MULTIPLIER;
+                        }
+                    }
+                }
+            }
+
+            let tx = ctx.tx();
+            if is_mega_system_address_transaction(tx) {
+                // Modify the transaction to make it appear as a deposit transaction
+                // This will cause the OpHandler to automatically bypass signature validation,
+                // nonce verification, and fee deduction during validation
+
+                // Check if the callee is in the whitelist
+                match tx.kind() {
+                    TxKind::Call(callee) => {
+                        if !MEGA_SYSTEM_TX_WHITELIST.contains(&callee) {
+                            // TODO: define MegaTransactionError
+                            return Err(Self::Error::from_string(
+                                "System transaction callee is not in the whitelist".to_string(),
+                            ));
+                        }
+                    }
+                    TxKind::Create => {
+                        // TODO: define MegaTransactionError
+                        return Err(Self::Error::from_string(
+                            "System transaction create is not supported".to_string(),
+                        ));
+                    }
+                }
+
+                // Set the deposit source hash of the transaction to mark it as a deposit
+                // transaction for `OpHandler`.
+                // The implementation of `revm::context_interface::Transaction` trait for
+                // `MegaTransaction` determines the tx type by the existence of the source
+                // hash.
+                ctx.inner.tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+            }
+        }
+
         self.op.pre_execution(evm)
+    }
+
+    /// This function copies the logic from `revm::handler::Handler::validate` to and
+    /// add additional gas cost for calldata.
+    fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
+        self.validate_env(evm)?;
+        let mut initial_and_floor_gas = self.validate_initial_tx_gas(evm)?;
+
+        let ctx = evm.ctx_mut();
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            // MegaETH modification: additional gas cost for creating account
+            let kind = ctx.tx().kind();
+            let new_account = match kind {
+                TxKind::Create => true,
+                TxKind::Call(address) => {
+                    !ctx.tx().value().is_zero() &&
+                        match ctx.db_mut().basic(address)? {
+                            Some(account) => account.is_empty(),
+                            None => true,
+                        }
+                }
+            };
+            if new_account {
+                let callee_address = match kind {
+                    TxKind::Create => {
+                        let tx = ctx.tx();
+                        let caller = tx.caller();
+                        let nonce = tx.nonce();
+                        caller.create(nonce)
+                    }
+                    TxKind::Call(address) => address,
+                };
+                initial_and_floor_gas.initial_gas +=
+                    ctx.new_account_gas(callee_address).map_err(|_| {
+                        let err_str = format!(
+                            "Failed to get new account gas for callee address: {callee_address}",
+                        );
+                        Self::Error::from_string(err_str)
+                    })?;
+            }
+
+            // MegaETH MiniRex modification: 100x increase in calldata gas costs
+            // - Standard tokens: 400 gas per token (vs 4)
+            // - EIP-7623 floor: 100x increase for transaction data floor cost
+            let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
+            let additional_calldata_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * tokens_in_calldata;
+            initial_and_floor_gas.initial_gas += additional_calldata_gas;
+            let additional_floor_calldata_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_FLOOR_GAS *
+                    tokens_in_calldata;
+            initial_and_floor_gas.floor_gas += additional_floor_calldata_gas;
+
+            // If the initial_gas exceeds the tx gas limit, return an error
+            if initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
+                return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
+                    gas_limit: ctx.tx().gas_limit(),
+                    initial_gas: initial_and_floor_gas.initial_gas,
+                }
+                .into());
+            }
+        }
+
+        Ok(initial_and_floor_gas)
     }
 
     fn reward_beneficiary(
@@ -76,28 +196,77 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        if self.disable_beneficiary {
+        if evm.ctx().disable_beneficiary {
             Ok(())
         } else {
             self.op.reward_beneficiary(evm, exec_result)
         }
     }
+
+    fn last_frame_result(
+        &mut self,
+        evm: &mut Self::Evm,
+        frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+    ) -> Result<(), Self::Error> {
+        if evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX) &&
+            evm.ctx()
+                .additional_limit
+                .borrow_mut()
+                .before_frame_return_result(frame_result, true)
+                .exceeded_limit()
+        {
+            return Ok(());
+        }
+
+        self.op.last_frame_result(evm, frame_result)
+    }
+
+    fn execution_result(
+        &mut self,
+        evm: &mut Self::Evm,
+        result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        let result = self.op.execution_result(evm, result)?;
+        Ok(result.map_haltreason(|reason| match reason {
+            OpHaltReason::Base(EthHaltReason::OutOfGas(OutOfGasError::Basic)) => {
+                // if it halts due to OOG, we further check if the data or kv update limit is
+                // exceeded
+                evm.ctx()
+                    .additional_limit
+                    .borrow_mut()
+                    .check_limit()
+                    .maybe_halt_reason()
+                    .unwrap_or(MegaHaltReason::Base(reason))
+            }
+            _ => MegaHaltReason::Base(reason),
+        }))
+    }
+
+    fn catch_error(
+        &self,
+        evm: &mut Self::Evm,
+        error: Self::Error,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        let result = self.op.catch_error(evm, error)?;
+        Ok(result.map_haltreason(MegaHaltReason::Base))
+    }
 }
 
-impl<DB, EVM, ERROR> InspectorHandler for Handler<EVM, ERROR, EthFrame<EthInterpreter>>
+impl<DB, EVM, ERROR, Oracle: ExternalEnvOracle> InspectorHandler
+    for MegaHandler<EVM, ERROR, EthFrame<EthInterpreter>>
 where
     DB: Database,
-    Context<DB>: ContextTr<Journal = Journal<DB>>,
+    MegaContext<DB, Oracle>: ContextTr<Journal = Journal<DB>>,
     Journal<DB>: revm::inspector::JournalExt,
     EVM: InspectorEvmTr<
-        Context = Context<DB>,
+        Context = MegaContext<DB, Oracle>,
         Frame = EthFrame<EthInterpreter>,
         Inspector: Inspector<
             <<Self as revm::handler::Handler>::Evm as EvmTr>::Context,
             EthInterpreter,
         >,
     >,
-    ERROR: EvmTrError<EVM> + From<TransactionError> + FromStringError + IsTxError,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
 {
     type IT = EthInterpreter;
 }

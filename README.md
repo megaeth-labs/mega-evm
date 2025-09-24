@@ -14,11 +14,19 @@ This repository contains a customized version of the revm EVM implementation spe
 
 ## Key Features
 
-- **Custom EVM Specifications**: EQUIVALENCE and MINI_REX specs - different EVM versions defined by mega-evm (EQUIVALENCE has the same semantics as Optimism EVM)
-- **Enhanced Security**: Modified LOG opcodes with quadratic data cost and disabled SELFDESTRUCT
-- **Increased Limits**: Support for larger contracts (512KB vs standard 24KB)
-- **Parallel Execution Support**: Block environment access tracking to facilitate parallel execution conflict detection
-- **Optimism Compatibility**: Built on top of op-revm for seamless integration
+### EQUIVALENCE Specification
+- **Optimism Compatibility**: Maintains full compatibility with Optimism Isthmus EVM
+- **Parallel Execution Support**: Block environment access tracking for conflict detection
+
+### MINI_REX Specification (Hardfork)
+- **Dynamic Gas Costs**: SALT bucket-based scaling preventing state bloat
+- **Massive Gas Increases**: 100x increases for LOG operations and calldata costs
+- **SELFDESTRUCT Prohibition**: Complete disabling for contract integrity
+- **Large Contract Support**: 512 KB contracts (21x increase from 24 KB)
+- **Transaction Limits**: 3.125 MB data and 1,000 KV update limits with enforcement
+- **Enhanced Security**: Comprehensive limit enforcement with OutOfGas penalties
+
+For complete MiniRex specification, see **[MiniRex.md](./MiniRex.md)**.
 
 ## Quick Start
 
@@ -77,8 +85,9 @@ cargo run --example block_env_tracking
 
 ## Documentation
 
+- **[MiniRex.md](MiniRex.md)**: Complete MiniRex hardfork specification and semantic changes
 - **[ARCH.md](ARCH.md)**: Detailed implementation architecture and technical specifications
-- **[DEV.md](DEV.md)**: Development guide.
+- **[DEV.md](DEV.md)**: Development guide and testing information
 
 ## License
 

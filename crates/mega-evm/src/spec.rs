@@ -1,78 +1,77 @@
+//! Definitions of the `MegaETH` EVM versions (`SpecId`).
+
 use core::str::FromStr;
-use op_revm::OpSpecId;
-use revm::primitives::hardfork::UnknownHardfork;
+pub use op_revm::OpSpecId;
+pub use revm::primitives::hardfork::{SpecId as EthSpecId, UnknownHardfork};
 use serde::{Deserialize, Serialize};
 
-/// `MegaETH` spec id type.
+/// `MegaETH` spec id, defining different versions of the `MegaETH` EVM.
+///
+/// Each `MegaETH` EVM version corresponds to a version of the Optimism EVM, which means the
+/// behavior of the `MegaETH` EVM inherits and is customized on top of that version of the Optimism
+/// EVM. Similarly, each Optimism EVM version also corresponds to a Ethereum EVM version. The
+/// corresponding relations are as follows:
+/// - [`SpecId::EQUIVALENCE`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::MINI_REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 #[repr(u8)]
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
 )]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms, missing_docs)]
-pub enum SpecId {
-    /// This is the spec of `MegaethEvm` when no harfork is enabled.
+pub enum MegaSpecId {
+    /// The EVM version when no `MegaETH` harfork is enabled. The behavior of the EVM
+    /// should be equivalent to the [`OpSpecId::ISTHMUS`] of the Optimism EVM.
     #[default]
     EQUIVALENCE,
+    /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
     MINI_REX,
 }
 
-/// Constants for the `MegaethSpecId` spec.
-pub mod constants {
-    /// Constants for the `MINI_REX` spec.
-    pub mod mini_rex {
-        /// The maximum contract size for the `MINI_REX` spec.
-        pub const MAX_CONTRACT_SIZE: usize = 512 * 1024;
-        /// The additional initcode size for the `MINI_REX` spec. The initcode size is limited to
-        /// `MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE`.
-        pub const ADDITIONAL_INITCODE_SIZE: usize = 24 * 1024;
-        /// The maximum initcode size for the `MINI_REX` spec.
-        pub const MAX_INITCODE_SIZE: usize = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE;
-        /// The cost of a log topic for the `MINI_REX` spec.
-        pub const LOG_TOPIC_COST: u64 = 10000;
-    }
-}
-
-/// String identifiers for Optimism hardforks
+/// String identifiers for `MegaETH` EVM versions.
 #[allow(missing_docs)]
 pub mod name {
+    /// The string identifier for the *Equivalence* version of the `MegaETH` EVM.
     pub const EQUIVALENCE: &str = "Equivalence";
+    /// The string identifier for the *Mini-Rex* version of the `MegaETH` EVM.
     pub const MINI_REX: &str = "MiniRex";
 }
 
-impl SpecId {
-    /// Converts the [`MegaethSpecId`] into a [`SpecId`].
-    pub const fn into_eth_spec(self) -> revm::primitives::hardfork::SpecId {
+impl MegaSpecId {
+    /// Converts the [`SpecId`] into its corresponding [`EthSpecId`].
+    pub const fn into_eth_spec(self) -> EthSpecId {
         self.into_op_spec().into_eth_spec()
     }
 
-    /// Converts the [`MegaethSpecId`] into a [`OpSpecId`].
+    /// Converts the [`SpecId`] into its corresponding [`OpSpecId`].
     pub const fn into_op_spec(self) -> OpSpecId {
         match self {
             Self::MINI_REX | Self::EQUIVALENCE => OpSpecId::ISTHMUS,
         }
     }
 
-    /// Checks if one [`MegaethSpecId`] is enabled in another.
+    /// Checks if one given [`SpecId`] is enabled in the current [`SpecId`].
     ///
     /// Evm versions are backward compatible, so a higher version is always enabled in a lower
     /// version.
-    pub const fn is_enabled_in(self, other: Self) -> bool {
+    pub const fn is_enabled(self, other: Self) -> bool {
         other as u8 <= self as u8
     }
 }
 
-impl From<SpecId> for &'static str {
-    fn from(spec_id: SpecId) -> Self {
+impl From<MegaSpecId> for &'static str {
+    /// Converts the [`SpecId`] into its corresponding string identifier.
+    fn from(spec_id: MegaSpecId) -> Self {
         match spec_id {
-            SpecId::EQUIVALENCE => name::EQUIVALENCE,
-            SpecId::MINI_REX => name::MINI_REX,
+            MegaSpecId::EQUIVALENCE => name::EQUIVALENCE,
+            MegaSpecId::MINI_REX => name::MINI_REX,
         }
     }
 }
 
-impl FromStr for SpecId {
+impl FromStr for MegaSpecId {
     type Err = UnknownHardfork;
 
+    /// Converts the string identifier into its corresponding [`SpecId`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             name::EQUIVALENCE => Ok(Self::EQUIVALENCE),
@@ -82,14 +81,16 @@ impl FromStr for SpecId {
     }
 }
 
-impl From<SpecId> for revm::primitives::hardfork::SpecId {
-    fn from(spec_id: SpecId) -> Self {
+impl From<MegaSpecId> for revm::primitives::hardfork::SpecId {
+    /// Converts the [`SpecId`] into its corresponding [`EthSpecId`].
+    fn from(spec_id: MegaSpecId) -> Self {
         spec_id.into_eth_spec()
     }
 }
 
-impl From<SpecId> for OpSpecId {
-    fn from(spec_id: SpecId) -> Self {
+impl From<MegaSpecId> for OpSpecId {
+    /// Converts the [`SpecId`] into its corresponding [`OpSpecId`].
+    fn from(spec_id: MegaSpecId) -> Self {
         spec_id.into_op_spec()
     }
 }

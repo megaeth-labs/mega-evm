@@ -3,7 +3,7 @@
 //! access.
 
 use alloy_primitives::{address, Address, Bytes, U256};
-use mega_evm::{Context, Evm, HaltReason, SpecId, Transaction};
+use mega_evm::{MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, NoOpOracle};
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODESIZE, POP, PUSH20, STOP},
     context::{result::ResultAndState, BlockEnv, ContextSetters, ContextTr, TxEnv},
@@ -18,9 +18,9 @@ const BENEFICIARY: Address = address!("0000000000000000000000000000000000BEEF01"
 const CALLER_ADDR: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT_ADDR: Address = address!("0000000000000000000000000000000000100001");
 
-fn create_evm() -> Evm<CacheDB<EmptyDB>, NoOpInspector> {
+fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle> {
     let db = CacheDB::<EmptyDB>::default();
-    let mut context = Context::new(db, SpecId::MINI_REX);
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
 
     let block_env =
         BlockEnv { beneficiary: BENEFICIARY, number: U256::from(10), ..Default::default() };
@@ -29,7 +29,7 @@ fn create_evm() -> Evm<CacheDB<EmptyDB>, NoOpInspector> {
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
 
-    Evm::new(context, NoOpInspector)
+    MegaEvm::new(context)
 }
 
 fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
@@ -40,17 +40,17 @@ fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
 }
 
 fn execute_tx(
-    evm: &mut Evm<CacheDB<EmptyDB>, NoOpInspector>,
+    evm: &mut MegaEvm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle>,
     caller: Address,
     to: Option<Address>,
     value: U256,
     disable_beneficiary: bool,
-) -> ResultAndState<HaltReason> {
+) -> ResultAndState<MegaHaltReason> {
     if disable_beneficiary {
         evm.disable_beneficiary();
     }
 
-    let tx = Transaction {
+    let tx = MegaTransaction {
         base: TxEnv {
             caller,
             kind: match to {
@@ -59,7 +59,7 @@ fn execute_tx(
             },
             data: Bytes::default(),
             value,
-            gas_limit: 100000,
+            gas_limit: 10000000,
             ..Default::default()
         },
         ..Default::default()
@@ -69,8 +69,8 @@ fn execute_tx(
 }
 
 fn assert_beneficiary_detection(
-    evm: &Evm<CacheDB<EmptyDB>, NoOpInspector>,
-    result_and_state: &ResultAndState<HaltReason>,
+    evm: &MegaEvm<CacheDB<EmptyDB>, NoOpInspector, NoOpOracle>,
+    result_and_state: &ResultAndState<MegaHaltReason>,
 ) {
     // Transaction should succeed
     assert!(result_and_state.result.is_success());
@@ -81,7 +81,9 @@ fn assert_beneficiary_detection(
     }
 }
 
-/// Test: beneficiary as caller - should always detect access
+/// Test that verifies beneficiary balance access detection when the beneficiary is the transaction
+/// caller. This test ensures that when the beneficiary address is used as the caller in a
+/// transaction, the system correctly detects and tracks beneficiary balance access.
 #[test]
 fn test_beneficiary_caller() {
     let mut evm = create_evm();
@@ -92,7 +94,9 @@ fn test_beneficiary_caller() {
     assert_beneficiary_detection(&evm, &result_and_state);
 }
 
-/// Test: beneficiary as recipient - should always detect access
+/// Test that verifies beneficiary balance access detection when the beneficiary is the transaction
+/// recipient. This test ensures that when a transaction sends value to the beneficiary address,
+/// the system correctly detects and tracks beneficiary balance access.
 #[test]
 fn test_beneficiary_recipient() {
     let mut evm = create_evm();
@@ -113,7 +117,10 @@ fn test_beneficiary_recipient() {
     assert_beneficiary_detection(&evm, &result_and_state);
 }
 
-/// Test: contract reads beneficiary balance
+/// Test that verifies beneficiary balance access detection when a contract uses the BALANCE opcode
+/// on the beneficiary address. This test ensures that when a contract reads the balance of the
+/// beneficiary address using the BALANCE opcode, the system correctly detects and tracks
+/// beneficiary balance access.
 #[test]
 fn test_balance_opcode() {
     let mut evm = create_evm();
@@ -133,7 +140,10 @@ fn test_balance_opcode() {
     assert_beneficiary_detection(&evm, &result_and_state);
 }
 
-/// Test: contract uses EXTCODESIZE on beneficiary
+/// Test that verifies beneficiary balance access detection when a contract uses the EXTCODESIZE
+/// opcode on the beneficiary address. This test ensures that when a contract checks the code size
+/// of the beneficiary address using the EXTCODESIZE opcode, the system correctly detects and tracks
+/// beneficiary balance access.
 #[test]
 fn test_extcodesize_opcode() {
     let mut evm = create_evm();

@@ -1,0 +1,85 @@
+CacheState {
+    accounts: {
+		0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba: CacheAccount {
+            account: Some(
+                PlainAccount {
+                    info: AccountInfo {
+                        balance: 203478,
+                        nonce: 0,
+                        code_hash: 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470,
+                        code: Some(
+                            LegacyAnalyzed(
+                                LegacyAnalyzedBytecode {
+                                    bytecode: 0x00,
+                                    original_len: 0,
+                                    jump_table: JumpTable {
+                                        map: "",
+                                    },
+                                },
+                            ),
+                        ),
+                    },
+                    storage: {},
+                },
+            ),
+            status: InMemoryChange,
+        },
+         0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b: CacheAccount {
+            account: None,
+            status: LoadedNotExisting,
+        },
+        0x8a0a19589531694250d570040a0c4b74576919b8: CacheAccount {
+            account: Some(
+                PlainAccount {
+                    info: AccountInfo {
+                        balance: 999999999999999321740,
+                        nonce: 1,
+                        code_hash: 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470,
+                        code: Some(
+                            LegacyAnalyzed(
+                                LegacyAnalyzedBytecode {
+                                    bytecode: 0x00,
+                                    original_len: 0,
+                                    jump_table: JumpTable {
+                                        map: "",
+                                    },
+                                },
+                            ),
+                        ),
+                    },
+                    storage: {},
+                },
+            ),
+            status: InMemoryChange,
+        },
+         0x1000000000000000000000000000000000001000: CacheAccount {
+            account: Some(
+                PlainAccount {
+                    info: AccountInfo {
+                        balance: 0,
+                        nonce: 1,
+                        code_hash: 0xfbd649b5e89a9cd9340bdbad17eb49cdb4136b87cedffb34823393fa48be10a0,
+                        code: Some(
+                            LegacyAnalyzed(
+                                LegacyAnalyzedBytecode {
+                                    bytecode: 0x600060006000600073a94f5374fce5edbc8e2a8697c15331677e6ebf0b5af460025561201560015500,
+                                    original_len: 41,
+                                    jump_table: JumpTable {
+                                        map: "000000000000",
+                                    },
+                                },
+                            ),
+                        ),
+                    },
+                    storage: {
+                        2: 1,
+                        1: 8213,
+                    },
+                },
+            ),
+            status: Changed,
+        },
+    },
+    contracts: {},
+    has_state_clear: true,
+}

@@ -8,8 +8,8 @@ repository = "https://github.com/paradigmxyz/reth"
 exclude = [".github/"]
 
 [workspace]
-members = ["crates/mega-evm"]
-default-members = ["crates/mega-evm"]
+members = ["crates/mega-evm", "crates/state-test"]
+default-members = ["crates/mega-evm", "crates/state-test"]
 exclude = []
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
@@ -156,8 +156,13 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.dependencies]
+# megaeth 
+mega-evm = { path = "./crates/mega-evm" }
+salt = { git = "https://github.com/megaeth-labs/salt.git", branch = "deep_narrow_bucket" }
+
 # revm
 revm = { version = "27.1.0", default-features = false }
+revm-inspectors = "0.27.1"
 op-revm = { version = "8.1.0", default-features = false }
 
 # alloy
@@ -167,9 +172,20 @@ alloy-evm = { version = "0.15.0", default-features = false }
 alloy-op-evm = { version = "0.15.0", default-features = false }
 alloy-op-hardforks = "0.2.2"
 alloy-primitives = { version = "1.3.0", default-features = false, features = ["map-foldhash"] }
+alloy-rlp = { version = "0.3.12", default-features = false }
 op-alloy-consensus = { version = "0.18.12", default-features = false }
 
 # misc
+auto_impl = "1.3"
+clap = { version = "4", features = ["derive"] }
 delegate = "0.13"
 derive_more = { version = "2", default-features = false }
+hash-db = "0.15"
+indicatif = "0.17"
+k256 = { version = "0.13.4", default-features = false }
+plain_hasher = "0.2"
 serde = { version = "1.0", default-features = false }
+serde_json = { version = "1.0", default-features = false }
+thiserror = "2.0"
+triehash = "0.8"
+walkdir = "2.5"

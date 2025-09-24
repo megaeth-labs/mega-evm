@@ -8,12 +8,11 @@
 //! 3. Contract 3: Does NOT use block environment (CALLER opcode)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{BlockEnvAccess, Context, Evm, SpecId, Transaction};
+use mega_evm::{BlockEnvAccess, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, NoOpOracle};
 use revm::{
     bytecode::opcode::{BASEFEE, CALLER, NUMBER, POP, STOP, TIMESTAMP},
     context::{ContextTr, TxEnv},
     database::{CacheDB, EmptyDB},
-    inspector::NoOpInspector,
     primitives::TxKind,
     state::{AccountInfo, Bytecode},
 };
@@ -21,7 +20,7 @@ use revm::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create database and EVM context
     let mut db = CacheDB::<EmptyDB>::default();
-    let spec = SpecId::MINI_REX;
+    let spec = MegaSpecId::MINI_REX;
 
     // Contract 1: Uses single block environment access (NUMBER opcode)
     let contract1_address = address!("0000000000000000000000000000000000100001");
@@ -44,11 +43,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_account_code(&mut db, contract3_address, contract3_code.into());
 
     // Create EVM instance with properly configured L1BlockInfo
-    let mut context = Context::new(db, spec);
+    let mut context = MegaContext::new(db, spec, NoOpOracle::default());
     // Set operator fee fields to zero to avoid panic in MINI_REX (ISTHMUS) spec
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
-    let mut evm = Evm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context);
 
     let caller = address!("0000000000000000000000000000000000100000");
 
@@ -62,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 1
-    let tx1 = Transaction {
+    let tx1 = MegaTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(contract1_address),
@@ -99,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 2
-    let tx2 = Transaction {
+    let tx2 = MegaTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(contract2_address),
@@ -141,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 3
-    let tx3 = Transaction {
+    let tx3 = MegaTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(contract3_address),

@@ -1,25 +1,22 @@
+//! Common type definitions for the `MegaETH` EVM.
+
 use bitflags::bitflags;
 use revm::context::TxEnv;
 use serde::{Deserialize, Serialize};
 
-/// `MegaETH` halt reason type.
-pub type HaltReason = op_revm::OpHaltReason;
-
-/// `MegaETH` EVM execution transaction error type.
-pub type TransactionError = op_revm::OpTransactionError;
-
 /// `MegaETH` transaction type used in revm.
-pub type Transaction = op_revm::OpTransaction<TxEnv>;
+pub type MegaTransaction = op_revm::OpTransaction<TxEnv>;
+/// `MegaETH` transaction builder type used in revm.
+pub type MegaTransactionBuilder = op_revm::transaction::abstraction::OpTransactionBuilder;
 
 /// `MegaETH` precompiles type.
-pub type Precompiles = op_revm::precompiles::OpPrecompiles;
+pub type MegaPrecompiles = op_revm::precompiles::OpPrecompiles;
 
 /// `MegaETH` transaction type.
-pub type TxType = op_alloy_consensus::OpTxType;
+pub type MegaTxType = op_alloy_consensus::OpTxType;
 
 bitflags! {
     /// Bitmap-based tracking of block environment accesses.
-    /// More efficient than Vec for frequent access checks.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct BlockEnvAccess: u16 {
         /// Block number (NUMBER opcode)
@@ -52,12 +49,12 @@ impl Default for BlockEnvAccess {
 }
 
 impl BlockEnvAccess {
-    /// Count the number of accessed block environment types.
+    /// Counts the number of accessed block environment types.
     pub fn count_accessed(self) -> usize {
         self.bits().count_ones() as usize
     }
 
-    /// Get the raw bitmap value.
+    /// Gets the raw bitmap value.
     pub const fn raw(self) -> u16 {
         self.bits()
     }

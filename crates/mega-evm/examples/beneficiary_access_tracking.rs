@@ -8,13 +8,12 @@
 //! 3. Contract 3: Accesses beneficiary via different operations (should trigger detection)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{Context, Evm, SpecId, Transaction};
+use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction, NoOpOracle};
 use revm::{
     bytecode::opcode::{BALANCE, CALLER, POP, PUSH20, STOP},
     context::{BlockEnv, ContextSetters, ContextTr, TxEnv},
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
-    inspector::NoOpInspector,
     primitives::TxKind,
     state::{AccountInfo, Bytecode},
 };
@@ -24,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create database and EVM context
     let mut db = CacheDB::<EmptyDB>::default();
-    let spec = SpecId::MINI_REX;
+    let spec = MegaSpecId::MINI_REX;
     let beneficiary = address!("0000000000000000000000000000000000000001");
 
     // Contract 1: Reads beneficiary balance
@@ -57,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_account_code(&mut db, contract3_address, contract3_code.into());
 
     // Create EVM instance with properly configured context
-    let mut context = Context::new(db, spec);
+    let mut context = MegaContext::new(db, spec, NoOpOracle::default());
 
     // Set the beneficiary in the block environment
     let block_env = BlockEnv { beneficiary, ..Default::default() };
@@ -67,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
 
-    let mut evm = Evm::new(context, NoOpInspector);
+    let mut evm = MegaEvm::new(context);
 
     let caller = address!("0000000000000000000000000000000000100000");
 
@@ -80,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  Initial state: no beneficiary access detected");
 
-    let tx1 = Transaction {
+    let tx1 = MegaTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(contract1_address),
@@ -118,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  Initial state: no beneficiary access detected");
 
-    let tx2 = Transaction {
+    let tx2 = MegaTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(contract2_address),
@@ -153,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  Initial state: no beneficiary access detected");
 
-    let tx3 = Transaction {
+    let tx3 = MegaTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(contract3_address),

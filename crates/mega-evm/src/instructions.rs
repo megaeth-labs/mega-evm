@@ -1,64 +1,94 @@
-use crate::{constants, Context, HostExt, SpecId};
+use core::cmp::min;
+
+use crate::{
+    constants::{
+        self,
+        equivalence::{CALL_STIPEND, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST},
+    },
+    AdditionalLimit, ExternalEnvOracle, HostExt, MegaContext, MegaSpecId,
+};
 use alloy_evm::Database;
-use alloy_primitives::{Bytes, Log, LogData, B256};
+use alloy_primitives::{keccak256, Bytes, Log, LogData, B256};
 use revm::{
-    bytecode::opcode::{LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT},
+    bytecode::opcode::{CALL, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE},
+    context::{ContextTr, CreateScheme, Host, JournalTr},
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
-        as_usize_or_fail,
-        gas::{LOG, LOGDATA},
+        as_usize_or_fail, check,
+        gas::{self, cost_per_word, warm_cold_cost_with_delegation},
         gas_or_fail,
-        instructions::control,
+        instructions::{contract::get_memory_input_and_out_ranges, control, utility::IntoAddress},
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
-        popn, require_non_staticcall, resize_memory, tri, InstructionContext, InstructionResult,
-        InstructionTable, Interpreter, InterpreterTypes,
+        popn, require_non_staticcall, resize_memory, CallInput, CallInputs, CallScheme, CallValue,
+        CreateInputs, FrameInput, InstructionContext, InstructionResult, InstructionTable,
+        InterpreterAction, InterpreterTypes,
     },
+    primitives::{self},
 };
 
 /// `MegaethInstructions` is the instruction table for `MegaETH`.
 ///
 /// This instruction table customizes certain opcodes for `MegaETH` specifications:
-/// - LOG opcodes with quadratic data cost after Mini-Rex
-/// - SELFDESTRUCT opcode disabled after Mini-Rex to prevent contract destruction
+/// - LOG opcodes with 100x gas cost increase and data size limit enforcement
+/// - SELFDESTRUCT opcode completely disabled (halts with `InvalidFEOpcode`)
+/// - SSTORE opcode with dynamically-scaled gas cost and data/KV limit enforcement
+/// - CREATE/CREATE2 opcodes with dynamically-scaled + flat gas cost and limit enforcement
+/// - CALL opcode with dynamically-scaled new account gas cost
+///
+/// # Assumptions
+///
+/// This instruction table is only used when the `MINI_REX` spec is enabled, so we can safely assume
+/// that all features before and including Mini-Rex are enabled.
 #[derive(Clone)]
-pub struct Instructions<DB: Database> {
-    spec: SpecId,
-    inner: EthInstructions<EthInterpreter, Context<DB>>,
+pub struct MegaInstructions<DB: Database, Oracle: ExternalEnvOracle> {
+    spec: MegaSpecId,
+    inner: EthInstructions<EthInterpreter, MegaContext<DB, Oracle>>,
 }
 
-impl<DB: Database> core::fmt::Debug for Instructions<DB> {
+impl<DB: Database, Oracle: ExternalEnvOracle> core::fmt::Debug for MegaInstructions<DB, Oracle> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethInstructions").field("spec", &self.spec).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database> Instructions<DB> {
+impl<DB: Database, Oracle: ExternalEnvOracle> MegaInstructions<DB, Oracle> {
     /// Create a new `MegaethInstructions` with the given spec id.
-    pub fn new(spec: SpecId) -> Self {
+    pub fn new(spec: MegaSpecId) -> Self {
         let this = Self { spec, inner: EthInstructions::new_mainnet() };
         this.with_spec(spec)
     }
 
-    fn with_spec(mut self, spec: SpecId) -> Self {
-        if spec.is_enabled_in(SpecId::MINI_REX) {
-            // Override the LOG instructions and use our own implementation with quadratic data cost
-            self.inner.insert_instruction(LOG0, log_with_quadratic_data_cost::<0, _>);
-            self.inner.insert_instruction(LOG1, log_with_quadratic_data_cost::<1, _>);
-            self.inner.insert_instruction(LOG2, log_with_quadratic_data_cost::<2, _>);
-            self.inner.insert_instruction(LOG3, log_with_quadratic_data_cost::<3, _>);
-            self.inner.insert_instruction(LOG4, log_with_quadratic_data_cost::<4, _>);
+    fn with_spec(mut self, spec: MegaSpecId) -> Self {
+        if spec.is_enabled(MegaSpecId::MINI_REX) {
+            // Override the LOG instructions with 100x gas cost increase and data limit enforcement
+            self.inner.insert_instruction(LOG0, log_with_data_bomb::<0, _>);
+            self.inner.insert_instruction(LOG1, log_with_data_bomb::<1, _>);
+            self.inner.insert_instruction(LOG2, log_with_data_bomb::<2, _>);
+            self.inner.insert_instruction(LOG3, log_with_data_bomb::<3, _>);
+            self.inner.insert_instruction(LOG4, log_with_data_bomb::<4, _>);
+
             // Disallow SELFDESTRUCT opcode in Mini-Rex spec
             // This prevents contracts from being permanently destroyed
             // When executed, it will halt with InvalidFEOpcode
             self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
+
+            // Override the SSTORE instruction
+            self.inner.insert_instruction(SSTORE, sstore_with_bomb);
+
+            // Override the CREATE and CREATE2 instructions
+            self.inner.insert_instruction(CREATE, create_with_bomb::<_, false, _>);
+            self.inner.insert_instruction(CREATE2, create_with_bomb::<_, true, _>);
+
+            // Override the CALL instruction
+            self.inner.insert_instruction(CALL, call_with_bomb);
         }
         self
     }
 }
 
-impl<DB: Database> InstructionProvider for Instructions<DB> {
-    type Context = Context<DB>;
+impl<DB: Database, Oracle: ExternalEnvOracle> InstructionProvider for MegaInstructions<DB, Oracle> {
+    type Context = MegaContext<DB, Oracle>;
     type InterpreterTypes = EthInterpreter;
 
     fn instruction_table(&self) -> &InstructionTable<Self::InterpreterTypes, Self::Context> {
@@ -66,19 +96,36 @@ impl<DB: Database> InstructionProvider for Instructions<DB> {
     }
 }
 
-/// `LOG` opcode implementation modified from `revm` to support quadratic data cost.
-pub fn log_with_quadratic_data_cost<const N: usize, H: HostExt + ?Sized>(
+/// `LOG` opcode implementation modified from `revm` with increased gas costs and data size limit
+/// enforcement.
+///
+/// # Differences from the standard EVM
+///
+/// 1. **Increased Gas Costs**: LOG topics cost 100x more (37,500 vs 375), LOG data costs 100x more
+///    (800 vs 8 per byte)
+/// 2. **Data Size Limit**: Checks if total transaction data size exceeds `TX_DATA_LIMIT` (3.125 MB)
+/// 3. **Limit Enforcement**: Halts with `OutOfGas` when data limit exceeded, consuming all
+///    remaining gas
+///
+/// # Assumptions
+///
+/// This alternative implementation of `LOG` is only used when the `MINI_REX` spec is enabled.
+pub fn log_with_data_bomb<const N: usize, H: HostExt + ?Sized>(
     context: InstructionContext<'_, H, impl InterpreterTypes>,
 ) {
     require_non_staticcall!(context.interpreter);
 
     popn!([offset, len], context.interpreter);
     let len = as_usize_or_fail!(context.interpreter, len);
-    let previous_total_log_data_size = context.host.log_data_size();
-    gas_or_fail!(
-        context.interpreter,
-        quadratic_log_cost(N as u8, len as u64, previous_total_log_data_size)
-    );
+    // MegaETH modification: calculate the increased gas cost for log topics and data
+    let log_cost = {
+        let topic_cost = constants::mini_rex::LOG_TOPIC_GAS.checked_mul(N as u64);
+        let data_cost = constants::mini_rex::LOG_DATA_GAS.checked_mul(len as u64);
+        topic_cost
+            .and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
+            .and_then(|cost| cost.checked_add(constants::equivalence::LOG))
+    };
+    gas_or_fail!(context.interpreter, log_cost);
     let data = if len == 0 {
         Bytes::new()
     } else {
@@ -102,49 +149,295 @@ pub fn log_with_quadratic_data_cost<const N: usize, H: HostExt + ?Sized>(
     };
 
     context.host.log(log);
+
+    /* The above logic is the same as the standard EVM's. The below is the data bomb logic. */
+
+    // Record the size of the log topics and data. If the total data size exceeds the limit, we
+    // halt.
+    if context.host.additional_limit().borrow_mut().on_log(N as u64, len as u64).exceeded_limit() {
+        context.interpreter.halt(InstructionResult::MemoryLimitOOG);
+    }
 }
 
-/// `LOG` opcode cost calculation.
+/// `SSTORE` opcode implementation modified from `revm` with dynamically-scaled gas costs and limit
+/// enforcement.
 ///
-/// # Parameters
+/// # Differences from the standard EVM
 ///
-/// - `n`: Number of topics
-/// - `len`: Length of the data of current opcode
-/// - `previous_total_data_size`: Total size of all previous log data, excluding current opcode
-#[inline]
-#[allow(unused_variables)]
-pub const fn quadratic_log_cost(n: u8, len: u64, previous_total_data_size: u64) -> Option<u64> {
-    // cost for opcode and topics
-    let base_cost = tri!(LOG.checked_add(constants::mini_rex::LOG_TOPIC_COST * n as u64));
+/// 1. **Dynamic Gas Costs**: Base cost 2,000,000 gas, multiplied by `bucket_capacity /
+///    MIN_BUCKET_SIZE`
+/// 2. **Data Size Tracking**: Adds 40 bytes when original ≠ new value AND first write to slot
+/// 3. **KV Update Tracking**: Adds 1 KV update when original ≠ new value AND first write to slot
+/// 4. **Limit Enforcement**: Halts with `OutOfGas` when data (3.125 MB) or KV (1,000) limits
+///    exceeded
+/// 5. **Refund Logic**: Refunds data/KV when slot reset to original value
+///
+/// # Assumptions
+///
+/// This alternative implementation of `SSTORE` is only used when the `MINI_REX` spec is enabled.
+/// so we can safely assume that all features before and including Mini-Rex are enabled.
+pub fn sstore_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    require_non_staticcall!(context.interpreter);
 
-    let data_cost = {
-        // cost for log data
-        // the total cost for the whole transaction (summing up all the logs) would be:
-        // - data_len * LOGDATA, if data_len <= 4096
-        // - 4096 * LOGDATA + (data_len - 4096) ^ 2, if data_len > 4096
-        // Here we calculate the cost for the current log.
-        let total_data_size = previous_total_data_size + len;
-        if total_data_size <= 4096 {
-            // Less than 4KB, linear cost. The cost of current log is linear to its length.
-            tri!(LOGDATA.checked_mul(len))
-        } else if previous_total_data_size <= 4096 {
-            // The previous total log length is less than 4KB, but the current log length is greater
-            // than 4KB. The cost of current log is a combination of linear and
-            // quadratic cost: (4096 - previous_total_data_size) * LOGDATA + (len -
-            // (4096 - previous_total_data_size)) ^ 2
-            let linear_cost_len = 4096 - previous_total_data_size;
-            let linear_cost = tri!(LOGDATA.checked_mul(linear_cost_len));
-            let quadratic_cost_len = len - linear_cost_len;
-            let quadratic_cost = tri!(quadratic_cost_len.checked_pow(2));
-            tri!(linear_cost.checked_add(quadratic_cost))
-        } else {
-            // The previous total log length is greater than 4KB, and the current log length is also
-            // greater than 4KB. The cost of current log is quadratic to its length:
-            // total_data_size ** 2 - previous_total_data_size ** 2 === (total_data_size +
-            // previous_total_data_size) * len
-            tri!(tri!(total_data_size.checked_add(previous_total_data_size)).checked_mul(len))
-        }
+    popn!([index, value], context.interpreter);
+
+    let target_address = context.interpreter.input.target_address();
+    let Some(state_load) = context.host.sstore(target_address, index, value) else {
+        context.interpreter.halt(InstructionResult::FatalExternalError);
+        return;
     };
 
-    base_cost.checked_add(data_cost)
+    // EIP-1706 Disable SSTORE with gasleft lower than call stipend. EIP-1706 is guaranteed to be
+    // enabled in mega-evm.
+    if context.interpreter.gas.remaining() <= CALL_STIPEND {
+        context.interpreter.halt(InstructionResult::ReentrancySentryOOG);
+        return;
+    }
+
+    // We directly use EIP-2200 to calculate the gas cost, since it is guaranteed to be enabled in
+    // mega-evm.
+    // In addition, we increase the gas cost for setting a storage slot to a non-zero value. Other
+    // gas costs are the same as the standard EVM.
+    let loaded_data = &state_load.data;
+    let gas_cost = if loaded_data.is_new_eq_present() {
+        WARM_STORAGE_READ_COST
+    } else if loaded_data.is_original_eq_present() && loaded_data.is_original_zero() {
+        // dynamically calculate the gas cost based on the SALT bucket capacity
+        let Ok(sstore_set_gas) = context.host.sstore_set_gas(target_address, index) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        sstore_set_gas
+    } else if loaded_data.is_original_eq_present() {
+        WARM_SSTORE_RESET
+    } else {
+        WARM_STORAGE_READ_COST
+    };
+    revm::interpreter::gas!(context.interpreter, gas_cost);
+
+    context
+        .interpreter
+        .gas
+        .record_refund(gas::sstore_refund(context.interpreter.runtime_flag.spec_id(), loaded_data));
+
+    // KV update bomb and data bomb (only when first writing non-zero value to originally zero
+    // slot): check if the number of key-value updates or the total data size will exceed the
+    // limit, if so, halt.
+    if context
+        .host
+        .additional_limit()
+        .borrow_mut()
+        .on_sstore(target_address, index, loaded_data)
+        .exceeded_limit()
+    {
+        context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
+    }
+}
+
+/// `CREATE`/`CREATE2` opcode implementation modified from `revm` with increased gas costs and limit
+/// enforcement.
+///
+/// # Differences from the standard EVM
+///
+/// 1. **Dynamic New Account Gas**: Base 2,000,000 gas, multiplied by `bucket_capacity /
+///    MIN_BUCKET_SIZE`
+/// 2. **Additional Create Gas**: Flat 2,000,000 gas fee on top of new account cost
+/// 3. **Data/KV Tracking**: Account creation adds 40 bytes data and 1 KV update
+/// 4. **Contract Code Tracking**: Deployed bytecode size added to transaction data
+/// 5. **Limit Enforcement**: Halts when data or KV limits exceeded
+///
+/// # Assumptions
+///
+/// This alternative implementation of `CREATE`/`CREATE2` is only used when the `MINI_REX` spec is
+/// enabled, so we can safely assume that all features before and including `MINI_REX` are enabled.
+pub fn create_with_bomb<
+    WIRE: InterpreterTypes,
+    const IS_CREATE2: bool,
+    H: HostExt + ContextTr + ?Sized,
+>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    require_non_staticcall!(context.interpreter);
+
+    let target_address = context.interpreter.input.target_address();
+
+    // EIP-1014: Skinny CREATE2
+    if IS_CREATE2 {
+        check!(context.interpreter, PETERSBURG);
+    }
+
+    popn!([value, code_offset, len], context.interpreter);
+    let initcode_len = as_usize_or_fail!(context.interpreter, len);
+
+    let mut code = Bytes::new();
+    if initcode_len != 0 {
+        // EIP-3860: Limit and meter initcode
+        // Limit is set as double of max contract bytecode size
+        if initcode_len > context.host.max_initcode_size() {
+            context.interpreter.halt(InstructionResult::CreateInitCodeSizeLimit);
+            return;
+        }
+        revm::interpreter::gas!(context.interpreter, gas::initcode_cost(initcode_len));
+
+        let code_offset = as_usize_or_fail!(context.interpreter, code_offset);
+        resize_memory!(context.interpreter, code_offset, initcode_len);
+        code = Bytes::copy_from_slice(
+            context.interpreter.memory.slice_len(code_offset, initcode_len).as_ref(),
+        );
+    }
+
+    // EIP-1014: Skinny CREATE2
+    // The gas cost of CREATE is retrieved from the host, increased to
+    // [`CREATE_GAS`](constants::mini_rex::CREATE_GAS) initially, and doubling as the
+    // corresponding SALT bucket capacity doubles.
+    let scheme = if IS_CREATE2 {
+        popn!([salt], context.interpreter);
+
+        // calculate the created address
+        let init_code_hash = keccak256(&code);
+        let created_address = target_address.create2(salt.to_be_bytes(), init_code_hash);
+        // MegaETH modification: gas cost for creating a new account
+        let Ok(new_account_gas) = context.host.new_account_gas(created_address) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let create2_cost = cost_per_word(initcode_len, constants::equivalence::KECCAK256WORD)
+            .and_then(|cost| new_account_gas.checked_add(cost))
+            // MegaETH modification: add additional gas cost for creating a new contract
+            .and_then(|cost| cost.checked_add(constants::mini_rex::CREATE_GAS));
+        gas_or_fail!(context.interpreter, create2_cost);
+        CreateScheme::Create2 { salt }
+    } else {
+        // calculate the created address
+        let Ok(creater) = context.host.journal_mut().load_account(target_address) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let created_address = target_address.create(creater.data.info.nonce);
+        // MegaETH modification: gas cost for creating a new account
+        let Ok(new_account_gas) = context.host.new_account_gas(created_address) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        // MegaETH modification: add additional gas cost for creating a new contract
+        let create_cost = new_account_gas.checked_add(constants::mini_rex::CREATE_GAS);
+        gas_or_fail!(context.interpreter, create_cost);
+        CreateScheme::Create
+    };
+
+    let mut gas_limit = context.interpreter.gas.remaining();
+
+    // EIP-150: Gas cost changes for IO-heavy operations
+    // MegaETH modification: Take remaining gas and deduce l32 part of it.
+    gas_limit -= gas_limit / 32;
+
+    revm::interpreter::gas!(context.interpreter, gas_limit);
+
+    // Call host to interact with target contract
+    context.interpreter.bytecode.set_action(InterpreterAction::NewFrame(FrameInput::Create(
+        Box::new(CreateInputs {
+            caller: target_address,
+            scheme,
+            value,
+            init_code: code,
+            gas_limit,
+        }),
+    )));
+}
+
+/// `CALL` opcode implementation modified from `revm` with increased new account gas costs and limit
+/// enforcement.
+///
+/// # Differences from the standard EVM
+///
+/// 1. **Dynamic New Account Gas**: When calling empty account with transfer, base 2,000,000 gas
+///    multiplied by `bucket_capacity / MIN_BUCKET_SIZE`
+/// 2. **Data/KV Tracking**: Value transfers to empty accounts add 40 bytes data and 2 KV updates
+///    (caller + callee)
+/// 3. **Limit Enforcement**: Operations halt when transaction data or KV limits exceeded
+///
+/// # Assumptions
+///
+/// This alternative implementation of `CALL` is only used when the `MINI_REX` spec is enabled, so
+/// we can safely assume that all features before and including Mini-Rex are enabled.
+pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    popn!([local_gas_limit, to, value], context.interpreter);
+    let to = to.into_address();
+    // Max gas limit is not possible in real ethereum situation.
+    let local_gas_limit = u64::try_from(local_gas_limit).unwrap_or(u64::MAX);
+
+    let has_transfer = !value.is_zero();
+    if context.interpreter.runtime_flag.is_static() && has_transfer {
+        context.interpreter.halt(InstructionResult::CallNotAllowedInsideStatic);
+        return;
+    }
+
+    let Some((input, return_memory_offset)) = get_memory_input_and_out_ranges(context.interpreter)
+    else {
+        return;
+    };
+
+    let Some(account_load) = context.host.load_account_delegated(to) else {
+        context.interpreter.halt(InstructionResult::FatalExternalError);
+        return;
+    };
+
+    let call_cost = {
+        let is_empty = account_load.data.is_empty;
+        // Account access.
+        let mut gas = warm_cold_cost_with_delegation(account_load);
+
+        // Transfer value cost
+        if has_transfer {
+            gas += constants::equivalence::CALLVALUE;
+        }
+
+        // New account cost
+        if is_empty {
+            // EIP-161: State trie clearing (invariant-preserving alternative)
+            // Account only if there is value transferred.
+            if has_transfer {
+                let Ok(new_account_gas) = context.host.new_account_gas(to) else {
+                    context.interpreter.halt(InstructionResult::FatalExternalError);
+                    return;
+                };
+                gas += new_account_gas;
+            }
+        }
+
+        gas
+    };
+    revm::interpreter::gas!(context.interpreter, call_cost);
+
+    // EIP-150: Gas cost changes for IO-heavy operations
+    // MegaETH modification: replace 63/64 rule with 31/32 rule (take l32 part of gas limit)
+    let remaining_gas =
+        context.interpreter.gas.remaining() - context.interpreter.gas.remaining() / 32;
+    let mut gas_limit = min(remaining_gas, local_gas_limit);
+
+    revm::interpreter::gas!(context.interpreter, gas_limit);
+
+    // Add call stipend if there is value to be transferred.
+    if has_transfer {
+        gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
+    }
+
+    // Call host to interact with target contract
+    context.interpreter.bytecode.set_action(InterpreterAction::NewFrame(FrameInput::Call(
+        Box::new(CallInputs {
+            input: CallInput::SharedBuffer(input),
+            gas_limit,
+            target_address: to,
+            caller: context.interpreter.input.target_address(),
+            bytecode_address: to,
+            value: CallValue::Transfer(value),
+            scheme: CallScheme::Call,
+            is_static: context.interpreter.runtime_flag.is_static(),
+            return_memory_offset,
+        }),
+    )));
 }
