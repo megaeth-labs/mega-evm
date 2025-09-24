@@ -636,7 +636,7 @@ fn calldata_test_case<const CALLDATA_LEN: usize>(spec: MegaSpecId, expected_gas_
 fn test_calldata_additional_cost() {
     calldata_test_case::<1024>(
         MegaSpecId::MINI_REX,
-        1_045_000, // This test uses a different calldata pattern than our floor gas tests
+        123_400, // This test uses a different calldata pattern than our floor gas tests
     );
 }
 
@@ -849,14 +849,14 @@ fn floor_gas_test_case(spec: MegaSpecId, calldata_size: usize, expected_gas_used
 #[test]
 fn test_floor_gas_calldata_mini_rex() {
     // Test with 100 bytes of calldata
-    floor_gas_test_case(MegaSpecId::MINI_REX, 100, 21_000 + 400_000);
+    floor_gas_test_case(MegaSpecId::MINI_REX, 100, 61_000);
 }
 
 /// Tests floor gas charges additional cost for large calldata in `MINI_REX` spec.
 #[test]
 fn test_floor_gas_large_calldata_mini_rex() {
     // Test with 1024 bytes of calldata
-    floor_gas_test_case(MegaSpecId::MINI_REX, 1024, 4_117_000);
+    floor_gas_test_case(MegaSpecId::MINI_REX, 1024, 430_600);
 }
 
 /// Tests floor gas is not charged in EQUIVALENCE spec.
@@ -875,5 +875,5 @@ fn test_floor_gas_empty_calldata() {
 /// Tests floor gas with minimal calldata (1 byte).
 #[test]
 fn test_floor_gas_minimal_calldata() {
-    floor_gas_test_case(MegaSpecId::MINI_REX, 1, 25_000);
+    floor_gas_test_case(MegaSpecId::MINI_REX, 1, 21_400);
 }

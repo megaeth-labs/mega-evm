@@ -43,17 +43,17 @@ pub mod mini_rex {
     /// Formula: `2_000_000 / 32 - CODEDEPOSIT` where CODEDEPOSIT = 200.
     pub const CODEDEPOSIT_ADDITIONAL_GAS: u64 = 2_000_000 / 32 - super::equivalence::CODEDEPOSIT;
     /// The gas cost for `LOGDATA` for the `MINI_REX` spec, i.e., gas cost per byte for log data.
-    pub const LOG_DATA_GAS: u64 = super::equivalence::LOGDATA * 100;
+    pub const LOG_DATA_GAS: u64 = super::equivalence::LOGDATA * 10;
     /// The gas cost for `LOGTOPIC` for the `MINI_REX` spec, i.e., gas cost per topic for log.
-    pub const LOG_TOPIC_GAS: u64 = super::equivalence::LOGTOPIC * 100;
+    pub const LOG_TOPIC_GAS: u64 = super::equivalence::LOGTOPIC * 10;
     /// The additional gas cost for `CALLDATA` for the `MINI_REX` spec, i.e., gas cost per token
     /// (one byte) for call data. This is charged on top of the calldata cost of standard EVM.
     pub const CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS: u64 =
-        super::equivalence::STANDARD_TOKEN_COST * 100 - super::equivalence::STANDARD_TOKEN_COST;
+        super::equivalence::STANDARD_TOKEN_COST * 10 - super::equivalence::STANDARD_TOKEN_COST;
     /// The additional gas cost for EIP-7623 floor gas cost, i.e., gas cost per token (one byte)
     /// for call data. This is charged on top of the floor cost of standard EVM.
     pub const CALLDATA_STANDARD_TOKEN_ADDITIONAL_FLOOR_GAS: u64 =
-        super::equivalence::TOTAL_COST_FLOOR_PER_TOKEN * 100 -
+        super::equivalence::TOTAL_COST_FLOOR_PER_TOKEN * 10 -
             super::equivalence::TOTAL_COST_FLOOR_PER_TOKEN;
 
     /// The maximum amount of data allowed to generate from a block for the `MINI_REX` spec.
@@ -66,5 +66,5 @@ pub mod mini_rex {
     pub const BLOCK_KV_UPDATE_LIMIT: u64 = 500_000;
     /// The maximum amount of key-value updates allowed to generate from a transaction for the
     /// `MINI_REX` spec.
-    pub const TX_KV_UPDATE_LIMIT: u64 = 1000;
+    pub const TX_KV_UPDATE_LIMIT: u64 = BLOCK_KV_UPDATE_LIMIT * 25 / 100; // 25% of the block limit
 }
