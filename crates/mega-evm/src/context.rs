@@ -226,6 +226,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     ///
     /// Returns `self` for method chaining.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
+        self.spec = cfg.spec;
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
             if self.inner.cfg.limit_contract_code_size.is_none() {
@@ -593,5 +594,52 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
         cfg.disable_eip3607 = self.disable_eip3607;
         cfg.disable_base_fee = self.disable_base_fee;
         cfg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NoOpOracle;
+    use revm::{context::CfgEnv, database::EmptyDB};
+
+    #[test]
+    fn test_with_cfg_updates_spec() {
+        // Create context with initial spec
+        let mut context =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, NoOpOracle::default());
+
+        // Verify initial state
+        assert_eq!(context.mega_spec(), MegaSpecId::EQUIVALENCE);
+        assert_eq!(context.inner.cfg.spec, OpSpecId::from(MegaSpecId::EQUIVALENCE));
+
+        // Create new config with different spec
+        let new_cfg = CfgEnv::new_with_spec(MegaSpecId::MINI_REX);
+
+        // Apply new config using with_cfg
+        context = context.with_cfg(new_cfg);
+
+        // Verify that both the context's spec and inner config's spec are updated
+        assert_eq!(context.mega_spec(), MegaSpecId::MINI_REX);
+        assert_eq!(context.inner.cfg.spec, OpSpecId::from(MegaSpecId::MINI_REX));
+    }
+
+    #[test]
+    fn test_with_cfg_spec_consistency() {
+        let context =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, NoOpOracle::default());
+
+        // Test multiple spec transitions
+        let specs_to_test = [MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE];
+
+        let mut current_context = context;
+        for spec in specs_to_test {
+            let cfg = CfgEnv::new_with_spec(spec);
+            current_context = current_context.with_cfg(cfg);
+
+            // Verify consistency between context spec and inner config spec
+            assert_eq!(current_context.mega_spec(), spec);
+            assert_eq!(current_context.inner.cfg.spec, OpSpecId::from(spec));
+        }
     }
 }
