@@ -108,7 +108,7 @@ impl TestUnit {
             gas_limit: self.env.current_gas_limit.try_into().unwrap_or(u64::MAX),
             basefee: self.env.current_base_fee.unwrap_or_default().try_into().unwrap_or(u64::MAX),
             difficulty: self.env.current_difficulty,
-            prevrandao: self.env.current_random,
+            prevrandao: self.env.current_random.map(|i| i.into()),
             ..BlockEnv::default()
         };
 

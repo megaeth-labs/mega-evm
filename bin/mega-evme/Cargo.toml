@@ -1,0 +1,35 @@
+[package]
+name = "mega-evme"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "MegaETH executable EVM"
+default-run = "mega-evme"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mega-evme"
+path = "src/main.rs"
+
+[dependencies]
+# megaeth
+mega-evm.workspace = true
+state-test.workspace = true
+
+# revm
+revm.workspace = true
+
+# alloy 
+alloy-consensus = { workspace = true, features = ["serde"] }
+alloy-serde = { workspace = true, features = ["default"]}
+
+# misc
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

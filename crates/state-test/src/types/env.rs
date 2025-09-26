@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+
+use alloy_eips::eip4895::Withdrawal;
 use revm::primitives::{Address, B256, U256};
 use serde::Deserialize;
 
@@ -23,9 +26,32 @@ pub struct Env {
     pub current_base_fee: Option<U256>,
     /// Previous block hash
     pub previous_hash: Option<B256>,
+    /// Parent block timestamp
+    pub parent_timestamp: Option<U256>,
+    /// Parent block gas used
+    pub parent_gas_used: Option<U256>,
+    /// Parent block gas limit
+    pub parent_gas_limit: Option<U256>,
+    /// Parent block base fee
+    pub parent_base_fee: Option<U256>,
+    /// Parent block hash
+    pub parent_hash: Option<B256>,
+    /// Parent block uncle hash
+    pub parent_uncle_hash: Option<B256>,
+    /// Parent block beacon block root
+    pub parent_beacon_block_root: Option<B256>,
+    /// Parent block difficulty
+    pub parent_difficulty: Option<U256>,
+
+    /// Block hashes
+    pub block_hashes: Option<BTreeMap<U256, B256>>,
+    /// Ommers
+    pub ommers: Option<Vec<B256>>,
+    /// Withdrawals
+    pub withdrawals: Option<Vec<Withdrawal>>,
 
     /// Current block randomness (EIP-4399 prevrandao)
-    pub current_random: Option<B256>,
+    pub current_random: Option<U256>,
     /// Current beacon chain root (EIP-4788)
     pub current_beacon_root: Option<B256>,
     /// Current withdrawals root
@@ -39,4 +65,6 @@ pub struct Env {
     pub parent_target_blobs_per_block: Option<U256>,
     /// Current block excess blob gas (EIP-4844)
     pub current_excess_blob_gas: Option<U256>,
+    /// Current block blob gas used (EIP-4844)
+    pub current_blob_gas_used: Option<U256>,
 }

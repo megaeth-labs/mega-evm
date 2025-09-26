@@ -1,10 +1,10 @@
 use revm::primitives::{Bytes, HashMap, StorageKey, StorageValue, U256};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::deserializer::deserialize_str_as_u64;
 
 /// Account information
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountInfo {
     /// Account balance in wei
@@ -12,7 +12,7 @@ pub struct AccountInfo {
     /// Account bytecode
     pub code: Bytes,
     /// Account nonce (transaction count)
-    #[serde(deserialize_with = "deserialize_str_as_u64")]
+    #[serde(with = "alloy_serde::quantity")]
     pub nonce: u64,
     /// Account storage (key-value pairs)
     pub storage: HashMap<StorageKey, StorageValue>,

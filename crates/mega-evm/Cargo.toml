@@ -31,6 +31,7 @@ op-revm = { workspace = true, features = ["dev", "serde"] }
 # misc
 auto_impl.workspace = true
 bitflags = "2.6"
+clap.workspace = true
 delegate.workspace = true
 derive_more.workspace = true
 serde = { workspace = true, features = ["derive"] }

@@ -3,17 +3,9 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-pub mod types;
-
-pub mod runner;
-
-pub mod utils;
-
 use clap::Parser;
-use runner::{find_all_json_tests, run, TestError};
+use state_test::runner::{find_all_json_tests, run, TestError, TestErrorKind};
 use std::path::PathBuf;
-
-use crate::runner::TestErrorKind;
 
 /// `statetest` subcommand
 #[derive(Parser, Debug)]
