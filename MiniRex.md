@@ -73,6 +73,13 @@ The MiniRex hardfork significantly increases gas costs for various operations to
   - `CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS`
   - `CALLDATA_STANDARD_TOKEN_ADDITIONAL_FLOOR_GAS`
 
+#### Gas Forwarding (EIP-150)
+
+- **Standard EVM**: 63/64 rule - forwards 63/64 of remaining gas to subcalls
+- **MiniRex**: 98/100 rule - forwards 98/100 of remaining gas to subcalls
+- **Purpose**: Provides more gas to subcalls, reducing out-of-gas failures
+- **Affected Operations**: CALL, CALLCODE, DELEGATECALL, STATICCALL, CREATE, CREATE2
+
 ### 4. Data and KV Update Limits
 
 **Block-Level Limits:**
@@ -164,8 +171,8 @@ The following opcodes have custom implementations in MiniRex:
 - `LOG0`, `LOG1`, `LOG2`, `LOG3`, `LOG4`: Enhanced with tx data size limit protection
 - `SELFDESTRUCT`: Completely disabled (maps to `invalid` instruction)
 - `SSTORE`: Increased gas cost and limit enforcement
-- `CREATE`, `CREATE2`: Increased gas cost and limit enforcement
-- `CALL`, `CALLCODE`: Enhanced new account gas cost and limit enforcement
+- `CREATE`, `CREATE2`: Increased gas cost, limit enforcement, and 98/100 gas forwarding
+- `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`: Enhanced new account gas cost, limit enforcement, and 98/100 gas forwarding
 
 ### Gas Cost Oracle
 

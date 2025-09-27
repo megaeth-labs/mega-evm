@@ -726,8 +726,8 @@ fn gas_forward_test_case(spec: MegaSpecId, is_create: bool, approx_expected_forw
                 self.reached = true;
                 // inner call
                 assert!(
-                    inputs.gas_limit >= self.approx_expected_forwarded_gas * 97 / 100 &&
-                        inputs.gas_limit <= self.approx_expected_forwarded_gas * 103 / 100,
+                    inputs.gas_limit >= self.approx_expected_forwarded_gas * 99 / 100 &&
+                        inputs.gas_limit <= self.approx_expected_forwarded_gas * 101 / 100,
                     "expected forwarded gas is not correct"
                 );
             }
@@ -743,8 +743,8 @@ fn gas_forward_test_case(spec: MegaSpecId, is_create: bool, approx_expected_forw
                 self.reached = true;
                 // inner create
                 assert!(
-                    inputs.gas_limit >= self.approx_expected_forwarded_gas * 97 / 100 &&
-                        inputs.gas_limit <= self.approx_expected_forwarded_gas * 103 / 100,
+                    inputs.gas_limit >= self.approx_expected_forwarded_gas * 99 / 100 &&
+                        inputs.gas_limit <= self.approx_expected_forwarded_gas * 101 / 100,
                     "expected forwarded gas is not correct"
                 );
             }
@@ -791,16 +791,16 @@ fn gas_forward_test_case(spec: MegaSpecId, is_create: bool, approx_expected_forw
     assert!(inspector.reached);
 }
 
-/// Tests gas forwarding to CALL uses 31/32 rule in `MegaETH` (instead of 63/64).
+/// Tests gas forwarding to CALL uses 98/100 rule in `MegaETH` (instead of 63/64).
 #[test]
 fn test_gas_forward_to_call_in_mini_rex() {
-    gas_forward_test_case(MegaSpecId::MINI_REX, false, 992_000_000);
+    gas_forward_test_case(MegaSpecId::MINI_REX, false, 1_003_520_000);
 }
 
-/// Tests gas forwarding to CREATE uses 31/32 rule in `MegaETH` (instead of 63/64).
+/// Tests gas forwarding to CREATE uses 98/100 rule in `MegaETH` (instead of 63/64).
 #[test]
 fn test_gas_forward_to_create_in_mini_rex() {
-    gas_forward_test_case(MegaSpecId::MINI_REX, true, 992_000_000);
+    gas_forward_test_case(MegaSpecId::MINI_REX, true, 1_003_520_000);
 }
 
 /// Tests gas forwarding to CALL uses standard 63/64 rule in equivalence spec.
