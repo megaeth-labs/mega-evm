@@ -191,7 +191,7 @@ MiniRex uses approximate formulas to track data size and KV updates incurred by 
 | **Operation** | **KV Count** | **Discarded on Revert** | **Notes** |
 |---|---|---|---|
 | **Transaction sender account update** | 1 | ❌ | Always counted at transaction start |
-| **EIP-7702 authorizations** | `authorization_count` | ❌ | 1 KV update per authorization |
+| **EIP-7702 authorizations** | `authorization_count` | ❌ | 1 KV update per authorization regardless of its validity |
 | **SSTORE (new write)** | 1 | ✅ | When original ≠ new AND first write to slot in transaction |
 | **SSTORE (refund)** | -1 | ✅ | When slot reset to original value |
 | **SSTORE (rewrite)** | 0 | ✅ | Overwrite slot with the same value |
