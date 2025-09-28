@@ -1,6 +1,5 @@
 use revm::context_interface::transaction::SignedAuthorization;
-use serde::de::Error;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{de::Error, Deserialize, Deserializer, Serialize};
 
 /// Struct for test authorization
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -21,7 +20,8 @@ impl<'de> Deserialize<'de> for TestAuthorization {
     where
         D: Deserializer<'de>,
     {
-        // This is a hack to remove duplicate yParity and v fields which can be used by the test files for cross client compat
+        // This is a hack to remove duplicate yParity and v fields which can be used by the test
+        // files for cross client compat
         let mut value: serde_json::Value = Deserialize::deserialize(deserializer)?;
         if let Some(val) = value.as_object_mut() {
             if val.contains_key("v") && val.contains_key("yParity") {
@@ -40,7 +40,8 @@ mod tests {
     #[test]
     fn recover_auth() {
         // Test named:
-        // tests/prague/eip7702_set_code_tx/test_gas.py::test_account_warming[fork_Prague-state_test-single_valid_authorization_single_signer-check_delegated_account_first_True]
+        // tests/prague/eip7702_set_code_tx/test_gas.
+        // py::test_account_warming[fork_Prague-state_test-single_valid_authorization_single_signer-check_delegated_account_first_True]
 
         let auth = r#"{
             "chainId": "0x00",

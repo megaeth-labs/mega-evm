@@ -1,0 +1,44 @@
+name: CI
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_CI }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_CI }}
+          repository: megaeth-labs/chain-ops
+          sparse-checkout: .github/actions
+          path: chain-ops
+
+      - name: Configure Git credentials
+        uses: ./chain-ops/.github/actions/git_config
+        with:
+          github_pat: ${{ secrets.PAT_CI }}
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Run Fmt
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy
+
+      - name: Build
+        run: cargo build
+
+      - name: Run Test
+        run: cargo test
