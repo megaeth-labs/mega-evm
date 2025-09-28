@@ -196,7 +196,7 @@ MiniRex uses approximate formulas to track data size and KV updates incurred by 
 | **SSTORE (refund)** | -1 | ✅ | When slot reset to original value |
 | **SSTORE (rewrite)** | 0 | ✅ | Overwrite slot with the same value |
 | **CREATE/CREATE2** | 1 or 2 | ✅ | One created account + caller account (optinal, if caller is not updated in the _parent_ message call) |
-| **CALL with transfer** | 2 | ✅ | Caller + callee accounts |
+| **CALL with transfer** | 1 or 2 | ✅ | Callee account + caller Account (optional, if caller is not updated in the _parent_ message call)|
 | **CALL without transfer** | 0 | ✅ | No account state changes |
 
 **Data Size Counting**
