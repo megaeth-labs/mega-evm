@@ -204,7 +204,8 @@ impl Cmd {
                     total_gas_used += tx_gas_used;
 
                     // Determine if execution was successful based on execution result type
-                    let is_success = matches!(result, revm::context::result::ExecutionResult::Success { .. });
+                    let is_success =
+                        matches!(result, revm::context::result::ExecutionResult::Success { .. });
 
                     // Only add logs if execution was successful
                     if is_success {
