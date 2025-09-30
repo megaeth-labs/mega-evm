@@ -1,11 +1,11 @@
 //! Definitions of the `MegaETH` EVM versions (`SpecId`).
 
+use clap::ValueEnum;
 use core::str::FromStr;
 pub use op_revm::OpSpecId;
 pub use revm::primitives::hardfork::{SpecId as EthSpecId, UnknownHardfork};
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
-use clap::ValueEnum;
 
 /// `MegaETH` spec id, defining different versions of the `MegaETH` EVM.
 ///
@@ -17,7 +17,18 @@ use clap::ValueEnum;
 /// - [`SpecId::MINI_REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 #[repr(u8)]
 #[derive(
-    Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize, ValueEnum,
+    Clone,
+    Copy,
+    Debug,
+    Hash,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    ValueEnum,
 )]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms, missing_docs)]
 pub enum MegaSpecId {

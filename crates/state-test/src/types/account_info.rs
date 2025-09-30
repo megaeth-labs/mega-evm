@@ -1,8 +1,6 @@
 use revm::primitives::{Bytes, HashMap, StorageKey, StorageValue, U256};
 use serde::{Deserialize, Serialize};
 
-use super::deserializer::deserialize_str_as_u64;
-
 /// Account information
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

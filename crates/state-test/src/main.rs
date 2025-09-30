@@ -7,6 +7,23 @@ use clap::Parser;
 use state_test::runner::{find_all_json_tests, run, TestError, TestErrorKind};
 use std::path::PathBuf;
 
+// Dependencies used by the library
+use alloy_eips as _;
+use alloy_primitives as _;
+use alloy_rlp as _;
+use alloy_serde as _;
+use hash_db as _;
+use indicatif as _;
+use k256 as _;
+use mega_evm as _;
+use plain_hasher as _;
+use revm as _;
+use serde as _;
+use serde_json as _;
+use thiserror as _;
+use triehash as _;
+use walkdir as _;
+
 /// `statetest` subcommand
 #[derive(Parser, Debug)]
 pub struct Cmd {
