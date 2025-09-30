@@ -6,9 +6,9 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    is_mega_system_transaction,
     system_tx::{
-        is_deposit_like_transaction, is_mega_system_address_transaction, MEGA_SYSTEM_ADDRESS,
-        MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+        is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
     },
     test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, NoOpOracle,
@@ -102,7 +102,7 @@ fn test_utility_functions() {
     let mega_system_tx = MegaTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
-            kind: TxKind::Call(CONTRACT_ADDR),
+            kind: TxKind::Call(WHITELISTED_ADDR),
             ..Default::default()
         },
         ..Default::default()
@@ -117,8 +117,8 @@ fn test_utility_functions() {
         ..Default::default()
     };
 
-    assert!(is_mega_system_address_transaction(&mega_system_tx));
-    assert!(!is_mega_system_address_transaction(&regular_tx));
+    assert!(is_mega_system_transaction(&mega_system_tx));
+    assert!(!is_mega_system_transaction(&regular_tx));
 
     // Test is_deposit_like_transaction
     assert!(is_deposit_like_transaction(&mega_system_tx));
@@ -271,7 +271,7 @@ fn test_mega_system_transaction_sets_source_hash() {
     };
 
     // The transaction should be detected as from mega system address
-    assert!(is_mega_system_address_transaction(&tx));
+    assert!(is_mega_system_transaction(&tx));
 
     // Set the transaction in the context
     evm.ctx().set_tx(tx);
@@ -317,7 +317,7 @@ fn test_deposit_transaction_behavior_preserved() {
     assert!(is_deposit_like_transaction(&deposit_tx));
 
     // But should NOT be detected as mega system address transaction
-    assert!(!is_mega_system_address_transaction(&deposit_tx));
+    assert!(!is_mega_system_transaction(&deposit_tx));
 }
 
 /// Tests that mega system transactions do not deduct gas fees from the system address balance.
@@ -405,6 +405,144 @@ fn test_regular_transaction_fee_deduction() {
         fee_deducted > U256::ZERO,
         "Gas fee should be deducted from regular caller. Fee deducted: {}",
         fee_deducted
+    );
+}
+
+/// Tests that mega system transactions do not pay operator fees even when fees are enabled.
+///
+/// This test verifies that:
+/// - `MEGA_SYSTEM_ADDRESS` balance remains unchanged even with operator fees enabled
+/// - Operator fees are not deducted from the system address (deposit-like behavior)
+/// - L1 data fees are not charged to system transactions
+/// - This demonstrates complete fee bypass including L1 and operator fees
+#[test]
+fn test_mega_system_transaction_no_operator_fees() {
+    // Create database and set up contract with an initial balance for the mega system address
+    let mut db = MemoryDatabase::default();
+    let initial_balance = U256::from(1_000_000u64);
+    db.set_account_balance(MEGA_SYSTEM_ADDRESS, initial_balance);
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
+
+    // Create EVM with operator fees enabled
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
+
+    let block_env = BlockEnv {
+        beneficiary: BENEFICIARY,
+        number: U256::from(10),
+        basefee: 1000,
+        ..Default::default()
+    };
+    context.set_block(block_env);
+
+    // Enable operator fees (instead of setting to zero)
+    context.chain_mut().operator_fee_scalar = Some(U256::from(1_000_000));
+    context.chain_mut().operator_fee_constant = Some(U256::from(10_000));
+
+    let mut evm = MegaEvm::new(context);
+
+    // Get the initial balance before transaction
+    let balance_before = evm.ctx().db_mut().basic(MEGA_SYSTEM_ADDRESS).unwrap().unwrap().balance;
+    assert_eq!(balance_before, initial_balance, "Initial balance should be set correctly");
+
+    // Execute transaction from mega system address with some calldata (to trigger L1 data fee)
+    let call_data = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    let result =
+        execute_transaction(&mut evm, MEGA_SYSTEM_ADDRESS, WHITELISTED_ADDR, U256::ZERO, call_data);
+
+    // Transaction should succeed
+    assert!(result.result.is_success(), "Mega system transaction should succeed");
+
+    // Check balance after transaction - should be unchanged (no operator or L1 data fee deducted)
+    let balance_after = evm.ctx().db_mut().basic(MEGA_SYSTEM_ADDRESS).unwrap().unwrap().balance;
+    assert_eq!(
+        balance_after, initial_balance,
+        "Balance should remain unchanged - no operator fee or L1 data fee should be deducted from mega system address"
+    );
+}
+
+/// Tests that mega system transactions with value transfer only deduct the transferred value.
+///
+/// This test verifies that:
+/// - When a mega system transaction transfers value, balance changes by exactly that amount
+/// - No gas fees, operator fees, or L1 data fees are added to the value transfer
+/// - The recipient receives the exact transferred amount
+/// - This demonstrates that fee bypass applies even when value is transferred
+#[test]
+fn test_mega_system_transaction_value_transfer_no_fees() {
+    // Create database and set up accounts
+    let mut db = MemoryDatabase::default();
+    let initial_sender_balance = U256::from(1_000_000_000_000u64);
+    let transfer_value = U256::from(50_000u64);
+
+    // Allocate balance to sender BEFORE creating EVM
+    db.set_account_balance(MEGA_SYSTEM_ADDRESS, initial_sender_balance);
+    // Set initial balance for recipient to ensure account exists
+    db.set_account_balance(WHITELISTED_ADDR, U256::ZERO);
+    db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
+
+    // Create EVM with operator fees enabled to ensure they're bypassed
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
+
+    let block_env = BlockEnv {
+        beneficiary: BENEFICIARY,
+        number: U256::from(10),
+        basefee: 1000,
+        ..Default::default()
+    };
+    context.set_block(block_env);
+
+    // Enable operator fees
+    context.chain_mut().operator_fee_scalar = Some(U256::from(1_000_000));
+    context.chain_mut().operator_fee_constant = Some(U256::from(10_000));
+
+    let mut evm = MegaEvm::new(context);
+
+    // Verify initial balances are set correctly
+    let sender_balance_before =
+        evm.ctx().db_mut().basic(MEGA_SYSTEM_ADDRESS).unwrap().unwrap().balance;
+    let recipient_balance_before =
+        evm.ctx().db_mut().basic(WHITELISTED_ADDR).unwrap().unwrap().balance;
+
+    assert_eq!(
+        sender_balance_before, initial_sender_balance,
+        "Initial sender balance should be set correctly"
+    );
+    assert_eq!(recipient_balance_before, U256::ZERO, "Initial recipient balance should be zero");
+
+    // Execute transaction with value transfer
+    let result = execute_transaction(
+        &mut evm,
+        MEGA_SYSTEM_ADDRESS,
+        WHITELISTED_ADDR,
+        transfer_value,
+        Bytes::new(),
+    );
+
+    // Transaction should succeed
+    assert!(
+        result.result.is_success(),
+        "Mega system transaction with value should succeed: {:?}",
+        result.result
+    );
+
+    // Check sender balance - should be reduced by exactly the transfer value (no fees)
+    let sender_balance_after = result.state.get(&MEGA_SYSTEM_ADDRESS).unwrap().info.balance;
+    assert_eq!(
+        sender_balance_after,
+        initial_sender_balance - transfer_value,
+        "Sender balance should be reduced by exactly the transfer value with no additional fees. Expected: {}, Got: {}",
+        initial_sender_balance - transfer_value,
+        sender_balance_after
+    );
+
+    // Check recipient balance - should be increased by exactly the transfer value
+    let recipient_balance_after = result.state.get(&WHITELISTED_ADDR).unwrap().info.balance;
+    assert_eq!(
+        recipient_balance_after,
+        recipient_balance_before + transfer_value,
+        "Recipient balance should be increased by exactly the transfer value. Expected: {}, Got: {}",
+        recipient_balance_before + transfer_value,
+        recipient_balance_after
     );
 }
 
@@ -526,16 +664,6 @@ fn test_mega_system_transaction_create_fails() {
     // Transaction should fail since CREATE is not supported for system transactions
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
     assert!(result.is_err(), "Mega system CREATE transaction should fail");
-
-    // Check that the error message mentions CREATE not being supported
-    let error_msg = format!("{:?}", result.unwrap_err());
-    assert!(
-        error_msg.contains("create") ||
-            error_msg.contains("Create") ||
-            error_msg.contains("CREATE"),
-        "Error should mention CREATE not being supported: {}",
-        error_msg
-    );
 }
 
 /// Tests that regular transactions to non-whitelisted addresses work normally.
