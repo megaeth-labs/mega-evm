@@ -20,10 +20,10 @@ use revm::{
 };
 
 use crate::{
-    constants,
-    system_tx::{is_mega_system_address_transaction, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH},
-    EthHaltReason, ExternalEnvOracle, HostExt, MegaContext, MegaHaltReason, MegaSpecId,
-    DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST, MEGA_SYSTEM_TX_WHITELIST,
+    constants, is_mega_system_transaction, sent_from_mega_system_address,
+    system_tx::MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, EthHaltReason, ExternalEnvOracle, HostExt,
+    MegaContext, MegaHaltReason, MegaSpecId, MegaTransactionError,
+    DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
@@ -51,7 +51,12 @@ impl<DB: Database, EVM, ERROR, FRAME, Oracle: ExternalEnvOracle> revm::handler::
     for MegaHandler<EVM, ERROR, FRAME>
 where
     EVM: EvmTr<Context = MegaContext<DB, Oracle>, Frame = FRAME>,
-    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
+    ERROR: EvmTrError<EVM>
+        + From<OpTransactionError>
+        + From<MegaTransactionError>
+        + FromStringError
+        + IsTxError
+        + std::fmt::Debug,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     type Evm = EVM;
@@ -92,27 +97,14 @@ where
             }
 
             let tx = ctx.tx();
-            if is_mega_system_address_transaction(tx) {
+            if sent_from_mega_system_address(tx) {
                 // Modify the transaction to make it appear as a deposit transaction
                 // This will cause the OpHandler to automatically bypass signature validation,
                 // nonce verification, and fee deduction during validation
-
-                // Check if the callee is in the whitelist
-                match tx.kind() {
-                    TxKind::Call(callee) => {
-                        if !MEGA_SYSTEM_TX_WHITELIST.contains(&callee) {
-                            // TODO: define MegaTransactionError
-                            return Err(Self::Error::from_string(
-                                "System transaction callee is not in the whitelist".to_string(),
-                            ));
-                        }
-                    }
-                    TxKind::Create => {
-                        // TODO: define MegaTransactionError
-                        return Err(Self::Error::from_string(
-                            "System transaction create is not supported".to_string(),
-                        ));
-                    }
+                if !is_mega_system_transaction(tx) {
+                    return Err(FromStringError::from_string(
+                        "Mega system transaction callee is not in the whitelist".to_string(),
+                    ));
                 }
 
                 // Set the deposit source hash of the transaction to mark it as a deposit
@@ -121,6 +113,9 @@ where
                 // `MegaTransaction` determines the tx type by the existence of the source
                 // hash.
                 ctx.inner.tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+                // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
+                // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
+                ctx.inner.tx.base.gas_price = 0;
             }
         }
 
@@ -266,7 +261,12 @@ where
             EthInterpreter,
         >,
     >,
-    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
+    ERROR: EvmTrError<EVM>
+        + From<OpTransactionError>
+        + From<MegaTransactionError>
+        + FromStringError
+        + IsTxError
+        + std::fmt::Debug,
 {
     type IT = EthInterpreter;
 }
