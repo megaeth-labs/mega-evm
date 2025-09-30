@@ -2,7 +2,7 @@
 //!
 //! This module contains constants, types, and utilities related to mega system transactions.
 
-use alloy_primitives::{address, b256, Address, B256};
+use alloy_primitives::{address, b256, Address, TxKind, B256};
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::context::Transaction;
 
@@ -26,21 +26,24 @@ pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[
 pub const MEGA_SYSTEM_TRANSACTION_SOURCE_HASH: B256 =
     b256!("852c082c0faff590c6300c2c34815d1f79882552fa95ba413cd5aeb1dba84957");
 
-/// Checks if a transaction is from the `MegaETH` system address.
-///
-/// Transactions from the mega system address are processed as deposit-like transactions,
-/// bypassing signature validation, nonce verification, and fee deduction.
-/// This is distinct from op system transactions.
-///
-/// # Arguments
-///
-/// * `tx` - The transaction to check
-///
-/// # Returns
-///
-/// Returns `true` if the transaction is from the mega system address, `false` otherwise.
-pub fn is_mega_system_address_transaction(tx: &MegaTransaction) -> bool {
-    tx.base.caller == MEGA_SYSTEM_ADDRESS
+/// Checks if a transaction is sent from the `MEGA_SYSTEM_ADDRESS`.
+pub fn sent_from_mega_system_address(tx: &MegaTransaction) -> bool {
+    tx.caller() == MEGA_SYSTEM_ADDRESS
+}
+
+/// Checks if a transaction is a mega system transaction.
+/// A mega system transaction is a legacy transaction that is submitted by the `MEGA_SYSTEM_ADDRESS`
+/// and calls a whitelisted address in `MEGA_SYSTEM_TX_WHITELIST`.
+pub fn is_mega_system_transaction(tx: &MegaTransaction) -> bool {
+    if tx.tx_type() == 0x0 && sent_from_mega_system_address(tx) {
+        // a mega system transaction must be a legacy transaction
+        match tx.kind() {
+            TxKind::Create => false,
+            TxKind::Call(address) => MEGA_SYSTEM_TX_WHITELIST.contains(&address),
+        }
+    } else {
+        false
+    }
 }
 
 /// Checks if a transaction should be processed as a deposit-like transaction.
@@ -62,7 +65,7 @@ pub fn is_deposit_like_transaction(tx: &MegaTransaction) -> bool {
     }
 
     // Check if it's from the mega system address
-    is_mega_system_address_transaction(tx)
+    is_mega_system_transaction(tx)
 }
 
 /// The multiplier for the gas stipend of the deposit transaction. If an Op Stack deposit tx calls a

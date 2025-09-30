@@ -330,8 +330,8 @@ pub fn create_with_bomb<
     let mut gas_limit = context.interpreter.gas.remaining();
 
     // EIP-150: Gas cost changes for IO-heavy operations
-    // MegaETH modification: Take remaining gas and deduce l32 part of it.
-    gas_limit -= gas_limit / 32;
+    // MegaETH modification: Take remaining gas and keep 98/100 of it.
+    gas_limit -= gas_limit * 2 / 100;
 
     revm::interpreter::gas!(context.interpreter, gas_limit);
 
@@ -414,9 +414,9 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     revm::interpreter::gas!(context.interpreter, call_cost);
 
     // EIP-150: Gas cost changes for IO-heavy operations
-    // MegaETH modification: replace 63/64 rule with 31/32 rule (take l32 part of gas limit)
+    // MegaETH modification: replace 63/64 rule with 98/100 rule
     let remaining_gas =
-        context.interpreter.gas.remaining() - context.interpreter.gas.remaining() / 32;
+        context.interpreter.gas.remaining() - context.interpreter.gas.remaining() * 2 / 100;
     let mut gas_limit = min(remaining_gas, local_gas_limit);
 
     revm::interpreter::gas!(context.interpreter, gas_limit);
