@@ -19,8 +19,10 @@ path = "src/main.rs"
 mega-evm.workspace = true
 
 # alloy
+alloy-eips = { workspace = true, features = ["serde"] }
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
+alloy-serde.workspace = true
 
 # revm 
 revm.workspace = true

@@ -2070,6 +2070,7 @@ dependencies = [
  "alloy-primitives",
  "auto_impl",
  "bitflags",
+ "clap",
  "delegate",
  "derive_more",
  "mega-evm",
@@ -2079,6 +2080,21 @@ dependencies = [
  "revm-inspectors",
  "salt",
  "serde",
+]
+
+[[package]]
+name = "mega-evme"
+version = "0.0.1"
+dependencies = [
+ "alloy-consensus",
+ "alloy-serde",
+ "clap",
+ "mega-evm",
+ "revm",
+ "serde",
+ "serde_json",
+ "state-test",
+ "thiserror",
 ]
 
 [[package]]
@@ -3291,8 +3307,10 @@ dependencies = [
 name = "state-test"
 version = "0.0.1"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
+ "alloy-serde",
  "clap",
  "hash-db",
  "indicatif",

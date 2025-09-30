@@ -1,9 +1,11 @@
 //! Definitions of the `MegaETH` EVM versions (`SpecId`).
 
+use clap::ValueEnum;
 use core::str::FromStr;
 pub use op_revm::OpSpecId;
 pub use revm::primitives::hardfork::{SpecId as EthSpecId, UnknownHardfork};
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display};
 
 /// `MegaETH` spec id, defining different versions of the `MegaETH` EVM.
 ///
@@ -15,15 +17,28 @@ use serde::{Deserialize, Serialize};
 /// - [`SpecId::MINI_REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 #[repr(u8)]
 #[derive(
-    Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    Hash,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    ValueEnum,
 )]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms, missing_docs)]
 pub enum MegaSpecId {
     /// The EVM version when no `MegaETH` harfork is enabled. The behavior of the EVM
     /// should be equivalent to the [`OpSpecId::ISTHMUS`] of the Optimism EVM.
     #[default]
+    #[value(name = "Equivalence")]
     EQUIVALENCE,
     /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
+    #[value(name = "MiniRex")]
     MINI_REX,
 }
 
@@ -92,5 +107,12 @@ impl From<MegaSpecId> for OpSpecId {
     /// Converts the [`SpecId`] into its corresponding [`OpSpecId`].
     fn from(spec_id: MegaSpecId) -> Self {
         spec_id.into_op_spec()
+    }
+}
+
+impl Display for MegaSpecId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s: &'static str = (*self).into();
+        write!(f, "{}", s)
     }
 }
