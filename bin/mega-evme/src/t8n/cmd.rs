@@ -202,32 +202,44 @@ impl Cmd {
                 Ok(result) => {
                     let tx_gas_used = result.gas_used();
                     total_gas_used += tx_gas_used;
-                    all_logs.extend_from_slice(result.logs());
 
-                    // Create successful receipt
+                    // Determine if execution was successful based on execution result type
+                    let is_success =
+                        matches!(result, revm::context::result::ExecutionResult::Success { .. });
+
+                    // Only add logs if execution was successful
+                    if is_success {
+                        all_logs.extend_from_slice(result.logs());
+                    }
+
+                    // Create receipt with status based on execution result
                     let receipt = TransactionReceipt {
-                        status: Some(1),
+                        status: Some(if is_success { 1 } else { 0 }),
                         cumulative_gas_used: total_gas_used,
-                        logs: result
-                            .logs()
-                            .to_vec()
-                            .into_iter()
-                            .enumerate()
-                            .map(|(log_index, log)| {
-                                let (topics, data) = log.data.split();
-                                TransactionLog {
-                                    address: log.address,
-                                    topics,
-                                    data,
-                                    block_number: 0,
-                                    transaction_hash: B256::default(), // TODO: Add transaction hash
-                                    transaction_index: tx_index as u64,
-                                    block_hash: B256::default(),
-                                    log_index: log_index as u64,
-                                    removed: false,
-                                }
-                            })
-                            .collect(),
+                        logs: if is_success {
+                            result
+                                .logs()
+                                .to_vec()
+                                .into_iter()
+                                .enumerate()
+                                .map(|(log_index, log)| {
+                                    let (topics, data) = log.data.split();
+                                    TransactionLog {
+                                        address: log.address,
+                                        topics,
+                                        data,
+                                        block_number: 0,
+                                        transaction_hash: B256::default(), // TODO: Add transaction hash
+                                        transaction_index: tx_index as u64,
+                                        block_hash: B256::default(),
+                                        log_index: log_index as u64,
+                                        removed: false,
+                                    }
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        },
                         transaction_hash: None,
                         gas_used: Some(tx_gas_used),
                         root: None,
