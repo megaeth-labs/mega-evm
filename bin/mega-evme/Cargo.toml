@@ -24,9 +24,13 @@ state-test.workspace = true
 # revm
 revm.workspace = true
 
-# alloy 
+# alloy
 alloy-consensus = { workspace = true, features = ["serde"] }
+alloy-primitives.workspace = true
 alloy-serde = { workspace = true, features = ["default"]}
+
+# op
+op-alloy-consensus.workspace = true
 
 # misc
 clap.workspace = true

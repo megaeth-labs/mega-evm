@@ -154,6 +154,11 @@ impl Cmd {
         let mut rejected = Vec::new();
 
         for (tx_index, tx_data) in inputs.txs.iter().enumerate() {
+            // Calculate transaction hash by converting to envelope
+            let tx =
+                tx_data.to_envelope().map_err(|e| T8nError::InvalidTransaction(e.to_string()))?;
+            let tx_hash = tx.tx_hash();
+
             // Convert transaction to TxEnv
             let tx_env = match self.convert_transaction_to_env(tx_data) {
                 Ok(env) => env,
@@ -165,11 +170,11 @@ impl Cmd {
 
                     // Create failed receipt
                     let receipt = TransactionReceipt {
-                        status: Some(0),
+                        status: 0,
                         cumulative_gas_used: total_gas_used,
                         logs: Vec::new(),
-                        transaction_hash: None, // TODO: Add transaction hash
-                        gas_used: Some(0),
+                        transaction_hash: tx_hash,
+                        gas_used: 0,
                         root: None,
                         logs_bloom: None,
                         contract_address: None,
@@ -214,7 +219,7 @@ impl Cmd {
 
                     // Create receipt with status based on execution result
                     let receipt = TransactionReceipt {
-                        status: Some(if is_success { 1 } else { 0 }),
+                        status: if is_success { 1 } else { 0 },
                         cumulative_gas_used: total_gas_used,
                         logs: if is_success {
                             result
@@ -229,7 +234,7 @@ impl Cmd {
                                         topics,
                                         data,
                                         block_number: 0,
-                                        transaction_hash: B256::default(), // TODO: Add transaction hash
+                                        transaction_hash: tx_hash,
                                         transaction_index: tx_index as u64,
                                         block_hash: B256::default(),
                                         log_index: log_index as u64,
@@ -240,8 +245,8 @@ impl Cmd {
                         } else {
                             Vec::new()
                         },
-                        transaction_hash: None,
-                        gas_used: Some(tx_gas_used),
+                        transaction_hash: tx_hash,
+                        gas_used: tx_gas_used,
                         root: None,
                         logs_bloom: None,
                         contract_address: None,
@@ -257,11 +262,11 @@ impl Cmd {
                 Err(e) => {
                     // For failed transactions, we still update the state but mark as failed
                     let receipt = TransactionReceipt {
-                        status: Some(0),
+                        status: 0,
                         cumulative_gas_used: total_gas_used, // Don't add gas for failed tx
                         logs: Vec::new(),
-                        transaction_hash: None,
-                        gas_used: Some(0),
+                        transaction_hash: tx_hash,
+                        gas_used: 0,
                         root: None,
                         logs_bloom: None,
                         contract_address: None,
