@@ -2079,7 +2079,6 @@ dependencies = [
  "revm-inspectors",
  "salt",
  "serde",
- "thiserror",
 ]
 
 [[package]]
