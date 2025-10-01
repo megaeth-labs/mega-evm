@@ -2087,9 +2087,11 @@ name = "mega-evme"
 version = "0.0.1"
 dependencies = [
  "alloy-consensus",
+ "alloy-primitives",
  "alloy-serde",
  "clap",
  "mega-evm",
+ "op-alloy-consensus",
  "revm",
  "serde",
  "serde_json",
