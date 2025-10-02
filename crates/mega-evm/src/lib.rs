@@ -7,6 +7,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+mod access;
 mod block;
 pub mod constants;
 mod context;
@@ -24,6 +25,7 @@ pub mod system_tx;
 pub mod test_utils;
 mod types;
 
+pub use access::*;
 pub use block::*;
 pub use context::*;
 pub use evm::*;
