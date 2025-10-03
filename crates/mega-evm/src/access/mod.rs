@@ -10,3 +10,6 @@ mod tracker;
 
 pub use block::*;
 pub use tracker::*;
+
+mod oracle;
+pub use oracle::*;
