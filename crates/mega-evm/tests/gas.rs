@@ -18,12 +18,12 @@ use revm::{
     primitives::Address,
     Inspector,
 };
-use salt::{constant::MIN_BUCKET_SIZE, BucketId, BucketMeta};
+use salt::{constant::MIN_BUCKET_SIZE, BucketId};
 use std::collections::HashMap;
 
 #[derive(Debug)]
 struct TestExternalEnvOracle {
-    buckets: HashMap<BucketId, BucketMeta>,
+    buckets: HashMap<BucketId, u64>,
 }
 
 #[allow(dead_code)]
@@ -32,34 +32,34 @@ impl TestExternalEnvOracle {
         Self { buckets: HashMap::new() }
     }
 
-    fn with_bucket(mut self, bucket_id: BucketId, bucket_meta: BucketMeta) -> Self {
-        self.buckets.insert(bucket_id, bucket_meta);
+    fn with_bucket(mut self, bucket_id: BucketId, bucket_cap: u64) -> Self {
+        assert!(
+            bucket_cap % salt::constant::MIN_BUCKET_SIZE as u64 == 0,
+            "Capacity must be a multiple of MIN_BUCKET_SIZE"
+        );
+        self.buckets.insert(bucket_id, bucket_cap);
         self
     }
 
-    fn add_bucket(&mut self, bucket_id: BucketId, bucket_meta: BucketMeta) {
-        self.buckets.insert(bucket_id, bucket_meta);
+    fn add_bucket(&mut self, bucket_id: BucketId, bucket_cap: u64) {
+        assert!(
+            bucket_cap % salt::constant::MIN_BUCKET_SIZE as u64 == 0,
+            "Capacity must be a multiple of MIN_BUCKET_SIZE"
+        );
+        self.buckets.insert(bucket_id, bucket_cap);
     }
 }
 
 impl ExternalEnvOracle for TestExternalEnvOracle {
     type Error = Infallible;
 
-    fn get_bucket_meta(
+    fn get_bucket_capacity(
         &self,
         bucket_id: BucketId,
         _at_block: BlockNumber,
-    ) -> Result<BucketMeta, Self::Error> {
+    ) -> Result<u64, Self::Error> {
         Ok(self.buckets.get(&bucket_id).copied().expect("Bucket not found"))
     }
-}
-
-fn create_bucket_meta(capacity: u64) -> BucketMeta {
-    assert!(
-        capacity % salt::constant::MIN_BUCKET_SIZE as u64 == 0,
-        "Capacity must be a multiple of MIN_BUCKET_SIZE"
-    );
-    BucketMeta { capacity, ..Default::default() }
 }
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
@@ -138,7 +138,7 @@ fn sstore_test_case(
     let bucket_id = slot_to_bucket_id(CALLEE, storage_key);
     // An oracle with the given bucket capacity
     let oracle = TestExternalEnvOracle::new()
-        .with_bucket(bucket_id, create_bucket_meta(MIN_BUCKET_SIZE as u64 * (expansion_times + 1)));
+        .with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // a contract that stores a value to the storage slot
     let bytecode = BytecodeBuilder::default().sstore(storage_key, storage_value).stop().build();
@@ -242,7 +242,7 @@ fn ether_transfer_test_case(
     // Determine the bucket for the callee and set up the oracle with the required capacity.
     let bucket_id = address_to_bucket_id(CALLEE);
     let oracle = TestExternalEnvOracle::new()
-        .with_bucket(bucket_id, create_bucket_meta(MIN_BUCKET_SIZE as u64 * (expansion_times + 1)));
+        .with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // Allocate initial balance to the caller.
     db.set_account_balance(CALLER, U256::from(1000));
@@ -323,7 +323,7 @@ fn nested_ether_transfer_test_case(
     let bucket_id = address_to_bucket_id(NESTED_CALLEE);
     // An oracle with the given bucket capacity
     let oracle = TestExternalEnvOracle::new()
-        .with_bucket(bucket_id, create_bucket_meta(MIN_BUCKET_SIZE as u64 * (expansion_times + 1)));
+        .with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // allocate some balance to callee, which will transfer the ether to the nested callee
     db.set_account_balance(CALLEE, U256::from(1000));
@@ -412,7 +412,7 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
     let bucket_id = address_to_bucket_id(callee);
     // An oracle with the given bucket capacity
     let oracle = TestExternalEnvOracle::new()
-        .with_bucket(bucket_id, create_bucket_meta(MIN_BUCKET_SIZE as u64 * (expansion_times + 1)));
+        .with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // constructor code
     let constructor_code = BytecodeBuilder::default().return_with_data([0x00]).build();
@@ -492,7 +492,7 @@ fn nested_create_contract_test_case(
     let bucket_id = address_to_bucket_id(nested_callee);
     // An oracle with the given bucket capacity
     let oracle = TestExternalEnvOracle::new()
-        .with_bucket(bucket_id, create_bucket_meta(MIN_BUCKET_SIZE as u64 * (expansion_times + 1)));
+        .with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // set the code of the calee that transfers ether to the nested callee
     let mut bytecode = BytecodeBuilder::default();
