@@ -67,8 +67,8 @@ impl<Oracle: ExternalEnvOracle> GasCostOracle<Oracle> {
         match self.bucket_cost_mulitipers.entry(bucket_id) {
             Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
             Entry::Vacant(vacant_entry) => {
-                let meta = self.oracle.get_bucket_meta(bucket_id, self.parent_block)?;
-                let multiplier = meta.capacity / salt::constant::MIN_BUCKET_SIZE as u64;
+                let capacity = self.oracle.get_bucket_capacity(bucket_id, self.parent_block)?;
+                let multiplier = capacity / salt::constant::MIN_BUCKET_SIZE as u64;
                 vacant_entry.insert(multiplier);
                 Ok(multiplier)
             }
@@ -112,22 +112,22 @@ pub trait ExternalEnvOracle: Debug + Send + Sync + Unpin {
     /// The error type for the oracle.
     type Error;
 
-    /// Gets the metadata of the SALT bucket for a given bucket ID at a specific block (according
+    /// Gets the capacity of the SALT bucket for a given bucket ID at a specific block (according
     /// to its post-execution state).
     ///
     /// # Arguments
     ///
     /// * `bucket_id` - The ID of the SALT bucket
-    /// * `at_block` - The block number at which to get the bucket metadata
+    /// * `at_block` - The block number at which to get the bucket capacity
     ///
     /// # Returns
     ///
-    /// The metadata of the SALT bucket for the given bucket ID at the given block.
-    fn get_bucket_meta(
+    /// The capacity of the SALT bucket for the given bucket ID at the given block.
+    fn get_bucket_capacity(
         &self,
         bucket_id: BucketId,
         at_block: BlockNumber,
-    ) -> Result<BucketMeta, Self::Error>;
+    ) -> Result<u64, Self::Error>;
 }
 
 /// A no-op implementation of the [`ExternalEnvOracle`] trait. It is useful when the EVM does not
@@ -165,12 +165,12 @@ impl<Error: 'static + Unpin + Send + Sync> NoOpOracle<Error> {
 impl<Error: Unpin + Send + Sync + 'static> ExternalEnvOracle for NoOpOracle<Error> {
     type Error = Error;
 
-    fn get_bucket_meta(
+    fn get_bucket_capacity(
         &self,
         _bucket_id: BucketId,
         _at_block: BlockNumber,
-    ) -> Result<BucketMeta, Self::Error> {
+    ) -> Result<u64, Self::Error> {
         // By default, return a default BucketMeta with maximum capacity
-        Ok(BucketMeta::default())
+        Ok(salt::constant::MIN_BUCKET_SIZE as u64)
     }
 }
