@@ -9,7 +9,7 @@ use revm::{
 };
 
 /// A memory database for testing purposes.
-#[derive(Debug, Default, derive_more::Deref, derive_more::DerefMut)]
+#[derive(Debug, Default, Clone, derive_more::Deref, derive_more::DerefMut)]
 pub struct MemoryDatabase {
     #[deref]
     #[deref_mut]
@@ -17,6 +17,11 @@ pub struct MemoryDatabase {
 }
 
 impl MemoryDatabase {
+    /// Creates a new MemoryDatabase from a CacheDB.
+    pub fn from_cache_db(db: CacheDB<EmptyDB>) -> Self {
+        Self { db }
+    }
+
     /// Sets the code for an account in the database.
     pub fn set_account_code(&mut self, address: Address, code: Bytes) {
         let bytecode = Bytecode::new_legacy(code);
@@ -92,6 +97,14 @@ impl revm::Database for MemoryDatabase {
             fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error>;
             fn storage(&mut self, address: Address, index: StorageKey) -> Result<StorageValue, Self::Error>;
             fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error>;
+        }
+    }
+}
+
+impl revm::DatabaseCommit for MemoryDatabase {
+    delegate! {
+        to self.db {
+            fn commit(&mut self, changes: revm::primitives::HashMap<Address, revm::state::Account>);
         }
     }
 }
