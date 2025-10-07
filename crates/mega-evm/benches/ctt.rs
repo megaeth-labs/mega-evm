@@ -111,7 +111,8 @@ fn execute_batch_transfer(
     });
     let mut evm = MegaEvm::new(context);
 
-    let tx = TxEnvBuilder::new().caller(CALLER).call(contract_addr).data(calldata.clone()).build_fill();
+    let tx =
+        TxEnvBuilder::new().caller(CALLER).call(contract_addr).data(calldata.clone()).build_fill();
     let mut mega_tx = MegaTransaction::new(tx);
     mega_tx.enveloped_tx = Some(Bytes::new());
 
