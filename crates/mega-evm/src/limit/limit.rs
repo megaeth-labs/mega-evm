@@ -39,7 +39,7 @@ use revm::{
     },
 };
 
-use crate::{constants, GasCostOracle, MegaHaltReason};
+use crate::{constants, DynamicGasCost, MegaHaltReason};
 
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
 ///

@@ -25,7 +25,7 @@ use revm::{
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    constants, AdditionalLimit, BlockEnvAccess, DefaultExternalEnvs, ExternalEnvs, GasCostOracle,
+    constants, AdditionalLimit, BlockEnvAccess, DefaultExternalEnvs, ExternalEnvs, DynamicGasCost,
     MegaSpecId,
 };
 
@@ -48,8 +48,8 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
     /// Additional limits for the EVM.
     pub(crate) additional_limit: Rc<RefCell<AdditionalLimit>>,
 
-    /// An oracle for the gas cost during the transaction execution.
-    pub(crate) gas_cost_oracle: Rc<RefCell<GasCostOracle<ExtEnvs::SaltEnv>>>,
+    /// Calculator for dynamic gas costs during transaction execution.
+    pub(crate) dynamic_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
 
     /* Internal state variables */
     /// Bitmap of block environment data accessed during transaction execution.
@@ -76,7 +76,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// * `db` - The database implementation to use for state storage
     /// * `spec` - The `MegaETH` specification version to use
-    /// * `oracle` - The external environment oracle for gas cost calculations
+    /// * `external_envs` - The external environments for gas cost calculations
     ///
     /// # Returns
     ///
@@ -95,7 +95,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             spec,
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
-            gas_cost_oracle: Rc::new(RefCell::new(GasCostOracle::new(
+            dynamic_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
@@ -115,7 +115,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// * `context` - The existing `OpStack` context to wrap
     /// * `spec` - The `MegaETH` specification version (must match context spec)
-    /// * `oracle` - The external environment oracle for gas cost calculations
+    /// * `external_envs` - The external environments for gas cost calculations
     ///
     /// # Returns
     ///
@@ -142,7 +142,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             spec,
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
-            gas_cost_oracle: Rc::new(RefCell::new(GasCostOracle::new(
+            dynamic_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>() - 1,
             ))),
@@ -172,7 +172,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             additional_limit: self.additional_limit,
             block_env_accessed: self.block_env_accessed,
             beneficiary_balance_accessed: self.beneficiary_balance_accessed,
-            gas_cost_oracle: self.gas_cost_oracle,
+            dynamic_gas_cost: self.dynamic_gas_cost,
         }
     }
 
@@ -425,11 +425,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// Resets the internal state for a new block.
     ///
     /// This method is called when transitioning to a new block and updates
-    /// the gas cost oracle and additional limits accordingly.
+    /// the dynamic gas cost calculator and additional limits accordingly.
     pub(crate) fn on_new_block(&self) {
-        // The gas cost oracle is only enabled when the `MINI_REX` spec is enabled.
+        // The dynamic gas cost calculator is only enabled when the `MINI_REX` spec is enabled.
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
-            self.gas_cost_oracle.borrow_mut().on_new_block(&self.inner.block);
+            self.dynamic_gas_cost.borrow_mut().on_new_block(&self.inner.block);
         }
     }
 

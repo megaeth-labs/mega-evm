@@ -6,19 +6,19 @@ use revm::{context::BlockEnv, primitives::HashMap};
 
 use crate::{constants, BucketId, SaltEnv};
 
-/// An oracle of the gas cost for setting a storage slot to a non-zero value.
+/// Calculator for dynamic gas costs based on bucket capacity.
 #[derive(Debug)]
-pub(crate) struct GasCostOracle<SaltEnvImpl> {
+pub(crate) struct DynamicGasCost<SaltEnvImpl> {
     /// The parent block number.
     parent_block: BlockNumber,
-    /// The external env oracle.
+    /// The external environment for SALT bucket information.
     salt_env: SaltEnvImpl,
     /// Cache of the bucket cost multiplier for each bucket Id. The multiplier will be used to
     /// multiple [`SSTORE_SET_GAS`] to get the actual gas cost for setting a storage slot.
     bucket_cost_mulitipers: HashMap<BucketId, u64>,
 }
 
-impl<SaltEnvImpl: SaltEnv> GasCostOracle<SaltEnvImpl> {
+impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     /// Creates a new [`SaltBucketCostFeed`].
     pub(crate) fn new(salt_env: SaltEnvImpl, parent_block: BlockNumber) -> Self {
         Self { parent_block, salt_env, bucket_cost_mulitipers: HashMap::default() }
@@ -74,7 +74,7 @@ impl<SaltEnvImpl: SaltEnv> GasCostOracle<SaltEnvImpl> {
     }
 }
 
-impl<SaltEnvImpl: SaltEnv> GasCostOracle<SaltEnvImpl> {
+impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     pub(crate) fn on_new_block(&mut self, block: &BlockEnv) {
         self.reset(block.number.to::<u64>() - 1);
     }

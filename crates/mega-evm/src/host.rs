@@ -132,12 +132,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
     #[inline]
     fn sstore_set_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        self.gas_cost_oracle.borrow_mut().sstore_set_gas(address, key)
+        self.dynamic_gas_cost.borrow_mut().sstore_set_gas(address, key)
     }
 
     #[inline]
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        self.gas_cost_oracle.borrow_mut().new_account_gas(address)
+        self.dynamic_gas_cost.borrow_mut().new_account_gas(address)
     }
 }
