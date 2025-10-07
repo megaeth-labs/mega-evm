@@ -15,10 +15,12 @@ This repository contains a customized version of the revm EVM implementation spe
 ## Key Features
 
 ### EQUIVALENCE Specification
+
 - **Optimism Compatibility**: Maintains full compatibility with Optimism Isthmus EVM
 - **Parallel Execution Support**: Block environment access tracking for conflict detection
 
 ### MINI_REX Specification (Hardfork)
+
 - **Dynamic Gas Costs**: SALT bucket-based scaling preventing state bloat
 - **Massive Gas Increases**: 100x increases for LOG operations and calldata costs
 - **SELFDESTRUCT Prohibition**: Complete disabling for contract integrity
@@ -26,7 +28,7 @@ This repository contains a customized version of the revm EVM implementation spe
 - **Transaction Limits**: 3.125 MB data and 1,000 KV update limits with enforcement
 - **Enhanced Security**: Comprehensive limit enforcement with OutOfGas penalties
 
-For complete MiniRex specification, see **[MiniRex.md](./MiniRex.md)**.
+For complete MiniRex specification, see **[MiniRex.md](./hardfork-spec/MiniRex.md)**.
 
 ## Quick Start
 
@@ -85,7 +87,6 @@ cargo run --example block_env_tracking
 
 ## Documentation
 
-- **[MiniRex.md](MiniRex.md)**: Complete MiniRex hardfork specification and semantic changes
 - **[ARCH.md](ARCH.md)**: Detailed implementation architecture and technical specifications
 - **[DEV.md](DEV.md)**: Development guide and testing information
 

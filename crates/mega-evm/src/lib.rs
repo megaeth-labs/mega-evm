@@ -7,45 +7,35 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-pub mod constants;
-
-mod context;
-pub use context::*;
-
 mod block;
-pub use block::*;
-
+pub mod constants;
+mod context;
 mod evm;
-pub use evm::*;
-
+mod external;
 mod gas;
-pub use gas::*;
-
 mod handler;
-pub use handler::*;
-
 mod host;
-pub use host::*;
-
 mod instructions;
-pub use instructions::*;
-
 mod limit;
-pub use limit::*;
-
 mod result;
-pub use result::*;
-
 mod spec;
-pub use spec::*;
-
 pub mod system_tx;
-pub use system_tx::*;
-
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
-
 mod types;
+
+pub use block::*;
+pub use context::*;
+pub use evm::*;
+pub use external::*;
+pub use gas::*;
+pub use handler::*;
+pub use host::*;
+pub use instructions::*;
+pub use limit::*;
+pub use result::*;
+pub use spec::*;
+pub use system_tx::*;
 pub use types::*;
 
 /* Alias of the mega-evm types */
@@ -62,15 +52,15 @@ pub type Precompiles = MegaPrecompiles;
 /// Alias for [`MegaTxType`]
 pub type TxType = MegaTxType;
 /// Alias for [`MegaInstructions`]
-pub type Instructions<DB, Oracle> = MegaInstructions<DB, Oracle>;
+pub type Instructions<DB, ExtEnvs> = MegaInstructions<DB, ExtEnvs>;
 /// Alias for [`MegaHandler`]
 pub type Handler<EVM, ERROR, FRAME> = MegaHandler<EVM, ERROR, FRAME>;
 /// Alias for [`MegaEvm`]
-pub type Evm<DB, INSP, Oracle> = MegaEvm<DB, INSP, Oracle>;
+pub type Evm<DB, INSP, ExtEnvs> = MegaEvm<DB, INSP, ExtEnvs>;
 /// Alias for [`MegaEvmFactory`]
-pub type EvmFactory<Oracle> = MegaEvmFactory<Oracle>;
+pub type EvmFactory<ExtEnvs> = MegaEvmFactory<ExtEnvs>;
 /// Alias for [`MegaContext`]
-pub type Context<DB, Oracle> = MegaContext<DB, Oracle>;
+pub type Context<DB, ExtEnvs> = MegaContext<DB, ExtEnvs>;
 /// Alias for [`MegaBlockExecutor`]
 pub type BlockExecutor<C, E, R> = MegaBlockExecutor<C, E, R>;
 /// Alias for [`MegaBlockExecutorFactory`]

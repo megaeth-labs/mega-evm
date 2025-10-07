@@ -1,7 +1,7 @@
-//! Benchmarks for the ConcurrencyTortureTest batchTransfer operation.
+//! Benchmarks for the `ConcurrencyTortureTest` batchTransfer operation.
 //!
 //! This benchmark suite measures the performance of the `batchTransfer` function
-//! from the ConcurrencyTortureTest (CTT) contract, comparing performance across
+//! from the `ConcurrencyTortureTest` (CTT) contract, comparing performance across
 //! different EVM specifications (`EQUIVALENCE` vs `MINI_REX`).
 
 #![allow(missing_docs)]
@@ -9,7 +9,7 @@
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
-    test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, NoOpOracle,
+    test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, DefaultExternalEnvs,
 };
 use revm::{context::tx::TxEnvBuilder, primitives::KECCAK_EMPTY, ExecuteCommitEvm, ExecuteEvm};
 
@@ -26,7 +26,7 @@ const SEED: [u8; 32] = *b"test-seed-for-ctt-benchmarking!!";
 
 /// Deploy CTT contract and return the deployed address and post-deployment database
 fn deploy_ctt(spec: MegaSpecId) -> (Address, MemoryDatabase) {
-    let creation_code = CTT_DEPLOY_CODE.clone();
+    let creation_code = CTT_DEPLOY_CODE;
 
     // Encode constructor parameters: (blockInfoReadPercentage, totalSupply, cellCount, seed)
     let mut constructor_args = Vec::new();
@@ -43,7 +43,7 @@ fn deploy_ctt(spec: MegaSpecId) -> (Address, MemoryDatabase) {
         .account_balance(DEPLOYER, U256::from(10).pow(U256::from(18)))
         .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
 
-    let mut context = MegaContext::new(&mut db, spec, NoOpOracle::default());
+    let mut context = MegaContext::new(&mut db, spec, DefaultExternalEnvs::default());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -104,7 +104,7 @@ fn execute_batch_transfer(
     contract_addr: Address,
     calldata: &Bytes,
 ) {
-    let mut context = MegaContext::new(black_box(db), black_box(spec), NoOpOracle::default());
+    let mut context = MegaContext::new(black_box(db), black_box(spec), DefaultExternalEnvs::default());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
