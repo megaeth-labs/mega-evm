@@ -5,7 +5,7 @@ use crate::{
         self,
         equivalence::{CALL_STIPEND, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST},
     },
-    AdditionalLimit, ExternalEnvOracle, HostExt, MegaContext, MegaSpecId,
+    AdditionalLimit, ExternalEnvs, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Bytes, Log, LogData, B256};
@@ -41,18 +41,18 @@ use revm::{
 /// This instruction table is only used when the `MINI_REX` spec is enabled, so we can safely assume
 /// that all features before and including Mini-Rex are enabled.
 #[derive(Clone)]
-pub struct MegaInstructions<DB: Database, Oracle: ExternalEnvOracle> {
+pub struct MegaInstructions<DB: Database, ExtEnvs: ExternalEnvs> {
     spec: MegaSpecId,
-    inner: EthInstructions<EthInterpreter, MegaContext<DB, Oracle>>,
+    inner: EthInstructions<EthInterpreter, MegaContext<DB, ExtEnvs>>,
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> core::fmt::Debug for MegaInstructions<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> core::fmt::Debug for MegaInstructions<DB, ExtEnvs> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethInstructions").field("spec", &self.spec).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> MegaInstructions<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> MegaInstructions<DB, ExtEnvs> {
     /// Create a new `MegaethInstructions` with the given spec id.
     pub fn new(spec: MegaSpecId) -> Self {
         let this = Self { spec, inner: EthInstructions::new_mainnet() };
@@ -87,8 +87,8 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaInstructions<DB, Oracle> {
     }
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> InstructionProvider for MegaInstructions<DB, Oracle> {
-    type Context = MegaContext<DB, Oracle>;
+impl<DB: Database, ExtEnvs: ExternalEnvs> InstructionProvider for MegaInstructions<DB, ExtEnvs> {
+    type Context = MegaContext<DB, ExtEnvs>;
     type InterpreterTypes = EthInterpreter;
 
     fn instruction_table(&self) -> &InstructionTable<Self::InterpreterTypes, Self::Context> {

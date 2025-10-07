@@ -2,14 +2,15 @@
 //!
 //! This benchmark suite measures the performance of transaction execution through
 //! the `ExecuteEvm::transact()` interface, comparing performance across different
-//! EVM specifications (EQUIVALENCE vs MINI_REX).
+//! EVM specifications (EQUIVALENCE vs `MINI_REX`).
 #![allow(missing_docs)]
 
 use alloy_evm::Database;
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
-    test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, NoOpOracle,
+    test_utils::MemoryDatabase, DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId,
+    MegaTransaction,
 };
 use revm::{
     context::{result::ResultAndState, tx::TxEnvBuilder},
@@ -44,7 +45,7 @@ fn execute_transaction<DB: Database>(
     callee: Address,
     value: U256,
 ) -> ResultAndState<mega_evm::MegaHaltReason> {
-    let mut context = MegaContext::new(db, spec, NoOpOracle::default());
+    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -87,7 +88,7 @@ fn bench_both_specs<DB, F>(
 /// Benchmark empty transaction (call with no value or data).
 fn bench_empty_transaction(c: &mut Criterion) {
     let mut group = c.benchmark_group("empty_transaction");
-    bench_both_specs(&mut group, || CacheDB::<EmptyDB>::default());
+    bench_both_specs(&mut group, CacheDB::<EmptyDB>::default);
     group.finish();
 }
 
@@ -112,11 +113,11 @@ fn execute_weth9_transfer(
     let balance_slot = erc20_balance_slot(CALLER, 3); // WETH9 uses slot 3 for balances
 
     let db = MemoryDatabase::default()
-        .account_code(WETH9_ADDRESS, Bytes::from(WETH9_RUNTIME_CODE))
-        .account_storage(WETH9_ADDRESS, balance_slot.into(), caller_balance.into())
+        .account_code(WETH9_ADDRESS, WETH9_RUNTIME_CODE)
+        .account_storage(WETH9_ADDRESS, balance_slot.into(), caller_balance)
         .account_balance(CALLER, U256::from(10).pow(U256::from(18))); // 1 ETH for gas
 
-    let mut context = MegaContext::new(db, spec, NoOpOracle::default());
+    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

@@ -17,7 +17,7 @@ pub struct MemoryDatabase {
 }
 
 impl MemoryDatabase {
-    /// Creates a new MemoryDatabase from a CacheDB.
+    /// Creates a new `MemoryDatabase` from a `CacheDB`.
     pub fn from_cache_db(db: CacheDB<EmptyDB>) -> Self {
         Self { db }
     }

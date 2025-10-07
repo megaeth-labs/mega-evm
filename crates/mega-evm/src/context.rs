@@ -25,14 +25,14 @@ use revm::{
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    constants, AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, GasCostOracle, MegaSpecId,
-    NoOpOracle,
+    constants, AdditionalLimit, BlockEnvAccess, DefaultExternalEnvs, DynamicGasCost, ExternalEnvs,
+    MegaSpecId,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
 /// trait to be used as the context for the [`crate::Evm`].
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
-pub struct MegaContext<DB: Database, Oracle: ExternalEnvOracle> {
+pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
     /// The inner context.
     #[deref]
     #[deref_mut]
@@ -48,8 +48,8 @@ pub struct MegaContext<DB: Database, Oracle: ExternalEnvOracle> {
     /// Additional limits for the EVM.
     pub(crate) additional_limit: Rc<RefCell<AdditionalLimit>>,
 
-    /// An oracle for the gas cost during the transaction execution.
-    pub(crate) gas_cost_oracle: Rc<RefCell<GasCostOracle<Oracle>>>,
+    /// Calculator for dynamic gas costs during transaction execution.
+    pub(crate) dynamic_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
 
     /* Internal state variables */
     /// Bitmap of block environment data accessed during transaction execution.
@@ -58,14 +58,14 @@ pub struct MegaContext<DB: Database, Oracle: ExternalEnvOracle> {
     pub(crate) beneficiary_balance_accessed: RefCell<bool>,
 }
 
-impl Default for MegaContext<EmptyDB, NoOpOracle> {
+impl Default for MegaContext<EmptyDB, DefaultExternalEnvs> {
     fn default() -> Self {
-        Self::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, NoOpOracle::default())
+        Self::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, DefaultExternalEnvs::default())
     }
 }
 
 /* Constructors */
-impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// Creates a new `Context` with the given database, specification, and oracle.
     ///
     /// This constructor initializes a new `MegaETH` EVM context with default settings.
@@ -76,12 +76,12 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     ///
     /// * `db` - The database implementation to use for state storage
     /// * `spec` - The `MegaETH` specification version to use
-    /// * `oracle` - The external environment oracle for gas cost calculations
+    /// * `external_envs` - The external environments for gas cost calculations
     ///
     /// # Returns
     ///
     /// Returns a new `Context` instance with default configuration.
-    pub fn new(db: DB, spec: MegaSpecId, oracle: Oracle) -> Self {
+    pub fn new(db: DB, spec: MegaSpecId, external_envs: ExtEnvs) -> Self {
         let mut inner =
             revm::Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
 
@@ -95,8 +95,8 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
             spec,
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
-            gas_cost_oracle: Rc::new(RefCell::new(GasCostOracle::new(
-                oracle,
+            dynamic_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+                external_envs.salt_env(),
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
             block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
@@ -115,12 +115,16 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     ///
     /// * `context` - The existing `OpStack` context to wrap
     /// * `spec` - The `MegaETH` specification version (must match context spec)
-    /// * `oracle` - The external environment oracle for gas cost calculations
+    /// * `external_envs` - The external environments for gas cost calculations
     ///
     /// # Returns
     ///
     /// Returns a new `Context` instance wrapping the provided context.
-    pub fn new_with_context(context: OpContext<DB>, spec: MegaSpecId, oracle: Oracle) -> Self {
+    pub fn new_with_context(
+        context: OpContext<DB>,
+        spec: MegaSpecId,
+        external_envs: ExtEnvs,
+    ) -> Self {
         let mut inner = context;
 
         // spec in context must keep the same with parameter `spec`
@@ -142,8 +146,8 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
             spec,
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
-            gas_cost_oracle: Rc::new(RefCell::new(GasCostOracle::new(
-                oracle,
+            dynamic_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+                external_envs.salt_env(),
                 inner.block.number.to::<u64>() - 1,
             ))),
             block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
@@ -164,7 +168,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
     /// # Returns
     ///
     /// Returns a new `Context` with the updated database type.
-    pub fn with_db<ODB: Database>(self, db: ODB) -> MegaContext<ODB, Oracle> {
+    pub fn with_db<ODB: Database>(self, db: ODB) -> MegaContext<ODB, ExtEnvs> {
         MegaContext {
             inner: self.inner.with_db(db),
             spec: self.spec,
@@ -172,7 +176,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
             additional_limit: self.additional_limit,
             block_env_accessed: self.block_env_accessed,
             beneficiary_balance_accessed: self.beneficiary_balance_accessed,
-            gas_cost_oracle: self.gas_cost_oracle,
+            dynamic_gas_cost: self.dynamic_gas_cost,
         }
     }
 
@@ -296,7 +300,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
 }
 
 /* Getters */
-impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// Gets the `MegaETH` specification ID.
     ///
     /// Returns the specification version currently configured for this context.
@@ -342,7 +346,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
 }
 
 /* Block Environment Access Tracking */
-impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// Returns the bitmap of block environment data accessed during transaction execution.
     ///
     /// This method provides information about which block environment fields
@@ -379,7 +383,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
 }
 
 /* Beneficiary Access Tracking */
-impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// Disables the beneficiary reward.
     pub fn disable_beneficiary(&mut self) {
         self.disable_beneficiary = true;
@@ -421,15 +425,15 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
 }
 
 /* Hooks */
-impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// Resets the internal state for a new block.
     ///
     /// This method is called when transitioning to a new block and updates
-    /// the gas cost oracle and additional limits accordingly.
+    /// the dynamic gas cost calculator and additional limits accordingly.
     pub(crate) fn on_new_block(&self) {
-        // The gas cost oracle is only enabled when the `MINI_REX` spec is enabled.
+        // The dynamic gas cost calculator is only enabled when the `MINI_REX` spec is enabled.
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
-            self.gas_cost_oracle.borrow_mut().on_new_block(&self.inner.block);
+            self.dynamic_gas_cost.borrow_mut().on_new_block(&self.inner.block);
         }
     }
 
@@ -455,7 +459,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
 /// maintaining the MegaETH-specific functionality. The trait provides access
 /// to the core EVM context components like transaction, block, configuration,
 /// database, journal, and chain information.
-impl<DB: Database, Oracle: ExternalEnvOracle> ContextTr for MegaContext<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> ContextTr for MegaContext<DB, ExtEnvs> {
     type Block = BlockEnv;
     type Tx = crate::MegaTransaction;
     type Cfg = CfgEnv<OpSpecId>;
@@ -489,7 +493,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> ContextTr for MegaContext<DB, Orac
 ///
 /// This implementation provides methods to update the context state, with
 /// special handling for transaction updates to reset internal state.
-impl<DB: Database, Oracle: ExternalEnvOracle> ContextSetters for MegaContext<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> ContextSetters for MegaContext<DB, ExtEnvs> {
     delegate! {
         to self.inner {
             fn set_block(&mut self, block: Self::Block);
@@ -601,14 +605,17 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NoOpOracle;
+    use crate::DefaultExternalEnvs;
     use revm::{context::CfgEnv, database::EmptyDB};
 
     #[test]
     fn test_with_cfg_updates_spec() {
         // Create context with initial spec
-        let mut context =
-            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, NoOpOracle::default());
+        let mut context = MegaContext::new(
+            EmptyDB::default(),
+            MegaSpecId::EQUIVALENCE,
+            DefaultExternalEnvs::default(),
+        );
 
         // Verify initial state
         assert_eq!(context.mega_spec(), MegaSpecId::EQUIVALENCE);
@@ -627,8 +634,11 @@ mod tests {
 
     #[test]
     fn test_with_cfg_spec_consistency() {
-        let context =
-            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, NoOpOracle::default());
+        let context = MegaContext::new(
+            EmptyDB::default(),
+            MegaSpecId::EQUIVALENCE,
+            DefaultExternalEnvs::default(),
+        );
 
         // Test multiple spec transitions
         let specs_to_test = [MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE];

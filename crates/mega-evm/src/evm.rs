@@ -48,30 +48,29 @@ use revm::{
 
 use crate::{
     constants, create_exceeding_limit_frame_result, mark_interpreter_result_as_exceeding_limit,
-    ExternalEnvOracle, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
+    DefaultExternalEnvs, ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
     MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
-    NoOpOracle,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
 ///
 /// The `EvmFactory` is responsible for creating EVM instances configured with `MegaETH`-specific
-/// specifications and optimizations. It encapsulates the oracle service and provides methods
-/// to create EVM instances with different configurations.
+/// specifications and optimizations. It encapsulates the `external_envs` service and provides
+/// methods to create EVM instances with different configurations.
 ///
 /// # Type Parameters
 ///
-/// - `Oracle`: The oracle service to provide deterministic external information during EVM
-///   execution. Must implement [`ExternalEnvOracle`] and [`Clone`] traits.
+/// - `Oracle`: The `external_envs` service to provide deterministic external information during EVM
+///   execution. Must implement [`ExternalEnvs`] and [`Clone`] traits.
 ///
 /// # Usage
 ///
 /// ```rust
 /// use alloy_evm::{EvmEnv, EvmFactory};
-/// use mega_evm::{MegaEvmFactory, MegaSpecId, NoOpOracle};
+/// use mega_evm::{DefaultExternalEnvs, MegaEvmFactory, MegaSpecId};
 /// use revm::database::{CacheDB, EmptyDB};
 ///
-/// // Create a factory with default oracle
+/// // Create a factory with default external_envs
 /// let factory = MegaEvmFactory::default();
 ///
 /// // Create EVM instance
@@ -83,47 +82,48 @@ use crate::{
 /// # Implementation Details
 ///
 /// The factory implements [`alloy_evm::EvmFactory`] and provides `MegaETH`-specific
-/// customizations through the configured oracle service and chain specifications.
+/// customizations through the configured `external_envs` service and chain specifications.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub struct MegaEvmFactory<Oracle> {
-    /// The oracle service to provide deterministic external information during EVM execution.
-    oracle: Oracle,
+pub struct MegaEvmFactory<ExtEnvs> {
+    /// The `external_envs` service to provide deterministic external information during EVM
+    /// execution.
+    external_envs: ExtEnvs,
 }
 
-impl Default for MegaEvmFactory<NoOpOracle<Infallible>> {
-    /// Creates a new [`EvmFactory`] instance with the default [`NoOpOracle`].
+impl Default for MegaEvmFactory<DefaultExternalEnvs<Infallible>> {
+    /// Creates a new [`EvmFactory`] instance with the default [`DefaultExternalEnvs`].
     ///
-    /// This is the recommended way to create a factory when no custom oracle is needed.
-    /// The `NoOpOracle` provides a no-operation implementation that doesn't perform
+    /// This is the recommended way to create a factory when no custom `external_envs` is needed.
+    /// The `DefaultExternalEnvs` provides a no-operation implementation that doesn't perform
     /// any external environment queries.
     fn default() -> Self {
-        Self::new(NoOpOracle::<Infallible>::new())
+        Self::new(DefaultExternalEnvs::<Infallible>::new())
     }
 }
 
-impl<Oracle> MegaEvmFactory<Oracle> {
-    /// Creates a new [`EvmFactory`] instance with the given oracle.
+impl<ExtEnvs> MegaEvmFactory<ExtEnvs> {
+    /// Creates a new [`EvmFactory`] instance with the given `external_envs`.
     ///
     /// # Parameters
     ///
-    /// - `oracle`: The oracle service to provide deterministic external information during EVM
-    ///   execution
+    /// - `external_envs`: The `external_envs` service to provide deterministic external information
+    ///   during EVM execution
     ///
     /// # Returns
     ///
-    /// A new `EvmFactory` instance configured with the provided oracle.
-    pub fn new(oracle: Oracle) -> Self {
-        Self { oracle }
+    /// A new `EvmFactory` instance configured with the provided `external_envs`.
+    pub fn new(external_envs: ExtEnvs) -> Self {
+        Self { external_envs }
     }
 }
 
-impl<Oracle> alloy_evm::EvmFactory for MegaEvmFactory<Oracle>
+impl<ExtEnvs> alloy_evm::EvmFactory for MegaEvmFactory<ExtEnvs>
 where
-    Oracle: ExternalEnvOracle + Clone,
+    ExtEnvs: ExternalEnvs + Clone,
 {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = MegaEvm<DB, I, Oracle>;
-    type Context<DB: Database> = MegaContext<DB, Oracle>;
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = MegaEvm<DB, I, ExtEnvs>;
+    type Context<DB: Database> = MegaContext<DB, ExtEnvs>;
     type Tx = MegaTransaction;
     type Error<DBError: core::error::Error + Send + Sync + 'static> =
         EVMError<DBError, MegaTransactionError>;
@@ -134,9 +134,9 @@ where
     /// Creates a new `Evm` instance with the provided database and EVM environment.
     ///
     /// This method constructs a new `Context` using the given database, the specification from the
-    /// EVM environment, and the factory's oracle. It then sets up the transaction, block, config,
-    /// and chain environment for the context, and finally returns a new `Evm` instance using the
-    /// [`NoOpInspector`] as the default inspector.
+    /// EVM environment, and the factory's `external_envs`. It then sets up the transaction, block,
+    /// config, and chain environment for the context, and finally returns a new `Evm` instance
+    /// using the [`NoOpInspector`] as the default inspector.
     ///
     /// # Parameters
     ///
@@ -152,7 +152,7 @@ where
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
         let spec = evm_env.cfg_env().spec;
-        let ctx = MegaContext::new(db, spec, self.oracle.clone())
+        let ctx = MegaContext::new(db, spec, self.external_envs.clone())
             .with_tx(MegaTransaction::default())
             .with_block(evm_env.block_env)
             .with_cfg(evm_env.cfg_env)
@@ -180,7 +180,7 @@ where
 ///
 /// - `DB`: The database type implementing [`Database`]
 /// - `INSP`: The inspector type implementing [`Inspector`]
-/// - `Oracle`: The oracle type implementing [`ExternalEnvOracle`]
+/// - `Oracle`: The `external_envs` type implementing [`ExternalEnvs`]
 ///
 /// # Implementation Details
 ///
@@ -188,11 +188,11 @@ where
 /// `MegaETH`-specific customizations through the configured context, instructions, and precompiles.
 #[allow(missing_debug_implementations)]
 #[allow(clippy::type_complexity)]
-pub struct MegaEvm<DB: Database, INSP, Oracle: ExternalEnvOracle> {
+pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvs> {
     inner: revm::context::Evm<
-        MegaContext<DB, Oracle>,
+        MegaContext<DB, ExtEnvs>,
         INSP,
-        MegaInstructions<DB, Oracle>,
+        MegaInstructions<DB, ExtEnvs>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     >,
@@ -200,17 +200,17 @@ pub struct MegaEvm<DB: Database, INSP, Oracle: ExternalEnvOracle> {
     inspect: bool,
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::fmt::Debug for MegaEvm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> core::fmt::Debug for MegaEvm<DB, INSP, ExtEnvs> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethEvm").field("inspect", &self.inspect).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::Deref for MegaEvm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> core::ops::Deref for MegaEvm<DB, INSP, ExtEnvs> {
     type Target = revm::context::Evm<
-        MegaContext<DB, Oracle>,
+        MegaContext<DB, ExtEnvs>,
         INSP,
-        MegaInstructions<DB, Oracle>,
+        MegaInstructions<DB, ExtEnvs>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     >;
@@ -220,26 +220,24 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::Deref for MegaEvm
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> core::ops::DerefMut
-    for MegaEvm<DB, INSP, Oracle>
-{
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> core::ops::DerefMut for MegaEvm<DB, INSP, ExtEnvs> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> MegaEvm<DB, NoOpInspector, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     /// Creates a new `MegaETH` EVM instance.
     ///
     /// # Parameters
     ///
-    /// - `context`: The `MegaETH` context containing database, configuration, and oracle
+    /// - `context`: The `MegaETH` context containing database, configuration, and `external_envs`
     /// - `inspect`: The inspector to use for debugging and monitoring
     ///
     /// # Returns
     ///
     /// A new `Evm` instance configured with the provided context and inspector.
-    pub fn new(context: MegaContext<DB, Oracle>) -> Self {
+    pub fn new(context: MegaContext<DB, ExtEnvs>) -> Self {
         let spec = context.mega_spec();
         let op_spec = context.cfg().spec();
         Self {
@@ -254,7 +252,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaEvm<DB, NoOpInspector, Oracle>
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     /// Creates a new `MegaETH` EVM instance with the given inspector enabled at runtime.
     ///
     /// # Parameters
@@ -264,7 +262,7 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
     /// # Returns
     ///
     /// A new `Evm` instance with the specified inspector enabled.
-    pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, Oracle> {
+    pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, ExtEnvs> {
         let inner = revm::context::Evm::new_with_inspector(
             self.inner.ctx,
             inspector,
@@ -291,7 +289,7 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
     }
 }
 
-impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     /// Provides a reference to the block environment.
     ///
     /// The block environment contains information about the current block being processed,
@@ -338,7 +336,7 @@ impl<DB: Database, INSP, Oracle: ExternalEnvOracle> MegaEvm<DB, INSP, Oracle> {
     }
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> PrecompileProvider<MegaContext<DB, Oracle>>
+impl<DB: Database, ExtEnvs: ExternalEnvs> PrecompileProvider<MegaContext<DB, ExtEnvs>>
     for PrecompilesMap
 {
     type Output = InterpreterResult;
@@ -351,7 +349,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> PrecompileProvider<MegaContext<DB,
     #[inline]
     fn run(
         &mut self,
-        context: &mut MegaContext<DB, Oracle>,
+        context: &mut MegaContext<DB, ExtEnvs>,
         address: &Address,
         inputs: &InputsImpl,
         is_static: bool,
@@ -373,13 +371,13 @@ impl<DB: Database, Oracle: ExternalEnvOracle> PrecompileProvider<MegaContext<DB,
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::handler::EvmTr for MegaEvm<DB, INSP, Oracle>
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::handler::EvmTr for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
 {
-    type Context = MegaContext<DB, Oracle>;
+    type Context = MegaContext<DB, ExtEnvs>;
 
-    type Instructions = MegaInstructions<DB, Oracle>;
+    type Instructions = MegaInstructions<DB, ExtEnvs>;
 
     type Precompiles = PrecompilesMap;
 
@@ -539,11 +537,10 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::inspector::InspectorEvmTr
-    for MegaEvm<DB, INSP, Oracle>
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::inspector::InspectorEvmTr for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
-    INSP: Inspector<MegaContext<DB, Oracle>>,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     type Inspector = INSP;
 
@@ -578,10 +575,10 @@ where
 /// This implementation provides the core EVM interface required by the Alloy EVM framework,
 /// enabling seamless integration with Alloy-based applications while providing `MegaETH`-specific
 /// customizations and optimizations.
-impl<DB, INSP, Oracle: ExternalEnvOracle> alloy_evm::Evm for MegaEvm<DB, INSP, Oracle>
+impl<DB, INSP, ExtEnvs: ExternalEnvs> alloy_evm::Evm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
-    INSP: Inspector<MegaContext<DB, Oracle>>,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     type DB = DB;
     type Tx = MegaTransaction;
@@ -668,7 +665,7 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::ExecuteEvm for MegaEvm<DB, INSP, Oracle>
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::ExecuteEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
 {
@@ -703,7 +700,7 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::ExecuteCommitEvm for MegaEvm<DB, INSP, Oracle>
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::ExecuteCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database + DatabaseCommit,
 {
@@ -712,10 +709,10 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::InspectEvm for MegaEvm<DB, INSP, Oracle>
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::InspectEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
-    INSP: Inspector<MegaContext<DB, Oracle>>,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     type Inspector = INSP;
 
@@ -730,14 +727,14 @@ where
     }
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::InspectCommitEvm for MegaEvm<DB, INSP, Oracle>
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::InspectCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database + DatabaseCommit,
-    INSP: Inspector<MegaContext<DB, Oracle>>,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
 }
 
-impl<DB, INSP, Oracle: ExternalEnvOracle> revm::SystemCallEvm for MegaEvm<DB, INSP, Oracle>
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
 {

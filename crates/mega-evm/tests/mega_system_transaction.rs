@@ -11,7 +11,7 @@ use mega_evm::{
         is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
     },
     test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, NoOpOracle,
+    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
@@ -32,8 +32,8 @@ const NON_WHITELISTED_ADDR: Address = address!("00000000000000000000000000000000
 const WHITELISTED_ADDR: Address = address!("4200000000000000000000000000000000000101");
 
 /// Creates a test EVM instance with the provided database.
-fn create_evm(db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector, NoOpOracle> {
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
+fn create_evm(db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector, DefaultExternalEnvs> {
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
 
     let block_env = BlockEnv {
         beneficiary: BENEFICIARY,
@@ -66,7 +66,7 @@ fn create_simple_contract() -> Bytes {
 
 /// Executes a transaction and returns the result.
 fn execute_transaction(
-    evm: &mut MegaEvm<MemoryDatabase, NoOpInspector, NoOpOracle>,
+    evm: &mut MegaEvm<MemoryDatabase, NoOpInspector, DefaultExternalEnvs>,
     caller: Address,
     to: Address,
     value: U256,
@@ -424,7 +424,7 @@ fn test_mega_system_transaction_no_operator_fees() {
     db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
 
     // Create EVM with operator fees enabled
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
 
     let block_env = BlockEnv {
         beneficiary: BENEFICIARY,
@@ -481,7 +481,7 @@ fn test_mega_system_transaction_value_transfer_no_fees() {
     db.set_account_code(WHITELISTED_ADDR, create_simple_contract());
 
     // Create EVM with operator fees enabled to ensure they're bypassed
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
 
     let block_env = BlockEnv {
         beneficiary: BENEFICIARY,

@@ -7,7 +7,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     system_tx::{DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST},
     test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, NoOpOracle,
+    DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
@@ -30,8 +30,8 @@ const GAS_PRICE_ORACLE_ADDR: Address = address!("4200000000000000000000000000000
 const OPERATOR_FEE_VAULT_ADDR: Address = address!("420000000000000000000000000000000000001b");
 
 /// Creates a test EVM instance with the provided database.
-fn create_evm(db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector, NoOpOracle> {
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, NoOpOracle::default());
+fn create_evm(db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector, DefaultExternalEnvs> {
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
 
     let block_env = BlockEnv {
         beneficiary: BENEFICIARY,
@@ -62,7 +62,7 @@ fn create_gas_reporter_contract() -> Bytes {
 
 /// Creates and executes a deposit transaction, returns the gas used.
 fn execute_deposit_tx(
-    evm: &mut MegaEvm<MemoryDatabase, NoOpInspector, NoOpOracle>,
+    evm: &mut MegaEvm<MemoryDatabase, NoOpInspector, DefaultExternalEnvs>,
     to: Address,
     gas_limit: u64,
 ) -> Result<u64, mega_evm::EVMError<Infallible, mega_evm::MegaTransactionError>> {
@@ -88,7 +88,7 @@ fn execute_deposit_tx(
 
 /// Creates and executes a regular (non-deposit) transaction, returns the gas used.
 fn execute_regular_tx(
-    evm: &mut MegaEvm<MemoryDatabase, NoOpInspector, NoOpOracle>,
+    evm: &mut MegaEvm<MemoryDatabase, NoOpInspector, DefaultExternalEnvs>,
     to: Address,
     gas_limit: u64,
 ) -> Result<u64, mega_evm::EVMError<Infallible, mega_evm::MegaTransactionError>> {

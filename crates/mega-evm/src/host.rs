@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{AdditionalLimit, BlockEnvAccess, ExternalEnvOracle, MegaContext, MegaSpecId};
+use crate::{AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, SaltEnv};
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
@@ -10,7 +10,7 @@ use revm::{
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
 };
 
-impl<DB: Database, Oracle: ExternalEnvOracle> Host for MegaContext<DB, Oracle> {
+impl<DB: Database, ExtEnvs: ExternalEnvs> Host for MegaContext<DB, ExtEnvs> {
     // Block environment related methods - with tracking
     fn basefee(&self) -> U256 {
         self.mark_block_env_accessed(BlockEnvAccess::BASE_FEE);
@@ -120,8 +120,8 @@ pub trait HostExt: Host {
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error>;
 }
 
-impl<DB: Database, Oracle: ExternalEnvOracle> HostExt for MegaContext<DB, Oracle> {
-    type Error = Oracle::Error;
+impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
+    type Error = <ExtEnvs::SaltEnv as SaltEnv>::Error;
 
     #[inline]
     fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>> {
@@ -132,12 +132,12 @@ impl<DB: Database, Oracle: ExternalEnvOracle> HostExt for MegaContext<DB, Oracle
     #[inline]
     fn sstore_set_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        self.gas_cost_oracle.borrow_mut().sstore_set_gas(address, key)
+        self.dynamic_gas_cost.borrow_mut().sstore_set_gas(address, key)
     }
 
     #[inline]
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        self.gas_cost_oracle.borrow_mut().new_account_gas(address)
+        self.dynamic_gas_cost.borrow_mut().new_account_gas(address)
     }
 }

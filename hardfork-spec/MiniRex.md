@@ -235,7 +235,7 @@ The following opcodes have custom implementations in MiniRex:
 
 ### 5.3 Gas Cost Oracle
 
-- **ExternalEnvOracle**: An oracle providing external environment information is introduced to EVM to provide SALT bucket metadata.
+- **SaltEnv**: An oracle providing external environment information is introduced to EVM to provide SALT bucket metadata.
 - **Dynamic Pricing**: Gas costs scale with SALT bucket capacity
 
 ## 6. Migration Impact

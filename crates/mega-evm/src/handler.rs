@@ -21,7 +21,7 @@ use revm::{
 
 use crate::{
     constants, is_mega_system_transaction, sent_from_mega_system_address,
-    system_tx::MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, EthHaltReason, ExternalEnvOracle, HostExt,
+    system_tx::MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, EthHaltReason, ExternalEnvs, HostExt,
     MegaContext, MegaHaltReason, MegaSpecId, MegaTransactionError,
     DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
 };
@@ -47,10 +47,10 @@ impl<EVM, ERROR, FRAME> Default for MegaHandler<EVM, ERROR, FRAME> {
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME, Oracle: ExternalEnvOracle> revm::handler::Handler
+impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvs> revm::handler::Handler
     for MegaHandler<EVM, ERROR, FRAME>
 where
-    EVM: EvmTr<Context = MegaContext<DB, Oracle>, Frame = FRAME>,
+    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
     ERROR: EvmTrError<EVM>
         + From<OpTransactionError>
         + From<MegaTransactionError>
@@ -247,14 +247,14 @@ where
     }
 }
 
-impl<DB, EVM, ERROR, Oracle: ExternalEnvOracle> InspectorHandler
+impl<DB, EVM, ERROR, ExtEnvs: ExternalEnvs> InspectorHandler
     for MegaHandler<EVM, ERROR, EthFrame<EthInterpreter>>
 where
     DB: Database,
-    MegaContext<DB, Oracle>: ContextTr<Journal = Journal<DB>>,
+    MegaContext<DB, ExtEnvs>: ContextTr<Journal = Journal<DB>>,
     Journal<DB>: revm::inspector::JournalExt,
     EVM: InspectorEvmTr<
-        Context = MegaContext<DB, Oracle>,
+        Context = MegaContext<DB, ExtEnvs>,
         Frame = EthFrame<EthInterpreter>,
         Inspector: Inspector<
             <<Self as revm::handler::Handler>::Evm as EvmTr>::Context,
