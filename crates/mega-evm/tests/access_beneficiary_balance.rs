@@ -3,7 +3,9 @@
 //! access.
 
 use alloy_primitives::{address, Address, Bytes, U256};
-use mega_evm::{MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, DefaultExternalEnvs};
+use mega_evm::{
+    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+};
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODESIZE, POP, PUSH20, STOP},
     context::{result::ResultAndState, BlockEnv, ContextSetters, ContextTr, TxEnv},

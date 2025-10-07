@@ -12,8 +12,8 @@ use alloy_eips::{
 use alloy_primitives::{address, bytes, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
-    DefaultExternalEnvs, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, STORAGE_SLOT_WRITE_SIZE,
+    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -946,9 +946,10 @@ fn test_limits_reset_across_multiple_transactions() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(10000));
 
     // Create context once and reuse it for multiple transactions
-    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default())
-        .with_data_limit(u64::MAX)
-        .with_kv_update_limit(u64::MAX);
+    let mut context =
+        MegaContext::new(&mut db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default())
+            .with_data_limit(u64::MAX)
+            .with_kv_update_limit(u64::MAX);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

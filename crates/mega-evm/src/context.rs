@@ -25,7 +25,7 @@ use revm::{
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    constants, AdditionalLimit, BlockEnvAccess, DefaultExternalEnvs, ExternalEnvs, DynamicGasCost,
+    constants, AdditionalLimit, BlockEnvAccess, DefaultExternalEnvs, DynamicGasCost, ExternalEnvs,
     MegaSpecId,
 };
 
@@ -120,7 +120,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// # Returns
     ///
     /// Returns a new `Context` instance wrapping the provided context.
-    pub fn new_with_context(context: OpContext<DB>, spec: MegaSpecId, external_envs: ExtEnvs) -> Self {
+    pub fn new_with_context(
+        context: OpContext<DB>,
+        spec: MegaSpecId,
+        external_envs: ExtEnvs,
+    ) -> Self {
         let mut inner = context;
 
         // spec in context must keep the same with parameter `spec`
@@ -607,8 +611,11 @@ mod tests {
     #[test]
     fn test_with_cfg_updates_spec() {
         // Create context with initial spec
-        let mut context =
-            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, DefaultExternalEnvs::default());
+        let mut context = MegaContext::new(
+            EmptyDB::default(),
+            MegaSpecId::EQUIVALENCE,
+            DefaultExternalEnvs::default(),
+        );
 
         // Verify initial state
         assert_eq!(context.mega_spec(), MegaSpecId::EQUIVALENCE);
@@ -627,8 +634,11 @@ mod tests {
 
     #[test]
     fn test_with_cfg_spec_consistency() {
-        let context =
-            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, DefaultExternalEnvs::default());
+        let context = MegaContext::new(
+            EmptyDB::default(),
+            MegaSpecId::EQUIVALENCE,
+            DefaultExternalEnvs::default(),
+        );
 
         // Test multiple spec transitions
         let specs_to_test = [MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE];

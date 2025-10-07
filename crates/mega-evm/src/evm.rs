@@ -48,15 +48,15 @@ use revm::{
 
 use crate::{
     constants, create_exceeding_limit_frame_result, mark_interpreter_result_as_exceeding_limit,
-    ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler, MegaInstructions,
-    DefaultExternalEnvs, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
+    DefaultExternalEnvs, ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
+    MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
 ///
 /// The `EvmFactory` is responsible for creating EVM instances configured with `MegaETH`-specific
-/// specifications and optimizations. It encapsulates the `external_envs` service and provides methods
-/// to create EVM instances with different configurations.
+/// specifications and optimizations. It encapsulates the `external_envs` service and provides
+/// methods to create EVM instances with different configurations.
 ///
 /// # Type Parameters
 ///
@@ -67,7 +67,7 @@ use crate::{
 ///
 /// ```rust
 /// use alloy_evm::{EvmEnv, EvmFactory};
-/// use mega_evm::{MegaEvmFactory, MegaSpecId, DefaultExternalEnvs};
+/// use mega_evm::{DefaultExternalEnvs, MegaEvmFactory, MegaSpecId};
 /// use revm::database::{CacheDB, EmptyDB};
 ///
 /// // Create a factory with default external_envs
@@ -86,7 +86,8 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct MegaEvmFactory<ExtEnvs> {
-    /// The `external_envs` service to provide deterministic external information during EVM execution.
+    /// The `external_envs` service to provide deterministic external information during EVM
+    /// execution.
     external_envs: ExtEnvs,
 }
 
@@ -106,8 +107,8 @@ impl<ExtEnvs> MegaEvmFactory<ExtEnvs> {
     ///
     /// # Parameters
     ///
-    /// - `external_envs`: The `external_envs` service to provide deterministic external information during EVM
-    ///   execution
+    /// - `external_envs`: The `external_envs` service to provide deterministic external information
+    ///   during EVM execution
     ///
     /// # Returns
     ///
@@ -133,9 +134,9 @@ where
     /// Creates a new `Evm` instance with the provided database and EVM environment.
     ///
     /// This method constructs a new `Context` using the given database, the specification from the
-    /// EVM environment, and the factory's `external_envs`. It then sets up the transaction, block, config,
-    /// and chain environment for the context, and finally returns a new `Evm` instance using the
-    /// [`NoOpInspector`] as the default inspector.
+    /// EVM environment, and the factory's `external_envs`. It then sets up the transaction, block,
+    /// config, and chain environment for the context, and finally returns a new `Evm` instance
+    /// using the [`NoOpInspector`] as the default inspector.
     ///
     /// # Parameters
     ///

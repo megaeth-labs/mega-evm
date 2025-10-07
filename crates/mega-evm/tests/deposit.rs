@@ -7,7 +7,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     system_tx::{DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST},
     test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, DefaultExternalEnvs,
+    DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{

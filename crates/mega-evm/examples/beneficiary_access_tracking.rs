@@ -8,7 +8,7 @@
 //! 3. Contract 3: Accesses beneficiary via different operations (should trigger detection)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction, DefaultExternalEnvs};
+use mega_evm::{DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
 use revm::{
     bytecode::opcode::{BALANCE, CALLER, POP, PUSH20, STOP},
     context::{BlockEnv, ContextSetters, ContextTr, TxEnv},

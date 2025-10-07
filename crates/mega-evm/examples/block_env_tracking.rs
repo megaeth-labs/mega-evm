@@ -8,7 +8,9 @@
 //! 3. Contract 3: Does NOT use block environment (CALLER opcode)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{BlockEnvAccess, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, DefaultExternalEnvs};
+use mega_evm::{
+    BlockEnvAccess, DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+};
 use revm::{
     bytecode::opcode::{BASEFEE, CALLER, NUMBER, POP, STOP, TIMESTAMP},
     context::{ContextTr, TxEnv},

@@ -10,7 +10,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, DefaultExternalEnvs,
+    DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm::{context::tx::TxEnvBuilder, ExecuteEvm};
 
@@ -65,8 +65,11 @@ fn bench_keccak256_opcode(c: &mut Criterion) {
                         .account_code(KECCAK_CONTRACT, bytecode.clone())
                         .account_balance(CALLER, U256::from(10).pow(U256::from(18))); // 1 ETH for gas
 
-                    let mut context =
-                        MegaContext::new(black_box(db), black_box(spec), DefaultExternalEnvs::default());
+                    let mut context = MegaContext::new(
+                        black_box(db),
+                        black_box(spec),
+                        DefaultExternalEnvs::default(),
+                    );
                     context.modify_chain(|chain| {
                         chain.operator_fee_scalar = Some(U256::from(0));
                         chain.operator_fee_constant = Some(U256::from(0));

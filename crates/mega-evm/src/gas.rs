@@ -61,7 +61,10 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     }
 
     /// Loads the bucket cost multiplier for a given bucket Id.
-    fn load_bucket_cost_multiplier(&mut self, bucket_id: BucketId) -> Result<u64, SaltEnvImpl::Error> {
+    fn load_bucket_cost_multiplier(
+        &mut self,
+        bucket_id: BucketId,
+    ) -> Result<u64, SaltEnvImpl::Error> {
         match self.bucket_cost_mulitipers.entry(bucket_id) {
             Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
             Entry::Vacant(vacant_entry) => {
