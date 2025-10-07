@@ -443,6 +443,7 @@ impl<DB: Database, Oracle: ExternalEnvOracle> MegaContext<DB, Oracle> {
 
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
+            self.additional_limit.borrow_mut().reset();
             self.additional_limit.borrow_mut().before_tx_start(&self.inner.tx);
         }
     }

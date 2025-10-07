@@ -22,10 +22,11 @@ use revm::{
     context::{
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        TxEnv,
+        ContextTr, TxEnv,
     },
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
+    DatabaseCommit,
 };
 
 /// Executes a transaction on the `MegaETH` EVM with configurable data limits.
@@ -929,4 +930,59 @@ fn test_state_revert_when_exceeding_limit() {
     assert!(res.state.get(&CALLEE).is_none_or(|contract| !contract.is_touched()));
     // the caller balance should not be changed (tx reverts)
     assert!(res.state.get(&CALLER).is_some_and(|caller| caller.info.balance == U256::from(10000)));
+}
+
+// ============================================================================
+// MULTIPLE TRANSACTION TESTS
+// ============================================================================
+
+/// Test that data limit and KV update limits reset for each transaction.
+///
+/// This test verifies that when executing multiple transactions sequentially with the same
+/// context (like when building a block), the data size and KV update counters properly
+/// reset for each new transaction instead of accumulating across transactions.
+#[test]
+fn test_limits_reset_across_multiple_transactions() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(10000));
+
+    // Create context once and reuse it for multiple transactions
+    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, NoOpOracle::default())
+        .with_data_limit(u64::MAX)
+        .with_kv_update_limit(u64::MAX);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    context.modify_cfg(|cfg| {
+        cfg.disable_nonce_check = true;
+    });
+    let mut evm = MegaEvm::new(context);
+
+    // Execute first transaction
+    let tx1 = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
+    let mut mega_tx1 = MegaTransaction::new(tx1);
+    mega_tx1.enveloped_tx = Some(Bytes::new());
+    let res1 = alloy_evm::Evm::transact_raw(&mut evm, mega_tx1).unwrap();
+    let data_size_after_tx1 = evm.ctx_ref().generated_data_size();
+    let kv_updates_after_tx1 = evm.ctx_ref().kv_update_count();
+
+    // Verify first transaction generated some data and KV updates
+    assert_eq!(data_size_after_tx1, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE);
+    assert_eq!(kv_updates_after_tx1, 1);
+
+    // Commit the first transaction's state changes
+    evm.ctx_mut().db_mut().commit(res1.state);
+
+    // Execute second transaction with same context
+    let tx2 = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
+    let mut mega_tx2 = MegaTransaction::new(tx2);
+    mega_tx2.enveloped_tx = Some(Bytes::new());
+    let _ = alloy_evm::Evm::transact_raw(&mut evm, mega_tx2).unwrap();
+    let data_size_after_tx2 = evm.ctx_ref().generated_data_size();
+    let kv_updates_after_tx2 = evm.ctx_ref().kv_update_count();
+
+    // Verify counters reset and show only second transaction's data
+    // Without reset, these would be 2x the single transaction values
+    assert_eq!(data_size_after_tx2, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE);
+    assert_eq!(kv_updates_after_tx2, 1);
 }
