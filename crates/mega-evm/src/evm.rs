@@ -530,10 +530,35 @@ where
                 }
                 return Ok(Some(result));
             }
+
         }
 
         // call the inner frame_return_result function to return the frame result
-        self.inner.frame_return_result(result)
+        let inner_result = self.inner.frame_return_result(result);
+
+        // After processing the frame return, limit the parent frame's gas if oracle was accessed
+        // This needs to happen AFTER inner.frame_return_result() because that's when the
+        // parent frame becomes the current frame again
+        if self.ctx_ref().spec.is_enabled(MegaSpecId::MINI_REX)
+            && self.ctx_ref().has_accessed_oracle()
+        {
+            // Now the parent frame is the current frame
+            if let Some(_index) = self.frame_stack().index() {
+                let current_frame = self.frame_stack().get();
+                let gas = &mut current_frame.interpreter.gas;
+                let remaining = gas.remaining();
+
+                // Only limit gas if remaining is more than the oracle access limit
+                if remaining > crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_GAS {
+                    let limit = gas.limit();
+                    let new_spent =
+                        limit.saturating_sub(crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_GAS);
+                    gas.set_spent(new_spent);
+                }
+            }
+        }
+
+        inner_result
     }
 }
 

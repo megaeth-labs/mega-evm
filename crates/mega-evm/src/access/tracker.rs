@@ -1,21 +1,14 @@
-use crate::BlockEnvAccess;
+use crate::{BlockEnvAccess, OracleAccessTracker};
 
 /// A tracker for sensitive data access.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SensitiveDataAccessTracker {
     /// Bitmap of block environment data accessed during transaction execution.
     block_env_accessed: BlockEnvAccess,
     /// Whether beneficiary data has been accessed in current transaction.
     beneficiary_balance_accessed: bool,
-}
-
-impl Default for SensitiveDataAccessTracker {
-    fn default() -> Self {
-        Self {
-            block_env_accessed: BlockEnvAccess::empty(),
-            beneficiary_balance_accessed: false,
-        }
-    }
+    /// Tracker for oracle contract access.
+    oracle_tracker: OracleAccessTracker,
 }
 
 impl SensitiveDataAccessTracker {
@@ -26,7 +19,9 @@ impl SensitiveDataAccessTracker {
 
     /// Checks if any sensitive data has been accessed.
     pub fn accessed(&self) -> bool {
-        !self.block_env_accessed.is_empty() || self.beneficiary_balance_accessed
+        !self.block_env_accessed.is_empty()
+            || self.beneficiary_balance_accessed
+            || self.oracle_tracker.has_accessed()
     }
 
     /// Returns the bitmap of block environment data accessed during transaction execution.
@@ -49,9 +44,20 @@ impl SensitiveDataAccessTracker {
         self.beneficiary_balance_accessed = true;
     }
 
+    /// Checks if the oracle contract has been accessed.
+    pub fn has_accessed_oracle(&self) -> bool {
+        self.oracle_tracker.has_accessed()
+    }
+
+    /// Checks if the given address is the oracle contract address and marks it as accessed.
+    pub fn check_oracle_access(&mut self, address: &alloy_primitives::Address) -> bool {
+        self.oracle_tracker.check_oracle_access(address)
+    }
+
     /// Resets all access tracking for a new transaction.
     pub fn reset(&mut self) {
         self.block_env_accessed = BlockEnvAccess::empty();
         self.beneficiary_balance_accessed = false;
+        self.oracle_tracker.reset();
     }
 }

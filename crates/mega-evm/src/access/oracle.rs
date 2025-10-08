@@ -1,13 +1,13 @@
-//! This module implements the EVM logic for MegaETH's sequencer oracle service.
+//! This module implements the EVM logic for `MegaETH`'s sequencer oracle service.
 //!
 //! The main feature is that, whenever an oracle data is read during the EVM execution, the EVM will
 //! immediately limit the remaining gas in all message calls to a small amount of gas, forcing the
-//! transaction to finish execution soon. These restrictions are necessary to prevent DoS attacks on
-//! EVM.
+//! transaction to finish execution soon. These restrictions are necessary to prevent `DoS` attacks
+//! on the EVM.
 
 use alloy_primitives::{address, Address};
 
-/// The address of the MegaETH's oracle contract.
+/// The address of the `MegaETH`'s oracle contract.
 pub const MEGA_ORACLE_CONTRACT_ADDRESS: Address =
     address!("0x4200000000000000000000000000000000000101");
 

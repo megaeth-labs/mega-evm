@@ -388,6 +388,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
         self.sensitive_data_tracker.borrow().has_accessed_beneficiary_balance()
     }
 
+    /// Check if oracle contract has been accessed in current transaction
+    pub fn has_accessed_oracle(&self) -> bool {
+        self.sensitive_data_tracker.borrow().has_accessed_oracle()
+    }
+
     /// Check if address is beneficiary and mark access if so. Returns true if beneficiary was
     /// accessed.
     pub(crate) fn check_and_mark_beneficiary_balance_access(&self, address: &Address) -> bool {

@@ -118,6 +118,10 @@ pub trait HostExt: Host {
 
     /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error>;
+
+    /// Checks if the given address is the oracle contract and marks it as accessed if so.
+    /// Returns true if the oracle was accessed.
+    fn check_and_mark_oracle_access(&self, address: &Address) -> bool;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
@@ -139,5 +143,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
         self.dynamic_gas_cost.borrow_mut().new_account_gas(address)
+    }
+
+    #[inline]
+    fn check_and_mark_oracle_access(&self, address: &Address) -> bool {
+        self.sensitive_data_tracker.borrow_mut().check_oracle_access(address)
     }
 }

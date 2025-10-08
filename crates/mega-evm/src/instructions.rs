@@ -370,6 +370,9 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     // Max gas limit is not possible in real ethereum situation.
     let local_gas_limit = u64::try_from(local_gas_limit).unwrap_or(u64::MAX);
 
+    // Check if calling the oracle contract and mark it as accessed
+    context.host.check_and_mark_oracle_access(&to);
+
     let has_transfer = !value.is_zero();
     if context.interpreter.runtime_flag.is_static() && has_transfer {
         context.interpreter.halt(InstructionResult::CallNotAllowedInsideStatic);

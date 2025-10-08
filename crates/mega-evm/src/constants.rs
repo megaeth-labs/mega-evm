@@ -67,4 +67,9 @@ pub mod mini_rex {
     /// The maximum amount of key-value updates allowed to generate from a transaction for the
     /// `MINI_REX` spec.
     pub const TX_KV_UPDATE_LIMIT: u64 = BLOCK_KV_UPDATE_LIMIT * 25 / 100; // 25% of the block limit
+
+    /// Gas limit for parent calls after oracle contract is accessed.
+    /// When oracle access is detected, all parent (nested) calls have their remaining gas
+    /// limited to this value to force the transaction to complete quickly.
+    pub const ORACLE_ACCESS_REMAINING_GAS: u64 = 10_000;
 }
