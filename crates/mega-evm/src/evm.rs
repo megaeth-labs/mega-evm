@@ -48,9 +48,9 @@ use revm::{
 
 use crate::{
     constants, create_exceeding_limit_frame_result, force_limit_remaining_gas,
-    mark_interpreter_result_as_exceeding_limit, DefaultExternalEnvs, ExternalEnvs,
-    IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler, MegaInstructions, MegaPrecompiles,
-    MegaSpecId, MegaTransaction, MegaTransactionError,
+    force_limit_remaining_gas_in_frame_result, mark_interpreter_result_as_exceeding_limit,
+    DefaultExternalEnvs, ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
+    MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -533,19 +533,29 @@ where
         }
 
         // call the inner frame_return_result function to return the frame result
-        let inner_result = self.inner.frame_return_result(result);
+        let mut inner_result = self.inner.frame_return_result(result);
 
         // After processing the frame return, limit the parent frame's gas if oracle was accessed
         // This needs to happen AFTER inner.frame_return_result() because that's when the
         // parent frame becomes the current frame again
         let ctx = self.ctx_ref();
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) &&
-            ctx.sensitive_data_tracker.borrow().accessed()
-        {
+        let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
+        let accessed = ctx.sensitive_data_tracker.borrow().accessed();
+        if is_mini_rex && accessed {
+            // Get the tracker first, before getting mutable references to frames
+            let tracker = self.ctx_ref().sensitive_data_tracker.clone();
+
             // Now the parent frame is the current frame
             if let Some(_index) = self.frame_stack().index() {
                 let current_frame = self.frame_stack().get();
-                force_limit_remaining_gas(&mut current_frame.interpreter.gas);
+                let mut tracker_mut = tracker.borrow_mut();
+                force_limit_remaining_gas(&mut current_frame.interpreter.gas, &mut tracker_mut);
+            } else {
+                // if the current frame is the top-level transaction, limit the gas
+                if let Ok(Some(inner_result)) = &mut inner_result {
+                    let mut tracker_mut = tracker.borrow_mut();
+                    force_limit_remaining_gas_in_frame_result(inner_result, &mut tracker_mut);
+                }
             }
         }
 

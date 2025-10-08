@@ -9,6 +9,9 @@ pub struct SensitiveDataAccessTracker {
     beneficiary_balance_accessed: bool,
     /// Tracker for oracle contract access.
     oracle_tracker: OracleAccessTracker,
+    /// Amount of gas artificially consumed for enforcement purposes.
+    /// This tracks the gas we "spent" to limit execution, which should be reimbursed to the user.
+    enforcement_gas_consumed: u64,
 }
 
 impl SensitiveDataAccessTracker {
@@ -56,10 +59,21 @@ impl SensitiveDataAccessTracker {
         self.oracle_tracker.check_and_mark_oracle_access(address)
     }
 
+    /// Returns the amount of gas artificially consumed for enforcement purposes.
+    pub fn enforcement_gas_consumed(&self) -> u64 {
+        self.enforcement_gas_consumed
+    }
+
+    /// Records additional enforcement gas consumed.
+    pub fn record_enforcement_gas(&mut self, gas: u64) {
+        self.enforcement_gas_consumed = self.enforcement_gas_consumed.saturating_add(gas);
+    }
+
     /// Resets all access tracking for a new transaction.
     pub fn reset(&mut self) {
         self.block_env_accessed = BlockEnvAccess::empty();
         self.beneficiary_balance_accessed = false;
         self.oracle_tracker.reset();
+        self.enforcement_gas_consumed = 0;
     }
 }

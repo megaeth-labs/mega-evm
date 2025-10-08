@@ -213,6 +213,18 @@ where
             return Ok(());
         }
 
+        // Add enforcement gas back to remaining gas before transaction finishes
+        if evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX) {
+            let enforcement_gas = evm.ctx().sensitive_data_tracker.borrow().enforcement_gas_consumed();
+
+            if enforcement_gas > 0 {
+                let gas = frame_result.gas_mut();
+                let current_spent = gas.spent();
+                let new_spent = current_spent.saturating_sub(enforcement_gas);
+                gas.set_spent(new_spent);
+            }
+        }
+
         self.op.last_frame_result(evm, frame_result)
     }
 

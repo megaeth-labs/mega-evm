@@ -502,7 +502,8 @@ macro_rules! wrap_op_force_gas {
                 host: &mut context.host,
             };
             $original_fn(ctx);
-            force_limit_remaining_gas(&mut context.interpreter.gas);
+            let mut tracker = context.host.sensitive_data_tracker().borrow_mut();
+            force_limit_remaining_gas(&mut context.interpreter.gas, &mut tracker);
         }
     };
 }
