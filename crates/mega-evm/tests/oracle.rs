@@ -46,7 +46,7 @@ fn execute_transaction_with_contracts(
     tx.enveloped_tx = Some(Bytes::new());
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
-    let oracle_accessed = evm.ctx.has_accessed_oracle();
+    let oracle_accessed = evm.ctx.sensitive_data_tracker.borrow().has_accessed_oracle();
     let success = result.result.is_success();
     let gas_used = result.result.gas_used();
 

@@ -46,14 +46,14 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
     pub(crate) disable_beneficiary: bool,
 
     /// Additional limits for the EVM.
-    pub(crate) additional_limit: Rc<RefCell<AdditionalLimit>>,
+    pub additional_limit: Rc<RefCell<AdditionalLimit>>,
 
     /// Calculator for dynamic gas costs during transaction execution.
-    pub(crate) dynamic_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
+    pub dynamic_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
 
     /* Internal state variables */
     /// Tracker for sensitive data access (block environment, beneficiary, etc.)
-    pub(crate) sensitive_data_tracker: RefCell<SensitiveDataAccessTracker>,
+    pub sensitive_data_tracker: Rc<RefCell<SensitiveDataAccessTracker>>,
 }
 
 impl Default for MegaContext<EmptyDB, DefaultExternalEnvs> {
@@ -97,7 +97,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
-            sensitive_data_tracker: RefCell::new(SensitiveDataAccessTracker::new()),
+            sensitive_data_tracker: Rc::new(RefCell::new(SensitiveDataAccessTracker::new())),
             inner,
         }
     }
@@ -147,7 +147,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>() - 1,
             ))),
-            sensitive_data_tracker: RefCell::new(SensitiveDataAccessTracker::new()),
+            sensitive_data_tracker: Rc::new(RefCell::new(SensitiveDataAccessTracker::new())),
             inner,
         }
     }
@@ -381,16 +381,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// Disables the beneficiary reward.
     pub fn disable_beneficiary(&mut self) {
         self.disable_beneficiary = true;
-    }
-
-    /// Check if beneficiary data has been accessed in current transaction
-    pub fn has_accessed_beneficiary_balance(&self) -> bool {
-        self.sensitive_data_tracker.borrow().has_accessed_beneficiary_balance()
-    }
-
-    /// Check if oracle contract has been accessed in current transaction
-    pub fn has_accessed_oracle(&self) -> bool {
-        self.sensitive_data_tracker.borrow().has_accessed_oracle()
     }
 
     /// Check if address is beneficiary and mark access if so. Returns true if beneficiary was

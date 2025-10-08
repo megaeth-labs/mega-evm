@@ -1,7 +1,10 @@
 use core::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, SaltEnv};
+use crate::{
+    AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, SaltEnv,
+    SensitiveDataAccessTracker,
+};
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
@@ -119,9 +122,8 @@ pub trait HostExt: Host {
     /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error>;
 
-    /// Checks if the given address is the oracle contract and marks it as accessed if so.
-    /// Returns true if the oracle was accessed.
-    fn check_and_mark_oracle_access(&self, address: &Address) -> bool;
+    /// Gets the sensitive data tracker. Only used when the `MINI_REX` spec is enabled.
+    fn sensitive_data_tracker(&self) -> &Rc<RefCell<SensitiveDataAccessTracker>>;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
@@ -146,7 +148,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
     }
 
     #[inline]
-    fn check_and_mark_oracle_access(&self, address: &Address) -> bool {
-        self.sensitive_data_tracker.borrow_mut().check_oracle_access(address)
+    fn sensitive_data_tracker(&self) -> &Rc<RefCell<SensitiveDataAccessTracker>> {
+        &self.sensitive_data_tracker
     }
 }

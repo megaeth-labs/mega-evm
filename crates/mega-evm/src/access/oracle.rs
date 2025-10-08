@@ -1,9 +1,10 @@
 //! This module implements the EVM logic for `MegaETH`'s sequencer oracle service.
 //!
-//! The main feature is that, whenever an oracle data is read during the EVM execution, the EVM will
-//! immediately limit the remaining gas in all message calls to a small amount of gas, forcing the
-//! transaction to finish execution soon. These restrictions are necessary to prevent `DoS` attacks
-//! on the EVM.
+//! The main feature is that, whenever oracle data is read during EVM execution, the EVM will
+//! limit the remaining gas in parent (nested) calls to a small amount of gas, forcing the
+//! transaction to finish execution soon. Similarly, block environment access (TIMESTAMP, NUMBER,
+//! etc.) immediately limits gas. These restrictions are necessary to prevent `DoS` attacks on the
+//! EVM.
 
 use alloy_primitives::{address, Address};
 
@@ -25,7 +26,7 @@ impl OracleAccessTracker {
 
     /// Checks if the given address is the oracle contract address. If so, it will mark that the
     /// oracle has been accessed and returns true.
-    pub fn check_oracle_access(&mut self, address: &Address) -> bool {
+    pub fn check_and_mark_oracle_access(&mut self, address: &Address) -> bool {
         if address == &MEGA_ORACLE_CONTRACT_ADDRESS {
             self.accessed = true;
             true

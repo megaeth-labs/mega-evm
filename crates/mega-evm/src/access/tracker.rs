@@ -18,10 +18,12 @@ impl SensitiveDataAccessTracker {
     }
 
     /// Checks if any sensitive data has been accessed.
+    /// If so, the remaining gas in all message calls will be limited to a small amount of gas,
+    /// forcing the transaction to finish execution soon.
     pub fn accessed(&self) -> bool {
-        !self.block_env_accessed.is_empty()
-            || self.beneficiary_balance_accessed
-            || self.oracle_tracker.has_accessed()
+        !self.block_env_accessed.is_empty() ||
+            self.beneficiary_balance_accessed ||
+            self.oracle_tracker.has_accessed()
     }
 
     /// Returns the bitmap of block environment data accessed during transaction execution.
@@ -50,8 +52,8 @@ impl SensitiveDataAccessTracker {
     }
 
     /// Checks if the given address is the oracle contract address and marks it as accessed.
-    pub fn check_oracle_access(&mut self, address: &alloy_primitives::Address) -> bool {
-        self.oracle_tracker.check_oracle_access(address)
+    pub fn check_and_mark_oracle_access(&mut self, address: &alloy_primitives::Address) -> bool {
+        self.oracle_tracker.check_and_mark_oracle_access(address)
     }
 
     /// Resets all access tracking for a new transaction.

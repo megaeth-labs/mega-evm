@@ -5,19 +5,24 @@ use crate::{
         self,
         equivalence::{CALL_STIPEND, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST},
     },
-    AdditionalLimit, ExternalEnvs, HostExt, MegaContext, MegaSpecId,
+    force_limit_remaining_gas, AdditionalLimit, ExternalEnvs, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Bytes, Log, LogData, B256};
 use revm::{
-    bytecode::opcode::{CALL, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE},
+    bytecode::opcode::{
+        BASEFEE, BLOBBASEFEE, BLOBHASH, BLOCKHASH, CALL, COINBASE, CREATE, CREATE2, DIFFICULTY,
+        GASLIMIT, LOG0, LOG1, LOG2, LOG3, LOG4, NUMBER, SELFDESTRUCT, SSTORE, TIMESTAMP,
+    },
     context::{ContextTr, CreateScheme, Host, JournalTr},
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
         as_usize_or_fail, check,
         gas::{self, cost_per_word, warm_cold_cost_with_delegation},
         gas_or_fail,
-        instructions::{contract::get_memory_input_and_out_ranges, control, utility::IntoAddress},
+        instructions::{
+            self, contract::get_memory_input_and_out_ranges, control, utility::IntoAddress,
+        },
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
         popn, require_non_staticcall, resize_memory, CallInput, CallInputs, CallScheme, CallValue,
@@ -34,7 +39,9 @@ use revm::{
 /// - SELFDESTRUCT opcode completely disabled (halts with `InvalidFEOpcode`)
 /// - SSTORE opcode with dynamically-scaled gas cost and data/KV limit enforcement
 /// - CREATE/CREATE2 opcodes with dynamically-scaled + flat gas cost and limit enforcement
-/// - CALL opcode with dynamically-scaled new account gas cost
+/// - CALL opcode with dynamically-scaled new account gas cost and oracle access detection
+/// - Block environment opcodes (TIMESTAMP, NUMBER, etc.) with immediate gas limiting to prevent
+///   `DoS`
 ///
 /// # Assumptions
 ///
@@ -82,6 +89,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaInstructions<DB, ExtEnvs> {
 
             // Override the CALL instruction
             self.inner.insert_instruction(CALL, call_with_bomb);
+
+            // Override block environment opcodes to immediately limit gas upon access
+            // This prevents DoS attacks using sensitive block environment data
+            self.inner.insert_instruction(TIMESTAMP, timestamp_limit_gas);
+            self.inner.insert_instruction(NUMBER, block_number_limit_gas);
+            self.inner.insert_instruction(COINBASE, coinbase_limit_gas);
+            self.inner.insert_instruction(DIFFICULTY, difficulty_limit_gas);
+            self.inner.insert_instruction(GASLIMIT, gas_limit_opcode_limit_gas);
+            self.inner.insert_instruction(BASEFEE, basefee_limit_gas);
+            self.inner.insert_instruction(BLOCKHASH, blockhash_limit_gas);
+            self.inner.insert_instruction(BLOBBASEFEE, blobbasefee_limit_gas);
+            self.inner.insert_instruction(BLOBHASH, blobhash_limit_gas);
         }
         self
     }
@@ -371,7 +390,7 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     let local_gas_limit = u64::try_from(local_gas_limit).unwrap_or(u64::MAX);
 
     // Check if calling the oracle contract and mark it as accessed
-    context.host.check_and_mark_oracle_access(&to);
+    context.host.sensitive_data_tracker().borrow_mut().check_and_mark_oracle_access(&to);
 
     let has_transfer = !value.is_zero();
     if context.interpreter.runtime_flag.is_static() && has_transfer {
@@ -444,3 +463,57 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         }),
     )));
 }
+
+/* BELOW are: block environment opcode handlers with immediate gas limiting.
+
+These custom instruction handlers override the standard EVM block environment opcodes
+(TIMESTAMP, NUMBER, etc.) to immediately limit remaining gas after accessing sensitive
+block environment data. This prevents DoS attacks using block environment information.
+
+# Gas Limiting Behavior
+
+When any block environment opcode executes:
+1. The opcode executes normally (calls host method, pushes result to stack)
+2. Gas is **immediately** limited to `SENSITIVE_DATA_ACCESS_REMAINING_GAS` (10,000)
+3. Transaction must complete quickly with limited remaining gas
+
+This is similar to oracle access limiting but happens immediately instead of on frame return.
+*/
+
+/// Macro to create block environment opcode handlers with gas limiting.
+///
+/// This macro generates a wrapper function that:
+/// 1. Calls the original instruction implementation from revm
+/// 2. Immediately limits remaining gas after execution
+///
+/// # Arguments
+/// * `$fn_name` - Name of the wrapper function to generate
+/// * `$opcode_name` - Human-readable opcode name for documentation
+/// * `$original_fn` - Path to the original instruction function (e.g.,
+///   `instructions::block_info::timestamp`)
+macro_rules! wrap_op_force_gas {
+    ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
+        #[doc = concat!("`", $opcode_name, "` opcode with immediate gas limiting after execution.")]
+        pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+            mut context: InstructionContext<'_, H, WIRE>,
+        ) {
+            let ctx = InstructionContext::<'_, H, WIRE> {
+                interpreter: &mut context.interpreter,
+                host: &mut context.host,
+            };
+            $original_fn(ctx);
+            force_limit_remaining_gas(&mut context.interpreter.gas);
+        }
+    };
+}
+
+// Generate all block environment opcode handlers with gas limiting
+wrap_op_force_gas!(timestamp_limit_gas, "TIMESTAMP", instructions::block_info::timestamp);
+wrap_op_force_gas!(block_number_limit_gas, "NUMBER", instructions::block_info::block_number);
+wrap_op_force_gas!(difficulty_limit_gas, "DIFFICULTY", instructions::block_info::difficulty);
+wrap_op_force_gas!(gas_limit_opcode_limit_gas, "GASLIMIT", instructions::block_info::gaslimit);
+wrap_op_force_gas!(basefee_limit_gas, "BASEFEE", instructions::block_info::basefee);
+wrap_op_force_gas!(coinbase_limit_gas, "COINBASE", instructions::block_info::coinbase);
+wrap_op_force_gas!(blockhash_limit_gas, "BLOCKHASH", instructions::host::blockhash);
+wrap_op_force_gas!(blobbasefee_limit_gas, "BLOBBASEFEE", instructions::block_info::blob_basefee);
+wrap_op_force_gas!(blobhash_limit_gas, "BLOBHASH", instructions::tx_info::blob_hash);

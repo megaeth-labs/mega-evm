@@ -79,7 +79,7 @@ fn assert_beneficiary_detection(
 
     // If state contains beneficiary, should have detection
     if result_and_state.state.contains_key(&BENEFICIARY) {
-        assert!(evm.ctx_ref().has_accessed_beneficiary_balance());
+        assert!(evm.ctx_ref().sensitive_data_tracker.borrow().has_accessed_beneficiary_balance());
     }
 }
 

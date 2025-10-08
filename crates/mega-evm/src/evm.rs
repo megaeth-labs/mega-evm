@@ -47,9 +47,10 @@ use revm::{
 };
 
 use crate::{
-    constants, create_exceeding_limit_frame_result, mark_interpreter_result_as_exceeding_limit,
-    DefaultExternalEnvs, ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
-    MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
+    constants, create_exceeding_limit_frame_result, force_limit_remaining_gas,
+    mark_interpreter_result_as_exceeding_limit, DefaultExternalEnvs, ExternalEnvs,
+    IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler, MegaInstructions, MegaPrecompiles,
+    MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -498,12 +499,12 @@ where
         Option<<Self::Frame as revm::handler::FrameTr>::FrameResult>,
         ContextDbError<Self::Context>,
     > {
+        let ctx = self.ctx_ref();
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
-        if self.ctx_ref().spec.is_enabled(MegaSpecId::MINI_REX) {
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
             // Return early if the limit is already exceeded before processing the child frame
             // return result.
-            if self
-                .ctx_ref()
+            if ctx
                 .additional_limit
                 .borrow_mut()
                 .is_exceeding_limit_result(result.instruction_result())
@@ -513,8 +514,7 @@ where
 
             // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
             // exceeded, return the error frame result
-            if self
-                .ctx_ref()
+            if ctx
                 .additional_limit
                 .borrow_mut()
                 .before_frame_return_result(&result, false)
@@ -530,7 +530,6 @@ where
                 }
                 return Ok(Some(result));
             }
-
         }
 
         // call the inner frame_return_result function to return the frame result
@@ -539,22 +538,14 @@ where
         // After processing the frame return, limit the parent frame's gas if oracle was accessed
         // This needs to happen AFTER inner.frame_return_result() because that's when the
         // parent frame becomes the current frame again
-        if self.ctx_ref().spec.is_enabled(MegaSpecId::MINI_REX)
-            && self.ctx_ref().has_accessed_oracle()
+        let ctx = self.ctx_ref();
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) &&
+            ctx.sensitive_data_tracker.borrow().accessed()
         {
             // Now the parent frame is the current frame
             if let Some(_index) = self.frame_stack().index() {
                 let current_frame = self.frame_stack().get();
-                let gas = &mut current_frame.interpreter.gas;
-                let remaining = gas.remaining();
-
-                // Only limit gas if remaining is more than the oracle access limit
-                if remaining > crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_GAS {
-                    let limit = gas.limit();
-                    let new_spent =
-                        limit.saturating_sub(crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_GAS);
-                    gas.set_spent(new_spent);
-                }
+                force_limit_remaining_gas(&mut current_frame.interpreter.gas);
             }
         }
 

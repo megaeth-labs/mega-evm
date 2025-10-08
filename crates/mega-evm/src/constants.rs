@@ -8,9 +8,9 @@ pub mod equivalence {
 
     /// Constants inherited from `revm`.
     pub use gas::{
-        CALLVALUE, CALL_STIPEND, CODEDEPOSIT, COLD_SLOAD_COST, CREATE, KECCAK256WORD, LOG, LOGDATA,
-        LOGTOPIC, SSTORE_RESET, SSTORE_SET, STANDARD_TOKEN_COST, TOTAL_COST_FLOOR_PER_TOKEN,
-        WARM_SSTORE_RESET, WARM_STORAGE_READ_COST,
+        BASE, BLOCKHASH, CALLVALUE, CALL_STIPEND, CODEDEPOSIT, COLD_SLOAD_COST, CREATE,
+        KECCAK256WORD, LOG, LOGDATA, LOGTOPIC, SSTORE_RESET, SSTORE_SET, STANDARD_TOKEN_COST,
+        TOTAL_COST_FLOOR_PER_TOKEN, VERYLOW, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST,
     };
     pub use revm::primitives::STACK_LIMIT;
 }
@@ -68,8 +68,8 @@ pub mod mini_rex {
     /// `MINI_REX` spec.
     pub const TX_KV_UPDATE_LIMIT: u64 = BLOCK_KV_UPDATE_LIMIT * 25 / 100; // 25% of the block limit
 
-    /// Gas limit for parent calls after oracle contract is accessed.
-    /// When oracle access is detected, all parent (nested) calls have their remaining gas
-    /// limited to this value to force the transaction to complete quickly.
-    pub const ORACLE_ACCESS_REMAINING_GAS: u64 = 10_000;
+    /// Gas limit after sensitive data access (oracle contract or block environment).
+    /// When sensitive data is accessed, remaining gas is immediately limited to this value
+    /// to force the transaction to complete quickly and prevent `DoS` attacks.
+    pub const SENSITIVE_DATA_ACCESS_REMAINING_GAS: u64 = 10_000;
 }
