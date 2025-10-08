@@ -16,7 +16,7 @@ const CALLER: alloy_primitives::Address = address!("2000000000000000000000000000
 const CALLEE: alloy_primitives::Address = address!("1000000000000000000000000000000000000001");
 
 /// Helper function to create and execute a transaction with the given contracts.
-/// Returns a tuple of (oracle_accessed: bool, result: Result, gas_used: u64).
+/// Returns a tuple of `(oracle_accessed: bool, result: Result, gas_used: u64)`.
 fn execute_transaction_with_contracts(
     spec: MegaSpecId,
     contracts: HashMap<alloy_primitives::Address, Bytes>,
@@ -114,7 +114,7 @@ fn test_oracle_access_not_detected_without_call() {
 }
 
 /// Test that oracle access is NOT detected in EQUIVALENCE spec (uses standard CALL).
-/// Oracle detection only works in MINI_REX spec with custom CALL instruction.
+/// Oracle detection only works in `MINI_REX` spec with custom CALL instruction.
 #[test]
 fn test_oracle_access_not_detected_in_equivalence_spec() {
     // Create bytecode that calls the oracle contract
