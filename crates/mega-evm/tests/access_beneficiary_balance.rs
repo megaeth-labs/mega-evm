@@ -11,7 +11,9 @@ use mega_evm::{
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use revm::{
-    bytecode::opcode::{BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, PUSH1, PUSH20, STOP},
+    bytecode::opcode::{
+        BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, PUSH1, PUSH20, STOP,
+    },
     context::{result::ResultAndState, BlockEnv, ContextSetters, ContextTr, TxEnv},
     database::{CacheDB, EmptyDB},
     handler::EvmTr,

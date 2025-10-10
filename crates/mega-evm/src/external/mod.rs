@@ -63,7 +63,8 @@ pub struct DefaultExternalEnvs<Error = Infallible> {
     _phantom: core::marker::PhantomData<Error>,
     /// Oracle storage for testing purposes. Maps storage slots to their values.
     oracle_storage: Arc<RwLock<HashMap<U256, U256>>>,
-    /// Bucket capacity storage for testing purposes. Maps (`bucket_id`, `block_number`) to capacity.
+    /// Bucket capacity storage for testing purposes. Maps (`bucket_id`, `block_number`) to
+    /// capacity.
     bucket_capacity: Arc<RwLock<HashMap<(BucketId, BlockNumber), u64>>>,
 }
 

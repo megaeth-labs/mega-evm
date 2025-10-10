@@ -538,7 +538,9 @@ fn test_nested_call_block_env_access_limits_parent_too() {
             // Check if we're in the nested contract and hit TIMESTAMP
             match &node.borrow().meta {
                 MsgCallMeta::Call(call_inputs) => {
-                    if call_inputs.target_address == NESTED_CONTRACT && opcode_info.opcode == TIMESTAMP {
+                    if call_inputs.target_address == NESTED_CONTRACT &&
+                        opcode_info.opcode == TIMESTAMP
+                    {
                         accessed_timestamp = true;
                     }
                 }

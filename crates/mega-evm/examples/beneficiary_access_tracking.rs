@@ -96,7 +96,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Gas used: {}", result1.result.gas_used());
 
     // Verify that beneficiary access was detected
-    let beneficiary_accessed = evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance();
+    let beneficiary_accessed =
+        evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance();
     println!("  Beneficiary access detected: {}", beneficiary_accessed);
     assert!(
         beneficiary_accessed,
@@ -134,7 +135,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Gas used: {}", result2.result.gas_used());
 
     // Verify that beneficiary was NOT accessed
-    let beneficiary_accessed = evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance();
+    let beneficiary_accessed =
+        evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance();
     println!("  Beneficiary access detected: {}", beneficiary_accessed);
     assert!(!beneficiary_accessed, "Contract 2 should NOT have detected beneficiary access!");
     assert!(result2.result.is_success(), "Contract 2 transaction should succeed");
@@ -169,7 +171,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Gas used: {}", result3.result.gas_used());
 
     // Verify that beneficiary access was detected
-    let beneficiary_accessed = evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance();
+    let beneficiary_accessed =
+        evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance();
     println!("  Beneficiary access detected: {}", beneficiary_accessed);
     assert!(
         beneficiary_accessed,
