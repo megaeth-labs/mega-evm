@@ -14,9 +14,6 @@ use super::DefaultExternalEnvs;
 /// database of `MegaETH` to provide deterministic oracle data during EVM execution.
 #[auto_impl(&, Box, Arc)]
 pub trait OracleEnv: Debug + Send + Sync + Unpin {
-    /// The error type for the oracle.
-    type Error;
-
     /// Gets the storage value at a specific slot of the `MegaETH` oracle contract.
     ///
     /// # Arguments
@@ -25,20 +22,19 @@ pub trait OracleEnv: Debug + Send + Sync + Unpin {
     ///
     /// # Returns
     ///
-    /// The storage value at the given slot of the oracle contract.
-    fn get_oracle_storage(&self, slot: U256) -> Result<U256, Self::Error>;
+    /// The storage value at the given slot of the oracle contract. If the oracle does not provide a
+    /// value, the result will be `None`.
+    fn get_oracle_storage(&self, slot: U256) -> Option<U256>;
 }
 
 impl<Error: Unpin + Send + Sync + Clone + 'static> OracleEnv for DefaultExternalEnvs<Error> {
-    type Error = Error;
-
-    fn get_oracle_storage(&self, slot: U256) -> Result<U256, Self::Error> {
+    fn get_oracle_storage(&self, slot: U256) -> Option<U256> {
         // Return the value from storage, or zero if not set
-        Ok(self.oracle_storage.read().expect("RwLock poisoned").get(&slot).copied().unwrap_or(U256::ZERO))
+        self.oracle_storage.read().expect("RwLock poisoned").get(&slot).copied()
     }
 }
 
-impl<Error: Unpin + Send + Sync + Clone + 'static> DefaultExternalEnvs<Error> {
+impl<Error> DefaultExternalEnvs<Error> {
     /// Sets an oracle storage slot to a specific value for testing purposes.
     ///
     /// # Arguments

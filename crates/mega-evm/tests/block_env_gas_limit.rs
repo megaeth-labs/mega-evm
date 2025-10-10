@@ -4,16 +4,16 @@
 //! immediately limits remaining gas to prevent `DoS` attacks.
 //!
 //! Key properties tested:
-//! 1. Block env opcodes trigger gas limiting (gas_used should be small)
-//! 2. Enforcement gas is restored before tx finishes (users only pay for real work)
+//! 1. Block env opcodes trigger gas limiting (`gas_used` should be small)
+//! 2. Detained gas is restored before tx finishes (users only pay for real work)
 //! 3. Gas limiting propagates through nested calls
-//! 4. Without block env access, no limiting occurs (gas_used reflects full work)
+//! 4. Without block env access, no limiting occurs (`gas_used` reflects full work)
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::mini_rex::SENSITIVE_DATA_ACCESS_REMAINING_GAS,
-    test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm::{bytecode::opcode::*, context::TxEnv, Database};
@@ -24,7 +24,16 @@ const NESTED_CONTRACT: Address = address!("1000000000000000000000000000000000000
 
 /// Helper to create and execute a transaction with given bytecode
 fn execute_bytecode(db: &mut MemoryDatabase, gas_limit: u64) -> (bool, u64, u64) {
-    execute_bytecode_with_price(db, gas_limit, 0)
+    execute_bytecode_with_price(db, gas_limit, 0, None)
+}
+
+/// Helper to create and execute a transaction with given bytecode and gas inspector
+fn execute_bytecode_with_inspector(
+    db: &mut MemoryDatabase,
+    gas_limit: u64,
+    gas_inspector: &mut GasInspector,
+) -> (bool, u64, u64) {
+    execute_bytecode_with_price(db, gas_limit, 0, Some(gas_inspector))
 }
 
 /// Helper to create and execute a transaction with given bytecode and gas price, committing state
@@ -32,6 +41,7 @@ fn execute_bytecode_with_price(
     db: &mut MemoryDatabase,
     gas_limit: u64,
     gas_price: u128,
+    gas_inspector: Option<&mut GasInspector>,
 ) -> (bool, u64, u64) {
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
     let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, &external_envs);
@@ -40,7 +50,6 @@ fn execute_bytecode_with_price(
         chain.operator_fee_constant = Some(U256::from(0));
     });
 
-    let mut evm = MegaEvm::new(context);
     let tx = TxEnv {
         caller: CALLER,
         kind: TxKind::Call(CONTRACT),
@@ -54,7 +63,14 @@ fn execute_bytecode_with_price(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let result = Evm::transact_commit(&mut evm, tx).unwrap();
+    let result = if let Some(inspector) = gas_inspector {
+        let mut evm = MegaEvm::new(context).with_inspector(inspector);
+        Evm::transact_commit(&mut evm, tx).unwrap()
+    } else {
+        let mut evm = MegaEvm::new(context);
+        Evm::transact_commit(&mut evm, tx).unwrap()
+    };
+
     let success = result.is_success();
     let gas_used = result.gas_used();
     let gas_remaining = gas_limit.saturating_sub(gas_used);
@@ -77,17 +93,38 @@ fn test_timestamp_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let mut gas_inspector = GasInspector::new();
+    let (success, gas_used, _gas_remaining) =
+        execute_bytecode_with_inspector(&mut db, 1_000_000, &mut gas_inspector);
 
     assert!(success, "Transaction should succeed");
-    // With enforcement gas restoration, gas_used should be much less than gas_limit
+    // With detained gas restoration, gas_used should be much less than gas_limit
     // The contract does minimal work (TIMESTAMP, MSTORE, RETURN), so should use < 30K gas
-    // If enforcement gas wasn't restored, gas_used would be ~990K
+    // If detained gas wasn't restored, gas_used would be ~990K
     assert!(
         gas_used < 30_000,
         "gas_used should only reflect real work after TIMESTAMP limiting, but got {}. \
-         If > 900K, enforcement gas was not restored.",
+         If > 900K, detained gas was not restored.",
         gas_used
+    );
+
+    // Verify that after TIMESTAMP opcode, all subsequent opcodes have gas ≤ 10k
+    let mut after_timestamp = false;
+    gas_inspector.trace.as_ref().unwrap().iterate_with(
+        |_node_location, _node, _item_location, item| {
+            let opcode_info = item.borrow();
+            if after_timestamp {
+                assert!(
+                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    "Gas after TIMESTAMP should be ≤ {}, got {}",
+                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after
+                );
+            }
+            if opcode_info.opcode == TIMESTAMP {
+                after_timestamp = true;
+            }
+        },
     );
 }
 
@@ -291,7 +328,7 @@ fn test_block_env_access_with_nested_calls() {
 
     let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
 
-    // With limited gas, the loop completes with minimal gas used (due to enforcement)
+    // With limited gas, the loop completes with minimal gas used (due to detained gas)
     assert!(
         gas_used < 100_000,
         "gas_used should be small after block env access limiting, got {}",
@@ -316,7 +353,9 @@ fn test_no_gas_limit_without_block_env_access() {
     db.set_account_code(CONTRACT, bytecode);
 
     let gas_limit = 1_000_000;
-    let (success, _gas_used, gas_remaining) = execute_bytecode(&mut db, gas_limit);
+    let mut gas_inspector = GasInspector::new();
+    let (success, _gas_used, gas_remaining) =
+        execute_bytecode_with_inspector(&mut db, gas_limit, &mut gas_inspector);
 
     assert!(success);
     // Without block env access, gas should NOT be limited
@@ -325,6 +364,18 @@ fn test_no_gas_limit_without_block_env_access() {
         "Regular opcodes should not limit gas, expected > {}, got {}",
         SENSITIVE_DATA_ACCESS_REMAINING_GAS,
         gas_remaining
+    );
+
+    // Verify that all opcodes have gas > 10k (no limiting occurred)
+    gas_inspector.trace.as_ref().unwrap().iterate_with(
+        |_node_location, _node, _item_location, item| {
+            assert!(
+                item.borrow().gas_after > SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                "Gas should remain > {} without block env access, got {}",
+                SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                item.borrow().gas_after
+            );
+        },
     );
 }
 
@@ -350,13 +401,13 @@ fn test_out_of_gas_after_block_env_access() {
 
     let (success, _gas_used, gas_remaining) = execute_bytecode(&mut db, 5_000_000);
 
-    // Should run out of gas - SSTORE costs 2M gas in Mini-Rex, but only 10K available after limiting
+    // Should run out of gas - SSTORE costs 2M gas in Mini-Rex, but only 10K available after
+    // limiting
     assert!(
         !success,
         "Should run out of gas when attempting expensive SSTORE after block env access. \
          gas_remaining: {}, success: {}",
-        gas_remaining,
-        success
+        gas_remaining, success
     );
 }
 
@@ -456,7 +507,9 @@ fn test_nested_call_block_env_access_limits_parent_too() {
         .build();
     db.set_account_code(CONTRACT, parent_bytecode);
 
-    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let mut gas_inspector = GasInspector::new();
+    let (success, gas_used, _gas_remaining) =
+        execute_bytecode_with_inspector(&mut db, 1_000_000, &mut gas_inspector);
 
     assert!(success, "Transaction should succeed");
     // Top-level transaction should be limited when child accesses block env
@@ -467,6 +520,31 @@ fn test_nested_call_block_env_access_limits_parent_too() {
         "Top-level transaction should be limited when child accesses block env. gas_used: {}. \
          If > 900K, gas limiting didn't propagate through nested calls.",
         gas_used
+    );
+
+    // Verify that after the nested call to TIMESTAMP, all subsequent parent opcodes have gas ≤ 10k
+    let mut accessed_timestamp = false;
+    gas_inspector.trace.as_ref().unwrap().iterate_with(
+        |_node_location, node, _item_location, item| {
+            let opcode_info = item.borrow();
+            if accessed_timestamp {
+                assert!(
+                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    "Gas after nested TIMESTAMP access should be ≤ {}, got {}",
+                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after
+                );
+            }
+            // Check if we're in the nested contract and hit TIMESTAMP
+            match &node.borrow().meta {
+                MsgCallMeta::Call(call_inputs) => {
+                    if call_inputs.target_address == NESTED_CONTRACT && opcode_info.opcode == TIMESTAMP {
+                        accessed_timestamp = true;
+                    }
+                }
+                MsgCallMeta::Create(_) => {}
+            }
+        },
     );
 }
 
@@ -509,11 +587,41 @@ fn test_nested_call_block_env_access_child_oog() {
         .build();
     db.set_account_code(CONTRACT, parent_bytecode);
 
-    let (success, _gas_used, _gas_remaining) = execute_bytecode(&mut db, 5_000_000);
+    let mut gas_inspector = GasInspector::new();
+    let (success, _gas_used, _gas_remaining) =
+        execute_bytecode_with_inspector(&mut db, 5_000_000, &mut gas_inspector);
 
     // Parent should succeed (child failure doesn't fail parent)
     // Child runs out of gas due to its own block env access limiting
     assert!(success, "Parent should succeed even if child runs out of gas");
+
+    // Verify that inside the nested contract, gas was limited after TIMESTAMP
+    let mut inside_nested = false;
+    let mut after_timestamp_in_nested = false;
+    gas_inspector.trace.as_ref().unwrap().iterate_with(
+        |_node_location, node, _item_location, item| {
+            let opcode_info = item.borrow();
+            match &node.borrow().meta {
+                MsgCallMeta::Call(call_inputs) => {
+                    inside_nested = call_inputs.target_address == NESTED_CONTRACT;
+                }
+                MsgCallMeta::Create(_) => {}
+            }
+            if inside_nested {
+                if after_timestamp_in_nested {
+                    assert!(
+                        opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                        "Gas in nested contract after TIMESTAMP should be ≤ {}, got {}",
+                        SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                        opcode_info.gas_after
+                    );
+                }
+                if opcode_info.opcode == TIMESTAMP {
+                    after_timestamp_in_nested = true;
+                }
+            }
+        },
+    );
 }
 
 #[test]
@@ -563,7 +671,6 @@ fn test_deeply_nested_call_block_env_access() {
         chain.operator_fee_constant = Some(U256::from(0));
     });
 
-    let mut evm = MegaEvm::new(context);
     let tx = TxEnv {
         caller: CALLER,
         kind: TxKind::Call(CONTRACT),
@@ -576,6 +683,8 @@ fn test_deeply_nested_call_block_env_access() {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
+    let mut gas_inspector = GasInspector::new();
+    let mut evm = MegaEvm::new(context).with_inspector(&mut gas_inspector);
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let success = result.result.is_success();
     let gas_used = result.result.gas_used();
@@ -585,6 +694,25 @@ fn test_deeply_nested_call_block_env_access() {
         gas_used < 100_000,
         "All parent calls should be limited when deeply nested call accesses block env. gas_used: {}",
         gas_used
+    );
+
+    // Verify that all opcodes after TIMESTAMP (in all frames) have gas ≤ 10k
+    let mut after_timestamp = false;
+    gas_inspector.trace.as_ref().unwrap().iterate_with(
+        |_node_location, _node, _item_location, item| {
+            let opcode_info = item.borrow();
+            if after_timestamp {
+                assert!(
+                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    "Gas in all frames after TIMESTAMP should be ≤ {}, got {}",
+                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after
+                );
+            }
+            if opcode_info.opcode == TIMESTAMP {
+                after_timestamp = true;
+            }
+        },
     );
 }
 
@@ -641,8 +769,7 @@ fn test_parent_block_env_access_oog_after_nested_call() {
         !success,
         "Parent should run out of gas when attempting SSTORE after accessing block env itself. \
          gas_remaining: {}, success: {}",
-        gas_remaining,
-        success
+        gas_remaining, success
     );
 }
 
@@ -694,12 +821,12 @@ fn test_nested_call_already_limited_no_further_restriction() {
 }
 
 #[test]
-fn test_enforcement_gas_is_restored_not_charged() {
-    // This test explicitly verifies the enforcement gas restoration mechanism:
+fn test_detained_gas_is_restored_not_charged() {
+    // This test explicitly verifies the detained gas restoration mechanism:
     // 1. Gas is artificially limited during execution (to SENSITIVE_DATA_ACCESS_REMAINING_GAS)
-    // 2. Enforcement gas is tracked
-    // 3. Enforcement gas is restored before tx finishes
-    // 4. User only pays for real work, not enforcement gas
+    // 2. Detained gas is tracked
+    // 3. Detained gas is restored before tx finishes
+    // 4. User only pays for real work, not detained gas
     let mut db = MemoryDatabase::default();
 
     // Give caller a known balance
@@ -723,14 +850,14 @@ fn test_enforcement_gas_is_restored_not_charged() {
     let gas_price = 1000u128; // Higher gas price to make differences more visible
 
     let (success, gas_used, _gas_remaining) =
-        execute_bytecode_with_price(&mut db, gas_limit, gas_price);
+        execute_bytecode_with_price(&mut db, gas_limit, gas_price, None);
 
     assert!(success, "Transaction should succeed");
 
-    // Verify gas_used is small (real work only, not including ~990K enforcement gas)
+    // Verify gas_used is small (real work only, not including ~990K detained gas)
     assert!(
         gas_used < 30_000,
-        "gas_used should only reflect real work, got {}. If > 900K, enforcement gas was NOT restored.",
+        "gas_used should only reflect real work, got {}. If > 900K, detained gas was NOT restored.",
         gas_used
     );
 
@@ -742,16 +869,15 @@ fn test_enforcement_gas_is_restored_not_charged() {
     assert_eq!(
         actual_cost, expected_cost,
         "User payment should match gas_used. actual: {}, expected: {}. \
-         If actual >> expected, enforcement gas was charged to user.",
+         If actual >> expected, detained gas was charged to user.",
         actual_cost, expected_cost
     );
 
-    // If enforcement gas was NOT restored, user would pay ~990K * 1000 = 990M units
+    // If detained gas was NOT restored, user would pay ~990K * 1000 = 990M units
     // With restoration, user pays ~20K * 1000 = 20M units
     assert!(
         actual_cost < U256::from(50_000_000u64),
-        "User cost ({}) should be < 50M. If > 900M, enforcement gas was charged.",
+        "User cost ({}) should be < 50M. If > 900M, detained gas was charged.",
         actual_cost
     );
 }
-

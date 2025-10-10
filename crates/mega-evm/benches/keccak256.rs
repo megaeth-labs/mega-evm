@@ -9,7 +9,7 @@
 use alloy_primitives::{address, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
-    test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, MemoryDatabase},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm::{context::tx::TxEnvBuilder, ExecuteEvm};

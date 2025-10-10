@@ -7,7 +7,7 @@ use mega_evm::{
     address_to_bucket_id,
     constants::{self, mini_rex::SSTORE_SET_GAS},
     slot_to_bucket_id,
-    test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, MemoryDatabase},
     DefaultExternalEnvs, EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
     MegaTransaction, MegaTransactionError,
 };
@@ -95,8 +95,11 @@ fn sstore_test_case(
     };
     let bucket_id = slot_to_bucket_id(CALLEE, storage_key);
     // An external envs with the given bucket capacity
-    let external_envs = DefaultExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, 0, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // a contract that stores a value to the storage slot
     let bytecode = BytecodeBuilder::default().sstore(storage_key, storage_value).stop().build();
@@ -206,8 +209,11 @@ fn ether_transfer_test_case(
 
     // Determine the bucket for the callee and set up the external envs with the required capacity.
     let bucket_id = address_to_bucket_id(CALLEE);
-    let external_envs = DefaultExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, 0, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // Allocate initial balance to the caller.
     db.set_account_balance(CALLER, U256::from(1000));
@@ -294,8 +300,11 @@ fn nested_ether_transfer_test_case(
     // Test address and storage slot
     let bucket_id = address_to_bucket_id(NESTED_CALLEE);
     // An external envs with the given bucket capacity
-    let external_envs = DefaultExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, 0, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // allocate some balance to callee, which will transfer the ether to the nested callee
     db.set_account_balance(CALLEE, U256::from(1000));
@@ -383,8 +392,11 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
     let callee = CALLER.create(0);
     let bucket_id = address_to_bucket_id(callee);
     // An external envs with the given bucket capacity
-    let external_envs = DefaultExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, 0, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // constructor code
     let constructor_code = BytecodeBuilder::default().return_with_data([0x00]).build();
@@ -392,9 +404,8 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
     // println!("calldata_tokens: {:?}", tokens);
 
     // create contract
-    let res =
-        transact(spec, &mut db, &external_envs, CALLER, None, constructor_code, U256::ZERO)
-            .unwrap();
+    let res = transact(spec, &mut db, &external_envs, CALLER, None, constructor_code, U256::ZERO)
+        .unwrap();
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
@@ -465,8 +476,11 @@ fn nested_create_contract_test_case(
     };
     let bucket_id = address_to_bucket_id(nested_callee);
     // An external envs with the given bucket capacity
-    let external_envs = DefaultExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, 0, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // set the code of the calee that transfers ether to the nested callee
     let mut bytecode = BytecodeBuilder::default();

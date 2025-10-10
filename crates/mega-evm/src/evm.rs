@@ -47,8 +47,7 @@ use revm::{
 };
 
 use crate::{
-    constants, create_exceeding_limit_frame_result, force_limit_remaining_gas,
-    force_limit_remaining_gas_in_frame_result, mark_interpreter_result_as_exceeding_limit,
+    constants, create_exceeding_limit_frame_result, mark_interpreter_result_as_exceeding_limit,
     DefaultExternalEnvs, ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
     MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
@@ -500,8 +499,9 @@ where
         ContextDbError<Self::Context>,
     > {
         let ctx = self.ctx_ref();
+        let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+        if is_mini_rex {
             // Return early if the limit is already exceeded before processing the child frame
             // return result.
             if ctx
@@ -532,29 +532,34 @@ where
             }
         }
 
+        // If the sensitive data tracker already accessed, the gas in the returned frame must have
+        // already been limited by the sensitive data tracker's global limited gas. The remaining
+        // gas in the returned frame should be recorded so that we can know how much
+        // gas is left and how we should limit the parent frame's gas.
+        let sensitive_data_tracker = ctx.sensitive_data_tracker.clone();
+        let mut sensitive_data_tracker = sensitive_data_tracker.borrow_mut();
+        let accessed_sensitive_data = sensitive_data_tracker.accessed();
+        if is_mini_rex && accessed_sensitive_data {
+            let gas_remaining = result.gas().remaining();
+            sensitive_data_tracker.update_remained_gas(gas_remaining);
+        }
+
         // call the inner frame_return_result function to return the frame result
         let mut inner_result = self.inner.frame_return_result(result);
 
-        // After processing the frame return, limit the parent frame's gas if oracle was accessed
-        // This needs to happen AFTER inner.frame_return_result() because that's when the
-        // parent frame becomes the current frame again
-        let ctx = self.ctx_ref();
-        let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
-        let accessed = ctx.sensitive_data_tracker.borrow().accessed();
-        if is_mini_rex && accessed {
-            // Get the tracker first, before getting mutable references to frames
-            let tracker = self.ctx_ref().sensitive_data_tracker.clone();
-
+        // After processing the frame return, we also to limit the parent frame's gas if oracle was
+        // accessed This needs to happen AFTER inner.frame_return_result() because that's
+        // when the parent frame has accured the remaining gas from the returned child frame and
+        // becomes the current frame again.
+        if is_mini_rex && accessed_sensitive_data {
             // Now the parent frame is the current frame
             if let Some(_index) = self.frame_stack().index() {
                 let current_frame = self.frame_stack().get();
-                let mut tracker_mut = tracker.borrow_mut();
-                force_limit_remaining_gas(&mut current_frame.interpreter.gas, &mut tracker_mut);
+                sensitive_data_tracker.detain_gas(&mut current_frame.interpreter.gas);
             } else {
                 // if the current frame is the top-level transaction, limit the gas
                 if let Ok(Some(inner_result)) = &mut inner_result {
-                    let mut tracker_mut = tracker.borrow_mut();
-                    force_limit_remaining_gas_in_frame_result(inner_result, &mut tracker_mut);
+                    sensitive_data_tracker.detain_gas_in_frame_result(inner_result);
                 }
             }
         }

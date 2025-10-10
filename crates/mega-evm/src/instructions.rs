@@ -5,14 +5,15 @@ use crate::{
         self,
         equivalence::{CALL_STIPEND, WARM_SSTORE_RESET, WARM_STORAGE_READ_COST},
     },
-    force_limit_remaining_gas, AdditionalLimit, ExternalEnvs, HostExt, MegaContext, MegaSpecId,
+    AdditionalLimit, ExternalEnvs, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Bytes, Log, LogData, B256};
 use revm::{
     bytecode::opcode::{
-        BASEFEE, BLOBBASEFEE, BLOBHASH, BLOCKHASH, CALL, COINBASE, CREATE, CREATE2, DIFFICULTY,
-        GASLIMIT, LOG0, LOG1, LOG2, LOG3, LOG4, NUMBER, SELFDESTRUCT, SSTORE, TIMESTAMP,
+        BALANCE, BASEFEE, BLOBBASEFEE, BLOBHASH, BLOCKHASH, CALL, COINBASE, CREATE, CREATE2,
+        DIFFICULTY, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, GASLIMIT, LOG0, LOG1, LOG2, LOG3, LOG4,
+        NUMBER, SELFDESTRUCT, SSTORE, TIMESTAMP,
     },
     context::{ContextTr, CreateScheme, Host, JournalTr},
     handler::instructions::{EthInstructions, InstructionProvider},
@@ -39,9 +40,21 @@ use revm::{
 /// - SELFDESTRUCT opcode completely disabled (halts with `InvalidFEOpcode`)
 /// - SSTORE opcode with dynamically-scaled gas cost and data/KV limit enforcement
 /// - CREATE/CREATE2 opcodes with dynamically-scaled + flat gas cost and limit enforcement
-/// - CALL opcode with dynamically-scaled new account gas cost and oracle access detection
-/// - Block environment opcodes (TIMESTAMP, NUMBER, etc.) with immediate gas limiting to prevent
-///   `DoS`
+/// - CALL opcode with dynamically-scaled new account gas cost, oracle access detection, and
+///   immediate gas detention for oracle calls
+/// - Block environment opcodes (TIMESTAMP, NUMBER, etc.) with immediate gas detention to prevent
+///   `DoS` attacks
+/// - Beneficiary-accessing opcodes (BALANCE, EXTCODESIZE, etc.) with immediate gas detention when
+///   beneficiary is accessed
+///
+/// # Gas Detention Mechanism
+///
+/// When sensitive data (block environment, beneficiary, or oracle) is accessed, the system
+/// implements a global gas detention mechanism:
+/// 1. Remaining gas is immediately limited to `SENSITIVE_DATA_ACCESS_REMAINING_GAS` (10,000)
+/// 2. Detained gas is tracked and refunded at transaction end
+/// 3. Users only pay for actual work performed, not for enforcement gas
+/// 4. This prevents `DoS` attacks while maintaining fair gas accounting
 ///
 /// # Assumptions
 ///
@@ -101,6 +114,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaInstructions<DB, ExtEnvs> {
             self.inner.insert_instruction(BLOCKHASH, blockhash_limit_gas);
             self.inner.insert_instruction(BLOBBASEFEE, blobbasefee_limit_gas);
             self.inner.insert_instruction(BLOBHASH, blobhash_limit_gas);
+
+            // Override beneficiary-accessing opcodes to immediately limit gas when beneficiary is
+            // accessed This prevents DoS attacks using beneficiary account data
+            self.inner.insert_instruction(BALANCE, balance_limit_gas);
+            self.inner.insert_instruction(EXTCODESIZE, extcodesize_limit_gas);
+            self.inner.insert_instruction(EXTCODECOPY, extcodecopy_limit_gas);
+            self.inner.insert_instruction(EXTCODEHASH, extcodehash_limit_gas);
         }
         self
     }
@@ -389,9 +409,6 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     // Max gas limit is not possible in real ethereum situation.
     let local_gas_limit = u64::try_from(local_gas_limit).unwrap_or(u64::MAX);
 
-    // Check if calling the oracle contract and mark it as accessed
-    context.host.sensitive_data_tracker().borrow_mut().check_and_mark_oracle_access(&to);
-
     let has_transfer = !value.is_zero();
     if context.interpreter.runtime_flag.is_static() && has_transfer {
         context.interpreter.halt(InstructionResult::CallNotAllowedInsideStatic);
@@ -448,6 +465,13 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
     }
 
+    // Check if calling the oracle contract and mark it as accessed. If so, we need to limit the
+    // forwarded gas immediately
+    let mut sensitive_data_tracker = context.host.sensitive_data_tracker().borrow_mut();
+    if sensitive_data_tracker.check_and_mark_oracle_access(&to) {
+        sensitive_data_tracker.detain_plain_gas(&mut gas_limit);
+    }
+
     // Call host to interact with target contract
     context.interpreter.bytecode.set_action(InterpreterAction::NewFrame(FrameInput::Call(
         Box::new(CallInputs {
@@ -464,57 +488,93 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     )));
 }
 
-/* BELOW are: block environment opcode handlers with immediate gas limiting.
+/* Sensitive data access opcode handlers with immediate gas detention.
 
-These custom instruction handlers override the standard EVM block environment opcodes
-(TIMESTAMP, NUMBER, etc.) to immediately limit remaining gas after accessing sensitive
-block environment data. This prevents DoS attacks using block environment information.
+These custom instruction handlers override opcodes that access sensitive data (block environment,
+beneficiary account data) to immediately detain remaining gas. This prevents DoS attacks while
+maintaining fair gas accounting through the global gas detention mechanism.
 
-# Gas Limiting Behavior
+# Gas Detention Mechanism
 
-When any block environment opcode executes:
-1. The opcode executes normally (calls host method, pushes result to stack)
-2. Gas is **immediately** limited to `SENSITIVE_DATA_ACCESS_REMAINING_GAS` (10,000)
-3. Transaction must complete quickly with limited remaining gas
+When sensitive data is accessed:
+1. The opcode executes normally (calls host method, processes data)
+2. If this is the first sensitive data access in the transaction:
+   - A global gas limit is established at `SENSITIVE_DATA_ACCESS_REMAINING_GAS` (10,000)
+   - Any gas above this limit is "detained" (tracked but not consumed)
+3. All subsequent opcodes are limited by this global gas limit
+4. At transaction end, all detained gas is refunded to the user
+5. Users only pay for actual computational work performed
 
-This is similar to oracle access limiting but happens immediately instead of on frame return.
+This approach:
+- Prevents DoS attacks by limiting execution after sensitive data access
+- Ensures fair billing by refunding enforcement gas
+- Works across nested calls through the global limit mechanism
+
+# Two Categories of Opcodes
+
+## Block Environment Opcodes (Always Sensitive)
+These opcodes ALWAYS access sensitive data and trigger detention:
+- TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH
+
+## Account-Accessing Opcodes (Conditionally Sensitive)
+These opcodes only SOMETIMES access sensitive data:
+- BALANCE(beneficiary_address) → sensitive, triggers detention
+- BALANCE(other_address) → not sensitive, no detention
+- EXTCODESIZE/EXTCODECOPY/EXTCODEHASH → same conditional behavior
+
+For conditional opcodes:
+- The Host methods detect when they access beneficiary/sensitive accounts
+- Gas detention only occurs if sensitive data is actually accessed
+- Regular account accesses don't trigger detention
 */
 
-/// Macro to create block environment opcode handlers with gas limiting.
+/// Macro to create opcode handlers with immediate gas detention.
 ///
 /// This macro generates a wrapper function that:
-/// 1. Calls the original instruction implementation from revm
-/// 2. Immediately limits remaining gas after execution
+/// 1. Checks if sensitive data was already accessed (to avoid redundant detention)
+/// 2. Calls the original instruction implementation from revm
+/// 3. If this opcode caused new sensitive data access, detains gas immediately
 ///
-/// # Arguments
-/// * `$fn_name` - Name of the wrapper function to generate
-/// * `$opcode_name` - Human-readable opcode name for documentation
-/// * `$original_fn` - Path to the original instruction function (e.g.,
-///   `instructions::block_info::timestamp`)
-macro_rules! wrap_op_force_gas {
+/// The detention is managed by `SensitiveDataAccessTracker.detain_gas()`, which:
+/// - Establishes a global gas limit on first sensitive data access
+/// - Tracks detained gas for later refund
+/// - Applies the same limit to all subsequent gas detentions
+macro_rules! wrap_op_detain_gas {
     ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
-        #[doc = concat!("`", $opcode_name, "` opcode with immediate gas limiting after execution.")]
+        #[doc = concat!("`", $opcode_name, "` opcode with immediate gas detention on sensitive data access.")]
         pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
             mut context: InstructionContext<'_, H, WIRE>,
         ) {
+            let sensitive_data_tracker = context.host.sensitive_data_tracker().clone();
+            let accessed_before = sensitive_data_tracker.borrow().accessed();
+
+            // The sensitive data tracker will be marked as accessed in the `Host` hooks,
+            // so we need to drop the borrow before calling the original function
             let ctx = InstructionContext::<'_, H, WIRE> {
                 interpreter: &mut context.interpreter,
                 host: &mut context.host,
             };
             $original_fn(ctx);
-            let mut tracker = context.host.sensitive_data_tracker().borrow_mut();
-            force_limit_remaining_gas(&mut context.interpreter.gas, &mut tracker);
+
+            // We should only detain gas if this opcode is the first time in the tx that accessed
+            // the sensitive data.
+            if !accessed_before && sensitive_data_tracker.borrow().accessed() {
+                sensitive_data_tracker.borrow_mut().detain_gas(&mut context.interpreter.gas);
+            }
         }
     };
 }
 
-// Generate all block environment opcode handlers with gas limiting
-wrap_op_force_gas!(timestamp_limit_gas, "TIMESTAMP", instructions::block_info::timestamp);
-wrap_op_force_gas!(block_number_limit_gas, "NUMBER", instructions::block_info::block_number);
-wrap_op_force_gas!(difficulty_limit_gas, "DIFFICULTY", instructions::block_info::difficulty);
-wrap_op_force_gas!(gas_limit_opcode_limit_gas, "GASLIMIT", instructions::block_info::gaslimit);
-wrap_op_force_gas!(basefee_limit_gas, "BASEFEE", instructions::block_info::basefee);
-wrap_op_force_gas!(coinbase_limit_gas, "COINBASE", instructions::block_info::coinbase);
-wrap_op_force_gas!(blockhash_limit_gas, "BLOCKHASH", instructions::host::blockhash);
-wrap_op_force_gas!(blobbasefee_limit_gas, "BLOBBASEFEE", instructions::block_info::blob_basefee);
-wrap_op_force_gas!(blobhash_limit_gas, "BLOBHASH", instructions::tx_info::blob_hash);
+wrap_op_detain_gas!(timestamp_limit_gas, "TIMESTAMP", instructions::block_info::timestamp);
+wrap_op_detain_gas!(block_number_limit_gas, "NUMBER", instructions::block_info::block_number);
+wrap_op_detain_gas!(difficulty_limit_gas, "DIFFICULTY", instructions::block_info::difficulty);
+wrap_op_detain_gas!(gas_limit_opcode_limit_gas, "GASLIMIT", instructions::block_info::gaslimit);
+wrap_op_detain_gas!(basefee_limit_gas, "BASEFEE", instructions::block_info::basefee);
+wrap_op_detain_gas!(coinbase_limit_gas, "COINBASE", instructions::block_info::coinbase);
+wrap_op_detain_gas!(blockhash_limit_gas, "BLOCKHASH", instructions::host::blockhash);
+wrap_op_detain_gas!(blobbasefee_limit_gas, "BLOBBASEFEE", instructions::block_info::blob_basefee);
+wrap_op_detain_gas!(blobhash_limit_gas, "BLOBHASH", instructions::tx_info::blob_hash);
+wrap_op_detain_gas!(balance_limit_gas, "BALANCE", instructions::host::balance);
+wrap_op_detain_gas!(extcodesize_limit_gas, "EXTCODESIZE", instructions::host::extcodesize);
+wrap_op_detain_gas!(extcodecopy_limit_gas, "EXTCODECOPY", instructions::host::extcodecopy);
+wrap_op_detain_gas!(extcodehash_limit_gas, "EXTCODEHASH", instructions::host::extcodehash);

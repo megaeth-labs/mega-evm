@@ -51,6 +51,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
     /// Calculator for dynamic gas costs during transaction execution.
     pub dynamic_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
 
+    /// The oracle environment.
+    pub oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
+
     /* Internal state variables */
     /// Tracker for sensitive data access (block environment, beneficiary, etc.)
     pub sensitive_data_tracker: Rc<RefCell<SensitiveDataAccessTracker>>,
@@ -97,6 +100,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
+            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
             sensitive_data_tracker: Rc::new(RefCell::new(SensitiveDataAccessTracker::new())),
             inner,
         }
@@ -147,6 +151,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>() - 1,
             ))),
+            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
             sensitive_data_tracker: Rc::new(RefCell::new(SensitiveDataAccessTracker::new())),
             inner,
         }
@@ -171,6 +176,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
             dynamic_gas_cost: self.dynamic_gas_cost,
+            oracle_env: self.oracle_env,
             sensitive_data_tracker: self.sensitive_data_tracker,
         }
     }

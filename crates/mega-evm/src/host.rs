@@ -2,8 +2,8 @@ use core::cell::RefCell;
 use std::rc::Rc;
 
 use crate::{
-    AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, SaltEnv,
-    SensitiveDataAccessTracker,
+    AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, OracleEnv, SaltEnv,
+    SensitiveDataAccessTracker, MEGA_ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
@@ -80,10 +80,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> Host for MegaContext<DB, ExtEnvs> {
                 key: U256,
                 value: U256,
             ) -> Option<StateLoad<SStoreResult>>;
-            fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>>;
             fn tstore(&mut self, address: Address, key: U256, value: U256);
             fn tload(&mut self, address: Address, key: U256) -> U256;
         }
+    }
+
+    fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
+        if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == MEGA_ORACLE_CONTRACT_ADDRESS {
+            // if the oracle env provides a value, return it. Otherwise, fallback to the inner
+            // context.
+            if let Some(value) = self.oracle_env.borrow().get_oracle_storage(key) {
+                return Some(StateLoad::new(value, true));
+            }
+        }
+        self.inner.sload(address, key)
     }
 
     fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
