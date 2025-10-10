@@ -12,7 +12,7 @@
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::mini_rex::SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+    constants::mini_rex::VOLATILE_DATA_ACCESS_REMAINING_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
@@ -115,9 +115,9 @@ fn test_timestamp_limits_gas() {
             let opcode_info = item.borrow();
             if after_timestamp {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after TIMESTAMP should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -360,9 +360,9 @@ fn test_no_gas_limit_without_block_env_access() {
     assert!(success);
     // Without block env access, gas should NOT be limited
     assert!(
-        gas_remaining > SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+        gas_remaining > VOLATILE_DATA_ACCESS_REMAINING_GAS,
         "Regular opcodes should not limit gas, expected > {}, got {}",
-        SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+        VOLATILE_DATA_ACCESS_REMAINING_GAS,
         gas_remaining
     );
 
@@ -370,9 +370,9 @@ fn test_no_gas_limit_without_block_env_access() {
     gas_inspector.trace.as_ref().unwrap().iterate_with(
         |_node_location, _node, _item_location, item| {
             assert!(
-                item.borrow().gas_after > SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                item.borrow().gas_after > VOLATILE_DATA_ACCESS_REMAINING_GAS,
                 "Gas should remain > {} without block env access, got {}",
-                SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                VOLATILE_DATA_ACCESS_REMAINING_GAS,
                 item.borrow().gas_after
             );
         },
@@ -529,9 +529,9 @@ fn test_nested_call_block_env_access_limits_parent_too() {
             let opcode_info = item.borrow();
             if accessed_timestamp {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after nested TIMESTAMP access should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -610,9 +610,9 @@ fn test_nested_call_block_env_access_child_oog() {
             if inside_nested {
                 if after_timestamp_in_nested {
                     assert!(
-                        opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                        opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                         "Gas in nested contract after TIMESTAMP should be ≤ {}, got {}",
-                        SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                        VOLATILE_DATA_ACCESS_REMAINING_GAS,
                         opcode_info.gas_after
                     );
                 }
@@ -703,9 +703,9 @@ fn test_deeply_nested_call_block_env_access() {
             let opcode_info = item.borrow();
             if after_timestamp {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas in all frames after TIMESTAMP should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -823,7 +823,7 @@ fn test_nested_call_already_limited_no_further_restriction() {
 #[test]
 fn test_detained_gas_is_restored_not_charged() {
     // This test explicitly verifies the detained gas restoration mechanism:
-    // 1. Gas is artificially limited during execution (to SENSITIVE_DATA_ACCESS_REMAINING_GAS)
+    // 1. Gas is artificially limited during execution (to VOLATILE_DATA_ACCESS_REMAINING_GAS)
     // 2. Detained gas is tracked
     // 3. Detained gas is restored before tx finishes
     // 4. User only pays for real work, not detained gas

@@ -532,16 +532,16 @@ where
             }
         }
 
-        // If the sensitive data tracker already accessed, the gas in the returned frame must have
-        // already been limited by the sensitive data tracker's global limited gas. The remaining
+        // If the volatile data tracker already accessed, the gas in the returned frame must have
+        // already been limited by the volatile data tracker's global limited gas. The remaining
         // gas in the returned frame should be recorded so that we can know how much
         // gas is left and how we should limit the parent frame's gas.
-        let sensitive_data_tracker = ctx.sensitive_data_tracker.clone();
-        let mut sensitive_data_tracker = sensitive_data_tracker.borrow_mut();
-        let accessed_sensitive_data = sensitive_data_tracker.accessed();
+        let volatile_data_tracker = ctx.volatile_data_tracker.clone();
+        let mut volatile_data_tracker = volatile_data_tracker.borrow_mut();
+        let accessed_sensitive_data = volatile_data_tracker.accessed();
         if is_mini_rex && accessed_sensitive_data {
             let gas_remaining = result.gas().remaining();
-            sensitive_data_tracker.update_remained_gas(gas_remaining);
+            volatile_data_tracker.update_remained_gas(gas_remaining);
         }
 
         // call the inner frame_return_result function to return the frame result
@@ -555,11 +555,11 @@ where
             // Now the parent frame is the current frame
             if let Some(_index) = self.frame_stack().index() {
                 let current_frame = self.frame_stack().get();
-                sensitive_data_tracker.detain_gas(&mut current_frame.interpreter.gas);
+                volatile_data_tracker.detain_gas(&mut current_frame.interpreter.gas);
             } else {
                 // if the current frame is the top-level transaction, limit the gas
                 if let Ok(Some(inner_result)) = &mut inner_result {
-                    sensitive_data_tracker.detain_gas_in_frame_result(inner_result);
+                    volatile_data_tracker.detain_gas_in_frame_result(inner_result);
                 }
             }
         }

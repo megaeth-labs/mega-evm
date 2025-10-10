@@ -68,8 +68,8 @@ pub mod mini_rex {
     /// `MINI_REX` spec.
     pub const TX_KV_UPDATE_LIMIT: u64 = BLOCK_KV_UPDATE_LIMIT * 25 / 100; // 25% of the block limit
 
-    /// Gas limit after sensitive data access (oracle contract or block environment).
-    /// When sensitive data is accessed, remaining gas is immediately limited to this value
+    /// Gas limit after volatile data access (oracle contract or block environment).
+    /// When volatile data is accessed, remaining gas is immediately limited to this value
     /// to force the transaction to complete quickly and prevent `DoS` attacks.
-    pub const SENSITIVE_DATA_ACCESS_REMAINING_GAS: u64 = 10_000;
+    pub const VOLATILE_DATA_ACCESS_REMAINING_GAS: u64 = 10_000;
 }

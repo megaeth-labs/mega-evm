@@ -219,9 +219,9 @@ where
 
             // Refund detained gas back to remaining gas before transaction finishes, so that the tx
             // sender is not charged for the detained gas.
-            let mut sensitive_data_tracker = evm.ctx().sensitive_data_tracker.borrow_mut();
+            let mut volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow_mut();
             let gas = frame_result.gas_mut();
-            sensitive_data_tracker.refund_detained_gas(gas);
+            volatile_data_tracker.refund_detained_gas(gas);
         }
 
         // call the inner last_frame_result function to return the frame result

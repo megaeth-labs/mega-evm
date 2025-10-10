@@ -6,7 +6,7 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::mini_rex::SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+    constants::mini_rex::VOLATILE_DATA_ACCESS_REMAINING_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
@@ -83,7 +83,7 @@ fn assert_beneficiary_detection(
 
     // If state contains beneficiary, should have detection
     if result_and_state.state.contains_key(&BENEFICIARY) {
-        assert!(evm.ctx_ref().sensitive_data_tracker.borrow().has_accessed_beneficiary_balance());
+        assert!(evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance());
     }
 }
 
@@ -103,7 +103,7 @@ fn test_beneficiary_caller() {
     assert_beneficiary_detection(&evm, &result_and_state);
 
     // Beneficiary balance access should be detected
-    assert!(evm.ctx_ref().sensitive_data_tracker.borrow().has_accessed_beneficiary_balance());
+    assert!(evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance());
 }
 
 /// Test that verifies beneficiary balance access detection when the beneficiary is the transaction
@@ -132,7 +132,7 @@ fn test_beneficiary_recipient() {
     assert_beneficiary_detection(&evm, &result_and_state);
 
     // Beneficiary balance access should be detected
-    assert!(evm.ctx_ref().sensitive_data_tracker.borrow().has_accessed_beneficiary_balance());
+    assert!(evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance());
 }
 
 /// Test that verifies beneficiary balance access detection when a contract uses the BALANCE opcode
@@ -167,9 +167,9 @@ fn test_balance_opcode() {
             let opcode_info = item.borrow();
             if after_balance {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after BALANCE should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -215,9 +215,9 @@ fn test_extcodesize_opcode() {
             let opcode_info = item.borrow();
             if after_extcodesize {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after EXTCODESIZE should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -268,9 +268,9 @@ fn test_extcodecopy_opcode() {
             let opcode_info = item.borrow();
             if after_extcodecopy {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after EXTCODECOPY should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -316,9 +316,9 @@ fn test_extcodehash_opcode() {
             let opcode_info = item.borrow();
             if after_extcodehash {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after EXTCODEHASH should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -374,9 +374,9 @@ fn test_call_to_beneficiary() {
 
             if after_call_to_beneficiary {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after CALL to beneficiary should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -429,9 +429,9 @@ fn test_staticcall_to_beneficiary() {
 
             if after_staticcall_to_beneficiary {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after STATICCALL to beneficiary should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -490,9 +490,9 @@ fn test_nested_call_beneficiary_access() {
 
             if accessed_beneficiary_in_nested {
                 assert!(
-                    opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     "Gas after nested beneficiary access should be ≤ {}, got {}",
-                    SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -535,7 +535,7 @@ fn test_detained_gas_is_restored() {
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success());
-    assert!(evm.ctx_ref().sensitive_data_tracker.borrow().has_accessed_beneficiary_balance());
+    assert!(evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance());
 
     // The gas_used should be much less than the gas_limit because detained gas is refunded.
     // We expect gas_used to be only a few thousand (for the actual work done), not close to 1M.
@@ -552,7 +552,7 @@ fn test_detained_gas_is_restored() {
     gas_inspector.trace.as_ref().unwrap().iterate_with(
         |_node_location, _node, _item_location, item| {
             let opcode_info = item.borrow();
-            if opcode_info.gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS {
+            if opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS {
                 saw_limited_gas = true;
             }
         },

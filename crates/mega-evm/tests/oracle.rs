@@ -3,7 +3,7 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::mini_rex::SENSITIVE_DATA_ACCESS_REMAINING_GAS,
+    constants::mini_rex::VOLATILE_DATA_ACCESS_REMAINING_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     MEGA_ORACLE_CONTRACT_ADDRESS,
@@ -47,12 +47,12 @@ fn execute_transaction(
     let (result, oracle_accessed) = if let Some(inspector) = gas_inspector {
         let mut evm = MegaEvm::new(context).with_inspector(inspector);
         let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
-        let oracle_accessed = evm.ctx.sensitive_data_tracker.borrow().has_accessed_oracle();
+        let oracle_accessed = evm.ctx.volatile_data_tracker.borrow().has_accessed_oracle();
         (result, oracle_accessed)
     } else {
         let mut evm = MegaEvm::new(context);
         let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
-        let oracle_accessed = evm.ctx.sensitive_data_tracker.borrow().has_accessed_oracle();
+        let oracle_accessed = evm.ctx.volatile_data_tracker.borrow().has_accessed_oracle();
         (result, oracle_accessed)
     };
 
@@ -220,14 +220,14 @@ fn test_oracle_access_limits_parent_gas() {
         .build();
 
     // Create main contract that calls intermediate contract, then executes more opcodes
-    // After the call returns, parent should only have SENSITIVE_DATA_ACCESS_REMAINING_GAS left
+    // After the call returns, parent should only have VOLATILE_DATA_ACCESS_REMAINING_GAS left
     let main_code = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
         .push_number(0u8) // value: 0 wei
         .push_address(INTERMEDIATE_CONTRACT) // callee: intermediate contract
         .append(GAS)
         .append(CALL)
-        // After this call, parent gas should be limited to SENSITIVE_DATA_ACCESS_REMAINING_GAS
+        // After this call, parent gas should be limited to VOLATILE_DATA_ACCESS_REMAINING_GAS
         // Execute a few more opcodes to verify gas limiting persists
         .push_number(42u8)
         .push_number(100u8)
@@ -252,14 +252,14 @@ fn test_oracle_access_limits_parent_gas() {
     assert!(oracle_accessed, "Oracle should have been accessed");
 
     // Check that after the call to oracle address, the total gas is limited to
-    // SENSITIVE_DATA_ACCESS_REMAINING_GAS
+    // VOLATILE_DATA_ACCESS_REMAINING_GAS
     let mut accessed = false;
     gas_inspector.trace.as_ref().unwrap().iterate_with(
         |_node_location, node, _item_location, item| {
             if accessed {
                 assert!(
-                    item.borrow().gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
-                    "Gas after oracle access is greater than SENSITIVE_DATA_ACCESS_REMAINING_GAS"
+                    item.borrow().gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    "Gas after oracle access is greater than VOLATILE_DATA_ACCESS_REMAINING_GAS"
                 );
             } else {
                 match &node.borrow().meta {
@@ -389,8 +389,8 @@ fn test_no_gas_limiting_without_oracle_access() {
     gas_inspector.trace.as_ref().unwrap().iterate_with(
         |_node_location, _node, _item_location, item| {
             assert!(
-                item.borrow().gas_after > SENSITIVE_DATA_ACCESS_REMAINING_GAS,
-                "Gas after oracle access is greater than SENSITIVE_DATA_ACCESS_REMAINING_GAS"
+                item.borrow().gas_after > VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                "Gas after oracle access is greater than VOLATILE_DATA_ACCESS_REMAINING_GAS"
             );
         },
     );
@@ -463,8 +463,8 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
             }
             if inside_oracle {
                 assert!(
-                    item.borrow().gas_after <= SENSITIVE_DATA_ACCESS_REMAINING_GAS,
-                    "Gas inside oracle contract should be limited to SENSITIVE_DATA_ACCESS_REMAINING_GAS"
+                    item.borrow().gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    "Gas inside oracle contract should be limited to VOLATILE_DATA_ACCESS_REMAINING_GAS"
                 );
             }
         },

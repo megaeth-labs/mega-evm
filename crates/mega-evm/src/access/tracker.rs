@@ -1,16 +1,16 @@
 use crate::{constants, BlockEnvAccess, OracleAccessTracker};
 use revm::{handler::FrameResult, interpreter::Gas};
 
-/// A tracker for sensitive data access with global gas detention mechanism.
+/// A tracker for volatile data access with global gas detention mechanism.
 ///
-/// This tracker manages sensitive data access detection (block environment, beneficiary, oracle)
+/// This tracker manages volatile data access detection (block environment, beneficiary, oracle)
 /// and implements a global gas detention system to prevent `DoS` attacks while maintaining fair
 /// gas accounting.
 ///
 /// # Global Gas Detention Mechanism
 ///
-/// When sensitive data is first accessed in a transaction:
-/// 1. A `GlobalLimitedGas` instance is created with `SENSITIVE_DATA_ACCESS_REMAINING_GAS` (10,000)
+/// When volatile data is first accessed in a transaction:
+/// 1. A `GlobalLimitedGas` instance is created with `VOLATILE_DATA_ACCESS_REMAINING_GAS` (10,000)
 /// 2. Any gas above this limit is "detained" (tracked separately, not consumed)
 /// 3. The same global limit applies to all subsequent gas detentions in the transaction
 /// 4. At transaction end, all detained gas is refunded via `refund_detained_gas()`
@@ -43,24 +43,24 @@ use revm::{handler::FrameResult, interpreter::Gas};
 ///   - User only pays for ~10,000 gas of actual work
 /// ```
 #[derive(Debug, Clone, Default)]
-pub struct SensitiveDataAccessTracker {
+pub struct VolatileDataAccessTracker {
     /// Bitmap of block environment data accessed during transaction execution.
     block_env_accessed: BlockEnvAccess,
     /// Whether beneficiary data has been accessed in current transaction.
     beneficiary_balance_accessed: bool,
     /// Tracker for oracle contract access.
     oracle_tracker: OracleAccessTracker,
-    /// The global (tx level) remaining gas after sensitive data access.
+    /// The global (tx level) remaining gas after volatile data access.
     global_limited_gas: Option<GlobalLimitedGas>,
 }
 
-impl SensitiveDataAccessTracker {
+impl VolatileDataAccessTracker {
     /// Creates a new tracker with no accesses recorded.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Checks if any sensitive data has been accessed.
+    /// Checks if any volatile data has been accessed.
     /// If so, the remaining gas in all message calls will be limited to a small amount of gas,
     /// forcing the transaction to finish execution soon.
     pub fn accessed(&self) -> bool {
@@ -122,7 +122,7 @@ impl SensitiveDataAccessTracker {
 
     /// Returns the amount of detained gas by the end of transaction.
     ///
-    /// If the sensitive data is not accessed, this will be a no-op.
+    /// If the volatile data is not accessed, this will be a no-op.
     pub fn refund_detained_gas(&mut self, gas: &mut Gas) {
         if let Some(global_limited_gas) = self.global_limited_gas.as_mut() {
             gas.erase_cost(global_limited_gas.refund());
@@ -133,21 +133,21 @@ impl SensitiveDataAccessTracker {
     ///
     /// # Panics
     ///
-    /// This will panic if the sensitive data is not accessed.
+    /// This will panic if the volatile data is not accessed.
     pub fn update_remained_gas(&mut self, remaining: u64) {
         let global_limited_gas = self
             .global_limited_gas
             .as_mut()
-            .expect("sensitive data is not accessed while trying to record gas remaining");
+            .expect("volatile data is not accessed while trying to record gas remaining");
         global_limited_gas.set_remaining(remaining);
     }
 
-    /// Force limit the remaining gas to the sensitive data access remaining gas.
+    /// Force limit the remaining gas to the volatile data access remaining gas.
     ///
     /// This method limits the remaining gas and records the enforcement gas consumed.
     /// This semantic should only be used when `MegaSpecId::MINI_REX` is enabled.
     ///
-    /// If the sensitive data is not accessed, this will be a no-op.
+    /// If the volatile data is not accessed, this will be a no-op.
     pub fn detain_gas(&mut self, gas: &mut Gas) {
         if let Some(global_limited_gas) = self.global_limited_gas.as_mut() {
             let mut remaining = gas.remaining();
@@ -161,7 +161,7 @@ impl SensitiveDataAccessTracker {
     /// Detains gas from the given gas limit. Any detained gas will be refunded. The gas
     /// limit will be updated in place.
     ///
-    /// If the sensitive data is not accessed, this will be a no-op.
+    /// If the volatile data is not accessed, this will be a no-op.
     pub fn detain_plain_gas(&mut self, gas_limit: &mut u64) {
         if let Some(global_limited_gas) = self.global_limited_gas.as_mut() {
             global_limited_gas.detain_gas(gas_limit)
@@ -172,7 +172,7 @@ impl SensitiveDataAccessTracker {
     ///
     /// This semantic should only be used when `MegaSpecId::MINI_REX` is enabled.
     ///
-    /// If the sensitive data is not accessed, this will be a no-op.
+    /// If the volatile data is not accessed, this will be a no-op.
     pub fn detain_gas_in_frame_result(&mut self, result: &mut FrameResult) {
         match result {
             FrameResult::Call(call_outcome) => {
@@ -191,7 +191,7 @@ impl SensitiveDataAccessTracker {
 ///
 /// This struct manages the global gas limit and tracks detained gas across all opcodes
 /// in a transaction. It ensures:
-/// - A single, consistent gas limit (10,000) applies across all sensitive data accesses
+/// - A single, consistent gas limit (10,000) applies across all volatile data accesses
 /// - All detained gas is accumulated for later refund
 /// - The remaining gas is updated as the transaction progresses through nested calls
 ///
@@ -208,7 +208,7 @@ struct GlobalLimitedGas {
 impl GlobalLimitedGas {
     /// Creates a new global limited gas with the default remaining gas.
     fn new() -> Self {
-        Self { remaining: constants::mini_rex::SENSITIVE_DATA_ACCESS_REMAINING_GAS, detained: 0 }
+        Self { remaining: constants::mini_rex::VOLATILE_DATA_ACCESS_REMAINING_GAS, detained: 0 }
     }
 
     /// Detains gas from the given gas limit. Any detained gas will be refunded.

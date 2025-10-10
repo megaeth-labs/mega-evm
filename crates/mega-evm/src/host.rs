@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::{
     AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, OracleEnv, SaltEnv,
-    SensitiveDataAccessTracker, MEGA_ORACLE_CONTRACT_ADDRESS,
+    VolatileDataAccessTracker, MEGA_ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
@@ -132,8 +132,8 @@ pub trait HostExt: Host {
     /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error>;
 
-    /// Gets the sensitive data tracker. Only used when the `MINI_REX` spec is enabled.
-    fn sensitive_data_tracker(&self) -> &Rc<RefCell<SensitiveDataAccessTracker>>;
+    /// Gets the volatile data tracker. Only used when the `MINI_REX` spec is enabled.
+    fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>>;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
@@ -158,7 +158,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
     }
 
     #[inline]
-    fn sensitive_data_tracker(&self) -> &Rc<RefCell<SensitiveDataAccessTracker>> {
-        &self.sensitive_data_tracker
+    fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>> {
+        &self.volatile_data_tracker
     }
 }

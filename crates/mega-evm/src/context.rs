@@ -26,7 +26,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     constants, AdditionalLimit, BlockEnvAccess, DefaultExternalEnvs, DynamicGasCost, ExternalEnvs,
-    MegaSpecId, SensitiveDataAccessTracker,
+    MegaSpecId, VolatileDataAccessTracker,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -56,7 +56,7 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
 
     /* Internal state variables */
     /// Tracker for sensitive data access (block environment, beneficiary, etc.)
-    pub sensitive_data_tracker: Rc<RefCell<SensitiveDataAccessTracker>>,
+    pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
 }
 
 impl Default for MegaContext<EmptyDB, DefaultExternalEnvs> {
@@ -101,7 +101,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
-            sensitive_data_tracker: Rc::new(RefCell::new(SensitiveDataAccessTracker::new())),
+            volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
             inner,
         }
     }
@@ -152,7 +152,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
                 inner.block.number.to::<u64>() - 1,
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
-            sensitive_data_tracker: Rc::new(RefCell::new(SensitiveDataAccessTracker::new())),
+            volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
             inner,
         }
     }
@@ -177,7 +177,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             additional_limit: self.additional_limit,
             dynamic_gas_cost: self.dynamic_gas_cost,
             oracle_env: self.oracle_env,
-            sensitive_data_tracker: self.sensitive_data_tracker,
+            volatile_data_tracker: self.volatile_data_tracker,
         }
     }
 
@@ -358,7 +358,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// Returns a [`BlockEnvAccess`] bitmap indicating accessed fields.
     pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
-        self.sensitive_data_tracker.borrow().get_block_env_accesses()
+        self.volatile_data_tracker.borrow().get_block_env_accesses()
     }
 
     /// Resets the block environment access bitmap for new transactions.
@@ -366,7 +366,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// This method clears the tracking of which block environment fields
     /// have been accessed, preparing the context for a new transaction.
     pub fn reset_block_env_access(&mut self) {
-        self.sensitive_data_tracker.borrow_mut().reset();
+        self.volatile_data_tracker.borrow_mut().reset();
     }
 
     /// Marks that a specific type of block environment has been accessed.
@@ -378,7 +378,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// * `access_type` - The type of block environment access to record
     pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
-        self.sensitive_data_tracker.borrow_mut().mark_block_env_accessed(access_type);
+        self.volatile_data_tracker.borrow_mut().mark_block_env_accessed(access_type);
     }
 }
 
@@ -393,7 +393,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// accessed.
     pub(crate) fn check_and_mark_beneficiary_balance_access(&self, address: &Address) -> bool {
         if self.inner.block.beneficiary == *address {
-            self.sensitive_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
+            self.volatile_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
             true
         } else {
             false
@@ -407,13 +407,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
 
         // Check if caller is beneficiary
         if tx.base.caller == beneficiary {
-            self.sensitive_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
+            self.volatile_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
         }
 
         // Check if recipient is beneficiary (for calls)
         if let revm::primitives::TxKind::Call(recipient) = tx.base.kind {
             if recipient == beneficiary {
-                self.sensitive_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
+                self.volatile_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
             }
         }
     }
