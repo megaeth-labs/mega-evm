@@ -2,21 +2,22 @@
 
 ## Summary
 
-| Area / Opcode | Standard EVM (Prague) | Mega EVM (MiniRex) |
-|---|---|---|
-| **SSTORE (0 → non-0)** | 20,000 (per EIP-2200) | **2,000,000 × bucket multiplier** |
-| **SSTORE (other cases)** | EIP-2200 rules (reset, same, refund, warm read) | Same as standard |
-| **New account (CALL → empty, tx callee, CREATE target)** | 25,000 (NEWACCOUNT) | **2,000,000 × bucket multiplier** |
-| **Contract creation (CREATE/CREATE2)** | 25,000 (new account) + code deposit gas | **2,000,000 × multiplier (new acct)** + **2,000,000 (codehash)** + code deposit gas |
-| **Code deposit (per byte)** | 200 gas/byte | **62,500 gas/byte** |
-| **Initcode max size** | 49152 bytes (per EIP-3860) | **MAX_CONTRACT_SIZE (512 KiB) + 24 KiB** |
-| **CREATE/CALL forwarding fraction** | 63/64 of gas left | **98/100** of gas left |
-| **LOG per topic** | 375 gas/topic | **3,750 gas/topic (×10)** |
-| **LOG per byte** | 8 gas/byte | **80 gas/byte (×10)** |
-| **Calldata per-byte** | 4 gas (zero byte), 16 gas (non-zero byte) | **40 gas (zero byte), 160 gas (non-zero byte)** |
-| **SELFDESTRUCT** | Disabled refunds post-Shanghai but still available | **Instruction removed** |
-| **Per-tx data limit** | none | **3.125 MiB (25% of 12.5 MiB block limit)** across calldata + logs + return + initcode |
-| **Per-tx KV update limit** | none | **12,500 updates (25% of block limit)** |
+| Area / Opcode                                            | Standard EVM (Prague)                              | Mega EVM (MiniRex)                                                                           |
+| -------------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **SSTORE (0 → non-0)**                                   | 20,000 (per EIP-2200)                              | **2,000,000 × bucket multiplier**                                                            |
+| **SSTORE (other cases)**                                 | EIP-2200 rules (reset, same, refund, warm read)    | Same as standard                                                                             |
+| **New account (CALL → empty, tx callee, CREATE target)** | 25,000 (NEWACCOUNT)                                | **2,000,000 × bucket multiplier**                                                            |
+| **Contract creation (CREATE/CREATE2)**                   | 25,000 (new account) + code deposit gas            | **2,000,000 × multiplier (new acct)** + **2,000,000 (codehash)** + code deposit gas          |
+| **Code deposit (per byte)**                              | 200 gas/byte                                       | **62,500 gas/byte**                                                                          |
+| **Initcode max size**                                    | 49152 bytes (per EIP-3860)                         | **MAX_CONTRACT_SIZE (512 KiB) + 24 KiB**                                                     |
+| **CREATE/CALL forwarding fraction**                      | 63/64 of gas left                                  | **98/100** of gas left                                                                       |
+| **LOG per topic**                                        | 375 gas/topic                                      | **3,750 gas/topic (×10)**                                                                    |
+| **LOG per byte**                                         | 8 gas/byte                                         | **80 gas/byte (×10)**                                                                        |
+| **Calldata per-byte**                                    | 4 gas (zero byte), 16 gas (non-zero byte)          | **40 gas (zero byte), 160 gas (non-zero byte)**                                              |
+| **SELFDESTRUCT**                                         | Disabled refunds post-Shanghai but still available | **Instruction removed**                                                                      |
+| **Sensitive data access**                                | No restrictions                                    | **Gas limited to 10,000** after accessing block env, beneficiary account, or oracle contract |
+| **Per-tx data limit**                                    | none                                               | **3.125 MiB (25% of 12.5 MiB block limit)** across calldata + logs + return + initcode       |
+| **Per-tx KV update limit**                               | none                                               | **12,500 updates (25% of block limit)**                                                      |
 
 ## 1. Introduction
 
@@ -32,9 +33,9 @@ To ensure network stability and sustainable growth of MegaETH, the MiniRex hardf
 
 1. **Multi-dimensional Resource Limits**: Novel constraints on data size and key-value updates enable safe removal of block gas limit
 2. **Strategic Gas Cost Increases**: Storage operations (SSTORE, account creation, logging) see substantial gas cost increases to reflect their true burden on blockchain nodes
+3. **Sensitive Data Access Control**: Block environment data, beneficiary balance, and oracle contract access trigger immediate gas limiting to 10,000 with excess gas detained and refunded
 
 This document details all semantic changes, their rationale, and implementation requirements for the MiniRex hardfork activation.
-
 
 ## 3. Comprehensive List of Changes
 
@@ -65,6 +66,7 @@ This document details all semantic changes, their rationale, and implementation 
 #### 3.3.1 Storage Operations (SSTORE)
 
 **Zero-to-Non-Zero Writes:**
+
 - **MiniRex Cost**: 2,000,000 gas (base) × bucket multiplier
 - **Standard EVM**: 20,000 gas (per EIP-2200)
 - **Bucket Multiplier**: Dynamic scaling factor based on SALT bucket capacity
@@ -75,11 +77,13 @@ This document details all semantic changes, their rationale, and implementation 
 - **Purpose**: Prevent unsustainable state bloat
 
 **Other SSTORE Cases:**
+
 - Follow standard EIP-2200 rules (reset, same value, refunds, warm reads)
 
 #### 3.3.2 Account Creation
 
 **New Account Gas:**
+
 - **MiniRex Cost**: 2,000,000 gas (base) × bucket multiplier
 - **Standard EVM**: 25,000 gas (NEWACCOUNT)
 - **Dynamic Scaling**: Same multiplier as SSTORE operations
@@ -87,6 +91,7 @@ This document details all semantic changes, their rationale, and implementation 
 - **Purpose**: Prevent unsustainable state bloat
 
 **Contract Creation (CREATE/CREATE2):**
+
 - **Additional Cost**: 2,000,000 gas (fixed, on top of new account cost to account for codehash)
 - **Constant**: `constants::mini_rex::CREATE_GAS = 2_000_000`
 - **Total**: `(NEW_ACCOUNT_GAS × multiplier) + CREATE_GAS + code_deposit_gas`
@@ -95,6 +100,7 @@ This document details all semantic changes, their rationale, and implementation 
 #### 3.3.3 Code Deposit
 
 **Per-Byte Cost:**
+
 - **MiniRex Cost**: 62,500 gas per byte
 - **Standard EVM**: 200 gas per byte
 - **Calculation**: `CREATE_GAS / 32 = 2_000_000 / 32 = 62,500`
@@ -103,11 +109,13 @@ This document details all semantic changes, their rationale, and implementation 
 #### 3.3.4 Logging Operations
 
 **Log Data:**
+
 - **MiniRex Cost**: 80 gas per byte (10× increase)
 - **Standard EVM**: 8 gas per byte
 - **Constant**: `LOG_DATA_GAS = LOGDATA × 10`
 
 **Log Topics:**
+
 - **MiniRex Cost**: 3,750 gas per topic (10× increase)
 - **Standard EVM**: 375 gas per topic
 - **Constant**: `LOG_TOPIC_GAS = LOGTOPIC × 10`
@@ -116,6 +124,7 @@ This document details all semantic changes, their rationale, and implementation 
 #### 3.3.5 Call Data
 
 **Transaction Data:**
+
 - **Zero Bytes**: 40 gas (10× increase from 4 gas)
 - **Non-Zero Bytes**: 160 gas (10× increase from 16 gas)
 - **EIP-7623 Floor Cost**: 10× increase for transaction data floor
@@ -129,15 +138,112 @@ This document details all semantic changes, their rationale, and implementation 
 MegaETH's extremely high transaction gas limits (e.g., 10 billion gas) reintroduce call depth attacks that EIP-150 solved for Ethereum. With 63/64 gas forwarding: `10^10 × (63/64)^1024 ≈ 991 gas` remains after 1,024 calls, enough to make one more call and exceed the stack depth limit.
 
 **Gas Forwarding Rule:**
+
 - **MiniRex**: 98/100 rule - forwards 98/100 of remaining gas to subcalls
 - **Standard EVM**: 63/64 rule - forwards 63/64 of remaining gas to subcalls (per EIP-150)
 - **Result**: `10^10 × (98/100)^1024 ≈ 10 gas` after 1,024 calls
 - **Affected Operations**: CALL, CALLCODE, DELEGATECALL, STATICCALL, CREATE, CREATE2
 - **Purpose**: Restore call depth attack protection for high-gas environments
 
-### 3.4. Multi-dimensional Resource Limits
+### 3.4 Sensitive Data Access Control
 
-#### 3.4.1 Rationale
+MiniRex introduces comprehensive tracking and gas limiting for three categories of sensitive information: block environment data, beneficiary balance, and oracle contract access. When any sensitive data is accessed during transaction execution, the remaining gas is immediately limited to prevent excessive computation after obtaining privileged information.
+
+#### 3.4.1 Gas Detention Mechanism
+
+**Global Gas Limitation:**
+
+- **Gas Limit After Access**: 10,000 gas (constant `SENSITIVE_DATA_ACCESS_REMAINING_GAS`)
+- **Scope**: Once triggered, applies globally to:
+  - The current call frame where sensitive data was accessed
+  - All parent call frames after the call returns
+  - All subsequent operations in the transaction
+- **Gas Detention**: Gas above the 10,000 limit is "detained" (tracked separately) and refunded at transaction end
+- **Fair Billing**: Users only pay for actual work; detained gas is refunded automatically
+- **Purpose**: Ensure sensitive data access is used only for essential decision-making, not extensive computation
+
+#### 3.4.2 Block Environment Access
+
+**Tracked Opcodes:**
+Block environment opcodes that trigger gas limiting when executed:
+
+| Opcode        | Access Type   | Description               |
+| ------------- | ------------- | ------------------------- |
+| `NUMBER`      | BLOCK_NUMBER  | Current block number      |
+| `TIMESTAMP`   | TIMESTAMP     | Current block timestamp   |
+| `COINBASE`    | COINBASE      | Block beneficiary address |
+| `DIFFICULTY`  | DIFFICULTY    | Current block difficulty  |
+| `GASLIMIT`    | GAS_LIMIT     | Block gas limit           |
+| `BASEFEE`     | BASE_FEE      | Base fee per gas          |
+| `PREVRANDAO`  | PREV_RANDAO   | Previous block randomness |
+| `BLOCKHASH`   | BLOCK_HASH    | Block hash lookup         |
+| `BLOBBASEFEE` | BLOB_BASE_FEE | Blob base fee per gas     |
+| `BLOBHASH`    | BLOB_HASH     | Blob hash lookup          |
+
+**Behavior:**
+
+- Accessing any of these opcodes marks the corresponding access type
+- Gas is limited immediately after the opcode executes
+- Multiple accesses to different block environment opcodes share the same global 10,000 gas limit
+
+#### 3.4.3 Beneficiary Account Access
+
+**Trigger Conditions:**
+Any operation that accesses the beneficiary account triggers gas limiting:
+
+| Operation              | Opcodes                                     | Description                                            |
+| ---------------------- | ------------------------------------------- | ------------------------------------------------------ |
+| **Account balance**    | `BALANCE`, `SELFBALANCE`                    | Reading beneficiary's balance                          |
+| **Account code**       | `EXTCODECOPY`, `EXTCODESIZE`, `EXTCODEHASH` | Accessing beneficiary's code                           |
+| **Transaction caller** | N/A                                         | Transaction sender is the beneficiary                  |
+| **Call recipient**     | N/A                                         | Transaction recipient (CALL target) is the beneficiary |
+| **Delegated access**   | `DELEGATECALL`                              | Accessing beneficiary account in delegated context     |
+
+**Note:** The beneficiary address is obtained from the block's coinbase field.
+
+**Behavior:**
+
+- Gas is limited immediately after any beneficiary account access
+- Shares the same global 10,000 gas limit with other sensitive data accesses
+- All account-related operations (balance, code, code hash) on the beneficiary trigger this protection
+
+#### 3.4.4 Oracle Contract Access
+
+**Oracle Contract Details:**
+
+- **Address**: `0x4200000000000000000000000000000000000101` (decimal: 790)
+- **Trigger Condition**: Any CALL, CALLCODE, DELEGATECALL, or STATICCALL instruction targeting the oracle contract address
+- **Tracking Limitation**: Direct transaction calls to the oracle contract do NOT trigger gas limiting or tracking
+
+**Storage Access:**
+
+- SLOAD operations on the oracle contract use the OracleEnv to provide storage values
+- If OracleEnv returns `None` for a storage slot, the operation falls back to standard database lookup
+- This allows the oracle contract to serve sensitive data from an external source while maintaining compatibility with standard storage operations
+
+**Example Flow:**
+
+```
+Transaction → Contract A → TIMESTAMP (block env accessed)
+                                         ↓
+                                    Gas limited to 10k, excess detained
+                                         ↓
+                          → Contract B → BALANCE(beneficiary)
+                                         ↓
+                                    Still limited to 10k (same global limit)
+                                         ↓
+                          → Oracle Contract (CALL)
+                                         ↓
+                                    Still limited to 10k
+                                         ↓
+                          → Returns to Contract A (gas still limited)
+                                         ↓
+                          Transaction ends, detained gas refunded
+```
+
+### 3.5. Multi-dimensional Resource Limits
+
+#### 3.5.1 Rationale
 
 Traditional blockchain networks rely on a single block gas limit to constrain all types of resources—computation, storage operations, and network bandwidth. While this unified approach provides simplicity, it creates fundamental scaling limitations. Each resource type has different characteristics and bottlenecks, yet the gas limit forces them to scale together. When operators want to increase one resource capacity (such as computation), they must proportionally increase all others, which is not always possible.
 
@@ -153,11 +259,12 @@ To solve this problem, MiniRex replaces the monolithic block gas limit with two 
 
 This multi-dimensional approach enables the sequencer to safely create blocks containing extensive computation, provided they satisfy both targeted constraints. The result is a more flexible and efficient resource allocation model that maximizes MegaETH's computational advantages while maintaining network stability.
 
-#### 3.4.2 Block-Level Limits
+#### 3.5.2 Block-Level Limits
 
 These limits define the maximum resources that can be consumed across all transactions within a single block:
 
 - **Maximum Block Data**: 12.5 MB
+
   - **Constant**: `BLOCK_DATA_LIMIT = 12 * 1024 * 1024 + 512 * 1024`
   - **Purpose**: Controls persistent data generation to prevent history bloat
 
@@ -165,11 +272,12 @@ These limits define the maximum resources that can be consumed across all transa
   - **Constant**: `BLOCK_KV_UPDATE_LIMIT = 500_000`
   - **Purpose**: Limits state database modification rate for sustainable growth
 
-#### 3.4.3 Transaction-Level Limits
+#### 3.5.3 Transaction-Level Limits
 
 To prevent DoS attacks where malicious actors create transactions that can never be included in blocks, each transaction is limited to 25% of the corresponding block limit. This ensures that successfully executed transactions will likely be included in blocks:
 
 - **Transaction Data Limit**: 3.125 MB
+
   - **Formula**: `TX_DATA_LIMIT = BLOCK_DATA_LIMIT × 25 / 100`
   - **Calculated**: `13,107,200 × 0.25 = 3,276,800 bytes (≈3.125 MB)`
 
@@ -178,42 +286,42 @@ To prevent DoS attacks where malicious actors create transactions that can never
   - **Calculated**: `500,000 × 0.25 = 125,000 updates`
 
 **Enforcement:**
+
 - When either limit is exceeded, the transaction halts immediately with `OutOfGas` error
 - **All remaining gas in the transaction is consumed as penalty**
 - Limits are enforced at the EVM instruction level during execution
 
-#### 3.4.4 Resource Accounting
+#### 3.5.4 Resource Accounting
 
 MiniRex uses approximate formulas to track data size and KV updates incurred by transactions. These measurements prioritize simplicity and performance over perfect accuracy, as very few transactions are expected to approach the resource limits in practice. The limits are designed to prevent extreme abuse cases rather than precisely meter every operation, allowing for efficient implementation while maintaining effective protection against resource exhaustion attacks.
 
 **KV Updates Counting**
 
-| **Operation** | **KV Count** | **Discarded on Revert** | **Notes** |
-|---|---|---|---|
-| **Transaction sender account update** | 1 | ❌ | Always counted at transaction start |
-| **EIP-7702 authorizations** | `authorization_count` | ❌ | 1 KV update per authorization regardless of its validity |
-| **SSTORE (new write)** | 1 | ✅ | When original ≠ new AND first write to slot in transaction |
-| **SSTORE (refund)** | -1 | ✅ | When slot reset to original value |
-| **SSTORE (rewrite)** | 0 | ✅ | Overwrite slot with the same value |
-| **CREATE/CREATE2** | 1 or 2 | ✅ | One created account + caller account (optinal, if caller is not updated in the _parent_ message call) |
-| **CALL with transfer** | 1 or 2 | ✅ | Callee account + caller Account (optional, if caller is not updated in the _parent_ message call)|
-| **CALL without transfer** | 0 | ✅ | No account state changes |
+| **Operation**                         | **KV Count**          | **Discarded on Revert** | **Notes**                                                                                             |
+| ------------------------------------- | --------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------- |
+| **Transaction sender account update** | 1                     | ❌                      | Always counted at transaction start                                                                   |
+| **EIP-7702 authorizations**           | `authorization_count` | ❌                      | 1 KV update per authorization regardless of its validity                                              |
+| **SSTORE (new write)**                | 1                     | ✅                      | When original ≠ new AND first write to slot in transaction                                            |
+| **SSTORE (refund)**                   | -1                    | ✅                      | When slot reset to original value                                                                     |
+| **SSTORE (rewrite)**                  | 0                     | ✅                      | Overwrite slot with the same value                                                                    |
+| **CREATE/CREATE2**                    | 1 or 2                | ✅                      | One created account + caller account (optinal, if caller is not updated in the _parent_ message call) |
+| **CALL with transfer**                | 1 or 2                | ✅                      | Callee account + caller Account (optional, if caller is not updated in the _parent_ message call)     |
+| **CALL without transfer**             | 0                     | ✅                      | No account state changes                                                                              |
 
 **Data Size Counting**
 
-| **Data Type** | **Size (Bytes)** | **Discarded on Revert** | **Notes** |
-|---|---|---|---|
-| **Base transaction data** | 110 (`BASE_TX`) | ❌ | Fixed overhead per transaction |
-| **Calldata** | `tx.input().len()` | ❌ | Variable length input data |
-| **Access list** | Sum of `access.size()` for each entry | ❌ | EIP-2930 access list entries |
-| **EIP-7702 authorizations** | `authorization_count × 101` | ❌ |  |
-| **Caller account update** | 40 | ❌ | Always counted at transaction start |
-| **EIP-7702 authority updates** | `authorization_count × 40` | ❌ | Account updates for authorities |
-| **Log** | `num_topics × 32 + data.len()` | ✅ |  |
-| **SSTORE** | `sstore_kv_change * 40`  | ✅ | Possible values: 40, 0, or -40 |
-| **Account update** | 40 | ✅ |  |
-| **Deployed bytecode** | `contract_code.len()` | ✅ | Actual deployed contract size |
-
+| **Data Type**                  | **Size (Bytes)**                      | **Discarded on Revert** | **Notes**                           |
+| ------------------------------ | ------------------------------------- | ----------------------- | ----------------------------------- |
+| **Base transaction data**      | 110 (`BASE_TX`)                       | ❌                      | Fixed overhead per transaction      |
+| **Calldata**                   | `tx.input().len()`                    | ❌                      | Variable length input data          |
+| **Access list**                | Sum of `access.size()` for each entry | ❌                      | EIP-2930 access list entries        |
+| **EIP-7702 authorizations**    | `authorization_count × 101`           | ❌                      |                                     |
+| **Caller account update**      | 40                                    | ❌                      | Always counted at transaction start |
+| **EIP-7702 authority updates** | `authorization_count × 40`            | ❌                      | Account updates for authorities     |
+| **Log**                        | `num_topics × 32 + data.len()`        | ✅                      |                                     |
+| **SSTORE**                     | `sstore_kv_change * 40`               | ✅                      | Possible values: 40, 0, or -40      |
+| **Account update**             | 40                                    | ✅                      |                                     |
+| **Deployed bytecode**          | `contract_code.len()`                 | ✅                      | Actual deployed contract size       |
 
 ## 5. Implementation Details
 
@@ -229,14 +337,20 @@ The following opcodes have custom implementations in MiniRex:
 
 - `LOG0`, `LOG1`, `LOG2`, `LOG3`, `LOG4`: Enhanced with tx data size limit protection
 - `SELFDESTRUCT`: Completely disabled (maps to `invalid` instruction)
-- `SSTORE`: Increased gas cost and limit enforcement
+- `SSTORE`: Increased gas cost, limit enforcement, and oracle storage access support
 - `CREATE`, `CREATE2`: Increased gas cost, limit enforcement, and 98/100 gas forwarding
-- `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`: Enhanced new account gas cost, limit enforcement, and 98/100 gas forwarding
+- `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`: Enhanced new account gas cost, limit enforcement, 98/100 gas forwarding, and oracle contract access detection with gas limiting
+- `NUMBER`, `TIMESTAMP`, `COINBASE`, `DIFFICULTY`, `GASLIMIT`, `BASEFEE`, `PREVRANDAO`, `BLOCKHASH`, `BLOBBASEFEE`, `BLOBHASH`: Enhanced with block env access detection and gas limiting
+- `BALANCE`, `SELFBALANCE`: Enhanced with beneficiary account access detection and gas limiting
+- `EXTCODECOPY`, `EXTCODESIZE`, `EXTCODEHASH`: Enhanced with beneficiary account access detection and gas limiting
 
-### 5.3 Gas Cost Oracle
+### 5.3 External Environment
 
-- **SaltEnv**: An oracle providing external environment information is introduced to EVM to provide SALT bucket metadata.
-- **Dynamic Pricing**: Gas costs scale with SALT bucket capacity
+- **SaltEnv**: An external data provider providing external environment information to the EVM for SALT bucket metadata, which is used to calculate dynamic gas cost for account creation and `SSTORE`.
+- **OracleEnv**: An external data provider providing storage values for the designated oracle contract (address `0x316`).
+  - Enables external data sources to provide sensitive information to smart contracts
+  - Falls back to standard database lookup if oracle returns `None`
+  - Only active during SLOAD operations targeting the oracle contract address
 
 ## 6. Migration Impact
 
@@ -250,3 +364,11 @@ The following opcodes have custom implementations in MiniRex:
 - **Multi-dimensional Resource Limits**: Must respect new data and KV update limits
 - **Gas Costs**: Opcodes like `SSTORE` and `LOG` become much more expensive in gas (but still much cheaper in dollar terms)
 - **Gas Estimation**: Local gas estimation by tools like Foundry becomes highly inaccurate
+- **Sensitive Data Access**: Applications accessing any of the following will have their remaining gas limited to 10,000, with excess gas detained and refunded:
+  - **Block environment opcodes**: NUMBER, TIMESTAMP, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, PREVRANDAO, BLOCKHASH, BLOBBASEFEE, BLOBHASH
+  - **Beneficiary account access**: Any operation on the beneficiary address including:
+    - Account balance (BALANCE, SELFBALANCE)
+    - Account code (EXTCODECOPY, EXTCODESIZE, EXTCODEHASH)
+    - Transaction involving beneficiary (as caller or recipient)
+  - **Oracle contract**: CALL-family instructions targeting address `0x4200000000000000000000000000000000000101`
+- Applications should use sensitive data access only for essential decision-making, not extensive computation
