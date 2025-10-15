@@ -28,7 +28,7 @@ use op_revm::{L1BlockInfo, OpContext, OpSpecId};
 use revm::{
     context::{
         result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
-        BlockEnv, Cfg, ContextSetters, ContextTr, FrameStack,
+        BlockEnv, ContextSetters, ContextTr, FrameStack,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
@@ -239,13 +239,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     /// A new `Evm` instance configured with the provided context and inspector.
     pub fn new(context: MegaContext<DB, ExtEnvs>) -> Self {
         let spec = context.mega_spec();
-        let op_spec = context.cfg().spec();
         Self {
             inner: revm::context::Evm::new_with_inspector(
                 context,
                 NoOpInspector,
                 MegaInstructions::new(spec),
-                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(op_spec).precompiles()),
+                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles()),
             ),
             inspect: false,
         }

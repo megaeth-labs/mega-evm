@@ -2181,6 +2181,7 @@ dependencies = [
  "derive_more",
  "hex",
  "mega-evm",
+ "once_cell",
  "op-alloy-consensus",
  "op-revm",
  "revm",

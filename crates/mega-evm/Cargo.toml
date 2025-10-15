@@ -34,6 +34,7 @@ bitflags = "2.6"
 clap.workspace = true
 delegate.workspace = true
 derive_more.workspace = true
+once_cell.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

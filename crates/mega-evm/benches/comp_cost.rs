@@ -1202,7 +1202,7 @@ fn bench_bls12_381_pairing_precompile(c: &mut Criterion) {
 // ============================================================================
 //
 
-/// Generate bytecode that calls BLS12-381 MAP_FP_TO_G1 precompile.
+/// Generate bytecode that calls BLS12-381 `MAP_FP_TO_G1` precompile.
 fn generate_bls12_381_map_fp_to_g1_bytecode(iterations: usize) -> Bytes {
     let mut builder = BytecodeBuilder::default();
 
@@ -1230,7 +1230,7 @@ fn generate_bls12_381_map_fp_to_g1_bytecode(iterations: usize) -> Bytes {
     builder.build()
 }
 
-/// Benchmark BLS12-381 MAP_FP_TO_G1 precompile.
+/// Benchmark BLS12-381 `MAP_FP_TO_G1` precompile.
 fn bench_bls12_381_map_fp_to_g1_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
 
@@ -1263,7 +1263,7 @@ fn bench_bls12_381_map_fp_to_g1_precompile(c: &mut Criterion) {
 // ============================================================================
 //
 
-/// Generate bytecode that calls BLS12-381 MAP_FP2_TO_G2 precompile.
+/// Generate bytecode that calls BLS12-381 `MAP_FP2_TO_G2` precompile.
 fn generate_bls12_381_map_fp2_to_g2_bytecode(iterations: usize) -> Bytes {
     let mut builder = BytecodeBuilder::default();
 
@@ -1293,7 +1293,7 @@ fn generate_bls12_381_map_fp2_to_g2_bytecode(iterations: usize) -> Bytes {
     builder.build()
 }
 
-/// Benchmark BLS12-381 MAP_FP2_TO_G2 precompile.
+/// Benchmark BLS12-381 `MAP_FP2_TO_G2` precompile.
 fn bench_bls12_381_map_fp2_to_g2_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
 
