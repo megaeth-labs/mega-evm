@@ -71,5 +71,5 @@ pub mod mini_rex {
     /// Gas limit after volatile data access (oracle contract or block environment).
     /// When volatile data is accessed, remaining gas is immediately limited to this value
     /// to force the transaction to complete quickly and prevent `DoS` attacks.
-    pub const VOLATILE_DATA_ACCESS_REMAINING_GAS: u64 = 10_000;
+    pub const VOLATILE_DATA_ACCESS_REMAINING_GAS: u64 = 1_000_000;
 }
