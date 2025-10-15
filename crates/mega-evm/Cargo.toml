@@ -41,6 +41,7 @@ mega-evm = { path = ".", features = ["test-utils"] }
 revm-inspectors.workspace = true
 criterion = "0.5"
 serde_json = "1.0"
+sha2.workspace = true
 hex = "0.4"
 
 [features]
@@ -53,7 +54,7 @@ name = "transact"
 harness = false
 
 [[bench]]
-name = "keccak256"
+name = "comp_cost"
 harness = false
 
 [[bench]]

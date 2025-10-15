@@ -11,9 +11,7 @@ use mega_evm::{
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use revm::{
-    bytecode::opcode::{
-        BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, PUSH1, PUSH20, STOP,
-    },
+    bytecode::opcode::{BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, STOP},
     context::{result::ResultAndState, BlockEnv, ContextSetters, ContextTr, TxEnv},
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
@@ -148,14 +146,14 @@ fn test_balance_opcode() {
     let mut evm = create_evm();
 
     // Contract that reads beneficiary balance
-    let mut code = vec![];
-    code.push(PUSH20);
-    code.extend_from_slice(BENEFICIARY.as_slice());
-    code.push(BALANCE);
-    code.push(POP);
-    code.push(STOP);
+    let code = BytecodeBuilder::default()
+        .push_address(BENEFICIARY)
+        .append(BALANCE)
+        .append(POP)
+        .stop()
+        .build();
 
-    set_account_code(evm.ctx().db_mut(), CONTRACT_ADDR, code.into());
+    set_account_code(evm.ctx().db_mut(), CONTRACT_ADDR, code);
 
     let result_and_state =
         execute_tx(&mut evm, CALLER_ADDR, Some(CONTRACT_ADDR), U256::ZERO, false);
@@ -196,14 +194,14 @@ fn test_extcodesize_opcode() {
     set_account_code(evm.ctx().db_mut(), BENEFICIARY, vec![STOP].into());
 
     // Contract that checks beneficiary code size
-    let mut code = vec![];
-    code.push(PUSH20);
-    code.extend_from_slice(BENEFICIARY.as_slice());
-    code.push(EXTCODESIZE);
-    code.push(POP);
-    code.push(STOP);
+    let code = BytecodeBuilder::default()
+        .push_address(BENEFICIARY)
+        .append(EXTCODESIZE)
+        .append(POP)
+        .stop()
+        .build();
 
-    set_account_code(evm.ctx().db_mut(), CONTRACT_ADDR, code.into());
+    set_account_code(evm.ctx().db_mut(), CONTRACT_ADDR, code);
 
     let result_and_state =
         execute_tx(&mut evm, CALLER_ADDR, Some(CONTRACT_ADDR), U256::ZERO, false);
@@ -244,19 +242,16 @@ fn test_extcodecopy_opcode() {
     set_account_code(evm.ctx().db_mut(), BENEFICIARY, vec![STOP, STOP, STOP, STOP].into());
 
     // Contract that copies beneficiary code: EXTCODECOPY(beneficiary, 0, 0, 4)
-    let mut code = vec![];
-    code.push(PUSH1); // size = 4
-    code.push(4);
-    code.push(PUSH1); // offset = 0
-    code.push(0);
-    code.push(PUSH1); // destOffset = 0
-    code.push(0);
-    code.push(PUSH20); // beneficiary address
-    code.extend_from_slice(BENEFICIARY.as_slice());
-    code.push(EXTCODECOPY);
-    code.push(STOP);
+    let code = BytecodeBuilder::default()
+        .push_number(4u8) // size = 4
+        .push_number(0u8) // offset = 0
+        .push_number(0u8) // destOffset = 0
+        .push_address(BENEFICIARY) // beneficiary address
+        .append(EXTCODECOPY)
+        .stop()
+        .build();
 
-    set_account_code(evm.ctx().db_mut(), CONTRACT_ADDR, code.into());
+    set_account_code(evm.ctx().db_mut(), CONTRACT_ADDR, code);
 
     let result_and_state =
         execute_tx(&mut evm, CALLER_ADDR, Some(CONTRACT_ADDR), U256::ZERO, false);
@@ -297,14 +292,14 @@ fn test_extcodehash_opcode() {
     set_account_code(evm.ctx().db_mut(), BENEFICIARY, vec![STOP].into());
 
     // Contract that reads beneficiary code hash
-    let mut code = vec![];
-    code.push(PUSH20);
-    code.extend_from_slice(BENEFICIARY.as_slice());
-    code.push(EXTCODEHASH);
-    code.push(POP);
-    code.push(STOP);
+    let code = BytecodeBuilder::default()
+        .push_address(BENEFICIARY)
+        .append(EXTCODEHASH)
+        .append(POP)
+        .stop()
+        .build();
 
-    set_account_code(evm.ctx().db_mut(), CONTRACT_ADDR, code.into());
+    set_account_code(evm.ctx().db_mut(), CONTRACT_ADDR, code);
 
     let result_and_state =
         execute_tx(&mut evm, CALLER_ADDR, Some(CONTRACT_ADDR), U256::ZERO, false);
@@ -507,7 +502,7 @@ fn test_nested_call_beneficiary_access() {
 /// beneficiary access.
 ///
 /// The transaction should start with high gas, detain most of it when beneficiary is accessed,
-/// but the detained gas should be refunded so the final gas_used is reasonable.
+/// but the detained gas should be refunded so the final `gas_used` is reasonable.
 #[test]
 fn test_detained_gas_is_restored() {
     let mut evm = create_evm();
