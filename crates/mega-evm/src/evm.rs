@@ -83,7 +83,7 @@ use crate::{
 ///
 /// The factory implements [`alloy_evm::EvmFactory`] and provides `MegaETH`-specific
 /// customizations through the configured `external_envs` service and chain specifications.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct MegaEvmFactory<ExtEnvs> {
     /// The `external_envs` service to provide deterministic external information during EVM
