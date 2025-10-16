@@ -10,14 +10,14 @@ use revm::{handler::FrameResult, interpreter::Gas};
 /// # Global Gas Detention Mechanism
 ///
 /// When volatile data is first accessed in a transaction:
-/// 1. A `GlobalLimitedGas` instance is created with `VOLATILE_DATA_ACCESS_REMAINING_GAS` (10,000)
+/// 1. A `GlobalLimitedGas` instance is created with `VOLATILE_DATA_ACCESS_REMAINING_GAS`
 /// 2. Any gas above this limit is "detained" (tracked separately, not consumed)
 /// 3. The same global limit applies to all subsequent gas detentions in the transaction
 /// 4. At transaction end, all detained gas is refunded via `refund_detained_gas()`
 ///
 /// # Key Properties
 ///
-/// - **Global Limit**: The 10,000 gas limit is established once per transaction, not per opcode
+/// - **Global Limit**: The `VOLATILE_DATA_ACCESS_REMAINING_GAS` limit is established once per transaction, not per opcode
 /// - **Cumulative Tracking**: All detained gas from multiple opcodes is accumulated
 /// - **Cross-Call Consistency**: The global limit applies across nested calls (see
 ///   `update_remained_gas()`)
@@ -26,21 +26,21 @@ use revm::{handler::FrameResult, interpreter::Gas};
 /// # Example Flow
 ///
 /// ```ignore
-/// // Transaction starts with 1,000,000 gas
+/// // Transaction starts with 1,000,000,000 gas
 /// TIMESTAMP opcode:
 ///   - Marks block_env_accessed
-///   - Creates GlobalLimitedGas { remaining: 10,000, detained: 0 }
-///   - Detains 990,000 gas → GlobalLimitedGas { remaining: 10,000, detained: 990,000 }
+///   - Creates GlobalLimitedGas { remaining: VOLATILE_DATA_ACCESS_REMAINING_GAS, detained: 0 }
+///   - Detains excess gas → GlobalLimitedGas { remaining: VOLATILE_DATA_ACCESS_REMAINING_GAS, detained: 999_000_000 }
 ///
 /// BALANCE(beneficiary) opcode:
 ///   - Marks beneficiary_balance_accessed
 ///   - GlobalLimitedGas already exists
-///   - Remaining gas is 9,500 (after TIMESTAMP + some work)
-///   - No additional detention (9,500 < 10,000)
+///   - Remaining gas is less than VOLATILE_DATA_ACCESS_REMAINING_GAS (after TIMESTAMP + some work)
+///   - No additional detention (remaining < VOLATILE_DATA_ACCESS_REMAINING_GAS)
 ///
 /// Transaction end:
-///   - refund_detained_gas() returns 990,000 gas to user
-///   - User only pays for ~10,000 gas of actual work
+///   - refund_detained_gas() returns detained gas to user
+///   - User only pays for actual work performed
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct VolatileDataAccessTracker {
@@ -191,13 +191,13 @@ impl VolatileDataAccessTracker {
 ///
 /// This struct manages the global gas limit and tracks detained gas across all opcodes
 /// in a transaction. It ensures:
-/// - A single, consistent gas limit (10,000) applies across all volatile data accesses
+/// - A single, consistent gas limit (`VOLATILE_DATA_ACCESS_REMAINING_GAS`) applies across all volatile data accesses
 /// - All detained gas is accumulated for later refund
 /// - The remaining gas is updated as the transaction progresses through nested calls
 ///
 /// # Fields
 ///
-/// - `remaining`: Current global gas limit (starts at 10,000, decreases as gas is consumed)
+/// - `remaining`: Current global gas limit (starts at `VOLATILE_DATA_ACCESS_REMAINING_GAS`, decreases as gas is consumed)
 /// - `detained`: Total amount of gas detained from all opcodes (refunded at transaction end)
 #[derive(Debug, Clone)]
 struct GlobalLimitedGas {

@@ -51,7 +51,7 @@ use revm::{
 ///
 /// When volatile data (block environment, beneficiary, or oracle) is accessed, the system
 /// implements a global gas detention mechanism:
-/// 1. Remaining gas is immediately limited to `VOLATILE_DATA_ACCESS_REMAINING_GAS` (10,000)
+/// 1. Remaining gas is immediately limited to `VOLATILE_DATA_ACCESS_REMAINING_GAS`
 /// 2. Detained gas is tracked and refunded at transaction end
 /// 3. Users only pay for actual work performed, not for enforcement gas
 /// 4. This prevents `DoS` attacks while maintaining fair gas accounting
@@ -499,7 +499,7 @@ maintaining fair gas accounting through the global gas detention mechanism.
 When volatile data is accessed:
 1. The opcode executes normally (calls host method, processes data)
 2. If this is the first volatile data access in the transaction:
-   - A global gas limit is established at `VOLATILE_DATA_ACCESS_REMAINING_GAS` (10,000)
+   - A global gas limit is established at `VOLATILE_DATA_ACCESS_REMAINING_GAS`
    - Any gas above this limit is "detained" (tracked but not consumed)
 3. All subsequent opcodes are limited by this global gas limit
 4. At transaction end, all detained gas is refunded to the user
