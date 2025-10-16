@@ -28,7 +28,7 @@ use op_revm::{L1BlockInfo, OpContext, OpSpecId};
 use revm::{
     context::{
         result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
-        BlockEnv, Cfg, ContextSetters, ContextTr, FrameStack,
+        BlockEnv, ContextSetters, ContextTr, FrameStack,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
@@ -239,13 +239,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     /// A new `Evm` instance configured with the provided context and inspector.
     pub fn new(context: MegaContext<DB, ExtEnvs>) -> Self {
         let spec = context.mega_spec();
-        let op_spec = context.cfg().spec();
         Self {
             inner: revm::context::Evm::new_with_inspector(
                 context,
                 NoOpInspector,
                 MegaInstructions::new(spec),
-                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(op_spec).precompiles()),
+                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles()),
             ),
             inspect: false,
         }
@@ -498,12 +497,13 @@ where
         Option<<Self::Frame as revm::handler::FrameTr>::FrameResult>,
         ContextDbError<Self::Context>,
     > {
+        let ctx = self.ctx_ref();
+        let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
-        if self.ctx_ref().spec.is_enabled(MegaSpecId::MINI_REX) {
+        if is_mini_rex {
             // Return early if the limit is already exceeded before processing the child frame
             // return result.
-            if self
-                .ctx_ref()
+            if ctx
                 .additional_limit
                 .borrow_mut()
                 .is_exceeding_limit_result(result.instruction_result())
@@ -513,8 +513,7 @@ where
 
             // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
             // exceeded, return the error frame result
-            if self
-                .ctx_ref()
+            if ctx
                 .additional_limit
                 .borrow_mut()
                 .before_frame_return_result(&result, false)
@@ -532,8 +531,39 @@ where
             }
         }
 
+        // If the volatile data tracker already accessed, the gas in the returned frame must have
+        // already been limited by the volatile data tracker's global limited gas. The remaining
+        // gas in the returned frame should be recorded so that we can know how much
+        // gas is left and how we should limit the parent frame's gas.
+        let volatile_data_tracker = ctx.volatile_data_tracker.clone();
+        let mut volatile_data_tracker = volatile_data_tracker.borrow_mut();
+        let accessed_sensitive_data = volatile_data_tracker.accessed();
+        if is_mini_rex && accessed_sensitive_data {
+            let gas_remaining = result.gas().remaining();
+            volatile_data_tracker.update_remained_gas(gas_remaining);
+        }
+
         // call the inner frame_return_result function to return the frame result
-        self.inner.frame_return_result(result)
+        let mut inner_result = self.inner.frame_return_result(result);
+
+        // After processing the frame return, we also to limit the parent frame's gas if oracle was
+        // accessed This needs to happen AFTER inner.frame_return_result() because that's
+        // when the parent frame has accured the remaining gas from the returned child frame and
+        // becomes the current frame again.
+        if is_mini_rex && accessed_sensitive_data {
+            // Now the parent frame is the current frame
+            if let Some(_index) = self.frame_stack().index() {
+                let current_frame = self.frame_stack().get();
+                volatile_data_tracker.detain_gas(&mut current_frame.interpreter.gas);
+            } else {
+                // if the current frame is the top-level transaction, limit the gas
+                if let Ok(Some(inner_result)) = &mut inner_result {
+                    volatile_data_tracker.detain_gas_in_frame_result(inner_result);
+                }
+            }
+        }
+
+        inner_result
     }
 }
 

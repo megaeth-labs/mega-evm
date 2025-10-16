@@ -34,6 +34,7 @@ bitflags = "2.6"
 clap.workspace = true
 delegate.workspace = true
 derive_more.workspace = true
+once_cell.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
@@ -41,6 +42,7 @@ mega-evm = { path = ".", features = ["test-utils"] }
 revm-inspectors.workspace = true
 criterion = "0.5"
 serde_json = "1.0"
+sha2.workspace = true
 hex = "0.4"
 
 [features]
@@ -53,7 +55,7 @@ name = "transact"
 harness = false
 
 [[bench]]
-name = "keccak256"
+name = "comp_cost"
 harness = false
 
 [[bench]]

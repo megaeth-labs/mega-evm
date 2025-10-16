@@ -1,12 +1,13 @@
 //! Test utilities for the `MegaETH` EVM.
 
 mod bytes;
-pub use bytes::*;
-
 mod database;
-pub use database::*;
-
 mod evm;
-pub use evm::*;
+mod inspectors;
+mod opcode_gen;
 
-pub mod opcode_gen;
+pub use bytes::*;
+pub use database::*;
+pub use evm::*;
+pub use inspectors::*;
+pub use opcode_gen::*;

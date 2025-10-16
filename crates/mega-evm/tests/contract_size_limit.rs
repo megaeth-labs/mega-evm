@@ -3,7 +3,7 @@
 use alloy_primitives::{address, Bytes, U256};
 use core::convert::Infallible;
 use mega_evm::{
-    test_utils::{opcode_gen::BytecodeBuilder, right_pad_bytes, transact, MemoryDatabase},
+    test_utils::{right_pad_bytes, transact, BytecodeBuilder, MemoryDatabase},
     *,
 };
 use revm::{

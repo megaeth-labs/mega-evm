@@ -203,16 +203,28 @@ where
         evm: &mut Self::Evm,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        if evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX) &&
-            evm.ctx()
+        let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
+        if is_mini_rex {
+            // Check if the limit is exceeded before returning the frame result
+            if evm
+                .ctx()
                 .additional_limit
                 .borrow_mut()
                 .before_frame_return_result(frame_result, true)
                 .exceeded_limit()
-        {
-            return Ok(());
+            {
+                // the frame result must have been marked as exceeding the limit, so return early
+                return Ok(());
+            }
+
+            // Refund detained gas back to remaining gas before transaction finishes, so that the tx
+            // sender is not charged for the detained gas.
+            let mut volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow_mut();
+            let gas = frame_result.gas_mut();
+            volatile_data_tracker.refund_detained_gas(gas);
         }
 
+        // call the inner last_frame_result function to return the frame result
         self.op.last_frame_result(evm, frame_result)
     }
 

@@ -7,6 +7,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+mod access;
 mod block;
 pub mod constants;
 mod context;
@@ -17,6 +18,7 @@ mod handler;
 mod host;
 mod instructions;
 mod limit;
+mod precompiles;
 mod result;
 mod spec;
 pub mod system_tx;
@@ -24,6 +26,7 @@ pub mod system_tx;
 pub mod test_utils;
 mod types;
 
+pub use access::*;
 pub use block::*;
 pub use context::*;
 pub use evm::*;
@@ -33,6 +36,7 @@ pub use handler::*;
 pub use host::*;
 pub use instructions::*;
 pub use limit::*;
+pub use precompiles::*;
 pub use result::*;
 pub use spec::*;
 pub use system_tx::*;

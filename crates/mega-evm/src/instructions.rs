@@ -10,14 +10,20 @@ use crate::{
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Bytes, Log, LogData, B256};
 use revm::{
-    bytecode::opcode::{CALL, CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SELFDESTRUCT, SSTORE},
+    bytecode::opcode::{
+        BALANCE, BASEFEE, BLOBBASEFEE, BLOBHASH, BLOCKHASH, CALL, COINBASE, CREATE, CREATE2,
+        DIFFICULTY, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, GASLIMIT, LOG0, LOG1, LOG2, LOG3, LOG4,
+        NUMBER, SELFDESTRUCT, SSTORE, TIMESTAMP,
+    },
     context::{ContextTr, CreateScheme, Host, JournalTr},
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
         as_usize_or_fail, check,
         gas::{self, cost_per_word, warm_cold_cost_with_delegation},
         gas_or_fail,
-        instructions::{contract::get_memory_input_and_out_ranges, control, utility::IntoAddress},
+        instructions::{
+            self, contract::get_memory_input_and_out_ranges, control, utility::IntoAddress,
+        },
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
         popn, require_non_staticcall, resize_memory, CallInput, CallInputs, CallScheme, CallValue,
@@ -34,7 +40,21 @@ use revm::{
 /// - SELFDESTRUCT opcode completely disabled (halts with `InvalidFEOpcode`)
 /// - SSTORE opcode with dynamically-scaled gas cost and data/KV limit enforcement
 /// - CREATE/CREATE2 opcodes with dynamically-scaled + flat gas cost and limit enforcement
-/// - CALL opcode with dynamically-scaled new account gas cost
+/// - CALL opcode with dynamically-scaled new account gas cost, oracle access detection, and
+///   immediate gas detention for oracle calls
+/// - Block environment opcodes (TIMESTAMP, NUMBER, etc.) with immediate gas detention to prevent
+///   `DoS` attacks
+/// - Beneficiary-accessing opcodes (BALANCE, EXTCODESIZE, etc.) with immediate gas detention when
+///   beneficiary is accessed
+///
+/// # Gas Detention Mechanism
+///
+/// When volatile data (block environment, beneficiary, or oracle) is accessed, the system
+/// implements a global gas detention mechanism:
+/// 1. Remaining gas is immediately limited to `VOLATILE_DATA_ACCESS_REMAINING_GAS`
+/// 2. Detained gas is tracked and refunded at transaction end
+/// 3. Users only pay for actual work performed, not for enforcement gas
+/// 4. This prevents `DoS` attacks while maintaining fair gas accounting
 ///
 /// # Assumptions
 ///
@@ -82,6 +102,25 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaInstructions<DB, ExtEnvs> {
 
             // Override the CALL instruction
             self.inner.insert_instruction(CALL, call_with_bomb);
+
+            // Override block environment opcodes to immediately limit gas upon access
+            // This prevents DoS attacks using sensitive block environment data
+            self.inner.insert_instruction(TIMESTAMP, timestamp_limit_gas);
+            self.inner.insert_instruction(NUMBER, block_number_limit_gas);
+            self.inner.insert_instruction(COINBASE, coinbase_limit_gas);
+            self.inner.insert_instruction(DIFFICULTY, difficulty_limit_gas);
+            self.inner.insert_instruction(GASLIMIT, gas_limit_opcode_limit_gas);
+            self.inner.insert_instruction(BASEFEE, basefee_limit_gas);
+            self.inner.insert_instruction(BLOCKHASH, blockhash_limit_gas);
+            self.inner.insert_instruction(BLOBBASEFEE, blobbasefee_limit_gas);
+            self.inner.insert_instruction(BLOBHASH, blobhash_limit_gas);
+
+            // Override beneficiary-accessing opcodes to immediately limit gas when beneficiary is
+            // accessed This prevents DoS attacks using beneficiary account data
+            self.inner.insert_instruction(BALANCE, balance_limit_gas);
+            self.inner.insert_instruction(EXTCODESIZE, extcodesize_limit_gas);
+            self.inner.insert_instruction(EXTCODECOPY, extcodecopy_limit_gas);
+            self.inner.insert_instruction(EXTCODEHASH, extcodehash_limit_gas);
         }
         self
     }
@@ -426,6 +465,13 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
     }
 
+    // Check if calling the oracle contract and mark it as accessed. If so, we need to limit the
+    // forwarded gas immediately
+    let mut volatile_data_tracker = context.host.volatile_data_tracker().borrow_mut();
+    if volatile_data_tracker.check_and_mark_oracle_access(&to) {
+        volatile_data_tracker.detain_plain_gas(&mut gas_limit);
+    }
+
     // Call host to interact with target contract
     context.interpreter.bytecode.set_action(InterpreterAction::NewFrame(FrameInput::Call(
         Box::new(CallInputs {
@@ -441,3 +487,94 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         }),
     )));
 }
+
+/* Volatile data access opcode handlers with immediate gas detention.
+
+These custom instruction handlers override opcodes that access volatile data (block environment,
+beneficiary account data) to immediately detain remaining gas. This prevents DoS attacks while
+maintaining fair gas accounting through the global gas detention mechanism.
+
+# Gas Detention Mechanism
+
+When volatile data is accessed:
+1. The opcode executes normally (calls host method, processes data)
+2. If this is the first volatile data access in the transaction:
+   - A global gas limit is established at `VOLATILE_DATA_ACCESS_REMAINING_GAS`
+   - Any gas above this limit is "detained" (tracked but not consumed)
+3. All subsequent opcodes are limited by this global gas limit
+4. At transaction end, all detained gas is refunded to the user
+5. Users only pay for actual computational work performed
+
+This approach:
+- Prevents DoS attacks by limiting execution after volatile data access
+- Ensures fair billing by refunding enforcement gas
+- Works across nested calls through the global limit mechanism
+
+# Two Categories of Opcodes
+
+## Block Environment Opcodes (Always Volatile)
+These opcodes ALWAYS access volatile data and trigger detention:
+- TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH
+
+## Account-Accessing Opcodes (Conditionally Volatile)
+These opcodes only SOMETIMES access volatile data:
+- BALANCE(beneficiary_address) → volatile, triggers detention
+- BALANCE(other_address) → not volatile, no detention
+- EXTCODESIZE/EXTCODECOPY/EXTCODEHASH → same conditional behavior
+
+For conditional opcodes:
+- The Host methods detect when they access beneficiary/volatile accounts
+- Gas detention only occurs if volatile data is actually accessed
+- Regular account accesses don't trigger detention
+*/
+
+/// Macro to create opcode handlers with immediate gas detention.
+///
+/// This macro generates a wrapper function that:
+/// 1. Checks if volatile data was already accessed (to avoid redundant detention)
+/// 2. Calls the original instruction implementation from revm
+/// 3. If this opcode caused new volatile data access, detains gas immediately
+///
+/// The detention is managed by `VolatileDataAccessTracker.detain_gas()`, which:
+/// - Establishes a global gas limit on first volatile data access
+/// - Tracks detained gas for later refund
+/// - Applies the same limit to all subsequent gas detentions
+macro_rules! wrap_op_detain_gas {
+    ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
+        #[doc = concat!("`", $opcode_name, "` opcode with immediate gas detention on volatile data access.")]
+        pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+            mut context: InstructionContext<'_, H, WIRE>,
+        ) {
+            let volatile_data_tracker = context.host.volatile_data_tracker().clone();
+            let accessed_before = volatile_data_tracker.borrow().accessed();
+
+            // The volatile data tracker will be marked as accessed in the `Host` hooks,
+            // so we need to drop the borrow before calling the original function
+            let ctx = InstructionContext::<'_, H, WIRE> {
+                interpreter: &mut context.interpreter,
+                host: &mut context.host,
+            };
+            $original_fn(ctx);
+
+            // We should only detain gas if this opcode is the first time in the tx that accessed
+            // the volatile data.
+            if !accessed_before && volatile_data_tracker.borrow().accessed() {
+                volatile_data_tracker.borrow_mut().detain_gas(&mut context.interpreter.gas);
+            }
+        }
+    };
+}
+
+wrap_op_detain_gas!(timestamp_limit_gas, "TIMESTAMP", instructions::block_info::timestamp);
+wrap_op_detain_gas!(block_number_limit_gas, "NUMBER", instructions::block_info::block_number);
+wrap_op_detain_gas!(difficulty_limit_gas, "DIFFICULTY", instructions::block_info::difficulty);
+wrap_op_detain_gas!(gas_limit_opcode_limit_gas, "GASLIMIT", instructions::block_info::gaslimit);
+wrap_op_detain_gas!(basefee_limit_gas, "BASEFEE", instructions::block_info::basefee);
+wrap_op_detain_gas!(coinbase_limit_gas, "COINBASE", instructions::block_info::coinbase);
+wrap_op_detain_gas!(blockhash_limit_gas, "BLOCKHASH", instructions::host::blockhash);
+wrap_op_detain_gas!(blobbasefee_limit_gas, "BLOBBASEFEE", instructions::block_info::blob_basefee);
+wrap_op_detain_gas!(blobhash_limit_gas, "BLOBHASH", instructions::tx_info::blob_hash);
+wrap_op_detain_gas!(balance_limit_gas, "BALANCE", instructions::host::balance);
+wrap_op_detain_gas!(extcodesize_limit_gas, "EXTCODESIZE", instructions::host::extcodesize);
+wrap_op_detain_gas!(extcodecopy_limit_gas, "EXTCODECOPY", instructions::host::extcodecopy);
+wrap_op_detain_gas!(extcodehash_limit_gas, "EXTCODEHASH", instructions::host::extcodehash);

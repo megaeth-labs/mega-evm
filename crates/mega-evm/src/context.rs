@@ -26,7 +26,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     constants, AdditionalLimit, BlockEnvAccess, DefaultExternalEnvs, DynamicGasCost, ExternalEnvs,
-    MegaSpecId,
+    MegaSpecId, VolatileDataAccessTracker,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -46,16 +46,17 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
     pub(crate) disable_beneficiary: bool,
 
     /// Additional limits for the EVM.
-    pub(crate) additional_limit: Rc<RefCell<AdditionalLimit>>,
+    pub additional_limit: Rc<RefCell<AdditionalLimit>>,
 
     /// Calculator for dynamic gas costs during transaction execution.
-    pub(crate) dynamic_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
+    pub dynamic_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
+
+    /// The oracle environment.
+    pub oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
 
     /* Internal state variables */
-    /// Bitmap of block environment data accessed during transaction execution.
-    pub(crate) block_env_accessed: RefCell<BlockEnvAccess>,
-    /// Whether beneficiary data has been accessed in current transaction
-    pub(crate) beneficiary_balance_accessed: RefCell<bool>,
+    /// Tracker for sensitive data access (block environment, beneficiary, etc.)
+    pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
 }
 
 impl Default for MegaContext<EmptyDB, DefaultExternalEnvs> {
@@ -99,8 +100,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
-            block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
-            beneficiary_balance_accessed: RefCell::new(false),
+            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
+            volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
             inner,
         }
     }
@@ -150,8 +151,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>() - 1,
             ))),
-            block_env_accessed: RefCell::new(BlockEnvAccess::empty()),
-            beneficiary_balance_accessed: RefCell::new(false),
+            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
+            volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
             inner,
         }
     }
@@ -174,9 +175,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             spec: self.spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
-            block_env_accessed: self.block_env_accessed,
-            beneficiary_balance_accessed: self.beneficiary_balance_accessed,
             dynamic_gas_cost: self.dynamic_gas_cost,
+            oracle_env: self.oracle_env,
+            volatile_data_tracker: self.volatile_data_tracker,
         }
     }
 
@@ -357,7 +358,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// Returns a [`BlockEnvAccess`] bitmap indicating accessed fields.
     pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
-        *self.block_env_accessed.borrow()
+        self.volatile_data_tracker.borrow().get_block_env_accesses()
     }
 
     /// Resets the block environment access bitmap for new transactions.
@@ -365,8 +366,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// This method clears the tracking of which block environment fields
     /// have been accessed, preparing the context for a new transaction.
     pub fn reset_block_env_access(&mut self) {
-        *self.block_env_accessed.borrow_mut() = BlockEnvAccess::empty();
-        *self.beneficiary_balance_accessed.borrow_mut() = false;
+        self.volatile_data_tracker.borrow_mut().reset();
     }
 
     /// Marks that a specific type of block environment has been accessed.
@@ -378,7 +378,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// * `access_type` - The type of block environment access to record
     pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
-        self.block_env_accessed.borrow_mut().insert(access_type);
+        self.volatile_data_tracker.borrow_mut().mark_block_env_accessed(access_type);
     }
 }
 
@@ -389,16 +389,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
         self.disable_beneficiary = true;
     }
 
-    /// Check if beneficiary data has been accessed in current transaction
-    pub fn has_accessed_beneficiary_balance(&self) -> bool {
-        *self.beneficiary_balance_accessed.borrow()
-    }
-
     /// Check if address is beneficiary and mark access if so. Returns true if beneficiary was
     /// accessed.
     pub(crate) fn check_and_mark_beneficiary_balance_access(&self, address: &Address) -> bool {
         if self.inner.block.beneficiary == *address {
-            *self.beneficiary_balance_accessed.borrow_mut() = true;
+            self.volatile_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
             true
         } else {
             false
@@ -412,13 +407,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
 
         // Check if caller is beneficiary
         if tx.base.caller == beneficiary {
-            *self.beneficiary_balance_accessed.borrow_mut() = true;
+            self.volatile_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
         }
 
         // Check if recipient is beneficiary (for calls)
         if let revm::primitives::TxKind::Call(recipient) = tx.base.kind {
             if recipient == beneficiary {
-                *self.beneficiary_balance_accessed.borrow_mut() = true;
+                self.volatile_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();
             }
         }
     }

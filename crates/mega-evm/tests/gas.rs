@@ -2,14 +2,14 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, keccak256, BlockNumber, Bytes, TxKind, U256};
+use alloy_primitives::{address, keccak256, Bytes, TxKind, U256};
 use mega_evm::{
     address_to_bucket_id,
     constants::{self, mini_rex::SSTORE_SET_GAS},
     slot_to_bucket_id,
-    test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
-    DefaultExternalEnvs, EVMError, ExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, SaltEnv,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
+    DefaultExternalEnvs, EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionError,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2, GAS, LOG0, PUSH0},
@@ -18,57 +18,7 @@ use revm::{
     primitives::Address,
     Inspector,
 };
-use salt::{constant::MIN_BUCKET_SIZE, BucketId};
-use std::collections::HashMap;
-
-#[derive(Debug, Clone)]
-struct TestSaltEnv {
-    buckets: HashMap<BucketId, u64>,
-}
-
-#[allow(dead_code)]
-impl TestSaltEnv {
-    fn new() -> Self {
-        Self { buckets: HashMap::new() }
-    }
-
-    fn with_bucket(mut self, bucket_id: BucketId, bucket_cap: u64) -> Self {
-        assert!(
-            bucket_cap % salt::constant::MIN_BUCKET_SIZE as u64 == 0,
-            "Capacity must be a multiple of MIN_BUCKET_SIZE"
-        );
-        self.buckets.insert(bucket_id, bucket_cap);
-        self
-    }
-
-    fn add_bucket(&mut self, bucket_id: BucketId, bucket_cap: u64) {
-        assert!(
-            bucket_cap % salt::constant::MIN_BUCKET_SIZE as u64 == 0,
-            "Capacity must be a multiple of MIN_BUCKET_SIZE"
-        );
-        self.buckets.insert(bucket_id, bucket_cap);
-    }
-}
-
-impl SaltEnv for TestSaltEnv {
-    type Error = Infallible;
-
-    fn get_bucket_capacity(
-        &self,
-        bucket_id: BucketId,
-        _at_block: BlockNumber,
-    ) -> Result<u64, Self::Error> {
-        Ok(self.buckets.get(&bucket_id).copied().expect("Bucket not found"))
-    }
-}
-
-impl ExternalEnvs for TestSaltEnv {
-    type SaltEnv = Self;
-
-    fn salt_env(&self) -> Self::SaltEnv {
-        self.clone()
-    }
-}
+use salt::constant::MIN_BUCKET_SIZE;
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const CALLEE: Address = address!("1000000000000000000000000000000000000001");
@@ -78,13 +28,13 @@ const NESTED_CALLEE: Address = address!("100000000000000000000000000000000000000
 fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
-    oracle: &TestSaltEnv,
+    external_envs: &DefaultExternalEnvs,
     caller: Address,
     callee: Option<Address>,
     data: Bytes,
     value: U256,
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
-    let mut context = MegaContext::new(db, spec, oracle);
+    let mut context = MegaContext::new(db, spec, external_envs);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -144,9 +94,12 @@ fn sstore_test_case(
         UpdateMode::Clear => U256::from(0),
     };
     let bucket_id = slot_to_bucket_id(CALLEE, storage_key);
-    // An oracle with the given bucket capacity
-    let oracle =
-        TestSaltEnv::new().with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    // An external envs with the given bucket capacity
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // a contract that stores a value to the storage slot
     let bytecode = BytecodeBuilder::default().sstore(storage_key, storage_value).stop().build();
@@ -155,9 +108,16 @@ fn sstore_test_case(
         db.set_account_storage(CALLEE, storage_key, U256::from(2333));
     }
 
-    let res =
-        transact(spec, &mut db, &oracle, CALLER, Some(CALLEE), Default::default(), U256::ZERO)
-            .unwrap();
+    let res = transact(
+        spec,
+        &mut db,
+        &external_envs,
+        CALLER,
+        Some(CALLEE),
+        Default::default(),
+        U256::ZERO,
+    )
+    .unwrap();
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
@@ -247,10 +207,13 @@ fn ether_transfer_test_case(
 
     let mut db = MemoryDatabase::default();
 
-    // Determine the bucket for the callee and set up the oracle with the required capacity.
+    // Determine the bucket for the callee and set up the external envs with the required capacity.
     let bucket_id = address_to_bucket_id(CALLEE);
-    let oracle =
-        TestSaltEnv::new().with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // Allocate initial balance to the caller.
     db.set_account_balance(CALLER, U256::from(1000));
@@ -260,9 +223,16 @@ fn ether_transfer_test_case(
     }
 
     // Perform the ether transfer (1 wei) from caller to callee.
-    let res =
-        transact(spec, &mut db, &oracle, CALLER, Some(CALLEE), Default::default(), U256::from(1))
-            .unwrap();
+    let res = transact(
+        spec,
+        &mut db,
+        &external_envs,
+        CALLER,
+        Some(CALLEE),
+        Default::default(),
+        U256::from(1),
+    )
+    .unwrap();
 
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
@@ -329,9 +299,12 @@ fn nested_ether_transfer_test_case(
 
     // Test address and storage slot
     let bucket_id = address_to_bucket_id(NESTED_CALLEE);
-    // An oracle with the given bucket capacity
-    let oracle =
-        TestSaltEnv::new().with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    // An external envs with the given bucket capacity
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // allocate some balance to callee, which will transfer the ether to the nested callee
     db.set_account_balance(CALLEE, U256::from(1000));
@@ -354,7 +327,7 @@ fn nested_ether_transfer_test_case(
     let res = transact(
         spec,
         &mut db,
-        &oracle,
+        &external_envs,
         CALLER,
         Some(CALLEE),
         Default::default(),
@@ -418,9 +391,12 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
     // Test address and storage slot
     let callee = CALLER.create(0);
     let bucket_id = address_to_bucket_id(callee);
-    // An oracle with the given bucket capacity
-    let oracle =
-        TestSaltEnv::new().with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    // An external envs with the given bucket capacity
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // constructor code
     let constructor_code = BytecodeBuilder::default().return_with_data([0x00]).build();
@@ -428,7 +404,8 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
     // println!("calldata_tokens: {:?}", tokens);
 
     // create contract
-    let res = transact(spec, &mut db, &oracle, CALLER, None, constructor_code, U256::ZERO).unwrap();
+    let res = transact(spec, &mut db, &external_envs, CALLER, None, constructor_code, U256::ZERO)
+        .unwrap();
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
@@ -498,9 +475,12 @@ fn nested_create_contract_test_case(
         CALLEE.create(0)
     };
     let bucket_id = address_to_bucket_id(nested_callee);
-    // An oracle with the given bucket capacity
-    let oracle =
-        TestSaltEnv::new().with_bucket(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    // An external envs with the given bucket capacity
+    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
+    );
 
     // set the code of the calee that transfers ether to the nested callee
     let mut bytecode = BytecodeBuilder::default();
@@ -521,7 +501,7 @@ fn nested_create_contract_test_case(
     let res = transact(
         spec,
         &mut db,
-        &oracle,
+        &external_envs,
         CALLER,
         Some(CALLEE),
         Default::default(),
@@ -624,9 +604,16 @@ fn calldata_test_case<const CALLDATA_LEN: usize>(spec: MegaSpecId, expected_gas_
     let calldata = Bytes::from([0x00; CALLDATA_LEN]);
 
     let mut db = MemoryDatabase::default();
-    let res =
-        transact(spec, &mut db, &TestSaltEnv::new(), CALLER, Some(CALLEE), calldata, U256::ZERO)
-            .unwrap();
+    let res = transact(
+        spec,
+        &mut db,
+        &DefaultExternalEnvs::new(),
+        CALLER,
+        Some(CALLEE),
+        calldata,
+        U256::ZERO,
+    )
+    .unwrap();
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
@@ -675,7 +662,7 @@ fn log_test_case<const TOPIC_COUNT: usize, const DATA_LEN: usize>(
     let res = transact(
         spec,
         &mut db,
-        &TestSaltEnv::new(),
+        &DefaultExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         Default::default(),
@@ -831,9 +818,16 @@ fn floor_gas_test_case(spec: MegaSpecId, calldata_size: usize, expected_gas_used
     // Create calldata of specified size
     let calldata = Bytes::from(vec![0x42; calldata_size]);
 
-    let res =
-        transact(spec, &mut db, &TestSaltEnv::new(), CALLER, Some(CALLEE), calldata, U256::ZERO)
-            .unwrap();
+    let res = transact(
+        spec,
+        &mut db,
+        &DefaultExternalEnvs::new(),
+        CALLER,
+        Some(CALLEE),
+        calldata,
+        U256::ZERO,
+    )
+    .unwrap();
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);

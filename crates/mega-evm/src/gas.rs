@@ -8,7 +8,7 @@ use crate::{constants, BucketId, SaltEnv};
 
 /// Calculator for dynamic gas costs based on bucket capacity.
 #[derive(Debug)]
-pub(crate) struct DynamicGasCost<SaltEnvImpl> {
+pub struct DynamicGasCost<SaltEnvImpl> {
     /// The parent block number.
     parent_block: BlockNumber,
     /// The external environment for SALT bucket information.
@@ -20,19 +20,19 @@ pub(crate) struct DynamicGasCost<SaltEnvImpl> {
 
 impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     /// Creates a new [`SaltBucketCostFeed`].
-    pub(crate) fn new(salt_env: SaltEnvImpl, parent_block: BlockNumber) -> Self {
+    pub fn new(salt_env: SaltEnvImpl, parent_block: BlockNumber) -> Self {
         Self { parent_block, salt_env, bucket_cost_mulitipers: HashMap::default() }
     }
 
     /// Resets the cache of the bucket cost multiplier.
-    pub(crate) fn reset(&mut self, parent_block: BlockNumber) {
+    pub fn reset(&mut self, parent_block: BlockNumber) {
         self.bucket_cost_mulitipers.clear();
         self.parent_block = parent_block;
     }
 
     /// Calculates the gas cost for setting a storage slot to a non-zero value. This overrides the
     /// [`SSTORE_SET`](revm::interpreter::gas::SSTORE_SET) gas cost in the original EVM.
-    pub(crate) fn sstore_set_gas(
+    pub fn sstore_set_gas(
         &mut self,
         address: Address,
         key: U256,
@@ -49,7 +49,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
 
     /// Calculates the gas cost for creating a new account. This overrides the
     /// [`NEWACCOUNT`](revm::interpreter::gas::NEWACCOUNT) gas cost in the original EVM.
-    pub(crate) fn new_account_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
+    pub fn new_account_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
         let mut gas = constants::mini_rex::NEW_ACCOUNT_GAS;
 
         // increase the gas cost according to the bucket capacity

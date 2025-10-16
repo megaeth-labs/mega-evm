@@ -3,7 +3,9 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use alloy_primitives::{Address, Bytes, U256};
-use revm::bytecode::opcode::{MSTORE, PUSH0, RETURN, REVERT, SSTORE, STOP};
+use revm::bytecode::opcode::{
+    DUP1, EQ, INVALID, JUMPDEST, JUMPI, MSTORE, PUSH0, RETURN, REVERT, SSTORE, STOP,
+};
 
 use crate::test_utils::right_pad_bytes;
 
@@ -61,6 +63,7 @@ impl BytecodeBuilder {
         let bytes = match core::mem::size_of::<T>() {
             1 => (num as u8).to_be_bytes().to_vec(),
             2 => (num as u16).to_be_bytes().to_vec(),
+            4 => (num as u32).to_be_bytes().to_vec(),
             8 => (num as u64).to_be_bytes().to_vec(),
             16 => num.to_be_bytes().to_vec(),
             _ => panic!("Unsupported integer size"),
@@ -129,9 +132,81 @@ impl BytecodeBuilder {
         self
     }
 
+    /// Append an assmembly snippet that checks whether the value at the given stack position is
+    /// equal to the given value.
+    ///
+    /// If not, call INVALID opcode.
+    ///
+    /// This snippet will left the stack unchanged after execution.
+    pub fn assert_stack_value(mut self, stack_position: usize, value: U256) -> Self {
+        self = self
+            .append(DUP1 + stack_position as u8) // duplicate the value at the given stack position to check
+            .push_u256(value)
+            .append(EQ);
+        let code_len = self.len();
+        self =
+            self.push_number(code_len as u64 + 1 + 8 + 2).append_many([JUMPI, INVALID, JUMPDEST]);
+        self
+    }
+
     /// Append a STOP opcode.
     pub fn stop(mut self) -> Self {
         self = self.append(STOP);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::convert::Infallible;
+
+    use alloy_primitives::address;
+    use revm::context::{
+        result::{EVMError, ResultAndState},
+        tx::TxEnvBuilder,
+    };
+
+    use crate::{
+        test_utils::MemoryDatabase, DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason,
+        MegaSpecId, MegaTransaction, MegaTransactionError,
+    };
+
+    use super::*;
+
+    fn execute_bytecode(
+        bytecode: Bytes,
+    ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+        let contract = address!("0000000000000000000000000000000000100001");
+        let mut db = MemoryDatabase::default();
+        db.set_account_code(contract, bytecode);
+        let mut context =
+            MegaContext::new(&mut db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::from(0));
+            chain.operator_fee_constant = Some(U256::from(0));
+        });
+        let mut evm = MegaEvm::new(context);
+        let tx = TxEnvBuilder::default().call(contract).gas_limit(1_000_000_000).build_fill();
+        let mut tx = MegaTransaction::new(tx);
+        tx.enveloped_tx = Some(Bytes::new());
+        alloy_evm::Evm::transact_raw(&mut evm, tx)
+    }
+
+    #[test]
+    fn test_assert_stack_value_success() {
+        let mut builder = BytecodeBuilder::default().push_number(0x2333u64);
+        builder = builder.assert_stack_value(0, U256::from(0x2333u64));
+        let bytecode = builder.build();
+        let result = execute_bytecode(bytecode);
+        assert!(result.unwrap().result.is_success(), "Transaction should succeed");
+    }
+
+    #[test]
+    fn test_assert_stack_value_failure() {
+        let mut builder = BytecodeBuilder::default().push_number(0x2333u64);
+        builder = builder.assert_stack_value(0, U256::from(0x9999u64));
+        let bytecode = builder.build();
+        let result = execute_bytecode(bytecode);
+        assert!(result.unwrap().result.is_halt(), "Transaction should fail");
     }
 }

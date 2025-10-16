@@ -1,7 +1,10 @@
 use core::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, SaltEnv};
+use crate::{
+    AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, OracleEnv, SaltEnv,
+    VolatileDataAccessTracker, MEGA_ORACLE_CONTRACT_ADDRESS,
+};
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
@@ -77,10 +80,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> Host for MegaContext<DB, ExtEnvs> {
                 key: U256,
                 value: U256,
             ) -> Option<StateLoad<SStoreResult>>;
-            fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>>;
             fn tstore(&mut self, address: Address, key: U256, value: U256);
             fn tload(&mut self, address: Address, key: U256) -> U256;
         }
+    }
+
+    fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
+        if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == MEGA_ORACLE_CONTRACT_ADDRESS {
+            // if the oracle env provides a value, return it. Otherwise, fallback to the inner
+            // context.
+            if let Some(value) = self.oracle_env.borrow().get_oracle_storage(key) {
+                return Some(StateLoad::new(value, true));
+            }
+        }
+        self.inner.sload(address, key)
     }
 
     fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
@@ -118,6 +131,9 @@ pub trait HostExt: Host {
 
     /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error>;
+
+    /// Gets the volatile data tracker. Only used when the `MINI_REX` spec is enabled.
+    fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>>;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
@@ -139,5 +155,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
     fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
         self.dynamic_gas_cost.borrow_mut().new_account_gas(address)
+    }
+
+    #[inline]
+    fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>> {
+        &self.volatile_data_tracker
     }
 }

@@ -11,7 +11,7 @@ use alloy_eips::{
 };
 use alloy_primitives::{address, bytes, Address, Bytes, B256, U256};
 use mega_evm::{
-    test_utils::{opcode_gen::BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, MemoryDatabase},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, STORAGE_SLOT_WRITE_SIZE,
 };
