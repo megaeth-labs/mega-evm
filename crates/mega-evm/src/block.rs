@@ -88,6 +88,16 @@ impl<ChainSpec, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<ChainSpec, EvmF, 
     pub fn new(spec: ChainSpec, evm_factory: EvmF, receipt_builder: ReceiptBuilder) -> Self {
         Self { receipt_builder, spec, evm_factory }
     }
+
+    /// Returns a reference to the EVM factory.
+    pub fn evm_factory_ref(&self) -> &EvmF {
+        &self.evm_factory
+    }
+
+    /// Returns a mutable reference to the EVM factory.
+    pub fn evm_factory_mut(&mut self) -> &mut EvmF {
+        &mut self.evm_factory
+    }
 }
 
 impl<ChainSpec, EvmF, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
@@ -107,7 +117,7 @@ where
     type Receipt = ReceiptBuilder::Receipt;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
-        &self.evm_factory
+        self.evm_factory_ref()
     }
 
     fn create_executor<'a, DB, I>(
