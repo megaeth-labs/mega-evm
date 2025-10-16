@@ -116,6 +116,16 @@ impl<ExtEnvs> MegaEvmFactory<ExtEnvs> {
     pub fn new(external_envs: ExtEnvs) -> Self {
         Self { external_envs }
     }
+
+    /// Provides a reference to the external environments.
+    pub fn external_envs_ref(&self) -> &ExtEnvs {
+        &self.external_envs
+    }
+
+    /// Provides a mutable reference to the external environments.
+    pub fn external_envs_mut(&mut self) -> &mut ExtEnvs {
+        &mut self.external_envs
+    }
 }
 
 impl<ExtEnvs> alloy_evm::EvmFactory for MegaEvmFactory<ExtEnvs>
