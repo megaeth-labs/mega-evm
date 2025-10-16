@@ -10,7 +10,7 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, GAS, KECCAK256, MSTORE, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, SLOAD,
+        CALL, GAS, MSTORE, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, SLOAD, SSTORE,
     },
     context::TxEnv,
 };
@@ -38,7 +38,7 @@ fn execute_transaction(
         kind: TxKind::Call(target),
         data: Default::default(),
         value: U256::ZERO,
-        gas_limit: 1_000_000,
+        gas_limit: 1_000_000_000,
         ..Default::default()
     };
     let mut tx = MegaTransaction::new(tx);
@@ -291,14 +291,13 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
         .append(GAS)
         .append(CALL);
     // After the call returns, the left gas is limited to 10k
-    // Try to execute 1000 KECCAK256 operations (each costs ~30-60 gas minimum)
+    // Try to execute 1000000 SSTORE operations (each costs 5000 gas minimum)
     // This should run out of gas partway through
-    for i in 0..1000 {
+    for i in 0..1000000 {
         builder = builder
-            .push_number(32u8) // size: 32 bytes
-            .push_number(i as u8) // offset: varying offset to avoid optimization
-            .append(KECCAK256)
-            .append(PUSH0); // pop the result
+            .push_number(i as u32) // offset: varying offset to avoid optimization
+            .push_number(0u32) // size: 32 bytes
+            .append(SSTORE);
     }
     let intermediate_code = builder.stop().build();
 
@@ -314,10 +313,11 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
         .push_address(INTERMEDIATE_CONTRACT)
         .append(GAS)
         .append(CALL);
-    let main_code = builder.append(SLOAD).stop().build();
+    let main_code = builder.append_many([SLOAD, SLOAD, SLOAD, SLOAD, SLOAD, SLOAD]).stop().build();
 
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, main_code);
+    db.set_account_storage(INTERMEDIATE_CONTRACT, U256::ZERO, U256::from(0x2333u64));
     db.set_account_code(INTERMEDIATE_CONTRACT, intermediate_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
@@ -403,14 +403,13 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
     // Since calling the oracle immediately limits gas to 10k, the oracle's own code
     // should run out of gas when trying to execute too many operations
     let mut builder = BytecodeBuilder::default();
-    // Try to execute 1000 KECCAK256 operations (each costs ~30-60 gas minimum)
+    // Try to execute 1000000 SSTORE operations (each costs 100 gas minimum)
     // With only 10k gas limit, this should run out of gas partway through
-    for i in 0..1000 {
+    for i in 0..1000000 {
         builder = builder
-            .push_number(32u8) // size: 32 bytes
-            .push_number(i as u8) // offset: varying offset to avoid optimization
-            .append(KECCAK256)
-            .append(PUSH0); // pop the result
+            .push_number(i as u32) // offset: varying offset to avoid optimization
+            .push_number(0u32) // size: 32 bytes
+            .append(SSTORE);
     }
     let oracle_code = builder.stop().build();
 
@@ -421,12 +420,13 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
         .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS)
         .append(CALL)
-        .append(SLOAD)
+        .append_many([SLOAD, SLOAD, SLOAD, SLOAD, SLOAD, SLOAD])
         .stop()
         .build();
 
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, main_code);
+    db.set_account_storage(MEGA_ORACLE_CONTRACT_ADDRESS, U256::ZERO, U256::from(0x2333u64));
     db.set_account_code(MEGA_ORACLE_CONTRACT_ADDRESS, oracle_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();

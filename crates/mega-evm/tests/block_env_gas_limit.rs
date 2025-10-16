@@ -95,16 +95,16 @@ fn test_timestamp_limits_gas() {
 
     let mut gas_inspector = GasInspector::new();
     let (success, gas_used, _gas_remaining) =
-        execute_bytecode_with_inspector(&mut db, 1_000_000, &mut gas_inspector);
+        execute_bytecode_with_inspector(&mut db, 1_000_000_000, &mut gas_inspector);
 
     assert!(success, "Transaction should succeed");
     // With detained gas restoration, gas_used should be much less than gas_limit
     // The contract does minimal work (TIMESTAMP, MSTORE, RETURN), so should use < 30K gas
-    // If detained gas wasn't restored, gas_used would be ~990K
+    // If detained gas wasn't restored, gas_used would be ~999M
     assert!(
         gas_used < 30_000,
         "gas_used should only reflect real work after TIMESTAMP limiting, but got {}. \
-         If > 900K, detained gas was not restored.",
+         If > 900M, detained gas was not restored.",
         gas_used
     );
 
@@ -143,7 +143,7 @@ fn test_number_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -167,7 +167,7 @@ fn test_coinbase_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -191,7 +191,7 @@ fn test_difficulty_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -215,7 +215,7 @@ fn test_gaslimit_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -239,7 +239,7 @@ fn test_basefee_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -263,7 +263,7 @@ fn test_blockhash_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -291,7 +291,7 @@ fn test_multiple_block_env_accesses() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(success);
     // After first block env access, gas should be limited (verified by small gas_used)
@@ -326,7 +326,7 @@ fn test_block_env_access_with_nested_calls() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     // With limited gas, the loop completes with minimal gas used (due to detained gas)
     assert!(
@@ -352,7 +352,7 @@ fn test_no_gas_limit_without_block_env_access() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let gas_limit = 1_000_000;
+    let gas_limit = 2_000_000;
     let mut gas_inspector = GasInspector::new();
     let (success, _gas_used, gas_remaining) =
         execute_bytecode_with_inspector(&mut db, gas_limit, &mut gas_inspector);
@@ -430,7 +430,7 @@ fn test_gas_limit_tracked_correctly() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -462,7 +462,7 @@ fn test_block_env_access_before_call() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     // The CALL should get limited gas, resulting in small total gas_used
     assert!(
@@ -509,16 +509,16 @@ fn test_nested_call_block_env_access_limits_parent_too() {
 
     let mut gas_inspector = GasInspector::new();
     let (success, gas_used, _gas_remaining) =
-        execute_bytecode_with_inspector(&mut db, 1_000_000, &mut gas_inspector);
+        execute_bytecode_with_inspector(&mut db, 1_000_000_000, &mut gas_inspector);
 
     assert!(success, "Transaction should succeed");
     // Top-level transaction should be limited when child accesses block env
     // Parent does minimal work (CALL setup + return), child does minimal work (TIMESTAMP + return)
-    // Total should be < 50K. If > 900K, limiting didn't propagate.
+    // Total should be < 50K. If > 900M, limiting didn't propagate.
     assert!(
         gas_used < 50_000,
         "Top-level transaction should be limited when child accesses block env. gas_used: {}. \
-         If > 900K, gas limiting didn't propagate through nested calls.",
+         If > 900M, gas limiting didn't propagate through nested calls.",
         gas_used
     );
 
@@ -678,7 +678,7 @@ fn test_deeply_nested_call_block_env_access() {
         kind: TxKind::Call(CONTRACT),
         data: Default::default(),
         value: U256::ZERO,
-        gas_limit: 1_000_000,
+        gas_limit: 1_000_000_000,
         ..Default::default()
     };
 
@@ -811,7 +811,7 @@ fn test_nested_call_already_limited_no_further_restriction() {
         .build();
     db.set_account_code(CONTRACT, parent_bytecode);
 
-    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000);
+    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
 
     assert!(success, "Transaction should succeed");
     // Should still be limited (not more restrictive than already imposed limit)
@@ -831,8 +831,8 @@ fn test_detained_gas_is_restored_not_charged() {
     // 4. User only pays for real work, not detained gas
     let mut db = MemoryDatabase::default();
 
-    // Give caller a known balance
-    let initial_balance = U256::from(10_000_000_000u64);
+    // Give caller a known balance (needs to cover gas_limit * gas_price)
+    let initial_balance = U256::from(10_000_000_000_000u128);
     db.set_account_balance(CALLER, initial_balance);
 
     // Contract that accesses TIMESTAMP then does minimal work
@@ -848,7 +848,7 @@ fn test_detained_gas_is_restored_not_charged() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let gas_limit = 1_000_000;
+    let gas_limit = 1_000_000_000;
     let gas_price = 1000u128; // Higher gas price to make differences more visible
 
     let (success, gas_used, _gas_remaining) =
@@ -856,10 +856,10 @@ fn test_detained_gas_is_restored_not_charged() {
 
     assert!(success, "Transaction should succeed");
 
-    // Verify gas_used is small (real work only, not including ~990K detained gas)
+    // Verify gas_used is small (real work only, not including ~999M detained gas)
     assert!(
         gas_used < 30_000,
-        "gas_used should only reflect real work, got {}. If > 900K, detained gas was NOT restored.",
+        "gas_used should only reflect real work, got {}. If > 900M, detained gas was NOT restored.",
         gas_used
     );
 
@@ -875,11 +875,11 @@ fn test_detained_gas_is_restored_not_charged() {
         actual_cost, expected_cost
     );
 
-    // If detained gas was NOT restored, user would pay ~990K * 1000 = 990M units
+    // If detained gas was NOT restored, user would pay ~999M * 1000 = 999B units
     // With restoration, user pays ~20K * 1000 = 20M units
     assert!(
         actual_cost < U256::from(50_000_000u64),
-        "User cost ({}) should be < 50M. If > 900M, detained gas was charged.",
+        "User cost ({}) should be < 50M. If > 900B, detained gas was charged.",
         actual_cost
     );
 }

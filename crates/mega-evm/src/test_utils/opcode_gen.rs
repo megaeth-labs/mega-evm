@@ -63,6 +63,7 @@ impl BytecodeBuilder {
         let bytes = match core::mem::size_of::<T>() {
             1 => (num as u8).to_be_bytes().to_vec(),
             2 => (num as u16).to_be_bytes().to_vec(),
+            4 => (num as u32).to_be_bytes().to_vec(),
             8 => (num as u64).to_be_bytes().to_vec(),
             16 => num.to_be_bytes().to_vec(),
             _ => panic!("Unsupported integer size"),
