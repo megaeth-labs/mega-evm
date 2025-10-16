@@ -17,7 +17,8 @@ use revm::{handler::FrameResult, interpreter::Gas};
 ///
 /// # Key Properties
 ///
-/// - **Global Limit**: The `VOLATILE_DATA_ACCESS_REMAINING_GAS` limit is established once per transaction, not per opcode
+/// - **Global Limit**: The `VOLATILE_DATA_ACCESS_REMAINING_GAS` limit is established once per
+///   transaction, not per opcode
 /// - **Cumulative Tracking**: All detained gas from multiple opcodes is accumulated
 /// - **Cross-Call Consistency**: The global limit applies across nested calls (see
 ///   `update_remained_gas()`)
@@ -191,13 +192,15 @@ impl VolatileDataAccessTracker {
 ///
 /// This struct manages the global gas limit and tracks detained gas across all opcodes
 /// in a transaction. It ensures:
-/// - A single, consistent gas limit (`VOLATILE_DATA_ACCESS_REMAINING_GAS`) applies across all volatile data accesses
+/// - A single, consistent gas limit (`VOLATILE_DATA_ACCESS_REMAINING_GAS`) applies across all
+///   volatile data accesses
 /// - All detained gas is accumulated for later refund
 /// - The remaining gas is updated as the transaction progresses through nested calls
 ///
 /// # Fields
 ///
-/// - `remaining`: Current global gas limit (starts at `VOLATILE_DATA_ACCESS_REMAINING_GAS`, decreases as gas is consumed)
+/// - `remaining`: Current global gas limit (starts at `VOLATILE_DATA_ACCESS_REMAINING_GAS`,
+///   decreases as gas is consumed)
 /// - `detained`: Total amount of gas detained from all opcodes (refunded at transaction end)
 #[derive(Debug, Clone)]
 struct GlobalLimitedGas {
