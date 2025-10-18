@@ -20,10 +20,10 @@ use revm::{
 };
 
 use crate::{
-    constants, is_mega_system_transaction, sent_from_mega_system_address,
-    system_tx::MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, EthHaltReason, ExternalEnvs, HostExt,
-    MegaContext, MegaHaltReason, MegaSpecId, MegaTransactionError,
+    constants, is_mega_system_transaction, sent_from_mega_system_address, EthHaltReason,
+    ExternalEnvs, HostExt, MegaContext, MegaHaltReason, MegaSpecId, MegaTransactionError,
     DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 

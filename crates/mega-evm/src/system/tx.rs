@@ -1,4 +1,4 @@
-//! System transaction utilities for the `MegaETH` EVM.
+//! System transaction for the `MegaETH` EVM.
 //!
 //! This module contains constants, types, and utilities related to mega system transactions.
 

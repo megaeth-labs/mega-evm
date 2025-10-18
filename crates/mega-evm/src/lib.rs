@@ -21,7 +21,7 @@ mod limit;
 mod precompiles;
 mod result;
 mod spec;
-pub mod system_tx;
+mod system;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 mod types;
@@ -39,7 +39,7 @@ pub use limit::*;
 pub use precompiles::*;
 pub use result::*;
 pub use spec::*;
-pub use system_tx::*;
+pub use system::*;
 pub use types::*;
 
 /* Alias of the mega-evm types */

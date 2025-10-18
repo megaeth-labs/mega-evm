@@ -6,12 +6,10 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    is_mega_system_transaction,
-    system_tx::{
-        is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
-    },
+    is_deposit_like_transaction, is_mega_system_transaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
