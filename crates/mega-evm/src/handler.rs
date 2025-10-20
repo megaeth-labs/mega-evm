@@ -81,7 +81,6 @@ where
         let ctx = evm.ctx_mut();
         ctx.on_new_tx();
 
-        // Check if this is a mega system address transaction
         if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
             let tx = ctx.tx();
             if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
@@ -96,6 +95,7 @@ where
                 }
             }
 
+            // Check if this is a mega system address transaction
             let tx = ctx.tx();
             if sent_from_mega_system_address(tx) {
                 // Modify the transaction to make it appear as a deposit transaction
