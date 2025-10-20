@@ -14,5 +14,4 @@ docs/
 .env
 
 # Include artifacts
-!out/MegaProxy.sol/MegaProxy.json
 !out/Oracle.sol/Oracle.json
