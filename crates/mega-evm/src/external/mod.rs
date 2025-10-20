@@ -7,10 +7,13 @@ use alloy_primitives::{BlockNumber, U256};
 use auto_impl::auto_impl;
 use revm::primitives::HashMap;
 
-mod oracle;
-mod salt;
-pub use oracle::*;
-pub use salt::*;
+use crate::{
+    oracle::OracleEnv,
+    salt::{BucketId, SaltEnv},
+};
+
+pub mod oracle;
+pub mod salt;
 
 /// A collection trait that aggregates all external environments needed by the EVM.
 ///

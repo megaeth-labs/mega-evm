@@ -2,8 +2,8 @@ use core::cell::RefCell;
 use std::rc::Rc;
 
 use crate::{
-    AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, OracleEnv, SaltEnv,
-    VolatileDataAccessTracker, MEGA_ORACLE_CONTRACT_ADDRESS,
+    oracle::OracleEnv, salt::SaltEnv, AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext,
+    MegaSpecId, VolatileDataAccessTracker, MEGA_ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
