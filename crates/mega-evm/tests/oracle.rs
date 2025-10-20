@@ -640,3 +640,93 @@ fn test_oracle_storage_sload_direct_call() {
     // Note: Return data verification removed as helper doesn't return output
     // The test still validates that direct calls don't trigger oracle tracking
 }
+
+/// Test that the oracle contract is deployed when mini-rex activates via block executor.
+/// This exercises the deployment logic in block.rs:284-292.
+#[test]
+fn test_oracle_contract_deployed_on_mini_rex_activation() {
+    use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
+    use alloy_op_hardforks::OpChainHardforks;
+    use alloy_primitives::B256;
+    use mega_evm::{
+        MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaSpecId,
+        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH,
+    };
+    use revm::database::State;
+
+    // Create a fresh in-memory database
+    let mut db = MemoryDatabase::default();
+    let mut state = State::builder().with_database(&mut db).build();
+
+    // Create EVM factory and environment
+    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let evm_factory = MegaEvmFactory::new(external_envs);
+
+    // Create EVM environment with MiniRex spec
+    use revm::context::BlockEnv;
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let mut block_env = BlockEnv::default();
+    block_env.number = revm::primitives::U256::from(1000); // Set non-zero block number to avoid overflow
+    block_env.timestamp = revm::primitives::U256::from(1_800_000_000); // High timestamp to ensure Isthmus is active
+    block_env.gas_limit = 30_000_000; // Set reasonable gas limit
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+
+    // Create the EVM instance
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    // Create block execution context with first_mini_rex_block = true
+    let block_ctx = MegaBlockExecutionCtx {
+        parent_hash: B256::ZERO,
+        first_mini_rex_block: true, // This triggers oracle deployment
+        parent_beacon_block_root: Some(B256::ZERO), // Set a beacon block root
+        extra_data: Default::default(),
+    };
+
+    // Try Base mainnet which should have the right hardfork configuration
+    let chain_spec = OpChainHardforks::base_mainnet();
+
+    // Create receipt builder (use concrete OpAlloyReceiptBuilder type)
+    use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+
+    // Create block executor
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    // Call apply_pre_execution_changes which triggers oracle deployment in block.rs:284-292
+    executor.apply_pre_execution_changes().expect("Pre-execution changes should succeed");
+
+    // The oracle deployment changes should be committed to the database
+    // Verify the oracle contract is actually deployed in the database
+    let db_ref = executor.evm_mut().db_mut();
+
+    // Load the oracle contract account from the cache
+    let cache_acc =
+        db_ref.load_cache_account(ORACLE_CONTRACT_ADDRESS).expect("Should be able to load account");
+    let acc_info = cache_acc.account_info().expect("Oracle contract account should exist");
+
+    // Verify code hash matches
+    assert_eq!(
+        acc_info.code_hash, ORACLE_CONTRACT_CODE_HASH,
+        "Oracle contract code hash should match"
+    );
+
+    // Verify code is set and matches
+    assert!(acc_info.code.is_some(), "Code should be set on the account");
+    let deployed_code = acc_info.code.as_ref().unwrap();
+    assert_eq!(
+        deployed_code.original_bytes(),
+        ORACLE_CONTRACT_CODE,
+        "Deployed code should match original code"
+    );
+
+    // Verify that calling deploy_oracle_contract again returns empty state
+    // (proving the contract is already deployed)
+    use mega_evm::deploy_oracle_contract;
+    let result = deploy_oracle_contract(db_ref).expect("Should not error");
+    assert_eq!(
+        result.len(),
+        0,
+        "Oracle should already be deployed, so deploy_oracle_contract should return empty state"
+    );
+}

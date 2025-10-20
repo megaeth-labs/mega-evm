@@ -6,11 +6,12 @@
 //! etc.) immediately limits gas. These restrictions are necessary to prevent `DoS` attacks on the
 //! EVM.
 
-use alloy_primitives::{address, Address};
+use alloy_primitives::Address;
+
+use crate::ORACLE_CONTRACT_ADDRESS;
 
 /// The address of the `MegaETH`'s oracle contract.
-pub const MEGA_ORACLE_CONTRACT_ADDRESS: Address =
-    address!("0x4200000000000000000000000000000000000101");
+pub const MEGA_ORACLE_CONTRACT_ADDRESS: Address = ORACLE_CONTRACT_ADDRESS;
 
 /// A tracker for oracle data access.
 #[derive(Default, Debug, Clone)]

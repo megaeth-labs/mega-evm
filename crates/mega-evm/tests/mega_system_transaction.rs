@@ -6,12 +6,10 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    is_mega_system_transaction,
-    system_tx::{
-        is_deposit_like_transaction, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
-    },
+    is_deposit_like_transaction, is_mega_system_transaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
@@ -29,7 +27,7 @@ const BENEFICIARY: Address = address!("0000000000000000000000000000000000BEEF01"
 const NON_WHITELISTED_ADDR: Address = address!("0000000000000000000000000000000000DEAD01");
 
 // Whitelisted address from MEGA_SYSTEM_TX_WHITELIST
-const WHITELISTED_ADDR: Address = address!("4200000000000000000000000000000000000101");
+const WHITELISTED_ADDR: Address = ORACLE_CONTRACT_ADDRESS;
 
 /// Creates a test EVM instance with the provided database.
 fn create_evm(db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector, DefaultExternalEnvs> {
