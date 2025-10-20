@@ -55,6 +55,8 @@ use revm::{
     DatabaseCommit, Inspector,
 };
 
+use crate::deploy_oracle_contract;
+
 /// `MegaETH` receipt builder type.
 pub trait MegaReceiptBuilder: OpReceiptBuilder {}
 impl<T: OpReceiptBuilder> MegaReceiptBuilder for T {}
@@ -217,16 +219,16 @@ where
         // do some safety check on hardforks
         let timestamp = evm.block().timestamp.saturating_to();
         assert!(
-            spec.is_isthmus_active_at_timestamp(timestamp),
-            "mega-evm assumes Isthmus hardfork is always active"
+            spec.is_regolith_active_at_timestamp(timestamp),
+            "mega-evm assumes Regolith hardfork is not active"
         );
         assert!(
             spec.is_canyon_active_at_timestamp(timestamp),
             "mega-evm assumes Canyon hardfork is always active"
         );
         assert!(
-            !spec.is_regolith_active_at_timestamp(timestamp),
-            "mega-evm assumes Regolith hardfork is not active"
+            spec.is_isthmus_active_at_timestamp(timestamp),
+            "mega-evm assumes Isthmus hardfork is always active"
         );
         Self {
             ctx,
@@ -276,6 +278,21 @@ where
         // In MegaETH, the Isthmus hardfork is always active, which means the Canyon hardfork has
         // already activated and the create2 deployer is already deployed, so we can safely assume
         // that `ensure_create2_deployer` function will never be called.
+
+        // If the current block is the first block activating MiniRex hardfork, we need to deploy
+        // oracle contract.
+        if self.ctx.first_mini_rex_block {
+            let state = deploy_oracle_contract(self.evm_mut().db_mut())
+                .map_err(BlockExecutionError::other)?;
+            // Invoke the state hook with state changes. We tentatively use
+            // `StateChangeSource::Transaction(0)` as state change source as there is no specific
+            // source defined for this oracle contract in alloy. This may change in the
+            // future.
+            self.system_caller.on_state(StateChangeSource::Transaction(0), &state);
+
+            // commit changes to database
+            self.evm.db_mut().commit(state);
+        }
 
         Ok(())
     }
@@ -360,12 +377,8 @@ where
                         // update to how receipt hashes should be computed
                         // when set. The state transition process ensures
                         // this is only set for post-Canyon deposit
-                        // transactions.
-                        deposit_receipt_version: (is_deposit &&
-                            self.chain_spec.is_canyon_active_at_timestamp(
-                                self.evm.block().timestamp.saturating_to(),
-                            ))
-                        .then_some(1),
+                        // transactions. In MegaETH, Canyon is always active.
+                        deposit_receipt_version: is_deposit.then_some(1),
                     })
                 }
             },

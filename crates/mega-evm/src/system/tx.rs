@@ -6,7 +6,7 @@ use alloy_primitives::{address, b256, Address, TxKind, B256};
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::context::Transaction;
 
-use crate::types::MegaTransaction;
+use crate::{types::MegaTransaction, ORACLE_CONTRACT_ADDRESS};
 
 /// The `MegaETH` system address for deposit-like transaction processing.
 /// Normal transactions sent from this address are processed as deposit transactions,
@@ -16,10 +16,7 @@ use crate::types::MegaTransaction;
 pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The whitelist of addresses that are allowed to be called by the `MegaETH` system address.
-pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[
-    // High-precision timestamp oracle pre-deployed contract
-    address!("0x4200000000000000000000000000000000000101"),
-];
+pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[ORACLE_CONTRACT_ADDRESS];
 
 /// The source hash of the `MegaETH` system transaction, used to set the `source_hash` field of the
 /// op deposit info. The value is `keccak256("MEGA_SYSTEM_TRANSACTION")`.
