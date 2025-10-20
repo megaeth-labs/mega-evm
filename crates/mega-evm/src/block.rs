@@ -28,24 +28,36 @@
 //! - Support for parallel execution through access tracking
 //! - Optimized gas calculations for modified opcodes
 
+use std::borrow::Cow;
+
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
-use alloy_consensus::{Transaction, TxReceipt};
-use alloy_eips::Encodable2718;
+use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
+use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::{
     block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutorFor, CommitChanges, ExecutableTx,
+        state_changes::{balance_increment_state, post_block_balance_increments},
+        BlockExecutionError, BlockExecutionResult, BlockExecutorFor, BlockValidationError,
+        CommitChanges, ExecutableTx, OnStateHook, StateChangePostBlockSource, StateChangeSource,
+        SystemCaller,
     },
+    eth::receipt_builder::ReceiptBuilderCtx,
     Database, FromRecoveredTx, FromTxWithEncoded,
 };
-use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, OpBlockExecutor};
+use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_op_hardforks::OpHardforks;
-use delegate::delegate;
-use revm::{context::result::ExecutionResult, database::State, Inspector};
+use alloy_primitives::{Bytes, B256};
+use op_alloy_consensus::OpDepositReceipt;
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+use revm::{
+    context::result::{ExecutionResult, ResultAndState},
+    database::State,
+    DatabaseCommit, Inspector,
+};
 
-/// Block execution context for the `MegaETH` chain, aliasing the Optimism block execution
-/// context.
-pub type BlockExecutionCtx = alloy_op_evm::block::OpBlockExecutionCtx;
+/// `MegaETH` receipt builder type.
+pub trait MegaReceiptBuilder: OpReceiptBuilder {}
+impl<T: OpReceiptBuilder> MegaReceiptBuilder for T {}
 
 /// `MegaETH` block executor factory.
 ///
@@ -112,7 +124,7 @@ where
     Self: 'static,
 {
     type EvmFactory = EvmF;
-    type ExecutionCtx<'a> = BlockExecutionCtx;
+    type ExecutionCtx<'a> = MegaBlockExecutionCtx;
     type Transaction = ReceiptBuilder::Transaction;
     type Receipt = ReceiptBuilder::Receipt;
 
@@ -131,6 +143,19 @@ where
     {
         MegaBlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
     }
+}
+
+/// Block execution context for the `MegaETH` chain.
+#[derive(Debug, Clone)]
+pub struct MegaBlockExecutionCtx {
+    /// Parent block hash.
+    pub parent_hash: B256,
+    /// Whether this is the first block of MiniRex spec
+    pub first_mini_rex_block: bool,
+    /// Parent beacon block root.
+    pub parent_beacon_block_root: Option<B256>,
+    /// The block's extra data.
+    pub extra_data: Bytes,
 }
 
 /// Block executor for the `MegaETH` chain.
@@ -153,7 +178,15 @@ where
 /// The delegation ensures minimal overhead while maintaining full compatibility with
 /// the Optimism EVM infrastructure.
 pub struct MegaBlockExecutor<C, E, R: OpReceiptBuilder> {
-    inner: OpBlockExecutor<E, R, C>,
+    chain_spec: C,
+    receipt_builder: R,
+    ctx: MegaBlockExecutionCtx,
+    evm: E,
+
+    system_caller: SystemCaller<C>,
+
+    receipts: Vec<R::Receipt>,
+    gas_used: u64,
 }
 
 impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> {
@@ -180,8 +213,30 @@ where
     /// # Returns
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
-    pub fn new(evm: E, ctx: BlockExecutionCtx, spec: C, receipt_builder: R) -> Self {
-        Self { inner: OpBlockExecutor::new(evm, ctx, spec, receipt_builder) }
+    pub fn new(evm: E, ctx: MegaBlockExecutionCtx, spec: C, receipt_builder: R) -> Self {
+        // do some safety check on hardforks
+        let timestamp = evm.block().timestamp.saturating_to();
+        assert!(
+            spec.is_isthmus_active_at_timestamp(timestamp),
+            "mega-evm assumes Isthmus hardfork is always active"
+        );
+        assert!(
+            spec.is_canyon_active_at_timestamp(timestamp),
+            "mega-evm assumes Canyon hardfork is always active"
+        );
+        assert!(
+            !spec.is_regolith_active_at_timestamp(timestamp),
+            "mega-evm assumes Regolith hardfork is not active"
+        );
+        Self {
+            ctx,
+            chain_spec: spec.clone(),
+            receipt_builder,
+            receipts: Vec::new(),
+            gas_used: 0,
+            evm,
+            system_caller: SystemCaller::new(spec.clone()),
+        }
     }
 }
 
@@ -206,18 +261,164 @@ where
 
     type Evm = E;
 
-    delegate! {
-        to self.inner {
-            fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError>;
-            fn execute_transaction_with_commit_condition(
-                &mut self,
-                tx: impl ExecutableTx<Self>,
-                f: impl FnOnce(&ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>) -> CommitChanges,
-            ) -> Result<Option<u64>, BlockExecutionError>;
-            fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError>;
-            fn set_state_hook(&mut self, hook: Option<Box<dyn alloy_evm::block::OnStateHook>>);
-            fn evm_mut(&mut self) -> &mut Self::Evm;
-            fn evm(&self) -> &Self::Evm;
+    /// NOTE: this function resembles the one in
+    /// `alloy_op_evm::OpBlockExecutor::apply_pre_execution_changes`. Changes there should be
+    /// synced.
+    fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        // In MegaETH, the Spurious Dragon hardfork is always active, so we can safely set the state
+        // clear flag to true.
+        self.evm.db_mut().set_state_clear_flag(true);
+
+        self.system_caller.apply_blockhashes_contract_call(self.ctx.parent_hash, &mut self.evm)?;
+        self.system_caller
+            .apply_beacon_root_contract_call(self.ctx.parent_beacon_block_root, &mut self.evm)?;
+
+        // In MegaETH, the Isthmus hardfork is always active, which means the Canyon hardfork has
+        // already activated and the create2 deployer is already deployed, so we can safely assume
+        // that `ensure_create2_deployer` function will never be called.
+
+        Ok(())
+    }
+
+    /// NOTE: this function resembles the one in
+    /// `alloy_op_evm::OpBlockExecutor::execute_transaction_with_commit_condition`. Changes there
+    /// should be synced.
+    fn execute_transaction_with_commit_condition(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+        f: impl FnOnce(&ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>) -> CommitChanges,
+    ) -> Result<Option<u64>, BlockExecutionError> {
+        let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
+
+        // The sum of the transaction’s gas limit, Tg, and the gas utilized in this block prior,
+        // must be no greater than the block’s gasLimit.
+        let block_available_gas = self.evm.block().gas_limit - self.gas_used;
+        // In MegaETH, the Regolith hardfork is not active, so we can safely assume that the
+        // transaction gas limit is always less than the block's gas limit.
+        if tx.tx().gas_limit() > block_available_gas {
+            return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                transaction_gas_limit: tx.tx().gas_limit(),
+                block_available_gas,
+            }
+            .into());
         }
+
+        // Cache the depositor account prior to the state transition for the deposit nonce.
+        //
+        // Note that in MegaETH, the Regolith hardfork is always active, so we always have deposit
+        // nonces. In addition, regular transactions don't have deposit
+        // nonces, so we don't need to touch the DB for those.
+        let depositor = is_deposit
+            .then(|| {
+                self.evm
+                    .db_mut()
+                    .load_cache_account(*tx.signer())
+                    .map(|acc| acc.account_info().unwrap_or_default())
+            })
+            .transpose()
+            .map_err(BlockExecutionError::other)?;
+
+        let hash = tx.tx().trie_hash();
+
+        // Execute transaction.
+        let ResultAndState { result, state } =
+            self.evm.transact(tx).map_err(move |err| BlockExecutionError::evm(err, hash))?;
+
+        if !f(&result).should_commit() {
+            return Ok(None);
+        }
+
+        self.system_caller.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
+
+        let gas_used = result.gas_used();
+
+        // append gas used
+        self.gas_used += gas_used;
+
+        self.receipts.push(
+            match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
+                tx: tx.tx(),
+                result,
+                cumulative_gas_used: self.gas_used,
+                evm: &self.evm,
+                state: &state,
+            }) {
+                Ok(receipt) => receipt,
+                Err(ctx) => {
+                    let receipt = alloy_consensus::Receipt {
+                        // Success flag was added in `EIP-658: Embedding transaction status code
+                        // in receipts`.
+                        status: Eip658Value::Eip658(ctx.result.is_success()),
+                        cumulative_gas_used: self.gas_used,
+                        logs: ctx.result.into_logs(),
+                    };
+
+                    self.receipt_builder.build_deposit_receipt(OpDepositReceipt {
+                        inner: receipt,
+                        deposit_nonce: depositor.map(|account| account.nonce),
+                        // The deposit receipt version was introduced in Canyon to indicate an
+                        // update to how receipt hashes should be computed
+                        // when set. The state transition process ensures
+                        // this is only set for post-Canyon deposit
+                        // transactions.
+                        deposit_receipt_version: (is_deposit &&
+                            self.chain_spec.is_canyon_active_at_timestamp(
+                                self.evm.block().timestamp.saturating_to(),
+                            ))
+                        .then_some(1),
+                    })
+                }
+            },
+        );
+
+        self.evm.db_mut().commit(state);
+
+        Ok(Some(gas_used))
+    }
+
+    /// NOTE: this function resembles the one in
+    /// `alloy_op_evm::OpBlockExecutor::finish`. Changes there should be
+    /// synced.
+    fn finish(
+        mut self,
+    ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
+        let balance_increments =
+            post_block_balance_increments::<Header>(&self.chain_spec, self.evm.block(), &[], None);
+        // increment balances
+        self.evm
+            .db_mut()
+            .increment_balances(balance_increments.clone())
+            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+        // call state hook with changes due to balance increments.
+        self.system_caller.try_on_state_with(|| {
+            balance_increment_state(&balance_increments, self.evm.db_mut()).map(|state| {
+                (
+                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
+                    Cow::Owned(state),
+                )
+            })
+        })?;
+
+        let gas_used = self.receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or_default();
+        Ok((
+            self.evm,
+            BlockExecutionResult {
+                receipts: self.receipts,
+                requests: Default::default(),
+                gas_used,
+            },
+        ))
+    }
+
+    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
+        self.system_caller.with_state_hook(hook);
+    }
+
+    fn evm_mut(&mut self) -> &mut Self::Evm {
+        &mut self.evm
+    }
+
+    fn evm(&self) -> &Self::Evm {
+        &self.evm
     }
 }
