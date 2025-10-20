@@ -150,7 +150,7 @@ where
 pub struct MegaBlockExecutionCtx {
     /// Parent block hash.
     pub parent_hash: B256,
-    /// Whether this is the first block of MiniRex spec
+    /// Whether this is the first block of `MiniRex` spec
     pub first_mini_rex_block: bool,
     /// Parent beacon block root.
     pub parent_beacon_block_root: Option<B256>,
@@ -235,7 +235,7 @@ where
             receipts: Vec::new(),
             gas_used: 0,
             evm,
-            system_caller: SystemCaller::new(spec.clone()),
+            system_caller: SystemCaller::new(spec),
         }
     }
 }
