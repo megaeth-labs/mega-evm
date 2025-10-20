@@ -159,7 +159,7 @@ codegen-units = 1
 # megaeth 
 mega-evm = { path = "./crates/mega-evm" }
 state-test = { path = "./crates/state-test" }
-salt = { git = "https://github.com/megaeth-labs/salt.git", rev = "f175203391f93331d92036d831cdbe18973bee2d" }
+salt = { git = "https://github.com/megaeth-labs/salt.git", rev = "10efc47cf172d69f47d72e4010bca2ec38efb7b8" }
 
 # revm
 revm = { version = "27.1.0", default-features = false }
