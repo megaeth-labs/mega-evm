@@ -10,9 +10,6 @@ use alloy_primitives::Address;
 
 use crate::ORACLE_CONTRACT_ADDRESS;
 
-/// The address of the `MegaETH`'s oracle contract.
-pub const MEGA_ORACLE_CONTRACT_ADDRESS: Address = ORACLE_CONTRACT_ADDRESS;
-
 /// A tracker for oracle data access.
 #[derive(Default, Debug, Clone)]
 pub struct OracleAccessTracker {
@@ -28,7 +25,7 @@ impl OracleAccessTracker {
     /// Checks if the given address is the oracle contract address. If so, it will mark that the
     /// oracle has been accessed and returns true.
     pub fn check_and_mark_oracle_access(&mut self, address: &Address) -> bool {
-        if address == &MEGA_ORACLE_CONTRACT_ADDRESS {
+        if address == &ORACLE_CONTRACT_ADDRESS {
             self.accessed = true;
             true
         } else {

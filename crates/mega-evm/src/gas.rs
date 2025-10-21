@@ -4,10 +4,7 @@ use std::collections::hash_map::Entry;
 use alloy_primitives::{Address, BlockNumber, B256, U256};
 use revm::{context::BlockEnv, primitives::HashMap};
 
-use crate::{
-    constants,
-    salt::{BucketId, SaltEnv},
-};
+use crate::{constants, BucketId, SaltEnv};
 
 /// Calculator for dynamic gas costs based on bucket capacity.
 #[derive(Debug)]
