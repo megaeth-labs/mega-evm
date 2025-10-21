@@ -6,7 +6,7 @@ use mega_evm::{
     constants::mini_rex::VOLATILE_DATA_ACCESS_REMAINING_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-    MEGA_ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{
@@ -69,7 +69,7 @@ fn test_oracle_access_detected_on_call() {
     let bytecode = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
         .push_number(0u8) // value: 0 wei
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS)
         .append(CALL)
         .stop()
@@ -135,7 +135,7 @@ fn test_oracle_access_not_detected_in_equivalence_spec() {
     let bytecode = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
         .push_number(0u8) // value: 0 wei
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS)
         .append(CALL)
         .stop()
@@ -159,7 +159,7 @@ fn test_oracle_access_detected_with_explicit_zero_value() {
     let bytecode = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
         .push_number(0u8) // value: 0 wei (explicit)
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS)
         .append(CALL)
         .stop()
@@ -182,11 +182,11 @@ fn test_oracle_access_detected_on_multiple_calls() {
     let bytecode = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
         .push_number(0u8) // value: 0 wei
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS)
         .append(CALL)
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args again
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract again
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract again
         .append(GAS)
         .append(CALL)
         .stop()
@@ -212,7 +212,7 @@ fn test_oracle_access_limits_parent_gas() {
     let intermediate_code = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
         .push_number(0u8) // value: 0 wei
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS)
         .append(CALL)
         .push_number(0u8)
@@ -264,7 +264,7 @@ fn test_oracle_access_limits_parent_gas() {
             } else {
                 match &node.borrow().meta {
                     MsgCallMeta::Call(call_inputs) => {
-                        if call_inputs.target_address == MEGA_ORACLE_CONTRACT_ADDRESS {
+                        if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
                             accessed = true;
                         }
                     }
@@ -287,7 +287,7 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
     builder = builder
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
         .push_number(0u8)
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS)
+        .push_address(ORACLE_CONTRACT_ADDRESS)
         .append(GAS)
         .append(CALL);
     // After the call returns, the left gas is limited to 10k
@@ -417,7 +417,7 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
     let main_code = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
         .push_number(0u8) // value: 0 wei
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS)
         .append(CALL)
         .append_many([SLOAD, SLOAD, SLOAD, SLOAD, SLOAD, SLOAD])
@@ -426,8 +426,8 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
 
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, main_code);
-    db.set_account_storage(MEGA_ORACLE_CONTRACT_ADDRESS, U256::ZERO, U256::from(0x2333u64));
-    db.set_account_code(MEGA_ORACLE_CONTRACT_ADDRESS, oracle_code);
+    db.set_account_storage(ORACLE_CONTRACT_ADDRESS, U256::ZERO, U256::from(0x2333u64));
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
     let mut gas_inspector = GasInspector::new();
@@ -455,7 +455,7 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
         |_node_location, node, _item_location, item| {
             match &node.borrow().meta {
                 MsgCallMeta::Call(call_inputs) => {
-                    if call_inputs.target_address == MEGA_ORACLE_CONTRACT_ADDRESS {
+                    if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
                         inside_oracle = true;
                     }
                 }
@@ -496,7 +496,7 @@ fn test_oracle_storage_sload_uses_oracle_env() {
         .push_number(0u8) // argsSize for CALL
         .push_number(0u8) // argsOffset for CALL
         .push_number(0u8) // value: 0 wei
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS) // gas
         .append(CALL) // execute the call
         .append(PUSH0) // pop the call result (success/fail)
@@ -514,7 +514,7 @@ fn test_oracle_storage_sload_uses_oracle_env() {
     // Set up the oracle environment with the test storage value
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, main_code);
-    db.set_account_code(MEGA_ORACLE_CONTRACT_ADDRESS, oracle_code);
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new()
         .with_oracle_storage(test_slot, oracle_value);
@@ -559,7 +559,7 @@ fn test_oracle_storage_sload_fallback_to_database() {
         .push_number(0u8) // argsSize for CALL
         .push_number(0u8) // argsOffset for CALL
         .push_number(0u8) // value: 0 wei
-        .push_address(MEGA_ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
+        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
         .append(GAS) // gas
         .append(CALL) // execute the call
         .append(PUSH0) // pop the call result (success/fail)
@@ -577,8 +577,8 @@ fn test_oracle_storage_sload_fallback_to_database() {
     // Set up database with a storage value for the oracle contract
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, main_code);
-    db.set_account_code(MEGA_ORACLE_CONTRACT_ADDRESS, oracle_code);
-    db.set_account_storage(MEGA_ORACLE_CONTRACT_ADDRESS, test_slot, db_value);
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
+    db.set_account_storage(ORACLE_CONTRACT_ADDRESS, test_slot, db_value);
 
     // Create external envs WITHOUT setting oracle storage (so it returns None)
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
@@ -617,7 +617,7 @@ fn test_oracle_storage_sload_direct_call() {
 
     // Set up the oracle environment with the test storage value
     let mut db = MemoryDatabase::default();
-    db.set_account_code(MEGA_ORACLE_CONTRACT_ADDRESS, oracle_code);
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new()
         .with_oracle_storage(test_slot, oracle_value);
@@ -628,7 +628,7 @@ fn test_oracle_storage_sload_direct_call() {
         &mut db,
         &external_envs,
         None,
-        MEGA_ORACLE_CONTRACT_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS,
     );
 
     // Verify the transaction succeeded

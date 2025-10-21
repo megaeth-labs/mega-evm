@@ -1,7 +1,10 @@
-//! The oracle system contract for the `MegaETH` EVM.
+//! The oracle system contract for the `MegaETH` EVM. The oracle contract is implemented in
+//! `../../system-contracts/src/Oracle.sol`.
 
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, bytes, Address, Bytes, B256};
+use alloy_sol_types::sol;
+pub use alloy_sol_types::SolCall;
 use revm::{
     database::State,
     state::{Bytecode, EvmState},
@@ -18,6 +21,16 @@ pub const ORACLE_CONTRACT_CODE: Bytes =
 /// The code hash of the oracle contract.
 pub const ORACLE_CONTRACT_CODE_HASH: B256 =
     b256!("0x76d9dee8ee8b8353378ede74ddd42258907f7eccce4691c37ac7d69d4ef4e0a8");
+
+sol! {
+    /// The Solidity interface for the oracle contract.
+    interface Oracle {
+        function getSlot(bytes32 slot) external view returns (bytes32 value);
+        function setSlot(bytes32 slot, bytes32 value) external;
+        function getSlots(bytes32[] calldata slots) external view returns (bytes32[] memory values);
+        function setSlots(bytes32[] calldata slots, bytes32[] calldata values) external;
+    }
+}
 
 /// Deploys the oracle contract in the designated address and returns the state changes. Note that
 /// the database `db` is not modified in this function. The caller is responsible to commit the
