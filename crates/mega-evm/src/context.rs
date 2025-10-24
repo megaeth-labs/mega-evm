@@ -361,11 +361,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
         self.volatile_data_tracker.borrow().get_block_env_accesses()
     }
 
-    /// Resets the block environment access bitmap for new transactions.
+    /// Resets the volatile data access tracker for new transactions.
     ///
-    /// This method clears the tracking of which block environment fields
-    /// have been accessed, preparing the context for a new transaction.
-    pub fn reset_block_env_access(&mut self) {
+    /// This method clears the volatile data access tracker, preparing the context for a new
+    /// transaction.
+    pub fn reset_volatile_data_access(&mut self) {
         self.volatile_data_tracker.borrow_mut().reset();
     }
 
@@ -437,7 +437,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// This method is called when starting a new transaction and resets
     /// block environment access tracking and additional limits.
     pub(crate) fn on_new_tx(&mut self) {
-        self.reset_block_env_access();
+        self.reset_volatile_data_access();
         self.check_tx_beneficiary_access();
 
         // Apply the additional limits only when the `MINI_REX` spec is enabled.

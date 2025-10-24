@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(result1.result.is_success(), "Contract 1 transaction should succeed");
 
     // Reset for next transaction
-    evm.ctx_mut().reset_block_env_access();
+    evm.ctx_mut().reset_volatile_data_access();
     println!("  After reset: no beneficiary access detected\n");
 
     // Test Contract 2 (does NOT access beneficiary)
@@ -142,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(result2.result.is_success(), "Contract 2 transaction should succeed");
 
     // Reset for next transaction
-    evm.ctx_mut().reset_block_env_access();
+    evm.ctx_mut().reset_volatile_data_access();
     println!("  After reset: no beneficiary access detected\n");
 
     // Test Contract 3 (accesses beneficiary balance)

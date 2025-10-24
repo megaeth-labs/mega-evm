@@ -141,7 +141,7 @@ fn test_block_env_tracking_with_evm() {
         }
 
         // Test reset functionality
-        evm.reset_block_env_access();
+        evm.reset_volatile_data_access();
         assert!(
             evm.get_block_env_accesses().is_empty(),
             "Block env access should be reset for {}",

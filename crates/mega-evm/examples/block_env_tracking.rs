@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!accesses1.is_empty(), "Contract 1 should have accessed block env");
 
     // Reset for next transaction
-    evm.reset_block_env_access();
+    evm.reset_volatile_data_access();
     println!("  After reset: {}\n", evm.get_block_env_accesses().is_empty());
 
     // Test Contract 2 (multiple block env accesses)
@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!accesses2.is_empty(), "Contract 2 should have accessed block env");
 
     // Reset for next transaction
-    evm.reset_block_env_access();
+    evm.reset_volatile_data_access();
     println!("  After reset: {}\n", evm.get_block_env_accesses().is_empty());
 
     // Test Contract 3 (does NOT access block env)
