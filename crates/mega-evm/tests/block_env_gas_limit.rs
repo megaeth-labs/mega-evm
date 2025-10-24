@@ -891,7 +891,8 @@ fn test_detained_gas_is_restored_not_charged() {
 ///
 /// # Test Scenario
 ///
-/// 1. A contract that reads BLOCK_NUMBER (triggers volatile data access) and performs SSTORE (2M gas)
+/// 1. A contract that reads BLOCK_NUMBER (triggers volatile data access) and performs SSTORE (2M
+///    gas)
 /// 2. Two consecutive system calls to the same contract
 /// 3. Both calls should behave identically with similar gas usage
 ///
@@ -972,7 +973,6 @@ fn test_system_call_volatile_data_tracker_reset() {
         "Both system calls should consume identical gas, proving the volatile data \
          tracker is reset between calls. First: {} gas, Second: {} gas. \
          Different gas usage indicates the tracker state is persisting across system calls.",
-        gas1,
-        gas2
+        gas1, gas2
     );
 }
