@@ -77,6 +77,27 @@ where
         }
     }
 
+    fn run_system_call(
+        &mut self,
+        evm: &mut Self::Evm,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        // system call does not call `pre_execution` and `post_execution`, so we need to extract
+        // some logic from them.
+        let ctx = evm.ctx_mut();
+        ctx.on_new_tx();
+
+        // dummy values that are not used.
+        let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
+        // call execution and than output.
+        match self
+            .execution(evm, &init_and_floor_gas)
+            .and_then(|exec_result| self.execution_result(evm, exec_result))
+        {
+            out @ Ok(_) => out,
+            Err(e) => self.catch_error(evm, e),
+        }
+    }
+
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
         let ctx = evm.ctx_mut();
         ctx.on_new_tx();
