@@ -3,14 +3,15 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::mini_rex::VOLATILE_DATA_ACCESS_REMAINING_GAS,
+    constants::mini_rex::ORACLE_ACCESS_REMAINING_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{
-        CALL, GAS, MSTORE, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, SLOAD, SSTORE,
+        CALL, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, SLOAD, SSTORE,
+        TIMESTAMP,
     },
     context::TxEnv,
 };
@@ -220,14 +221,14 @@ fn test_oracle_access_limits_parent_gas() {
         .build();
 
     // Create main contract that calls intermediate contract, then executes more opcodes
-    // After the call returns, parent should only have VOLATILE_DATA_ACCESS_REMAINING_GAS left
+    // After the call returns, parent should only have ORACLE_ACCESS_REMAINING_GAS left
     let main_code = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
         .push_number(0u8) // value: 0 wei
         .push_address(INTERMEDIATE_CONTRACT) // callee: intermediate contract
         .append(GAS)
         .append(CALL)
-        // After this call, parent gas should be limited to VOLATILE_DATA_ACCESS_REMAINING_GAS
+        // After this call, parent gas should be limited to ORACLE_ACCESS_REMAINING_GAS
         // Execute a few more opcodes to verify gas limiting persists
         .push_number(42u8)
         .push_number(100u8)
@@ -252,14 +253,14 @@ fn test_oracle_access_limits_parent_gas() {
     assert!(oracle_accessed, "Oracle should have been accessed");
 
     // Check that after the call to oracle address, the total gas is limited to
-    // VOLATILE_DATA_ACCESS_REMAINING_GAS
+    // ORACLE_ACCESS_REMAINING_GAS
     let mut accessed = false;
     gas_inspector.trace.as_ref().unwrap().iterate_with(
         |_node_location, node, _item_location, item| {
             if accessed {
                 assert!(
-                    item.borrow().gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
-                    "Gas after oracle access is greater than VOLATILE_DATA_ACCESS_REMAINING_GAS"
+                    item.borrow().gas_after <= ORACLE_ACCESS_REMAINING_GAS,
+                    "Gas after oracle access is greater than ORACLE_ACCESS_REMAINING_GAS"
                 );
             } else {
                 match &node.borrow().meta {
@@ -389,8 +390,8 @@ fn test_no_gas_limiting_without_oracle_access() {
     gas_inspector.trace.as_ref().unwrap().iterate_with(
         |_node_location, _node, _item_location, item| {
             assert!(
-                item.borrow().gas_after > VOLATILE_DATA_ACCESS_REMAINING_GAS,
-                "Gas after oracle access is greater than VOLATILE_DATA_ACCESS_REMAINING_GAS"
+                item.borrow().gas_after > ORACLE_ACCESS_REMAINING_GAS,
+                "Gas after oracle access is greater than ORACLE_ACCESS_REMAINING_GAS"
             );
         },
     );
@@ -463,8 +464,8 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
             }
             if inside_oracle {
                 assert!(
-                    item.borrow().gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
-                    "Gas inside oracle contract should be limited to VOLATILE_DATA_ACCESS_REMAINING_GAS"
+                    item.borrow().gas_after <= ORACLE_ACCESS_REMAINING_GAS,
+                    "Gas inside oracle contract should be limited to ORACLE_ACCESS_REMAINING_GAS"
                 );
             }
         },
@@ -666,10 +667,13 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
     use revm::context::BlockEnv;
     let mut cfg_env = revm::context::CfgEnv::default();
     cfg_env.spec = MegaSpecId::MINI_REX;
-    let mut block_env = BlockEnv::default();
-    block_env.number = revm::primitives::U256::from(1000); // Set non-zero block number to avoid overflow
-    block_env.timestamp = revm::primitives::U256::from(1_800_000_000); // High timestamp to ensure Isthmus is active
-    block_env.gas_limit = 30_000_000; // Set reasonable gas limit
+    let block_env = BlockEnv {
+        number: revm::primitives::U256::from(1000), // Set non-zero block number to avoid overflow
+        timestamp: revm::primitives::U256::from(1_800_000_000), /* High timestamp to ensure
+                                                                 * Isthmus is active */
+        gas_limit: 30_000_000, // Set reasonable gas limit
+        ..Default::default()
+    };
     let evm_env = EvmEnv::new(cfg_env, block_env);
 
     // Create the EVM instance
@@ -729,4 +733,201 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
         0,
         "Oracle should already be deployed, so deploy_oracle_contract should return empty state"
     );
+}
+
+/// Test progressive restriction: accessing block env (20M limit) then oracle (1M limit)
+/// should further restrict gas to 1M.
+#[test]
+fn test_progressive_restriction_block_env_then_oracle() {
+    use mega_evm::constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS;
+
+    // Create a simple oracle contract that returns success
+    let oracle_code =
+        BytecodeBuilder::default().push_number(0u8).push_number(0u8).append(RETURN).build();
+
+    // Main contract that:
+    // 1. Accesses TIMESTAMP (limits gas to 20M)
+    // 2. Calls oracle (should further limit to 1M)
+    // 3. Records gas before and after
+    let main_code = BytecodeBuilder::default()
+        // Record gas before TIMESTAMP
+        .append(GAS)
+        .push_number(0u8)
+        .append(MSTORE)
+        // Access block env - limits to 20M
+        .append(TIMESTAMP)
+        .append(POP)
+        // Record gas after TIMESTAMP (should be ≤ 20M)
+        .append(GAS)
+        .push_number(0x20u8)
+        .append(MSTORE)
+        // Call oracle - should further limit to 1M
+        .push_number(0u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(0u8) // argsSize
+        .push_number(0u8) // argsOffset
+        .push_number(0u8) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS) // pass all available gas
+        .append(CALL)
+        .append(POP)
+        // Record gas after oracle call (should be ≤ 1M)
+        .append(GAS)
+        .push_number(0x40u8)
+        .append(MSTORE)
+        // Return all recorded gas values
+        .push_number(0x60u8)
+        .push_number(0u8)
+        .append(RETURN)
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CALLEE, main_code);
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
+
+    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let mut gas_inspector = GasInspector::new();
+
+    let (oracle_accessed, success, _gas_used) = execute_transaction(
+        MegaSpecId::MINI_REX,
+        &mut db,
+        &external_envs,
+        Some(&mut gas_inspector),
+        CALLEE,
+    );
+
+    assert!(success, "Transaction should succeed");
+    assert!(oracle_accessed, "Oracle should have been accessed");
+
+    // Verify progressive restriction in the trace:
+    // After TIMESTAMP, gas should be ≤ 20M
+    // After CALL to oracle, gas should be ≤ 1M
+    let mut after_timestamp = false;
+    let mut after_oracle_call = false;
+
+    gas_inspector.trace.as_ref().unwrap().iterate_with(
+        |_node_location, node, _item_location, item| {
+            // Check if we've passed TIMESTAMP opcode
+            if item.borrow().opcode == TIMESTAMP {
+                after_timestamp = true;
+            }
+            // Check if we've passed CALL to oracle
+            match &node.borrow().meta {
+                MsgCallMeta::Call(call_inputs) => {
+                    if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
+                        after_oracle_call = true;
+                    }
+                }
+                MsgCallMeta::Create(_) => {}
+            }
+
+            // After TIMESTAMP but before oracle, gas should be ≤ 20M
+            if after_timestamp && !after_oracle_call {
+                assert!(
+                    item.borrow().gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
+                    "After TIMESTAMP, gas should be limited to BLOCK_ENV_ACCESS_REMAINING_GAS \
+                     (20M), got {}",
+                    item.borrow().gas_after
+                );
+            }
+
+            // After oracle call, gas should be ≤ 1M (progressive restriction)
+            if after_oracle_call {
+                assert!(
+                    item.borrow().gas_after <= ORACLE_ACCESS_REMAINING_GAS,
+                    "After oracle access, gas should be progressively restricted to \
+                     ORACLE_ACCESS_REMAINING_GAS (1M), got {}",
+                    item.borrow().gas_after
+                );
+            }
+        },
+    );
+
+    // Ensure we actually tested the progressive restriction
+    assert!(after_timestamp, "Should have executed TIMESTAMP");
+    assert!(after_oracle_call, "Should have called oracle");
+}
+
+/// Test order independence: accessing oracle (1M limit) then block env (20M limit)
+/// should result in the same 1M final limit.
+#[test]
+fn test_order_independent_oracle_then_block_env() {
+    // Create a simple oracle contract that accesses TIMESTAMP before returning
+    let oracle_code = BytecodeBuilder::default()
+        .append(TIMESTAMP) // Oracle accesses block env (20M limit)
+        .append(POP)
+        .push_number(0u8)
+        .push_number(0u8)
+        .append(RETURN)
+        .build();
+
+    // Main contract that calls oracle first (which will access TIMESTAMP internally)
+    let main_code = BytecodeBuilder::default()
+        // Call oracle - this will establish 1M limit AND oracle will access TIMESTAMP (20M)
+        .push_number(0u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(0u8) // argsSize
+        .push_number(0u8) // argsOffset
+        .push_number(0u8) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS) // pass all available gas
+        .append(CALL)
+        .append(POP)
+        // Record gas after oracle call - should be ≤ 1M (not 20M)
+        .append(GAS)
+        .push_number(0u8)
+        .append(MSTORE)
+        // Return recorded gas value
+        .push_number(0x20u8)
+        .push_number(0u8)
+        .append(RETURN)
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CALLEE, main_code);
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
+
+    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let mut gas_inspector = GasInspector::new();
+
+    let (oracle_accessed, success, _gas_used) = execute_transaction(
+        MegaSpecId::MINI_REX,
+        &mut db,
+        &external_envs,
+        Some(&mut gas_inspector),
+        CALLEE,
+    );
+
+    assert!(success, "Transaction should succeed");
+    assert!(oracle_accessed, "Oracle should have been accessed");
+
+    // After oracle call (which internally accessed block env), gas should be ≤ 1M
+    // This proves that min(1M, 20M) = 1M regardless of access order
+    let mut found_oracle_call = false;
+    gas_inspector.trace.as_ref().unwrap().iterate_with(
+        |_node_location, node, _item_location, item| {
+            match &node.borrow().meta {
+                MsgCallMeta::Call(call_inputs) => {
+                    if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
+                        found_oracle_call = true;
+                    }
+                }
+                MsgCallMeta::Create(_) => {}
+            }
+
+            // After oracle call completes, gas should be limited to 1M (not 20M)
+            if found_oracle_call && item.borrow().depth == 0 {
+                // Back in main contract after oracle call
+                assert!(
+                    item.borrow().gas_after <= ORACLE_ACCESS_REMAINING_GAS,
+                    "After oracle access (even though oracle accessed block env internally), \
+                     gas should be limited to ORACLE_ACCESS_REMAINING_GAS (1M), not \
+                     BLOCK_ENV_ACCESS_REMAINING_GAS (20M). Got {}",
+                    item.borrow().gas_after
+                );
+            }
+        },
+    );
+
+    assert!(found_oracle_call, "Should have found oracle call");
 }

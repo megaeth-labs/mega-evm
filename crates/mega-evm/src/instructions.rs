@@ -51,10 +51,14 @@ use revm::{
 ///
 /// When volatile data (block environment, beneficiary, or oracle) is accessed, the system
 /// implements a global gas detention mechanism:
-/// 1. Remaining gas is immediately limited to `VOLATILE_DATA_ACCESS_REMAINING_GAS`
-/// 2. Detained gas is tracked and refunded at transaction end
-/// 3. Users only pay for actual work performed, not for enforcement gas
-/// 4. This prevents `DoS` attacks while maintaining fair gas accounting
+/// 1. Remaining gas is immediately limited based on the type of volatile data:
+///    - Block environment or beneficiary: `BLOCK_ENV_ACCESS_REMAINING_GAS` (20M gas)
+///    - Oracle contract: `ORACLE_ACCESS_REMAINING_GAS` (1M gas)
+/// 2. Most restrictive limit wins: If multiple volatile data types are accessed, the minimum (most
+///    restrictive) limit applies, regardless of access order
+/// 3. Detained gas is tracked and refunded at transaction end
+/// 4. Users only pay for actual work performed, not for enforcement gas
+/// 5. This prevents `DoS` attacks while maintaining fair gas accounting
 ///
 /// # Assumptions
 ///
@@ -465,11 +469,16 @@ pub fn call_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
     }
 
-    // Check if calling the oracle contract and mark it as accessed. If so, we need to limit the
-    // forwarded gas immediately
+    // Check if calling the oracle contract and mark it as accessed. If so, we need to:
+    // 1. Limit the forwarded gas to the child call
+    // 2. Detain gas from current interpreter to enforce the limit (may be a no-op if limit
+    //    unchanged)
     let mut volatile_data_tracker = context.host.volatile_data_tracker().borrow_mut();
     if volatile_data_tracker.check_and_mark_oracle_access(&to) {
         volatile_data_tracker.detain_plain_gas(&mut gas_limit);
+        // Detain gas from current interpreter. This is a no-op if interpreter gas is already
+        // below the limit, but necessary when oracle access further restricts an existing limit.
+        volatile_data_tracker.detain_gas(&mut context.interpreter.gas);
     }
 
     // Call host to interact with target contract
@@ -499,27 +508,33 @@ maintaining fair gas accounting through the global gas detention mechanism.
 When volatile data is accessed:
 1. The opcode executes normally (calls host method, processes data)
 2. If this is the first volatile data access in the transaction:
-   - A global gas limit is established at `VOLATILE_DATA_ACCESS_REMAINING_GAS`
+   - A global gas limit is established based on the type:
+     * Block environment or beneficiary: `BLOCK_ENV_ACCESS_REMAINING_GAS` (20M gas)
+     * Oracle contract: `ORACLE_ACCESS_REMAINING_GAS` (1M gas)
    - Any gas above this limit is "detained" (tracked but not consumed)
-3. All subsequent opcodes are limited by this global gas limit
-4. At transaction end, all detained gas is refunded to the user
-5. Users only pay for actual computational work performed
+3. Most restrictive limit wins: If additional volatile data with different limit is accessed,
+   the minimum (most restrictive) limit is applied, regardless of access order
+4. All subsequent opcodes are limited by this global gas limit
+5. At transaction end, all detained gas is refunded to the user
+6. Users only pay for actual computational work performed
 
 This approach:
 - Prevents DoS attacks by limiting execution after volatile data access
 - Ensures fair billing by refunding enforcement gas
 - Works across nested calls through the global limit mechanism
+- Order-independent: accessing oracle then block env OR block env then oracle both result in
+  the same final limit (the minimum of the two)
 
 # Two Categories of Opcodes
 
 ## Block Environment Opcodes (Always Volatile)
-These opcodes ALWAYS access volatile data and trigger detention:
+These opcodes ALWAYS access volatile data and apply 20M gas limit:
 - TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH
 
 ## Account-Accessing Opcodes (Conditionally Volatile)
-These opcodes only SOMETIMES access volatile data:
-- BALANCE(beneficiary_address) → volatile, triggers detention
-- BALANCE(other_address) → not volatile, no detention
+These opcodes only SOMETIMES access volatile data (20M gas limit when volatile):
+- BALANCE(beneficiary_address) → volatile, applies 20M limit
+- BALANCE(other_address) → not volatile, no limit
 - EXTCODESIZE/EXTCODECOPY/EXTCODEHASH → same conditional behavior
 
 For conditional opcodes:
@@ -531,14 +546,12 @@ For conditional opcodes:
 /// Macro to create opcode handlers with immediate gas detention.
 ///
 /// This macro generates a wrapper function that:
-/// 1. Checks if volatile data was already accessed (to avoid redundant detention)
-/// 2. Calls the original instruction implementation from revm
-/// 3. If this opcode caused new volatile data access, detains gas immediately
+/// 1. Calls the original instruction implementation from revm
+/// 2. Detains gas from the interpreter to enforce the volatile data access limit
 ///
 /// The detention is managed by `VolatileDataAccessTracker.detain_gas()`, which:
-/// - Establishes a global gas limit on first volatile data access
-/// - Tracks detained gas for later refund
-/// - Applies the same limit to all subsequent gas detentions
+/// - On first volatile data access: establishes a global gas limit and detains excess gas
+/// - On subsequent accesses: is a no-op since gas is already below the limit
 macro_rules! wrap_op_detain_gas {
     ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
         #[doc = concat!("`", $opcode_name, "` opcode with immediate gas detention on volatile data access.")]
@@ -546,7 +559,6 @@ macro_rules! wrap_op_detain_gas {
             mut context: InstructionContext<'_, H, WIRE>,
         ) {
             let volatile_data_tracker = context.host.volatile_data_tracker().clone();
-            let accessed_before = volatile_data_tracker.borrow().accessed();
 
             // The volatile data tracker will be marked as accessed in the `Host` hooks,
             // so we need to drop the borrow before calling the original function
@@ -556,11 +568,9 @@ macro_rules! wrap_op_detain_gas {
             };
             $original_fn(ctx);
 
-            // We should only detain gas if this opcode is the first time in the tx that accessed
-            // the volatile data.
-            if !accessed_before && volatile_data_tracker.borrow().accessed() {
-                volatile_data_tracker.borrow_mut().detain_gas(&mut context.interpreter.gas);
-            }
+            // Detain gas from interpreter. This is a no-op if no volatile data was accessed
+            // or if gas is already below the limit.
+            volatile_data_tracker.borrow_mut().detain_gas(&mut context.interpreter.gas);
         }
     };
 }
