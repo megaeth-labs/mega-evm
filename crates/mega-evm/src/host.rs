@@ -2,7 +2,7 @@ use core::cell::RefCell;
 use std::rc::Rc;
 
 use crate::{
-    AdditionalLimit, BlockEnvAccess, ExternalEnvs, MegaContext, MegaSpecId, OracleEnv, SaltEnv,
+    AdditionalLimit, ExternalEnvs, MegaContext, MegaSpecId, OracleEnv, SaltEnv, VolatileDataAccess,
     VolatileDataAccessTracker, ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
@@ -16,53 +16,53 @@ use revm::{
 impl<DB: Database, ExtEnvs: ExternalEnvs> Host for MegaContext<DB, ExtEnvs> {
     // Block environment related methods - with tracking
     fn basefee(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::BASE_FEE);
+        self.mark_block_env_accessed(VolatileDataAccess::BASE_FEE);
         self.inner.basefee()
     }
 
     fn gas_limit(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::GAS_LIMIT);
+        self.mark_block_env_accessed(VolatileDataAccess::GAS_LIMIT);
         self.inner.gas_limit()
     }
 
     fn difficulty(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::DIFFICULTY);
+        self.mark_block_env_accessed(VolatileDataAccess::DIFFICULTY);
         self.inner.difficulty()
     }
 
     fn prevrandao(&self) -> Option<U256> {
-        self.mark_block_env_accessed(BlockEnvAccess::PREV_RANDAO);
+        self.mark_block_env_accessed(VolatileDataAccess::PREV_RANDAO);
         self.inner.prevrandao()
     }
 
     fn block_number(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::BLOCK_NUMBER);
+        self.mark_block_env_accessed(VolatileDataAccess::BLOCK_NUMBER);
         self.inner.block_number()
     }
 
     fn timestamp(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::TIMESTAMP);
+        self.mark_block_env_accessed(VolatileDataAccess::TIMESTAMP);
         self.inner.timestamp()
     }
 
     fn beneficiary(&self) -> Address {
-        self.mark_block_env_accessed(BlockEnvAccess::COINBASE);
+        self.mark_block_env_accessed(VolatileDataAccess::COINBASE);
         self.inner.beneficiary()
     }
 
     fn block_hash(&mut self, number: u64) -> Option<B256> {
-        self.mark_block_env_accessed(BlockEnvAccess::BLOCK_HASH);
+        self.mark_block_env_accessed(VolatileDataAccess::BLOCK_HASH);
         self.inner.block_hash(number)
     }
 
     // Blob-related block environment methods - with tracking
     fn blob_gasprice(&self) -> U256 {
-        self.mark_block_env_accessed(BlockEnvAccess::BLOB_BASE_FEE);
+        self.mark_block_env_accessed(VolatileDataAccess::BLOB_BASE_FEE);
         self.inner.blob_gasprice()
     }
 
     fn blob_hash(&self, number: usize) -> Option<U256> {
-        self.mark_block_env_accessed(BlockEnvAccess::BLOB_HASH);
+        self.mark_block_env_accessed(VolatileDataAccess::BLOB_HASH);
         self.inner.blob_hash(number)
     }
 

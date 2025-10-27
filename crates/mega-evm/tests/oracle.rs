@@ -938,7 +938,7 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
     // (VolatileDataAccessOutOfGas with Oracle type), it does NOT consume all gas.
     // Instead, detained gas is refunded and gas_used reflects only actual work performed.
     use alloy_evm::Evm;
-    use mega_evm::{MegaHaltReason, VolatileDataAccessType};
+    use mega_evm::MegaHaltReason;
     use revm::context::result::ExecutionResult;
 
     let mut db = MemoryDatabase::default();
@@ -1001,12 +1001,13 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
     // Verify it's specifically VolatileDataAccessOutOfGas with Oracle type
     match &result {
         ExecutionResult::Halt { reason, .. } => match reason {
-            MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained } => {
+            MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, .. } => {
                 // Verify the halt reason details
-                assert_eq!(
-                    *access_type,
-                    VolatileDataAccessType::Oracle,
-                    "Should be Oracle access type"
+                assert!(access_type.has_oracle_access(), "Should have oracle access");
+                assert!(
+                    !access_type.has_block_env_access() &&
+                        !access_type.has_beneficiary_balance_access(),
+                    "Should only have oracle access, not block env or beneficiary"
                 );
                 assert_eq!(
                     *limit, ORACLE_ACCESS_REMAINING_GAS,
@@ -1035,7 +1036,7 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     // runs out of gas, the halt reason correctly identifies "Both" type with the most restrictive
     // limit (1M from oracle), and detained gas is properly refunded.
     use alloy_evm::Evm;
-    use mega_evm::{MegaHaltReason, VolatileDataAccessType};
+    use mega_evm::MegaHaltReason;
     use revm::context::result::ExecutionResult;
 
     let mut db = MemoryDatabase::default();
@@ -1103,10 +1104,11 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
         ExecutionResult::Halt { reason, .. } => match reason {
             MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained: _ } => {
                 // Verify the halt reason details
-                assert_eq!(
-                    *access_type,
-                    VolatileDataAccessType::Both,
-                    "Should be Both access type (block env + oracle)"
+                assert!(access_type.has_oracle_access(), "Should have oracle access");
+                assert!(
+                    access_type.has_block_env_access() ||
+                        access_type.has_beneficiary_balance_access(),
+                    "Should have both block env/beneficiary and oracle access"
                 );
                 assert_eq!(
                     *limit, ORACLE_ACCESS_REMAINING_GAS,

@@ -25,8 +25,8 @@ use revm::{
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    constants, AdditionalLimit, BlockEnvAccess, DefaultExternalEnvs, DynamicGasCost, ExternalEnvs,
-    MegaSpecId, VolatileDataAccessTracker,
+    constants, AdditionalLimit, DefaultExternalEnvs, DynamicGasCost, ExternalEnvs, MegaSpecId,
+    VolatileDataAccess, VolatileDataAccessTracker,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -356,8 +356,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// # Returns
     ///
-    /// Returns a [`BlockEnvAccess`] bitmap indicating accessed fields.
-    pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
+    /// Returns a [`VolatileDataAccess`] bitmap indicating accessed fields.
+    pub fn get_block_env_accesses(&self) -> VolatileDataAccess {
         self.volatile_data_tracker.borrow().get_block_env_accesses()
     }
 
@@ -377,7 +377,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// # Arguments
     ///
     /// * `access_type` - The type of block environment access to record
-    pub(crate) fn mark_block_env_accessed(&self, access_type: BlockEnvAccess) {
+    pub(crate) fn mark_block_env_accessed(&self, access_type: VolatileDataAccess) {
         self.volatile_data_tracker.borrow_mut().mark_block_env_accessed(access_type);
     }
 }

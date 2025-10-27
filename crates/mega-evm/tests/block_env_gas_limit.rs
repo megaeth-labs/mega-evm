@@ -16,7 +16,11 @@ use mega_evm::{
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
-use revm::{bytecode::opcode::*, context::{result::ExecutionResult, TxEnv}, Database};
+use revm::{
+    bytecode::opcode::*,
+    context::{result::ExecutionResult, TxEnv},
+    Database,
+};
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const CONTRACT: Address = address!("1000000000000000000000000000000000000001");
@@ -1007,9 +1011,10 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
 
     let gas_used = result.gas_used();
 
-    // Key assertion: gas_used should be close to the enforced limit (20M), NOT the full tx gas_limit (30M)
-    // The transaction tries to do 11 SSTOREs (22M gas needed) but is limited to 20M after TIMESTAMP.
-    // It will consume close to 20M before hitting OutOfGas, but definitely NOT all 30M.
+    // Key assertion: gas_used should be close to the enforced limit (20M), NOT the full tx
+    // gas_limit (30M) The transaction tries to do 11 SSTOREs (22M gas needed) but is limited to
+    // 20M after TIMESTAMP. It will consume close to 20M before hitting OutOfGas, but definitely
+    // NOT all 30M.
     assert!(
         gas_used > 19_000_000 && gas_used < 21_000_000,
         "gas_used should be close to enforced limit (20M), not all tx gas (30M). Got: {}",
@@ -1022,11 +1027,12 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
             match reason {
                 MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained: _ } => {
                     // Verify the halt reason details
-                    assert_eq!(
-                        *access_type,
-                        mega_evm::VolatileDataAccessType::BlockEnvOrBeneficiary,
-                        "Should be BlockEnvOrBeneficiary access type"
+                    assert!(
+                        access_type.has_block_env_access() ||
+                            access_type.has_beneficiary_balance_access(),
+                        "Should have block env or beneficiary access"
                     );
+                    assert!(!access_type.has_oracle_access(), "Should not have oracle access");
                     assert_eq!(*limit, 20_000_000, "Limit should be 20M for block env access");
 
                     // The key check: gas_used should NOT be gas_limit (30M)
@@ -1038,13 +1044,9 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
                         gas_limit
                     );
                 }
-                other => panic!(
-                    "Expected VolatileDataAccessOutOfGas, got: {:?}",
-                    other
-                ),
+                other => panic!("Expected VolatileDataAccessOutOfGas, got: {:?}", other),
             }
         }
         other => panic!("Expected Halt result, got: {:?}", other),
     }
 }
-

@@ -9,19 +9,7 @@ pub use revm::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Type of volatile data that was accessed, causing gas detention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum VolatileDataAccessType {
-    /// Block environment data (TIMESTAMP, NUMBER, etc.) or beneficiary account data was accessed.
-    /// Gas is limited to 20M.
-    BlockEnvOrBeneficiary,
-    /// Oracle contract was accessed.
-    /// Gas is limited to 1M.
-    Oracle,
-    /// Both block environment/beneficiary AND oracle were accessed.
-    /// Gas is limited to the minimum (1M from oracle).
-    Both,
-}
+use crate::VolatileDataAccess;
 
 /// `MegaETH` transaction validation error type.
 pub type MegaTransactionError = OpTransactionError;
@@ -55,10 +43,12 @@ pub enum MegaHaltReason {
     /// Out of gas due to volatile data access limit enforcement.
     /// The transaction exceeded the gas limit imposed after accessing volatile data
     /// (block environment, beneficiary, or oracle contract). The detained gas has been
-    /// refunded, so gas_used reflects only actual computational work performed.
+    /// refunded, so `gas_used` reflects only actual computational work performed.
     VolatileDataAccessOutOfGas {
-        /// Type of volatile data that was accessed
-        access_type: VolatileDataAccessType,
+        /// Bitflags indicating which volatile data was accessed.
+        /// Can check specific accesses using `has_block_env_access()`,
+        /// `has_beneficiary_balance_access()`, `has_oracle_access()`
+        access_type: VolatileDataAccess,
         /// The gas limit that was enforced after volatile data access
         limit: u64,
         /// Total amount of gas detained during execution (already refunded)

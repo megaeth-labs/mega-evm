@@ -18,13 +18,13 @@ use revm::{
 #[test]
 fn test_block_env_tracking_with_evm() {
     let test_cases = vec![
-        ("NUMBER", vec![NUMBER, STOP], Some(BlockEnvAccess::BLOCK_NUMBER)),
-        ("TIMESTAMP", vec![TIMESTAMP, STOP], Some(BlockEnvAccess::TIMESTAMP)),
-        ("COINBASE", vec![COINBASE, STOP], Some(BlockEnvAccess::COINBASE)),
-        ("DIFFICULTY", vec![DIFFICULTY, STOP], Some(BlockEnvAccess::PREV_RANDAO)),
-        ("GASLIMIT", vec![GASLIMIT, STOP], Some(BlockEnvAccess::GAS_LIMIT)),
-        ("BASEFEE", vec![BASEFEE, STOP], Some(BlockEnvAccess::BASE_FEE)),
-        ("BLOCKHASH", vec![PUSH1, 0x05, BLOCKHASH, STOP], Some(BlockEnvAccess::BLOCK_HASH)),
+        ("NUMBER", vec![NUMBER, STOP], Some(VolatileDataAccess::BLOCK_NUMBER)),
+        ("TIMESTAMP", vec![TIMESTAMP, STOP], Some(VolatileDataAccess::TIMESTAMP)),
+        ("COINBASE", vec![COINBASE, STOP], Some(VolatileDataAccess::COINBASE)),
+        ("DIFFICULTY", vec![DIFFICULTY, STOP], Some(VolatileDataAccess::PREV_RANDAO)),
+        ("GASLIMIT", vec![GASLIMIT, STOP], Some(VolatileDataAccess::GAS_LIMIT)),
+        ("BASEFEE", vec![BASEFEE, STOP], Some(VolatileDataAccess::BASE_FEE)),
+        ("BLOCKHASH", vec![PUSH1, 0x05, BLOCKHASH, STOP], Some(VolatileDataAccess::BLOCK_HASH)),
         // Non-block env opcodes
         ("CALLER", vec![CALLER, STOP], None),
         ("ORIGIN", vec![ORIGIN, STOP], None),
@@ -59,7 +59,7 @@ fn test_block_env_tracking_with_evm() {
             opcode_name
         );
         assert_eq!(
-            evm.get_block_env_accesses().count_accessed(),
+            evm.get_block_env_accesses().count_block_env_accessed(),
             0,
             "EVM should start with no access count for {}",
             opcode_name
@@ -101,18 +101,18 @@ fn test_block_env_tracking_with_evm() {
                 if opcode_name == "BLOCKHASH" {
                     // BLOCKHASH accesses both BlockNumber (to validate range) and BlockHash
                     assert_eq!(
-                        accesses.count_accessed(),
+                        accesses.count_block_env_accessed(),
                         2,
                         "BLOCKHASH should access exactly two items: BlockNumber and BlockHash"
                     );
                     assert!(
-                        accesses.contains(BlockEnvAccess::BLOCK_NUMBER),
+                        accesses.contains(VolatileDataAccess::BLOCK_NUMBER),
                         "BLOCKHASH should access BlockNumber for validation"
                     );
                     assert!(accesses.contains(access_type), "BLOCKHASH should access BlockHash");
                 } else {
                     assert_eq!(
-                        accesses.count_accessed(),
+                        accesses.count_block_env_accessed(),
                         1,
                         "Should have exactly one access for {}",
                         opcode_name
@@ -132,7 +132,7 @@ fn test_block_env_tracking_with_evm() {
                     opcode_name
                 );
                 assert_eq!(
-                    evm.get_block_env_accesses().count_accessed(),
+                    evm.get_block_env_accesses().count_block_env_accessed(),
                     0,
                     "Access count should be zero for {}",
                     opcode_name
@@ -148,7 +148,7 @@ fn test_block_env_tracking_with_evm() {
             opcode_name
         );
         assert_eq!(
-            evm.get_block_env_accesses().count_accessed(),
+            evm.get_block_env_accesses().count_block_env_accessed(),
             0,
             "Access count should be zero after reset for {}",
             opcode_name
@@ -199,12 +199,16 @@ fn test_multiple_block_env_accesses() {
     // Should have accessed 3 different types
     let accesses = evm.get_block_env_accesses();
     assert!(!accesses.is_empty());
-    assert_eq!(accesses.count_accessed(), 3, "Should have accessed 3 different block env types");
+    assert_eq!(
+        accesses.count_block_env_accessed(),
+        3,
+        "Should have accessed 3 different block env types"
+    );
 
     // Check specific accesses
-    assert!(accesses.contains(BlockEnvAccess::BLOCK_NUMBER));
-    assert!(accesses.contains(BlockEnvAccess::TIMESTAMP));
-    assert!(accesses.contains(BlockEnvAccess::BASE_FEE));
+    assert!(accesses.contains(VolatileDataAccess::BLOCK_NUMBER));
+    assert!(accesses.contains(VolatileDataAccess::TIMESTAMP));
+    assert!(accesses.contains(VolatileDataAccess::BASE_FEE));
 }
 
 /// Test that verifies the block environment access tracking is properly reset between transactions.

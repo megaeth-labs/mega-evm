@@ -261,12 +261,18 @@ where
         evm: &mut Self::Evm,
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        // Capture volatile data info BEFORE calling op.execution_result (which calls last_frame_result)
-        // because last_frame_result will call refund_detained_gas which resets detained to 0
-        let volatile_info_before_refund = {
-            let volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow();
-            volatile_data_tracker.get_volatile_data_info()
-        };
+        // Capture volatile data info BEFORE calling op.execution_result (which calls
+        // last_frame_result) because last_frame_result will call refund_detained_gas which
+        // resets detained to 0
+        let volatile_info_before_refund = evm
+            .ctx()
+            .spec
+            .is_enabled(MegaSpecId::MINI_REX)
+            .then(|| {
+                let volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow();
+                volatile_data_tracker.get_volatile_data_info()
+            })
+            .flatten();
 
         let result = self.op.execution_result(evm, result)?;
         Ok(result.map_haltreason(|reason| match reason {

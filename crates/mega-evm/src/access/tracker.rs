@@ -1,4 +1,5 @@
-use crate::{constants, BlockEnvAccess, OracleAccessTracker};
+use crate::{constants, VolatileDataAccess, ORACLE_CONTRACT_ADDRESS};
+use alloy_primitives::Address;
 use revm::{handler::FrameResult, interpreter::Gas};
 
 /// A tracker for volatile data access with global gas detention mechanism.
@@ -65,12 +66,9 @@ use revm::{handler::FrameResult, interpreter::Gas};
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct VolatileDataAccessTracker {
-    /// Bitmap of block environment data accessed during transaction execution.
-    block_env_accessed: BlockEnvAccess,
-    /// Whether beneficiary data has been accessed in current transaction.
-    beneficiary_balance_accessed: bool,
-    /// Tracker for oracle contract access.
-    oracle_tracker: OracleAccessTracker,
+    /// Unified bitmap tracking all types of volatile data access.
+    /// Includes block environment fields, beneficiary balance, and oracle access.
+    volatile_data_accessed: VolatileDataAccess,
     /// The global (tx level) remaining gas after volatile data access.
     global_limited_gas: Option<GlobalLimitedGas>,
 }
@@ -85,68 +83,54 @@ impl VolatileDataAccessTracker {
     /// If so, the remaining gas in all message calls will be limited to a small amount of gas,
     /// forcing the transaction to finish execution soon.
     pub fn accessed(&self) -> bool {
-        !self.block_env_accessed.is_empty() ||
-            self.beneficiary_balance_accessed ||
-            self.oracle_tracker.has_accessed()
+        !self.volatile_data_accessed.is_empty()
     }
 
-    /// Returns the volatile data access information: (access_type, limit, detained).
+    /// Returns the volatile data access information: (`access_type`, limit, detained).
     /// Returns None if no volatile data has been accessed.
-    pub fn get_volatile_data_info(&self) -> Option<(crate::VolatileDataAccessType, u64, u64)> {
-        use crate::VolatileDataAccessType;
-
+    pub fn get_volatile_data_info(&self) -> Option<(VolatileDataAccess, u64, u64)> {
         if !self.accessed() {
             return None;
         }
 
         let global_limited_gas = self.global_limited_gas.as_ref()?;
 
-        // Determine access type based on what was accessed
-        let access_type = match (
-            !self.block_env_accessed.is_empty() || self.beneficiary_balance_accessed,
-            self.oracle_tracker.has_accessed(),
-        ) {
-            (true, true) => VolatileDataAccessType::Both,
-            (true, false) => VolatileDataAccessType::BlockEnvOrBeneficiary,
-            (false, true) => VolatileDataAccessType::Oracle,
-            (false, false) => return None, // Should not happen if accessed() is true
-        };
-
-        Some((access_type, global_limited_gas.limit, global_limited_gas.detained))
+        Some((self.volatile_data_accessed, global_limited_gas.limit, global_limited_gas.detained))
     }
 
     /// Returns the bitmap of block environment data accessed during transaction execution.
-    pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
-        self.block_env_accessed
+    pub fn get_block_env_accesses(&self) -> VolatileDataAccess {
+        self.volatile_data_accessed.block_env_only()
     }
 
     /// Marks that a specific type of block environment has been accessed.
-    pub fn mark_block_env_accessed(&mut self, access_type: BlockEnvAccess) {
-        self.block_env_accessed.insert(access_type);
+    pub fn mark_block_env_accessed(&mut self, access_type: VolatileDataAccess) {
+        self.volatile_data_accessed.insert(access_type);
         self.apply_or_create_limit(constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS);
     }
 
     /// Checks if beneficiary balance has been accessed.
     pub fn has_accessed_beneficiary_balance(&self) -> bool {
-        self.beneficiary_balance_accessed
+        self.volatile_data_accessed.has_beneficiary_balance_access()
     }
 
     /// Marks that beneficiary balance has been accessed.
     pub fn mark_beneficiary_balance_accessed(&mut self) {
-        self.beneficiary_balance_accessed = true;
+        self.volatile_data_accessed.insert(VolatileDataAccess::BENEFICIARY_BALANCE);
         self.apply_or_create_limit(constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS);
     }
 
     /// Checks if the oracle contract has been accessed.
     pub fn has_accessed_oracle(&self) -> bool {
-        self.oracle_tracker.has_accessed()
+        self.volatile_data_accessed.has_oracle_access()
     }
 
     /// Checks if the given address is the oracle contract address and marks it as accessed.
     /// Applies the oracle access gas limit, which may further restrict gas if a less
     /// restrictive limit was already in place.
-    pub fn check_and_mark_oracle_access(&mut self, address: &alloy_primitives::Address) -> bool {
-        if self.oracle_tracker.check_and_mark_oracle_access(address) {
+    pub fn check_and_mark_oracle_access(&mut self, address: &Address) -> bool {
+        if address == &ORACLE_CONTRACT_ADDRESS {
+            self.volatile_data_accessed.insert(VolatileDataAccess::ORACLE);
             self.apply_or_create_limit(constants::mini_rex::ORACLE_ACCESS_REMAINING_GAS);
             true
         } else {
@@ -168,9 +152,7 @@ impl VolatileDataAccessTracker {
 
     /// Resets all access tracking for a new transaction.
     pub fn reset(&mut self) {
-        self.block_env_accessed = BlockEnvAccess::empty();
-        self.beneficiary_balance_accessed = false;
-        self.oracle_tracker.reset();
+        self.volatile_data_accessed = VolatileDataAccess::empty();
         self.global_limited_gas = None;
     }
 
@@ -253,8 +235,8 @@ impl VolatileDataAccessTracker {
 ///
 /// # Fields
 ///
-/// - `limit`: The gas limit enforced after volatile data access (immutable once set, may be
-///   lowered by `apply_limit` to the more restrictive value)
+/// - `limit`: The gas limit enforced after volatile data access (immutable once set, may be lowered
+///   by `apply_limit` to the more restrictive value)
 /// - `remaining`: Current remaining gas (starts at limit, decreases as gas is consumed)
 /// - `detained`: Total amount of gas detained from all opcodes (refunded at transaction end)
 #[derive(Debug, Clone)]
