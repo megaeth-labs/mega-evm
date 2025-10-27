@@ -14,9 +14,13 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
-use revm::{bytecode::opcode::*, context::TxEnv, Database};
+use revm::{
+    bytecode::opcode::*,
+    context::{result::ExecutionResult, TxEnv},
+    Database,
+};
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const CONTRACT: Address = address!("1000000000000000000000000000000000000001");
@@ -959,4 +963,90 @@ fn test_system_call_volatile_data_tracker_reset() {
          Different gas usage indicates the tracker state is persisting across system calls.",
         gas1, gas2
     );
+}
+
+#[test]
+fn test_volatile_data_access_oog_does_not_consume_all_gas() {
+    // This test verifies that when a transaction runs out of gas due to volatile data access
+    // (VolatileDataAccessOutOfGas), it does NOT consume all gas like a regular OutOfGas.
+    // Instead, detained gas is refunded and gas_used reflects only actual work performed.
+    let mut db = MemoryDatabase::default();
+
+    // Contract that accesses TIMESTAMP then tries expensive work that exceeds the limit
+    let mut builder = BytecodeBuilder::default()
+        .append(TIMESTAMP) // Limits gas to 20M
+        .append(POP);
+    // Try to do 11 SSTOREs (22M gas needed, but only 20M available after limiting)
+    for i in 0..11 {
+        builder = builder.push_number(i as u8).push_number(i as u8).append(SSTORE);
+    }
+    let bytecode = builder.push_number(0u8).push_number(0u8).append(RETURN).build();
+    db.set_account_code(CONTRACT, bytecode);
+
+    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &external_envs);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+
+    let gas_limit = 30_000_000;
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CONTRACT),
+        data: Default::default(),
+        value: U256::ZERO,
+        gas_limit,
+        ..Default::default()
+    };
+
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context);
+    let result = alloy_evm::Evm::transact_commit(&mut evm, tx).unwrap();
+
+    // Should fail with VolatileDataAccessOutOfGas
+    assert!(!result.is_success(), "Transaction should fail due to volatile data access OOG");
+
+    let gas_used = result.gas_used();
+
+    // Key assertion: gas_used should be close to the enforced limit (20M), NOT the full tx
+    // gas_limit (30M) The transaction tries to do 11 SSTOREs (22M gas needed) but is limited to
+    // 20M after TIMESTAMP. It will consume close to 20M before hitting OutOfGas, but definitely
+    // NOT all 30M.
+    assert!(
+        gas_used > 19_000_000 && gas_used < 21_000_000,
+        "gas_used should be close to enforced limit (20M), not all tx gas (30M). Got: {}",
+        gas_used
+    );
+
+    // Verify it's specifically VolatileDataAccessOutOfGas, not regular OutOfGas
+    match &result {
+        ExecutionResult::Halt { reason, .. } => {
+            match reason {
+                MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained: _ } => {
+                    // Verify the halt reason details
+                    assert!(
+                        access_type.has_block_env_access() ||
+                            access_type.has_beneficiary_balance_access(),
+                        "Should have block env or beneficiary access"
+                    );
+                    assert!(!access_type.has_oracle_access(), "Should not have oracle access");
+                    assert_eq!(*limit, 20_000_000, "Limit should be 20M for block env access");
+
+                    // The key check: gas_used should NOT be gas_limit (30M)
+                    // It should be close to the enforced limit (20M)
+                    assert!(
+                        gas_used < gas_limit,
+                        "gas_used ({}) should be less than gas_limit ({}), proving detained gas was refunded",
+                        gas_used,
+                        gas_limit
+                    );
+                }
+                other => panic!("Expected VolatileDataAccessOutOfGas, got: {:?}", other),
+            }
+        }
+        other => panic!("Expected Halt result, got: {:?}", other),
+    }
 }

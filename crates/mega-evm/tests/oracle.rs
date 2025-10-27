@@ -931,3 +931,200 @@ fn test_order_independent_oracle_then_block_env() {
 
     assert!(found_oracle_call, "Should have found oracle call");
 }
+
+#[test]
+fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
+    // This test verifies that when a transaction runs out of gas due to oracle access
+    // (VolatileDataAccessOutOfGas with Oracle type), it does NOT consume all gas.
+    // Instead, detained gas is refunded and gas_used reflects only actual work performed.
+    use alloy_evm::Evm;
+    use mega_evm::MegaHaltReason;
+    use revm::context::result::ExecutionResult;
+
+    let mut db = MemoryDatabase::default();
+    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+
+    // Contract that calls the oracle then tries expensive work that exceeds the 1M oracle limit
+    let mut builder = BytecodeBuilder::default()
+        .push_number(0u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(0u8) // argSize
+        .push_number(0u8) // argOffset
+        .push_number(0u8) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS) // oracle address
+        .push_number(0xffffu16) // gas
+        .append(CALL) // Call oracle - limits gas to 1M
+        .append(POP); // pop result
+
+    // Try to do 2 SSTOREs (4M gas needed, but only 1M available after oracle limiting)
+    for i in 0..2 {
+        builder = builder.push_number(i as u8).push_number(i as u8).append(SSTORE);
+    }
+    let bytecode = builder.push_number(0u8).push_number(0u8).append(RETURN).build();
+    db.set_account_code(CALLEE, bytecode);
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &external_envs);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+
+    let gas_limit = 30_000_000;
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        data: Default::default(),
+        value: U256::ZERO,
+        gas_limit,
+        ..Default::default()
+    };
+
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context);
+    let result = Evm::transact_commit(&mut evm, tx).unwrap();
+
+    // Should fail with VolatileDataAccessOutOfGas
+    assert!(!result.is_success(), "Transaction should fail due to oracle volatile data access OOG");
+
+    let gas_used = result.gas_used();
+
+    // Key assertion: gas_used should be much less than gas_limit (30M)
+    // The oracle call + setup is cheap (~89K), but it proves detained gas was refunded
+    assert!(
+        gas_used < 200_000,
+        "gas_used should be much less than gas_limit (30M), proving detained gas was refunded. Got: {}",
+        gas_used
+    );
+
+    // Verify it's specifically VolatileDataAccessOutOfGas with Oracle type
+    match &result {
+        ExecutionResult::Halt { reason, .. } => match reason {
+            MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, .. } => {
+                // Verify the halt reason details
+                assert!(access_type.has_oracle_access(), "Should have oracle access");
+                assert!(
+                    !access_type.has_block_env_access() &&
+                        !access_type.has_beneficiary_balance_access(),
+                    "Should only have oracle access, not block env or beneficiary"
+                );
+                assert_eq!(
+                    *limit, ORACLE_ACCESS_REMAINING_GAS,
+                    "Limit should be 1M for oracle access"
+                );
+
+                // The key check: gas_used should be much less than gas_limit
+                assert!(
+                    gas_used < gas_limit,
+                    "gas_used ({}) should be less than gas_limit ({}), proving detained gas was refunded",
+                    gas_used,
+                    gas_limit
+                );
+            }
+            other => {
+                panic!("Expected VolatileDataAccessOutOfGas with Oracle type, got: {:?}", other)
+            }
+        },
+        other => panic!("Expected Halt result, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
+    // This test verifies that when BOTH block env and oracle are accessed, and the transaction
+    // runs out of gas, the halt reason correctly identifies "Both" type with the most restrictive
+    // limit (1M from oracle), and detained gas is properly refunded.
+    use alloy_evm::Evm;
+    use mega_evm::MegaHaltReason;
+    use revm::context::result::ExecutionResult;
+
+    let mut db = MemoryDatabase::default();
+    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+
+    // Contract that accesses TIMESTAMP (20M limit), then calls oracle (1M limit),
+    // then tries expensive work that exceeds the 1M limit
+    let mut builder = BytecodeBuilder::default()
+        .append(TIMESTAMP) // Limits gas to 20M
+        .append(POP)
+        .push_number(0u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(0u8) // argSize
+        .push_number(0u8) // argOffset
+        .push_number(0u8) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS) // oracle address
+        .push_number(0xffffu16) // gas
+        .append(CALL) // Call oracle - further limits gas to 1M
+        .append(POP); // pop result
+
+    // Try to do 2 SSTOREs (4M gas needed, but only 1M available)
+    for i in 0..2 {
+        builder = builder.push_number(i as u8).push_number(i as u8).append(SSTORE);
+    }
+    let bytecode = builder.push_number(0u8).push_number(0u8).append(RETURN).build();
+    db.set_account_code(CALLEE, bytecode);
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &external_envs);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+
+    let gas_limit = 30_000_000;
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(CALLEE),
+        data: Default::default(),
+        value: U256::ZERO,
+        gas_limit,
+        ..Default::default()
+    };
+
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context);
+    let result = Evm::transact_commit(&mut evm, tx).unwrap();
+
+    // Should fail with VolatileDataAccessOutOfGas
+    assert!(!result.is_success(), "Transaction should fail due to volatile data access OOG");
+
+    let gas_used = result.gas_used();
+
+    // Key assertion: gas_used should be much less than gas_limit (30M)
+    // TIMESTAMP + oracle call + setup is cheap (~89K), but it proves detained gas was refunded
+    assert!(
+        gas_used < 200_000,
+        "gas_used should be much less than gas_limit (30M), proving detained gas was refunded. Got: {}",
+        gas_used
+    );
+
+    // Verify it's VolatileDataAccessOutOfGas with Both type and 1M limit (most restrictive)
+    match &result {
+        ExecutionResult::Halt { reason, .. } => match reason {
+            MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained: _ } => {
+                // Verify the halt reason details
+                assert!(access_type.has_oracle_access(), "Should have oracle access");
+                assert!(
+                    access_type.has_block_env_access() ||
+                        access_type.has_beneficiary_balance_access(),
+                    "Should have both block env/beneficiary and oracle access"
+                );
+                assert_eq!(
+                    *limit, ORACLE_ACCESS_REMAINING_GAS,
+                    "Limit should be 1M (most restrictive, from oracle)"
+                );
+
+                // The key check: gas_used should be much less than gas_limit
+                assert!(
+                    gas_used < gas_limit,
+                    "gas_used ({}) should be less than gas_limit ({}), proving detained gas was refunded",
+                    gas_used,
+                    gas_limit
+                );
+            }
+            other => panic!("Expected VolatileDataAccessOutOfGas with Both type, got: {:?}", other),
+        },
+        other => panic!("Expected Halt result, got: {:?}", other),
+    }
+}

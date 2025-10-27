@@ -5,11 +5,8 @@
 //! the remaining gas in all message calls to a small amount of gas, forcing the transaction to
 //! finish execution soon. These restrictions are necessary to prevent `DoS` attacks on EVM.
 
-mod block;
 mod tracker;
+mod volatile;
 
-pub use block::*;
 pub use tracker::*;
-
-mod oracle;
-pub use oracle::*;
+pub use volatile::*;
