@@ -670,7 +670,7 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
     let block_env = BlockEnv {
         number: revm::primitives::U256::from(1000), // Set non-zero block number to avoid overflow
         timestamp: revm::primitives::U256::from(1_800_000_000), /* High timestamp to ensure
-                                                                 * Isthmus is active */
+                                                     * Isthmus is active */
         gas_limit: 30_000_000, // Set reasonable gas limit
         ..Default::default()
     };
