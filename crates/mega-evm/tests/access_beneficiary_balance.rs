@@ -6,7 +6,7 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::mini_rex::VOLATILE_DATA_ACCESS_REMAINING_GAS,
+    constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
@@ -167,9 +167,9 @@ fn test_balance_opcode() {
             let opcode_info = item.borrow();
             if after_balance {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after BALANCE should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -215,9 +215,9 @@ fn test_extcodesize_opcode() {
             let opcode_info = item.borrow();
             if after_extcodesize {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after EXTCODESIZE should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -265,9 +265,9 @@ fn test_extcodecopy_opcode() {
             let opcode_info = item.borrow();
             if after_extcodecopy {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after EXTCODECOPY should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -313,9 +313,9 @@ fn test_extcodehash_opcode() {
             let opcode_info = item.borrow();
             if after_extcodehash {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after EXTCODEHASH should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -371,9 +371,9 @@ fn test_call_to_beneficiary() {
 
             if after_call_to_beneficiary {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after CALL to beneficiary should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -426,9 +426,9 @@ fn test_staticcall_to_beneficiary() {
 
             if after_staticcall_to_beneficiary {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after STATICCALL to beneficiary should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -487,9 +487,9 @@ fn test_nested_call_beneficiary_access() {
 
             if accessed_beneficiary_in_nested {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after nested beneficiary access should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -549,7 +549,7 @@ fn test_detained_gas_is_restored() {
     gas_inspector.trace.as_ref().unwrap().iterate_with(
         |_node_location, _node, _item_location, item| {
             let opcode_info = item.borrow();
-            if opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS {
+            if opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS {
                 saw_limited_gas = true;
             }
         },

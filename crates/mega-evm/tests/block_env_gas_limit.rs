@@ -12,7 +12,7 @@
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::mini_rex::VOLATILE_DATA_ACCESS_REMAINING_GAS,
+    constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
     DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
@@ -95,16 +95,16 @@ fn test_timestamp_limits_gas() {
 
     let mut gas_inspector = GasInspector::new();
     let (success, gas_used, _gas_remaining) =
-        execute_bytecode_with_inspector(&mut db, 1_000_000_000, &mut gas_inspector);
+        execute_bytecode_with_inspector(&mut db, 30_000_000, &mut gas_inspector);
 
     assert!(success, "Transaction should succeed");
     // With detained gas restoration, gas_used should be much less than gas_limit
     // The contract does minimal work (TIMESTAMP, MSTORE, RETURN), so should use < 30K gas
-    // If detained gas wasn't restored, gas_used would be ~999M
+    // If detained gas wasn't restored, gas_used would be ~29M
     assert!(
         gas_used < 30_000,
         "gas_used should only reflect real work after TIMESTAMP limiting, but got {}. \
-         If > 900M, detained gas was not restored.",
+         If > 25M, detained gas was not restored.",
         gas_used
     );
 
@@ -115,9 +115,9 @@ fn test_timestamp_limits_gas() {
             let opcode_info = item.borrow();
             if after_timestamp {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after TIMESTAMP should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -143,7 +143,7 @@ fn test_number_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -167,7 +167,7 @@ fn test_coinbase_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -191,7 +191,7 @@ fn test_difficulty_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -215,7 +215,7 @@ fn test_gaslimit_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -239,7 +239,7 @@ fn test_basefee_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -263,7 +263,7 @@ fn test_blockhash_limits_gas() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -291,7 +291,7 @@ fn test_multiple_block_env_accesses() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(success);
     // After first block env access, gas should be limited (verified by small gas_used)
@@ -326,7 +326,7 @@ fn test_block_env_access_with_nested_calls() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     // With limited gas, the loop completes with minimal gas used (due to detained gas)
     assert!(
@@ -354,28 +354,23 @@ fn test_no_gas_limit_without_block_env_access() {
 
     let gas_limit = 2_000_000;
     let mut gas_inspector = GasInspector::new();
-    let (success, _gas_used, gas_remaining) =
+    let (success, gas_used, gas_remaining) =
         execute_bytecode_with_inspector(&mut db, gas_limit, &mut gas_inspector);
 
     assert!(success);
     // Without block env access, gas should NOT be limited
+    // gas_used should be very small (just a few opcodes), so gas_remaining should be close to
+    // gas_limit
     assert!(
-        gas_remaining > VOLATILE_DATA_ACCESS_REMAINING_GAS,
-        "Regular opcodes should not limit gas, expected > {}, got {}",
-        VOLATILE_DATA_ACCESS_REMAINING_GAS,
-        gas_remaining
+        gas_used < 50_000,
+        "Regular opcodes should use minimal gas, expected < 50000, got {}",
+        gas_used
     );
-
-    // Verify that all opcodes have gas > 10k (no limiting occurred)
-    gas_inspector.trace.as_ref().unwrap().iterate_with(
-        |_node_location, _node, _item_location, item| {
-            assert!(
-                item.borrow().gas_after > VOLATILE_DATA_ACCESS_REMAINING_GAS,
-                "Gas should remain > {} without block env access, got {}",
-                VOLATILE_DATA_ACCESS_REMAINING_GAS,
-                item.borrow().gas_after
-            );
-        },
+    assert!(
+        gas_remaining > gas_limit - 50_000,
+        "Regular opcodes should not limit gas significantly, expected > {}, got {}",
+        gas_limit - 50_000,
+        gas_remaining
     );
 }
 
@@ -383,30 +378,24 @@ fn test_no_gas_limit_without_block_env_access() {
 fn test_out_of_gas_after_block_env_access() {
     // Try to do expensive work after block env access with limited gas
     let mut db = MemoryDatabase::default();
-    let bytecode = BytecodeBuilder::default()
-        .append(TIMESTAMP) // limits gas to 10,000
-        .append(POP)
-        // Try to use more than 10,000 gas doing storage writes
-        .push_number(1u8)
-        .push_number(0u8)
-        .append(SSTORE) // expensive - 2M gas in Mini-Rex
-        .push_number(2u8)
-        .push_number(1u8)
-        .append(SSTORE) // another expensive operation
-        .push_number(0u8)
-        .push_number(0u8)
-        .append(RETURN)
-        .build();
+    let mut builder = BytecodeBuilder::default()
+        .append(TIMESTAMP) // limits gas to 20M
+        .append(POP);
+    // Try to use more than 20M gas doing storage writes
+    // Each SSTORE costs 2M gas in Mini-Rex, so we need 11+ to exceed 20M
+    for i in 0..12 {
+        builder = builder.push_number(i as u8).push_number(i as u8).append(SSTORE);
+    }
+    let bytecode = builder.push_number(0u8).push_number(0u8).append(RETURN).build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (success, _gas_used, gas_remaining) = execute_bytecode(&mut db, 5_000_000);
+    let (success, _gas_used, gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
-    // Should run out of gas - SSTORE costs 2M gas in Mini-Rex, but only 10K available after
-    // limiting
+    // Should run out of gas - 12 SSTOREs cost 24M gas, but only 20M available after limiting
     assert!(
         !success,
-        "Should run out of gas when attempting expensive SSTORE after block env access. \
-         gas_remaining: {}, success: {}",
+        "Should run out of gas when attempting 12 SSTOREs (24M gas) after block env access \
+         (20M gas limit). gas_remaining: {}, success: {}",
         gas_remaining, success
     );
 }
@@ -430,7 +419,7 @@ fn test_gas_limit_tracked_correctly() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(
         gas_used < 100_000,
@@ -462,7 +451,7 @@ fn test_block_env_access_before_call() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (_success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     // The CALL should get limited gas, resulting in small total gas_used
     assert!(
@@ -509,16 +498,16 @@ fn test_nested_call_block_env_access_limits_parent_too() {
 
     let mut gas_inspector = GasInspector::new();
     let (success, gas_used, _gas_remaining) =
-        execute_bytecode_with_inspector(&mut db, 1_000_000_000, &mut gas_inspector);
+        execute_bytecode_with_inspector(&mut db, 30_000_000, &mut gas_inspector);
 
     assert!(success, "Transaction should succeed");
     // Top-level transaction should be limited when child accesses block env
     // Parent does minimal work (CALL setup + return), child does minimal work (TIMESTAMP + return)
-    // Total should be < 50K. If > 900M, limiting didn't propagate.
+    // Total should be < 50K. If > 25M, limiting didn't propagate.
     assert!(
         gas_used < 50_000,
         "Top-level transaction should be limited when child accesses block env. gas_used: {}. \
-         If > 900M, gas limiting didn't propagate through nested calls.",
+         If > 25M, gas limiting didn't propagate through nested calls.",
         gas_used
     );
 
@@ -529,9 +518,9 @@ fn test_nested_call_block_env_access_limits_parent_too() {
             let opcode_info = item.borrow();
             if accessed_timestamp {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas after nested TIMESTAMP access should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -591,7 +580,7 @@ fn test_nested_call_block_env_access_child_oog() {
 
     let mut gas_inspector = GasInspector::new();
     let (success, _gas_used, _gas_remaining) =
-        execute_bytecode_with_inspector(&mut db, 5_000_000, &mut gas_inspector);
+        execute_bytecode_with_inspector(&mut db, 25_000_000, &mut gas_inspector);
 
     // Parent should succeed (child failure doesn't fail parent)
     // Child runs out of gas due to its own block env access limiting
@@ -612,9 +601,9 @@ fn test_nested_call_block_env_access_child_oog() {
             if inside_nested {
                 if after_timestamp_in_nested {
                     assert!(
-                        opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                        opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                         "Gas in nested contract after TIMESTAMP should be ≤ {}, got {}",
-                        VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                        BLOCK_ENV_ACCESS_REMAINING_GAS,
                         opcode_info.gas_after
                     );
                 }
@@ -678,7 +667,7 @@ fn test_deeply_nested_call_block_env_access() {
         kind: TxKind::Call(CONTRACT),
         data: Default::default(),
         value: U256::ZERO,
-        gas_limit: 1_000_000_000,
+        gas_limit: 30_000_000,
         ..Default::default()
     };
 
@@ -705,9 +694,9 @@ fn test_deeply_nested_call_block_env_access() {
             let opcode_info = item.borrow();
             if after_timestamp {
                 assert!(
-                    opcode_info.gas_after <= VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    opcode_info.gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
                     "Gas in all frames after TIMESTAMP should be ≤ {}, got {}",
-                    VOLATILE_DATA_ACCESS_REMAINING_GAS,
+                    BLOCK_ENV_ACCESS_REMAINING_GAS,
                     opcode_info.gas_after
                 );
             }
@@ -737,8 +726,8 @@ fn test_parent_block_env_access_oog_after_nested_call() {
     db.set_account_code(NESTED_CONTRACT, nested_bytecode);
 
     // Parent contract that accesses block env FIRST, then calls nested, then tries expensive work
-    let parent_bytecode = BytecodeBuilder::default()
-        .append(TIMESTAMP) // Parent accesses block env - limits parent's gas
+    let mut parent_builder = BytecodeBuilder::default()
+        .append(TIMESTAMP) // Parent accesses block env - limits parent's gas to 20M
         .append(POP)
         // Make a nested call (should succeed, child is not limited)
         .push_number(0u8)
@@ -749,28 +738,23 @@ fn test_parent_block_env_access_oog_after_nested_call() {
         .push_address(NESTED_CONTRACT)
         .append(GAS)
         .append(CALL)
-        .append(POP)
-        // Try to do expensive work in parent (should OOG due to parent's own limit)
-        .push_number(1u8)
-        .push_number(0u8)
-        .append(SSTORE) // expensive - 2M gas in Mini-Rex
-        .push_number(2u8)
-        .push_number(1u8)
-        .append(SSTORE)
-        .push_number(0u8)
-        .push_number(0u8)
-        .append(RETURN)
-        .build();
+        .append(POP);
+    // Try to do expensive work in parent (should OOG due to parent's own 20M limit)
+    // Need 11+ SSTOREs to exceed 20M
+    for i in 0..12 {
+        parent_builder = parent_builder.push_number(i as u8).push_number(i as u8).append(SSTORE);
+    }
+    let parent_bytecode = parent_builder.push_number(0u8).push_number(0u8).append(RETURN).build();
     db.set_account_code(CONTRACT, parent_bytecode);
 
-    let (success, _gas_used, gas_remaining) = execute_bytecode(&mut db, 5_000_000);
+    let (success, _gas_used, gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     // Parent should run out of gas due to its own block env access
-    // SSTORE requires 2M gas but only 10K available after TIMESTAMP limiting
+    // 12 SSTOREs require 24M gas but only 20M available after TIMESTAMP limiting
     assert!(
         !success,
-        "Parent should run out of gas when attempting SSTORE after accessing block env itself. \
-         gas_remaining: {}, success: {}",
+        "Parent should run out of gas when attempting 12 SSTOREs (24M gas) after accessing block \
+         env itself (20M limit). gas_remaining: {}, success: {}",
         gas_remaining, success
     );
 }
@@ -811,7 +795,7 @@ fn test_nested_call_already_limited_no_further_restriction() {
         .build();
     db.set_account_code(CONTRACT, parent_bytecode);
 
-    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 1_000_000_000);
+    let (success, gas_used, _gas_remaining) = execute_bytecode(&mut db, 30_000_000);
 
     assert!(success, "Transaction should succeed");
     // Should still be limited (not more restrictive than already imposed limit)
@@ -825,7 +809,7 @@ fn test_nested_call_already_limited_no_further_restriction() {
 #[test]
 fn test_detained_gas_is_restored_not_charged() {
     // This test explicitly verifies the detained gas restoration mechanism:
-    // 1. Gas is artificially limited during execution (to VOLATILE_DATA_ACCESS_REMAINING_GAS)
+    // 1. Gas is artificially limited during execution (to BLOCK_ENV_ACCESS_REMAINING_GAS)
     // 2. Detained gas is tracked
     // 3. Detained gas is restored before tx finishes
     // 4. User only pays for real work, not detained gas
@@ -848,7 +832,7 @@ fn test_detained_gas_is_restored_not_charged() {
         .build();
     db.set_account_code(CONTRACT, bytecode);
 
-    let gas_limit = 1_000_000_000;
+    let gas_limit = 30_000_000;
     let gas_price = 1000u128; // Higher gas price to make differences more visible
 
     let (success, gas_used, _gas_remaining) =
@@ -856,10 +840,10 @@ fn test_detained_gas_is_restored_not_charged() {
 
     assert!(success, "Transaction should succeed");
 
-    // Verify gas_used is small (real work only, not including ~999M detained gas)
+    // Verify gas_used is small (real work only, not including ~29M detained gas)
     assert!(
         gas_used < 30_000,
-        "gas_used should only reflect real work, got {}. If > 900M, detained gas was NOT restored.",
+        "gas_used should only reflect real work, got {}. If > 25M, detained gas was NOT restored.",
         gas_used
     );
 
@@ -875,11 +859,11 @@ fn test_detained_gas_is_restored_not_charged() {
         actual_cost, expected_cost
     );
 
-    // If detained gas was NOT restored, user would pay ~999M * 1000 = 999B units
+    // If detained gas was NOT restored, user would pay ~29M * 1000 = 29B units
     // With restoration, user pays ~20K * 1000 = 20M units
     assert!(
         actual_cost < U256::from(50_000_000u64),
-        "User cost ({}) should be < 50M. If > 900B, detained gas was charged.",
+        "User cost ({}) should be < 50M. If > 25B, detained gas was charged.",
         actual_cost
     );
 }
@@ -891,7 +875,7 @@ fn test_detained_gas_is_restored_not_charged() {
 ///
 /// # Test Scenario
 ///
-/// 1. A contract that reads BLOCK_NUMBER (triggers volatile data access) and performs SSTORE (2M
+/// 1. A contract that reads `BLOCK_NUMBER` (triggers volatile data access) and performs SSTORE (2M
 ///    gas)
 /// 2. Two consecutive system calls to the same contract
 /// 3. Both calls should behave identically with similar gas usage
@@ -906,7 +890,7 @@ fn test_detained_gas_is_restored_not_charged() {
 ///
 /// Previously, system calls bypassed the normal `pre_execution()` flow where `on_new_tx()`
 /// would reset the volatile data tracker. This caused inconsistent behavior where the first
-/// call would fail with OutOfGas (gas detained to 1M, but SSTORE needs 2M) while the second
+/// call would fail with `OutOfGas` (gas detained to 1M, but SSTORE needs 2M) while the second
 /// would succeed (no new detention, full gas available). This has been fixed by explicitly
 /// resetting the volatile data tracker in `transact_system_call_with_caller()`.
 #[test]
