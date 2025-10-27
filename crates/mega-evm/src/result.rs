@@ -9,6 +9,20 @@ pub use revm::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Type of volatile data that was accessed, causing gas detention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VolatileDataAccessType {
+    /// Block environment data (TIMESTAMP, NUMBER, etc.) or beneficiary account data was accessed.
+    /// Gas is limited to 20M.
+    BlockEnvOrBeneficiary,
+    /// Oracle contract was accessed.
+    /// Gas is limited to 1M.
+    Oracle,
+    /// Both block environment/beneficiary AND oracle were accessed.
+    /// Gas is limited to the minimum (1M from oracle).
+    Both,
+}
+
 /// `MegaETH` transaction validation error type.
 pub type MegaTransactionError = OpTransactionError;
 
@@ -38,6 +52,18 @@ pub enum MegaHaltReason {
         /// address called
         callee: Address,
     },
+    /// Out of gas due to volatile data access limit enforcement.
+    /// The transaction exceeded the gas limit imposed after accessing volatile data
+    /// (block environment, beneficiary, or oracle contract). The detained gas has been
+    /// refunded, so gas_used reflects only actual computational work performed.
+    VolatileDataAccessOutOfGas {
+        /// Type of volatile data that was accessed
+        access_type: VolatileDataAccessType,
+        /// The gas limit that was enforced after volatile data access
+        limit: u64,
+        /// Total amount of gas detained during execution (already refunded)
+        detained: u64,
+    },
 }
 
 impl From<EthHaltReason> for MegaHaltReason {
@@ -60,7 +86,8 @@ impl TryFrom<MegaHaltReason> for EthHaltReason {
             MegaHaltReason::Base(reason) => Ok(reason.try_into()?),
             MegaHaltReason::DataLimitExceeded { .. } |
             MegaHaltReason::KVUpdateLimitExceeded { .. } |
-            MegaHaltReason::SystemTxInvalidCallee { .. } => Err(value),
+            MegaHaltReason::SystemTxInvalidCallee { .. } |
+            MegaHaltReason::VolatileDataAccessOutOfGas { .. } => Err(value),
         }
     }
 }

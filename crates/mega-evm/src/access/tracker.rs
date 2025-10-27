@@ -90,6 +90,31 @@ impl VolatileDataAccessTracker {
             self.oracle_tracker.has_accessed()
     }
 
+    /// Returns the volatile data access information: (access_type, limit, detained).
+    /// Returns None if no volatile data has been accessed.
+    pub fn get_volatile_data_info(&self) -> Option<(crate::VolatileDataAccessType, u64, u64)> {
+        use crate::VolatileDataAccessType;
+
+        if !self.accessed() {
+            return None;
+        }
+
+        let global_limited_gas = self.global_limited_gas.as_ref()?;
+
+        // Determine access type based on what was accessed
+        let access_type = match (
+            !self.block_env_accessed.is_empty() || self.beneficiary_balance_accessed,
+            self.oracle_tracker.has_accessed(),
+        ) {
+            (true, true) => VolatileDataAccessType::Both,
+            (true, false) => VolatileDataAccessType::BlockEnvOrBeneficiary,
+            (false, true) => VolatileDataAccessType::Oracle,
+            (false, false) => return None, // Should not happen if accessed() is true
+        };
+
+        Some((access_type, global_limited_gas.limit, global_limited_gas.detained))
+    }
+
     /// Returns the bitmap of block environment data accessed during transaction execution.
     pub fn get_block_env_accesses(&self) -> BlockEnvAccess {
         self.block_env_accessed
@@ -228,19 +253,21 @@ impl VolatileDataAccessTracker {
 ///
 /// # Fields
 ///
-/// - `remaining`: Current global gas limit (starts at initial limit, may be lowered by
-///   `apply_limit`, decreases as gas is consumed)
+/// - `limit`: The gas limit enforced after volatile data access (immutable once set, may be
+///   lowered by `apply_limit` to the more restrictive value)
+/// - `remaining`: Current remaining gas (starts at limit, decreases as gas is consumed)
 /// - `detained`: Total amount of gas detained from all opcodes (refunded at transaction end)
 #[derive(Debug, Clone)]
 struct GlobalLimitedGas {
+    limit: u64,
     remaining: u64,
     detained: u64,
 }
 
 impl GlobalLimitedGas {
-    /// Creates a new global limited gas with the specified remaining gas limit.
+    /// Creates a new global limited gas with the specified gas limit.
     fn new(limit: u64) -> Self {
-        Self { remaining: limit, detained: 0 }
+        Self { limit, remaining: limit, detained: 0 }
     }
 
     /// Detains gas from the given gas limit. Any detained gas will be refunded.
@@ -262,6 +289,7 @@ impl GlobalLimitedGas {
     /// The actual gas detention happens when `detain_gas()` is called on the interpreter.
     fn apply_limit(&mut self, new_limit: u64) {
         // Always apply the more restrictive limit (minimum)
+        self.limit = self.limit.min(new_limit);
         self.remaining = self.remaining.min(new_limit);
     }
 

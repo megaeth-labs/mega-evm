@@ -237,16 +237,23 @@ where
                 // the frame result must have been marked as exceeding the limit, so return early
                 return Ok(());
             }
+        }
 
-            // Refund detained gas back to remaining gas before transaction finishes, so that the tx
-            // sender is not charged for the detained gas.
+        // Call the inner last_frame_result function first
+        // This will finalize gas accounting according to REVM's rules:
+        // - Spends all gas_limit
+        // - Only refunds remaining gas if is_ok_or_revert()
+        self.op.last_frame_result(evm, frame_result)?;
+
+        // After REVM's gas accounting, refund detained gas for volatile data access
+        // This must happen AFTER the op handler to override its gas calculation
+        if is_mini_rex {
             let mut volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow_mut();
             let gas = frame_result.gas_mut();
             volatile_data_tracker.refund_detained_gas(gas);
         }
 
-        // call the inner last_frame_result function to return the frame result
-        self.op.last_frame_result(evm, frame_result)
+        Ok(())
     }
 
     fn execution_result(
@@ -254,17 +261,30 @@ where
         evm: &mut Self::Evm,
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        // Capture volatile data info BEFORE calling op.execution_result (which calls last_frame_result)
+        // because last_frame_result will call refund_detained_gas which resets detained to 0
+        let volatile_info_before_refund = {
+            let volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow();
+            volatile_data_tracker.get_volatile_data_info()
+        };
+
         let result = self.op.execution_result(evm, result)?;
         Ok(result.map_haltreason(|reason| match reason {
             OpHaltReason::Base(EthHaltReason::OutOfGas(OutOfGasError::Basic)) => {
-                // if it halts due to OOG, we further check if the data or kv update limit is
-                // exceeded
-                evm.ctx()
-                    .additional_limit
-                    .borrow_mut()
-                    .check_limit()
-                    .maybe_halt_reason()
-                    .unwrap_or(MegaHaltReason::Base(reason))
+                // Check if this OutOfGas is due to volatile data access
+                if let Some((access_type, limit, detained)) = volatile_info_before_refund {
+                    // This OutOfGas happened after volatile data access - it's likely due to
+                    // hitting the detention limit. Return our custom halt reason.
+                    MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained }
+                } else {
+                    // No volatile data accessed - check if data/kv limits exceeded
+                    evm.ctx()
+                        .additional_limit
+                        .borrow_mut()
+                        .check_limit()
+                        .maybe_halt_reason()
+                        .unwrap_or(MegaHaltReason::Base(reason))
+                }
             }
             _ => MegaHaltReason::Base(reason),
         }))
