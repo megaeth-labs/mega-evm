@@ -15,7 +15,7 @@
 | **LOG per byte**                                         | 8 gas/byte                                         | **80 gas/byte (×10)**                                                                        |
 | **Calldata per-byte**                                    | 4 gas (zero byte), 16 gas (non-zero byte)          | **40 gas (zero byte), 160 gas (non-zero byte)**                                              |
 | **SELFDESTRUCT**                                         | Disabled refunds post-Shanghai but still available | **Instruction removed**                                                                      |
-| **Volatile data access**                                | No restrictions                                    | **Gas limited to `VOLATILE_DATA_ACCESS_REMAINING_GAS`** after accessing block env, beneficiary account, or oracle contract |
+| **Volatile data access**                                | No restrictions                                    | **Gas limited based on access type:** Block env/beneficiary → **20M gas (`BLOCK_ENV_ACCESS_REMAINING_GAS`)**, Oracle contract → **1M gas (`ORACLE_ACCESS_REMAINING_GAS`)**, most restrictive limit applies when multiple types accessed |
 | **Per-tx data limit**                                    | none                                               | **3.125 MiB (25% of 12.5 MiB block limit)** across calldata + logs + return + initcode       |
 | **Per-tx KV update limit**                               | none                                               | **12,500 updates (25% of block limit)**                                                      |
 
@@ -33,7 +33,7 @@ To ensure network stability and sustainable growth of MegaETH, the MiniRex hardf
 
 1. **Multi-dimensional Resource Limits**: Novel constraints on data size and key-value updates enable safe removal of block gas limit
 2. **Strategic Gas Cost Increases**: Storage operations (SSTORE, account creation, logging) see substantial gas cost increases to reflect their true burden on blockchain nodes
-3. **Volatile Data Access Control**: Block environment data, beneficiary balance, and oracle contract access trigger immediate gas limiting to `VOLATILE_DATA_ACCESS_REMAINING_GAS` with excess gas detained and refunded
+3. **Volatile Data Access Control**: Block environment data, beneficiary balance, and oracle contract access trigger immediate gas limiting with type-specific limits (20M gas for block env/beneficiary, 1M gas for oracle), with excess gas detained and refunded
 
 This document details all semantic changes, their rationale, and implementation requirements for the MiniRex hardfork activation.
 
@@ -151,16 +151,27 @@ MiniRex introduces comprehensive tracking and gas limiting for three categories 
 
 #### 3.4.1 Gas Detention Mechanism
 
+**Type-Specific Gas Limits:**
+
+- **Block Environment and Beneficiary Access**: `BLOCK_ENV_ACCESS_REMAINING_GAS` = 20,000,000 gas (20M)
+- **Oracle Contract Access**: `ORACLE_ACCESS_REMAINING_GAS` = 1,000,000 gas (1M)
+- **Most Restrictive Limit Wins**: When multiple volatile data types are accessed, the minimum (most restrictive) limit applies, regardless of access order
+
 **Global Gas Limitation:**
 
-- **Gas Limit After Access**: `VOLATILE_DATA_ACCESS_REMAINING_GAS` (currently 1,000,000 gas)
 - **Scope**: Once triggered, applies globally to:
   - The current call frame where volatile data was accessed
   - All parent call frames after the call returns
   - All subsequent operations in the transaction
-- **Gas Detention**: Gas above the `VOLATILE_DATA_ACCESS_REMAINING_GAS` limit is "detained" (tracked separately) and refunded at transaction end
+- **Gas Detention**: Gas above the applicable limit is "detained" (tracked separately) and refunded at transaction end
 - **Fair Billing**: Users only pay for actual work; detained gas is refunded automatically
 - **Purpose**: Ensure volatile data access is used only for essential decision-making, not extensive computation
+
+**Example Flows:**
+
+1. **Block env then oracle**: Transaction with 1B gas → TIMESTAMP (20M limit, 980M detained) → CALL(oracle) (1M limit applied, 999M total detained)
+2. **Oracle then block env**: Transaction with 1B gas → CALL(oracle) (1M limit, 999M detained) → TIMESTAMP (still 1M limit, same detention)
+3. **Result**: Both orders produce the same final state with 1M gas limit and 999M gas detained
 
 #### 3.4.2 Block Environment Access
 
@@ -224,21 +235,21 @@ Any operation that accesses the beneficiary account triggers gas limiting:
 **Example Flow:**
 
 ```
-Transaction → Contract A → TIMESTAMP (block env accessed)
+Transaction (1B gas) → Contract A → TIMESTAMP (block env accessed)
                                          ↓
-                      Gas limited to VOLATILE_DATA_ACCESS_REMAINING_GAS, excess detained
+                      Gas limited to 20M (BLOCK_ENV_ACCESS_REMAINING_GAS), 980M detained
                                          ↓
                           → Contract B → BALANCE(beneficiary)
                                          ↓
-                      Still limited to VOLATILE_DATA_ACCESS_REMAINING_GAS (same global limit)
+                      Still limited to 20M (beneficiary also uses 20M limit)
                                          ↓
                           → Oracle Contract (CALL)
                                          ↓
-                      Still limited to VOLATILE_DATA_ACCESS_REMAINING_GAS
+                      Gas further limited to 1M (ORACLE_ACCESS_REMAINING_GAS), 999M detained
                                          ↓
-                          → Returns to Contract A (gas still limited)
+                          → Returns to Contract A (gas still limited to 1M)
                                          ↓
-                          Transaction ends, detained gas refunded
+                          Transaction ends, 999M detained gas refunded
 ```
 
 ### 3.5. Multi-dimensional Resource Limits
@@ -364,11 +375,12 @@ The following opcodes have custom implementations in MiniRex:
 - **Multi-dimensional Resource Limits**: Must respect new data and KV update limits
 - **Gas Costs**: Opcodes like `SSTORE` and `LOG` become much more expensive in gas (but still much cheaper in dollar terms)
 - **Gas Estimation**: Local gas estimation by tools like Foundry becomes highly inaccurate
-- **Volatile Data Access**: Applications accessing any of the following will have their remaining gas limited to `VOLATILE_DATA_ACCESS_REMAINING_GAS`, with excess gas detained and refunded:
-  - **Block environment opcodes**: NUMBER, TIMESTAMP, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, PREVRANDAO, BLOCKHASH, BLOBBASEFEE, BLOBHASH
-  - **Beneficiary account access**: Any operation on the beneficiary address including:
+- **Volatile Data Access**: Applications accessing volatile data will have their remaining gas limited based on access type, with excess gas detained and refunded:
+  - **Block environment opcodes** (20M gas limit): NUMBER, TIMESTAMP, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, PREVRANDAO, BLOCKHASH, BLOBBASEFEE, BLOBHASH
+  - **Beneficiary account access** (20M gas limit): Any operation on the beneficiary address including:
     - Account balance (BALANCE, SELFBALANCE)
     - Account code (EXTCODECOPY, EXTCODESIZE, EXTCODEHASH)
     - Transaction involving beneficiary (as caller or recipient)
-  - **Oracle contract**: CALL-family instructions targeting address `0x4200000000000000000000000000000000000101`
+  - **Oracle contract** (1M gas limit): CALL-family instructions targeting address `0x4200000000000000000000000000000000000101`
+  - **Most restrictive limit applies**: When multiple volatile data types are accessed, the minimum limit (1M for oracle, 20M for block env/beneficiary) applies globally
 - Applications should use volatile data access only for essential decision-making, not extensive computation
