@@ -7,6 +7,8 @@ use clap::Parser;
 pub enum MainCmd {
     /// State transition tool
     T8n(crate::t8n::Cmd),
+    /// Run arbitrary EVM bytecode
+    Run(crate::run::Cmd),
 }
 
 /// Error types for the main command system
@@ -18,6 +20,9 @@ pub enum Error {
     /// T8n tool error
     #[error("T8n error: {0}")]
     T8n(#[from] crate::t8n::T8nError),
+    /// Run tool error
+    #[error("Run error: {0}")]
+    Run(#[from] crate::run::RunError),
 }
 
 impl MainCmd {
@@ -25,6 +30,10 @@ impl MainCmd {
     pub fn run(&self) -> Result<(), Error> {
         match self {
             Self::T8n(cmd) => {
+                cmd.run()?;
+                Ok(())
+            }
+            Self::Run(cmd) => {
                 cmd.run()?;
                 Ok(())
             }

@@ -23,10 +23,12 @@ state-test.workspace = true
 
 # revm
 revm.workspace = true
+revm-inspectors.workspace = true
 
 # alloy
 alloy-consensus = { workspace = true, features = ["serde"] }
 alloy-primitives.workspace = true
+alloy-rpc-types-trace.workspace = true
 alloy-serde = { workspace = true, features = ["default"]}
 
 # op
