@@ -246,6 +246,39 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
         self
     }
 
+    /// Sets the external environments for the EVM.
+    ///
+    /// This method updates the external environments used for gas cost calculations,
+    /// including the salt environment and oracle environment. When setting new
+    /// external environments, the dynamic gas cost calculator and oracle environment
+    /// are reinitialized with the new configurations.
+    ///
+    /// # Arguments
+    ///
+    /// * `external_envs` - The new external environments configuration
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
+    pub fn with_external_envs<NewExtEnvs: ExternalEnvs>(
+        self,
+        external_envs: NewExtEnvs,
+    ) -> MegaContext<DB, NewExtEnvs> {
+        let parent_block_number = self.inner.block.number.to::<u64>().saturating_sub(1);
+        MegaContext {
+            inner: self.inner,
+            spec: self.spec,
+            disable_beneficiary: self.disable_beneficiary,
+            additional_limit: self.additional_limit,
+            dynamic_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+                external_envs.salt_env(),
+                parent_block_number,
+            ))),
+            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
+            volatile_data_tracker: self.volatile_data_tracker,
+        }
+    }
+
     /// Sets the Op Stack's [`L1BlockInfo`] for the EVM.
     ///
     /// This method configures the L1 block information used by the `OpStack`

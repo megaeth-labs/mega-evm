@@ -65,6 +65,32 @@ let tx = Transaction {
 let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 ```
 
+## Command Line Tool: `mega-evme`
+
+The `mega-evme` binary provides a command-line interface for executing arbitrary EVM bytecode, similar to go-ethereum's `evm` tool.
+
+### Installation
+
+```bash
+cargo build --release
+# Binary will be at ./target/release/mega-evme
+```
+
+### Basic Usage
+
+```bash
+# Execute bytecode directly
+mega-evme run 0x60016000526001601ff3
+
+# Execute bytecode from file
+mega-evme run --codefile contract.hex
+
+# Execute with custom parameters
+mega-evme run 0x60016000526001601ff3 \
+  --gas 1000000 \
+  --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+```
+
 ## Development
 
 ### Building

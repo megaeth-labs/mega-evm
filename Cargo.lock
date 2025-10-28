@@ -2200,11 +2200,13 @@ version = "0.0.1"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-rpc-types-trace",
  "alloy-serde",
  "clap",
  "mega-evm",
  "op-alloy-consensus",
  "revm",
+ "revm-inspectors",
  "serde",
  "serde_json",
  "state-test",

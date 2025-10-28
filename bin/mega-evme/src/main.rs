@@ -11,6 +11,9 @@ pub use cmd::*;
 /// T8N (state transition) module containing all transition-related functionality
 pub mod t8n;
 
+/// Run module for executing arbitrary EVM bytecode
+pub mod run;
+
 fn main() -> Result<(), Error> {
     set_thread_panic_hook();
     MainCmd::parse().run().inspect_err(|e| println!("{e:?}"))
