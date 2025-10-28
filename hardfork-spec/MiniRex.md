@@ -80,6 +80,13 @@ This document details all semantic changes, their rationale, and implementation 
 
 - Follow standard EIP-2200 rules (reset, same value, refunds, warm reads)
 
+**Cold Storage Access (EIP-2929):**
+
+- **Cold Access Penalty**: Additional 2,100 gas on first access to storage slot per transaction
+- **Applies to**: Both SSTORE and SLOAD operations
+- **Behavior**: First access to an `(address, storage_key)` pair charges the cold access cost; subsequent accesses in the same transaction use warm pricing
+- **Purpose**: Properly price storage access operations and prevent DoS attacks
+
 #### 3.3.2 Account Creation
 
 **New Account Gas:**

@@ -209,11 +209,13 @@ pub fn log_with_data_bomb<const N: usize, H: HostExt + ?Sized>(
 ///
 /// 1. **Dynamic Gas Costs**: Base cost 2,000,000 gas, multiplied by `bucket_capacity /
 ///    MIN_BUCKET_SIZE`
-/// 2. **Data Size Tracking**: Adds 40 bytes when original ≠ new value AND first write to slot
-/// 3. **KV Update Tracking**: Adds 1 KV update when original ≠ new value AND first write to slot
-/// 4. **Limit Enforcement**: Halts with `OutOfGas` when data (3.125 MB) or KV (1,000) limits
+/// 2. **Cold Storage Access (EIP-2929)**: Additional 2,100 gas on first access to storage slot per
+///    transaction
+/// 3. **Data Size Tracking**: Adds 40 bytes when original ≠ new value AND first write to slot
+/// 4. **KV Update Tracking**: Adds 1 KV update when original ≠ new value AND first write to slot
+/// 5. **Limit Enforcement**: Halts with `OutOfGas` when data (3.125 MB) or KV (1,000) limits
 ///    exceeded
-/// 5. **Refund Logic**: Refunds data/KV when slot reset to original value
+/// 6. **Refund Logic**: Refunds data/KV when slot reset to original value
 ///
 /// # Assumptions
 ///
@@ -244,7 +246,7 @@ pub fn sstore_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     // In addition, we increase the gas cost for setting a storage slot to a non-zero value. Other
     // gas costs are the same as the standard EVM.
     let loaded_data = &state_load.data;
-    let gas_cost = if loaded_data.is_new_eq_present() {
+    let mut gas_cost = if loaded_data.is_new_eq_present() {
         WARM_STORAGE_READ_COST
     } else if loaded_data.is_original_eq_present() && loaded_data.is_original_zero() {
         // dynamically calculate the gas cost based on the SALT bucket capacity
@@ -258,6 +260,12 @@ pub fn sstore_with_bomb<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     } else {
         WARM_STORAGE_READ_COST
     };
+
+    // EIP-2929: Add cold storage access cost if this is the first access
+    if state_load.is_cold {
+        gas_cost += constants::equivalence::COLD_SLOAD_COST;
+    }
+
     revm::interpreter::gas!(context.interpreter, gas_cost);
 
     context
