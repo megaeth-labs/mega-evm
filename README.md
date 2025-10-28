@@ -91,6 +91,8 @@ mega-evme run 0x60016000526001601ff3 \
   --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 ```
 
+More details can be found [here](bin/mega-evme/src/run/README.md).
+
 ## Development
 
 ### Building
