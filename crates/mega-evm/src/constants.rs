@@ -39,9 +39,9 @@ pub mod mini_rex {
     /// Applied to both CREATE and CREATE2 operations.
     pub const CREATE_GAS: u64 = 2_000_000;
     /// Additional gas cost per byte for code deposit during contract creation in `MINI_REX` spec.
-    /// Total cost per byte: ~62,500 gas (200 standard + 62,300 additional).
-    /// Formula: `2_000_000 / 32 - CODEDEPOSIT` where CODEDEPOSIT = 200.
-    pub const CODEDEPOSIT_ADDITIONAL_GAS: u64 = 2_000_000 / 32 - super::equivalence::CODEDEPOSIT;
+    /// Total cost per byte: 10,000 gas (200 standard + 9,800 additional).
+    /// Formula: `10_000 - CODEDEPOSIT` where CODEDEPOSIT = 200.
+    pub const CODEDEPOSIT_ADDITIONAL_GAS: u64 = 10_000 - super::equivalence::CODEDEPOSIT;
     /// The gas cost for `LOGDATA` for the `MINI_REX` spec, i.e., gas cost per byte for log data.
     pub const LOG_DATA_GAS: u64 = super::equivalence::LOGDATA * 10;
     /// The gas cost for `LOGTOPIC` for the `MINI_REX` spec, i.e., gas cost per topic for log.

@@ -8,7 +8,7 @@
 | **SSTORE (other cases)**                                 | EIP-2200 rules (reset, same, refund, warm read)    | Same as standard                                                                             |
 | **New account (CALL → empty, tx callee, CREATE target)** | 25,000 (NEWACCOUNT)                                | **2,000,000 × bucket multiplier**                                                            |
 | **Contract creation (CREATE/CREATE2)**                   | 25,000 (new account) + code deposit gas            | **2,000,000 × multiplier (new acct)** + **2,000,000 (codehash)** + code deposit gas          |
-| **Code deposit (per byte)**                              | 200 gas/byte                                       | **62,500 gas/byte**                                                                          |
+| **Code deposit (per byte)**                              | 200 gas/byte                                       | **10,000 gas/byte**                                                                          |
 | **Initcode max size**                                    | 49152 bytes (per EIP-3860)                         | **MAX_CONTRACT_SIZE (512 KiB) + 24 KiB**                                                     |
 | **CREATE/CALL forwarding fraction**                      | 63/64 of gas left                                  | **98/100** of gas left                                                                       |
 | **LOG per topic**                                        | 375 gas/topic                                      | **3,750 gas/topic (×10)**                                                                    |
@@ -108,9 +108,9 @@ This document details all semantic changes, their rationale, and implementation 
 
 **Per-Byte Cost:**
 
-- **MiniRex Cost**: 62,500 gas per byte
+- **MiniRex Cost**: 10,000 gas per byte (200 standard + 9,800 additional)
 - **Standard EVM**: 200 gas per byte
-- **Calculation**: `CREATE_GAS / 32 = 2_000_000 / 32 = 62,500`
+- **Constant**: `CODEDEPOSIT_ADDITIONAL_GAS = 10_000 - CODEDEPOSIT` where CODEDEPOSIT = 200
 - **Purpose**: Prevent unsustainable state bloat
 
 #### 3.3.4 Logging Operations
