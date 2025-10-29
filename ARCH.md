@@ -94,7 +94,7 @@ self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
 **Limits**:
 - `MAX_CONTRACT_SIZE`: 512 KB (vs standard 24 KB) - ~21x increase
 - `MAX_INITCODE_SIZE`: 536 KB (512 KB + 24 KB buffer) - ~11x increase
-- `CODEDEPOSIT_COST`: ~62,500 gas per byte (vs 200) - ~312x increase
+- `CODEDEPOSIT_COST`: 10,000 gas per byte (vs 200) - 50x increase
 
 #### Data and KV Update Limits
 
