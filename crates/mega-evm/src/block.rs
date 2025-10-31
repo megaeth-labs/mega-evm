@@ -184,22 +184,15 @@ impl MegaBlockExecutionCtx {
         parent_hash: B256,
         parent_beacon_block_root: Option<B256>,
         extra_data: Bytes,
+        first_mini_rex_block: bool,
     ) -> Self {
-        Self { parent_hash, parent_beacon_block_root, extra_data, ..Default::default() }
-    }
-
-    /// Mark this as the first `MiniRex` block.
-    ///
-    /// This is a builder method that sets the `first_mini_rex_block` flag to true.
-    /// This flag is used to trigger oracle contract deployment.
-    pub fn as_first_mini_rex_block(mut self) -> Self {
-        self.first_mini_rex_block = true;
-        self
-    }
-
-    /// Set the `first_mini_rex_block` flag.
-    pub fn set_first_mini_rex_block(&mut self, value: bool) {
-        self.first_mini_rex_block = value;
+        Self {
+            parent_hash,
+            parent_beacon_block_root,
+            extra_data,
+            first_mini_rex_block,
+            ..Default::default()
+        }
     }
 
     /// Set a custom block data limit.
