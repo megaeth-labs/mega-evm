@@ -163,6 +163,9 @@ pub struct MegaBlockExecutionCtx {
     /// The maximum amount of key-value updates allowed to generate from a block.
     /// Defaults to [`crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT`].
     pub block_kv_update_limit: u64,
+    /// The maximum size of all transactions (transaction body, not execution outcome) included in
+    /// a block.
+    pub block_tx_size_limit: u64,
 }
 
 impl Default for MegaBlockExecutionCtx {
@@ -174,6 +177,7 @@ impl Default for MegaBlockExecutionCtx {
             extra_data: Bytes::new(),
             block_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
             block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
+            block_tx_size_limit: u64::MAX,
         }
     }
 }
@@ -212,6 +216,15 @@ impl MegaBlockExecutionCtx {
         self.block_kv_update_limit = limit;
         self
     }
+
+    /// Set a custom block transaction size limit.
+    ///
+    /// This is a builder method that consumes self and returns a new instance
+    /// with the specified transaction size limit.
+    pub fn with_tx_size_limit(mut self, limit: u64) -> Self {
+        self.block_tx_size_limit = limit;
+        self
+    }
 }
 
 /// Block executor for the `MegaETH` chain.
@@ -245,6 +258,7 @@ pub struct MegaBlockExecutor<C, E, R: OpReceiptBuilder> {
     gas_used: u64,
     block_data_used: u64,
     block_kv_updates_used: u64,
+    block_tx_size_used: u64,
 }
 
 impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> {
@@ -294,6 +308,7 @@ where
             gas_used: 0,
             block_data_used: 0,
             block_kv_updates_used: 0,
+            block_tx_size_used: 0,
             evm,
             system_caller: SystemCaller::new(spec),
         }
@@ -307,7 +322,7 @@ where
     C: OpHardforks,
     ExtEnvs: crate::ExternalEnvs,
     INSP: Inspector<crate::MegaContext<DB, ExtEnvs>>,
-    R: OpReceiptBuilder,
+    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718>,
 {
     /// Get the current data size and KV update count from the EVM context.
     fn get_tx_resource_usage(&self) -> (u64, u64) {
@@ -318,7 +333,7 @@ where
     }
 
     /// Check and update block-level resource limits
-    fn check_and_update_block_limits(&mut self) -> Result<(), BlockExecutionError> {
+    fn post_check_limits(&mut self) -> Result<(), BlockExecutionError> {
         let (tx_data_size, tx_kv_updates) = self.get_tx_resource_usage();
 
         // Get limits from context
@@ -430,6 +445,18 @@ where
             .into());
         }
 
+        // The sum of the transaction size must be no greater than the block's tx size limit.
+        let tx_size = tx.tx().encode_2718_len() as u64;
+        if tx_size + self.block_tx_size_used > self.ctx.block_tx_size_limit {
+            return Err(BlockExecutionError::other(
+                MegaBlockLimitExceededError::TransactionSizeLimit {
+                    block_used: self.block_tx_size_used,
+                    tx_used: tx_size,
+                    limit: self.ctx.block_tx_size_limit,
+                },
+            ));
+        }
+
         // Cache the depositor account prior to the state transition for the deposit nonce.
         //
         // Note that in MegaETH, the Regolith hardfork is always active, so we always have deposit
@@ -456,7 +483,7 @@ where
         }
 
         // Check block-level limits after transaction execution but before committing
-        self.check_and_update_block_limits()?;
+        self.post_check_limits()?;
 
         self.system_caller.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
 
@@ -464,6 +491,9 @@ where
 
         // append gas used
         self.gas_used += gas_used;
+
+        // append transaction size
+        self.block_tx_size_used += tx_size;
 
         self.receipts.push(
             match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
@@ -574,6 +604,17 @@ pub enum MegaBlockLimitExceededError {
         /// KV updates used by current transaction
         tx_used: u64,
         /// Block KV update limit
+        limit: u64,
+    },
+
+    /// Transaction size limit exceeded.
+    #[error("Transaction size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    TransactionSizeLimit {
+        /// Transaction size used by block so far
+        block_used: u64,
+        /// Transaction size used by current transaction
+        tx_used: u64,
+        /// Transaction size limit
         limit: u64,
     },
 }
