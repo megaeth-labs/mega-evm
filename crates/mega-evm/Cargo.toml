@@ -37,6 +37,7 @@ delegate.workspace = true
 derive_more.workspace = true
 once_cell.workspace = true
 serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
 
 [dev-dependencies]
 mega-evm = { path = ".", features = ["test-utils"] }
