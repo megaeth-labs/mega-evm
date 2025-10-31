@@ -6,6 +6,7 @@
 use std::convert::Infallible;
 
 use alloy_consensus::{Signed, Transaction, TxLegacy};
+use alloy_eips::eip2718::Encodable2718;
 use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_op_hardforks::OpChainHardforks;
@@ -512,10 +513,10 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     let storage_result = db_state.storage(CONTRACT, U256::ZERO);
 
     // The storage should either not exist or be zero (not 42)
-    match storage_result {
-        Ok(value) => assert_eq!(value, U256::ZERO, "Storage should not be committed"),
-        Err(_) => {} // Storage doesn't exist, which is fine
+    if let Ok(value) = storage_result {
+        assert_eq!(value, U256::ZERO, "Storage should not be committed");
     }
+    // Storage doesn't exist, which is fine
 
     // Finish the block - should have 0 receipts
     let block_result = executor.finish();
@@ -523,4 +524,315 @@ fn test_block_no_state_commit_on_limit_exceeded() {
 
     let (_, receipts) = block_result.unwrap();
     assert_eq!(receipts.receipts.len(), 0, "Should have 0 receipts (tx failed)");
+}
+
+#[test]
+fn test_block_tx_size_limit_default_unlimited() {
+    // Create database and deploy contract
+    let mut db = MemoryDatabase::default();
+    let bytecode = create_log_generating_contract(100);
+    db.set_account_code(CONTRACT, bytecode);
+    // Fund the caller account
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    // Create state
+    let mut state = State::builder().with_database(&mut db).build();
+
+    // Create EVM factory
+    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new(external_envs);
+
+    // Create EVM environment
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+
+    // Create EVM
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    // Create block context with default limits (tx size should be u64::MAX)
+    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false);
+    assert_eq!(block_ctx.block_tx_size_limit, u64::MAX, "Default tx size limit should be u64::MAX");
+
+    // Create block executor
+    let chain_spec = OpChainHardforks::base_mainnet();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    // Execute multiple transactions - should all succeed with unlimited size
+    for nonce in 0..10 {
+        let tx = create_transaction(nonce, 1_000_000);
+        let result = executor.execute_transaction(&tx);
+        assert!(
+            result.is_ok(),
+            "Transaction {} should succeed with unlimited tx size limit",
+            nonce
+        );
+    }
+
+    // Finish the block
+    let block_result = executor.finish();
+    assert!(block_result.is_ok(), "Block should finish successfully");
+
+    let (_, receipts) = block_result.unwrap();
+    assert_eq!(receipts.receipts.len(), 10, "Should have 10 receipts");
+}
+
+#[test]
+fn test_block_tx_size_limit_allows_multiple_transactions() {
+    // Create database and deploy contract
+    let mut db = MemoryDatabase::default();
+    let bytecode = create_log_generating_contract(100);
+    db.set_account_code(CONTRACT, bytecode);
+    // Fund the caller account
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    // Create state
+    let mut state = State::builder().with_database(&mut db).build();
+
+    // Create EVM factory
+    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new(external_envs);
+
+    // Create EVM environment
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+
+    // Create EVM
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    // Create a transaction to measure its size
+    let sample_tx = create_transaction(0, 1_000_000);
+    let tx_size = sample_tx.encode_2718_len() as u64;
+
+    // Set limit to allow exactly 5 transactions
+    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false)
+        .with_tx_size_limit(tx_size * 5);
+
+    // Create block executor
+    let chain_spec = OpChainHardforks::base_mainnet();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    // Execute 5 transactions - should all succeed
+    for nonce in 0..5 {
+        let tx = create_transaction(nonce, 1_000_000);
+        let result = executor.execute_transaction(&tx);
+        assert!(result.is_ok(), "Transaction {} should succeed", nonce);
+    }
+
+    // Finish the block
+    let block_result = executor.finish();
+    assert!(block_result.is_ok(), "Block should finish successfully");
+
+    let (_, receipts) = block_result.unwrap();
+    assert_eq!(receipts.receipts.len(), 5, "Should have 5 receipts");
+}
+
+#[test]
+fn test_block_tx_size_limit_exceeded_first_transaction() {
+    // Create database and deploy contract
+    let mut db = MemoryDatabase::default();
+    let bytecode = create_log_generating_contract(100);
+    db.set_account_code(CONTRACT, bytecode);
+    // Fund the caller account
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    // Create state
+    let mut state = State::builder().with_database(&mut db).build();
+
+    // Create EVM factory
+    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new(external_envs);
+
+    // Create EVM environment
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+
+    // Create EVM
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    // Set a very small tx size limit that won't fit even one transaction
+    let block_ctx =
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false).with_tx_size_limit(10); // Very small limit
+
+    // Create block executor
+    let chain_spec = OpChainHardforks::base_mainnet();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    // Execute transaction (should fail immediately due to tx size limit)
+    let result = executor.execute_transaction(&create_transaction(0, 1_000_000));
+    assert!(result.is_err(), "Transaction should fail due to tx size limit");
+
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("TransactionSizeLimit"),
+        "Error should mention TransactionSizeLimit, got: {}",
+        err_msg
+    );
+
+    // Finish the block - should have 0 receipts
+    let block_result = executor.finish();
+    assert!(block_result.is_ok(), "Block should finish successfully");
+
+    let (_, receipts) = block_result.unwrap();
+    assert_eq!(receipts.receipts.len(), 0, "Should have 0 receipts (tx failed)");
+}
+
+#[test]
+fn test_block_tx_size_limit_exceeded_mid_block() {
+    // Create database and deploy contract
+    let mut db = MemoryDatabase::default();
+    let bytecode = create_log_generating_contract(100);
+    db.set_account_code(CONTRACT, bytecode);
+    // Fund the caller account
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    // Create state
+    let mut state = State::builder().with_database(&mut db).build();
+
+    // Create EVM factory
+    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new(external_envs);
+
+    // Create EVM environment
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+
+    // Create EVM
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    // Create a transaction to measure its size
+    let sample_tx = create_transaction(0, 1_000_000);
+    let tx_size = sample_tx.encode_2718_len() as u64;
+
+    // Set limit to allow exactly 3 transactions
+    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false)
+        .with_tx_size_limit(tx_size * 3);
+
+    // Create block executor
+    let chain_spec = OpChainHardforks::base_mainnet();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    // Execute first 3 transactions (should all succeed)
+    for nonce in 0..3 {
+        let tx = create_transaction(nonce, 1_000_000);
+        let result = executor.execute_transaction(&tx);
+        assert!(result.is_ok(), "Transaction {} should succeed", nonce);
+    }
+
+    // Execute 4th transaction (should fail due to tx size limit)
+    let result = executor.execute_transaction(&create_transaction(3, 1_000_000));
+    assert!(result.is_err(), "Fourth transaction should fail due to tx size limit");
+
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("TransactionSizeLimit"),
+        "Error should mention TransactionSizeLimit, got: {}",
+        err_msg
+    );
+
+    // Finish the block - should have 3 receipts
+    let block_result = executor.finish();
+    assert!(block_result.is_ok(), "Block should finish successfully");
+
+    let (_, receipts) = block_result.unwrap();
+    assert_eq!(receipts.receipts.len(), 3, "Should have 3 receipts (4th tx failed)");
+}
+
+#[test]
+fn test_block_tx_size_limit_with_varying_sizes() {
+    // Create database and deploy contract
+    let mut db = MemoryDatabase::default();
+    let bytecode = create_log_generating_contract(100);
+    db.set_account_code(CONTRACT, bytecode);
+    // Fund the caller account
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    // Create state
+    let mut state = State::builder().with_database(&mut db).build();
+
+    // Create EVM factory
+    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new(external_envs);
+
+    // Create EVM environment
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+
+    // Create EVM
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    // Measure transaction sizes with different gas limits
+    let small_tx = create_transaction(0, 100_000);
+    let large_tx = create_transaction(0, 10_000_000);
+    let small_size = small_tx.encode_2718_len() as u64;
+    let large_size = large_tx.encode_2718_len() as u64;
+
+    // Set limit to allow 2 small + 1 large transaction
+    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false)
+        .with_tx_size_limit(small_size * 2 + large_size);
+
+    // Create block executor
+    let chain_spec = OpChainHardforks::base_mainnet();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    // Execute 2 small transactions
+    let result1 = executor.execute_transaction(&create_transaction(0, 100_000));
+    assert!(result1.is_ok(), "First small transaction should succeed");
+
+    let result2 = executor.execute_transaction(&create_transaction(1, 100_000));
+    assert!(result2.is_ok(), "Second small transaction should succeed");
+
+    // Execute 1 large transaction
+    let result3 = executor.execute_transaction(&create_transaction(2, 10_000_000));
+    assert!(result3.is_ok(), "Large transaction should succeed");
+
+    // Try to execute one more small transaction (should fail)
+    let result4 = executor.execute_transaction(&create_transaction(3, 100_000));
+    assert!(result4.is_err(), "Fourth transaction should fail due to tx size limit");
+
+    // Finish the block - should have 3 receipts
+    let block_result = executor.finish();
+    assert!(block_result.is_ok(), "Block should finish successfully");
+
+    let (_, receipts) = block_result.unwrap();
+    assert_eq!(receipts.receipts.len(), 3, "Should have 3 receipts (4th tx failed)");
 }
