@@ -2,13 +2,11 @@
 
 use alloy_consensus::{Signed, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
 use alloy_primitives::{Signature, TxKind};
+use mega_evm::MegaTxEnvelope;
 use revm::{
     context_interface::transaction::{AccessList, SignedAuthorization},
     primitives::{Address, Bytes, B256, U256},
 };
-
-/// `MegaETH` transaction envelope type.
-pub type MegaTxEnvelope = op_alloy_consensus::OpTxEnvelope;
 
 /// Error type for transaction conversion failures
 #[derive(Debug, thiserror::Error)]

@@ -197,6 +197,11 @@ impl MegaBlockExecutionCtx {
         self
     }
 
+    /// Set the `first_mini_rex_block` flag.
+    pub fn set_first_mini_rex_block(&mut self, value: bool) {
+        self.first_mini_rex_block = value;
+    }
+
     /// Set a custom block data limit.
     ///
     /// This is a builder method that consumes self and returns a new instance
