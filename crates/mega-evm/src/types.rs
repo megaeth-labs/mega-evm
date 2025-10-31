@@ -9,3 +9,5 @@ pub type MegaTransactionBuilder = op_revm::transaction::abstraction::OpTransacti
 
 /// `MegaETH` transaction type.
 pub type MegaTxType = op_alloy_consensus::OpTxType;
+/// `MegaETH` transaction envelope type.
+pub type MegaTxEnvelope = op_alloy_consensus::OpTxEnvelope;

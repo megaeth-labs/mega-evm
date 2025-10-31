@@ -42,7 +42,7 @@ use alloy_evm::{
         SystemCaller,
     },
     eth::receipt_builder::ReceiptBuilderCtx,
-    Database, FromRecoveredTx, FromTxWithEncoded,
+    Database, Evm as _, FromRecoveredTx, FromTxWithEncoded,
 };
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_op_hardforks::OpHardforks;
@@ -114,18 +114,17 @@ impl<ChainSpec, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<ChainSpec, EvmF, 
     }
 }
 
-impl<ChainSpec, EvmF, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
-    for MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>
+impl<ChainSpec, ExtEnvs, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
+    for MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvs>, ReceiptBuilder>
 where
     ReceiptBuilder: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
     ChainSpec: OpHardforks + Clone,
-    EvmF: alloy_evm::EvmFactory<
-        Tx: FromRecoveredTx<ReceiptBuilder::Transaction>
-                + FromTxWithEncoded<ReceiptBuilder::Transaction>,
-    >,
+    ExtEnvs: crate::ExternalEnvs + Clone,
+    crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>
+        + FromTxWithEncoded<ReceiptBuilder::Transaction>,
     Self: 'static,
 {
-    type EvmFactory = EvmF;
+    type EvmFactory = crate::MegaEvmFactory<ExtEnvs>;
     type ExecutionCtx<'a> = MegaBlockExecutionCtx;
     type Transaction = ReceiptBuilder::Transaction;
     type Receipt = ReceiptBuilder::Receipt;
@@ -158,6 +157,68 @@ pub struct MegaBlockExecutionCtx {
     pub parent_beacon_block_root: Option<B256>,
     /// The block's extra data.
     pub extra_data: Bytes,
+    /// The maximum amount of data allowed to generate from a block.
+    /// Defaults to [`crate::constants::mini_rex::BLOCK_DATA_LIMIT`].
+    pub block_data_limit: u64,
+    /// The maximum amount of key-value updates allowed to generate from a block.
+    /// Defaults to [`crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT`].
+    pub block_kv_update_limit: u64,
+}
+
+impl Default for MegaBlockExecutionCtx {
+    fn default() -> Self {
+        Self {
+            parent_hash: B256::ZERO,
+            first_mini_rex_block: false,
+            parent_beacon_block_root: None,
+            extra_data: Bytes::new(),
+            block_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
+            block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
+        }
+    }
+}
+
+impl MegaBlockExecutionCtx {
+    /// Create a new block execution context with default limits.
+    pub fn new(
+        parent_hash: B256,
+        parent_beacon_block_root: Option<B256>,
+        extra_data: Bytes,
+    ) -> Self {
+        Self { parent_hash, parent_beacon_block_root, extra_data, ..Default::default() }
+    }
+
+    /// Mark this as the first `MiniRex` block.
+    ///
+    /// This is a builder method that sets the `first_mini_rex_block` flag to true.
+    /// This flag is used to trigger oracle contract deployment.
+    pub fn as_first_mini_rex_block(mut self) -> Self {
+        self.first_mini_rex_block = true;
+        self
+    }
+
+    /// Set the `first_mini_rex_block` flag.
+    pub fn set_first_mini_rex_block(&mut self, value: bool) {
+        self.first_mini_rex_block = value;
+    }
+
+    /// Set a custom block data limit.
+    ///
+    /// This is a builder method that consumes self and returns a new instance
+    /// with the specified data limit.
+    pub fn with_data_limit(mut self, limit: u64) -> Self {
+        self.block_data_limit = limit;
+        self
+    }
+
+    /// Set a custom block KV update limit.
+    ///
+    /// This is a builder method that consumes self and returns a new instance
+    /// with the specified KV update limit.
+    pub fn with_kv_update_limit(mut self, limit: u64) -> Self {
+        self.block_kv_update_limit = limit;
+        self
+    }
 }
 
 /// Block executor for the `MegaETH` chain.
@@ -189,6 +250,8 @@ pub struct MegaBlockExecutor<C, E, R: OpReceiptBuilder> {
 
     receipts: Vec<R::Receipt>,
     gas_used: u64,
+    block_data_used: u64,
+    block_kv_updates_used: u64,
 }
 
 impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> {
@@ -236,9 +299,63 @@ where
             receipt_builder,
             receipts: Vec::new(),
             gas_used: 0,
+            block_data_used: 0,
+            block_kv_updates_used: 0,
             evm,
             system_caller: SystemCaller::new(spec),
         }
+    }
+}
+
+// Helper methods for accessing MegaEvm-specific functionality
+impl<DB, C, R, INSP, ExtEnvs> MegaBlockExecutor<C, crate::MegaEvm<DB, INSP, ExtEnvs>, R>
+where
+    DB: Database,
+    C: OpHardforks,
+    ExtEnvs: crate::ExternalEnvs,
+    INSP: Inspector<crate::MegaContext<DB, ExtEnvs>>,
+    R: OpReceiptBuilder,
+{
+    /// Get the current data size and KV update count from the EVM context.
+    fn get_tx_resource_usage(&self) -> (u64, u64) {
+        let additional_limit = self.evm.ctx.additional_limit.borrow();
+        let data_size = additional_limit.data_size_tracker.current_size();
+        let kv_updates = additional_limit.kv_update_counter.current_count();
+        (data_size, kv_updates)
+    }
+
+    /// Check and update block-level resource limits
+    fn check_and_update_block_limits(&mut self) -> Result<(), BlockExecutionError> {
+        let (tx_data_size, tx_kv_updates) = self.get_tx_resource_usage();
+
+        // Get limits from context
+        let block_data_limit = self.ctx.block_data_limit;
+        let block_kv_update_limit = self.ctx.block_kv_update_limit;
+
+        let new_block_data = self.block_data_used + tx_data_size;
+        let new_block_kv_updates = self.block_kv_updates_used + tx_kv_updates;
+
+        if new_block_data > block_data_limit {
+            return Err(BlockExecutionError::other(MegaBlockLimitExceededError::DataLimit {
+                block_used: self.block_data_used,
+                tx_used: tx_data_size,
+                limit: block_data_limit,
+            }));
+        }
+
+        if new_block_kv_updates > block_kv_update_limit {
+            return Err(BlockExecutionError::other(MegaBlockLimitExceededError::KVUpdateLimit {
+                block_used: self.block_kv_updates_used,
+                tx_used: tx_kv_updates,
+                limit: block_kv_update_limit,
+            }));
+        }
+
+        // Update accumulators
+        self.block_data_used = new_block_data;
+        self.block_kv_updates_used = new_block_kv_updates;
+
+        Ok(())
     }
 }
 
@@ -247,21 +364,21 @@ where
 /// This implementation delegates all block execution operations to the underlying
 /// Optimism block executor while providing MegaETH-specific customizations through
 /// the configured chain specification and EVM factory.
-impl<'db, DB, E, C, R> alloy_evm::block::BlockExecutor for MegaBlockExecutor<C, E, R>
+impl<'db, DB, C, R, INSP, ExtEnvs> alloy_evm::block::BlockExecutor
+    for MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
     DB: Database + 'db,
     C: OpHardforks,
-    E: alloy_evm::Evm<
-        DB = &'db mut State<DB>,
-        Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
-    >,
+    ExtEnvs: crate::ExternalEnvs,
+    INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
+    crate::MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
 {
     type Transaction = R::Transaction;
 
     type Receipt = R::Receipt;
 
-    type Evm = E;
+    type Evm = crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>;
 
     /// NOTE: this function resembles the one in
     /// `alloy_op_evm::OpBlockExecutor::apply_pre_execution_changes`. Changes there should be
@@ -344,6 +461,9 @@ where
         if !f(&result).should_commit() {
             return Ok(None);
         }
+
+        // Check block-level limits after transaction execution but before committing
+        self.check_and_update_block_limits()?;
 
         self.system_caller.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
 
@@ -434,4 +554,33 @@ where
     fn evm(&self) -> &Self::Evm {
         &self.evm
     }
+}
+
+/// Error type for block-level limit exceeded. These errors are only thrown after the transaction
+/// execution but before any changes are committed to the database.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum MegaBlockLimitExceededError {
+    /// Block data limit exceeded.
+    #[error(
+        "Block data limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}"
+    )]
+    DataLimit {
+        /// Data used by block so far
+        block_used: u64,
+        /// Data used by current transaction
+        tx_used: u64,
+        /// Block data limit
+        limit: u64,
+    },
+
+    /// Block KV update limit exceeded.
+    #[error("Block KV update limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    KVUpdateLimit {
+        /// KV updates used by block so far
+        block_used: u64,
+        /// KV updates used by current transaction
+        tx_used: u64,
+        /// Block KV update limit
+        limit: u64,
+    },
 }

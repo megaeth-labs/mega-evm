@@ -680,12 +680,13 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
     // Create block execution context with first_mini_rex_block = true
-    let block_ctx = MegaBlockExecutionCtx {
-        parent_hash: B256::ZERO,
-        first_mini_rex_block: true, // This triggers oracle deployment
-        parent_beacon_block_root: Some(B256::ZERO), // Set a beacon block root
-        extra_data: Default::default(),
-    };
+    // Using builder pattern to mark this as the first MiniRex block
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO), // Set a beacon block root
+        Default::default(),
+    )
+    .as_first_mini_rex_block(); // This triggers oracle deployment
 
     // Try Base mainnet which should have the right hardfork configuration
     let chain_spec = OpChainHardforks::base_mainnet();
