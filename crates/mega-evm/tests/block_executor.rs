@@ -510,13 +510,10 @@ fn test_block_no_state_commit_on_limit_exceeded() {
 
     // Verify storage slot 0 is NOT set in the database
     let db_state = executor.evm_mut().db_mut();
-    let storage_result = db_state.storage(CONTRACT, U256::ZERO);
+    let value = db_state.storage(CONTRACT, U256::ZERO).expect("Storage access should not fail");
 
-    // The storage should either not exist or be zero (not 42)
-    if let Ok(value) = storage_result {
-        assert_eq!(value, U256::ZERO, "Storage should not be committed");
-    }
-    // Storage doesn't exist, which is fine
+    // The storage should be zero (not 42) since the transaction was not committed
+    assert_eq!(value, U256::ZERO, "Storage should not be committed");
 
     // Finish the block - should have 0 receipts
     let block_result = executor.finish();
