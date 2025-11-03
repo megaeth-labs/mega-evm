@@ -32,10 +32,12 @@ sol! {
     }
 }
 
-/// Deploys the oracle contract in the designated address and returns the state changes. Note that
-/// the database `db` is not modified in this function. The caller is responsible to commit the
-/// changes to database.
-pub fn deploy_oracle_contract<DB: Database>(db: &mut State<DB>) -> Result<EvmState, DB::Error> {
+/// Ensures the oracle contract is deployed in the designated address and returns the state changes.
+/// Note that the database `db` is not modified in this function. The caller is responsible to
+/// commit the changes to database.
+pub fn ensure_oracle_contract_deployed<DB: Database>(
+    db: &mut State<DB>,
+) -> Result<EvmState, DB::Error> {
     // Load the oracle contract account from the cache
     let acc = db.load_cache_account(ORACLE_CONTRACT_ADDRESS)?;
 
@@ -82,7 +84,8 @@ mod tests {
         let mut state = State::builder().with_database(&mut db).build();
 
         // Deploy the oracle contract
-        let result = deploy_oracle_contract(&mut state).expect("Deployment should succeed");
+        let result =
+            ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
 
         // Verify that state changes were returned
         assert_eq!(result.len(), 1, "Should have state changes for one account");
@@ -128,7 +131,8 @@ mod tests {
         let mut state = State::builder().with_database(&mut db).build();
 
         // Deploy should return empty state (no changes needed)
-        let result = deploy_oracle_contract(&mut state).expect("Deployment should succeed");
+        let result =
+            ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
         assert_eq!(
             result.len(),
             0,
@@ -158,7 +162,8 @@ mod tests {
         let mut state = State::builder().with_database(&mut db).build();
 
         // Deploy should update the contract with correct code
-        let result = deploy_oracle_contract(&mut state).expect("Deployment should succeed");
+        let result =
+            ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
 
         // Verify that state changes were returned (contract was updated)
         assert_eq!(result.len(), 1, "Should have state changes to update the contract");
@@ -178,7 +183,8 @@ mod tests {
         let mut state = State::builder().with_database(&mut db).build();
 
         // Deploy the oracle contract
-        let result = deploy_oracle_contract(&mut state).expect("Deployment should succeed");
+        let result =
+            ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
 
         // Get the account from result
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist in result");

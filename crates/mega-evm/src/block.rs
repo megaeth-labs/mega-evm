@@ -55,7 +55,7 @@ use revm::{
     DatabaseCommit, Inspector,
 };
 
-use crate::deploy_oracle_contract;
+use crate::{ensure_oracle_contract_deployed, MegaSpecId};
 
 /// `MegaETH` receipt builder type.
 pub trait MegaReceiptBuilder: OpReceiptBuilder {}
@@ -151,8 +151,6 @@ where
 pub struct MegaBlockExecutionCtx {
     /// Parent block hash.
     pub parent_hash: B256,
-    /// Whether this is the first block of `MiniRex` spec
-    pub first_mini_rex_block: bool,
     /// Parent beacon block root.
     pub parent_beacon_block_root: Option<B256>,
     /// The block's extra data.
@@ -172,7 +170,6 @@ impl Default for MegaBlockExecutionCtx {
     fn default() -> Self {
         Self {
             parent_hash: B256::ZERO,
-            first_mini_rex_block: false,
             parent_beacon_block_root: None,
             extra_data: Bytes::new(),
             block_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
@@ -188,15 +185,8 @@ impl MegaBlockExecutionCtx {
         parent_hash: B256,
         parent_beacon_block_root: Option<B256>,
         extra_data: Bytes,
-        first_mini_rex_block: bool,
     ) -> Self {
-        Self {
-            parent_hash,
-            parent_beacon_block_root,
-            extra_data,
-            first_mini_rex_block,
-            ..Default::default()
-        }
+        Self { parent_hash, parent_beacon_block_root, extra_data, ..Default::default() }
     }
 
     /// Set a custom block data limit.
@@ -404,10 +394,9 @@ where
         // already activated and the create2 deployer is already deployed, so we can safely assume
         // that `ensure_create2_deployer` function will never be called.
 
-        // If the current block is the first block activating MiniRex hardfork, we need to deploy
-        // oracle contract.
-        if self.ctx.first_mini_rex_block {
-            let state = deploy_oracle_contract(self.evm_mut().db_mut())
+        // If the MiniRex hardfork is active, we need to ensure the oracle contract is deployed.
+        if self.evm.ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            let state = ensure_oracle_contract_deployed(self.evm_mut().db_mut())
                 .map_err(BlockExecutionError::other)?;
             // Invoke the state hook with state changes. We tentatively use
             // `StateChangeSource::Transaction(0)` as state change source as there is no specific

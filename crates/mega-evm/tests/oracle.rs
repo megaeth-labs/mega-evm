@@ -685,7 +685,6 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
         B256::ZERO,
         Some(B256::ZERO), // Set a beacon block root
         Default::default(),
-        true, // first_mini_rex_block
     );
 
     // Try Base mainnet which should have the right hardfork configuration
@@ -727,8 +726,8 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
 
     // Verify that calling deploy_oracle_contract again returns empty state
     // (proving the contract is already deployed)
-    use mega_evm::deploy_oracle_contract;
-    let result = deploy_oracle_contract(db_ref).expect("Should not error");
+    use mega_evm::ensure_oracle_contract_deployed;
+    let result = ensure_oracle_contract_deployed(db_ref).expect("Should not error");
     assert_eq!(
         result.len(),
         0,
