@@ -22,8 +22,16 @@ contract Oracle is ISemver {
     /// @notice Restricts function access to the system address only.
     /// @dev Reverts with NotSystemAddress if caller is not MEGA_SYSTEM_ADDRESS.
     modifier onlySystemAddress() {
-        if (msg.sender != MEGA_SYSTEM_ADDRESS) revert NotSystemAddress();
         _;
+        // This check is placed after the _; to facilitate off-chain simulation.
+        // EVM inspector will be able to see the execution trace even if the sender is not the system address.
+        _onlySystemAddress();
+    }
+
+    /// @notice Checks if the caller is the system address.
+    /// @dev Reverts with NotSystemAddress if caller is not MEGA_SYSTEM_ADDRESS.
+    function _onlySystemAddress() internal view {
+        if (msg.sender != MEGA_SYSTEM_ADDRESS) revert NotSystemAddress();
     }
 
     /// @notice Returns the semantic version of this contract.
@@ -62,13 +70,14 @@ contract Oracle is ISemver {
     /// @return values Array of bytes32 values stored at corresponding slots.
     function getSlots(bytes32[] calldata slots) external view returns (bytes32[] memory values) {
         values = new bytes32[](slots.length);
-        for (uint256 i = 0; i < slots.length;) {
-            bytes32 slot = slots[i];
-            assembly {
-                mstore(add(add(values, 0x20), mul(i, 0x20)), sload(slot))
-            }
-            unchecked {
-                ++i;
+        assembly {
+            let valuesPtr := add(values, 0x20)
+            let slotsPtr := slots.offset
+            let length := slots.length
+
+            for { let i := 0 } lt(i, length) { i := add(i, 1) } {
+                let slot := calldataload(add(slotsPtr, mul(i, 0x20)))
+                mstore(add(valuesPtr, mul(i, 0x20)), sload(slot))
             }
         }
     }
@@ -79,14 +88,15 @@ contract Oracle is ISemver {
     /// @param values Array of bytes32 values to store at corresponding slots.
     function setSlots(bytes32[] calldata slots, bytes32[] calldata values) external onlySystemAddress {
         if (slots.length != values.length) revert InvalidLength(slots.length, values.length);
-        for (uint256 i = 0; i < slots.length;) {
-            bytes32 slot = slots[i];
-            bytes32 value = values[i];
-            assembly {
+        assembly {
+            let slotsPtr := slots.offset
+            let valuesPtr := values.offset
+            let length := slots.length
+
+            for { let i := 0 } lt(i, length) { i := add(i, 1) } {
+                let slot := calldataload(add(slotsPtr, mul(i, 0x20)))
+                let value := calldataload(add(valuesPtr, mul(i, 0x20)))
                 sstore(slot, value)
-            }
-            unchecked {
-                ++i;
             }
         }
     }

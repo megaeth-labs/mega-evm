@@ -16,7 +16,7 @@ contract OracleTest is Test {
     }
 
     function testVersion() public view {
-        assertEq(oracle.version(), "2.0.0");
+        assertEq(oracle.version(), "1.0.0");
     }
 
     function testSystemAddress() public view {

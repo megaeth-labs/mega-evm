@@ -98,6 +98,46 @@ where
         }
     }
 
+    fn run_without_catch_error(
+        &mut self,
+        evm: &mut Self::Evm,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        // Before validation, we need to properly set the mega system transaction
+        let ctx = evm.ctx_mut();
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            // Check if this is a mega system address transaction
+            let tx = &mut ctx.inner.tx;
+            if sent_from_mega_system_address(tx) {
+                // Modify the transaction to make it appear as a deposit transaction
+                // This will cause the OpHandler to automatically bypass signature validation,
+                // nonce verification, and fee deduction during validation
+                if !is_mega_system_transaction(tx) {
+                    return Err(FromStringError::from_string(
+                        "Mega system transaction callee is not in the whitelist".to_string(),
+                    ));
+                }
+
+                // Set the deposit source hash of the transaction to mark it as a deposit
+                // transaction for `OpHandler`.
+                // The implementation of `revm::context_interface::Transaction` trait for
+                // `MegaTransaction` determines the tx type by the existence of the source
+                // hash.
+                tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+                // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
+                // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
+                tx.base.gas_price = 0;
+            }
+        }
+
+        let init_and_floor_gas = self.validate(evm)?;
+        let eip7702_refund = self.pre_execution(evm)? as i64;
+        let mut exec_result = self.execution(evm, &init_and_floor_gas)?;
+        self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
+
+        // Prepare the output
+        self.execution_result(evm, exec_result)
+    }
+
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
         let ctx = evm.ctx_mut();
         ctx.on_new_tx();
@@ -114,29 +154,6 @@ where
                         }
                     }
                 }
-            }
-
-            // Check if this is a mega system address transaction
-            let tx = ctx.tx();
-            if sent_from_mega_system_address(tx) {
-                // Modify the transaction to make it appear as a deposit transaction
-                // This will cause the OpHandler to automatically bypass signature validation,
-                // nonce verification, and fee deduction during validation
-                if !is_mega_system_transaction(tx) {
-                    return Err(FromStringError::from_string(
-                        "Mega system transaction callee is not in the whitelist".to_string(),
-                    ));
-                }
-
-                // Set the deposit source hash of the transaction to mark it as a deposit
-                // transaction for `OpHandler`.
-                // The implementation of `revm::context_interface::Transaction` trait for
-                // `MegaTransaction` determines the tx type by the existence of the source
-                // hash.
-                ctx.inner.tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-                // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
-                // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
-                ctx.inner.tx.base.gas_price = 0;
             }
         }
 
