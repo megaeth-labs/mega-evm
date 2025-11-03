@@ -11,3 +11,7 @@ fs_permissions = [{ access = "read-write", path = "./artifacts" }]
 runs = 64
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[lint]
+# Ignore lint warnings in test files
+ignore = ["test/**/*.sol", "script/**/*.sol"]
