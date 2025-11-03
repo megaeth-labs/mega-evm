@@ -141,7 +141,7 @@ fn test_block_default_limits_applied() {
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
     // Create block context with default limits
-    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false);
+    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new());
 
     // Verify default limits are set
     assert_eq!(block_ctx.block_data_limit, BLOCK_DATA_LIMIT);
@@ -199,7 +199,7 @@ fn test_block_custom_data_limit() {
     // We set limit low enough that 2 transactions will exceed it
     // Using builder pattern to set only the data limit
     let block_ctx =
-        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false).with_data_limit(2_500); // 2.5 KB data limit - should fit 1 tx but not 2
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new()).with_data_limit(2_500); // 2.5 KB data limit - should fit 1 tx but not 2
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
@@ -260,7 +260,7 @@ fn test_block_custom_kv_update_limit() {
     // Set limit to 0 to ensure first transaction exceeds it
     // Using builder pattern to set only the KV limit
     let block_ctx =
-        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false).with_kv_update_limit(0); // Zero limit - any transaction will exceed
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new()).with_kv_update_limit(0); // Zero limit - any transaction will exceed
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
@@ -309,7 +309,7 @@ fn test_block_multiple_transactions_within_limits() {
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
     // Create block context with reasonable limits
-    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false)
+    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new())
         .with_data_limit(10_000) // 10 KB data limit
         .with_kv_update_limit(1_000); // 1000 KV update limit
 
@@ -366,7 +366,7 @@ fn test_block_data_limit_exceeded_mid_block() {
 
     // Create block context with ~6 KB limit (should fit 2 transactions but not 3)
     let block_ctx =
-        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false).with_data_limit(6_000); // 6 KB data limit
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new()).with_data_limit(6_000); // 6 KB data limit
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
@@ -427,7 +427,7 @@ fn test_block_kv_limit_exceeded_mid_block() {
     // This should allow exactly 2 transaction to succeed (each transaction induces 2 KV updates,
     // sender account info and storage slot)
     let block_ctx =
-        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false).with_kv_update_limit(4); // 2 KV update limit - should fit 2 txs but not 3
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new()).with_kv_update_limit(4); // 2 KV update limit - should fit 2 txs but not 3
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
@@ -497,7 +497,7 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     // Create block context with VERY low KV update limit (1 update)
     // This should only allow the account update from the transaction, not the SSTORE
     let block_ctx =
-        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false).with_kv_update_limit(1); // Only 1 KV update allowed
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new()).with_kv_update_limit(1); // Only 1 KV update allowed
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
@@ -554,7 +554,7 @@ fn test_block_tx_size_limit_default_unlimited() {
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
     // Create block context with default limits (tx size should be u64::MAX)
-    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false);
+    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new());
     assert_eq!(block_ctx.block_tx_size_limit, u64::MAX, "Default tx size limit should be u64::MAX");
 
     // Create block executor
@@ -616,8 +616,8 @@ fn test_block_tx_size_limit_allows_multiple_transactions() {
     let tx_size = sample_tx.encode_2718_len() as u64;
 
     // Set limit to allow exactly 5 transactions
-    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false)
-        .with_tx_size_limit(tx_size * 5);
+    let block_ctx =
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new()).with_tx_size_limit(tx_size * 5);
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
@@ -671,7 +671,7 @@ fn test_block_tx_size_limit_exceeded_first_transaction() {
 
     // Set a very small tx size limit that won't fit even one transaction
     let block_ctx =
-        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false).with_tx_size_limit(10); // Very small limit
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new()).with_tx_size_limit(10); // Very small limit
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
@@ -732,8 +732,8 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
     let tx_size = sample_tx.encode_2718_len() as u64;
 
     // Set limit to allow exactly 3 transactions
-    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false)
-        .with_tx_size_limit(tx_size * 3);
+    let block_ctx =
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new()).with_tx_size_limit(tx_size * 3);
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
@@ -803,7 +803,7 @@ fn test_block_tx_size_limit_with_varying_sizes() {
     let large_size = large_tx.encode_2718_len() as u64;
 
     // Set limit to allow 2 small + 1 large transaction
-    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), false)
+    let block_ctx = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new())
         .with_tx_size_limit(small_size * 2 + large_size);
 
     // Create block executor
