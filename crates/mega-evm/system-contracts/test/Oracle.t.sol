@@ -24,7 +24,7 @@ contract OracleTest is Test {
     }
 
     function testSetSlot() public {
-        bytes32 slot = bytes32(uint256(0));
+        uint256 slot = 0;
         bytes32 value = bytes32(uint256(12345));
 
         vm.prank(systemAddress);
@@ -33,7 +33,7 @@ contract OracleTest is Test {
     }
 
     function testSetSlotFailsFromNonSystem() public {
-        bytes32 slot = bytes32(uint256(0));
+        uint256 slot = 0;
         bytes32 value = bytes32(uint256(12345));
 
         vm.prank(user);
@@ -42,24 +42,24 @@ contract OracleTest is Test {
     }
 
     function testGetSlotDefaultValue() public view {
-        bytes32 slot = bytes32(uint256(0));
+        uint256 slot = 0;
         assertEq(oracle.getSlot(slot), bytes32(0));
     }
 
     function testSetMultipleSlots() public {
         vm.startPrank(systemAddress);
-        oracle.setSlot(bytes32(uint256(0)), bytes32(uint256(100)));
-        oracle.setSlot(bytes32(uint256(1)), bytes32(uint256(200)));
-        oracle.setSlot(bytes32(uint256(255)), bytes32(uint256(300)));
+        oracle.setSlot(0, bytes32(uint256(100)));
+        oracle.setSlot(1, bytes32(uint256(200)));
+        oracle.setSlot(255, bytes32(uint256(300)));
         vm.stopPrank();
 
-        assertEq(oracle.getSlot(bytes32(uint256(0))), bytes32(uint256(100)));
-        assertEq(oracle.getSlot(bytes32(uint256(1))), bytes32(uint256(200)));
-        assertEq(oracle.getSlot(bytes32(uint256(255))), bytes32(uint256(300)));
+        assertEq(oracle.getSlot(0), bytes32(uint256(100)));
+        assertEq(oracle.getSlot(1), bytes32(uint256(200)));
+        assertEq(oracle.getSlot(255), bytes32(uint256(300)));
     }
 
     function testOverwriteSlot() public {
-        bytes32 slot = bytes32(uint256(0));
+        uint256 slot = 0;
 
         vm.startPrank(systemAddress);
         oracle.setSlot(slot, bytes32(uint256(100)));
@@ -69,7 +69,7 @@ contract OracleTest is Test {
         assertEq(oracle.getSlot(slot), bytes32(uint256(200)));
     }
 
-    function testFuzzSetSlot(bytes32 slot, bytes32 value) public {
+    function testFuzzSetSlot(uint256 slot, bytes32 value) public {
         vm.prank(systemAddress);
         oracle.setSlot(slot, value);
         assertEq(oracle.getSlot(slot), value);
@@ -77,10 +77,10 @@ contract OracleTest is Test {
 
     function testBatchGetSlots() public {
         // Prepare data
-        bytes32[] memory slots = new bytes32[](3);
-        slots[0] = bytes32(uint256(0));
-        slots[1] = bytes32(uint256(1));
-        slots[2] = bytes32(uint256(2));
+        uint256[] memory slots = new uint256[](3);
+        slots[0] = 0;
+        slots[1] = 1;
+        slots[2] = 2;
 
         bytes32[] memory values = new bytes32[](3);
         values[0] = bytes32(uint256(111));
@@ -100,10 +100,10 @@ contract OracleTest is Test {
 
     function testBatchSetAndGet() public {
         // Prepare batch data
-        bytes32[] memory slots = new bytes32[](10);
+        uint256[] memory slots = new uint256[](10);
         bytes32[] memory values = new bytes32[](10);
         for (uint256 i = 0; i < 10; i++) {
-            slots[i] = bytes32(i);
+            slots[i] = i;
             values[i] = bytes32(i * 100);
         }
 
@@ -120,7 +120,7 @@ contract OracleTest is Test {
     }
 
     function testSetSlotsFailsWithMismatchedLengths() public {
-        bytes32[] memory slots = new bytes32[](2);
+        uint256[] memory slots = new uint256[](2);
         bytes32[] memory values = new bytes32[](3);
 
         vm.prank(systemAddress);
@@ -129,7 +129,7 @@ contract OracleTest is Test {
     }
 
     function testSetSlotsFailsFromNonSystem() public {
-        bytes32[] memory slots = new bytes32[](1);
+        uint256[] memory slots = new uint256[](1);
         bytes32[] memory values = new bytes32[](1);
 
         vm.prank(user);
@@ -138,10 +138,10 @@ contract OracleTest is Test {
     }
 
     function testGetSlotsDefaultValues() public view {
-        bytes32[] memory slots = new bytes32[](3);
-        slots[0] = bytes32(uint256(10));
-        slots[1] = bytes32(uint256(20));
-        slots[2] = bytes32(uint256(30));
+        uint256[] memory slots = new uint256[](3);
+        slots[0] = 10;
+        slots[1] = 20;
+        slots[2] = 30;
 
         bytes32[] memory values = oracle.getSlots(slots);
         assertEq(values[0], bytes32(0));
@@ -150,7 +150,7 @@ contract OracleTest is Test {
     }
 
     function testSetSlotsEmptyArrays() public {
-        bytes32[] memory slots = new bytes32[](0);
+        uint256[] memory slots = new uint256[](0);
         bytes32[] memory values = new bytes32[](0);
 
         vm.prank(systemAddress);
@@ -159,16 +159,16 @@ contract OracleTest is Test {
     }
 
     function testGetSlotsEmptyArray() public view {
-        bytes32[] memory slots = new bytes32[](0);
+        uint256[] memory slots = new uint256[](0);
         bytes32[] memory values = oracle.getSlots(slots);
         assertEq(values.length, 0);
     }
 
     function testArbitrarySlots() public {
         // Test with non-sequential, arbitrary slot addresses
-        bytes32 slot1 = keccak256("slot.one");
-        bytes32 slot2 = keccak256("slot.two");
-        bytes32 slot3 = bytes32(uint256(type(uint256).max));
+        uint256 slot1 = uint256(keccak256("slot.one"));
+        uint256 slot2 = uint256(keccak256("slot.two"));
+        uint256 slot3 = type(uint256).max;
 
         bytes32 value1 = bytes32(uint256(0xdeadbeef));
         bytes32 value2 = bytes32(uint256(0xcafebabe));
@@ -186,10 +186,10 @@ contract OracleTest is Test {
     }
 
     function testBatchWithArbitrarySlots() public {
-        bytes32[] memory slots = new bytes32[](3);
-        slots[0] = keccak256("custom.slot.alpha");
-        slots[1] = keccak256("custom.slot.beta");
-        slots[2] = bytes32(uint256(type(uint256).max - 1));
+        uint256[] memory slots = new uint256[](3);
+        slots[0] = uint256(keccak256("custom.slot.alpha"));
+        slots[1] = uint256(keccak256("custom.slot.beta"));
+        slots[2] = type(uint256).max - 1;
 
         bytes32[] memory values = new bytes32[](3);
         values[0] = bytes32(uint256(0x1111));
@@ -207,8 +207,8 @@ contract OracleTest is Test {
 
     function testStorageCollision() public {
         // Test that writing to different slots doesn't interfere
-        bytes32 slot1 = bytes32(uint256(100));
-        bytes32 slot2 = bytes32(uint256(101));
+        uint256 slot1 = 100;
+        uint256 slot2 = 101;
         bytes32 value1 = bytes32(uint256(0xaaaa));
         bytes32 value2 = bytes32(uint256(0xbbbb));
 
