@@ -236,4 +236,50 @@ mod tests {
             "Deployed account must be marked as touched for state changes to take effect"
         );
     }
+
+    #[test]
+    fn test_high_precision_timestamp_oracle_deployment() {
+        // Create a fresh in-memory database
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+
+        // Deploy the high precision timestamp oracle contract
+        let result = ensure_high_precision_timestamp_oracle_contract_deployed(&mut state)
+            .expect("Deployment should succeed");
+
+        // Verify that state changes were returned
+        assert_eq!(result.len(), 1, "Should have state changes for one account");
+        assert!(
+            result.contains_key(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS),
+            "State changes should contain high precision timestamp oracle address"
+        );
+
+        // Verify the account in the state changes
+        let account =
+            result.get(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS).expect("Account should exist");
+        assert!(account.is_touched(), "Account should be marked as touched");
+
+        // Verify the account info
+        let info = &account.info;
+        assert_eq!(
+            info.code_hash, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
+            "Code hash should match the expected value"
+        );
+        assert!(info.code.is_some(), "Code should be set");
+
+        // Verify code matches
+        let code = info.code.as_ref().unwrap();
+        assert_eq!(
+            code.original_bytes(),
+            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
+            "Code bytes should match the expected value"
+        );
+
+        // Verify code hash matches computed hash
+        let computed_hash = keccak256(&HIGH_PRECISION_TIMESTAMP_ORACLE_CODE);
+        assert_eq!(
+            computed_hash, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
+            "Code hash constant should match computed hash"
+        );
+    }
 }
