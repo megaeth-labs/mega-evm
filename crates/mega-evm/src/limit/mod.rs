@@ -11,10 +11,12 @@ use revm::{
 
 use crate::{constants, MegaHaltReason, MegaTransaction};
 
+mod compute_gas;
 mod data_size;
-pub use data_size::*;
-
 mod kv_update;
+
+pub use compute_gas::*;
+pub use data_size::*;
 pub use kv_update::*;
 
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
@@ -59,6 +61,18 @@ pub struct AdditionalLimit {
     /// updates.
     pub kv_update_limit: u64,
 
+    /// The compute gas limit for the EVM. When the compute gas limit is reached, the transaction
+    /// will error and halt (remaining gas will be refunded).
+    ///
+    /// This limit controls the maximum total compute gas that can be consumed during transaction
+    /// execution.
+    pub compute_gas_limit: u64,
+
+    /// A tracker for the total compute gas consumed during transaction execution.
+    ///
+    /// This tracker monitors all compute gas consumed during execution.
+    pub compute_gas_tracker: compute_gas::ComputeGasTracker,
+
     /// A tracker for the total data size (in bytes) generated from a transaction execution.
     ///
     /// This tracker monitors all data generated during execution, including transaction data,
@@ -77,6 +91,8 @@ impl Default for AdditionalLimit {
             has_exceeded_limit: AdditionalLimitResult::WithinLimit,
             data_limit: constants::mini_rex::TX_DATA_LIMIT,
             kv_update_limit: constants::mini_rex::TX_KV_UPDATE_LIMIT,
+            compute_gas_limit: constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
+            compute_gas_tracker: compute_gas::ComputeGasTracker::new(),
             data_size_tracker: data_size::DataSizeTracker::new(),
             kv_update_counter: kv_update::KVUpdateCounter::new(),
         }

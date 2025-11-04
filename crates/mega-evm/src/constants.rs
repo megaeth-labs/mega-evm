@@ -25,6 +25,9 @@ pub mod mini_rex {
     /// The maximum initcode size for the `MINI_REX` spec.
     pub const MAX_INITCODE_SIZE: usize = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE;
 
+    /// The maximum compute gas allowed per transaction for the `MINI_REX` spec.
+    pub const TX_COMPUTE_GAS_LIMIT: u64 = 1_000_000_000;
+
     /// The base gas cost for setting a storage slot to a non-zero value for the `MINI_REX` spec.
     /// Actual cost is dynamically scaled by SALT bucket capacity: `SSTORE_SET_GAS ×
     /// (bucket_capacity / MIN_BUCKET_SIZE)`.
