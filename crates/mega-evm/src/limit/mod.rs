@@ -71,6 +71,15 @@ pub struct AdditionalLimit {
     pub kv_update_counter: kv_update::KVUpdateCounter,
 }
 
+/// The usage of the additional limits.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LimitUsage {
+    /// The data size usage in bytes.
+    pub data_size: u64,
+    /// The number of KV updates.
+    pub kv_updates: u64,
+}
+
 impl Default for AdditionalLimit {
     fn default() -> Self {
         Self {
@@ -98,6 +107,14 @@ impl AdditionalLimit {
         self.has_exceeded_limit = AdditionalLimitResult::WithinLimit;
         self.data_size_tracker.reset();
         self.kv_update_counter.reset();
+    }
+
+    /// Gets the usage of the additional limits.
+    pub fn get_usage(&self) -> LimitUsage {
+        LimitUsage {
+            data_size: self.data_size_tracker.current_size(),
+            kv_updates: self.kv_update_counter.current_count(),
+        }
     }
 
     /// Checks if any of the configured limits have been exceeded.
