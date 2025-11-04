@@ -55,7 +55,10 @@ use revm::{
     DatabaseCommit, Inspector,
 };
 
-use crate::{ensure_oracle_contract_deployed, MegaSpecId};
+use crate::{
+    ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
+    MegaSpecId,
+};
 
 /// `MegaETH` receipt builder type.
 pub trait MegaReceiptBuilder: OpReceiptBuilder {}
@@ -396,8 +399,23 @@ where
 
         // If the MiniRex hardfork is active, we need to ensure the oracle contract is deployed.
         if self.evm.ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            // System oracle contract, which is the centralized storage of oracle data for all
+            // oracle services.
             let state = ensure_oracle_contract_deployed(self.evm_mut().db_mut())
                 .map_err(BlockExecutionError::other)?;
+            // Invoke the state hook with state changes. We tentatively use
+            // `StateChangeSource::Transaction(0)` as state change source as there is no specific
+            // source defined for this oracle contract in alloy. This may change in the
+            // future.
+            self.system_caller.on_state(StateChangeSource::Transaction(0), &state);
+
+            // commit changes to database
+            self.evm.db_mut().commit(state);
+
+            // High precision timestamp oracle service
+            let state =
+                ensure_high_precision_timestamp_oracle_contract_deployed(self.evm_mut().db_mut())
+                    .map_err(BlockExecutionError::other)?;
             // Invoke the state hook with state changes. We tentatively use
             // `StateChangeSource::Transaction(0)` as state change source as there is no specific
             // source defined for this oracle contract in alloy. This may change in the
