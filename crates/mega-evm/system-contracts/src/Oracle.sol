@@ -49,7 +49,7 @@ contract Oracle is ISemver {
     /// @notice Reads a value from a specific storage slot.
     /// @param slot The storage slot to read from.
     /// @return value The bytes32 value stored at the slot.
-    function getSlot(bytes32 slot) external view returns (bytes32 value) {
+    function getSlot(uint256 slot) external view returns (bytes32 value) {
         assembly {
             value := sload(slot)
         }
@@ -59,7 +59,7 @@ contract Oracle is ISemver {
     /// @dev Can only be called by MEGA_SYSTEM_ADDRESS.
     /// @param slot The storage slot to write to.
     /// @param value The bytes32 value to store.
-    function setSlot(bytes32 slot, bytes32 value) external onlySystemAddress {
+    function setSlot(uint256 slot, bytes32 value) external onlySystemAddress {
         assembly {
             sstore(slot, value)
         }
@@ -68,7 +68,7 @@ contract Oracle is ISemver {
     /// @notice Reads values from multiple storage slots in a single call.
     /// @param slots Array of storage slots to read from.
     /// @return values Array of bytes32 values stored at corresponding slots.
-    function getSlots(bytes32[] calldata slots) external view returns (bytes32[] memory values) {
+    function getSlots(uint256[] calldata slots) external view returns (bytes32[] memory values) {
         values = new bytes32[](slots.length);
         assembly {
             let valuesPtr := add(values, 0x20)
@@ -86,7 +86,7 @@ contract Oracle is ISemver {
     /// @dev Can only be called by MEGA_SYSTEM_ADDRESS. Arrays must have equal length.
     /// @param slots Array of storage slots to write to.
     /// @param values Array of bytes32 values to store at corresponding slots.
-    function setSlots(bytes32[] calldata slots, bytes32[] calldata values) external onlySystemAddress {
+    function setSlots(uint256[] calldata slots, bytes32[] calldata values) external onlySystemAddress {
         if (slots.length != values.length) revert InvalidLength(slots.length, values.length);
         assembly {
             let slotsPtr := slots.offset
