@@ -55,7 +55,7 @@ use revm::{
     database::State,
     handler::EvmTr,
     inspector::NoOpInspector,
-    state::EvmState,
+    state::{AccountInfo, EvmState},
     DatabaseCommit, Inspector,
 };
 use salt::BucketId;
@@ -389,18 +389,21 @@ where
     INSP: Inspector<crate::MegaContext<DB, ExtEnvs>>,
     R: OpReceiptBuilder<Transaction: Transaction + Encodable2718>,
 {
-    /// Get the current data size and KV update count from the EVM context.
-    fn get_tx_resource_usage(&self) -> (u64, u64) {
-        let additional_limit = self.evm.ctx.additional_limit.borrow();
-        let data_size = additional_limit.data_size_tracker.current_size();
-        let kv_updates = additional_limit.kv_update_counter.current_count();
-        (data_size, kv_updates)
-    }
-
     /// Check and update block-level resource limits
-    fn post_check_limits(&mut self) -> Result<(), BlockExecutionError> {
-        let (tx_data_size, tx_kv_updates) = self.get_tx_resource_usage();
-
+    ///
+    /// # Parameters
+    ///
+    /// - `tx_data_size`: The data size used by the transaction in bytes.
+    /// - `tx_kv_updates`: The number of KV updates performed by the transaction.
+    ///
+    /// # Returns
+    ///
+    /// Returns an error if adding the transaction's resource usage would exceed block limits.
+    fn post_check_limits(
+        &mut self,
+        tx_data_size: u64,
+        tx_kv_updates: u64,
+    ) -> Result<(), BlockExecutionError> {
         // Get limits from context
         let block_data_limit = self.ctx.block_data_limit;
         let block_kv_update_limit = self.ctx.block_kv_update_limit;
@@ -510,7 +513,13 @@ where
         tx: impl ExecutableTx<Self>,
         f: impl FnOnce(&ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>) -> CommitChanges,
     ) -> Result<Option<u64>, BlockExecutionError> {
-        self.execute_mega_transaction(tx, |outcome| f(outcome.result))
+        let outcome = self.execute_mega_transaction(tx)?;
+        if f(&outcome.result).should_commit() {
+            let gas_used = self.commit_execution_outcome(outcome)?;
+            Ok(Some(gas_used))
+        } else {
+            Ok(None)
+        }
     }
 
     /// NOTE: this function resembles the one in
@@ -563,26 +572,42 @@ where
 /// Extension trait for `MegaBlockExecutor` to add MegaETH-specific transaction execution
 /// functionality.
 pub trait MegaBlockExecutorExt<R: OpReceiptBuilder> {
-    /// Execute a transaction with a commit condition function.
-    ///
-    /// This method executes a transaction and calls the commit condition function with the
-    /// transaction execution outcome.
+    /// Execute a transaction with a commit condition function without committing the execution
+    /// result to the block executor's inner state.
     ///
     /// # Parameters
     ///
     /// - `tx`: The transaction to execute.
-    /// - `on_outcome`: The function to call with the transaction execution outcome. The function
-    ///   should return whether the transaction should be committed into the block executor's inner
-    ///   state.
+    ///
+    /// # Returns
+    ///
+    /// Returns the execution outcome of the transaction. Note that the execution result is not
+    /// committed to the block executor's inner state.
+    fn execute_mega_transaction<Tx>(
+        &mut self,
+        tx: Tx,
+    ) -> Result<MegaTransactionExecutionOutcome<Tx>, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy;
+
+    /// Commit the execution outcome of a transaction.
+    ///
+    /// This method commits the execution outcome of a transaction to the block executor's inner
+    /// state.
+    ///
+    /// # Parameters
+    ///
+    /// - `outcome`: The execution outcome of the transaction.
     ///
     /// # Returns
     ///
     /// Returns the gas used by the transaction.
-    fn execute_mega_transaction(
+    fn commit_execution_outcome<Tx>(
         &mut self,
-        tx: impl IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
-        on_outcome: impl FnOnce(MegaTransactionExecutionOutcome<'_>) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError>;
+        outcome: MegaTransactionExecutionOutcome<Tx>,
+    ) -> Result<u64, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy;
 
     /// Get the bucket IDs used during transaction execution.
     ///
@@ -608,11 +633,13 @@ where
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
 {
-    fn execute_mega_transaction(
+    fn execute_mega_transaction<Tx>(
         &mut self,
-        tx: impl IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
-        f: impl FnOnce(MegaTransactionExecutionOutcome<'_>) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError> {
+        tx: Tx,
+    ) -> Result<MegaTransactionExecutionOutcome<Tx>, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+    {
         let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
 
         // The sum of the transaction’s gas limit, Tg, and the gas utilized in this block prior,
@@ -662,19 +689,38 @@ where
             self.evm.transact(tx).map_err(move |err| BlockExecutionError::evm(err, hash))?;
 
         let evm_ctx = self.evm.ctx_ref();
-        if !f(MegaTransactionExecutionOutcome {
-            result: &result,
-            state: &state,
+        let outcome = MegaTransactionExecutionOutcome {
+            tx,
+            tx_size,
+            depositor,
+            result,
+            state,
             data_size: evm_ctx.generated_data_size(),
             kv_updates: evm_ctx.kv_update_count(),
-        })
-        .should_commit()
-        {
-            return Ok(None);
-        }
+        };
+
+        Ok(outcome)
+    }
+
+    fn commit_execution_outcome<Tx>(
+        &mut self,
+        outcome: MegaTransactionExecutionOutcome<Tx>,
+    ) -> Result<u64, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+    {
+        let MegaTransactionExecutionOutcome {
+            tx,
+            tx_size,
+            depositor,
+            result,
+            state,
+            data_size,
+            kv_updates,
+        } = outcome;
 
         // Check block-level limits after transaction execution but before committing
-        self.post_check_limits()?;
+        self.post_check_limits(data_size, kv_updates)?;
 
         self.system_caller.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
 
@@ -706,13 +752,13 @@ where
 
                     self.receipt_builder.build_deposit_receipt(OpDepositReceipt {
                         inner: receipt,
-                        deposit_nonce: depositor.map(|account| account.nonce),
                         // The deposit receipt version was introduced in Canyon to indicate an
                         // update to how receipt hashes should be computed
                         // when set. The state transition process ensures
                         // this is only set for post-Canyon deposit
                         // transactions. In MegaETH, Canyon is always active.
-                        deposit_receipt_version: is_deposit.then_some(1),
+                        deposit_receipt_version: depositor.is_some().then_some(1),
+                        deposit_nonce: depositor.map(|account| account.nonce),
                     })
                 }
             },
@@ -720,7 +766,7 @@ where
 
         self.evm.db_mut().commit(state);
 
-        Ok(Some(gas_used))
+        Ok(gas_used)
     }
 
     fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
@@ -737,11 +783,17 @@ where
 /// This struct contains additional information about the transaction execution on top of the
 /// standard EVM's execution result and state.
 #[derive(Debug, Clone)]
-pub struct MegaTransactionExecutionOutcome<'a> {
+pub struct MegaTransactionExecutionOutcome<T> {
+    /// The transaction.
+    pub tx: T,
+    /// The transaction size in bytes.
+    pub tx_size: u64,
+    /// The depositor account info.
+    pub depositor: Option<AccountInfo>,
     /// The transaction execution result.
-    pub result: &'a ExecutionResult<MegaHaltReason>,
+    pub result: ExecutionResult<MegaHaltReason>,
     /// The post-execution evm state.
-    pub state: &'a EvmState,
+    pub state: EvmState,
     /// The data size usage in bytes.
     pub data_size: u64,
     /// The number of KV updates.
