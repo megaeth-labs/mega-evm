@@ -60,17 +60,6 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
 }
 
-/// The additional transaction execution outcome.
-#[derive(Clone, Debug, Default)]
-pub struct AdditionalOutcome {
-    /// The data size usage in bytes.
-    pub data_size: u64,
-    /// The number of KV updates.
-    pub kv_updates: u64,
-    /// The bucket IDs used during transaction execution.
-    pub bucket_ids: Vec<BucketId>,
-}
-
 impl Default for MegaContext<EmptyDB, DefaultExternalEnvs> {
     fn default() -> Self {
         Self::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, DefaultExternalEnvs::default())
@@ -358,26 +347,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
         self.spec
     }
 
-    /// Gets the additional transaction execution outcome.
-    ///
-    /// # Returns
-    ///
-    /// Returns the additional transaction execution outcome.
-    pub fn additional_outcome(&self) -> AdditionalOutcome {
-        AdditionalOutcome {
-            data_size: self.additional_limit.borrow().data_size_tracker.current_size(),
-            kv_updates: self.additional_limit.borrow().kv_update_counter.current_count(),
-            bucket_ids: self.dynamic_gas_cost.borrow().get_bucket_ids(),
-        }
-    }
-
     /// Gets the current total data size generated from transaction execution.
     ///
     /// # Returns
     ///
     /// Returns the current total data size in bytes generated so far. The data size is reset at the
     /// beginning of each transaction.
-    #[deprecated(note = "Use `additional_outcome` instead")]
     pub fn generated_data_size(&self) -> u64 {
         self.additional_limit.borrow().data_size_tracker.current_size()
     }
@@ -388,9 +363,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// Returns the current total number of KV operations performed so far. The count is reset at
     /// the beginning of each transaction.
-    #[deprecated(note = "Use `additional_outcome` instead")]
     pub fn kv_update_count(&self) -> u64 {
         self.additional_limit.borrow().kv_update_counter.current_count()
+    }
+
+    /// Gets the bucket IDs used during transaction execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns the bucket IDs used during transaction execution.
+    pub fn accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.dynamic_gas_cost.borrow().get_bucket_ids()
     }
 
     /// Consumes the context and converts it into the inner `OpContext`.

@@ -28,21 +28,22 @@
 //! - Support for parallel execution through access tracking
 //! - Optimized gas calculations for modified opcodes
 
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};
+pub use alloy_evm::block::CommitChanges;
 use alloy_evm::{
     block::{
         state_changes::{balance_increment_state, post_block_balance_increments},
         BlockExecutionError, BlockExecutionResult, BlockExecutorFor, BlockValidationError,
-        CommitChanges, ExecutableTx, OnStateHook, StateChangePostBlockSource, StateChangeSource,
-        SystemCaller,
+        ExecutableTx, OnStateHook, StateChangePostBlockSource, StateChangeSource, SystemCaller,
     },
     eth::receipt_builder::ReceiptBuilderCtx,
-    Database, Evm as _, FromRecoveredTx, FromTxWithEncoded,
+    Database, Evm as _, EvmEnv, EvmFactory, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv,
+    RecoveredTx,
 };
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_op_hardforks::OpHardforks;
@@ -52,12 +53,16 @@ use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
     context::result::{ExecutionResult, ResultAndState},
     database::State,
+    handler::EvmTr,
+    inspector::NoOpInspector,
+    state::EvmState,
     DatabaseCommit, Inspector,
 };
+use salt::BucketId;
 
 use crate::{
     ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
-    MegaSpecId,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 
 /// `MegaETH` receipt builder type.
@@ -90,7 +95,10 @@ pub struct MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
     evm_factory: EvmF,
 }
 
-impl<ChainSpec, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
+impl<ChainSpec, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>
+where
+    ReceiptBuilder: OpReceiptBuilder,
+{
     /// Create a new block executor factory.
     ///
     /// # Parameters
@@ -114,6 +122,70 @@ impl<ChainSpec, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<ChainSpec, EvmF, 
     /// Returns a mutable reference to the EVM factory.
     pub fn evm_factory_mut(&mut self) -> &mut EvmF {
         &mut self.evm_factory
+    }
+}
+
+impl<ChainSpec, ExtEnvs, ReceiptBuilder>
+    MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvs>, ReceiptBuilder>
+where
+    ChainSpec: OpHardforks + Clone,
+    ReceiptBuilder: OpReceiptBuilder<Transaction: Transaction + Encodable2718> + Clone,
+    crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>,
+    ExtEnvs: crate::ExternalEnvs + Clone,
+{
+    /// Create a new block executor.
+    ///
+    /// # Parameters
+    ///
+    /// - `db`: The database to use for EVM state.
+    /// - `evm_env`: The EVM environment, including block and config environments.
+    /// - `block_ctx`: The block execution context for tracking access patterns.
+    ///
+    /// # Returns
+    ///
+    /// A new `BlockExecutor` instance configured with the provided parameters.
+    pub fn create_executor<'a, DB>(
+        &self,
+        db: &'a mut State<DB>,
+        evm_env: EvmEnv<MegaSpecId>,
+        block_ctx: MegaBlockExecutionCtx,
+    ) -> MegaBlockExecutor<
+        ChainSpec,
+        MegaEvm<&'a mut State<DB>, NoOpInspector, ExtEnvs>,
+        ReceiptBuilder,
+    >
+    where
+        DB: Database + 'a,
+    {
+        let evm = self.evm_factory.create_evm(db, evm_env);
+        MegaBlockExecutor::new(evm, block_ctx, self.spec.clone(), self.receipt_builder.clone())
+    }
+
+    /// Create a new block executor with an inspector.
+    ///
+    /// # Parameters
+    ///
+    /// - `db`: The database to use for EVM state.
+    /// - `evm_env`: The EVM environment, including block and config environments.
+    /// - `block_ctx`: The block execution context for tracking access patterns.
+    /// - `inspector`: The inspector to use for debugging and monitoring.
+    ///
+    /// # Returns
+    ///
+    /// A new `BlockExecutor` instance configured with the provided parameters.
+    pub fn create_executor_with_inspector<'a, DB, I>(
+        &self,
+        db: &'a mut State<DB>,
+        evm_env: EvmEnv<MegaSpecId>,
+        block_ctx: MegaBlockExecutionCtx,
+        inspector: I,
+    ) -> MegaBlockExecutor<ChainSpec, MegaEvm<&'a mut State<DB>, I, ExtEnvs>, ReceiptBuilder>
+    where
+        DB: Database + 'a,
+        I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvs>> + 'a,
+    {
+        let evm = self.evm_factory.create_evm_with_inspector(db, evm_env, inspector);
+        MegaBlockExecutor::new(evm, block_ctx, self.spec.clone(), self.receipt_builder.clone())
     }
 }
 
@@ -374,6 +446,7 @@ where
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
     crate::MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
+    Self: MegaBlockExecutorExt<R>,
 {
     type Transaction = R::Transaction;
 
@@ -437,6 +510,109 @@ where
         tx: impl ExecutableTx<Self>,
         f: impl FnOnce(&ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>) -> CommitChanges,
     ) -> Result<Option<u64>, BlockExecutionError> {
+        self.execute_mega_transaction(tx, |outcome| f(outcome.result))
+    }
+
+    /// NOTE: this function resembles the one in
+    /// `alloy_op_evm::OpBlockExecutor::finish`. Changes there should be
+    /// synced.
+    fn finish(
+        mut self,
+    ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
+        let balance_increments =
+            post_block_balance_increments::<Header>(&self.chain_spec, self.evm.block(), &[], None);
+        // increment balances
+        self.evm
+            .db_mut()
+            .increment_balances(balance_increments.clone())
+            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+        // call state hook with changes due to balance increments.
+        self.system_caller.try_on_state_with(|| {
+            balance_increment_state(&balance_increments, self.evm.db_mut()).map(|state| {
+                (
+                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
+                    Cow::Owned(state),
+                )
+            })
+        })?;
+
+        let gas_used = self.receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or_default();
+        Ok((
+            self.evm,
+            BlockExecutionResult {
+                receipts: self.receipts,
+                requests: Default::default(),
+                gas_used,
+            },
+        ))
+    }
+
+    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
+        self.system_caller.with_state_hook(hook);
+    }
+
+    fn evm_mut(&mut self) -> &mut Self::Evm {
+        &mut self.evm
+    }
+
+    fn evm(&self) -> &Self::Evm {
+        &self.evm
+    }
+}
+
+/// Extension trait for `MegaBlockExecutor` to add MegaETH-specific transaction execution
+/// functionality.
+pub trait MegaBlockExecutorExt<R: OpReceiptBuilder> {
+    /// Execute a transaction with a commit condition function.
+    ///
+    /// This method executes a transaction and calls the commit condition function with the
+    /// transaction execution outcome.
+    ///
+    /// # Parameters
+    ///
+    /// - `tx`: The transaction to execute.
+    /// - `on_outcome`: The function to call with the transaction execution outcome. The function
+    ///   should return whether the transaction should be committed into the block executor's inner
+    ///   state.
+    ///
+    /// # Returns
+    ///
+    /// Returns the gas used by the transaction.
+    fn execute_mega_transaction(
+        &mut self,
+        tx: impl IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+        on_outcome: impl FnOnce(MegaTransactionExecutionOutcome<'_>) -> CommitChanges,
+    ) -> Result<Option<u64>, BlockExecutionError>;
+
+    /// Get the bucket IDs used during transaction execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns the bucket IDs used during transaction execution.
+    fn get_accessed_bucket_ids(&self) -> Vec<BucketId>;
+
+    /// Get the block hashes used during transaction execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns the block hashes used during transaction execution.
+    fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256>;
+}
+
+impl<'db, DB, C, R, INSP, ExtEnvs> MegaBlockExecutorExt<R>
+    for MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
+where
+    DB: Database + 'db,
+    C: OpHardforks,
+    ExtEnvs: crate::ExternalEnvs,
+    INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
+    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
+{
+    fn execute_mega_transaction(
+        &mut self,
+        tx: impl IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+        f: impl FnOnce(MegaTransactionExecutionOutcome<'_>) -> CommitChanges,
+    ) -> Result<Option<u64>, BlockExecutionError> {
         let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
 
         // The sum of the transaction’s gas limit, Tg, and the gas utilized in this block prior,
@@ -485,7 +661,15 @@ where
         let ResultAndState { result, state } =
             self.evm.transact(tx).map_err(move |err| BlockExecutionError::evm(err, hash))?;
 
-        if !f(&result).should_commit() {
+        let evm_ctx = self.evm.ctx_ref();
+        if !f(MegaTransactionExecutionOutcome {
+            result: &result,
+            state: &state,
+            data_size: evm_ctx.generated_data_size(),
+            kv_updates: evm_ctx.kv_update_count(),
+        })
+        .should_commit()
+        {
             return Ok(None);
         }
 
@@ -539,51 +723,29 @@ where
         Ok(Some(gas_used))
     }
 
-    /// NOTE: this function resembles the one in
-    /// `alloy_op_evm::OpBlockExecutor::finish`. Changes there should be
-    /// synced.
-    fn finish(
-        mut self,
-    ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        let balance_increments =
-            post_block_balance_increments::<Header>(&self.chain_spec, self.evm.block(), &[], None);
-        // increment balances
-        self.evm
-            .db_mut()
-            .increment_balances(balance_increments.clone())
-            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-        // call state hook with changes due to balance increments.
-        self.system_caller.try_on_state_with(|| {
-            balance_increment_state(&balance_increments, self.evm.db_mut()).map(|state| {
-                (
-                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
-                    Cow::Owned(state),
-                )
-            })
-        })?;
-
-        let gas_used = self.receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or_default();
-        Ok((
-            self.evm,
-            BlockExecutionResult {
-                receipts: self.receipts,
-                requests: Default::default(),
-                gas_used,
-            },
-        ))
+    fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.evm.ctx_ref().dynamic_gas_cost.borrow().get_bucket_ids()
     }
 
-    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
-        self.system_caller.with_state_hook(hook);
+    fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
+        self.evm.db().block_hashes.clone()
     }
+}
 
-    fn evm_mut(&mut self) -> &mut Self::Evm {
-        &mut self.evm
-    }
-
-    fn evm(&self) -> &Self::Evm {
-        &self.evm
-    }
+/// The execution outcome of a transaction in `MegaETH`.
+///
+/// This struct contains additional information about the transaction execution on top of the
+/// standard EVM's execution result and state.
+#[derive(Debug, Clone)]
+pub struct MegaTransactionExecutionOutcome<'a> {
+    /// The transaction execution result.
+    pub result: &'a ExecutionResult<MegaHaltReason>,
+    /// The post-execution evm state.
+    pub state: &'a EvmState,
+    /// The data size usage in bytes.
+    pub data_size: u64,
+    /// The number of KV updates.
+    pub kv_updates: u64,
 }
 
 /// Error type for block-level limit exceeded. These errors are only thrown after the transaction
