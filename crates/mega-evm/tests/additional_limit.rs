@@ -53,7 +53,8 @@ fn transact(
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
     let ctx = evm.ctx_ref();
-    Ok((r, ctx.generated_data_size(), ctx.kv_update_count()))
+    let additional_outcome = ctx.additional_outcome();
+    Ok((r, additional_outcome.data_size, additional_outcome.kv_updates))
 }
 
 /// Checks if the execution result indicates that the data limit was exceeded.
@@ -964,8 +965,8 @@ fn test_limits_reset_across_multiple_transactions() {
     let mut mega_tx1 = MegaTransaction::new(tx1);
     mega_tx1.enveloped_tx = Some(Bytes::new());
     let res1 = alloy_evm::Evm::transact_raw(&mut evm, mega_tx1).unwrap();
-    let data_size_after_tx1 = evm.ctx_ref().generated_data_size();
-    let kv_updates_after_tx1 = evm.ctx_ref().kv_update_count();
+    let data_size_after_tx1 = evm.ctx_ref().additional_outcome().data_size;
+    let kv_updates_after_tx1 = evm.ctx_ref().additional_outcome().kv_updates;
 
     // Verify first transaction generated some data and KV updates
     assert_eq!(data_size_after_tx1, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE);
@@ -979,8 +980,8 @@ fn test_limits_reset_across_multiple_transactions() {
     let mut mega_tx2 = MegaTransaction::new(tx2);
     mega_tx2.enveloped_tx = Some(Bytes::new());
     let _ = alloy_evm::Evm::transact_raw(&mut evm, mega_tx2).unwrap();
-    let data_size_after_tx2 = evm.ctx_ref().generated_data_size();
-    let kv_updates_after_tx2 = evm.ctx_ref().kv_update_count();
+    let data_size_after_tx2 = evm.ctx_ref().additional_outcome().data_size;
+    let kv_updates_after_tx2 = evm.ctx_ref().additional_outcome().kv_updates;
 
     // Verify counters reset and show only second transaction's data
     // Without reset, these would be 2x the single transaction values
