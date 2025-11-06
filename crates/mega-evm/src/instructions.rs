@@ -295,6 +295,17 @@ const fn instruction_table<WIRE: InterpreterTypes, H: HostExt + ContextTr + ?Siz
     table
 }
 
+/// Macro to record compute gas and check if the limit has been exceeded. If the limit is exceeded,
+/// the interpreter halts and returns.
+macro_rules! compute_gas {
+    ($interpreter:expr, $additional_limit:expr, $gas_used:expr) => {
+        if $additional_limit.record_compute_gas($gas_used).exceeded_limit() {
+            $interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
+            return;
+        }
+    };
+}
+
 /// `LOG` opcode implementation modified from `revm` with compute gas tracking, increased storage
 /// gas costs, and data size limit enforcement.
 ///
@@ -341,7 +352,7 @@ pub fn log<const N: usize, H: HostExt + ?Sized>(
     let log_cost = gas::log_cost(N as u8, len as u64);
     gas_or_fail!(context.interpreter, log_cost);
     // Record the compute gas cost
-    additional_limit.compute_gas_tracker.record_gas_used(log_cost.unwrap_or_default());
+    compute_gas!(context.interpreter, additional_limit, log_cost.unwrap_or_default());
 
     // MegaETH modification: calculate the storage gas cost for log topics and data
     let log_storage_cost = {
@@ -362,7 +373,7 @@ pub fn log<const N: usize, H: HostExt + ?Sized>(
         // Record the memory expansion compute gas cost
         let memory_expansion_cost =
             gas_remaining_before.saturating_sub(context.interpreter.gas.remaining());
-        additional_limit.compute_gas_tracker.record_gas_used(memory_expansion_cost);
+        compute_gas!(context.interpreter, additional_limit, memory_expansion_cost);
 
         Bytes::copy_from_slice(context.interpreter.memory.slice_len(offset, len).as_ref())
     };
@@ -431,6 +442,9 @@ pub fn log<const N: usize, H: HostExt + ?Sized>(
 pub fn sstore<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     context: InstructionContext<'_, H, WIRE>,
 ) {
+    let additional_limit = context.host.additional_limit().clone();
+    let mut additional_limit = additional_limit.borrow_mut();
+
     require_non_staticcall!(context.interpreter);
 
     popn!([index, value], context.interpreter);
@@ -456,7 +470,7 @@ pub fn sstore<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     );
     revm::interpreter::gas!(context.interpreter, gas_cost);
     // Record the compute gas cost
-    context.host.additional_limit().borrow_mut().compute_gas_tracker.record_gas_used(gas_cost);
+    compute_gas!(context.interpreter, additional_limit, gas_cost);
 
     // MegaETH modification: we charge additional storage gas cost for setting a storage slot to a
     // non-zero value.
@@ -482,13 +496,7 @@ pub fn sstore<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     // KV update bomb and data bomb (only when first writing non-zero value to originally zero
     // slot): check if the number of key-value updates or the total data size will exceed the
     // limit, if so, halt.
-    if context
-        .host
-        .additional_limit()
-        .borrow_mut()
-        .on_sstore(target_address, index, loaded_data)
-        .exceeded_limit()
-    {
+    if additional_limit.on_sstore(target_address, index, loaded_data).exceeded_limit() {
         context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
     }
 }
@@ -516,7 +524,7 @@ pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + Conte
 
     let target_address = context.interpreter.input.target_address();
     let additional_limit = context.host.additional_limit().clone();
-    let compute_gas_tracker = &mut additional_limit.borrow_mut().compute_gas_tracker;
+    let mut additional_limit = additional_limit.borrow_mut();
 
     // EIP-1014: Skinny CREATE2
     if IS_CREATE2 {
@@ -538,7 +546,7 @@ pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + Conte
         revm::interpreter::gas!(context.interpreter, initcode_cost);
 
         // Record the compute gas cost
-        compute_gas_tracker.record_gas_used(initcode_cost);
+        compute_gas!(context.interpreter, additional_limit, initcode_cost);
 
         let gas_remaining_before = context.interpreter.gas.remaining();
 
@@ -551,7 +559,7 @@ pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + Conte
         // Record the memory expansion compute gas cost
         let memory_expansion_cost =
             gas_remaining_before.saturating_sub(context.interpreter.gas.remaining());
-        compute_gas_tracker.record_gas_used(memory_expansion_cost);
+        compute_gas!(context.interpreter, additional_limit, memory_expansion_cost);
     }
 
     // EIP-1014: Skinny CREATE2
@@ -564,7 +572,7 @@ pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + Conte
         let create2_cost = gas::create2_cost(initcode_len);
         gas_or_fail!(context.interpreter, create2_cost);
         // Record the compute gas cost
-        compute_gas_tracker.record_gas_used(create2_cost.unwrap_or_default());
+        compute_gas!(context.interpreter, additional_limit, create2_cost.unwrap_or_default());
 
         // MegaETH modification: gas cost for creating a new account
         // calculate the created address
@@ -582,7 +590,7 @@ pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + Conte
         let create_cost = gas::CREATE;
         revm::interpreter::gas!(context.interpreter, create_cost);
         // Record the compute gas cost
-        compute_gas_tracker.record_gas_used(create_cost);
+        compute_gas!(context.interpreter, additional_limit, create_cost);
 
         // MegaETH modification: gas cost for creating a new account
         // calculate the created address
@@ -656,7 +664,7 @@ pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + Conte
 /// we can safely assume that all features before and including Mini-Rex are enabled.
 pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
     let additional_limit = context.host.additional_limit().clone();
-    let compute_gas_tracker = &mut additional_limit.borrow_mut().compute_gas_tracker;
+    let mut additional_limit = additional_limit.borrow_mut();
 
     popn!([local_gas_limit, to, value], context.interpreter);
     let to = to.into_address();
@@ -677,7 +685,7 @@ pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionCon
     // Record the memory expansion compute gas cost
     let memory_expansion_cost =
         gas_remaining_before.saturating_sub(context.interpreter.gas.remaining());
-    compute_gas_tracker.record_gas_used(memory_expansion_cost);
+    compute_gas!(context.interpreter, additional_limit, memory_expansion_cost);
 
     let Some(account_load) = context.host.load_account_delegated(to) else {
         context.interpreter.halt(InstructionResult::FatalExternalError);
@@ -693,7 +701,7 @@ pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionCon
     revm::interpreter::gas!(context.interpreter, call_cost);
 
     // Record the compute gas cost
-    compute_gas_tracker.record_gas_used(call_cost);
+    compute_gas!(context.interpreter, additional_limit, call_cost);
 
     // MegaETH modification: add additional storage gas cost for creating a new account
     // This must be charged BEFORE calculating the forwarded gas amount (98/100 rule)
@@ -858,14 +866,17 @@ pub mod compute_gas_ext {
                 };
                 $original_fn(ctx);
 
-                let gas_after = context.interpreter.gas.remaining();
-                let gas_used = gas_before - gas_after;
-                context
+                let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                if context
                     .host
                     .additional_limit()
                     .borrow_mut()
-                    .compute_gas_tracker
-                    .record_gas_used(gas_used);
+                    .record_compute_gas(gas_used)
+                    .exceeded_limit()
+                {
+                    context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
+                    return;
+                }
             }
         };
     }

@@ -47,9 +47,10 @@ use revm::{
 };
 
 use crate::{
-    constants, create_exceeding_limit_frame_result, mark_interpreter_result_as_exceeding_limit,
-    DefaultExternalEnvs, ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
-    MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
+    constants, create_exceeding_limit_frame_result, mark_frame_result_as_exceeding_limit,
+    mark_interpreter_result_as_exceeding_limit, DefaultExternalEnvs, ExternalEnvs,
+    IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler, MegaInstructions, MegaPrecompiles,
+    MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -370,11 +371,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> PrecompileProvider<MegaContext<DB, Ext
         // Record the compute gas cost
         Ok(maybe_output.inspect(|output| {
             if context.spec.is_enabled(MegaSpecId::MINI_REX) {
-                context
-                    .additional_limit
-                    .borrow_mut()
-                    .compute_gas_tracker
-                    .record_gas_used(output.gas.spent());
+                context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
             }
         }))
     }
@@ -511,7 +508,7 @@ where
 
         // Process the frame action, it may need to create a new frame or return the current frame
         // result.
-        let frame_output = frame
+        let mut frame_output = frame
             .process_next_action::<_, ContextDbError<Self::Context>>(context, action)
             .inspect(|i| {
                 if i.is_result() {
@@ -520,15 +517,14 @@ where
             })?;
 
         // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
-        match (&frame_output, gas_remaining_before, is_mini_rex_enabled) {
+        match (&mut frame_output, gas_remaining_before, is_mini_rex_enabled) {
             (ItemOrResult::Result(frame_result), Some(gas_remaining_before), true) => {
                 let compute_gas_cost =
                     gas_remaining_before.saturating_sub(frame_result.gas().remaining());
-                self.ctx()
-                    .additional_limit
-                    .borrow_mut()
-                    .compute_gas_tracker
-                    .record_gas_used(compute_gas_cost);
+                let mut additional_limit = self.ctx().additional_limit.borrow_mut();
+                if additional_limit.record_compute_gas(compute_gas_cost).exceeded_limit() {
+                    mark_frame_result_as_exceeding_limit(frame_result);
+                }
             }
             _ => {}
         }
@@ -547,24 +543,17 @@ where
         let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if is_mini_rex {
+            let mut additional_limit = ctx.additional_limit.borrow_mut();
+
             // Return early if the limit is already exceeded before processing the child frame
             // return result.
-            if ctx
-                .additional_limit
-                .borrow_mut()
-                .is_exceeding_limit_result(result.instruction_result())
-            {
+            if additional_limit.is_exceeding_limit_result(result.instruction_result()) {
                 return Ok(Some(result));
             }
 
             // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
             // exceeded, return the error frame result
-            if ctx
-                .additional_limit
-                .borrow_mut()
-                .before_frame_return_result(&result, false)
-                .exceeded_limit()
-            {
+            if additional_limit.before_frame_return_result(&result, false).exceeded_limit() {
                 match &mut result {
                     FrameResult::Call(call_outcome) => {
                         mark_interpreter_result_as_exceeding_limit(&mut call_outcome.result)

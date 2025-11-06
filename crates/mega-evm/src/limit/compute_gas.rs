@@ -1,5 +1,4 @@
-use revm::interpreter::Gas;
-
+/// A tracker for the total compute gas consumed during transaction execution.
 #[derive(Debug, Clone, Default)]
 pub struct ComputeGasTracker {
     /// Total gas consumed by the transaction across message calls.

@@ -169,11 +169,20 @@ where
         let ctx = evm.ctx_mut();
         let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         if is_mini_rex_enabled {
+            let mut additional_limit = ctx.additional_limit().borrow_mut();
             // record the initial gas cost as compute gas cost
-            ctx.additional_limit()
-                .borrow_mut()
-                .compute_gas_tracker
-                .record_gas_used(initial_and_floor_gas.initial_gas);
+            if additional_limit
+                .record_compute_gas(initial_and_floor_gas.initial_gas)
+                .exceeded_limit()
+            {
+                // TODO: can we custom error?
+                return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
+                    gas_limit: additional_limit.compute_gas_limit,
+                    initial_gas: initial_and_floor_gas.initial_gas,
+                }
+                .into());
+            }
+            drop(additional_limit);
 
             // MegaETH modification: additional storage gas cost for creating account
             let kind = ctx.tx().kind();

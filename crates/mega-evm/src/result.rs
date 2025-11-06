@@ -35,6 +35,13 @@ pub enum MegaHaltReason {
         /// The actual KV update count
         actual: u64,
     },
+    /// Compute gas limit exceeded
+    ComputeGasLimitExceeded {
+        /// The configured compute gas limit
+        limit: u64,
+        /// The actual compute gas usage
+        actual: u64,
+    },
     /// System transaction's callee is not in the whitelist
     SystemTxInvalidCallee {
         /// address called
@@ -76,6 +83,7 @@ impl TryFrom<MegaHaltReason> for EthHaltReason {
             MegaHaltReason::Base(reason) => Ok(reason.try_into()?),
             MegaHaltReason::DataLimitExceeded { .. } |
             MegaHaltReason::KVUpdateLimitExceeded { .. } |
+            MegaHaltReason::ComputeGasLimitExceeded { .. } |
             MegaHaltReason::SystemTxInvalidCallee { .. } |
             MegaHaltReason::VolatileDataAccessOutOfGas { .. } => Err(value),
         }
