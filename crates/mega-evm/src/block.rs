@@ -32,7 +32,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
-use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
+use alloy_consensus::{transaction::Recovered, Eip658Value, Header, Transaction, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};
 pub use alloy_evm::block::CommitChanges;
 use alloy_evm::{
@@ -62,7 +62,7 @@ use salt::BucketId;
 
 use crate::{
     ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
-    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTxEnvelope,
 };
 
 /// `MegaETH` receipt builder type.
@@ -192,7 +192,8 @@ where
 impl<ChainSpec, ExtEnvs, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
     for MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvs>, ReceiptBuilder>
 where
-    ReceiptBuilder: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
+    ReceiptBuilder:
+        OpReceiptBuilder<Transaction: Transaction + Encodable2718 + TxDASize, Receipt: TxReceipt>,
     ChainSpec: OpHardforks + Clone,
     ExtEnvs: crate::ExternalEnvs + Clone,
     crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>
@@ -237,8 +238,12 @@ pub struct MegaBlockExecutionCtx {
     /// Defaults to [`crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT`].
     pub block_kv_update_limit: u64,
     /// The maximum size of all transactions (transaction body, not execution outcome) included in
-    /// a block.
+    /// a block. The difference between this limit and the `block_da_size_limit` is that the
+    /// current limit applies to the transaction size uncompressed, while the `block_da_size_limit`
+    /// applies to the transaction size after DA compression.
     pub block_tx_size_limit: u64,
+    /// The maximum amount of data availability size allowed to generate from a block.
+    pub block_da_size_limit: u64,
 }
 
 impl Default for MegaBlockExecutionCtx {
@@ -250,6 +255,7 @@ impl Default for MegaBlockExecutionCtx {
             block_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
             block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
             block_tx_size_limit: u64::MAX,
+            block_da_size_limit: u64::MAX,
         }
     }
 }
@@ -290,6 +296,15 @@ impl MegaBlockExecutionCtx {
         self.block_tx_size_limit = limit;
         self
     }
+
+    /// Set a custom block data availability size limit.
+    ///
+    /// This is a builder method that consumes self and returns a new instance
+    /// with the specified data availability size limit.
+    pub fn with_da_size_limit(mut self, limit: u64) -> Self {
+        self.block_da_size_limit = limit;
+        self
+    }
 }
 
 /// Block executor for the `MegaETH` chain.
@@ -324,6 +339,7 @@ pub struct MegaBlockExecutor<C, E, R: OpReceiptBuilder> {
     block_data_used: u64,
     block_kv_updates_used: u64,
     block_tx_size_used: u64,
+    block_da_size_used: u64,
 }
 
 impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> {
@@ -374,6 +390,7 @@ where
             block_data_used: 0,
             block_kv_updates_used: 0,
             block_tx_size_used: 0,
+            block_da_size_used: 0,
             evm,
             system_caller: SystemCaller::new(spec),
         }
@@ -447,7 +464,7 @@ where
     C: OpHardforks,
     ExtEnvs: crate::ExternalEnvs,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
-    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
+    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718 + TxDASize, Receipt: TxReceipt>,
     crate::MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
     Self: MegaBlockExecutorExt<R>,
 {
@@ -631,7 +648,7 @@ where
     C: OpHardforks,
     ExtEnvs: crate::ExternalEnvs,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
-    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
+    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718 + TxDASize, Receipt: TxReceipt>,
 {
     fn execute_mega_transaction<Tx>(
         &mut self,
@@ -667,6 +684,19 @@ where
             ));
         }
 
+        // The sum of the transaction data availability size must be no greater than the block's
+        // data availability size limit.
+        let da_size = tx.tx().estimated_da_size();
+        if da_size + self.block_da_size_used > self.ctx.block_da_size_limit {
+            return Err(BlockExecutionError::other(
+                MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
+                    block_used: self.block_da_size_used,
+                    tx_used: da_size,
+                    limit: self.ctx.block_da_size_limit,
+                },
+            ));
+        }
+
         // Cache the depositor account prior to the state transition for the deposit nonce.
         //
         // Note that in MegaETH, the Regolith hardfork is always active, so we always have deposit
@@ -692,6 +722,7 @@ where
         let outcome = MegaTransactionExecutionOutcome {
             tx,
             tx_size,
+            da_size,
             depositor,
             result,
             state,
@@ -712,6 +743,7 @@ where
         let MegaTransactionExecutionOutcome {
             tx,
             tx_size,
+            da_size,
             depositor,
             result,
             state,
@@ -731,6 +763,9 @@ where
 
         // append transaction size
         self.block_tx_size_used += tx_size;
+
+        // append transaction data availability size
+        self.block_da_size_used += da_size;
 
         self.receipts.push(
             match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
@@ -788,6 +823,8 @@ pub struct MegaTransactionExecutionOutcome<T> {
     pub tx: T,
     /// The transaction size in bytes.
     pub tx_size: u64,
+    /// The transaction data availability size in bytes.
+    pub da_size: u64,
     /// The depositor account info.
     pub depositor: Option<AccountInfo>,
     /// The transaction execution result.
@@ -838,4 +875,33 @@ pub enum MegaBlockLimitExceededError {
         /// Transaction size limit
         limit: u64,
     },
+
+    /// Block data availability size limit exceeded.
+    #[error("Block data availability size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    DataAvailabilitySizeLimit {
+        /// Data availability size used by block so far
+        block_used: u64,
+        /// Data availability size used by current transaction
+        tx_used: u64,
+        /// Block data availability size limit
+        limit: u64,
+    },
 }
+
+/// Helper trait that allows attaching an estimated data availability size.
+pub trait TxDASize {
+    /// Get the estimated data availability size of the transaction.
+    ///
+    /// Note: the default implementation is not efficient since it does not cache the `da_size` and
+    /// always recalculates it.
+    fn estimated_da_size(&self) -> u64
+    where
+        Self: Encodable2718,
+    {
+        op_alloy_flz::tx_estimated_size_fjord_bytes(self.encoded_2718().as_slice())
+    }
+}
+
+impl TxDASize for Recovered<MegaTxEnvelope> {}
+
+impl TxDASize for MegaTxEnvelope {}

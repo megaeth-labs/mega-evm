@@ -178,6 +178,7 @@ alloy-rpc-types-trace = { version = "1.0.22" }
 alloy-serde = { version = "1.0.23", default-features = false }
 alloy-sol-types = { version = "1.0.23" }
 op-alloy-consensus = { version = "0.18.12", default-features = false }
+op-alloy-flz = { version = "0.13.1" }
 
 # misc
 auto_impl = "1.3"
