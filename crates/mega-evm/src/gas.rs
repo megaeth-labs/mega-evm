@@ -42,7 +42,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         address: Address,
         key: U256,
     ) -> Result<u64, SaltEnvImpl::Error> {
-        let mut gas = constants::mini_rex::SSTORE_SET_GAS;
+        let mut gas = constants::mini_rex::SSTORE_SET_STORAGE_GAS;
 
         // increase the gas cost according to the bucket capacity
         let bucket_id = slot_to_bucket_id(address, key);
@@ -55,7 +55,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     /// Calculates the gas cost for creating a new account. This overrides the
     /// [`NEWACCOUNT`](revm::interpreter::gas::NEWACCOUNT) gas cost in the original EVM.
     pub fn new_account_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
-        let mut gas = constants::mini_rex::NEW_ACCOUNT_GAS;
+        let mut gas = constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS;
 
         // increase the gas cost according to the bucket capacity
         let bucket_id = address_to_bucket_id(address);

@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use alloy_primitives::{address, keccak256, Bytes, TxKind, U256};
 use mega_evm::{
     address_to_bucket_id,
-    constants::{self, mini_rex::SSTORE_SET_GAS},
+    constants::{self, mini_rex::SSTORE_SET_STORAGE_GAS},
     slot_to_bucket_id,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     DefaultExternalEnvs, EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
@@ -131,7 +131,7 @@ fn test_sstore_no_bucket_expansion() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         0,
-        21_006 + SSTORE_SET_GAS + constants::equivalence::COLD_SLOAD_COST,
+        21_006 + SSTORE_SET_STORAGE_GAS + constants::equivalence::COLD_SLOAD_COST,
     );
 }
 
@@ -143,7 +143,7 @@ fn test_sstore_with_bucket_expansion_once() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         1,
-        21_006 + SSTORE_SET_GAS * 2 + constants::equivalence::COLD_SLOAD_COST,
+        21_006 + SSTORE_SET_STORAGE_GAS * 2 + constants::equivalence::COLD_SLOAD_COST,
     );
 }
 
@@ -155,7 +155,7 @@ fn test_sstore_with_bucket_expansion_ten_times() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         9,
-        21_006 + SSTORE_SET_GAS * 10 + constants::equivalence::COLD_SLOAD_COST,
+        21_006 + SSTORE_SET_STORAGE_GAS * 10 + constants::equivalence::COLD_SLOAD_COST,
     );
 }
 
@@ -260,7 +260,7 @@ fn test_sstore_cold_then_warm_access() {
     // - Second SSTORE (warm, overwriting non-zero with non-zero): WARM_STORAGE_READ_COST
     let expected_gas = 21_000
         + 12 // bytecode overhead
-        + SSTORE_SET_GAS
+        + SSTORE_SET_STORAGE_GAS
         + constants::equivalence::COLD_SLOAD_COST
         + constants::equivalence::WARM_STORAGE_READ_COST;
     assert_eq!(res.result.gas_used(), expected_gas);
@@ -329,7 +329,7 @@ fn test_ether_transfer_to_non_existent_account() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         0,
-        21_000 + constants::mini_rex::NEW_ACCOUNT_GAS,
+        21_000 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS,
     );
 }
 
@@ -340,7 +340,7 @@ fn test_ether_transfer_to_non_existent_account_with_bucket_expansion() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         1,
-        21_000 + constants::mini_rex::NEW_ACCOUNT_GAS * 2,
+        21_000 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2,
     );
 }
 
@@ -429,7 +429,7 @@ fn test_nested_ether_transfer_to_non_existent_account() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         0,
-        30_316 + constants::mini_rex::NEW_ACCOUNT_GAS,
+        30_316 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS,
     );
 }
 
@@ -440,7 +440,7 @@ fn test_nested_ether_transfer_to_non_existent_account_with_bucket_expansion() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         1,
-        30_316 + constants::mini_rex::NEW_ACCOUNT_GAS * 2,
+        30_316 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2,
     );
 }
 
@@ -501,9 +501,9 @@ fn test_create_contract_to_non_existent_account() {
         MegaSpecId::MINI_REX,
         0,
         53_554 +
-            constants::mini_rex::NEW_ACCOUNT_GAS +
-            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS +
-            constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * 83,
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS +
+            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS +
+            constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * 83,
     );
 }
 
@@ -514,9 +514,9 @@ fn test_create_contract_to_non_existent_account_with_bucket_expansion() {
         MegaSpecId::MINI_REX,
         1,
         53_554 +
-            constants::mini_rex::NEW_ACCOUNT_GAS * 2 +
-            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS +
-            constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * 83,
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2 +
+            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS +
+            constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * 83,
     );
 }
 
@@ -604,9 +604,9 @@ fn test_nested_create_contract_to_non_existent_account() {
         false,
         0,
         21_255 +
-            constants::mini_rex::CREATE_GAS +
-            constants::mini_rex::NEW_ACCOUNT_GAS +
-            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS,
+            constants::equivalence::CREATE +
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS +
+            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS,
     );
 }
 
@@ -618,9 +618,9 @@ fn test_nested_create_contract_to_non_existent_account_with_bucket_expansion() {
         false,
         1,
         21_255 +
-            constants::mini_rex::CREATE_GAS +
-            constants::mini_rex::NEW_ACCOUNT_GAS * 2 +
-            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS,
+            constants::equivalence::CREATE +
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2 +
+            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS,
     );
 }
 
@@ -643,9 +643,9 @@ fn test_nested_create2_contract_to_non_existent_account() {
         true,
         0,
         21_270 +
-            constants::mini_rex::CREATE_GAS +
-            constants::mini_rex::NEW_ACCOUNT_GAS +
-            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS,
+            constants::equivalence::CREATE +
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS +
+            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS,
     );
 }
 
@@ -657,9 +657,9 @@ fn test_nested_create2_contract_to_non_existent_account_with_bucket_expansion() 
         true,
         1,
         21_270 +
-            constants::mini_rex::CREATE_GAS +
-            constants::mini_rex::NEW_ACCOUNT_GAS * 2 +
-            constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS,
+            constants::equivalence::CREATE +
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2 +
+            constants::mini_rex::CODEDEPOSIT_STORAGE_GAS,
     );
 }
 
@@ -762,7 +762,9 @@ fn log_test_case<const TOPIC_COUNT: usize, const DATA_LEN: usize>(
 fn test_log_additional_cost() {
     log_test_case::<1, 1024>(
         MegaSpecId::MINI_REX,
-        21_482 + constants::mini_rex::LOG_TOPIC_GAS + constants::mini_rex::LOG_DATA_GAS * 1024,
+        21_482 +
+            constants::mini_rex::LOG_TOPIC_STORAGE_GAS +
+            constants::mini_rex::LOG_DATA_STORAGE_GAS * 1024,
     );
 }
 

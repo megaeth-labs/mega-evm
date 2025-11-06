@@ -50,7 +50,7 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
     pub additional_limit: Rc<RefCell<AdditionalLimit>>,
 
     /// Calculator for dynamic gas costs during transaction execution.
-    pub dynamic_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
+    pub dynamic_storage_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
 
     /// The oracle environment.
     pub oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
@@ -97,7 +97,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             spec,
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
-            dynamic_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+            dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
@@ -148,7 +148,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             spec,
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
-            dynamic_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+            dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>() - 1,
             ))),
@@ -176,7 +176,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             spec: self.spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
-            dynamic_gas_cost: self.dynamic_gas_cost,
+            dynamic_storage_gas_cost: self.dynamic_storage_gas_cost,
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
         }
@@ -271,7 +271,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             spec: self.spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
-            dynamic_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+            dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 external_envs.salt_env(),
                 parent_block_number,
             ))),
@@ -373,7 +373,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     ///
     /// Returns the bucket IDs used during transaction execution.
     pub fn accessed_bucket_ids(&self) -> Vec<BucketId> {
-        self.dynamic_gas_cost.borrow().get_bucket_ids()
+        self.dynamic_storage_gas_cost.borrow().get_bucket_ids()
     }
 
     /// Consumes the context and converts it into the inner `OpContext`.
@@ -471,7 +471,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     pub(crate) fn on_new_block(&self) {
         // The dynamic gas cost calculator is only enabled when the `MINI_REX` spec is enabled.
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
-            self.dynamic_gas_cost.borrow_mut().on_new_block(&self.inner.block);
+            self.dynamic_storage_gas_cost.borrow_mut().on_new_block(&self.inner.block);
         }
     }
 

@@ -364,9 +364,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> PrecompileProvider<MegaContext<DB, Ext
         is_static: bool,
         gas_limit: u64,
     ) -> Result<Option<Self::Output>, String> {
-        PrecompileProvider::<OpContext<DB>>::run(
+        let maybe_output = PrecompileProvider::<OpContext<DB>>::run(
             self, context, address, inputs, is_static, gas_limit,
-        )
+        )?;
+        // Record the compute gas cost
+        Ok(maybe_output.inspect(|output| {
+            if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+                context
+                    .additional_limit
+                    .borrow_mut()
+                    .compute_gas_tracker
+                    .record_gas_used(output.gas.spent());
+            }
+        }))
     }
 
     #[inline]
@@ -464,19 +474,17 @@ where
 
         let mut action = frame.interpreter.run_plain(instructions.instruction_table(), context);
 
-        // Apply the additional limits and gas cost only when the `MINI_REX` spec is enabled.
-        if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+        // Apply additional limits and storage gas cost only when the `MINI_REX` spec is enabled.
+        let is_mini_rex_enabled = context.spec.is_enabled(MegaSpecId::MINI_REX);
+        if is_mini_rex_enabled {
             if let InterpreterAction::Return(interpreter_result) = &mut action {
-                // charge additional gas cost for the number of bytes
+                // charge storage gas cost for the number of bytes
                 if frame.data.is_create() && interpreter_result.is_ok() {
-                    // if the creation is successful, charge the additional gas cost for the
-                    // number of bytes. The EVM's original `CODEDEPOSIT` gas cost will be
-                    // charged later in `process_next_action`. We only charge the difference
-                    // here.
-                    let additional_code_deposit_gas =
-                        constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS *
-                            interpreter_result.output.len() as u64;
-                    if !interpreter_result.gas.record_cost(additional_code_deposit_gas) {
+                    // if the creation is successful, charge the storage gas cost for the
+                    // number of bytes.
+                    let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
+                        interpreter_result.output.len() as u64;
+                    if !interpreter_result.gas.record_cost(code_deposit_storage_gas) {
                         // if out of gas, set the instruction result to OOG
                         interpreter_result.result = InstructionResult::OutOfGas;
                     }
@@ -493,11 +501,39 @@ where
             }
         }
 
-        frame.process_next_action(context, action).inspect(|i| {
-            if i.is_result() {
-                frame.set_finished(true);
+        // Record gas remaining before frame action processing
+        let gas_remaining_before = match (&action, is_mini_rex_enabled) {
+            (InterpreterAction::Return(interpreter_result), true) => {
+                Some(interpreter_result.gas.remaining())
             }
-        })
+            _ => None,
+        };
+
+        // Process the frame action, it may need to create a new frame or return the current frame
+        // result.
+        let frame_output = frame
+            .process_next_action::<_, ContextDbError<Self::Context>>(context, action)
+            .inspect(|i| {
+                if i.is_result() {
+                    frame.set_finished(true);
+                }
+            })?;
+
+        // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
+        match (&frame_output, gas_remaining_before, is_mini_rex_enabled) {
+            (ItemOrResult::Result(frame_result), Some(gas_remaining_before), true) => {
+                let compute_gas_cost =
+                    gas_remaining_before.saturating_sub(frame_result.gas().remaining());
+                self.ctx()
+                    .additional_limit
+                    .borrow_mut()
+                    .compute_gas_tracker
+                    .record_gas_used(compute_gas_cost);
+            }
+            _ => {}
+        }
+
+        Ok(frame_output)
     }
 
     fn frame_return_result(

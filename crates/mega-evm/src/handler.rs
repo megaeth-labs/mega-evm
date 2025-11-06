@@ -161,14 +161,21 @@ where
     }
 
     /// This function copies the logic from `revm::handler::Handler::validate` to and
-    /// add additional gas cost for calldata.
+    /// add additional storage gas cost for calldata.
     fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
         self.validate_env(evm)?;
         let mut initial_and_floor_gas = self.validate_initial_tx_gas(evm)?;
 
         let ctx = evm.ctx_mut();
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            // MegaETH modification: additional gas cost for creating account
+        let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
+        if is_mini_rex_enabled {
+            // record the initial gas cost as compute gas cost
+            ctx.additional_limit()
+                .borrow_mut()
+                .compute_gas_tracker
+                .record_gas_used(initial_and_floor_gas.initial_gas);
+
+            // MegaETH modification: additional storage gas cost for creating account
             let kind = ctx.tx().kind();
             let new_account = match kind {
                 TxKind::Create => true,
@@ -191,7 +198,7 @@ where
                     TxKind::Call(address) => address,
                 };
                 initial_and_floor_gas.initial_gas +=
-                    ctx.new_account_gas(callee_address).map_err(|_| {
+                    ctx.new_account_storage_gas(callee_address).map_err(|_| {
                         let err_str = format!(
                             "Failed to get new account gas for callee address: {callee_address}",
                         );
@@ -199,17 +206,16 @@ where
                     })?;
             }
 
-            // MegaETH MiniRex modification: 100x increase in calldata gas costs
+            // MegaETH MiniRex modification: calldata storage gas costs
             // - Standard tokens: 400 gas per token (vs 4)
             // - EIP-7623 floor: 100x increase for transaction data floor cost
             let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
-            let additional_calldata_gas =
-                constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * tokens_in_calldata;
-            initial_and_floor_gas.initial_gas += additional_calldata_gas;
-            let additional_floor_calldata_gas =
-                constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_FLOOR_GAS *
-                    tokens_in_calldata;
-            initial_and_floor_gas.floor_gas += additional_floor_calldata_gas;
+            let calldata_storage_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * tokens_in_calldata;
+            initial_and_floor_gas.initial_gas += calldata_storage_gas;
+            let floor_calldata_storage_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS * tokens_in_calldata;
+            initial_and_floor_gas.floor_gas += floor_calldata_storage_gas;
 
             // If the initial_gas exceeds the tx gas limit, return an error
             if initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {

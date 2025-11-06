@@ -770,7 +770,7 @@ where
     }
 
     fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
-        self.evm.ctx_ref().dynamic_gas_cost.borrow().get_bucket_ids()
+        self.evm.ctx_ref().dynamic_storage_gas_cost.borrow().get_bucket_ids()
     }
 
     fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {

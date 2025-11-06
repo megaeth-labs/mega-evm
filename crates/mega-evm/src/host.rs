@@ -127,10 +127,10 @@ pub trait HostExt: Host {
 
     /// Gets the gas cost for setting a storage slot to a non-zero value. Only used when the
     /// `MINI_REX` spec is enabled.
-    fn sstore_set_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error>;
+    fn sstore_set_storage_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error>;
 
     /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
-    fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error>;
+    fn new_account_storage_gas(&self, address: Address) -> Result<u64, Self::Error>;
 
     /// Gets the volatile data tracker. Only used when the `MINI_REX` spec is enabled.
     fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>>;
@@ -146,15 +146,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
     }
 
     #[inline]
-    fn sstore_set_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error> {
+    fn sstore_set_storage_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        self.dynamic_gas_cost.borrow_mut().sstore_set_gas(address, key)
+        self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(address, key)
     }
 
     #[inline]
-    fn new_account_gas(&self, address: Address) -> Result<u64, Self::Error> {
+    fn new_account_storage_gas(&self, address: Address) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        self.dynamic_gas_cost.borrow_mut().new_account_gas(address)
+        self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(address)
     }
 
     #[inline]
