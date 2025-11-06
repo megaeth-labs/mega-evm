@@ -21,6 +21,7 @@ alloy-op-hardforks.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
+op-alloy-flz.workspace = true
 
 # megaeth
 salt.workspace = true
