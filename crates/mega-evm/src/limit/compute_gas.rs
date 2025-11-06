@@ -14,11 +14,13 @@ impl ComputeGasTracker {
         self.total_gas_used = 0;
     }
 
-    pub(crate) fn current_gas_used(&self) -> u64 {
+    #[inline]
+    pub(crate) const fn current_gas_used(&self) -> u64 {
         self.total_gas_used
     }
 
-    pub(crate) fn exceeds_limit(&self, limit: u64) -> bool {
+    #[inline]
+    pub(crate) const fn exceeds_limit(&self, limit: u64) -> bool {
         self.current_gas_used() > limit
     }
 }

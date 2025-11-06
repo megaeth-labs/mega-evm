@@ -306,7 +306,7 @@ To prevent DoS attacks where malicious actors create transactions that can never
 **Enforcement:**
 
 - When either limit is exceeded, the transaction halts immediately with `OutOfGas` error
-- **All remaining gas in the transaction is consumed as penalty**
+- **Remaining gas in the transaction is preserved (not consumed) and refunded to the sender**
 - Limits are enforced at the EVM instruction level during execution
 
 #### 3.5.4 Resource Accounting

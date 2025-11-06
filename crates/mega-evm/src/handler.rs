@@ -20,10 +20,10 @@ use revm::{
 };
 
 use crate::{
-    constants, is_mega_system_transaction, sent_from_mega_system_address, EthHaltReason,
-    ExternalEnvs, HostExt, MegaContext, MegaHaltReason, MegaSpecId, MegaTransactionError,
-    DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    constants, is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
+    sent_from_mega_system_address, EthHaltReason, ExternalEnvs, HostExt, MegaContext,
+    MegaHaltReason, MegaSpecId, MegaTransactionError, DEPOSIT_TX_GAS_STIPEND_MULTIPLIER,
+    DEPOSIT_TX_GAS_STIPEND_WHITELIST, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
@@ -258,16 +258,10 @@ where
     ) -> Result<(), Self::Error> {
         let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         if is_mini_rex {
-            // Check if the limit is exceeded before returning the frame result
-            if evm
-                .ctx()
-                .additional_limit
-                .borrow_mut()
-                .before_frame_return_result(frame_result, true)
-                .exceeded_limit()
-            {
-                // the frame result must have been marked as exceeding the limit, so return early
-                return Ok(());
+            let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
+            // Update the additional limit before returning the frame result
+            if additional_limit.before_frame_return_result::<true>(frame_result).exceeded_limit() {
+                mark_frame_result_as_exceeding_limit(frame_result);
             }
         }
 
@@ -280,9 +274,15 @@ where
         // After REVM's gas accounting, refund detained gas for volatile data access
         // This must happen AFTER the op handler to override its gas calculation
         if is_mini_rex {
-            let mut volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow_mut();
+            let ctx = evm.ctx_mut();
+
+            let mut volatile_data_tracker = ctx.volatile_data_tracker.borrow_mut();
             let gas = frame_result.gas_mut();
             volatile_data_tracker.refund_detained_gas(gas);
+
+            // We also return the rescued gas here
+            let additional_limit = ctx.additional_limit.borrow();
+            gas.erase_cost(additional_limit.rescued_gas);
         }
 
         Ok(())

@@ -38,8 +38,8 @@ use revm::{
     },
     inspector::NoOpInspector,
     interpreter::{
-        interpreter::EthInterpreter, FrameInput, InputsImpl, InstructionResult, InterpreterAction,
-        InterpreterResult,
+        interpreter::EthInterpreter, FrameInput, Gas, InputsImpl, InstructionResult,
+        InterpreterAction, InterpreterResult,
     },
     primitives::Address,
     state::EvmState,
@@ -47,10 +47,10 @@ use revm::{
 };
 
 use crate::{
-    constants, create_exceeding_limit_frame_result, mark_frame_result_as_exceeding_limit,
-    mark_interpreter_result_as_exceeding_limit, DefaultExternalEnvs, ExternalEnvs,
-    IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler, MegaInstructions, MegaPrecompiles,
-    MegaSpecId, MegaTransaction, MegaTransactionError,
+    constants, create_exceeding_interpreter_result, create_exceeding_limit_frame_result,
+    mark_frame_result_as_exceeding_limit, mark_interpreter_result_as_exceeding_limit,
+    DefaultExternalEnvs, ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
+    MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -441,7 +441,7 @@ where
                 FrameInput::Empty => unreachable!(),
             };
             return Ok(FrameInitResult::Result(create_exceeding_limit_frame_result(
-                gas_limit,
+                Gas::new(gas_limit),
                 return_memory_offset,
             )));
         }
@@ -469,10 +469,25 @@ where
         let context = &mut self.inner.ctx;
         let instructions = &mut self.inner.instruction;
 
-        let mut action = frame.interpreter.run_plain(instructions.instruction_table(), context);
+        let is_mini_rex_enabled = context.spec.is_enabled(MegaSpecId::MINI_REX);
+
+        // Check if the additional limit is already exceeded, if so, we should immediately stop
+        // and synthesize an interpreter action.
+        let mut action = if is_mini_rex_enabled {
+            let mut additional_limit = context.additional_limit.borrow_mut();
+            if additional_limit.check_limit().exceeded_limit() {
+                InterpreterAction::Return(create_exceeding_interpreter_result(
+                    frame.interpreter.gas,
+                ))
+            } else {
+                drop(additional_limit);
+                frame.interpreter.run_plain(instructions.instruction_table(), context)
+            }
+        } else {
+            frame.interpreter.run_plain(instructions.instruction_table(), context)
+        };
 
         // Apply additional limits and storage gas cost only when the `MINI_REX` spec is enabled.
-        let is_mini_rex_enabled = context.spec.is_enabled(MegaSpecId::MINI_REX);
         if is_mini_rex_enabled {
             if let InterpreterAction::Return(interpreter_result) = &mut action {
                 // charge storage gas cost for the number of bytes
@@ -545,15 +560,9 @@ where
         if is_mini_rex {
             let mut additional_limit = ctx.additional_limit.borrow_mut();
 
-            // Return early if the limit is already exceeded before processing the child frame
-            // return result.
-            if additional_limit.is_exceeding_limit_result(result.instruction_result()) {
-                return Ok(Some(result));
-            }
-
             // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
             // exceeded, return the error frame result
-            if additional_limit.before_frame_return_result(&result, false).exceeded_limit() {
+            if additional_limit.before_frame_return_result::<false>(&result).exceeded_limit() {
                 match &mut result {
                     FrameResult::Call(call_outcome) => {
                         mark_interpreter_result_as_exceeding_limit(&mut call_outcome.result)
@@ -562,7 +571,6 @@ where
                         mark_interpreter_result_as_exceeding_limit(&mut create_outcome.result)
                     }
                 }
-                return Ok(Some(result));
             }
         }
 

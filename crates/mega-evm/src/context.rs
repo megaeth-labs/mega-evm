@@ -300,7 +300,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// Sets the data limit for the EVM.
     ///
     /// When the data limit is reached, the transaction will error and halt
-    /// (consuming all remaining gas). This limit controls the maximum amount
+    /// (preserving remaining gas). This limit controls the maximum amount
     /// of data that can be processed during transaction execution.
     ///
     /// # Arguments
@@ -316,7 +316,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     }
 
     /// Sets the KV update limit for the EVM. When the KV update limit is reached,
-    /// the transaction will error and halt (consuming all remaining gas).
+    /// the transaction will error and halt (preserving remaining gas).
     ///
     /// This limit controls the maximum number of key-value storage operations
     /// (reads, writes, deletes) that can be performed during transaction execution.

@@ -58,7 +58,7 @@ pub mod mini_rex {
     /// The maximum amount of data allowed to generate from a block for the `MINI_REX` spec.
     pub const BLOCK_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024; // 12.5 MB
     /// The maximum data size allowed per transaction for the `MINI_REX` spec.
-    /// Transactions exceeding this limit halt with `OutOfGas`, consuming all remaining gas.
+    /// Transactions exceeding this limit halt with `OutOfGas`, preserving remaining gas.
     pub const TX_DATA_LIMIT: u64 = BLOCK_DATA_LIMIT * 25 / 100; // 25% of the block limit
     /// The maximum amount of key-value updates allowed to generate from a block for the `MINI_REX`
     /// spec.
