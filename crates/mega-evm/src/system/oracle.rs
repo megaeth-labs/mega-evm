@@ -7,7 +7,7 @@ use alloy_sol_types::sol;
 pub use alloy_sol_types::SolCall;
 use revm::{
     database::State,
-    state::{Bytecode, EvmState},
+    state::{Account, Bytecode, EvmState},
 };
 
 /// The address of the oracle system contract.
@@ -42,8 +42,14 @@ pub fn ensure_oracle_contract_deployed<DB: Database>(
     let acc = db.load_cache_account(ORACLE_CONTRACT_ADDRESS)?;
 
     // If the contract is already deployed, return early
-    if acc.account_info().is_some_and(|info| info.code_hash == ORACLE_CONTRACT_CODE_HASH) {
-        return Ok(EvmState::default());
+    if let Some(account_info) = acc.account_info() {
+        if account_info.code_hash == ORACLE_CONTRACT_CODE_HASH {
+            // Although we do not need to update the account, we need to mark it as read
+            return Ok(EvmState::from_iter([(
+                ORACLE_CONTRACT_ADDRESS,
+                Account { info: account_info, ..Default::default() },
+            )]));
+        }
     }
 
     // Update the account info with the contract code
@@ -80,11 +86,14 @@ pub fn ensure_high_precision_timestamp_oracle_contract_deployed<DB: Database>(
     let acc = db.load_cache_account(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS)?;
 
     // If the contract is already deployed, return early
-    if acc
-        .account_info()
-        .is_some_and(|info| info.code_hash == HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH)
-    {
-        return Ok(EvmState::default());
+    if let Some(account_info) = acc.account_info() {
+        if account_info.code_hash == HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH {
+            // Although we do not need to update the account, we need to mark it as read
+            return Ok(EvmState::from_iter([(
+                HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+                Account { info: account_info, ..Default::default() },
+            )]));
+        }
     }
 
     // Update the account info with the contract code
@@ -171,14 +180,18 @@ mod tests {
 
         let mut state = State::builder().with_database(&mut db).build();
 
-        // Deploy should return empty state (no changes needed)
+        // Deploy should return state with the account marked as read
         let result =
             ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
         assert_eq!(
             result.len(),
-            0,
-            "Deployment should return empty state when contract is already correctly deployed"
+            1,
+            "Deployment should return state with account marked as read when contract is already correctly deployed"
         );
+
+        // Verify the account is in the result
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH, "Code hash should match");
     }
 
     #[test]
