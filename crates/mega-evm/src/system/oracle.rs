@@ -180,14 +180,18 @@ mod tests {
 
         let mut state = State::builder().with_database(&mut db).build();
 
-        // Deploy should return empty state (no changes needed)
+        // Deploy should return state with the account marked as read
         let result =
             ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
         assert_eq!(
             result.len(),
-            0,
-            "Deployment should return empty state when contract is already correctly deployed"
+            1,
+            "Deployment should return state with account marked as read when contract is already correctly deployed"
         );
+
+        // Verify the account is in the result
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH, "Code hash should match");
     }
 
     #[test]
