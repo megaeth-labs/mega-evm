@@ -22,6 +22,7 @@ use revm::{
     database::EmptyDB,
     Journal,
 };
+use salt::BucketId;
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
@@ -364,6 +365,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// the beginning of each transaction.
     pub fn kv_update_count(&self) -> u64 {
         self.additional_limit.borrow().kv_update_counter.current_count()
+    }
+
+    /// Gets the bucket IDs used during transaction execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns the bucket IDs used during transaction execution.
+    pub fn accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.dynamic_gas_cost.borrow().get_bucket_ids()
     }
 
     /// Consumes the context and converts it into the inner `OpContext`.

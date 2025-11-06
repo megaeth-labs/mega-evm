@@ -30,6 +30,11 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         self.parent_block = parent_block;
     }
 
+    /// Gets the bucket IDs used during transaction execution.
+    pub fn get_bucket_ids(&self) -> Vec<BucketId> {
+        self.bucket_cost_mulitipers.keys().copied().collect()
+    }
+
     /// Calculates the gas cost for setting a storage slot to a non-zero value. This overrides the
     /// [`SSTORE_SET`](revm::interpreter::gas::SSTORE_SET) gas cost in the original EVM.
     pub fn sstore_set_gas(

@@ -1,5 +1,11 @@
 //! System transaction for the `MegaETH` EVM.
 //!
+//! The mega system transaction is a special transaction used by the sequencer to do state
+//! maintenance with minimal side effects:
+//! - no transaction fee (no L2 gas fee, no L1 data fee, no base fee, etc.), thus no state change to
+//!   the block beneficiary or any fee vaults.
+//! - system address's nonce still bumps as normal transactions
+//!
 //! This module contains constants, types, and utilities related to mega system transactions.
 
 use alloy_primitives::{address, b256, Address, TxKind, B256};
@@ -32,9 +38,24 @@ pub fn sent_from_mega_system_address(tx: &MegaTransaction) -> bool {
 /// A mega system transaction is a legacy transaction that is submitted by the `MEGA_SYSTEM_ADDRESS`
 /// and calls a whitelisted address in `MEGA_SYSTEM_TX_WHITELIST`.
 pub fn is_mega_system_transaction(tx: &MegaTransaction) -> bool {
-    if tx.tx_type() == 0x0 && sent_from_mega_system_address(tx) {
+    check_if_mega_system_transaction(tx.caller(), tx.tx_type(), tx.kind())
+}
+
+/// Checks if a transaction is a mega system transaction.
+///
+/// # Arguments
+///
+/// * `tx_signer` - The signer of the transaction
+/// * `tx_type` - The type of the transaction
+/// * `tx_kind` - The kind of the transaction
+///
+/// # Returns
+///
+/// Returns `true` if the transaction is a mega system transaction, `false` otherwise.
+pub fn check_if_mega_system_transaction(tx_signer: Address, tx_type: u8, tx_kind: TxKind) -> bool {
+    if tx_type == 0x0 && tx_signer == MEGA_SYSTEM_ADDRESS {
         // a mega system transaction must be a legacy transaction
-        match tx.kind() {
+        match tx_kind {
             TxKind::Create => false,
             TxKind::Call(address) => MEGA_SYSTEM_TX_WHITELIST.contains(&address),
         }
