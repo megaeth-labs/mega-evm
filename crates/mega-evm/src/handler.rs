@@ -10,7 +10,7 @@ use revm::{
         result::{ExecutionResult, FromStringError, InvalidTransaction, OutOfGasError},
         ContextTr, Transaction,
     },
-    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, FrameTr},
+    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, FrameTr, Handler},
     inspector::{InspectorEvmTr, InspectorHandler},
     interpreter::{
         gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
@@ -47,7 +47,66 @@ impl<EVM, ERROR, FRAME> Default for MegaHandler<EVM, ERROR, FRAME> {
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvs> revm::handler::Handler
+impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
+where
+    DB: Database,
+    ExtEnvs: ExternalEnvs,
+    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
+    ERROR: FromStringError,
+{
+    /// The hook to be called in `revm::handler::Handler::run_without_catch_error` and
+    /// `revm::handler::InspectorHandler::inspect_run_without_catch_error`
+    #[inline]
+    fn before_run(&mut self, evm: &mut EVM) -> Result<(), ERROR> {
+        // Before validation, we need to properly set the mega system transaction
+        let ctx = evm.ctx_mut();
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            // Check if this is a mega system address transaction
+            let tx = &mut ctx.inner.tx;
+            if sent_from_mega_system_address(tx) {
+                // Modify the transaction to make it appear as a deposit transaction
+                // This will cause the OpHandler to automatically bypass signature validation,
+                // nonce verification, and fee deduction during validation
+                if !is_mega_system_transaction(tx) {
+                    return Err(FromStringError::from_string(
+                        "Mega system transaction callee is not in the whitelist".to_string(),
+                    ));
+                }
+
+                // Set the deposit source hash of the transaction to mark it as a deposit
+                // transaction for `OpHandler`.
+                // The implementation of `revm::context_interface::Transaction` trait for
+                // `MegaTransaction` determines the tx type by the existence of the source
+                // hash.
+                tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+                // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
+                // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
+                tx.base.gas_price = 0;
+            }
+
+            // Provide gas stipend to the deposit transaction if the callee is in the whitelist.
+            let tx = ctx.tx();
+            if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
+                // If the deposit tx calls a whitelisted address, we apply gas stipend to the tx
+                match tx.kind() {
+                    TxKind::Create => {}
+                    TxKind::Call(address) => {
+                        if DEPOSIT_TX_GAS_STIPEND_WHITELIST.contains(&address) {
+                            ctx.inner.tx.base.gas_limit *= DEPOSIT_TX_GAS_STIPEND_MULTIPLIER;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Call the `on_new_tx` hook to initialize the transaction context.
+        evm.ctx_mut().on_new_tx();
+
+        Ok(())
+    }
+}
+
+impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvs> Handler
     for MegaHandler<EVM, ERROR, FRAME>
 where
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
@@ -72,6 +131,7 @@ where
                 &self,
                 evm: &mut Self::Evm,
             ) -> Result<(), Self::Error>;
+            fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
         }
@@ -102,32 +162,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        // Before validation, we need to properly set the mega system transaction
-        let ctx = evm.ctx_mut();
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            // Check if this is a mega system address transaction
-            let tx = &mut ctx.inner.tx;
-            if sent_from_mega_system_address(tx) {
-                // Modify the transaction to make it appear as a deposit transaction
-                // This will cause the OpHandler to automatically bypass signature validation,
-                // nonce verification, and fee deduction during validation
-                if !is_mega_system_transaction(tx) {
-                    return Err(FromStringError::from_string(
-                        "Mega system transaction callee is not in the whitelist".to_string(),
-                    ));
-                }
-
-                // Set the deposit source hash of the transaction to mark it as a deposit
-                // transaction for `OpHandler`.
-                // The implementation of `revm::context_interface::Transaction` trait for
-                // `MegaTransaction` determines the tx type by the existence of the source
-                // hash.
-                tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-                // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
-                // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
-                tx.base.gas_price = 0;
-            }
-        }
+        self.before_run(evm)?;
 
         let init_and_floor_gas = self.validate(evm)?;
         let eip7702_refund = self.pre_execution(evm)? as i64;
@@ -136,28 +171,6 @@ where
 
         // Prepare the output
         self.execution_result(evm, exec_result)
-    }
-
-    fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
-        let ctx = evm.ctx_mut();
-        ctx.on_new_tx();
-
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            let tx = ctx.tx();
-            if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
-                // If the deposit tx calls a whitelisted address, we apply gas stipend to the tx
-                match tx.kind() {
-                    TxKind::Create => {}
-                    TxKind::Call(address) => {
-                        if DEPOSIT_TX_GAS_STIPEND_WHITELIST.contains(&address) {
-                            ctx.inner.tx.base.gas_limit *= DEPOSIT_TX_GAS_STIPEND_MULTIPLIER;
-                        }
-                    }
-                }
-            }
-        }
-
-        self.op.pre_execution(evm)
     }
 
     /// This function copies the logic from `revm::handler::Handler::validate` to and
@@ -360,4 +373,17 @@ where
         + std::fmt::Debug,
 {
     type IT = EthInterpreter;
+
+    fn inspect_run_without_catch_error(
+        &mut self,
+        evm: &mut Self::Evm,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        self.before_run(evm)?;
+
+        let init_and_floor_gas = self.validate(evm)?;
+        let eip7702_refund = self.pre_execution(evm)? as i64;
+        let mut frame_result = self.inspect_execution(evm, &init_and_floor_gas)?;
+        self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
+        self.execution_result(evm, frame_result)
+    }
 }
