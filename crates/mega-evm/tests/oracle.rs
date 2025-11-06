@@ -724,14 +724,14 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
         "Deployed code should match original code"
     );
 
-    // Verify that calling deploy_oracle_contract again returns empty state
+    // Verify that calling deploy_oracle_contract again returns state with account marked as read
     // (proving the contract is already deployed)
     use mega_evm::ensure_oracle_contract_deployed;
     let result = ensure_oracle_contract_deployed(db_ref).expect("Should not error");
     assert_eq!(
         result.len(),
-        0,
-        "Oracle should already be deployed, so deploy_oracle_contract should return empty state"
+        1,
+        "Oracle should already be deployed, so deploy_oracle_contract should return state with account marked as read"
     );
 }
 
