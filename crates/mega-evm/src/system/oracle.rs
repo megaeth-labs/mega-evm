@@ -7,7 +7,7 @@ use alloy_sol_types::sol;
 pub use alloy_sol_types::SolCall;
 use revm::{
     database::State,
-    state::{Bytecode, EvmState},
+    state::{Account, Bytecode, EvmState},
 };
 
 /// The address of the oracle system contract.
@@ -43,7 +43,11 @@ pub fn ensure_oracle_contract_deployed<DB: Database>(
 
     // If the contract is already deployed, return early
     if acc.account_info().is_some_and(|info| info.code_hash == ORACLE_CONTRACT_CODE_HASH) {
-        return Ok(EvmState::default());
+        // Although we do not need to update the account, we need to mark it as read
+        return Ok(EvmState::from_iter([(
+            ORACLE_CONTRACT_ADDRESS,
+            Account { info: acc.account_info().unwrap_or_default(), ..Default::default() },
+        )]));
     }
 
     // Update the account info with the contract code
