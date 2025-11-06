@@ -675,7 +675,8 @@ pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionCon
         return;
     };
     // Record the memory expansion compute gas cost
-    let memory_expansion_cost = context.interpreter.gas.remaining() - gas_remaining_before;
+    let memory_expansion_cost =
+        gas_remaining_before.saturating_sub(context.interpreter.gas.remaining());
     compute_gas_tracker.record_gas_used(memory_expansion_cost);
 
     let Some(account_load) = context.host.load_account_delegated(to) else {
@@ -694,15 +695,8 @@ pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionCon
     // Record the compute gas cost
     compute_gas_tracker.record_gas_used(call_cost);
 
-    // EIP-150: Gas cost changes for IO-heavy operations
-    // MegaETH modification: replace 63/64 rule with 98/100 rule
-    let remaining_gas =
-        context.interpreter.gas.remaining() - context.interpreter.gas.remaining() * 2 / 100;
-    let mut gas_limit = min(remaining_gas, local_gas_limit);
-
-    revm::interpreter::gas!(context.interpreter, gas_limit);
-
     // MegaETH modification: add additional storage gas cost for creating a new account
+    // This must be charged BEFORE calculating the forwarded gas amount (98/100 rule)
     if is_empty && has_transfer {
         let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
@@ -710,6 +704,14 @@ pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionCon
         };
         revm::interpreter::gas!(context.interpreter, new_account_storage_gas);
     }
+
+    // EIP-150: Gas cost changes for IO-heavy operations
+    // MegaETH modification: replace 63/64 rule with 98/100 rule
+    let remaining_gas =
+        context.interpreter.gas.remaining() - context.interpreter.gas.remaining() * 2 / 100;
+    let mut gas_limit = min(remaining_gas, local_gas_limit);
+
+    revm::interpreter::gas!(context.interpreter, gas_limit);
 
     // Add call stipend if there is value to be transferred.
     if has_transfer {

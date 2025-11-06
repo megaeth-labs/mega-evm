@@ -127,24 +127,14 @@ fn sstore_test_case(
 /// due to high `SSTORE_SET_GAS` cost plus EIP-2929 cold access penalty.
 #[test]
 fn test_sstore_no_bucket_expansion() {
-    sstore_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Set,
-        0,
-        21_006 + SSTORE_SET_STORAGE_GAS + constants::equivalence::COLD_SLOAD_COST,
-    );
+    sstore_test_case(MegaSpecId::MINI_REX, UpdateMode::Set, 0, 43_106 + SSTORE_SET_STORAGE_GAS);
 }
 
 /// Tests SSTORE with single bucket expansion, expecting doubled gas cost (4M+ gas) due to bucket
 /// capacity doubling, plus EIP-2929 cold access penalty.
 #[test]
 fn test_sstore_with_bucket_expansion_once() {
-    sstore_test_case(
-        MegaSpecId::MINI_REX,
-        UpdateMode::Set,
-        1,
-        21_006 + SSTORE_SET_STORAGE_GAS * 2 + constants::equivalence::COLD_SLOAD_COST,
-    );
+    sstore_test_case(MegaSpecId::MINI_REX, UpdateMode::Set, 1, 43_106 + SSTORE_SET_STORAGE_GAS * 2);
 }
 
 /// Tests SSTORE with 10x bucket expansion, expecting 10x gas cost (20M+ gas) due to linear scaling
@@ -155,7 +145,7 @@ fn test_sstore_with_bucket_expansion_ten_times() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         9,
-        21_006 + SSTORE_SET_STORAGE_GAS * 10 + constants::equivalence::COLD_SLOAD_COST,
+        43_106 + SSTORE_SET_STORAGE_GAS * 10,
     );
 }
 
@@ -261,6 +251,7 @@ fn test_sstore_cold_then_warm_access() {
     let expected_gas = 21_000
         + 12 // bytecode overhead
         + SSTORE_SET_STORAGE_GAS
+        + constants::equivalence::SSTORE_SET
         + constants::equivalence::COLD_SLOAD_COST
         + constants::equivalence::WARM_STORAGE_READ_COST;
     assert_eq!(res.result.gas_used(), expected_gas);
@@ -429,7 +420,7 @@ fn test_nested_ether_transfer_to_non_existent_account() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         0,
-        30_316 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS,
+        55_316 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS,
     );
 }
 
@@ -440,7 +431,7 @@ fn test_nested_ether_transfer_to_non_existent_account_with_bucket_expansion() {
         MegaSpecId::MINI_REX,
         UpdateMode::Set,
         1,
-        30_316 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2,
+        55_316 + constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * 2,
     );
 }
 
@@ -707,7 +698,7 @@ fn calldata_test_case<const CALLDATA_LEN: usize>(spec: MegaSpecId, expected_gas_
 fn test_calldata_additional_cost() {
     calldata_test_case::<1024>(
         MegaSpecId::MINI_REX,
-        123_400, // This test uses a different calldata pattern than our floor gas tests
+        133_640, // 21,000 base + 110 gas/byte × 1,024 bytes (10 intrinsic + 100 storage floor)
     );
 }
 
@@ -762,7 +753,7 @@ fn log_test_case<const TOPIC_COUNT: usize, const DATA_LEN: usize>(
 fn test_log_additional_cost() {
     log_test_case::<1, 1024>(
         MegaSpecId::MINI_REX,
-        21_482 +
+        30_049 +
             constants::mini_rex::LOG_TOPIC_STORAGE_GAS +
             constants::mini_rex::LOG_DATA_STORAGE_GAS * 1024,
     );
@@ -922,14 +913,14 @@ fn floor_gas_test_case(spec: MegaSpecId, calldata_size: usize, expected_gas_used
 #[test]
 fn test_floor_gas_calldata_mini_rex() {
     // Test with 100 bytes of calldata
-    floor_gas_test_case(MegaSpecId::MINI_REX, 100, 61_000);
+    floor_gas_test_case(MegaSpecId::MINI_REX, 100, 65_000);
 }
 
 /// Tests floor gas charges additional cost for large calldata in `MINI_REX` spec.
 #[test]
 fn test_floor_gas_large_calldata_mini_rex() {
     // Test with 1024 bytes of calldata
-    floor_gas_test_case(MegaSpecId::MINI_REX, 1024, 430_600);
+    floor_gas_test_case(MegaSpecId::MINI_REX, 1024, 471_560);
 }
 
 /// Tests floor gas is not charged in EQUIVALENCE spec.
@@ -948,5 +939,5 @@ fn test_floor_gas_empty_calldata() {
 /// Tests floor gas with minimal calldata (1 byte).
 #[test]
 fn test_floor_gas_minimal_calldata() {
-    floor_gas_test_case(MegaSpecId::MINI_REX, 1, 21_400);
+    floor_gas_test_case(MegaSpecId::MINI_REX, 1, 21_440);
 }
