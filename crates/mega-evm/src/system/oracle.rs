@@ -42,12 +42,14 @@ pub fn ensure_oracle_contract_deployed<DB: Database>(
     let acc = db.load_cache_account(ORACLE_CONTRACT_ADDRESS)?;
 
     // If the contract is already deployed, return early
-    if acc.account_info().is_some_and(|info| info.code_hash == ORACLE_CONTRACT_CODE_HASH) {
-        // Although we do not need to update the account, we need to mark it as read
-        return Ok(EvmState::from_iter([(
-            ORACLE_CONTRACT_ADDRESS,
-            Account { info: acc.account_info().unwrap_or_default(), ..Default::default() },
-        )]));
+    if let Some(account_info) = acc.account_info() {
+        if account_info.code_hash == ORACLE_CONTRACT_CODE_HASH {
+            // Although we do not need to update the account, we need to mark it as read
+            return Ok(EvmState::from_iter([(
+                ORACLE_CONTRACT_ADDRESS,
+                Account { info: account_info, ..Default::default() },
+            )]));
+        }
     }
 
     // Update the account info with the contract code
@@ -84,11 +86,14 @@ pub fn ensure_high_precision_timestamp_oracle_contract_deployed<DB: Database>(
     let acc = db.load_cache_account(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS)?;
 
     // If the contract is already deployed, return early
-    if acc
-        .account_info()
-        .is_some_and(|info| info.code_hash == HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH)
-    {
-        return Ok(EvmState::default());
+    if let Some(account_info) = acc.account_info() {
+        if account_info.code_hash == HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH {
+            // Although we do not need to update the account, we need to mark it as read
+            return Ok(EvmState::from_iter([(
+                HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+                Account { info: account_info, ..Default::default() },
+            )]));
+        }
     }
 
     // Update the account info with the contract code
