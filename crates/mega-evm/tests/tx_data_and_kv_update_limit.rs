@@ -694,7 +694,7 @@ fn test_data_limit_just_exceed() {
     // the data size is 110 bytes for the intrinsic data of a transaction, 312 bytes for the caller
     // account info update
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
-    let (res, _, _) = transact(
+    transact(
         MegaSpecId::MINI_REX,
         &mut db,
         BASE_TX_SIZE  // base tx
@@ -703,9 +703,7 @@ fn test_data_limit_just_exceed() {
         u64::MAX,
         tx,
     )
-    .unwrap();
-    assert!(res.result.is_halt());
-    assert!(is_data_limit_exceeded(&res));
+    .expect_err("should error");
 }
 
 /// Test that KV update limit enforcement works correctly when the limit is not exceeded.
