@@ -1,6 +1,7 @@
 pub use alloy_evm::InvalidTxError;
 use alloy_primitives::Address;
 pub use op_revm::{OpHaltReason, OpTransactionError};
+use revm::{context::result::ExecutionResult, state::EvmState};
 pub use revm::{
     context::result::{EVMError, InvalidTransaction},
     context_interface::{
@@ -10,6 +11,24 @@ pub use revm::{
 use serde::{Deserialize, Serialize};
 
 use crate::VolatileDataAccess;
+
+/// The execution outcome of a transaction in `MegaETH`.
+///
+/// This struct contains additional information about the transaction execution on top of the
+/// standard EVM's execution result and state.
+#[derive(Debug, Clone)]
+pub struct MegaTransactionOutcome {
+    /// The transaction execution result.
+    pub result: ExecutionResult<MegaHaltReason>,
+    /// The post-execution evm state.
+    pub state: EvmState,
+    /// The data size usage in bytes.
+    pub data_size: u64,
+    /// The number of KV updates.
+    pub kv_updates: u64,
+    /// The compute gas used.
+    pub compute_gas_used: u64,
+}
 
 /// `MegaETH` transaction validation error type.
 ///

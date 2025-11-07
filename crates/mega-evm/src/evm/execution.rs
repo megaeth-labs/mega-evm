@@ -1,31 +1,38 @@
-use alloy_evm::Database;
+use alloy_evm::{precompiles::PrecompilesMap, Database};
 use alloy_primitives::TxKind;
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
+    transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
     OpTransactionError,
 };
 use revm::{
     context::{
         result::{ExecutionResult, FromStringError, InvalidTransaction},
-        ContextTr, Transaction,
+        ContextTr, FrameStack, Transaction,
     },
-    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, FrameTr, Handler},
+    handler::{
+        evm::{ContextDbError, FrameInitResult},
+        instructions::InstructionProvider,
+        EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr, Handler,
+        ItemOrResult,
+    },
     inspector::{InspectorEvmTr, InspectorHandler},
     interpreter::{
         gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
-        InitialAndFloorGas,
+        FrameInput, Gas, InitialAndFloorGas, InstructionResult, InterpreterAction,
     },
     Inspector, Journal,
 };
 
 use crate::{
-    constants, is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
-    sent_from_mega_system_address, ExternalEnvs, HostExt, MegaContext, MegaHaltReason, MegaSpecId,
+    constants, create_exceeding_interpreter_result, create_exceeding_limit_frame_result,
+    is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
+    mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvs,
+    HostExt, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
     MegaTransactionError, DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
     MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
-use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
 /// most functionalities from Optimism.
@@ -381,5 +388,229 @@ where
         let mut frame_result = self.inspect_execution(evm, &init_and_floor_gas)?;
         self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
         self.execution_result(evm, frame_result)
+    }
+}
+
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::handler::EvmTr for MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+{
+    type Context = MegaContext<DB, ExtEnvs>;
+
+    type Instructions = MegaInstructions<DB, ExtEnvs>;
+
+    type Precompiles = PrecompilesMap;
+
+    type Frame = EthFrame<EthInterpreter>;
+
+    #[inline]
+    fn ctx(&mut self) -> &mut Self::Context {
+        &mut self.inner.ctx
+    }
+
+    #[inline]
+    fn ctx_ref(&self) -> &Self::Context {
+        &self.inner.ctx
+    }
+
+    #[inline]
+    fn ctx_instructions(&mut self) -> (&mut Self::Context, &mut Self::Instructions) {
+        (&mut self.inner.ctx, &mut self.inner.instruction)
+    }
+
+    #[inline]
+    fn ctx_precompiles(&mut self) -> (&mut Self::Context, &mut Self::Precompiles) {
+        (&mut self.inner.ctx, &mut self.inner.precompiles)
+    }
+
+    fn frame_stack(&mut self) -> &mut FrameStack<Self::Frame> {
+        &mut self.inner.frame_stack
+    }
+
+    fn frame_init(
+        &mut self,
+        frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
+    ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
+        let additional_limit = self.ctx().additional_limit.clone();
+        if is_mini_rex_enabled &&
+            additional_limit.borrow_mut().before_frame_init(&frame_init).exceeded_limit()
+        {
+            // if the limit is exceeded, create an error frame result and return it directly
+            let (gas_limit, return_memory_offset) = match &frame_init.frame_input {
+                FrameInput::Create(inputs) => (inputs.gas_limit, None),
+                FrameInput::Call(inputs) => {
+                    (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
+                }
+                FrameInput::Empty => unreachable!(),
+            };
+            return Ok(FrameInitResult::Result(create_exceeding_limit_frame_result(
+                Gas::new(gas_limit),
+                return_memory_offset,
+            )));
+        }
+
+        // call the inner frame_init function to initialize the frame
+        let init_result = self.inner.frame_init(frame_init)?;
+
+        // Apply the additional limits only when the `MINI_REX` spec is enabled.
+        if is_mini_rex_enabled {
+            if let ItemOrResult::Item(frame) = &init_result {
+                additional_limit.borrow_mut().after_frame_init_on_frame(frame);
+            }
+        }
+
+        Ok(init_result)
+    }
+
+    /// This method copies the logic from `revm::handler::EvmTr::frame_run` to and add additional
+    /// logic before `process_next_action` to handle the additional limit.
+    #[inline]
+    fn frame_run(
+        &mut self,
+    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
+        let frame = self.inner.frame_stack.get();
+        let context = &mut self.inner.ctx;
+        let instructions = &mut self.inner.instruction;
+
+        let is_mini_rex_enabled = context.spec.is_enabled(MegaSpecId::MINI_REX);
+
+        // Check if the additional limit is already exceeded, if so, we should immediately stop
+        // and synthesize an interpreter action.
+        let mut action = if is_mini_rex_enabled {
+            let mut additional_limit = context.additional_limit.borrow_mut();
+            if additional_limit.check_limit().exceeded_limit() {
+                InterpreterAction::Return(create_exceeding_interpreter_result(
+                    frame.interpreter.gas,
+                ))
+            } else {
+                drop(additional_limit);
+                frame.interpreter.run_plain(instructions.instruction_table(), context)
+            }
+        } else {
+            frame.interpreter.run_plain(instructions.instruction_table(), context)
+        };
+
+        // Apply additional limits and storage gas cost only when the `MINI_REX` spec is enabled.
+        if is_mini_rex_enabled {
+            if let InterpreterAction::Return(interpreter_result) = &mut action {
+                // charge storage gas cost for the number of bytes
+                if frame.data.is_create() && interpreter_result.is_ok() {
+                    // if the creation is successful, charge the storage gas cost for the
+                    // number of bytes.
+                    let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
+                        interpreter_result.output.len() as u64;
+                    if !interpreter_result.gas.record_cost(code_deposit_storage_gas) {
+                        // if out of gas, set the instruction result to OOG
+                        interpreter_result.result = InstructionResult::OutOfGas;
+                    }
+                }
+
+                // update additional limits
+                let mut additional_limit = context.additional_limit.borrow_mut();
+                if frame.data.is_create() &&
+                    additional_limit.after_create_frame_run(interpreter_result).exceeded_limit()
+                {
+                    // if exceeded the limit, set the instruction result
+                    mark_interpreter_result_as_exceeding_limit(interpreter_result);
+                }
+            }
+        }
+
+        // Record gas remaining before frame action processing
+        let gas_remaining_before = match (&action, is_mini_rex_enabled) {
+            (InterpreterAction::Return(interpreter_result), true) => {
+                Some(interpreter_result.gas.remaining())
+            }
+            _ => None,
+        };
+
+        // Process the frame action, it may need to create a new frame or return the current frame
+        // result.
+        let mut frame_output = frame
+            .process_next_action::<_, ContextDbError<Self::Context>>(context, action)
+            .inspect(|i| {
+                if i.is_result() {
+                    frame.set_finished(true);
+                }
+            })?;
+
+        // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
+        if let (ItemOrResult::Result(frame_result), Some(gas_remaining_before), true) =
+            (&mut frame_output, gas_remaining_before, is_mini_rex_enabled)
+        {
+            let compute_gas_cost =
+                gas_remaining_before.saturating_sub(frame_result.gas().remaining());
+            let mut additional_limit = self.ctx().additional_limit.borrow_mut();
+            if additional_limit.record_compute_gas(compute_gas_cost).exceeded_limit() {
+                mark_frame_result_as_exceeding_limit(frame_result);
+            }
+        }
+
+        Ok(frame_output)
+    }
+
+    fn frame_return_result(
+        &mut self,
+        mut result: <Self::Frame as revm::handler::FrameTr>::FrameResult,
+    ) -> Result<
+        Option<<Self::Frame as revm::handler::FrameTr>::FrameResult>,
+        ContextDbError<Self::Context>,
+    > {
+        let ctx = self.ctx_ref();
+        let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
+        // Apply the additional limits only when the `MINI_REX` spec is enabled.
+        if is_mini_rex {
+            let mut additional_limit = ctx.additional_limit.borrow_mut();
+
+            // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
+            // exceeded, return the error frame result
+            if additional_limit.before_frame_return_result::<false>(&result).exceeded_limit() {
+                match &mut result {
+                    FrameResult::Call(call_outcome) => {
+                        mark_interpreter_result_as_exceeding_limit(&mut call_outcome.result)
+                    }
+                    FrameResult::Create(create_outcome) => {
+                        mark_interpreter_result_as_exceeding_limit(&mut create_outcome.result)
+                    }
+                }
+            }
+        }
+
+        // Call the inner frame_return_result function to return the frame result.
+        self.inner.frame_return_result(result)
+    }
+}
+
+impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::inspector::InspectorEvmTr for MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+{
+    type Inspector = INSP;
+
+    fn inspector(&mut self) -> &mut Self::Inspector {
+        &mut self.inner.inspector
+    }
+
+    fn ctx_inspector(&mut self) -> (&mut Self::Context, &mut Self::Inspector) {
+        (&mut self.inner.ctx, &mut self.inner.inspector)
+    }
+
+    fn ctx_inspector_frame(
+        &mut self,
+    ) -> (&mut Self::Context, &mut Self::Inspector, &mut Self::Frame) {
+        (&mut self.inner.ctx, &mut self.inner.inspector, self.inner.frame_stack.get())
+    }
+
+    fn ctx_inspector_frame_instructions(
+        &mut self,
+    ) -> (&mut Self::Context, &mut Self::Inspector, &mut Self::Frame, &mut Self::Instructions) {
+        (
+            &mut self.inner.ctx,
+            &mut self.inner.inspector,
+            self.inner.frame_stack.get(),
+            &mut self.inner.instruction,
+        )
     }
 }
