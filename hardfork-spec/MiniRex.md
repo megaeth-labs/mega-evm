@@ -4,18 +4,23 @@
 
 | Area / Opcode                                            | Standard EVM (Prague)                              | Mega EVM (MiniRex)                                                                                                                                                                                                                      |
 | -------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **SSTORE (0 → non-0)**                                   | 20,000 (per EIP-2200)                              | **2,000,000 × bucket multiplier**                                                                                                                                                                                                       |
-| **SSTORE (other cases)**                                 | EIP-2200 rules (reset, same, refund, warm read)    | Same as standard                                                                                                                                                                                                                        |
-| **New account (CALL → empty, tx callee, CREATE target)** | 25,000 (NEWACCOUNT)                                | **2,000,000 × bucket multiplier**                                                                                                                                                                                                       |
-| **Contract creation (CREATE/CREATE2)**                   | 25,000 (new account) + code deposit gas            | **2,000,000 × multiplier (new acct)** + **2,000,000 (codehash)** + code deposit gas                                                                                                                                                     |
-| **Code deposit (per byte)**                              | 200 gas/byte                                       | **10,000 gas/byte**                                                                                                                                                                                                                     |
+| **SSTORE (0 → non-0) - compute gas**                    | 20,000 (per EIP-2200)                              | **20,000 gas (same)**                                                                                                                                                                                                                   |
+| **SSTORE (0 → non-0) - storage gas**                    | N/A                                                | **2,000,000 × bucket multiplier**                                                                                                                                                                                                       |
+| **SSTORE (other cases)**                                 | EIP-2200 rules (reset, same, refund, warm read)    | Same as standard (compute gas only, no storage gas)                                                                                                                                                                                     |
+| **New account - compute gas**                            | 25,000 (NEWACCOUNT)                                | **25,000 gas (same)**                                                                                                                                                                                                                   |
+| **New account - storage gas**                            | N/A                                                | **2,000,000 × bucket multiplier**                                                                                                                                                                                                       |
+| **Contract creation - compute gas**                      | 32,000 (CREATE base)                               | **32,000 gas (same)**                                                                                                                                                                                                                   |
+| **Contract creation - storage gas**                      | New account cost                                   | **NEW_ACCOUNT_STORAGE_GAS × bucket multiplier** + code deposit storage gas                                                                                                                                                              |
+| **Code deposit - compute gas**                           | 200 gas/byte                                       | **200 gas/byte (same)**                                                                                                                                                                                                                 |
+| **Code deposit - storage gas**                           | N/A                                                | **10,000 gas/byte**                                                                                                                                                                                                                     |
 | **Initcode max size**                                    | 49152 bytes (per EIP-3860)                         | **MAX_CONTRACT_SIZE (512 KiB) + 24 KiB**                                                                                                                                                                                                |
 | **CREATE/CALL forwarding fraction**                      | 63/64 of gas left                                  | **98/100** of gas left                                                                                                                                                                                                                  |
 | **LOG per topic (compute gas)**                          | 375 gas/topic                                      | **375 gas/topic (same)**                                                                                                                                                                                                                |
 | **LOG per topic (storage gas)**                          | N/A                                                | **3,750 gas/topic (10× multiplier)**                                                                                                                                                                                                    |
 | **LOG per byte (compute gas)**                           | 8 gas/byte                                         | **8 gas/byte (same)**                                                                                                                                                                                                                   |
 | **LOG per byte (storage gas)**                           | N/A                                                | **80 gas/byte (10× multiplier)**                                                                                                                                                                                                        |
-| **Calldata per-byte**                                    | 4 gas (zero byte), 16 gas (non-zero byte)          | **40 gas (zero byte), 160 gas (non-zero byte)**                                                                                                                                                                                         |
+| **Calldata - compute gas**                               | 4 gas (zero byte), 16 gas (non-zero byte)          | **4 gas (zero byte), 16 gas (non-zero byte) - same as standard**                                                                                                                                                                       |
+| **Calldata - storage gas**                               | N/A                                                | **40 gas (zero byte), 160 gas (non-zero byte)**                                                                                                                                                                                        |
 | **SELFDESTRUCT**                                         | Disabled refunds post-Shanghai but still available | **Instruction removed**                                                                                                                                                                                                                 |
 | **Volatile data access**                                 | No restrictions                                    | **Gas limited based on access type:** Block env/beneficiary → **20M gas (`BLOCK_ENV_ACCESS_REMAINING_GAS`)**, Oracle contract → **1M gas (`ORACLE_ACCESS_REMAINING_GAS`)**, most restrictive limit applies when multiple types accessed |
 | **Per-tx compute gas limit**                             | none                                               | **1,000,000,000 gas** for compute operations (separate from standard gas limit)                                                                                                                                                         |
@@ -69,53 +74,72 @@ This document details all semantic changes, their rationale, and implementation 
 
 #### 3.3.1 Storage Operations (SSTORE)
 
+MiniRex introduces a dual-gas model for SSTORE operations, separating the cost into compute gas (standard EVM cost) and storage gas (additional cost for persistence).
+
 **Zero-to-Non-Zero Writes:**
 
-- **MiniRex Cost**: 2,000,000 gas (base) × bucket multiplier
-- **Standard EVM**: 20,000 gas (per EIP-2200)
-- **Bucket Multiplier**: Dynamic scaling factor based on SALT bucket capacity
-  - **Formula**: `bucket_capacity / MIN_BUCKET_SIZE`
-  - **Behavior**: Multiplier doubles when bucket capacity doubles
-  - **Purpose**: Prevent key collision attacks on SALT buckets
-- **Constant**: `constants::mini_rex::SSTORE_SET_GAS = 2_000_000`
-- **Purpose**: Prevent unsustainable state bloat
+- **Compute Gas** (tracked in compute gas limit):
+  - **Cost**: 20,000 gas (standard EIP-2200 cost for zero-to-non-zero)
+  - Includes cold access penalty (2,100 gas) if first access to slot
+
+- **Storage Gas** (tracked in standard gas limit):
+  - **Base Cost**: 2,000,000 gas × bucket multiplier
+  - **Bucket Multiplier**: Dynamic scaling factor based on SALT bucket capacity
+    - **Formula**: `bucket_capacity / MIN_BUCKET_SIZE`
+    - **Behavior**: Multiplier doubles when bucket capacity doubles
+    - **Purpose**: Prevent key collision attacks on SALT buckets
+  - **Constant**: `SSTORE_SET_STORAGE_GAS = 2_000_000`
+
+- **Total Cost**: Compute gas + Storage gas
+- **Purpose**: Separate computational work from storage burden, prevent state bloat
 
 **Other SSTORE Cases:**
 
-- Follow standard EIP-2200 rules (reset, same value, refunds, warm reads)
-
-**Cold Storage Access (EIP-2929):**
-
-- **Cold Access Penalty**: Additional 2,100 gas on first access to storage slot per transaction
-- **Applies to**: Both SSTORE and SLOAD operations
-- **Behavior**: First access to an `(address, storage_key)` pair charges the cold access cost; subsequent accesses in the same transaction use warm pricing
-- **Purpose**: Properly price storage access operations and prevent DoS attacks
+- **Compute Gas**: Follow standard EIP-2200 rules (reset, same value, refunds, warm reads)
+- **Storage Gas**: Only charged for zero-to-non-zero writes (setting a storage slot that was originally zero to a non-zero value)
 
 #### 3.3.2 Account Creation
 
+MiniRex introduces a dual-gas model for account creation operations, separating the cost into compute gas (standard EVM cost) and storage gas (additional cost for state storage).
+
 **New Account Gas:**
 
-- **MiniRex Cost**: 2,000,000 gas (base) × bucket multiplier
-- **Standard EVM**: 25,000 gas (NEWACCOUNT)
-- **Dynamic Scaling**: Same multiplier as SSTORE operations
-- **Constant**: `constants::mini_rex::NEW_ACCOUNT_GAS = 2_000_000`
+- **Compute Gas** (tracked in compute gas limit):
+  - **Cost**: 25,000 gas (standard NEWACCOUNT cost per EIP-2929)
+  - Includes cold access penalty if first access to account
+
+- **Storage Gas** (tracked in standard gas limit):
+  - **Base Cost**: 2,000,000 gas × bucket multiplier
+  - **Dynamic Scaling**: Same bucket multiplier as SSTORE operations
+  - **Constant**: `NEW_ACCOUNT_STORAGE_GAS = 2_000_000`
+
+- **Total Cost**: Compute gas + Storage gas
 - **Purpose**: Prevent unsustainable state bloat
 
 **Contract Creation (CREATE/CREATE2):**
 
-- **Additional Cost**: 2,000,000 gas (fixed, on top of new account cost to account for codehash)
-- **Constant**: `constants::mini_rex::CREATE_GAS = 2_000_000`
-- **Total**: `(NEW_ACCOUNT_GAS × multiplier) + CREATE_GAS + code_deposit_gas`
-- **Purpose**: Prevent unsustainable state bloat
+- **Compute Gas**: Standard CREATE cost (32,000 gas) + memory expansion + return data
+- **Storage Gas**:
+  - New account storage gas: `NEW_ACCOUNT_STORAGE_GAS × bucket_multiplier`
+  - Code deposit storage gas: See section 3.3.3
+- **Total**: Compute gas + Storage gas
+- **Purpose**: Separate computational work from storage burden
 
 #### 3.3.3 Code Deposit
 
+MiniRex introduces a dual-gas model for code deposit operations during contract creation.
+
 **Per-Byte Cost:**
 
-- **MiniRex Cost**: 10,000 gas per byte (200 standard + 9,800 additional)
-- **Standard EVM**: 200 gas per byte
-- **Constant**: `CODEDEPOSIT_ADDITIONAL_GAS = 10_000 - CODEDEPOSIT` where CODEDEPOSIT = 200
-- **Purpose**: Prevent unsustainable state bloat
+- **Compute Gas** (tracked in compute gas limit):
+  - **Cost**: 200 gas per byte (standard CODEDEPOSIT cost)
+
+- **Storage Gas** (tracked in standard gas limit):
+  - **Cost**: 10,000 gas per byte
+  - **Constant**: `CODEDEPOSIT_STORAGE_GAS = 10_000`
+
+- **Total Cost**: 200 + 10,000 = 10,200 gas per byte
+- **Purpose**: Separate computational work from storage burden, prevent state bloat
 
 #### 3.3.4 Logging Operations
 
@@ -148,15 +172,26 @@ MiniRex introduces a dual-gas model for LOG operations, separating the cost into
 
 #### 3.3.5 Call Data
 
+MiniRex introduces a dual-gas model for transaction calldata, separating the cost into compute gas (standard EVM cost) and storage gas (additional cost for data storage).
+
 **Transaction Data:**
 
-- **Zero Bytes**: 40 gas (10× increase from 4 gas)
-- **Non-Zero Bytes**: 160 gas (10× increase from 16 gas)
-- **EIP-7623 Floor Cost**: 10× increase for transaction data floor
-- **Constants**:
-  - `CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS`
-  - `CALLDATA_STANDARD_TOKEN_ADDITIONAL_FLOOR_GAS`
-- **Purpose**: Prevent unsustainable history data growth
+- **Compute Gas** (tracked in compute gas limit):
+  - **Zero Bytes**: 4 gas per byte (standard EVM cost)
+  - **Non-Zero Bytes**: 16 gas per byte (standard EVM cost per EIP-2028)
+
+- **Storage Gas** (tracked in standard gas limit):
+  - **Zero Bytes**: 40 gas per byte (10× standard cost)
+  - **Non-Zero Bytes**: 160 gas per byte (10× standard cost)
+  - **Constant**: `CALLDATA_STANDARD_TOKEN_STORAGE_GAS = 40` (for both zero and non-zero, calculated as 10× base)
+
+- **Total Cost**:
+  - **Zero Bytes**: 4 + 40 = 44 gas per byte
+  - **Non-Zero Bytes**: 16 + 160 = 176 gas per byte
+
+- **EIP-7623 Floor Cost**: Also split into compute (standard) + storage (10× standard)
+
+- **Purpose**: Separate computational work from data storage burden, prevent history data growth
 
 #### 3.3.6 Gas Forwarding
 
