@@ -532,16 +532,15 @@ where
             })?;
 
         // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
-        match (&mut frame_output, gas_remaining_before, is_mini_rex_enabled) {
-            (ItemOrResult::Result(frame_result), Some(gas_remaining_before), true) => {
-                let compute_gas_cost =
-                    gas_remaining_before.saturating_sub(frame_result.gas().remaining());
-                let mut additional_limit = self.ctx().additional_limit.borrow_mut();
-                if additional_limit.record_compute_gas(compute_gas_cost).exceeded_limit() {
-                    mark_frame_result_as_exceeding_limit(frame_result);
-                }
+        if let (ItemOrResult::Result(frame_result), Some(gas_remaining_before), true) =
+            (&mut frame_output, gas_remaining_before, is_mini_rex_enabled)
+        {
+            let compute_gas_cost =
+                gas_remaining_before.saturating_sub(frame_result.gas().remaining());
+            let mut additional_limit = self.ctx().additional_limit.borrow_mut();
+            if additional_limit.record_compute_gas(compute_gas_cost).exceeded_limit() {
+                mark_frame_result_as_exceeding_limit(frame_result);
             }
-            _ => {}
         }
 
         Ok(frame_output)

@@ -332,6 +332,24 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
         self.additional_limit.borrow_mut().kv_update_limit = kv_update_limit;
         self
     }
+
+    /// Sets the compute gas limit for the EVM. When the compute gas limit is reached,
+    /// the transaction will error and halt (preserving remaining gas).
+    ///
+    /// This limit controls the maximum total compute gas that can be consumed during transaction
+    /// execution.
+    ///
+    /// # Arguments
+    ///
+    /// * `compute_gas_limit` - The maximum total compute gas allowed
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
+    pub fn with_compute_gas_limit(self, compute_gas_limit: u64) -> Self {
+        self.additional_limit.borrow_mut().compute_gas_limit = compute_gas_limit;
+        self
+    }
 }
 
 /* Getters */

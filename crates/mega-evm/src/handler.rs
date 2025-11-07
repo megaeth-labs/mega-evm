@@ -57,7 +57,7 @@ where
     /// The hook to be called in `revm::handler::Handler::run_without_catch_error` and
     /// `revm::handler::InspectorHandler::inspect_run_without_catch_error`
     #[inline]
-    fn before_run(&mut self, evm: &mut EVM) -> Result<(), ERROR> {
+    fn before_run(&self, evm: &mut EVM) -> Result<(), ERROR> {
         // Before validation, we need to properly set the mega system transaction
         let ctx = evm.ctx_mut();
         if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {

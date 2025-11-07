@@ -41,8 +41,8 @@ use revm::{
 /// # Customized Opcodes
 ///
 /// ## LOG Opcodes (LOG0-LOG4)
-/// - Compute gas: Standard EVM costs (375 + 375×topics + 8×data_bytes)
-/// - Storage gas: 10x multiplier (3,750×topics + 80×data_bytes)
+/// - Compute gas: Standard EVM costs (375 + 375×topics + `8×data_bytes`)
+/// - Storage gas: 10x multiplier (3,750×topics + `80×data_bytes`)
 /// - Data limit enforcement: Halts when total transaction data exceeds 3.125 MB
 ///
 /// ## SELFDESTRUCT Opcode
@@ -71,7 +71,7 @@ use revm::{
 /// ## Volatile Data Access Opcodes
 /// Block environment opcodes (TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE,
 /// BLOCKHASH, BLOBBASEFEE, BLOBHASH) and beneficiary-accessing opcodes (BALANCE, EXTCODESIZE,
-/// EXTCODECOPY, EXTCODEHASH) implement immediate gas detention to prevent DoS attacks.
+/// EXTCODECOPY, EXTCODEHASH) implement immediate gas detention to prevent `DoS` attacks.
 ///
 /// # Gas Detention Mechanism
 ///
@@ -84,7 +84,7 @@ use revm::{
 ///    restrictive) limit applies, regardless of access order
 /// 3. Detained gas is tracked and refunded at transaction end
 /// 4. Users only pay for actual work performed, not for enforcement gas
-/// 5. This prevents DoS attacks while maintaining fair gas accounting
+/// 5. This prevents `DoS` attacks while maintaining fair gas accounting
 ///
 /// # Assumptions
 ///
@@ -328,11 +328,11 @@ macro_rules! compute_gas {
 /// **Compute Gas** (tracked in compute gas tracker):
 /// - LOG base cost: 375 gas
 /// - LOG topics: 375 gas × N topics
-/// - LOG data: 8 gas × data_length bytes
+/// - LOG data: 8 gas × `data_length` bytes
 ///
 /// **Storage Gas** (for persisting logs):
 /// - Topic storage: 3,750 gas × N topics (10x standard topic cost)
-/// - Data storage: 80 gas × data_length bytes (10x standard data cost)
+/// - Data storage: 80 gas × `data_length` bytes (10x standard data cost)
 ///
 /// Total gas = Compute gas + Storage gas
 ///
@@ -757,7 +757,7 @@ pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionCon
 /** Volatile data access opcode handlers with immediate gas detention.
 
 These custom instruction handlers override opcodes that access volatile data (block environment,
-beneficiary account data) to immediately detain remaining gas. This prevents DoS attacks while
+beneficiary account data) to immediately detain remaining gas. This prevents `DoS` attacks while
 maintaining fair gas accounting through the global gas detention mechanism.
 
 # Gas Detention Mechanism
@@ -776,7 +776,7 @@ When volatile data is accessed:
 6. Users only pay for actual computational work performed
 
 This approach:
-- Prevents DoS attacks by limiting execution after volatile data access
+- Prevents `DoS` attacks by limiting execution after volatile data access
 - Ensures fair billing by refunding enforcement gas
 - Works across nested calls through the global limit mechanism
 - Order-independent: accessing oracle then block env OR block env then oracle both result in
@@ -790,8 +790,8 @@ These opcodes ALWAYS access volatile data and apply 20M gas limit:
 
 ## Account-Accessing Opcodes (Conditionally Volatile)
 These opcodes only SOMETIMES access volatile data (20M gas limit when volatile):
-- BALANCE(beneficiary_address) → volatile, applies 20M limit
-- BALANCE(other_address) → not volatile, no limit
+- `BALANCE(beneficiary_address)` → volatile, applies 20M limit
+- `BALANCE(other_address)` → not volatile, no limit
 - EXTCODESIZE/EXTCODECOPY/EXTCODEHASH → same conditional behavior
 
 For conditional opcodes:

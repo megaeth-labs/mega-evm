@@ -41,9 +41,8 @@ fn transact(
     compute_gas_limit: u64,
     tx: TxEnv,
 ) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
-    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
-    // Set compute gas limit
-    context.additional_limit.borrow_mut().compute_gas_limit = compute_gas_limit;
+    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default())
+        .with_compute_gas_limit(compute_gas_limit);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -381,7 +380,7 @@ fn test_nested_call_compute_gas_accumulation() {
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000))
         .account_code(CONTRACT, caller_bytecode)
-        .account_code(CONTRACT2, callee_bytecode.clone());
+        .account_code(CONTRACT2, callee_bytecode);
 
     // Get baseline gas for just calling callee
     let tx_callee = TxEnvBuilder::new().caller(CALLER).call(CONTRACT2).build_fill();
