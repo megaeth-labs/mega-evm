@@ -20,6 +20,11 @@ use revm::{
     },
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
+    precompile::{
+        bn128::pair,
+        hash::{RIPEMD160, SHA256},
+        secp256k1::ECRECOVER,
+    },
 };
 
 // ============================================================================
@@ -583,6 +588,336 @@ fn test_compute_gas_not_tracked_in_equivalence() {
     assert!(result.result.is_success());
     // In EQUIVALENCE, compute gas should NOT be tracked
     assert_eq!(compute_gas_used, 0);
+}
+
+// ============================================================================
+// PRECOMPILE TESTS
+// ============================================================================
+
+#[test]
+fn test_precompile_compute_gas_limit_exceeded() {
+    // SHA256 precompile at address 0x02
+    // Gas cost: 60 + 12 * (data_size / 32) for SHA256
+    // With 32 bytes: 60 + 12 = 72 gas for precompile
+    // Plus call overhead and setup opcodes
+
+    // Contract that calls SHA256 precompile
+    let mut bytecode = BytecodeBuilder::default()
+        // Push call parameters: gas, addr, value, argsOffset, argsSize, retOffset, retSize
+        .push_number(32u8) // retSize (32 bytes for SHA256 output)
+        .push_number(0u8) // retOffset
+        .push_number(32u8) // argsSize (32 bytes input)
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    bytecode = bytecode.push_address(*SHA256.address()); // address
+    bytecode = bytecode
+        .push_number(0xFFFFu16) // gas for call
+        .append(CALL)
+        .append(POP)
+        .append(STOP);
+
+    let bytecode = bytecode.build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode.clone());
+
+    let tx = TxEnvBuilder::new()
+        .caller(CALLER)
+        .call(CONTRACT)
+        .gas_limit(1_000_000) // High tx gas limit
+        .build_fill();
+
+    // First measure actual compute gas usage with unlimited compute gas
+    let (_, actual_usage) = transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, tx.clone()).unwrap();
+
+    // Should have some compute gas usage (intrinsic + opcodes + precompile)
+    assert!(actual_usage > 100, "Expected at least 100 gas, got {}", actual_usage);
+
+    // Reset db to ensure consistent state
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    // Set compute gas limit below what's needed - should exceed
+    let limit = actual_usage - 50;
+    let (result, compute_gas_used) = transact(MegaSpecId::MINI_REX, &mut db, limit, tx).unwrap();
+
+    // Should halt with compute gas limit exceeded
+    assert!(
+        is_compute_gas_limit_exceeded(&result),
+        "Expected compute gas limit exceeded, actual gas: {}, limit: {}",
+        compute_gas_used,
+        limit
+    );
+    assert!(compute_gas_used > limit);
+}
+
+#[test]
+fn test_multiple_precompiles_accumulate_compute_gas() {
+    // Test calling multiple precompiles in sequence
+    // ECRECOVER (0x01), SHA256 (0x02), RIPEMD160 (0x03)
+
+    // Contract that calls multiple precompiles
+    let mut bytecode = BytecodeBuilder::default();
+
+    // Call SHA256 first
+    bytecode = bytecode
+        .push_number(32u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(32u8) // argsSize
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    bytecode = bytecode.push_address(*SHA256.address());
+    bytecode = bytecode.push_number(0xFFFFu16).append(CALL).append(POP);
+
+    // Call RIPEMD160 second
+    bytecode = bytecode
+        .push_number(32u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(32u8) // argsSize
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    bytecode = bytecode.push_address(*RIPEMD160.address());
+    bytecode = bytecode.push_number(0xFFFFu16).append(CALL).append(POP);
+
+    // Call ECRECOVER third (more expensive)
+    bytecode = bytecode
+        .push_number(32u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(128u8) // argsSize (ECRECOVER needs 128 bytes)
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    bytecode = bytecode.push_address(*ECRECOVER.address());
+    bytecode = bytecode.push_number(0xFFFFu16).append(CALL).append(POP).append(STOP);
+
+    let bytecode = bytecode.build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode.clone());
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(1_000_000).build_fill();
+
+    // Measure actual usage
+    let (_, actual_usage) = transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, tx.clone()).unwrap();
+
+    // Should have significant gas from multiple precompiles
+    assert!(
+        actual_usage > 500,
+        "Expected at least 500 gas for multiple precompiles, got {}",
+        actual_usage
+    );
+
+    // Reset db
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    // Set limit to fail mid-sequence (after first precompile but before all complete)
+    // Need to ensure limit is high enough to pass validation (> 21,000)
+    let limit = actual_usage - 200;
+    let (result, _) = transact(MegaSpecId::MINI_REX, &mut db, limit, tx).unwrap();
+
+    // Should halt with compute gas limit exceeded
+    assert!(is_compute_gas_limit_exceeded(&result));
+}
+
+#[test]
+fn test_expensive_precompile_near_limit() {
+    // ECPAIRING (0x08) is very expensive
+    // Gas cost: 45000 * k + 34000 where k is number of pairs
+    // With minimal input (k=1): 45000 + 34000 = 79000 gas
+
+    // Contract that calls ECPAIRING
+    let mut bytecode = BytecodeBuilder::default()
+        .push_number(32u8) // retSize (returns 32 bytes: 0 or 1)
+        .push_number(0u8) // retOffset
+        .push_number(192u8) // argsSize (192 bytes for one pair: 64 + 128)
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    bytecode = bytecode.push_address(pair::ADDRESS);
+    bytecode = bytecode
+        .push_number(0xFFFFFFu32) // Need high gas for expensive precompile
+        .append(CALL)
+        .append(POP)
+        .append(STOP);
+
+    let bytecode = bytecode.build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_code(CONTRACT, bytecode.clone());
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(10_000_000).build_fill();
+
+    // Measure actual usage
+    let (r, actual_usage) = transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, tx.clone()).unwrap();
+
+    // Should use significant gas for expensive precompile
+    assert!(
+        actual_usage > 50_000 || !r.result.is_success(),
+        "Expected at least 50,000 gas for ECPAIRING, got {}",
+        actual_usage
+    );
+
+    // Reset db
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    // Set limit just below what one call needs
+    let limit = if actual_usage > 10_000 { actual_usage - 5_000 } else { 30_000 };
+    let (result, _) = transact(MegaSpecId::MINI_REX, &mut db, limit, tx).unwrap();
+
+    // Should halt with compute gas limit exceeded if the precompile succeeded in measurement
+    if r.result.is_success() {
+        assert!(is_compute_gas_limit_exceeded(&result));
+    }
+}
+
+#[test]
+fn test_precompile_in_nested_call_with_compute_limit() {
+    // Callee calls SHA256 precompile
+    let mut callee_bytecode = BytecodeBuilder::default()
+        .push_number(32u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(32u8) // argsSize
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    callee_bytecode = callee_bytecode.push_address(*SHA256.address());
+    callee_bytecode = callee_bytecode.push_number(0xFFFFu16).append(CALL).append(POP).append(STOP);
+
+    let callee_bytecode = callee_bytecode.build();
+
+    // Caller does some work then calls callee
+    let mut caller_bytecode = BytecodeBuilder::default();
+    for _ in 0..10 {
+        caller_bytecode = caller_bytecode.push_number(1u8).push_number(2u8).append(ADD).append(POP);
+    }
+
+    // Call callee
+    caller_bytecode = caller_bytecode
+        .push_number(0u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(0u8) // argsSize
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    caller_bytecode = caller_bytecode.push_address(CONTRACT2);
+    caller_bytecode = caller_bytecode.push_number(0xFFFFu16).append(CALL).append(POP).append(STOP);
+
+    let caller_bytecode = caller_bytecode.build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, caller_bytecode.clone())
+        .account_code(CONTRACT2, callee_bytecode.clone());
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(1_000_000).build_fill();
+
+    // Measure actual usage
+    let (_, actual_usage) = transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, tx.clone()).unwrap();
+
+    // Should track gas through nested call with precompile
+    assert!(actual_usage > 200, "Expected at least 200 gas, got {}", actual_usage);
+
+    // Reset db
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, caller_bytecode)
+        .account_code(CONTRACT2, callee_bytecode);
+
+    // Set limit to fail during precompile in nested call
+    let limit = actual_usage - 50;
+    let (result, _) = transact(MegaSpecId::MINI_REX, &mut db, limit, tx).unwrap();
+
+    // Should halt with compute gas limit exceeded
+    assert!(is_compute_gas_limit_exceeded(&result));
+}
+
+#[test]
+fn test_mixed_opcodes_and_precompiles_compute_gas() {
+    // Mix arithmetic operations with precompile calls
+    let mut bytecode = BytecodeBuilder::default();
+
+    // Do some arithmetic
+    for _ in 0..100 {
+        bytecode = bytecode.push_number(1u8).push_number(2u8).append(ADD).append(POP);
+    }
+
+    // Call SHA256
+    bytecode = bytecode
+        .push_number(32u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(32u8) // argsSize
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    bytecode = bytecode.push_address(*SHA256.address());
+    bytecode = bytecode.push_number(0xFFFFu16).append(CALL).append(POP);
+
+    // Do more arithmetic
+    for _ in 0..100 {
+        bytecode = bytecode.push_number(3u8).push_number(4u8).append(MUL).append(POP);
+    }
+
+    bytecode = bytecode.append(STOP);
+    let bytecode = bytecode.build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(1_000_000).build_fill();
+
+    // Should successfully track both opcodes and precompile
+    let (result, compute_gas_used) = transact(MegaSpecId::MINI_REX, &mut db, 100_000, tx).unwrap();
+
+    assert!(result.result.is_success());
+    // Should track gas from both arithmetic and precompile
+    // 200 iterations of simple ops + precompile call
+    assert!(compute_gas_used > 2_000, "Expected at least 2,000 gas, got {}", compute_gas_used);
+    assert!(compute_gas_used < 100_000);
+}
+
+#[test]
+fn test_precompile_exact_compute_gas_limit() {
+    // Test that precompile succeeds with exact compute gas limit
+    let mut bytecode = BytecodeBuilder::default()
+        .push_number(32u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(32u8) // argsSize
+        .push_number(0u8) // argsOffset
+        .push_number(0u8); // value
+    bytecode = bytecode.push_address(*SHA256.address());
+    bytecode = bytecode.push_number(0xFFFFu16).append(CALL).append(POP).append(STOP);
+
+    let bytecode = bytecode.build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode.clone());
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(1_000_000).build_fill();
+
+    // Measure exact usage
+    let (_, actual_usage) = transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, tx.clone()).unwrap();
+
+    // Reset db
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    // Set limit to exactly what's needed (should succeed since check uses > not >=)
+    let (result, compute_gas_used) =
+        transact(MegaSpecId::MINI_REX, &mut db, actual_usage, tx).unwrap();
+
+    assert!(
+        result.result.is_success(),
+        "Should succeed with exact limit. Used: {}, Limit: {}",
+        compute_gas_used,
+        actual_usage
+    );
+    assert_eq!(compute_gas_used, actual_usage);
 }
 
 // ============================================================================
