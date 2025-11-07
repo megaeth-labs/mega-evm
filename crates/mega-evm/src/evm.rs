@@ -24,7 +24,7 @@ use core::convert::Infallible;
 use alloc::vec::Vec;
 use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
 use alloy_primitives::Bytes;
-use op_revm::{L1BlockInfo, OpContext, OpSpecId};
+use op_revm::L1BlockInfo;
 use revm::{
     context::{
         result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
@@ -33,13 +33,11 @@ use revm::{
     handler::{
         evm::{ContextDbError, FrameInitResult},
         instructions::InstructionProvider,
-        EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult, PrecompileProvider,
-        SystemCallTx,
+        EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult, SystemCallTx,
     },
     inspector::NoOpInspector,
     interpreter::{
-        interpreter::EthInterpreter, FrameInput, Gas, InputsImpl, InstructionResult,
-        InterpreterAction, InterpreterResult,
+        interpreter::EthInterpreter, FrameInput, Gas, InstructionResult, InterpreterAction,
     },
     primitives::Address,
     state::EvmState,
@@ -343,47 +341,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     #[inline]
     pub fn into_journaled_state(self) -> Journal<DB> {
         self.inner.ctx.inner.journaled_state
-    }
-}
-
-impl<DB: Database, ExtEnvs: ExternalEnvs> PrecompileProvider<MegaContext<DB, ExtEnvs>>
-    for PrecompilesMap
-{
-    type Output = InterpreterResult;
-
-    #[inline]
-    fn set_spec(&mut self, spec: OpSpecId) -> bool {
-        PrecompileProvider::<OpContext<DB>>::set_spec(self, spec)
-    }
-
-    #[inline]
-    fn run(
-        &mut self,
-        context: &mut MegaContext<DB, ExtEnvs>,
-        address: &Address,
-        inputs: &InputsImpl,
-        is_static: bool,
-        gas_limit: u64,
-    ) -> Result<Option<Self::Output>, String> {
-        let maybe_output = PrecompileProvider::<OpContext<DB>>::run(
-            self, context, address, inputs, is_static, gas_limit,
-        )?;
-        // Record the compute gas cost
-        Ok(maybe_output.inspect(|output| {
-            if context.spec.is_enabled(MegaSpecId::MINI_REX) {
-                context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
-            }
-        }))
-    }
-
-    #[inline]
-    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        PrecompileProvider::<OpContext<DB>>::warm_addresses(self)
-    }
-
-    #[inline]
-    fn contains(&self, address: &Address) -> bool {
-        PrecompileProvider::<OpContext<DB>>::contains(self, address)
     }
 }
 
