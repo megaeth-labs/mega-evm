@@ -2,22 +2,25 @@
 
 ## Summary
 
-| Area / Opcode                                            | Standard EVM (Prague)                              | Mega EVM (MiniRex)                                                                           |
-| -------------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| **SSTORE (0 → non-0)**                                   | 20,000 (per EIP-2200)                              | **2,000,000 × bucket multiplier**                                                            |
-| **SSTORE (other cases)**                                 | EIP-2200 rules (reset, same, refund, warm read)    | Same as standard                                                                             |
-| **New account (CALL → empty, tx callee, CREATE target)** | 25,000 (NEWACCOUNT)                                | **2,000,000 × bucket multiplier**                                                            |
-| **Contract creation (CREATE/CREATE2)**                   | 25,000 (new account) + code deposit gas            | **2,000,000 × multiplier (new acct)** + **2,000,000 (codehash)** + code deposit gas          |
-| **Code deposit (per byte)**                              | 200 gas/byte                                       | **10,000 gas/byte**                                                                          |
-| **Initcode max size**                                    | 49152 bytes (per EIP-3860)                         | **MAX_CONTRACT_SIZE (512 KiB) + 24 KiB**                                                     |
-| **CREATE/CALL forwarding fraction**                      | 63/64 of gas left                                  | **98/100** of gas left                                                                       |
-| **LOG per topic**                                        | 375 gas/topic                                      | **3,750 gas/topic (×10)**                                                                    |
-| **LOG per byte**                                         | 8 gas/byte                                         | **80 gas/byte (×10)**                                                                        |
-| **Calldata per-byte**                                    | 4 gas (zero byte), 16 gas (non-zero byte)          | **40 gas (zero byte), 160 gas (non-zero byte)**                                              |
-| **SELFDESTRUCT**                                         | Disabled refunds post-Shanghai but still available | **Instruction removed**                                                                      |
-| **Volatile data access**                                | No restrictions                                    | **Gas limited based on access type:** Block env/beneficiary → **20M gas (`BLOCK_ENV_ACCESS_REMAINING_GAS`)**, Oracle contract → **1M gas (`ORACLE_ACCESS_REMAINING_GAS`)**, most restrictive limit applies when multiple types accessed |
-| **Per-tx data limit**                                    | none                                               | **3.125 MiB (25% of 12.5 MiB block limit)** across calldata + logs + return + initcode       |
-| **Per-tx KV update limit**                               | none                                               | **12,500 updates (25% of block limit)**                                                      |
+| Area / Opcode                                            | Standard EVM (Prague)                              | Mega EVM (MiniRex)                                                                                                                                                                                                                      |
+| -------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **SSTORE (0 → non-0)**                                   | 20,000 (per EIP-2200)                              | **2,000,000 × bucket multiplier**                                                                                                                                                                                                       |
+| **SSTORE (other cases)**                                 | EIP-2200 rules (reset, same, refund, warm read)    | Same as standard                                                                                                                                                                                                                        |
+| **New account (CALL → empty, tx callee, CREATE target)** | 25,000 (NEWACCOUNT)                                | **2,000,000 × bucket multiplier**                                                                                                                                                                                                       |
+| **Contract creation (CREATE/CREATE2)**                   | 25,000 (new account) + code deposit gas            | **2,000,000 × multiplier (new acct)** + **2,000,000 (codehash)** + code deposit gas                                                                                                                                                     |
+| **Code deposit (per byte)**                              | 200 gas/byte                                       | **10,000 gas/byte**                                                                                                                                                                                                                     |
+| **Initcode max size**                                    | 49152 bytes (per EIP-3860)                         | **MAX_CONTRACT_SIZE (512 KiB) + 24 KiB**                                                                                                                                                                                                |
+| **CREATE/CALL forwarding fraction**                      | 63/64 of gas left                                  | **98/100** of gas left                                                                                                                                                                                                                  |
+| **LOG per topic (compute gas)**                          | 375 gas/topic                                      | **375 gas/topic (same)**                                                                                                                                                                                                                |
+| **LOG per topic (storage gas)**                          | N/A                                                | **3,750 gas/topic (10× multiplier)**                                                                                                                                                                                                    |
+| **LOG per byte (compute gas)**                           | 8 gas/byte                                         | **8 gas/byte (same)**                                                                                                                                                                                                                   |
+| **LOG per byte (storage gas)**                           | N/A                                                | **80 gas/byte (10× multiplier)**                                                                                                                                                                                                        |
+| **Calldata per-byte**                                    | 4 gas (zero byte), 16 gas (non-zero byte)          | **40 gas (zero byte), 160 gas (non-zero byte)**                                                                                                                                                                                         |
+| **SELFDESTRUCT**                                         | Disabled refunds post-Shanghai but still available | **Instruction removed**                                                                                                                                                                                                                 |
+| **Volatile data access**                                 | No restrictions                                    | **Gas limited based on access type:** Block env/beneficiary → **20M gas (`BLOCK_ENV_ACCESS_REMAINING_GAS`)**, Oracle contract → **1M gas (`ORACLE_ACCESS_REMAINING_GAS`)**, most restrictive limit applies when multiple types accessed |
+| **Per-tx compute gas limit**                             | none                                               | **1,000,000,000 gas** for compute operations (separate from standard gas limit)                                                                                                                                                         |
+| **Per-tx data limit**                                    | none                                               | **3.125 MiB (25% of 12.5 MiB block limit)** across calldata + logs + return + initcode                                                                                                                                                  |
+| **Per-tx KV update limit**                               | none                                               | **125,000 updates (25% of block limit)**                                                                                                                                                                                                |
 
 ## 1. Introduction
 
@@ -31,9 +34,10 @@ While MegaETH's low fees make computation extremely affordable—enabling comple
 
 To ensure network stability and sustainable growth of MegaETH, the MiniRex hardfork introduces:
 
-1. **Multi-dimensional Resource Limits**: Novel constraints on data size and key-value updates enable safe removal of block gas limit
-2. **Strategic Gas Cost Increases**: Storage operations (SSTORE, account creation, logging) see substantial gas cost increases to reflect their true burden on blockchain nodes
-3. **Volatile Data Access Control**: Block environment data, beneficiary balance, and oracle contract access trigger immediate gas limiting with type-specific limits (20M gas for block env/beneficiary, 1M gas for oracle), with excess gas detained and refunded
+1. **Multi-dimensional Resource Limits**: Novel constraints on compute gas (1B), data size (3.125 MB), and key-value updates (125K) enable safe removal of block gas limit while preventing resource exhaustion
+2. **Compute Gas Tracking**: Separate tracking for computational costs with immediate enforcement when compute gas limit is exceeded, halting execution while preserving remaining gas
+3. **Strategic Gas Cost Increases**: Storage operations (SSTORE, account creation) see substantial gas cost increases while LOG operations split costs into compute gas (standard) and storage gas (10× multiplier)
+4. **Volatile Data Access Control**: Block environment data, beneficiary balance, and oracle contract access trigger immediate gas detention with type-specific limits (20M gas for block env/beneficiary, 1M gas for oracle), with excess gas detained and refunded
 
 This document details all semantic changes, their rationale, and implementation requirements for the MiniRex hardfork activation.
 
@@ -115,18 +119,32 @@ This document details all semantic changes, their rationale, and implementation 
 
 #### 3.3.4 Logging Operations
 
-**Log Data:**
+MiniRex introduces a dual-gas model for LOG operations, separating the cost into compute gas (for EVM execution) and storage gas (for persistent storage). This enables independent pricing of computational work versus storage burden.
 
-- **MiniRex Cost**: 80 gas per byte (10× increase)
-- **Standard EVM**: 8 gas per byte
-- **Constant**: `LOG_DATA_GAS = LOGDATA × 10`
+**Compute Gas (tracked in compute gas limit):**
 
-**Log Topics:**
+- **Base cost**: 375 gas (LOG0) + 375 gas per topic (same as standard EVM)
+- **Data cost**: 8 gas per byte (same as standard EVM)
+- **Total compute**: `375 + (375 × num_topics) + (8 × data_length)`
 
-- **MiniRex Cost**: 3,750 gas per topic (10× increase)
-- **Standard EVM**: 375 gas per topic
-- **Constant**: `LOG_TOPIC_GAS = LOGTOPIC × 10`
-- **Purpose**: Prevent unsustainable history data growth
+**Storage Gas (tracked in standard gas limit):**
+
+- **Topic storage**: 3,750 gas per topic (10× standard topic cost)
+- **Data storage**: 80 gas per byte (10× standard data cost)
+- **Total storage**: `(3,750 × num_topics) + (80 × data_length)`
+
+**Total Gas Cost**: Compute gas + Storage gas
+
+**Constants**:
+
+- Base and topic costs remain at standard 375 gas each for compute tracking
+- Storage multiplier: 10× for both topics and data
+
+**Purpose**:
+
+- Separate computational work from storage burden
+- Prevent unsustainable history data growth through storage gas
+- Enable independent resource pricing for compute vs storage
 
 #### 3.3.5 Call Data
 
@@ -269,13 +287,15 @@ For example, suppose developers implement a clever optimization in the EVM execu
 
 MegaETH's architecture exemplifies this challenge. The hyper-optimized sequencer possesses exceptionally high computation capacity, capable of processing far more transactions than traditional networks. However, replica nodes still face the same fundamental constraints: they must receive state updates over the network and apply database modifications to update their state roots accordingly. Under a traditional gas limit model, these network and storage constraints artificially bottleneck the sequencer's computational capabilities.
 
-To solve this problem, MiniRex replaces the monolithic block gas limit with two targeted resource constraints:
+To solve this problem, MiniRex replaces the monolithic block gas limit with three independent resource constraints:
+
+- **Compute Gas Limit**: Tracks and limits computational work performed during EVM execution, separate from the standard gas limit. This enables fine-grained control over computational resources while preserving gas for other operations.
 
 - **Data Size Limit**: Constrains the amount of data that must be transmitted over the network during live synchronization, preventing history bloat and ensuring replica nodes can maintain pace with data transmission requirements.
 
 - **KV Updates Limit**: Constrains the number of key-value updates that must be applied to the local database and incorporated into state root calculations, ensuring replica nodes can process state changes efficiently.
 
-This multi-dimensional approach enables the sequencer to safely create blocks containing extensive computation, provided they satisfy both targeted constraints. The result is a more flexible and efficient resource allocation model that maximizes MegaETH's computational advantages while maintaining network stability.
+This multi-dimensional approach enables the sequencer to safely create blocks containing extensive computation, provided they satisfy all three independent constraints. The result is a more flexible and efficient resource allocation model that maximizes MegaETH's computational advantages while maintaining network stability.
 
 #### 3.5.2 Block-Level Limits
 
@@ -292,7 +312,12 @@ These limits define the maximum resources that can be consumed across all transa
 
 #### 3.5.3 Transaction-Level Limits
 
-To prevent DoS attacks where malicious actors create transactions that can never be included in blocks, each transaction is limited to 25% of the corresponding block limit. This ensures that successfully executed transactions will likely be included in blocks:
+To prevent DoS attacks where malicious actors create transactions that can never be included in blocks, each transaction enforces independent limits for compute gas, data size, and KV updates:
+
+- **Transaction Compute Gas Limit**: 1,000,000,000 gas
+
+  - **Constant**: `TX_COMPUTE_GAS_LIMIT = 1_000_000_000`
+  - **Purpose**: Limits computational work during EVM execution, tracked separately from standard gas
 
 - **Transaction Data Limit**: 3.125 MB
 
@@ -305,13 +330,27 @@ To prevent DoS attacks where malicious actors create transactions that can never
 
 **Enforcement:**
 
-- When either limit is exceeded, the transaction halts immediately with `OutOfGas` error
-- **Remaining gas in the transaction is preserved (not consumed) and refunded to the sender**
+- When any limit is exceeded, the transaction halts immediately with `OutOfGas` error
+- **Remaining gas in the transaction is preserved (not consumed) and refunded to the sender** - this applies to all three limit types
 - Limits are enforced at the EVM instruction level during execution
+- Each limit is tracked independently and enforced separately
 
 #### 3.5.4 Resource Accounting
 
-MiniRex uses approximate formulas to track data size and KV updates incurred by transactions. These measurements prioritize simplicity and performance over perfect accuracy, as very few transactions are expected to approach the resource limits in practice. The limits are designed to prevent extreme abuse cases rather than precisely meter every operation, allowing for efficient implementation while maintaining effective protection against resource exhaustion attacks.
+MiniRex uses approximate formulas to track compute gas, data size, and KV updates incurred by transactions. These measurements prioritize simplicity and performance over perfect accuracy, as very few transactions are expected to approach the resource limits in practice. The limits are designed to prevent extreme abuse cases rather than precisely meter every operation, allowing for efficient implementation while maintaining effective protection against resource exhaustion attacks.
+
+**Compute Gas Tracking**
+
+Compute gas is tracked separately from the standard gas limit and monitors the cumulative gas consumed during EVM instruction execution:
+
+- **Tracked Operations**: All gas consumed during frame execution, including:
+  - EVM instruction costs (SSTORE, CALL, CREATE, arithmetic, etc.)
+  - Memory expansion costs
+  - LOG operations (only the compute portion: 375 base + 375/topic + 8/byte)
+  - Code deposit costs during contract creation
+- **Not Tracked**: Gas refunds, gas detention from volatile data access
+- **Accumulation**: Compute gas accumulates across all nested call frames within a transaction
+- **Limit Enforcement**: When `compute_gas_used > TX_COMPUTE_GAS_LIMIT`, transaction halts with `OutOfGas` and remaining gas is preserved
 
 **KV Updates Counting**
 
@@ -353,14 +392,15 @@ The semantic of MiniRex spec is inherited and customized from:
 
 The following opcodes have custom implementations in MiniRex:
 
-- `LOG0`, `LOG1`, `LOG2`, `LOG3`, `LOG4`: Enhanced with tx data size limit protection
+- `LOG0`, `LOG1`, `LOG2`, `LOG3`, `LOG4`: Split into compute gas (standard costs) and storage gas (10× multiplier), with compute gas tracked in compute gas limit and tx data size limit protection
 - `SELFDESTRUCT`: Completely disabled (maps to `invalid` instruction)
-- `SSTORE`: Increased gas cost, limit enforcement, and oracle storage access support
-- `CREATE`, `CREATE2`: Increased gas cost, limit enforcement, and 98/100 gas forwarding
-- `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`: Enhanced new account gas cost, limit enforcement, 98/100 gas forwarding, and oracle contract access detection with gas limiting
-- `NUMBER`, `TIMESTAMP`, `COINBASE`, `DIFFICULTY`, `GASLIMIT`, `BASEFEE`, `PREVRANDAO`, `BLOCKHASH`, `BLOBBASEFEE`, `BLOBHASH`: Enhanced with block env access detection and gas limiting
-- `BALANCE`, `SELFBALANCE`: Enhanced with beneficiary account access detection and gas limiting
-- `EXTCODECOPY`, `EXTCODESIZE`, `EXTCODEHASH`: Enhanced with beneficiary account access detection and gas limiting
+- `SSTORE`: Increased gas cost, compute gas tracking, limit enforcement, and oracle storage access support
+- `CREATE`, `CREATE2`: Increased gas cost, compute gas tracking, limit enforcement, and 98/100 gas forwarding
+- `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`: Enhanced new account gas cost, compute gas tracking, limit enforcement, 98/100 gas forwarding, and oracle contract access detection with gas detention (1M gas limit)
+- `NUMBER`, `TIMESTAMP`, `COINBASE`, `DIFFICULTY`, `GASLIMIT`, `BASEFEE`, `PREVRANDAO`, `BLOCKHASH`, `BLOBBASEFEE`, `BLOBHASH`: Enhanced with block env access detection and gas detention (20M gas limit)
+- `BALANCE`, `SELFBALANCE`: Enhanced with beneficiary account access detection and gas detention (20M gas limit)
+- `EXTCODECOPY`, `EXTCODESIZE`, `EXTCODEHASH`: Enhanced with beneficiary account access detection and gas detention (20M gas limit)
+- All other instructions: Compute gas costs are tracked in the compute gas limit
 
 ### 5.3 External Environment
 

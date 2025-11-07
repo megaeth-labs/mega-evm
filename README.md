@@ -21,12 +21,14 @@ This repository contains a customized version of the revm EVM implementation spe
 
 ### MINI_REX Specification (Hardfork)
 
+- **Multidimensional Gas Model**: Independent tracking for compute gas (1B), data size (3.125 MB), and KV updates (125K)
+- **Compute Gas Tracking**: Separate limit for computational work with gas detention for volatile data access
 - **Dynamic Gas Costs**: SALT bucket-based scaling preventing state bloat
-- **Massive Gas Increases**: 100x increases for LOG operations and calldata costs
+- **Split LOG Costs**: Compute gas (standard) + storage gas (10× multiplier) for independent resource pricing
 - **SELFDESTRUCT Prohibition**: Complete disabling for contract integrity
 - **Large Contract Support**: 512 KB contracts (21x increase from 24 KB)
-- **Transaction Limits**: 3.125 MB data and 1,000 KV update limits with enforcement
-- **Enhanced Security**: Comprehensive limit enforcement with OutOfGas penalties
+- **Gas Detention**: Volatile data access (block env, beneficiary, oracle) triggers gas limiting with refunds
+- **Enhanced Security**: Comprehensive limit enforcement preserving remaining gas on limit violations
 
 For complete MiniRex specification, see **[MiniRex.md](./hardfork-spec/MiniRex.md)**.
 
