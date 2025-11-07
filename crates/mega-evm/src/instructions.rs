@@ -162,7 +162,7 @@ const fn instruction_table<WIRE: InterpreterTypes, H: HostExt + ContextTr + ?Siz
     table[KECCAK256 as usize] = compute_gas_ext::keccak256;
 
     table[ADDRESS as usize] = compute_gas_ext::address;
-    table[BALANCE as usize] = compute_gas_ext::balance;
+    table[BALANCE as usize] = volatile_data_ext::balance;
     table[ORIGIN as usize] = compute_gas_ext::origin;
     table[CALLER as usize] = compute_gas_ext::caller;
     table[CALLVALUE as usize] = compute_gas_ext::callvalue;
@@ -173,12 +173,12 @@ const fn instruction_table<WIRE: InterpreterTypes, H: HostExt + ContextTr + ?Siz
     table[CODECOPY as usize] = compute_gas_ext::codecopy;
 
     table[GASPRICE as usize] = compute_gas_ext::gasprice;
-    table[EXTCODESIZE as usize] = compute_gas_ext::extcodesize;
-    table[EXTCODECOPY as usize] = compute_gas_ext::extcodecopy;
-    table[EXTCODEHASH as usize] = compute_gas_ext::extcodehash;
+    table[EXTCODESIZE as usize] = volatile_data_ext::extcodesize;
+    table[EXTCODECOPY as usize] = volatile_data_ext::extcodecopy;
+    table[EXTCODEHASH as usize] = volatile_data_ext::extcodehash;
     table[RETURNDATASIZE as usize] = compute_gas_ext::returndatasize;
     table[RETURNDATACOPY as usize] = compute_gas_ext::returndatacopy;
-    table[BLOCKHASH as usize] = compute_gas_ext::blockhash;
+    table[BLOCKHASH as usize] = volatile_data_ext::blockhash;
     table[COINBASE as usize] = volatile_data_ext::coinbase;
     table[TIMESTAMP as usize] = volatile_data_ext::timestamp;
     table[NUMBER as usize] = volatile_data_ext::block_number;
@@ -731,8 +731,7 @@ pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionCon
     let mut volatile_data_tracker = context.host.volatile_data_tracker().borrow_mut();
     if volatile_data_tracker.check_and_mark_oracle_access(&to) {
         if let Some(compute_gas_limit) = volatile_data_tracker.get_compute_gas_limit() {
-            drop(volatile_data_tracker);  // Drop borrow before borrowing additional_limit
-            context.host.additional_limit().borrow_mut().set_compute_gas_limit(compute_gas_limit);
+            additional_limit.set_compute_gas_limit(compute_gas_limit);
         }
     }
 

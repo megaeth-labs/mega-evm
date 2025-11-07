@@ -14,14 +14,15 @@ use alloy_primitives::Address;
 ///    - `ORACLE_ACCESS_REMAINING_GAS` (1M) for oracle contract
 /// 2. If additional volatile data is accessed with a different limit, the **most restrictive**
 ///    limit (minimum) is applied
-/// 3. The caller is responsible for applying this limit to the AdditionalLimit
+/// 3. The caller is responsible for applying this limit to the `AdditionalLimit`
 ///
 /// # Key Properties
 ///
-/// - **Type-Specific Limits**: Block env/beneficiary access → 20M compute gas, Oracle access → 1M compute gas
+/// - **Type-Specific Limits**: Block env/beneficiary access → 20M compute gas, Oracle access → 1M
+///   compute gas
 /// - **Most Restrictive Wins**: Multiple accesses with different limits → minimum limit applied
 /// - **Order Independent**: Oracle→BlockEnv or BlockEnv→Oracle both result in same final limit
-/// - **Compute Gas Only**: Only limits computational costs, not storage operations
+/// - **Compute Gas Only**: Only limits compute gas costs, not storage gas cost
 ///
 /// # Example Flows
 ///
@@ -74,7 +75,7 @@ impl VolatileDataAccessTracker {
         !self.volatile_data_accessed.is_empty()
     }
 
-    /// Returns the volatile data access information: (`access_type`, compute_gas_limit).
+    /// Returns the volatile data access information: (`access_type`, `compute_gas_limit`).
     /// Returns None if no volatile data has been accessed.
     pub fn get_volatile_data_info(&self) -> Option<(VolatileDataAccess, u64)> {
         if !self.accessed() {
@@ -100,7 +101,7 @@ impl VolatileDataAccessTracker {
     /// Marks that a specific type of block environment has been accessed.
     pub fn mark_block_env_accessed(&mut self, access_type: VolatileDataAccess) {
         self.volatile_data_accessed.insert(access_type);
-        self.apply_or_create_limit(constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS);
+        self.apply_or_create_limit(constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS);
     }
 
     /// Checks if beneficiary balance has been accessed.
@@ -111,7 +112,7 @@ impl VolatileDataAccessTracker {
     /// Marks that beneficiary balance has been accessed.
     pub fn mark_beneficiary_balance_accessed(&mut self) {
         self.volatile_data_accessed.insert(VolatileDataAccess::BENEFICIARY_BALANCE);
-        self.apply_or_create_limit(constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS);
+        self.apply_or_create_limit(constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS);
     }
 
     /// Checks if the oracle contract has been accessed.
@@ -125,7 +126,7 @@ impl VolatileDataAccessTracker {
     pub fn check_and_mark_oracle_access(&mut self, address: &Address) -> bool {
         if address == &ORACLE_CONTRACT_ADDRESS {
             self.volatile_data_accessed.insert(VolatileDataAccess::ORACLE);
-            self.apply_or_create_limit(constants::mini_rex::ORACLE_ACCESS_REMAINING_GAS);
+            self.apply_or_create_limit(constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS);
             true
         } else {
             false
