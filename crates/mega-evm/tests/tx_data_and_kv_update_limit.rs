@@ -694,7 +694,7 @@ fn test_data_limit_just_exceed() {
     // the data size is 110 bytes for the intrinsic data of a transaction, 312 bytes for the caller
     // account info update
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
-    let (res, _, _) = transact(
+    transact(
         MegaSpecId::MINI_REX,
         &mut db,
         BASE_TX_SIZE  // base tx
@@ -703,9 +703,7 @@ fn test_data_limit_just_exceed() {
         u64::MAX,
         tx,
     )
-    .unwrap();
-    assert!(res.result.is_halt());
-    assert!(is_data_limit_exceeded(&res));
+    .expect_err("should error");
 }
 
 /// Test that KV update limit enforcement works correctly when the limit is not exceeded.
@@ -986,4 +984,175 @@ fn test_limits_reset_across_multiple_transactions() {
     // Without reset, these would be 2x the single transaction values
     assert_eq!(data_size_after_tx2, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE);
     assert_eq!(kv_updates_after_tx2, 1);
+}
+
+// ============================================================================
+// GAS PRESERVATION TESTS
+// ============================================================================
+
+/// Test that remaining gas is preserved (not consumed) when data limit is exceeded.
+///
+/// This test verifies that when a transaction exceeds the data limit, the remaining
+/// gas is refunded to the sender rather than being consumed as a penalty. This ensures
+/// fair gas accounting where users only pay for work actually performed.
+#[test]
+fn test_data_limit_exceeded_preserves_remaining_gas() {
+    let mut db = MemoryDatabase::default();
+
+    // Simple contract with one SSTORE
+    let code = BytecodeBuilder::default()
+        .push_number(1u8)
+        .push_number(0u8)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    db.set_account_code(CALLEE, code);
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(1_000_000_000).build_fill();
+
+    // Run with limit that will be exceeded
+    // Base tx + caller update + storage slot write - 1 (just under minimum needed)
+    let tight_limit = BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE + STORAGE_SLOT_WRITE_SIZE - 1;
+    let (result, _, _) =
+        transact(MegaSpecId::MINI_REX, &mut db, tight_limit, u64::MAX, tx).unwrap();
+
+    // Verify the transaction halted due to data limit
+    assert!(is_data_limit_exceeded(&result), "Expected data limit exceeded");
+
+    // Verify gas accounting - remaining gas should be significant
+    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    // Most gas should remain since we barely started execution
+    assert!(
+        gas_remaining > 990_000_000,
+        "Expected >990m gas remaining (transaction barely started), but got {}",
+        gas_remaining
+    );
+}
+
+/// Test that remaining gas is preserved when KV update limit is exceeded.
+///
+/// This verifies that KV limit violations don't consume all gas as penalty,
+/// but rather preserve the remaining gas for refund to the sender.
+#[test]
+fn test_kv_update_limit_exceeded_preserves_remaining_gas() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(100));
+
+    // Value transfer creates 2 KV updates (caller and callee account updates)
+    let tx = TxEnvBuilder::new()
+        .caller(CALLER)
+        .call(CALLEE)
+        .value(U256::from(1))
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    // Set KV limit to 1 (will exceed on the 2nd update)
+    let (result, _, _) = transact(
+        MegaSpecId::MINI_REX,
+        &mut db,
+        u64::MAX,
+        2 - 1, // Same as test_kv_update_limit_just_exceed
+        tx,
+    )
+    .unwrap();
+
+    // Verify the transaction halted due to KV limit
+    assert!(is_kv_update_limit_exceeded(&result), "Expected KV update limit exceeded");
+
+    // Verify gas accounting - most gas should remain
+    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    // Transaction barely started before hitting limit
+    assert!(
+        gas_remaining > 997_000_000,
+        "Expected >997m gas remaining (transaction barely started), but got {}",
+        gas_remaining
+    );
+}
+
+/// Test that remaining gas is preserved when data limit is exceeded in a nested call.
+///
+/// This test verifies that when a nested call exceeds the data limit:
+/// 1. The nested call preserves its remaining gas
+/// 2. The parent call also preserves its remaining gas
+/// 3. Both amounts are refunded to the transaction sender
+#[test]
+fn test_nested_call_data_limit_exceeded_preserves_gas() {
+    let mut db = MemoryDatabase::default();
+
+    // Parent contract that calls library
+    let contract_code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0]) // value, argOffset, argLen, returnOffset, returnLen
+        .push_address(LIBRARY) // callee address
+        .append(GAS) // gas to forward
+        .append(CALL)
+        .build();
+    db.set_account_code(CALLEE, contract_code);
+
+    // Library that does SLOAD and SSTORE
+    let library_code =
+        BytecodeBuilder::default().append_many([PUSH1, 0x1u8, PUSH0, SLOAD, SSTORE, STOP]).build();
+    db.set_account_code(LIBRARY, library_code);
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(1_000_000_000).build_fill();
+
+    // Same limit as test_data_limit_exceed_in_nested_call
+    let tight_limit = BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE + STORAGE_SLOT_WRITE_SIZE - 1;
+    let (result, _, _) =
+        transact(MegaSpecId::MINI_REX, &mut db, tight_limit, u64::MAX, tx).unwrap();
+
+    // Verify halt due to data limit
+    assert!(is_data_limit_exceeded(&result), "Expected data limit exceeded");
+
+    // Verify significant gas remains from both parent and child
+    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    // Should have most of the gas remaining (stopped very early)
+    assert!(
+        gas_remaining > 990_000_000,
+        "Expected >990m gas remaining in nested call scenario, got {}",
+        gas_remaining
+    );
+}
+
+/// Test that gas is correctly preserved across multiple limit-exceeding operations.
+///
+/// This test creates a scenario with multiple operations that exceed limits,
+/// verifying that gas accounting remains correct throughout.
+#[test]
+fn test_multiple_operations_with_limit_exceeded_preserves_gas() {
+    let mut db = MemoryDatabase::default();
+
+    // Contract that does a few SSTOREs
+    let code = BytecodeBuilder::default()
+        .push_number(1u8)
+        .push_number(0u8)
+        .append(SSTORE)
+        .push_number(2u8)
+        .push_number(1u8)
+        .append(SSTORE)
+        .push_number(3u8)
+        .push_number(2u8)
+        .append(SSTORE)
+        .append(STOP)
+        .build();
+
+    db.set_account_code(CALLEE, code);
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(1_000_000_000).build_fill();
+
+    // Set limit to allow: base tx + caller update + only 1 storage write
+    let tight_limit = BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE + STORAGE_SLOT_WRITE_SIZE;
+    let (result, _, _) =
+        transact(MegaSpecId::MINI_REX, &mut db, tight_limit, u64::MAX, tx).unwrap();
+
+    // Should halt due to data limit
+    assert!(is_data_limit_exceeded(&result), "Expected data limit exceeded");
+
+    // Verify gas is preserved
+    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    // Should have significant gas remaining (stopped after 1 write instead of 3)
+    assert!(
+        gas_remaining > 990_000_000,
+        "Expected >990m gas remaining with multiple operations, got {}",
+        gas_remaining
+    );
 }

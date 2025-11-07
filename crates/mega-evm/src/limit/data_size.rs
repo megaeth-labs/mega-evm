@@ -87,7 +87,8 @@ impl DataSizeTracker {
         self.frame_stack.clear();
     }
 
-    pub(crate) fn current_size(&self) -> u64 {
+    #[inline]
+    pub(crate) const fn current_size(&self) -> u64 {
         if self.total_size < 0 {
             0
         } else {
@@ -95,7 +96,8 @@ impl DataSizeTracker {
         }
     }
 
-    pub(crate) fn exceeds_limit(&self, limit: u64) -> bool {
+    #[inline]
+    pub(crate) const fn exceeds_limit(&self, limit: u64) -> bool {
         self.current_size() > limit
     }
 }

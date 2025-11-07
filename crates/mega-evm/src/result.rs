@@ -12,6 +12,16 @@ use serde::{Deserialize, Serialize};
 use crate::VolatileDataAccess;
 
 /// `MegaETH` transaction validation error type.
+///
+/// TODO: This is currently a type alias due to constraints from `op_revm::OpHandler`.
+/// `OpHandler` requires `ERROR: From<OpTransactionError>`, but we cannot satisfy this
+/// for `EVMError<DBError, MegaTransactionError>` due to Rust's orphan rules.
+///
+/// To add custom transaction error variants, we need to:
+/// 1. Stop using `OpHandler` directly
+/// 2. Implement all handler methods manually without delegating to `OpHandler`
+/// 3. Then we can use a custom enum like: ``` pub enum MegaTransactionError {
+///    Base(OpTransactionError), CustomVariant, } ```
 pub type MegaTransactionError = OpTransactionError;
 
 /// `MegaETH` halt reason type, with additional MegaETH-specific halt reasons.
@@ -33,6 +43,13 @@ pub enum MegaHaltReason {
         /// The configured KV update limit
         limit: u64,
         /// The actual KV update count
+        actual: u64,
+    },
+    /// Compute gas limit exceeded
+    ComputeGasLimitExceeded {
+        /// The configured compute gas limit
+        limit: u64,
+        /// The actual compute gas usage
         actual: u64,
     },
     /// System transaction's callee is not in the whitelist
@@ -76,6 +93,7 @@ impl TryFrom<MegaHaltReason> for EthHaltReason {
             MegaHaltReason::Base(reason) => Ok(reason.try_into()?),
             MegaHaltReason::DataLimitExceeded { .. } |
             MegaHaltReason::KVUpdateLimitExceeded { .. } |
+            MegaHaltReason::ComputeGasLimitExceeded { .. } |
             MegaHaltReason::SystemTxInvalidCallee { .. } |
             MegaHaltReason::VolatileDataAccessOutOfGas { .. } => Err(value),
         }

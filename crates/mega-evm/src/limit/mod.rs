@@ -11,20 +11,28 @@ use revm::{
 
 use crate::{constants, MegaHaltReason, MegaTransaction};
 
+mod compute_gas;
 mod data_size;
-pub use data_size::*;
-
 mod kv_update;
+
+pub use compute_gas::*;
+pub use data_size::*;
 pub use kv_update::*;
 
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
 ///
-/// This struct coordinates both data size and key-value update limits, providing
-/// a unified interface for limit enforcement during transaction execution. When
-/// limits are exceeded, transactions halt with `OutOfGas`, consuming all remaining gas.
+/// This struct coordinates three independent resource limits: compute gas, data size, and
+/// key-value updates. Each limit is tracked separately and enforced during transaction execution.
+/// When a limit is exceeded, the transaction halts with `OutOfGas` and remaining gas is preserved
+/// (not consumed):
+/// - **Compute gas limit**: Transaction halts with `OutOfGas`, remaining gas is preserved
+/// - **Data size limit**: Transaction halts with `OutOfGas`, remaining gas is preserved
+/// - **KV update limit**: Transaction halts with `OutOfGas`, remaining gas is preserved
 ///
 /// # Tracking Details
 ///
+/// - **Compute Gas**: Tracks gas consumption from EVM instructions during execution, monitoring the
+///   computational cost separate from the standard gas limit
 /// - **Data Size**: Tracks transaction data (110 bytes base + calldata + access lists +
 ///   authorizations), caller/authority account updates (40 bytes each), log data, storage writes
 ///   (40 bytes when original ≠ new), account updates from calls/creates (40 bytes), and contract
@@ -34,7 +42,8 @@ pub use kv_update::*;
 ///
 /// # Default Limits (`MINI_REX`)
 ///
-/// - Data limit: 3.125 MB (25% of 12.5 MB block limit)
+/// - Compute gas limit: 30,000,000 gas
+/// - Data size limit: 3.125 MB (25% of 12.5 MB block limit)
 /// - KV update limit: 1,000 operations
 #[derive(Debug)]
 pub struct AdditionalLimit {
@@ -44,20 +53,35 @@ pub struct AdditionalLimit {
     /// exceeded, the frames will be reverted and the data size and count will be discarded.
     pub has_exceeded_limit: AdditionalLimitResult,
 
+    /// The total remaining gas after the limit exceeds.
+    pub rescued_gas: u64,
+
     /// The data limit for the EVM. When the data limit is reached, the transaction will error and
-    /// halt (consuming all remaining gas).
+    /// halt (remaining gas is preserved).
     ///
     /// This limit controls the maximum total data size that can be generated during
     /// transaction execution, including transaction data, logs, storage operations, etc.
     pub data_limit: u64,
 
     /// The key-value update limit for the EVM. When the key-value update limit is reached, the
-    /// transaction will error and halt (consuming all remaining gas).
+    /// transaction will error and halt (remaining gas is preserved).
     ///
     /// This limit controls the maximum number of key-value storage operations that can be
     /// performed during transaction execution, including storage reads, writes, and account
     /// updates.
     pub kv_update_limit: u64,
+
+    /// The compute gas limit for the EVM. When the compute gas limit is reached, the transaction
+    /// will error and halt (remaining gas will be refunded).
+    ///
+    /// This limit controls the maximum total compute gas that can be consumed during transaction
+    /// execution.
+    pub compute_gas_limit: u64,
+
+    /// A tracker for the total compute gas consumed during transaction execution.
+    ///
+    /// This tracker monitors all compute gas consumed during execution.
+    pub compute_gas_tracker: compute_gas::ComputeGasTracker,
 
     /// A tracker for the total data size (in bytes) generated from a transaction execution.
     ///
@@ -78,14 +102,19 @@ pub struct LimitUsage {
     pub data_size: u64,
     /// The number of KV updates.
     pub kv_updates: u64,
+    /// The compute gas usage.
+    pub compute_gas: u64,
 }
 
 impl Default for AdditionalLimit {
     fn default() -> Self {
         Self {
             has_exceeded_limit: AdditionalLimitResult::WithinLimit,
+            rescued_gas: 0,
             data_limit: constants::mini_rex::TX_DATA_LIMIT,
             kv_update_limit: constants::mini_rex::TX_KV_UPDATE_LIMIT,
+            compute_gas_limit: constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
+            compute_gas_tracker: compute_gas::ComputeGasTracker::new(),
             data_size_tracker: data_size::DataSizeTracker::new(),
             kv_update_counter: kv_update::KVUpdateCounter::new(),
         }
@@ -105,15 +134,19 @@ impl AdditionalLimit {
     /// preparing the limit system for a new execution context.
     pub fn reset(&mut self) {
         self.has_exceeded_limit = AdditionalLimitResult::WithinLimit;
+        self.rescued_gas = 0;
         self.data_size_tracker.reset();
         self.kv_update_counter.reset();
+        self.compute_gas_tracker.reset();
     }
 
     /// Gets the usage of the additional limits.
-    pub fn get_usage(&self) -> LimitUsage {
+    #[inline]
+    pub const fn get_usage(&self) -> LimitUsage {
         LimitUsage {
             data_size: self.data_size_tracker.current_size(),
             kv_updates: self.kv_update_counter.current_count(),
+            compute_gas: self.compute_gas_tracker.current_gas_used(),
         }
     }
 
@@ -127,7 +160,7 @@ impl AdditionalLimit {
     /// Returns an [`AdditionalLimitResult`] indicating whether limits have been exceeded
     /// and which specific limit was exceeded if any.
     #[inline]
-    pub fn check_limit(&mut self) -> AdditionalLimitResult {
+    pub const fn check_limit(&mut self) -> AdditionalLimitResult {
         // short circuit if the limit has already been exceeded
         if self.has_exceeded_limit.exceeded_limit() {
             return self.has_exceeded_limit;
@@ -142,6 +175,11 @@ impl AdditionalLimit {
             self.has_exceeded_limit = AdditionalLimitResult::ExceedsKVUpdateLimit {
                 limit: self.kv_update_limit,
                 used: self.kv_update_counter.current_count(),
+            }
+        } else if self.compute_gas_tracker.exceeds_limit(self.compute_gas_limit) {
+            self.has_exceeded_limit = AdditionalLimitResult::ExceedsComputeGasLimit {
+                limit: self.compute_gas_limit,
+                used: self.compute_gas_tracker.current_gas_used(),
             }
         }
         self.has_exceeded_limit
@@ -159,6 +197,7 @@ impl AdditionalLimit {
     /// # Returns
     ///
     /// Returns `true` if the result indicates limit exceeded, `false` otherwise.
+    #[inline]
     pub fn is_exceeding_limit_result(&mut self, instruction_result: InstructionResult) -> bool {
         instruction_result == Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT &&
             self.check_limit().exceeded_limit()
@@ -193,6 +232,14 @@ pub enum AdditionalLimitResult {
     /// * `limit` - The configured KV update limit
     /// * `used` - The current KV update count
     ExceedsKVUpdateLimit { limit: u64, used: u64 },
+
+    /// Indicates that the compute gas limit has been exceeded.
+    ///
+    /// # Fields
+    ///
+    /// * `limit` - The configured compute gas limit
+    /// * `used` - The current compute gas usage
+    ExceedsComputeGasLimit { limit: u64, used: u64 },
 }
 
 impl AdditionalLimitResult {
@@ -204,6 +251,9 @@ impl AdditionalLimitResult {
             }
             Self::ExceedsKVUpdateLimit { limit, used } => {
                 Some(MegaHaltReason::KVUpdateLimitExceeded { limit: *limit, actual: *used })
+            }
+            Self::ExceedsComputeGasLimit { limit, used } => {
+                Some(MegaHaltReason::ComputeGasLimitExceeded { limit: *limit, actual: *used })
             }
             Self::WithinLimit => None,
         }
@@ -218,8 +268,9 @@ impl AdditionalLimitResult {
     /// # Returns
     ///
     /// Returns `true` if either the data limit or KV update limit has been exceeded.
-    pub(crate) fn exceeded_limit(&self) -> bool {
-        matches!(self, Self::ExceedsDataLimit { .. } | Self::ExceedsKVUpdateLimit { .. })
+    #[inline]
+    pub(crate) const fn exceeded_limit(&self) -> bool {
+        !matches!(self, Self::WithinLimit)
     }
 
     /// Checks if all limits are within their configured thresholds.
@@ -227,13 +278,29 @@ impl AdditionalLimitResult {
     /// # Returns
     ///
     /// Returns `true` if no limits have been exceeded.
-    pub(crate) fn within_limit(&self) -> bool {
+    #[inline]
+    pub(crate) const fn within_limit(&self) -> bool {
         matches!(self, Self::WithinLimit)
     }
 }
 
 /* Hooks for transaction execution lifecycle. */
 impl AdditionalLimit {
+    /// Records the compute gas used and checks if the limit has been exceeded.
+    pub(crate) fn record_compute_gas(&mut self, compute_gas_used: u64) -> AdditionalLimitResult {
+        self.compute_gas_tracker.record_gas_used(compute_gas_used);
+
+        self.check_limit()
+    }
+
+    /// Rescues gas from the limit exceeding. This method is used to record the remaining gas of a
+    /// frame after the limit exceeds. Typically, the frame execution will halt consuming all the
+    /// remaining gas, we need to record so that we can give it back to the transaction sender
+    /// afterwards.
+    pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
+        self.rescued_gas += gas.remaining();
+    }
+
     /// Hook called when a new transaction starts.
     pub(crate) fn before_tx_start(&mut self, tx: &MegaTransaction) -> AdditionalLimitResult {
         // record the data size of the tx itself
@@ -308,16 +375,28 @@ impl AdditionalLimit {
     }
 
     /// Hook called when returning a frame result to parent frame in `frame_return_result`.
-    pub(crate) fn before_frame_return_result(
+    pub(crate) fn before_frame_return_result<const LAST_FRAME: bool>(
         &mut self,
         result: &FrameResult,
-        last_frame: bool,
     ) -> AdditionalLimitResult {
-        // end the current frame and merge into the previous frame
-        self.data_size_tracker.end_frame(result.instruction_result(), last_frame);
-        self.kv_update_counter.end_frame(result.instruction_result(), last_frame);
+        // TRUE if the current function is called twice for the top-level frame. If the top-level
+        // frame has child frames, the top-level frame's result will be handled twice (one via
+        // `EvmTr::frame_return_result`, the other via `Handler::last_frame_result`). This flag is
+        // used to distinguish these two cases.
+        let duplicate_return_frame_result =
+            LAST_FRAME && self.data_size_tracker.current_frame().is_none();
 
-        self.check_limit()
+        // end the current frame and merge into the previous frame
+        self.data_size_tracker.end_frame(result.instruction_result(), LAST_FRAME);
+        self.kv_update_counter.end_frame(result.instruction_result(), LAST_FRAME);
+
+        let limit_check = self.check_limit();
+        if limit_check.exceeded_limit() && !duplicate_return_frame_result {
+            // We rescue the remaining gas of the frame after the limit exceeds.
+            // This gas will be refunded to the transaction sender in `last_frame_result`.
+            self.rescue_gas(result.gas());
+        }
+        limit_check
     }
 
     /// Hook called when an orginally zero storage slot is written non-zero value for the first time
@@ -344,8 +423,7 @@ impl AdditionalLimit {
 
 /// Creates a `FrameResult` indicating that the limit is exceeded.
 ///
-/// This utility function creates a frame result that signals limit exceeded,
-/// consuming all remaining gas and discarding any output.
+/// This utility function creates a frame result that signals limit exceeded.
 ///
 /// # Arguments
 ///
@@ -358,43 +436,64 @@ impl AdditionalLimit {
 /// A `FrameResult` indicating that the limit is exceeded with
 /// [`AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT`] instruction result.
 pub(crate) fn create_exceeding_limit_frame_result(
-    gas_limit: u64,
+    gas: Gas,
     return_memory_offset: Option<Range<usize>>,
 ) -> FrameResult {
     match return_memory_offset {
-        None => FrameResult::Create(CreateOutcome::new(
-            InterpreterResult::new(
-                AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
-                Bytes::new(),
-                Gas::new_spent(gas_limit),
-            ),
-            None,
-        )),
+        None => {
+            FrameResult::Create(CreateOutcome::new(create_exceeding_interpreter_result(gas), None))
+        }
         Some(return_memory_offset) => FrameResult::Call(CallOutcome::new(
-            InterpreterResult::new(
-                AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
-                Bytes::new(),
-                Gas::new_spent(gas_limit),
-            ),
+            create_exceeding_interpreter_result(gas),
             return_memory_offset,
         )),
     }
 }
 
+/// Creates an interpreter result indicating that the limit is exceeded.
+///
+/// This utility function creates an interpreter result that signals limit exceeded.
+///
+/// # Arguments
+///
+/// * `gas` - The gas of the interpreter result
+///
+/// # Returns
+///
+/// An interpreter result indicating that the limit is exceeded with
+/// [`AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT`] instruction result.
+pub(crate) fn create_exceeding_interpreter_result(gas: Gas) -> InterpreterResult {
+    InterpreterResult::new(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT, Bytes::new(), gas)
+}
+
 /// Marks an existing interpreter result as exceeding the limit.
 ///
 /// This utility function modifies an existing interpreter result to indicate that
-/// limits have been exceeded, consuming all remaining gas and discarding output.
+/// limits have been exceeded. Remaining gas is preserved.
 ///
 /// # Arguments
 ///
 /// * `result` - The interpreter result to modify
 pub(crate) fn mark_interpreter_result_as_exceeding_limit(result: &mut InterpreterResult) {
-    // spend all the gas and discard all the refund
-    result.gas.spend_all();
-    result.gas.set_refund(0);
-
     // mark the instruction result as exceeding the limit and discard the output
     result.result = AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT;
-    result.output = Bytes::new();
+}
+
+/// Marks a frame result as exceeding the limit.
+///
+/// This utility function modifies a frame result to indicate that limits have been exceeded.
+/// Remaining gas is preserved.
+///
+/// # Arguments
+///
+/// * `result` - The frame result to modify
+pub(crate) fn mark_frame_result_as_exceeding_limit(result: &mut FrameResult) {
+    match result {
+        FrameResult::Call(call_outcome) => {
+            mark_interpreter_result_as_exceeding_limit(&mut call_outcome.result);
+        }
+        FrameResult::Create(create_outcome) => {
+            mark_interpreter_result_as_exceeding_limit(&mut create_outcome.result);
+        }
+    }
 }

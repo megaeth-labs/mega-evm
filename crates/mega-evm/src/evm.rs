@@ -38,8 +38,8 @@ use revm::{
     },
     inspector::NoOpInspector,
     interpreter::{
-        interpreter::EthInterpreter, FrameInput, InputsImpl, InstructionResult, InterpreterAction,
-        InterpreterResult,
+        interpreter::EthInterpreter, FrameInput, Gas, InputsImpl, InstructionResult,
+        InterpreterAction, InterpreterResult,
     },
     primitives::Address,
     state::EvmState,
@@ -47,7 +47,8 @@ use revm::{
 };
 
 use crate::{
-    constants, create_exceeding_limit_frame_result, mark_interpreter_result_as_exceeding_limit,
+    constants, create_exceeding_interpreter_result, create_exceeding_limit_frame_result,
+    mark_frame_result_as_exceeding_limit, mark_interpreter_result_as_exceeding_limit,
     DefaultExternalEnvs, ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaHaltReason, MegaHandler,
     MegaInstructions, MegaPrecompiles, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
@@ -364,9 +365,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> PrecompileProvider<MegaContext<DB, Ext
         is_static: bool,
         gas_limit: u64,
     ) -> Result<Option<Self::Output>, String> {
-        PrecompileProvider::<OpContext<DB>>::run(
+        let maybe_output = PrecompileProvider::<OpContext<DB>>::run(
             self, context, address, inputs, is_static, gas_limit,
-        )
+        )?;
+        // Record the compute gas cost
+        Ok(maybe_output.inspect(|output| {
+            if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+                context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
+            }
+        }))
     }
 
     #[inline]
@@ -434,7 +441,7 @@ where
                 FrameInput::Empty => unreachable!(),
             };
             return Ok(FrameInitResult::Result(create_exceeding_limit_frame_result(
-                gas_limit,
+                Gas::new(gas_limit),
                 return_memory_offset,
             )));
         }
@@ -462,21 +469,34 @@ where
         let context = &mut self.inner.ctx;
         let instructions = &mut self.inner.instruction;
 
-        let mut action = frame.interpreter.run_plain(instructions.instruction_table(), context);
+        let is_mini_rex_enabled = context.spec.is_enabled(MegaSpecId::MINI_REX);
 
-        // Apply the additional limits and gas cost only when the `MINI_REX` spec is enabled.
-        if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+        // Check if the additional limit is already exceeded, if so, we should immediately stop
+        // and synthesize an interpreter action.
+        let mut action = if is_mini_rex_enabled {
+            let mut additional_limit = context.additional_limit.borrow_mut();
+            if additional_limit.check_limit().exceeded_limit() {
+                InterpreterAction::Return(create_exceeding_interpreter_result(
+                    frame.interpreter.gas,
+                ))
+            } else {
+                drop(additional_limit);
+                frame.interpreter.run_plain(instructions.instruction_table(), context)
+            }
+        } else {
+            frame.interpreter.run_plain(instructions.instruction_table(), context)
+        };
+
+        // Apply additional limits and storage gas cost only when the `MINI_REX` spec is enabled.
+        if is_mini_rex_enabled {
             if let InterpreterAction::Return(interpreter_result) = &mut action {
-                // charge additional gas cost for the number of bytes
+                // charge storage gas cost for the number of bytes
                 if frame.data.is_create() && interpreter_result.is_ok() {
-                    // if the creation is successful, charge the additional gas cost for the
-                    // number of bytes. The EVM's original `CODEDEPOSIT` gas cost will be
-                    // charged later in `process_next_action`. We only charge the difference
-                    // here.
-                    let additional_code_deposit_gas =
-                        constants::mini_rex::CODEDEPOSIT_ADDITIONAL_GAS *
-                            interpreter_result.output.len() as u64;
-                    if !interpreter_result.gas.record_cost(additional_code_deposit_gas) {
+                    // if the creation is successful, charge the storage gas cost for the
+                    // number of bytes.
+                    let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
+                        interpreter_result.output.len() as u64;
+                    if !interpreter_result.gas.record_cost(code_deposit_storage_gas) {
                         // if out of gas, set the instruction result to OOG
                         interpreter_result.result = InstructionResult::OutOfGas;
                     }
@@ -493,11 +513,37 @@ where
             }
         }
 
-        frame.process_next_action(context, action).inspect(|i| {
-            if i.is_result() {
-                frame.set_finished(true);
+        // Record gas remaining before frame action processing
+        let gas_remaining_before = match (&action, is_mini_rex_enabled) {
+            (InterpreterAction::Return(interpreter_result), true) => {
+                Some(interpreter_result.gas.remaining())
             }
-        })
+            _ => None,
+        };
+
+        // Process the frame action, it may need to create a new frame or return the current frame
+        // result.
+        let mut frame_output = frame
+            .process_next_action::<_, ContextDbError<Self::Context>>(context, action)
+            .inspect(|i| {
+                if i.is_result() {
+                    frame.set_finished(true);
+                }
+            })?;
+
+        // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
+        if let (ItemOrResult::Result(frame_result), Some(gas_remaining_before), true) =
+            (&mut frame_output, gas_remaining_before, is_mini_rex_enabled)
+        {
+            let compute_gas_cost =
+                gas_remaining_before.saturating_sub(frame_result.gas().remaining());
+            let mut additional_limit = self.ctx().additional_limit.borrow_mut();
+            if additional_limit.record_compute_gas(compute_gas_cost).exceeded_limit() {
+                mark_frame_result_as_exceeding_limit(frame_result);
+            }
+        }
+
+        Ok(frame_output)
     }
 
     fn frame_return_result(
@@ -511,24 +557,11 @@ where
         let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if is_mini_rex {
-            // Return early if the limit is already exceeded before processing the child frame
-            // return result.
-            if ctx
-                .additional_limit
-                .borrow_mut()
-                .is_exceeding_limit_result(result.instruction_result())
-            {
-                return Ok(Some(result));
-            }
+            let mut additional_limit = ctx.additional_limit.borrow_mut();
 
             // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
             // exceeded, return the error frame result
-            if ctx
-                .additional_limit
-                .borrow_mut()
-                .before_frame_return_result(&result, false)
-                .exceeded_limit()
-            {
+            if additional_limit.before_frame_return_result::<false>(&result).exceeded_limit() {
                 match &mut result {
                     FrameResult::Call(call_outcome) => {
                         mark_interpreter_result_as_exceeding_limit(&mut call_outcome.result)
@@ -537,7 +570,6 @@ where
                         mark_interpreter_result_as_exceeding_limit(&mut create_outcome.result)
                     }
                 }
-                return Ok(Some(result));
             }
         }
 

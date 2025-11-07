@@ -10,7 +10,7 @@ use revm::{
         result::{ExecutionResult, FromStringError, InvalidTransaction, OutOfGasError},
         ContextTr, Transaction,
     },
-    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, FrameTr},
+    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, FrameTr, Handler},
     inspector::{InspectorEvmTr, InspectorHandler},
     interpreter::{
         gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
@@ -20,10 +20,10 @@ use revm::{
 };
 
 use crate::{
-    constants, is_mega_system_transaction, sent_from_mega_system_address, EthHaltReason,
-    ExternalEnvs, HostExt, MegaContext, MegaHaltReason, MegaSpecId, MegaTransactionError,
-    DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    constants, is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
+    sent_from_mega_system_address, EthHaltReason, ExternalEnvs, HostExt, MegaContext,
+    MegaHaltReason, MegaSpecId, MegaTransactionError, DEPOSIT_TX_GAS_STIPEND_MULTIPLIER,
+    DEPOSIT_TX_GAS_STIPEND_WHITELIST, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
@@ -47,7 +47,66 @@ impl<EVM, ERROR, FRAME> Default for MegaHandler<EVM, ERROR, FRAME> {
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvs> revm::handler::Handler
+impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
+where
+    DB: Database,
+    ExtEnvs: ExternalEnvs,
+    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
+    ERROR: FromStringError,
+{
+    /// The hook to be called in `revm::handler::Handler::run_without_catch_error` and
+    /// `revm::handler::InspectorHandler::inspect_run_without_catch_error`
+    #[inline]
+    fn before_run(&self, evm: &mut EVM) -> Result<(), ERROR> {
+        // Before validation, we need to properly set the mega system transaction
+        let ctx = evm.ctx_mut();
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            // Check if this is a mega system address transaction
+            let tx = &mut ctx.inner.tx;
+            if sent_from_mega_system_address(tx) {
+                // Modify the transaction to make it appear as a deposit transaction
+                // This will cause the OpHandler to automatically bypass signature validation,
+                // nonce verification, and fee deduction during validation
+                if !is_mega_system_transaction(tx) {
+                    return Err(FromStringError::from_string(
+                        "Mega system transaction callee is not in the whitelist".to_string(),
+                    ));
+                }
+
+                // Set the deposit source hash of the transaction to mark it as a deposit
+                // transaction for `OpHandler`.
+                // The implementation of `revm::context_interface::Transaction` trait for
+                // `MegaTransaction` determines the tx type by the existence of the source
+                // hash.
+                tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+                // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
+                // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
+                tx.base.gas_price = 0;
+            }
+
+            // Provide gas stipend to the deposit transaction if the callee is in the whitelist.
+            let tx = ctx.tx();
+            if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
+                // If the deposit tx calls a whitelisted address, we apply gas stipend to the tx
+                match tx.kind() {
+                    TxKind::Create => {}
+                    TxKind::Call(address) => {
+                        if DEPOSIT_TX_GAS_STIPEND_WHITELIST.contains(&address) {
+                            ctx.inner.tx.base.gas_limit *= DEPOSIT_TX_GAS_STIPEND_MULTIPLIER;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Call the `on_new_tx` hook to initialize the transaction context.
+        evm.ctx_mut().on_new_tx();
+
+        Ok(())
+    }
+}
+
+impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvs> Handler
     for MegaHandler<EVM, ERROR, FRAME>
 where
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
@@ -72,6 +131,7 @@ where
                 &self,
                 evm: &mut Self::Evm,
             ) -> Result<(), Self::Error>;
+            fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
         }
@@ -102,32 +162,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        // Before validation, we need to properly set the mega system transaction
-        let ctx = evm.ctx_mut();
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            // Check if this is a mega system address transaction
-            let tx = &mut ctx.inner.tx;
-            if sent_from_mega_system_address(tx) {
-                // Modify the transaction to make it appear as a deposit transaction
-                // This will cause the OpHandler to automatically bypass signature validation,
-                // nonce verification, and fee deduction during validation
-                if !is_mega_system_transaction(tx) {
-                    return Err(FromStringError::from_string(
-                        "Mega system transaction callee is not in the whitelist".to_string(),
-                    ));
-                }
-
-                // Set the deposit source hash of the transaction to mark it as a deposit
-                // transaction for `OpHandler`.
-                // The implementation of `revm::context_interface::Transaction` trait for
-                // `MegaTransaction` determines the tx type by the existence of the source
-                // hash.
-                tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-                // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
-                // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
-                tx.base.gas_price = 0;
-            }
-        }
+        self.before_run(evm)?;
 
         let init_and_floor_gas = self.validate(evm)?;
         let eip7702_refund = self.pre_execution(evm)? as i64;
@@ -138,37 +173,31 @@ where
         self.execution_result(evm, exec_result)
     }
 
-    fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
-        let ctx = evm.ctx_mut();
-        ctx.on_new_tx();
-
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            let tx = ctx.tx();
-            if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
-                // If the deposit tx calls a whitelisted address, we apply gas stipend to the tx
-                match tx.kind() {
-                    TxKind::Create => {}
-                    TxKind::Call(address) => {
-                        if DEPOSIT_TX_GAS_STIPEND_WHITELIST.contains(&address) {
-                            ctx.inner.tx.base.gas_limit *= DEPOSIT_TX_GAS_STIPEND_MULTIPLIER;
-                        }
-                    }
-                }
-            }
-        }
-
-        self.op.pre_execution(evm)
-    }
-
     /// This function copies the logic from `revm::handler::Handler::validate` to and
-    /// add additional gas cost for calldata.
+    /// add additional storage gas cost for calldata.
     fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
         self.validate_env(evm)?;
         let mut initial_and_floor_gas = self.validate_initial_tx_gas(evm)?;
 
         let ctx = evm.ctx_mut();
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            // MegaETH modification: additional gas cost for creating account
+        let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
+        if is_mini_rex_enabled {
+            let mut additional_limit = ctx.additional_limit().borrow_mut();
+            // record the initial gas cost as compute gas cost
+            if additional_limit
+                .record_compute_gas(initial_and_floor_gas.initial_gas)
+                .exceeded_limit()
+            {
+                // TODO: can we custom error?
+                return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
+                    gas_limit: additional_limit.compute_gas_limit,
+                    initial_gas: initial_and_floor_gas.initial_gas,
+                }
+                .into());
+            }
+            drop(additional_limit);
+
+            // MegaETH modification: additional storage gas cost for creating account
             let kind = ctx.tx().kind();
             let new_account = match kind {
                 TxKind::Create => true,
@@ -191,7 +220,7 @@ where
                     TxKind::Call(address) => address,
                 };
                 initial_and_floor_gas.initial_gas +=
-                    ctx.new_account_gas(callee_address).map_err(|_| {
+                    ctx.new_account_storage_gas(callee_address).map_err(|_| {
                         let err_str = format!(
                             "Failed to get new account gas for callee address: {callee_address}",
                         );
@@ -199,17 +228,16 @@ where
                     })?;
             }
 
-            // MegaETH MiniRex modification: 100x increase in calldata gas costs
+            // MegaETH MiniRex modification: calldata storage gas costs
             // - Standard tokens: 400 gas per token (vs 4)
             // - EIP-7623 floor: 100x increase for transaction data floor cost
             let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
-            let additional_calldata_gas =
-                constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_GAS * tokens_in_calldata;
-            initial_and_floor_gas.initial_gas += additional_calldata_gas;
-            let additional_floor_calldata_gas =
-                constants::mini_rex::CALLDATA_STANDARD_TOKEN_ADDITIONAL_FLOOR_GAS *
-                    tokens_in_calldata;
-            initial_and_floor_gas.floor_gas += additional_floor_calldata_gas;
+            let calldata_storage_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * tokens_in_calldata;
+            initial_and_floor_gas.initial_gas += calldata_storage_gas;
+            let floor_calldata_storage_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS * tokens_in_calldata;
+            initial_and_floor_gas.floor_gas += floor_calldata_storage_gas;
 
             // If the initial_gas exceeds the tx gas limit, return an error
             if initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
@@ -243,16 +271,10 @@ where
     ) -> Result<(), Self::Error> {
         let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         if is_mini_rex {
-            // Check if the limit is exceeded before returning the frame result
-            if evm
-                .ctx()
-                .additional_limit
-                .borrow_mut()
-                .before_frame_return_result(frame_result, true)
-                .exceeded_limit()
-            {
-                // the frame result must have been marked as exceeding the limit, so return early
-                return Ok(());
+            let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
+            // Update the additional limit before returning the frame result
+            if additional_limit.before_frame_return_result::<true>(frame_result).exceeded_limit() {
+                mark_frame_result_as_exceeding_limit(frame_result);
             }
         }
 
@@ -265,9 +287,15 @@ where
         // After REVM's gas accounting, refund detained gas for volatile data access
         // This must happen AFTER the op handler to override its gas calculation
         if is_mini_rex {
-            let mut volatile_data_tracker = evm.ctx().volatile_data_tracker.borrow_mut();
+            let ctx = evm.ctx_mut();
+
+            let mut volatile_data_tracker = ctx.volatile_data_tracker.borrow_mut();
             let gas = frame_result.gas_mut();
             volatile_data_tracker.refund_detained_gas(gas);
+
+            // We also return the rescued gas here
+            let additional_limit = ctx.additional_limit.borrow();
+            gas.erase_cost(additional_limit.rescued_gas);
         }
 
         Ok(())
@@ -345,4 +373,17 @@ where
         + std::fmt::Debug,
 {
     type IT = EthInterpreter;
+
+    fn inspect_run_without_catch_error(
+        &mut self,
+        evm: &mut Self::Evm,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        self.before_run(evm)?;
+
+        let init_and_floor_gas = self.validate(evm)?;
+        let eip7702_refund = self.pre_execution(evm)? as i64;
+        let mut frame_result = self.inspect_execution(evm, &init_and_floor_gas)?;
+        self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
+        self.execution_result(evm, frame_result)
+    }
 }
