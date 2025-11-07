@@ -175,7 +175,6 @@ mod tests {
     use revm::{
         handler::PrecompileProvider,
         interpreter::{InputsImpl, InstructionResult},
-        primitives::Address,
     };
     use sha2::{Digest, Sha256};
 
@@ -197,7 +196,7 @@ mod tests {
         input.extend_from_slice(&commitment);
         input.extend_from_slice(&proof);
 
-        let address = Address::from(revm::precompile::kzg_point_evaluation::ADDRESS);
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
         InputsImpl {
             target_address: address,
             bytecode_address: Some(address),
@@ -216,7 +215,7 @@ mod tests {
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
         let inputs = generate_kzg_test_input();
-        let address = Address::from(revm::precompile::kzg_point_evaluation::ADDRESS);
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
         let result = precompiles_map.run(&mut context, &address, &inputs, true, 200_000);
         assert!(result.is_ok(), "Precompile should succeed with sufficient gas");
@@ -234,7 +233,7 @@ mod tests {
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
         let inputs = generate_kzg_test_input();
-        let address = Address::from(revm::precompile::kzg_point_evaluation::ADDRESS);
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
         let result = precompiles_map.run(&mut context, &address, &inputs, true, GAS_COST);
         assert!(result.is_ok(), "Precompile should succeed with exact GAS_COST");
@@ -252,7 +251,7 @@ mod tests {
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
         let inputs = generate_kzg_test_input();
-        let address = Address::from(revm::precompile::kzg_point_evaluation::ADDRESS);
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
         let result = precompiles_map.run(&mut context, &address, &inputs, true, 50_000);
         assert!(result.is_ok(), "Should not panic");
@@ -275,7 +274,7 @@ mod tests {
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
         let inputs = generate_kzg_test_input();
-        let address = Address::from(revm::precompile::kzg_point_evaluation::ADDRESS);
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
         let result = precompiles_map.run(&mut context, &address, &inputs, true, GAS_COST - 1);
         assert!(result.is_ok(), "Should not panic");
@@ -297,7 +296,7 @@ mod tests {
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
         let inputs = generate_kzg_test_input();
-        let address = Address::from(revm::precompile::kzg_point_evaluation::ADDRESS);
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
         let result = precompiles_map.run(&mut context, &address, &inputs, true, 0);
         assert!(result.is_ok(), "Should not panic");
