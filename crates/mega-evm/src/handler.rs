@@ -3,11 +3,11 @@ use alloy_primitives::TxKind;
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
-    OpHaltReason, OpTransactionError,
+    OpTransactionError,
 };
 use revm::{
     context::{
-        result::{ExecutionResult, FromStringError, InvalidTransaction, OutOfGasError},
+        result::{ExecutionResult, FromStringError, InvalidTransaction},
         ContextTr, Transaction,
     },
     handler::{EthFrame, EvmTr, EvmTrError, FrameResult, FrameTr, Handler},
@@ -21,9 +21,9 @@ use revm::{
 
 use crate::{
     constants, is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
-    sent_from_mega_system_address, EthHaltReason, ExternalEnvs, HostExt, MegaContext,
-    MegaHaltReason, MegaSpecId, MegaTransactionError, DEPOSIT_TX_GAS_STIPEND_MULTIPLIER,
-    DEPOSIT_TX_GAS_STIPEND_WHITELIST, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    sent_from_mega_system_address, ExternalEnvs, HostExt, MegaContext, MegaHaltReason, MegaSpecId,
+    MegaTransactionError, DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
@@ -284,17 +284,12 @@ where
         // - Only refunds remaining gas if is_ok_or_revert()
         self.op.last_frame_result(evm, frame_result)?;
 
-        // After REVM's gas accounting, refund detained gas for volatile data access
-        // This must happen AFTER the op handler to override its gas calculation
+        // After REVM's gas accounting, we need to return the rescued gas from additional limits.
         if is_mini_rex {
             let ctx = evm.ctx_mut();
 
-            let mut volatile_data_tracker = ctx.volatile_data_tracker.borrow_mut();
-            let gas = frame_result.gas_mut();
-            volatile_data_tracker.refund_detained_gas(gas);
-
-            // We also return the rescued gas here
             let additional_limit = ctx.additional_limit.borrow();
+            let gas = frame_result.gas_mut();
             gas.erase_cost(additional_limit.rescued_gas);
         }
 
@@ -306,10 +301,8 @@ where
         evm: &mut Self::Evm,
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        // Capture volatile data info BEFORE calling op.execution_result (which calls
-        // last_frame_result) because last_frame_result will call refund_detained_gas which
-        // resets detained to 0
-        let volatile_info_before_refund = evm
+        // Capture volatile data info for error reporting
+        let volatile_info = evm
             .ctx()
             .spec
             .is_enabled(MegaSpecId::MINI_REX)
@@ -320,24 +313,27 @@ where
             .flatten();
 
         let result = self.op.execution_result(evm, result)?;
-        Ok(result.map_haltreason(|reason| match reason {
-            OpHaltReason::Base(EthHaltReason::OutOfGas(OutOfGasError::Basic)) => {
-                // Check if this OutOfGas is due to volatile data access
-                if let Some((access_type, limit, detained)) = volatile_info_before_refund {
-                    // This OutOfGas happened after volatile data access - it's likely due to
-                    // hitting the detention limit. Return our custom halt reason.
-                    MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained }
+        Ok(result.map_haltreason(|reason| {
+            let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
+            if additional_limit.is_exceeding_limit_halt(&reason) {
+                if let Some((access_type, compute_gas_limit)) = volatile_info {
+                    // it's due to volatile data access
+                    MegaHaltReason::VolatileDataAccessOutOfGas {
+                        access_type,
+                        limit: compute_gas_limit,
+                        actual: additional_limit.compute_gas_tracker.current_gas_used(),
+                    }
                 } else {
-                    // No volatile data accessed - check if data/kv limits exceeded
-                    evm.ctx()
-                        .additional_limit
-                        .borrow_mut()
+                    // normal additional limit exceeded without volatile data access
+                    additional_limit
                         .check_limit()
                         .maybe_halt_reason()
-                        .unwrap_or(MegaHaltReason::Base(reason))
+                        .expect("should have a halt reason")
                 }
+            } else {
+                // not due to additional limit exceeded
+                MegaHaltReason::Base(reason)
             }
-            _ => MegaHaltReason::Base(reason),
         }))
     }
 

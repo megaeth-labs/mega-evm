@@ -1,7 +1,9 @@
 use core::ops::Range;
 
 use alloy_primitives::{Address, Bytes, U256};
+use op_revm::OpHaltReason;
 use revm::{
+    context::result::{HaltReason, OutOfGasError},
     handler::{EthFrame, FrameResult},
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, CreateOutcome,
@@ -150,6 +152,14 @@ impl AdditionalLimit {
         }
     }
 
+    /// Sets the compute gas limit to a new value.
+    /// This is used to dynamically lower the compute gas limit when volatile data is accessed.
+    /// The new limit must be lower than the current limit.
+    #[inline]
+    pub fn set_compute_gas_limit(&mut self, new_limit: u64) {
+        self.compute_gas_limit = self.compute_gas_limit.min(new_limit);
+    }
+
     /// Checks if any of the configured limits have been exceeded.
     ///
     /// This method examines both the data size and KV update limits to determine
@@ -200,6 +210,21 @@ impl AdditionalLimit {
     #[inline]
     pub fn is_exceeding_limit_result(&mut self, instruction_result: InstructionResult) -> bool {
         instruction_result == Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT &&
+            self.check_limit().exceeded_limit()
+    }
+
+    /// Checks if the halt reason indicates that the limit has been exceeded.
+    ///
+    /// # Arguments
+    ///
+    /// * `halt_reason` - The halt reason to check
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the halt reason indicates that the limit has been exceeded, `false`
+    /// otherwise.
+    pub fn is_exceeding_limit_halt(&mut self, halt_reason: &OpHaltReason) -> bool {
+        matches!(halt_reason, &OpHaltReason::Base(HaltReason::OutOfGas(OutOfGasError::Basic))) &&
             self.check_limit().exceeded_limit()
     }
 }

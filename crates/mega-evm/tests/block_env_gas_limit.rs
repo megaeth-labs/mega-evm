@@ -1025,7 +1025,7 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
     match &result {
         ExecutionResult::Halt { reason, .. } => {
             match reason {
-                MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained: _ } => {
+                MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, actual: _ } => {
                     // Verify the halt reason details
                     assert!(
                         access_type.has_block_env_access() ||

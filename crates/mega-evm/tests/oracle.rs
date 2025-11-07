@@ -1102,7 +1102,7 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     // Verify it's VolatileDataAccessOutOfGas with Both type and 1M limit (most restrictive)
     match &result {
         ExecutionResult::Halt { reason, .. } => match reason {
-            MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained: _ } => {
+            MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, actual: _ } => {
                 // Verify the halt reason details
                 assert!(access_type.has_oracle_access(), "Should have oracle access");
                 assert!(
