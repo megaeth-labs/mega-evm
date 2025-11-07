@@ -58,18 +58,17 @@ pub enum MegaHaltReason {
         callee: Address,
     },
     /// Out of gas due to volatile data access limit enforcement.
-    /// The transaction exceeded the gas limit imposed after accessing volatile data
-    /// (block environment, beneficiary, or oracle contract). The detained gas has been
-    /// refunded, so `gas_used` reflects only actual computational work performed.
+    /// The transaction exceeded the compute gas limit imposed after accessing volatile data
+    /// (block environment, beneficiary, or oracle contract).
     VolatileDataAccessOutOfGas {
         /// Bitflags indicating which volatile data was accessed.
         /// Can check specific accesses using `has_block_env_access()`,
         /// `has_beneficiary_balance_access()`, `has_oracle_access()`
         access_type: VolatileDataAccess,
-        /// The gas limit that was enforced after volatile data access
+        /// The compute gas limit that was enforced after volatile data access
         limit: u64,
-        /// Total amount of gas detained during execution (already refunded)
-        detained: u64,
+        /// The actual compute gas usage
+        actual: u64,
     },
 }
 

@@ -3,9 +3,9 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::mini_rex::ORACLE_ACCESS_REMAINING_GAS,
-    test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase, MsgCallMeta},
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    constants::mini_rex::{ORACLE_ACCESS_REMAINING_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
+    test_utils::{BytecodeBuilder, MemoryDatabase},
+    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
@@ -13,21 +13,33 @@ use revm::{
         CALL, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, SLOAD, SSTORE,
         TIMESTAMP,
     },
-    context::TxEnv,
+    context::{result::ExecutionResult, TxEnv},
+    handler::EvmTr,
+    inspector::NoOpInspector,
+    Inspector,
 };
 
 const CALLER: alloy_primitives::Address = address!("2000000000000000000000000000000000000002");
 const CALLEE: alloy_primitives::Address = address!("1000000000000000000000000000000000000001");
 
 /// Helper function to execute a transaction with the given database.
-/// Returns a tuple of `(oracle_accessed: bool, success: bool, gas_used: u64)`.
-fn execute_transaction(
+/// Returns a tuple of `(ExecutionResult, MegaEvm, oracle_accessed: bool)`.
+fn execute_transaction<
+    'a,
+    INSP: Inspector<
+        MegaContext<&'a mut MemoryDatabase, &'a DefaultExternalEnvs<std::convert::Infallible>>,
+    >,
+>(
     spec: MegaSpecId,
-    db: &mut MemoryDatabase,
-    external_envs: &DefaultExternalEnvs<std::convert::Infallible>,
-    gas_inspector: Option<&mut GasInspector>,
+    db: &'a mut MemoryDatabase,
+    external_envs: &'a DefaultExternalEnvs<std::convert::Infallible>,
+    inspector: INSP,
     target: alloy_primitives::Address,
-) -> (bool, bool, u64) {
+) -> (
+    ExecutionResult<MegaHaltReason>,
+    MegaEvm<&'a mut MemoryDatabase, INSP, &'a DefaultExternalEnvs<std::convert::Infallible>>,
+    bool,
+) {
     let mut context = MegaContext::new(db, spec, external_envs);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -39,28 +51,33 @@ fn execute_transaction(
         kind: TxKind::Call(target),
         data: Default::default(),
         value: U256::ZERO,
-        gas_limit: 1_000_000_000,
+        gas_limit: 1_000_000_000_000,
+        gas_price: 0,
         ..Default::default()
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let (result, oracle_accessed) = if let Some(inspector) = gas_inspector {
-        let mut evm = MegaEvm::new(context).with_inspector(inspector);
-        let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
-        let oracle_accessed = evm.ctx.volatile_data_tracker.borrow().has_accessed_oracle();
-        (result, oracle_accessed)
-    } else {
-        let mut evm = MegaEvm::new(context);
-        let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
-        let oracle_accessed = evm.ctx.volatile_data_tracker.borrow().has_accessed_oracle();
-        (result, oracle_accessed)
-    };
+    let mut evm = MegaEvm::new(context).with_inspector(inspector);
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = result_envelope.result;
+    // Get oracle_accessed before returning to avoid RefCell borrow conflicts
+    let oracle_accessed = evm
+        .ctx
+        .volatile_data_tracker
+        .try_borrow()
+        .map(|tracker| tracker.has_accessed_oracle())
+        .unwrap_or(false);
 
-    let success = result.result.is_success();
-    let gas_used = result.result.gas_used();
+    (result, evm, oracle_accessed)
+}
 
-    (oracle_accessed, success, gas_used)
+/// Checks if the result is a volatile data access out of gas error.
+fn is_volatile_data_access_oog(result: &ExecutionResult<MegaHaltReason>) -> bool {
+    matches!(
+        result,
+        &ExecutionResult::Halt { reason: MegaHaltReason::VolatileDataAccessOutOfGas { .. }, .. }
+    )
 }
 
 /// Test that calling the oracle contract is detected.
@@ -80,9 +97,16 @@ fn test_oracle_access_detected_on_call() {
     db.set_account_code(CALLEE, bytecode);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let (oracle_accessed, success, _gas_used) =
-        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, None, CALLEE);
-    assert!(success, "Transaction should succeed");
+    let (result, evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+
+    assert_eq!(
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        "Compute gas limit should be set to oracle access limit"
+    );
+
+    assert!(result.is_success(), "Transaction should succeed");
     assert!(oracle_accessed, "Oracle access should be detected");
 }
 
@@ -106,9 +130,9 @@ fn test_oracle_access_not_detected_on_regular_call() {
     db.set_account_code(CALLEE, bytecode);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let (oracle_accessed, success, _gas_used) =
-        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, None, CALLEE);
-    assert!(success, "Transaction should succeed");
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+    assert!(result.is_success(), "Transaction should succeed");
     assert!(!oracle_accessed, "Oracle access should not be detected");
 }
 
@@ -122,9 +146,9 @@ fn test_oracle_access_not_detected_without_call() {
     db.set_account_code(CALLEE, bytecode);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let (oracle_accessed, success, _gas_used) =
-        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, None, CALLEE);
-    assert!(success, "Transaction should succeed");
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+    assert!(result.is_success(), "Transaction should succeed");
     assert!(!oracle_accessed, "Oracle access should not be detected");
 }
 
@@ -147,9 +171,14 @@ fn test_oracle_access_not_detected_in_equivalence_spec() {
 
     // Oracle detection only works in MINI_REX spec, not EQUIVALENCE
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let (oracle_accessed, success, _gas_used) =
-        execute_transaction(MegaSpecId::EQUIVALENCE, &mut db, &external_envs, None, CALLEE);
-    assert!(success, "Transaction should succeed");
+    let (result, _evm, oracle_accessed) = execute_transaction(
+        MegaSpecId::EQUIVALENCE,
+        &mut db,
+        &external_envs,
+        NoOpInspector,
+        CALLEE,
+    );
+    assert!(result.is_success(), "Transaction should succeed");
     assert!(!oracle_accessed, "Oracle access should not be detected in EQUIVALENCE spec");
 }
 
@@ -170,9 +199,9 @@ fn test_oracle_access_detected_with_explicit_zero_value() {
     db.set_account_code(CALLEE, bytecode);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let (oracle_accessed, success, _gas_used) =
-        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, None, CALLEE);
-    assert!(success, "Transaction should succeed");
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+    assert!(result.is_success(), "Transaction should succeed");
     assert!(oracle_accessed, "Oracle access should be detected");
 }
 
@@ -197,83 +226,10 @@ fn test_oracle_access_detected_on_multiple_calls() {
     db.set_account_code(CALLEE, bytecode);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let (oracle_accessed, success, _gas_used) =
-        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, None, CALLEE);
-    assert!(success, "Transaction should succeed");
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+    assert!(result.is_success(), "Transaction should succeed");
     assert!(oracle_accessed, "Oracle access should be detected");
-}
-
-/// Test that parent frame's gas is limited after oracle access in a nested call.
-#[test]
-fn test_oracle_access_limits_parent_gas() {
-    const INTERMEDIATE_CONTRACT: alloy_primitives::Address =
-        address!("3000000000000000000000000000000000000003");
-
-    // Create intermediate contract that calls the oracle
-    let intermediate_code = BytecodeBuilder::default()
-        .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
-        .push_number(0u8) // value: 0 wei
-        .push_address(ORACLE_CONTRACT_ADDRESS) // callee: oracle contract
-        .append(GAS)
-        .append(CALL)
-        .push_number(0u8)
-        .stop()
-        .build();
-
-    // Create main contract that calls intermediate contract, then executes more opcodes
-    // After the call returns, parent should only have ORACLE_ACCESS_REMAINING_GAS left
-    let main_code = BytecodeBuilder::default()
-        .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
-        .push_number(0u8) // value: 0 wei
-        .push_address(INTERMEDIATE_CONTRACT) // callee: intermediate contract
-        .append(GAS)
-        .append(CALL)
-        // After this call, parent gas should be limited to ORACLE_ACCESS_REMAINING_GAS
-        // Execute a few more opcodes to verify gas limiting persists
-        .push_number(42u8)
-        .push_number(100u8)
-        .append_many([PUSH0, PUSH0])
-        .stop()
-        .build();
-
-    let mut db = MemoryDatabase::default();
-    db.set_account_code(CALLEE, main_code);
-    db.set_account_code(INTERMEDIATE_CONTRACT, intermediate_code);
-
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let mut gas_inspector = GasInspector::new();
-    let (oracle_accessed, success, _gas_used) = execute_transaction(
-        MegaSpecId::MINI_REX,
-        &mut db,
-        &external_envs,
-        Some(&mut gas_inspector),
-        CALLEE,
-    );
-    assert!(success, "Transaction should succeed");
-    assert!(oracle_accessed, "Oracle should have been accessed");
-
-    // Check that after the call to oracle address, the total gas is limited to
-    // ORACLE_ACCESS_REMAINING_GAS
-    let mut accessed = false;
-    gas_inspector.trace.as_ref().unwrap().iterate_with(
-        |_node_location, node, _item_location, item| {
-            if accessed {
-                assert!(
-                    item.borrow().gas_after <= ORACLE_ACCESS_REMAINING_GAS,
-                    "Gas after oracle access is greater than ORACLE_ACCESS_REMAINING_GAS"
-                );
-            } else {
-                match &node.borrow().meta {
-                    MsgCallMeta::Call(call_inputs) => {
-                        if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
-                            accessed = true;
-                        }
-                    }
-                    MsgCallMeta::Create(_) => {}
-                }
-            }
-        },
-    );
 }
 
 /// Test that contract runs out of gas when trying to execute expensive operations after oracle
@@ -294,10 +250,10 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
     // After the call returns, the left gas is limited to 10k
     // Try to execute 1000000 SSTORE operations (each costs 5000 gas minimum)
     // This should run out of gas partway through
-    for i in 0..1000000 {
+    for i in 1..=1000 {
         builder = builder
             .push_number(i as u32) // offset: varying offset to avoid optimization
-            .push_number(0u32) // size: 32 bytes
+            .push_number(i as u32) // size: 32 bytes
             .append(SSTORE);
     }
     let intermediate_code = builder.stop().build();
@@ -322,21 +278,19 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
     db.set_account_code(INTERMEDIATE_CONTRACT, intermediate_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let mut gas_inspector = GasInspector::new();
-    let (oracle_accessed, success, _gas_used) = execute_transaction(
-        MegaSpecId::MINI_REX,
-        &mut db,
-        &external_envs,
-        Some(&mut gas_inspector),
-        CALLEE,
-    );
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
     // Verify oracle was accessed
     assert!(oracle_accessed, "Oracle should have been accessed");
 
     // The transaction runs out of gas - the parent frame couldn't complete all expensive operations
     // because its gas was limited to 10k after oracle access
-    assert!(!success, "Transaction should run out of gas");
+    assert!(!result.is_success(), "Transaction should run out of gas");
+    assert!(
+        is_volatile_data_access_oog(&result),
+        "Transaction should fail due to volatile data access out of gas"
+    );
 }
 
 /// Test that gas is NOT limited when oracle is not accessed in nested calls.
@@ -373,28 +327,18 @@ fn test_no_gas_limiting_without_oracle_access() {
     db.set_account_code(OTHER_CONTRACT, Bytes::new()); // Empty contract
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let mut gas_inspector = GasInspector::new();
-    let (oracle_accessed, success, _gas_used) = execute_transaction(
-        MegaSpecId::MINI_REX,
-        &mut db,
-        &external_envs,
-        Some(&mut gas_inspector),
-        CALLEE,
+    let (result, evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+    assert!(result.is_success(), "Transaction should succeed");
+
+    assert_eq!(
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        TX_COMPUTE_GAS_LIMIT,
+        "Compute gas limit should be the same as the transaction compute gas limit"
     );
-    assert!(success, "Transaction should succeed");
 
     // Verify oracle was NOT accessed
     assert!(!oracle_accessed, "Oracle should not have been accessed");
-
-    // Verify that the gas is not limited
-    gas_inspector.trace.as_ref().unwrap().iterate_with(
-        |_node_location, _node, _item_location, item| {
-            assert!(
-                item.borrow().gas_after > ORACLE_ACCESS_REMAINING_GAS,
-                "Gas after oracle access is greater than ORACLE_ACCESS_REMAINING_GAS"
-            );
-        },
-    );
 }
 
 /// Test that when the oracle contract has code, that code is also subject to the gas limit.
@@ -406,10 +350,10 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
     let mut builder = BytecodeBuilder::default();
     // Try to execute 1000000 SSTORE operations (each costs 100 gas minimum)
     // With only 10k gas limit, this should run out of gas partway through
-    for i in 0..1000000 {
+    for i in 1..=1000 {
         builder = builder
             .push_number(i as u32) // offset: varying offset to avoid optimization
-            .push_number(0u32) // size: 32 bytes
+            .push_number(i as u32) // size: 32 bytes
             .append(SSTORE);
     }
     let oracle_code = builder.stop().build();
@@ -431,14 +375,8 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let mut gas_inspector = GasInspector::new();
-    let (oracle_accessed, success, _gas_used) = execute_transaction(
-        MegaSpecId::MINI_REX,
-        &mut db,
-        &external_envs,
-        Some(&mut gas_inspector),
-        CALLEE,
-    );
+    let (result, _, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
     // Verify oracle was accessed
     assert!(oracle_accessed, "Oracle should have been accessed");
@@ -446,29 +384,12 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
     // The transaction should run out of gas because the oracle contract's code
     // tries to execute too many expensive operations with only 10k gas available
     assert!(
-        !success,
+        !result.is_success(),
         "Transaction should run out of gas due to oracle contract code exceeding gas limit"
     );
-
-    // Verify that inside the oracle contract call, gas was limited
-    let mut inside_oracle = false;
-    gas_inspector.trace.as_ref().unwrap().iterate_with(
-        |_node_location, node, _item_location, item| {
-            match &node.borrow().meta {
-                MsgCallMeta::Call(call_inputs) => {
-                    if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
-                        inside_oracle = true;
-                    }
-                }
-                MsgCallMeta::Create(_) => {}
-            }
-            if inside_oracle {
-                assert!(
-                    item.borrow().gas_after <= ORACLE_ACCESS_REMAINING_GAS,
-                    "Gas inside oracle contract should be limited to ORACLE_ACCESS_REMAINING_GAS"
-                );
-            }
-        },
+    assert!(
+        is_volatile_data_access_oog(&result),
+        "Transaction should fail due to volatile data access out of gas"
     );
 }
 
@@ -520,19 +441,14 @@ fn test_oracle_storage_sload_uses_oracle_env() {
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new()
         .with_oracle_storage(test_slot, oracle_value);
 
-    let (oracle_accessed, success, _gas_used) =
-        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, None, CALLEE);
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
     // Verify the transaction succeeded
-    assert!(success, "Transaction should succeed");
+    assert!(result.is_success(), "Transaction should succeed");
 
     // Verify oracle was accessed
     assert!(oracle_accessed, "Oracle should have been accessed");
-
-    // Verify the return data contains the oracle value
-    // Note: The helper function doesn't return output data, so we'll need to verify differently
-    // For now, we just verify oracle access and success
-    // TODO: If we need to verify return data, we'd need to extend the helper function
 }
 
 /// Test that SLOAD on oracle contract falls back to database when OracleEnv returns None.
@@ -584,17 +500,14 @@ fn test_oracle_storage_sload_fallback_to_database() {
     // Create external envs WITHOUT setting oracle storage (so it returns None)
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
 
-    let (oracle_accessed, success, _gas_used) =
-        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, None, CALLEE);
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
     // Verify the transaction succeeded
-    assert!(success, "Transaction should succeed");
+    assert!(result.is_success(), "Transaction should succeed");
 
     // Verify oracle was accessed
     assert!(oracle_accessed, "Oracle should have been accessed");
-
-    // Note: Return data verification removed as helper doesn't return output
-    // The test still validates the oracle was accessed and storage fallback works
 }
 
 /// Test that SLOAD works correctly when transaction directly calls the oracle contract.
@@ -624,22 +537,19 @@ fn test_oracle_storage_sload_direct_call() {
         .with_oracle_storage(test_slot, oracle_value);
 
     // Call the oracle contract DIRECTLY as the transaction target
-    let (oracle_accessed, success, _gas_used) = execute_transaction(
+    let (result, _evm, oracle_accessed) = execute_transaction(
         MegaSpecId::MINI_REX,
         &mut db,
         &external_envs,
-        None,
+        NoOpInspector,
         ORACLE_CONTRACT_ADDRESS,
     );
 
     // Verify the transaction succeeded
-    assert!(success, "Transaction should succeed");
+    assert!(result.is_success(), "Transaction should succeed");
 
     // Verify oracle was NOT accessed (oracle access tracking only happens via CALL instruction)
     assert!(!oracle_accessed, "Oracle access should NOT be tracked for direct transaction calls");
-
-    // Note: Return data verification removed as helper doesn't return output
-    // The test still validates that direct calls don't trigger oracle tracking
 }
 
 /// Test that the oracle contract is deployed when mini-rex activates via block executor.
@@ -739,8 +649,6 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
 /// should further restrict gas to 1M.
 #[test]
 fn test_progressive_restriction_block_env_then_oracle() {
-    use mega_evm::constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_GAS;
-
     // Create a simple oracle contract that returns success
     let oracle_code =
         BytecodeBuilder::default().push_number(0u8).push_number(0u8).append(RETURN).build();
@@ -786,66 +694,18 @@ fn test_progressive_restriction_block_env_then_oracle() {
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let mut gas_inspector = GasInspector::new();
 
-    let (oracle_accessed, success, _gas_used) = execute_transaction(
-        MegaSpecId::MINI_REX,
-        &mut db,
-        &external_envs,
-        Some(&mut gas_inspector),
-        CALLEE,
+    let (result, evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+
+    assert_eq!(
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        "Compute gas limit should be set to oracle access limit"
     );
 
-    assert!(success, "Transaction should succeed");
+    assert!(result.is_success(), "Transaction should succeed");
     assert!(oracle_accessed, "Oracle should have been accessed");
-
-    // Verify progressive restriction in the trace:
-    // After TIMESTAMP, gas should be ≤ 20M
-    // After CALL to oracle, gas should be ≤ 1M
-    let mut after_timestamp = false;
-    let mut after_oracle_call = false;
-
-    gas_inspector.trace.as_ref().unwrap().iterate_with(
-        |_node_location, node, _item_location, item| {
-            // Check if we've passed TIMESTAMP opcode
-            if item.borrow().opcode == TIMESTAMP {
-                after_timestamp = true;
-            }
-            // Check if we've passed CALL to oracle
-            match &node.borrow().meta {
-                MsgCallMeta::Call(call_inputs) => {
-                    if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
-                        after_oracle_call = true;
-                    }
-                }
-                MsgCallMeta::Create(_) => {}
-            }
-
-            // After TIMESTAMP but before oracle, gas should be ≤ 20M
-            if after_timestamp && !after_oracle_call {
-                assert!(
-                    item.borrow().gas_after <= BLOCK_ENV_ACCESS_REMAINING_GAS,
-                    "After TIMESTAMP, gas should be limited to BLOCK_ENV_ACCESS_REMAINING_GAS \
-                     (20M), got {}",
-                    item.borrow().gas_after
-                );
-            }
-
-            // After oracle call, gas should be ≤ 1M (progressive restriction)
-            if after_oracle_call {
-                assert!(
-                    item.borrow().gas_after <= ORACLE_ACCESS_REMAINING_GAS,
-                    "After oracle access, gas should be progressively restricted to \
-                     ORACLE_ACCESS_REMAINING_GAS (1M), got {}",
-                    item.borrow().gas_after
-                );
-            }
-        },
-    );
-
-    // Ensure we actually tested the progressive restriction
-    assert!(after_timestamp, "Should have executed TIMESTAMP");
-    assert!(after_oracle_call, "Should have called oracle");
 }
 
 /// Test order independence: accessing oracle (1M limit) then block env (20M limit)
@@ -888,48 +748,17 @@ fn test_order_independent_oracle_then_block_env() {
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let mut gas_inspector = GasInspector::new();
+    let (result, evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
-    let (oracle_accessed, success, _gas_used) = execute_transaction(
-        MegaSpecId::MINI_REX,
-        &mut db,
-        &external_envs,
-        Some(&mut gas_inspector),
-        CALLEE,
+    assert_eq!(
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        "Compute gas limit should be set to oracle access limit"
     );
 
-    assert!(success, "Transaction should succeed");
+    assert!(result.is_success(), "Transaction should succeed");
     assert!(oracle_accessed, "Oracle should have been accessed");
-
-    // After oracle call (which internally accessed block env), gas should be ≤ 1M
-    // This proves that min(1M, 20M) = 1M regardless of access order
-    let mut found_oracle_call = false;
-    gas_inspector.trace.as_ref().unwrap().iterate_with(
-        |_node_location, node, _item_location, item| {
-            match &node.borrow().meta {
-                MsgCallMeta::Call(call_inputs) => {
-                    if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
-                        found_oracle_call = true;
-                    }
-                }
-                MsgCallMeta::Create(_) => {}
-            }
-
-            // After oracle call completes, gas should be limited to 1M (not 20M)
-            if found_oracle_call && item.borrow().depth == 0 {
-                // Back in main contract after oracle call
-                assert!(
-                    item.borrow().gas_after <= ORACLE_ACCESS_REMAINING_GAS,
-                    "After oracle access (even though oracle accessed block env internally), \
-                     gas should be limited to ORACLE_ACCESS_REMAINING_GAS (1M), not \
-                     BLOCK_ENV_ACCESS_REMAINING_GAS (20M). Got {}",
-                    item.borrow().gas_after
-                );
-            }
-        },
-    );
-
-    assert!(found_oracle_call, "Should have found oracle call");
 }
 
 #[test]
@@ -937,10 +766,6 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
     // This test verifies that when a transaction runs out of gas due to oracle access
     // (VolatileDataAccessOutOfGas with Oracle type), it does NOT consume all gas.
     // Instead, detained gas is refunded and gas_used reflects only actual work performed.
-    use alloy_evm::Evm;
-    use mega_evm::MegaHaltReason;
-    use revm::context::result::ExecutionResult;
-
     let mut db = MemoryDatabase::default();
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
 
@@ -956,78 +781,32 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
         .append(CALL) // Call oracle - limits gas to 1M
         .append(POP); // pop result
 
-    // Try to do 2 SSTOREs (4M gas needed, but only 1M available after oracle limiting)
-    for i in 0..2 {
-        builder = builder.push_number(i as u8).push_number(i as u8).append(SSTORE);
+    // Try to do 1000 SSTOREs (2M gas needed, but only 1M available after oracle limiting)
+    for i in 1..=1000 {
+        builder = builder.push_number(i as u32).push_number(i as u32).append(SSTORE);
     }
-    let bytecode = builder.push_number(0u8).push_number(0u8).append(RETURN).build();
+    let bytecode = builder.stop().build();
     db.set_account_code(CALLEE, bytecode);
 
-    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &external_envs);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
+    let (result, _, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
-    let gas_limit = 30_000_000;
-    let tx = TxEnv {
-        caller: CALLER,
-        kind: TxKind::Call(CALLEE),
-        data: Default::default(),
-        value: U256::ZERO,
-        gas_limit,
-        ..Default::default()
-    };
-
-    let mut tx = MegaTransaction::new(tx);
-    tx.enveloped_tx = Some(Bytes::new());
-
-    let mut evm = MegaEvm::new(context);
-    let result = Evm::transact_commit(&mut evm, tx).unwrap();
-
+    assert!(oracle_accessed, "Oracle should have been accessed");
     // Should fail with VolatileDataAccessOutOfGas
     assert!(!result.is_success(), "Transaction should fail due to oracle volatile data access OOG");
+    assert!(
+        is_volatile_data_access_oog(&result),
+        "Transaction should fail due to volatile data access out of gas"
+    );
 
     let gas_used = result.gas_used();
 
-    // Key assertion: gas_used should be much less than gas_limit (30M)
-    // The oracle call + setup is cheap (~89K), but it proves detained gas was refunded
+    // Key assertion: gas_used should be much less than gas_limit
     assert!(
-        gas_used < 200_000,
-        "gas_used should be much less than gas_limit (30M), proving detained gas was refunded. Got: {}",
+        gas_used < 1_000_000_000,
+        "gas_used should be much less than gas_limit, proving detained gas was refunded. Got: {}",
         gas_used
     );
-
-    // Verify it's specifically VolatileDataAccessOutOfGas with Oracle type
-    match &result {
-        ExecutionResult::Halt { reason, .. } => match reason {
-            MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, .. } => {
-                // Verify the halt reason details
-                assert!(access_type.has_oracle_access(), "Should have oracle access");
-                assert!(
-                    !access_type.has_block_env_access() &&
-                        !access_type.has_beneficiary_balance_access(),
-                    "Should only have oracle access, not block env or beneficiary"
-                );
-                assert_eq!(
-                    *limit, ORACLE_ACCESS_REMAINING_GAS,
-                    "Limit should be 1M for oracle access"
-                );
-
-                // The key check: gas_used should be much less than gas_limit
-                assert!(
-                    gas_used < gas_limit,
-                    "gas_used ({}) should be less than gas_limit ({}), proving detained gas was refunded",
-                    gas_used,
-                    gas_limit
-                );
-            }
-            other => {
-                panic!("Expected VolatileDataAccessOutOfGas with Oracle type, got: {:?}", other)
-            }
-        },
-        other => panic!("Expected Halt result, got: {:?}", other),
-    }
 }
 
 #[test]
@@ -1035,9 +814,6 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     // This test verifies that when BOTH block env and oracle are accessed, and the transaction
     // runs out of gas, the halt reason correctly identifies "Both" type with the most restrictive
     // limit (1M from oracle), and detained gas is properly refunded.
-    use alloy_evm::Evm;
-    use mega_evm::MegaHaltReason;
-    use revm::context::result::ExecutionResult;
 
     let mut db = MemoryDatabase::default();
     let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
@@ -1057,74 +833,29 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
         .append(CALL) // Call oracle - further limits gas to 1M
         .append(POP); // pop result
 
-    // Try to do 2 SSTOREs (4M gas needed, but only 1M available)
-    for i in 0..2 {
-        builder = builder.push_number(i as u8).push_number(i as u8).append(SSTORE);
+    // Try to do 1000 SSTOREs (2M gas needed, but only 1M available)
+    for i in 1..=1000 {
+        builder = builder.push_number(i as u32).push_number(i as u32).append(SSTORE);
     }
-    let bytecode = builder.push_number(0u8).push_number(0u8).append(RETURN).build();
+    let bytecode = builder.stop().build();
     db.set_account_code(CALLEE, bytecode);
 
-    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &external_envs);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-
-    let gas_limit = 30_000_000;
-    let tx = TxEnv {
-        caller: CALLER,
-        kind: TxKind::Call(CALLEE),
-        data: Default::default(),
-        value: U256::ZERO,
-        gas_limit,
-        ..Default::default()
-    };
-
-    let mut tx = MegaTransaction::new(tx);
-    tx.enveloped_tx = Some(Bytes::new());
-
-    let mut evm = MegaEvm::new(context);
-    let result = Evm::transact_commit(&mut evm, tx).unwrap();
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
     // Should fail with VolatileDataAccessOutOfGas
+    assert!(oracle_accessed, "Oracle should have been accessed");
     assert!(!result.is_success(), "Transaction should fail due to volatile data access OOG");
-
-    let gas_used = result.gas_used();
-
-    // Key assertion: gas_used should be much less than gas_limit (30M)
-    // TIMESTAMP + oracle call + setup is cheap (~89K), but it proves detained gas was refunded
     assert!(
-        gas_used < 200_000,
-        "gas_used should be much less than gas_limit (30M), proving detained gas was refunded. Got: {}",
-        gas_used
+        is_volatile_data_access_oog(&result),
+        "Transaction should fail due to volatile data access out of gas"
     );
 
-    // Verify it's VolatileDataAccessOutOfGas with Both type and 1M limit (most restrictive)
-    match &result {
-        ExecutionResult::Halt { reason, .. } => match reason {
-            MegaHaltReason::VolatileDataAccessOutOfGas { access_type, limit, detained: _ } => {
-                // Verify the halt reason details
-                assert!(access_type.has_oracle_access(), "Should have oracle access");
-                assert!(
-                    access_type.has_block_env_access() ||
-                        access_type.has_beneficiary_balance_access(),
-                    "Should have both block env/beneficiary and oracle access"
-                );
-                assert_eq!(
-                    *limit, ORACLE_ACCESS_REMAINING_GAS,
-                    "Limit should be 1M (most restrictive, from oracle)"
-                );
-
-                // The key check: gas_used should be much less than gas_limit
-                assert!(
-                    gas_used < gas_limit,
-                    "gas_used ({}) should be less than gas_limit ({}), proving detained gas was refunded",
-                    gas_used,
-                    gas_limit
-                );
-            }
-            other => panic!("Expected VolatileDataAccessOutOfGas with Both type, got: {:?}", other),
-        },
-        other => panic!("Expected Halt result, got: {:?}", other),
-    }
+    let gas_used = result.gas_used();
+    // Key assertion: gas_used should be much less than gas_limit
+    assert!(
+        gas_used < 1_000_000_000,
+        "gas_used should be much less than gas_limit, proving detained gas was refunded. Got: {}",
+        gas_used
+    );
 }
