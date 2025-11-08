@@ -865,17 +865,16 @@ pub mod compute_gas_ext {
                 };
                 $original_fn(ctx);
 
-                let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
-                if context
-                    .host
-                    .additional_limit()
-                    .borrow_mut()
-                    .record_compute_gas(gas_used)
-                    .exceeded_limit()
-                {
-                    context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
-                    return;
+                let mut gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                // Some of the gas may be forwarded to the child call. We need to substract them.
+                match context.interpreter.bytecode.action() {
+                    Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
+                        gas_used = gas_used.saturating_sub(call_inputs.gas_limit);
+                    }
+                    _ => {}
                 }
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, gas_used);
             }
         };
     }
