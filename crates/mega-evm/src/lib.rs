@@ -10,17 +10,9 @@ extern crate alloc;
 mod access;
 mod block;
 pub mod constants;
-mod context;
 mod evm;
 mod external;
-mod gas;
-mod handler;
-mod host;
-mod instructions;
 mod limit;
-mod precompiles;
-mod result;
-mod spec;
 mod system;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -28,17 +20,9 @@ mod types;
 
 pub use access::*;
 pub use block::*;
-pub use context::*;
 pub use evm::*;
 pub use external::*;
-pub use gas::*;
-pub use handler::*;
-pub use host::*;
-pub use instructions::*;
 pub use limit::*;
-pub use precompiles::*;
-pub use result::*;
-pub use spec::*;
 pub use system::*;
 pub use types::*;
 

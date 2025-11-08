@@ -7,9 +7,11 @@ use alloy_primitives::{BlockNumber, U256};
 use auto_impl::auto_impl;
 use revm::primitives::HashMap;
 
+mod gas;
 mod oracle;
 mod salt;
 
+pub use gas::*;
 pub use oracle::*;
 pub use salt::*;
 
