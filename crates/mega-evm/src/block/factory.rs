@@ -1,14 +1,12 @@
 use alloy_consensus::{Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
-use alloy_evm::{
-    block::BlockExecutorFor, Database, EvmEnv, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
-};
+use alloy_evm::{block::BlockExecutorFor, Database, FromRecoveredTx, FromTxWithEncoded};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_op_hardforks::OpHardforks;
 use alloy_primitives::{Bytes, B256};
 use revm::{database::State, inspector::NoOpInspector, Inspector};
 
-use crate::{MegaBlockExecutor, MegaEvm, MegaSpecId, TxDASize};
+use crate::{MegaBlockExecutor, MegaEvm, MegaEvmEnvAndSettings, TxDASize};
 
 /// `MegaETH` block executor factory.
 ///
@@ -85,11 +83,11 @@ where
     /// # Returns
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
-    pub fn create_executor<'a, DB>(
+    pub fn create_executor_with_config<'a, DB>(
         &self,
         db: &'a mut State<DB>,
-        evm_env: EvmEnv<MegaSpecId>,
         block_ctx: MegaBlockExecutionCtx,
+        evm_config: MegaEvmEnvAndSettings,
     ) -> MegaBlockExecutor<
         ChainSpec,
         MegaEvm<&'a mut State<DB>, NoOpInspector, ExtEnvs>,
@@ -98,7 +96,7 @@ where
     where
         DB: Database + 'a,
     {
-        let evm = self.evm_factory.create_evm(db, evm_env);
+        let evm = self.evm_factory.create_evm_with_config(db, evm_config);
         MegaBlockExecutor::new(evm, block_ctx, self.spec.clone(), self.receipt_builder.clone())
     }
 
@@ -114,18 +112,18 @@ where
     /// # Returns
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
-    pub fn create_executor_with_inspector<'a, DB, I>(
+    pub fn create_executor_with_config_and_inspector<'a, DB, I>(
         &self,
         db: &'a mut State<DB>,
-        evm_env: EvmEnv<MegaSpecId>,
         block_ctx: MegaBlockExecutionCtx,
+        evm_config: MegaEvmEnvAndSettings,
         inspector: I,
     ) -> MegaBlockExecutor<ChainSpec, MegaEvm<&'a mut State<DB>, I, ExtEnvs>, ReceiptBuilder>
     where
         DB: Database + 'a,
         I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvs>> + 'a,
     {
-        let evm = self.evm_factory.create_evm_with_inspector(db, evm_env, inspector);
+        let evm = self.evm_factory.create_evm_with_config_and_inspector(db, evm_config, inspector);
         MegaBlockExecutor::new(evm, block_ctx, self.spec.clone(), self.receipt_builder.clone())
     }
 }

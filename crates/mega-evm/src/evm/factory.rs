@@ -92,20 +92,40 @@ where
     pub fn create_evm_with_config<DB: Database>(
         &self,
         db: DB,
-        config: MegaEvmConfig,
+        config: MegaEvmEnvAndSettings,
     ) -> MegaEvm<DB, NoOpInspector, ExtEnvs> {
-        let ctx = MegaContext::new(db, config.evm_env.cfg_env().spec, self.external_envs.clone())
-            .with_data_limit(config.data_limit)
-            .with_kv_update_limit(config.kv_update_limit)
-            .with_compute_gas_limit(config.compute_gas_limit);
+        let MegaEvmEnvAndSettings { evm_env, data_limit, kv_update_limit, compute_gas_limit } =
+            config;
+        let ctx = MegaContext::new(db, evm_env.cfg_env().spec, self.external_envs.clone())
+            .with_tx(MegaTransaction::default())
+            .with_block(evm_env.block_env)
+            .with_cfg(evm_env.cfg_env)
+            .with_chain(L1BlockInfo::default())
+            .with_data_limit(data_limit)
+            .with_kv_update_limit(kv_update_limit)
+            .with_compute_gas_limit(compute_gas_limit);
         MegaEvm::new(ctx)
+    }
+
+    /// Creates a new `MegaEvm` instance with the given configuration and inspector.
+    pub fn create_evm_with_config_and_inspector<
+        DB: Database,
+        I: Inspector<MegaContext<DB, ExtEnvs>>,
+    >(
+        &self,
+        db: DB,
+        config: MegaEvmEnvAndSettings,
+        inspector: I,
+    ) -> MegaEvm<DB, I, ExtEnvs> {
+        let ctx = self.create_evm_with_config(db, config);
+        ctx.with_inspector(inspector)
     }
 }
 
 /// Configuration for the `MegaEvm`. This struct provides a collective settings to configure the
 /// `MegaContext`.
 #[derive(Debug, Clone)]
-pub struct MegaEvmConfig {
+pub struct MegaEvmEnvAndSettings {
     /// The EVM environment.
     pub evm_env: EvmEnv<MegaSpecId>,
     /// The data limit for one transaction.
@@ -114,6 +134,17 @@ pub struct MegaEvmConfig {
     pub kv_update_limit: u64,
     /// The compute gas limit for one transaction.
     pub compute_gas_limit: u64,
+}
+
+impl Default for MegaEvmEnvAndSettings {
+    fn default() -> Self {
+        Self {
+            evm_env: EvmEnv::default(),
+            data_limit: crate::constants::mini_rex::TX_DATA_LIMIT,
+            kv_update_limit: crate::constants::mini_rex::TX_KV_UPDATE_LIMIT,
+            compute_gas_limit: crate::constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
+        }
+    }
 }
 
 impl<ExtEnvs> alloy_evm::EvmFactory for MegaEvmFactory<ExtEnvs>
@@ -149,13 +180,8 @@ where
         db: DB,
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
-        let spec = evm_env.cfg_env().spec;
-        let ctx = MegaContext::new(db, spec, self.external_envs.clone())
-            .with_tx(MegaTransaction::default())
-            .with_block(evm_env.block_env)
-            .with_cfg(evm_env.cfg_env)
-            .with_chain(L1BlockInfo::default());
-        MegaEvm::new(ctx)
+        let config = MegaEvmEnvAndSettings { evm_env, ..Default::default() };
+        self.create_evm_with_config(db, config)
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -164,6 +190,7 @@ where
         input: EvmEnv<Self::Spec>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        Self::create_evm(self, db, input).with_inspector(inspector)
+        let config = MegaEvmEnvAndSettings { evm_env: input, ..Default::default() };
+        self.create_evm_with_config_and_inspector(db, config, inspector)
     }
 }
