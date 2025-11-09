@@ -1,3 +1,4 @@
+use alloy_evm::InvalidTxError;
 use revm::state::AccountInfo;
 
 use crate::MegaTransactionOutcome;
@@ -20,6 +21,45 @@ pub struct BlockMegaTransactionOutcome<T> {
     #[deref]
     #[deref_mut]
     pub inner: MegaTransactionOutcome,
+}
+
+/// Error type for additional reasons of an invalid transaction. If one transaction is invalid, it
+/// will never be able to be included in a block and should be discarded.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum MegaTxLimitExceededError {
+    /// Transaction gas limit exceeded.
+    #[error("Transaction gas limit exceeded: tx_gas_limit={tx_gas_limit} > limit={limit}")]
+    TransactionGasLimit {
+        /// Transaction gas limit used by current transaction
+        tx_gas_limit: u64,
+        /// Transaction gas limit limit
+        limit: u64,
+    },
+    /// Transaction size limit exceeded.
+    #[error("Transaction size limit exceeded: tx_size={tx_size} > limit={limit}")]
+    TransactionSizeLimit {
+        /// Transaction size used by current transaction
+        tx_size: u64,
+        /// Transaction size limit
+        limit: u64,
+    },
+
+    /// Transaction data availability size limit exceeded.
+    #[error(
+        "Transaction data availability size limit exceeded: da_size={da_size} > limit={limit}"
+    )]
+    DataAvailabilitySizeLimit {
+        /// Data availability size used by current transaction
+        da_size: u64,
+        /// Data availability size limit
+        limit: u64,
+    },
+}
+
+impl InvalidTxError for MegaTxLimitExceededError {
+    fn is_nonce_too_low(&self) -> bool {
+        false
+    }
 }
 
 /// Error type for block-level limit exceeded. These errors are only thrown after the transaction
@@ -71,4 +111,10 @@ pub enum MegaBlockLimitExceededError {
         /// Block data availability size limit
         limit: u64,
     },
+}
+
+impl InvalidTxError for MegaBlockLimitExceededError {
+    fn is_nonce_too_low(&self) -> bool {
+        false
+    }
 }

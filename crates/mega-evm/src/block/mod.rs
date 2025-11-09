@@ -31,9 +31,11 @@
 mod executor;
 mod factory;
 mod helpers;
+mod limit;
 mod result;
 
 pub use executor::*;
 pub use factory::*;
 pub use helpers::*;
+pub use limit::*;
 pub use result::*;
