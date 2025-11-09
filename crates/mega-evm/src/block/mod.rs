@@ -17,8 +17,8 @@
 //!
 //! # Resource Limit Enforcement
 //!
-//! `MegaETH` implements a comprehensive resource limiting system to prevent `DoS` attacks and ensure
-//! fair resource allocation. The system enforces limits at two levels:
+//! `MegaETH` implements a comprehensive resource limiting system to prevent `DoS` attacks and
+//! ensure fair resource allocation. The system enforces limits at two levels:
 //!
 //! ## Transaction-level Limits
 //!

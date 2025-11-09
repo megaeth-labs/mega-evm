@@ -3,8 +3,8 @@
 //! This module provides comprehensive limit tracking and enforcement for block-level resources
 //! in the `MegaETH` EVM. It implements a two-phase checking system:
 //!
-//! 1. **Pre-execution checks**: Validates gas limits, transaction size, and data availability
-//!    size before transaction execution to ensure the transaction can fit in the block.
+//! 1. **Pre-execution checks**: Validates gas limits, transaction size, and data availability size
+//!    before transaction execution to ensure the transaction can fit in the block.
 //! 2. **Post-execution checks**: Validates actual resource consumption (data size, KV updates)
 //!    after execution but before committing state changes.
 //!
@@ -325,10 +325,10 @@ impl BlockLimits {
 /// that each transaction stays within both transaction-level and block-level limits. It
 /// provides a two-phase checking mechanism:
 ///
-/// 1. **Pre-execution**: Validates limits that can be determined before execution
-///    (gas limit, transaction size, DA size)
-/// 2. **Post-execution**: Validates limits based on execution results (data size, KV updates)
-///    and updates the usage accumulators
+/// 1. **Pre-execution**: Validates limits that can be determined before execution (gas limit,
+///    transaction size, DA size)
+/// 2. **Post-execution**: Validates limits based on execution results (data size, KV updates) and
+///    updates the usage accumulators
 ///
 /// # Resource Tracking
 ///
