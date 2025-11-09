@@ -8,7 +8,7 @@
 //!
 //! The block execution system consists of five main components:
 //!
-//! 1. **[`MegaBlockExecutorFactory`]**: Factory for creating block executors with MegaETH
+//! 1. **[`MegaBlockExecutorFactory`]**: Factory for creating block executors with `MegaETH`
 //!    specifications
 //! 2. **[`MegaBlockExecutor`]**: The actual executor that processes transactions within a block
 //! 3. **[`BlockLimits`]**: Configuration for block-level resource limits
@@ -17,7 +17,7 @@
 //!
 //! # Resource Limit Enforcement
 //!
-//! MegaETH implements a comprehensive resource limiting system to prevent DoS attacks and ensure
+//! `MegaETH` implements a comprehensive resource limiting system to prevent `DoS` attacks and ensure
 //! fair resource allocation. The system enforces limits at two levels:
 //!
 //! ## Transaction-level Limits

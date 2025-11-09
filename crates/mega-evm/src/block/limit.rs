@@ -1,7 +1,7 @@
-//! Block-level resource limit enforcement for MegaETH.
+//! Block-level resource limit enforcement for `MegaETH`.
 //!
 //! This module provides comprehensive limit tracking and enforcement for block-level resources
-//! in the MegaETH EVM. It implements a two-phase checking system:
+//! in the `MegaETH` EVM. It implements a two-phase checking system:
 //!
 //! 1. **Pre-execution checks**: Validates gas limits, transaction size, and data availability
 //!    size before transaction execution to ensure the transaction can fit in the block.
@@ -162,7 +162,7 @@ pub struct BlockLimits {
     /// rejected with [`MegaBlockLimitExceededError::DataLimit`], and their state changes
     /// are **not committed**.
     ///
-    /// Note: Transaction-level data limits are enforced separately in the MegaEVM.
+    /// Note: Transaction-level data limits are enforced separately in the `MegaEVM`.
     /// Transactions exceeding transaction-level limits may still be included but marked
     /// as failed.
     ///
@@ -179,7 +179,7 @@ pub struct BlockLimits {
     /// rejected with [`MegaBlockLimitExceededError::KVUpdateLimit`], and their state changes
     /// are **not committed**.
     ///
-    /// Note: Transaction-level KV update limits are enforced separately in the MegaEVM.
+    /// Note: Transaction-level KV update limits are enforced separately in the `MegaEVM`.
     /// Transactions exceeding transaction-level limits may still be included but marked
     /// as failed.
     ///
@@ -446,7 +446,7 @@ impl BlockLimiter {
     /// Returns [`BlockExecutionError::Validation`] containing either:
     /// - [`MegaTxLimitExceededError`]: Transaction exceeds its own limits (invalid transaction)
     /// - [`MegaBlockLimitExceededError`]: Transaction would exceed block capacity
-    /// - [`BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas`]: Insufficient
+    /// - [`BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas`][] - Insufficient
     ///   remaining gas in block
     ///
     /// # Example
