@@ -85,18 +85,3 @@ pub fn is_deposit_like_transaction(tx: &MegaTransaction) -> bool {
     // Check if it's from the mega system address
     is_mega_system_transaction(tx)
 }
-
-/// The multiplier for the gas stipend of the deposit transaction. If an Op Stack deposit tx calls a
-/// whitelisted address, its gas limit will be automatically multiplied by this multiplier as
-/// additional gas stipend.
-pub const DEPOSIT_TX_GAS_STIPEND_MULTIPLIER: u64 = 100;
-
-/// The whitelist of callee addresses of Op Stack deposit txs inducing additional gas stipend.
-pub const DEPOSIT_TX_GAS_STIPEND_WHITELIST: &[Address] = &[
-    // L1Block pre-deployed contract
-    address!("0x4200000000000000000000000000000000000015"),
-    // GasPriaceOracle pre-deployed contract
-    address!("0x420000000000000000000000000000000000000F"),
-    // OperatorFeeVault pre-deployed contract
-    address!("0x420000000000000000000000000000000000001b"),
-];
