@@ -1,11 +1,13 @@
 //! Definitions of the `MegaETH` EVM versions (`SpecId`).
 
 use clap::ValueEnum;
-use core::str::FromStr;
+use core::{
+    fmt::{self, Display},
+    str::FromStr,
+};
 pub use op_revm::OpSpecId;
 pub use revm::primitives::hardfork::{SpecId as EthSpecId, UnknownHardfork};
 use serde::{Deserialize, Serialize};
-use std::fmt::{self, Display};
 
 /// `MegaETH` spec id, defining different versions of the `MegaETH` EVM.
 ///

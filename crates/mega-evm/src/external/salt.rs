@@ -15,7 +15,7 @@ use super::DefaultExternalEnvs;
 /// database of `MegaETH` to provide deterministic information (e.g., bucket capacity) during EVM
 /// execution.
 #[auto_impl(&, Box, Arc)]
-pub trait SaltEnv: Debug + Send + Sync + Unpin {
+pub trait SaltEnv: Debug + Unpin {
     /// The error type for the oracle.
     type Error;
 
@@ -37,7 +37,7 @@ pub trait SaltEnv: Debug + Send + Sync + Unpin {
     ) -> Result<u64, Self::Error>;
 }
 
-impl<Error: Unpin + Send + Sync + Clone + 'static> SaltEnv for DefaultExternalEnvs<Error> {
+impl<Error: Unpin + Clone + 'static> SaltEnv for DefaultExternalEnvs<Error> {
     type Error = Error;
 
     fn get_bucket_capacity(
@@ -48,15 +48,14 @@ impl<Error: Unpin + Send + Sync + Clone + 'static> SaltEnv for DefaultExternalEn
         // Return the value from storage, or MIN_BUCKET_SIZE if not set
         Ok(self
             .bucket_capacity
-            .read()
-            .expect("RwLock poisoned")
+            .borrow()
             .get(&(bucket_id, at_block))
             .copied()
             .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64))
     }
 }
 
-impl<Error: Unpin + Send + Sync + Clone + 'static> DefaultExternalEnvs<Error> {
+impl<Error: Unpin + Clone + 'static> DefaultExternalEnvs<Error> {
     /// Sets a bucket capacity for a given bucket ID at a specific block for testing purposes.
     ///
     /// # Arguments
@@ -74,15 +73,12 @@ impl<Error: Unpin + Send + Sync + Clone + 'static> DefaultExternalEnvs<Error> {
         at_block: BlockNumber,
         capacity: u64,
     ) -> Self {
-        self.bucket_capacity
-            .write()
-            .expect("RwLock poisoned")
-            .insert((bucket_id, at_block), capacity);
+        self.bucket_capacity.borrow_mut().insert((bucket_id, at_block), capacity);
         self
     }
 
     /// Clears all bucket capacity values.
     pub fn clear_bucket_capacity(&self) {
-        self.bucket_capacity.write().expect("RwLock poisoned").clear();
+        self.bucket_capacity.borrow_mut().clear();
     }
 }

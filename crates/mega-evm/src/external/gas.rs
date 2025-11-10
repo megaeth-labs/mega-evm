@@ -1,5 +1,5 @@
 use core::fmt::Debug;
-use std::collections::hash_map::Entry;
+use revm::primitives::hash_map::Entry;
 
 use alloy_primitives::{Address, BlockNumber, B256, U256};
 use revm::{context::BlockEnv, primitives::HashMap};

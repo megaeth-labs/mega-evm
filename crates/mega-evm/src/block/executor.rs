@@ -1,7 +1,5 @@
-use std::{borrow::Cow, collections::BTreeMap};
-
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
+use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap};
 use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};
 pub use alloy_evm::block::CommitChanges;
@@ -23,6 +21,8 @@ use revm::{
     context::result::ExecutionResult, database::State, handler::EvmTr, DatabaseCommit, Inspector,
 };
 use salt::BucketId;
+#[cfg(feature = "std")]
+use std::{borrow::Cow, collections::BTreeMap};
 
 use crate::{
     ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
