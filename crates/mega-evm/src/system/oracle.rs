@@ -25,10 +25,10 @@ pub const ORACLE_CONTRACT_CODE_HASH: B256 =
 sol! {
     /// The Solidity interface for the oracle contract.
     interface Oracle {
-        function getSlot(bytes32 slot) external view returns (bytes32 value);
-        function setSlot(bytes32 slot, bytes32 value) external;
-        function getSlots(bytes32[] calldata slots) external view returns (bytes32[] memory values);
-        function setSlots(bytes32[] calldata slots, bytes32[] calldata values) external;
+        function getSlot(uint256 slot) external view returns (bytes32 value);
+        function setSlot(uint256 slot, bytes32 value) external;
+        function getSlots(uint256[] calldata slots) external view returns (bytes32[] memory values);
+        function setSlots(uint256[] calldata slots, bytes32[] calldata values) external;
     }
 }
 
