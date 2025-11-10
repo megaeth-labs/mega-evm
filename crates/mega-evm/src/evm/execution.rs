@@ -3,7 +3,6 @@ use alloy_primitives::TxKind;
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
-    transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
     OpTransactionError,
 };
 use revm::{
@@ -30,8 +29,7 @@ use crate::{
     is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
     mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvs,
     HostExt, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
-    MegaTransactionError, DEPOSIT_TX_GAS_STIPEND_MULTIPLIER, DEPOSIT_TX_GAS_STIPEND_WHITELIST,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -89,20 +87,6 @@ where
                 // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
                 // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
                 tx.base.gas_price = 0;
-            }
-
-            // Provide gas stipend to the deposit transaction if the callee is in the whitelist.
-            let tx = ctx.tx();
-            if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
-                // If the deposit tx calls a whitelisted address, we apply gas stipend to the tx
-                match tx.kind() {
-                    TxKind::Create => {}
-                    TxKind::Call(address) => {
-                        if DEPOSIT_TX_GAS_STIPEND_WHITELIST.contains(&address) {
-                            ctx.inner.tx.base.gas_limit *= DEPOSIT_TX_GAS_STIPEND_MULTIPLIER;
-                        }
-                    }
-                }
             }
         }
 
