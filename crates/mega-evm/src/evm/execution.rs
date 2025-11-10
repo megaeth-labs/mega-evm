@@ -122,7 +122,7 @@ where
         + From<MegaTransactionError>
         + FromStringError
         + IsTxError
-        + std::fmt::Debug,
+        + core::fmt::Debug,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     type Evm = EVM;
@@ -373,7 +373,7 @@ where
         + From<MegaTransactionError>
         + FromStringError
         + IsTxError
-        + std::fmt::Debug,
+        + core::fmt::Debug,
 {
     type IT = EthInterpreter;
 

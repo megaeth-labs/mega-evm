@@ -13,7 +13,7 @@ use super::DefaultExternalEnvs;
 /// Typically, one implementation of this trait can be a reader of the underlying blockchain
 /// database of `MegaETH` to provide deterministic oracle data during EVM execution.
 #[auto_impl(&, Box, Arc)]
-pub trait OracleEnv: Debug + Send + Sync + Unpin {
+pub trait OracleEnv: Debug + Unpin {
     /// Gets the storage value at a specific slot of the `MegaETH` oracle contract.
     ///
     /// # Arguments
@@ -27,10 +27,10 @@ pub trait OracleEnv: Debug + Send + Sync + Unpin {
     fn get_oracle_storage(&self, slot: U256) -> Option<U256>;
 }
 
-impl<Error: Unpin + Send + Sync + Clone + 'static> OracleEnv for DefaultExternalEnvs<Error> {
+impl<Error: Unpin + Clone + 'static> OracleEnv for DefaultExternalEnvs<Error> {
     fn get_oracle_storage(&self, slot: U256) -> Option<U256> {
         // Return the value from storage, or zero if not set
-        self.oracle_storage.read().expect("RwLock poisoned").get(&slot).copied()
+        self.oracle_storage.borrow().get(&slot).copied()
     }
 }
 
@@ -46,12 +46,12 @@ impl<Error> DefaultExternalEnvs<Error> {
     ///
     /// Returns `self` for method chaining.
     pub fn with_oracle_storage(self, slot: U256, value: U256) -> Self {
-        self.oracle_storage.write().expect("RwLock poisoned").insert(slot, value);
+        self.oracle_storage.borrow_mut().insert(slot, value);
         self
     }
 
     /// Clears all oracle storage values.
     pub fn clear_oracle_storage(&self) {
-        self.oracle_storage.write().expect("RwLock poisoned").clear();
+        self.oracle_storage.borrow_mut().clear();
     }
 }

@@ -1,4 +1,8 @@
 use core::cell::RefCell;
+
+#[cfg(not(feature = "std"))]
+use alloc::rc::Rc;
+#[cfg(feature = "std")]
 use std::rc::Rc;
 
 use crate::{

@@ -1,7 +1,11 @@
 //! External environment oracles for the EVM.
 
-use core::{convert::Infallible, fmt::Debug};
-use std::sync::{Arc, RwLock};
+use core::{cell::RefCell, convert::Infallible, fmt::Debug};
+
+#[cfg(not(feature = "std"))]
+use alloc::{rc::Rc, sync::Arc};
+#[cfg(feature = "std")]
+use std::{rc::Rc, sync::Arc};
 
 use alloy_primitives::{BlockNumber, U256};
 use auto_impl::auto_impl;
@@ -43,7 +47,7 @@ pub use salt::*;
 /// }
 /// ```
 #[auto_impl(&, Box, Arc)]
-pub trait ExternalEnvs: Debug + Send + Sync + Unpin {
+pub trait ExternalEnvs: Debug + Unpin {
     /// The SALT environment type.
     type SaltEnv: SaltEnv;
     /// The Oracle environment type.
@@ -65,10 +69,10 @@ pub struct DefaultExternalEnvs<Error = Infallible> {
     #[debug(ignore)]
     _phantom: core::marker::PhantomData<Error>,
     /// Oracle storage for testing purposes. Maps storage slots to their values.
-    oracle_storage: Arc<RwLock<HashMap<U256, U256>>>,
+    oracle_storage: Rc<RefCell<HashMap<U256, U256>>>,
     /// Bucket capacity storage for testing purposes. Maps (`bucket_id`, `block_number`) to
     /// capacity.
-    bucket_capacity: Arc<RwLock<HashMap<(BucketId, BlockNumber), u64>>>,
+    bucket_capacity: Rc<RefCell<HashMap<(BucketId, BlockNumber), u64>>>,
 }
 
 impl Default for DefaultExternalEnvs {
@@ -77,13 +81,13 @@ impl Default for DefaultExternalEnvs {
     }
 }
 
-impl<Error: Unpin + Send + Sync + Clone + 'static> DefaultExternalEnvs<Error> {
+impl<Error: Unpin + Clone + 'static> DefaultExternalEnvs<Error> {
     /// Creates a new [`DefaultExternalEnvs`].
     pub fn new() -> Self {
         Self {
             _phantom: core::marker::PhantomData,
-            oracle_storage: Arc::new(RwLock::new(HashMap::default())),
-            bucket_capacity: Arc::new(RwLock::new(HashMap::default())),
+            oracle_storage: Rc::new(RefCell::new(HashMap::default())),
+            bucket_capacity: Rc::new(RefCell::new(HashMap::default())),
         }
     }
 
@@ -99,7 +103,7 @@ impl<Error: Unpin + Send + Sync + Clone + 'static> DefaultExternalEnvs<Error> {
     }
 }
 
-impl<Error: Unpin + Send + Sync + Clone + 'static> ExternalEnvs for DefaultExternalEnvs<Error> {
+impl<Error: Unpin + Clone + 'static> ExternalEnvs for DefaultExternalEnvs<Error> {
     type SaltEnv = Self;
     type OracleEnv = Self;
 

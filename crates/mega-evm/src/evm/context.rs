@@ -23,7 +23,13 @@ use revm::{
     Journal,
 };
 use salt::BucketId;
-use std::{cell::RefCell, rc::Rc};
+
+#[cfg(not(feature = "std"))]
+use alloc::rc::Rc;
+#[cfg(feature = "std")]
+use std::rc::Rc;
+
+use core::cell::RefCell;
 
 use crate::{
     constants, AdditionalLimit, DefaultExternalEnvs, DynamicGasCost, ExternalEnvs, MegaSpecId,
