@@ -26,8 +26,8 @@ use salt::BucketId;
 
 use crate::{
     ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
-    BlockMegaTransactionOutcome, MegaBlockExecutionCtx, MegaBlockLimitExceededError, MegaSpecId,
-    MegaTransaction, MegaTransactionOutcome, TxDASize,
+    BlockLimiter, BlockMegaTransactionOutcome, MegaBlockExecutionCtx, MegaSpecId, MegaTransaction,
+    MegaTransactionOutcome, MegaTxEnvelope, TxDASize,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -55,14 +55,11 @@ pub struct MegaBlockExecutor<C, E, R: OpReceiptBuilder> {
     ctx: MegaBlockExecutionCtx,
     evm: E,
 
+    block_limiter: BlockLimiter,
+
     system_caller: SystemCaller<C>,
 
     receipts: Vec<R::Receipt>,
-    gas_used: u64,
-    block_data_used: u64,
-    block_kv_updates_used: u64,
-    block_tx_size_used: u64,
-    block_da_size_used: u64,
 }
 
 impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> {
@@ -89,7 +86,7 @@ where
     /// # Returns
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
-    pub fn new(evm: E, ctx: MegaBlockExecutionCtx, spec: C, receipt_builder: R) -> Self {
+    pub fn new(evm: E, mut ctx: MegaBlockExecutionCtx, spec: C, receipt_builder: R) -> Self {
         // do some safety check on hardforks
         let timestamp = evm.block().timestamp.saturating_to();
         assert!(
@@ -104,16 +101,16 @@ where
             spec.is_isthmus_active_at_timestamp(timestamp),
             "mega-evm assumes Isthmus hardfork is always active"
         );
+
+        // IMPORTANT: Forcibly set the block gas limit to the block env gas limit in EVM.
+        ctx.block_limits.block_gas_limit = evm.block().gas_limit;
+
         Self {
-            ctx,
             chain_spec: spec.clone(),
             receipt_builder,
             receipts: Vec::new(),
-            gas_used: 0,
-            block_data_used: 0,
-            block_kv_updates_used: 0,
-            block_tx_size_used: 0,
-            block_da_size_used: 0,
+            block_limiter: ctx.block_limits.to_block_limiter(),
+            ctx,
             evm,
             system_caller: SystemCaller::new(spec),
         }
@@ -127,7 +124,7 @@ where
     C: OpHardforks,
     ExtEnvs: crate::ExternalEnvs,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
-    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718 + TxDASize, Receipt: TxReceipt>,
+    R: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
 {
     /// Execute a transaction with a commit condition function without committing the execution
     /// result to the block executor's inner state.
@@ -148,44 +145,16 @@ where
         Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
     {
         let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
-
-        // The sum of the transaction’s gas limit, Tg, and the gas utilized in this block prior,
-        // must be no greater than the block’s gasLimit.
-        let block_available_gas = self.evm.block().gas_limit - self.gas_used;
-        // In MegaETH, the Regolith hardfork is not active, so we can safely assume that the
-        // transaction gas limit is always less than the block's gas limit.
-        if tx.tx().gas_limit() > block_available_gas {
-            return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
-                transaction_gas_limit: tx.tx().gas_limit(),
-                block_available_gas,
-            }
-            .into());
-        }
-
-        // The sum of the transaction size must be no greater than the block's tx size limit.
         let tx_size = tx.tx().encode_2718_len() as u64;
-        if tx_size + self.block_tx_size_used > self.ctx.block_tx_size_limit {
-            return Err(BlockExecutionError::other(
-                MegaBlockLimitExceededError::TransactionSizeLimit {
-                    block_used: self.block_tx_size_used,
-                    tx_used: tx_size,
-                    limit: self.ctx.block_tx_size_limit,
-                },
-            ));
-        }
-
-        // The sum of the transaction data availability size must be no greater than the block's
-        // data availability size limit.
         let da_size = tx.tx().estimated_da_size();
-        if da_size + self.block_da_size_used > self.ctx.block_da_size_limit {
-            return Err(BlockExecutionError::other(
-                MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
-                    block_used: self.block_da_size_used,
-                    tx_used: da_size,
-                    limit: self.ctx.block_da_size_limit,
-                },
-            ));
-        }
+
+        // Check transaction-level and block-level limits before transaction execution
+        self.block_limiter.pre_execution_check(
+            tx.tx().tx_hash(),
+            tx.tx().gas_limit(),
+            tx_size,
+            da_size,
+        )?;
 
         // Cache the depositor account prior to the state transition for the deposit nonce.
         //
@@ -234,28 +203,26 @@ where
     {
         let BlockMegaTransactionOutcome { tx, tx_size, da_size, depositor, inner } = outcome;
         let MegaTransactionOutcome { result, state, data_size, kv_updates, .. } = inner;
+        let gas_used = result.gas_used();
 
         // Check block-level limits after transaction execution but before committing
-        self.post_check_limits(data_size, kv_updates)?;
+        self.block_limiter.post_execution_check(
+            tx.tx().tx_hash(),
+            gas_used,
+            tx_size,
+            da_size,
+            data_size,
+            kv_updates,
+        )?;
 
         self.system_caller.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
 
-        let gas_used = result.gas_used();
-
-        // append gas used
-        self.gas_used += gas_used;
-
-        // append transaction size
-        self.block_tx_size_used += tx_size;
-
-        // append transaction data availability size
-        self.block_da_size_used += da_size;
-
+        let block_gas_used = self.block_limiter.block_gas_used;
         self.receipts.push(
             match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
                 tx: tx.tx(),
                 result,
-                cumulative_gas_used: self.gas_used,
+                cumulative_gas_used: block_gas_used,
                 evm: &self.evm,
                 state: &state,
             }) {
@@ -265,7 +232,7 @@ where
                         // Success flag was added in `EIP-658: Embedding transaction status code
                         // in receipts`.
                         status: Eip658Value::Eip658(ctx.result.is_success()),
-                        cumulative_gas_used: self.gas_used,
+                        cumulative_gas_used: block_gas_used,
                         logs: ctx.result.into_logs(),
                     };
 
@@ -307,61 +274,6 @@ where
     }
 }
 
-// Helper methods for accessing MegaEvm-specific functionality
-impl<DB, C, R, INSP, ExtEnvs> MegaBlockExecutor<C, crate::MegaEvm<DB, INSP, ExtEnvs>, R>
-where
-    DB: Database,
-    C: OpHardforks,
-    ExtEnvs: crate::ExternalEnvs,
-    INSP: Inspector<crate::MegaContext<DB, ExtEnvs>>,
-    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718>,
-{
-    /// Check and update block-level resource limits
-    ///
-    /// # Parameters
-    ///
-    /// - `tx_data_size`: The data size used by the transaction in bytes.
-    /// - `tx_kv_updates`: The number of KV updates performed by the transaction.
-    ///
-    /// # Returns
-    ///
-    /// Returns an error if adding the transaction's resource usage would exceed block limits.
-    fn post_check_limits(
-        &mut self,
-        tx_data_size: u64,
-        tx_kv_updates: u64,
-    ) -> Result<(), BlockExecutionError> {
-        // Get limits from context
-        let block_data_limit = self.ctx.block_data_limit;
-        let block_kv_update_limit = self.ctx.block_kv_update_limit;
-
-        let new_block_data = self.block_data_used + tx_data_size;
-        let new_block_kv_updates = self.block_kv_updates_used + tx_kv_updates;
-
-        if new_block_data > block_data_limit {
-            return Err(BlockExecutionError::other(MegaBlockLimitExceededError::DataLimit {
-                block_used: self.block_data_used,
-                tx_used: tx_data_size,
-                limit: block_data_limit,
-            }));
-        }
-
-        if new_block_kv_updates > block_kv_update_limit {
-            return Err(BlockExecutionError::other(MegaBlockLimitExceededError::KVUpdateLimit {
-                block_used: self.block_kv_updates_used,
-                tx_used: tx_kv_updates,
-                limit: block_kv_update_limit,
-            }));
-        }
-
-        // Update accumulators
-        self.block_data_used = new_block_data;
-        self.block_kv_updates_used = new_block_kv_updates;
-
-        Ok(())
-    }
-}
-
 /// Implementation of `alloy_evm::block::BlockExecutor` for `MegaETH` block executor.
 ///
 /// This implementation delegates all block execution operations to the underlying
@@ -374,7 +286,7 @@ where
     C: OpHardforks,
     ExtEnvs: crate::ExternalEnvs,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
-    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718 + TxDASize, Receipt: TxReceipt>,
+    R: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
     crate::MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
 {
     type Transaction = R::Transaction;

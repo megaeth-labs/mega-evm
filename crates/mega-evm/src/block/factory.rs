@@ -6,7 +6,7 @@ use alloy_op_hardforks::OpHardforks;
 use alloy_primitives::{Bytes, B256};
 use revm::{database::State, inspector::NoOpInspector, Inspector};
 
-use crate::{MegaBlockExecutor, MegaEvm, MegaEvmEnvAndSettings, TxDASize};
+use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaEvmEnvAndSettings, MegaTxEnvelope};
 
 /// `MegaETH` block executor factory.
 ///
@@ -131,8 +131,7 @@ where
 impl<ChainSpec, ExtEnvs, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
     for MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvs>, ReceiptBuilder>
 where
-    ReceiptBuilder:
-        OpReceiptBuilder<Transaction: Transaction + Encodable2718 + TxDASize, Receipt: TxReceipt>,
+    ReceiptBuilder: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
     ChainSpec: OpHardforks + Clone,
     ExtEnvs: crate::ExternalEnvs + Clone,
     crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>
@@ -170,19 +169,9 @@ pub struct MegaBlockExecutionCtx {
     pub parent_beacon_block_root: Option<B256>,
     /// The block's extra data.
     pub extra_data: Bytes,
-    /// The maximum amount of data allowed to generate from a block.
-    /// Defaults to [`crate::constants::mini_rex::BLOCK_DATA_LIMIT`].
-    pub block_data_limit: u64,
-    /// The maximum amount of key-value updates allowed to generate from a block.
-    /// Defaults to [`crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT`].
-    pub block_kv_update_limit: u64,
-    /// The maximum size of all transactions (transaction body, not execution outcome) included in
-    /// a block. The difference between this limit and the `block_da_size_limit` is that the
-    /// current limit applies to the transaction size uncompressed, while the `block_da_size_limit`
-    /// applies to the transaction size after DA compression.
-    pub block_tx_size_limit: u64,
-    /// The maximum amount of data availability size allowed to generate from a block.
-    pub block_da_size_limit: u64,
+
+    /// The block limits.
+    pub block_limits: BlockLimits,
 }
 
 impl Default for MegaBlockExecutionCtx {
@@ -191,10 +180,7 @@ impl Default for MegaBlockExecutionCtx {
             parent_hash: B256::ZERO,
             parent_beacon_block_root: None,
             extra_data: Bytes::new(),
-            block_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
-            block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
-            block_tx_size_limit: u64::MAX,
-            block_da_size_limit: u64::MAX,
+            block_limits: BlockLimits::default(),
         }
     }
 }
@@ -209,39 +195,9 @@ impl MegaBlockExecutionCtx {
         Self { parent_hash, parent_beacon_block_root, extra_data, ..Default::default() }
     }
 
-    /// Set a custom block data limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified data limit.
-    pub fn with_data_limit(mut self, limit: u64) -> Self {
-        self.block_data_limit = limit;
-        self
-    }
-
-    /// Set a custom block KV update limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified KV update limit.
-    pub fn with_kv_update_limit(mut self, limit: u64) -> Self {
-        self.block_kv_update_limit = limit;
-        self
-    }
-
-    /// Set a custom block transaction size limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified transaction size limit.
-    pub fn with_tx_size_limit(mut self, limit: u64) -> Self {
-        self.block_tx_size_limit = limit;
-        self
-    }
-
-    /// Set a custom block data availability size limit.
-    ///
-    /// This is a builder method that consumes self and returns a new instance
-    /// with the specified data availability size limit.
-    pub fn with_da_size_limit(mut self, limit: u64) -> Self {
-        self.block_da_size_limit = limit;
+    /// Set the block limits.
+    pub fn with_block_limits(mut self, limits: BlockLimits) -> Self {
+        self.block_limits = limits;
         self
     }
 }
