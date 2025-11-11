@@ -1,4 +1,5 @@
-use alloy_evm::{precompiles::PrecompilesMap, Database};
+use crate::evm::precompiles_map::PrecompilesMap;
+use alloy_evm::Database;
 use alloy_primitives::TxKind;
 use delegate::delegate;
 use op_revm::{

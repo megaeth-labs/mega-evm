@@ -8,8 +8,8 @@ repository = "https://github.com/paradigmxyz/reth"
 exclude = [".github/"]
 
 [workspace]
-members = ["crates/mega-evm", "crates/state-test", "bin/mega-evme" ]
-default-members = ["crates/mega-evm", "crates/state-test", "bin/mega-evme"]
+members = ["crates/mega-evm", "crates/revm-compat", "crates/state-test", "bin/mega-evme" ]
+default-members = ["crates/mega-evm", "crates/revm-compat", "crates/state-test", "bin/mega-evme"]
 exclude = []
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
@@ -158,6 +158,7 @@ codegen-units = 1
 [workspace.dependencies]
 # megaeth 
 mega-evm = { path = "./crates/mega-evm" }
+revm-compat = { path = "./crates/revm-compat" }
 state-test = { path = "./crates/state-test" }
 salt = { git = "https://github.com/megaeth-labs/salt.git", rev = "10efc47cf172d69f47d72e4010bca2ec38efb7b8" }
 

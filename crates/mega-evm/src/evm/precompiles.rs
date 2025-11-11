@@ -3,8 +3,8 @@
 //! This module provides custom precompile implementations with `MegaETH`-specific
 //! gas cost overrides.
 
-use crate::{ExternalEnvs, MegaContext, MegaSpecId};
-use alloy_evm::{precompiles::PrecompilesMap, Database};
+use crate::{evm::precompiles_map::PrecompilesMap, ExternalEnvs, MegaContext, MegaSpecId};
+use alloy_evm::Database;
 use delegate::delegate;
 use once_cell::race::OnceBox;
 use op_revm::{OpContext, OpSpecId};
@@ -169,8 +169,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> PrecompileProvider<MegaContext<DB, Ext
 #[cfg(test)]
 mod tests {
     use super::{kzg_point_evaluation::GAS_COST, MegaPrecompiles};
-    use crate::{test_utils::MemoryDatabase, DefaultExternalEnvs, MegaContext, MegaSpecId};
-    use alloy_evm::precompiles::PrecompilesMap;
+    use crate::{
+        evm::precompiles_map::PrecompilesMap, test_utils::MemoryDatabase, DefaultExternalEnvs,
+        MegaContext, MegaSpecId,
+    };
     use alloy_primitives::Bytes;
     use revm::{
         handler::PrecompileProvider,

@@ -25,6 +25,7 @@ mod host;
 mod instructions;
 mod interfaces;
 mod precompiles;
+mod precompiles_map;
 mod result;
 mod spec;
 
@@ -36,10 +37,11 @@ pub use instructions::*;
 #[allow(unused_imports, unreachable_pub)]
 pub use interfaces::*;
 pub use precompiles::*;
+pub use precompiles_map::*;
 pub use result::*;
 pub use spec::*;
 
-use alloy_evm::{precompiles::PrecompilesMap, Database};
+use alloy_evm::Database;
 use revm::{
     context::{result::ResultAndState, BlockEnv},
     handler::{EthFrame, EvmTr},
@@ -117,14 +119,38 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     /// # Returns
     ///
     /// A new `Evm` instance configured with the provided context and inspector.
+    #[deprecated(note = "use `new_with_accelerated_precompiles` instead")]
     pub fn new(context: MegaContext<DB, ExtEnvs>) -> Self {
+        Self::new_with_accelerated_precompiles(context, None)
+    }
+
+    /// Creates a new `MegaETH` EVM instance with the given accelerated precompiles.
+    ///
+    /// # Parameters
+    ///
+    /// - `context`: The `MegaETH` context containing database, configuration, and `external_envs`
+    /// - `accelerated_precompile_creator`: The function to create the accelerated precompiles
+    ///
+    /// # Returns
+    ///
+    /// A new `Evm` instance configured with the provided context and accelerated precompiles.
+    pub fn new_with_accelerated_precompiles(
+        context: MegaContext<DB, ExtEnvs>,
+        accelerated_precompile_creator: Option<AcceleratedPrecompileCreator>,
+    ) -> Self {
         let spec = context.mega_spec();
+        let mut precompiles =
+            PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles());
+        if let Some(creator) = accelerated_precompile_creator {
+            precompiles.set_accelerated_precompiles(creator.call(spec));
+        }
+
         Self {
             inner: revm::context::Evm::new_with_inspector(
                 context,
                 NoOpInspector,
                 MegaInstructions::new(spec),
-                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles()),
+                precompiles,
             ),
             inspect: false,
         }

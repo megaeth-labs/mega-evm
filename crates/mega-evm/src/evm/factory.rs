@@ -1,4 +1,5 @@
-use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
+use crate::{evm::precompiles_map::PrecompilesMap, AcceleratedPrecompileCreator};
+use alloy_evm::{Database, EvmEnv};
 use core::convert::Infallible;
 use op_revm::L1BlockInfo;
 use revm::{context::result::EVMError, inspector::NoOpInspector, Inspector};
@@ -45,6 +46,10 @@ pub struct MegaEvmFactory<ExtEnvs> {
     /// The `external_envs` service to provide deterministic external information during EVM
     /// execution.
     external_envs: ExtEnvs,
+    /// An optional function that creates a mapping of accelerated precompiles for a given
+    /// [`MegaSpecId`].
+    /// If not provided, the default accelerated precompiles will be used.
+    accelerated_precompile_creator: Option<AcceleratedPrecompileCreator>,
 }
 
 impl Default for MegaEvmFactory<DefaultExternalEnvs<Infallible>> {
@@ -70,7 +75,27 @@ impl<ExtEnvs> MegaEvmFactory<ExtEnvs> {
     ///
     /// A new `EvmFactory` instance configured with the provided `external_envs`.
     pub fn new(external_envs: ExtEnvs) -> Self {
-        Self { external_envs }
+        Self { external_envs, accelerated_precompile_creator: None }
+    }
+
+    /// Creates a new [`EvmFactory`] instance with the given `external_envs` and
+    /// `accelerated_precompile_creator`.
+    ///
+    /// # Parameters
+    ///
+    /// - `external_envs`: The `external_envs` service to provide deterministic external information
+    ///   during EVM execution
+    /// - `accelerated_precompile_creator`: The function to create the accelerated precompiles
+    ///
+    /// # Returns
+    ///
+    /// A new [`EvmFactory`] instance configured with the provided `external_envs` and
+    /// `accelerated_precompile_creator`.
+    pub fn new_with_accelerated_precompile_creator(
+        external_envs: ExtEnvs,
+        accelerated_precompile_creator: AcceleratedPrecompileCreator,
+    ) -> Self {
+        Self { external_envs, accelerated_precompile_creator: Some(accelerated_precompile_creator) }
     }
 
     /// Provides a reference to the external environments.
@@ -104,7 +129,7 @@ where
             .with_data_limit(data_limit)
             .with_kv_update_limit(kv_update_limit)
             .with_compute_gas_limit(compute_gas_limit);
-        MegaEvm::new(ctx)
+        MegaEvm::new_with_accelerated_precompiles(ctx, self.accelerated_precompile_creator.clone())
     }
 
     /// Creates a new `MegaEvm` instance with the given configuration and inspector.

@@ -2862,6 +2862,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "revm-compat"
+version = "0.0.1"
+dependencies = [
+ "alloy-evm",
+ "alloy-op-evm",
+ "op-revm",
+ "revm",
+ "revm-inspectors",
+]
+
+[[package]]
 name = "revm-context"
 version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

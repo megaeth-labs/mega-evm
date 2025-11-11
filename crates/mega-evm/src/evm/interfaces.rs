@@ -1,4 +1,5 @@
-use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
+use crate::evm::precompiles_map::PrecompilesMap;
+use alloy_evm::{Database, EvmEnv};
 use alloy_primitives::{Address, Bytes};
 use revm::{
     context::{
