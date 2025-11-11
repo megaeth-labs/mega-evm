@@ -422,13 +422,13 @@ fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErro
     // Execute
     let timer = Instant::now();
     let (db, exec_result) = if ctx.trace {
-        let mut evm = MegaEvm::new(evm_context)
+        let mut evm = MegaEvm::new_with_accelerated_precompiles(evm_context, None)
             .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
         let res = evm.inspect_tx_commit(tx);
         let db = evm.into_journaled_state().database;
         (db, res)
     } else {
-        let mut evm = MegaEvm::new(evm_context);
+        let mut evm = MegaEvm::new_with_accelerated_precompiles(evm_context, None);
         let res = evm.transact_commit(tx);
         let db = evm.into_journaled_state().database;
         (db, res)
@@ -470,7 +470,7 @@ fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
         .with_block(ctx.block.clone());
     let mut tx = MegaTransaction::new(ctx.tx.clone());
     tx.enveloped_tx = Some(Bytes::default());
-    let mut evm = MegaEvm::new(evm_context)
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(evm_context, None)
         .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
 
     let exec_result = evm.inspect_tx_commit(tx);

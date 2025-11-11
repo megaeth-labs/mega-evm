@@ -185,7 +185,7 @@ mod tests {
             chain.operator_fee_scalar = Some(U256::from(0));
             chain.operator_fee_constant = Some(U256::from(0));
         });
-        let mut evm = MegaEvm::new(context);
+        let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
         let tx = TxEnvBuilder::default().call(contract).gas_limit(1_000_000_000).build_fill();
         let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());

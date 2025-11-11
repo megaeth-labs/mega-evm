@@ -46,7 +46,7 @@ fn create_evm(db: MemoryDatabase) -> MegaEvm<MemoryDatabase, NoOpInspector, Defa
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
 
-    MegaEvm::new(context)
+    MegaEvm::new_with_accelerated_precompiles(context, None)
 }
 
 /// Creates a simple contract that returns the caller address.
@@ -436,7 +436,7 @@ fn test_mega_system_transaction_no_operator_fees() {
     context.chain_mut().operator_fee_scalar = Some(U256::from(1_000_000));
     context.chain_mut().operator_fee_constant = Some(U256::from(10_000));
 
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
 
     // Get the initial balance before transaction
     let balance_before = evm.ctx().db_mut().basic(MEGA_SYSTEM_ADDRESS).unwrap().unwrap().balance;
@@ -493,7 +493,7 @@ fn test_mega_system_transaction_value_transfer_no_fees() {
     context.chain_mut().operator_fee_scalar = Some(U256::from(1_000_000));
     context.chain_mut().operator_fee_constant = Some(U256::from(10_000));
 
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
 
     // Verify initial balances are set correctly
     let sender_balance_before =

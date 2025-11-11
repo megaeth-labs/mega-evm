@@ -31,7 +31,7 @@ where
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
     let tx = TxEnv {
         caller,
         kind: callee.map_or(TxKind::Create, TxKind::Call),

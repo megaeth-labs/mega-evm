@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set operator fee fields to zero to avoid panic in MINI_REX (ISTHMUS) spec
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
 
     let caller = address!("0000000000000000000000000000000000100000");
 

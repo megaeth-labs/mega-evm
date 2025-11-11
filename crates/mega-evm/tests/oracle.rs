@@ -58,7 +58,8 @@ fn execute_transaction<
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let mut evm = MegaEvm::new(context).with_inspector(inspector);
+    let mut evm =
+        MegaEvm::new_with_accelerated_precompiles(context, None).with_inspector(inspector);
     let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let result = result_envelope.result;
     // Get oracle_accessed before returning to avoid RefCell borrow conflicts

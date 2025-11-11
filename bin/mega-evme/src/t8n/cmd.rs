@@ -200,7 +200,7 @@ impl Cmd {
             tx.enveloped_tx = Some(Bytes::default());
 
             // Execute transaction
-            let mut evm = MegaEvm::new(evm_context);
+            let mut evm = MegaEvm::new_with_accelerated_precompiles(evm_context, None);
             let exec_result = evm.transact_commit(tx);
 
             match &exec_result {

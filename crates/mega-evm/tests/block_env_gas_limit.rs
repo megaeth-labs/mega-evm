@@ -69,7 +69,8 @@ fn execute_bytecode_with_inspector<
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let mut evm = MegaEvm::new(context).with_inspector(inspector);
+    let mut evm =
+        MegaEvm::new_with_accelerated_precompiles(context, None).with_inspector(inspector);
     let result = Evm::transact_commit(&mut evm, tx).unwrap();
 
     (result, evm)

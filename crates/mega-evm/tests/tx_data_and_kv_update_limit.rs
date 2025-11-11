@@ -47,7 +47,7 @@ fn transact(
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
@@ -955,7 +955,7 @@ fn test_limits_reset_across_multiple_transactions() {
     context.modify_cfg(|cfg| {
         cfg.disable_nonce_check = true;
     });
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
 
     // Execute first transaction
     let tx1 = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();

@@ -50,7 +50,7 @@ fn test_block_env_tracking_with_evm() {
         let block_env = BlockEnv { number: U256::from(10), ..Default::default() };
         context.set_block(block_env);
 
-        let mut evm = MegaEvm::new(context);
+        let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
 
         // Ensure we start with no block env access
         assert!(
@@ -178,7 +178,7 @@ fn test_multiple_block_env_accesses() {
     // Configure L1BlockInfo to avoid operator fee scalar panic
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
 
     // Execute transaction
     let tx = MegaTransaction {
@@ -225,7 +225,7 @@ fn test_block_env_reset_between_transactions() {
     // Configure L1BlockInfo to avoid operator fee scalar panic
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
 
     // First transaction - accesses block env
     let tx1 = MegaTransaction {

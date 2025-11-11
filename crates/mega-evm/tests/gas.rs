@@ -39,7 +39,7 @@ fn transact(
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let mut evm = MegaEvm::new(context);
+    let mut evm = MegaEvm::new_with_accelerated_precompiles(context, None);
     let tx = TxEnv {
         caller,
         kind: callee.map_or(TxKind::Create, TxKind::Call),
@@ -839,7 +839,8 @@ fn gas_forward_test_case(spec: MegaSpecId, is_create: bool, approx_expected_forw
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut inspector = CallGasInspector { approx_expected_forwarded_gas, reached: false };
-    let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
+    let mut evm =
+        MegaEvm::new_with_accelerated_precompiles(context, None).with_inspector(&mut inspector);
     let tx = TxEnv {
         caller: CALLER,
         kind: TxKind::Call(CALLEE),

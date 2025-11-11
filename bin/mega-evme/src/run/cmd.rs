@@ -427,7 +427,8 @@ impl Cmd {
             // Execute with tracing inspector
             let config = TracingInspectorConfig::all();
             let mut inspector = TracingInspector::new(config);
-            let mut evm = MegaEvm::new(evm_context).with_inspector(&mut inspector);
+            let mut evm = MegaEvm::new_with_accelerated_precompiles(evm_context, None)
+                .with_inspector(&mut inspector);
 
             let result_and_state = evm.inspect_tx(tx).map_err(|e| {
                 super::RunError::ExecutionError(format!("EVM execution failed: {:?}", e))
@@ -466,7 +467,7 @@ impl Cmd {
             Ok((result_and_state.result, result_and_state.state, Some(trace_str)))
         } else {
             // Execute without tracing
-            let mut evm = MegaEvm::new(evm_context);
+            let mut evm = MegaEvm::new_with_accelerated_precompiles(evm_context, None);
             let result_and_state = evm.transact(tx).map_err(|e| {
                 super::RunError::ExecutionError(format!("EVM execution failed: {:?}", e))
             })?;

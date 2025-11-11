@@ -35,7 +35,7 @@ fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, GasInspector, DefaultExternalEnvs> 
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
 
-    MegaEvm::new(context).with_inspector(GasInspector::new())
+    MegaEvm::new_with_accelerated_precompiles(context, None).with_inspector(GasInspector::new())
 }
 
 fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
