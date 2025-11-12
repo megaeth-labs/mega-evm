@@ -27,7 +27,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 use crate::{
     ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
     BlockLimiter, BlockMegaTransactionOutcome, MegaBlockExecutionCtx, MegaSpecId, MegaTransaction,
-    MegaTransactionOutcome, MegaTxEnvelope, TxDASize,
+    MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -102,6 +102,7 @@ where
             "mega-evm assumes Isthmus hardfork is always active"
         );
 
+        #[cfg(not(any(test, feature = "test-utils")))]
         assert!(
             ctx.block_limits.block_gas_limit == evm.block().gas_limit,
             "block gas limit must be set to the block env gas limit"
@@ -126,7 +127,10 @@ where
     C: OpHardforks,
     ExtEnvs: crate::ExternalEnvs,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
-    R: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
+    R: OpReceiptBuilder<
+        Transaction: Transaction + Encodable2718 + MegaTransactionExt,
+        Receipt: TxReceipt,
+    >,
 {
     /// Execute a transaction with a commit condition function without committing the execution
     /// result to the block executor's inner state.
@@ -156,6 +160,7 @@ where
             tx.tx().gas_limit(),
             tx_size,
             da_size,
+            is_deposit,
         )?;
 
         // Cache the depositor account prior to the state transition for the deposit nonce.
@@ -281,7 +286,10 @@ where
     C: OpHardforks,
     ExtEnvs: crate::ExternalEnvs,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
-    R: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
+    R: OpReceiptBuilder<
+        Transaction: Transaction + Encodable2718 + MegaTransactionExt,
+        Receipt: TxReceipt,
+    >,
     crate::MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
 {
     type Transaction = R::Transaction;

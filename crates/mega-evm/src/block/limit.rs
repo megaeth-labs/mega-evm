@@ -78,6 +78,7 @@
 //! 3. **Data Availability Size Limit**
 //!    - Tx-level: `single_tx_da_size_limit` - Maximum DA size per transaction
 //!    - Block-level: `block_da_size_limit` - Total compressed DA size in block
+//!    - **Note**: Deposit transactions are exempt from DA size limit checks
 //!
 //! ## Post-execution Limits (Checked during/after execution)
 //!
@@ -94,6 +95,19 @@
 //!    - Tx-level: `single_tx_kv_update_limit` - Maximum storage updates per transaction
 //!    - Block-level: `block_kv_update_limit` - Total storage updates in block
 //!    - Tracks: SSTORE operations and account updates
+//!
+//! # Deposit Transaction Exemptions
+//!
+//! Deposit transactions (Optimism Layer 1 to Layer 2 deposits) receive special treatment:
+//!
+//! - **DA Size Limit Exemption**: Deposit transactions are exempt from both transaction-level and
+//!   block-level Data Availability size limit checks during pre-execution validation
+//! - **Rationale**: Deposit transactions are trustless L1→L2 messages that cannot be censored. They
+//!   must be included in blocks regardless of their DA size to maintain bridge integrity
+//! - **Tracking**: While exempt from limit checks, deposit DA sizes are still tracked and
+//!   accumulated in block DA usage counters for monitoring purposes
+//! - **Other Limits**: Deposit transactions are still subject to all other limits (gas, tx size,
+//!   compute gas, data size, KV updates)
 //!
 //! # Block Building Workflow
 //!
@@ -165,15 +179,17 @@
 //! - [`crate::MegaBlockExecutor`] - Block executor that orchestrates limit checks
 //! - [Block and Transaction Limits Documentation](../../../docs/BLOCK_AND_TX_LIMITS.md)
 
+use alloy_consensus::Transaction;
 use alloy_evm::{
     block::{BlockExecutionError, BlockValidationError},
-    RecoveredTx,
+    EvmEnv, RecoveredTx,
 };
 use alloy_primitives::TxHash;
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
 use crate::{
-    BlockMegaTransactionOutcome, EvmTxRuntimeLimits, MegaBlockLimitExceededError, MegaTxEnvelope,
-    MegaTxLimitExceededError,
+    BlockMegaTransactionOutcome, EvmTxRuntimeLimits, MegaBlockLimitExceededError, MegaSpecId,
+    MegaTransactionExt, MegaTxLimitExceededError,
 };
 
 /// Configuration for block-level resource limits.
@@ -322,6 +338,18 @@ impl BlockLimits {
             single_tx_compute_gas_limit: u64::MAX,
             block_compute_gas_limit: u64::MAX,
         }
+    }
+
+    /// Creates a new block limits instance from an EVM environment. This method will use the
+    /// appropriate spec limits and set the block gas limit from the EVM environment. Other
+    /// unspecified limits will be set to unlimited. This method is useful for
+    /// replaying a block.
+    pub fn from_evm_env(evm_env: &EvmEnv<MegaSpecId>) -> Self {
+        match *evm_env.spec_id() {
+            MegaSpecId::EQUIVALENCE => Self::no_limits().fit_equivalence(),
+            MegaSpecId::MINI_REX => Self::no_limits().fit_mini_rex(),
+        }
+        .with_block_gas_limit(evm_env.block_env.gas_limit)
     }
 
     /// Fits the block limits to the equivalence spec. Overrides those limits with the
@@ -665,6 +693,7 @@ impl BlockLimiter {
         gas_limit: u64,
         tx_size: u64,
         da_size: u64,
+        is_deposit: bool,
     ) -> Result<(), BlockExecutionError> {
         // Check single transaction gas limit
         if gas_limit > self.limits.single_tx_gas_limit {
@@ -710,27 +739,30 @@ impl BlockLimiter {
             }));
         }
 
-        // Check single transaction data availability size limit
-        if da_size > self.limits.single_tx_da_size_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaTxLimitExceededError::DataAvailabilitySizeLimit {
-                    da_size,
-                    limit: self.limits.single_tx_da_size_limit,
-                }),
-            }));
-        }
+        // Deposit transactions are exempt from data availability size limits
+        if !is_deposit {
+            // Check single transaction data availability size limit
+            if da_size > self.limits.single_tx_da_size_limit {
+                return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                    hash: tx_hash,
+                    error: Box::new(MegaTxLimitExceededError::DataAvailabilitySizeLimit {
+                        da_size,
+                        limit: self.limits.single_tx_da_size_limit,
+                    }),
+                }));
+            }
 
-        // Check block data availability size limit
-        if da_size + self.block_da_size_used > self.limits.block_da_size_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: tx_hash,
-                error: Box::new(MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
-                    block_used: self.block_da_size_used,
-                    tx_used: da_size,
-                    limit: self.limits.block_da_size_limit,
-                }),
-            }));
+            // Check block data availability size limit
+            if da_size + self.block_da_size_used > self.limits.block_da_size_limit {
+                return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                    hash: tx_hash,
+                    error: Box::new(MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
+                        block_used: self.block_da_size_used,
+                        tx_used: da_size,
+                        limit: self.limits.block_da_size_limit,
+                    }),
+                }));
+            }
         }
 
         Ok(())
@@ -800,10 +832,12 @@ impl BlockLimiter {
     /// // Only commit if post_execution_check passed
     /// db.commit(result.state);
     /// ```
-    pub fn post_execution_check<T: RecoveredTx<MegaTxEnvelope>>(
+    pub fn post_execution_check<T: Transaction + MegaTransactionExt>(
         &mut self,
-        outcome: &BlockMegaTransactionOutcome<T>,
+        outcome: &BlockMegaTransactionOutcome<impl RecoveredTx<T>>,
     ) -> Result<(), BlockExecutionError> {
+        let is_deposit = outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
+
         // Block gas limit. No need to check here since it's checked before transaction execution.
         self.block_gas_used += outcome.result.gas_used();
 
@@ -812,8 +846,10 @@ impl BlockLimiter {
         self.block_tx_size_used += outcome.tx_size;
 
         // Block da size limit, no need to check here since it's checked before transaction
-        // execution.
-        self.block_da_size_used += outcome.da_size;
+        // execution. Only appliable for non-deposit transactions.
+        if !is_deposit {
+            self.block_da_size_used += outcome.da_size;
+        }
 
         // Block data limit
         if self.block_data_used + outcome.data_size > self.limits.block_data_limit {

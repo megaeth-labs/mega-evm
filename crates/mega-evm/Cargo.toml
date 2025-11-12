@@ -43,6 +43,7 @@ thiserror.workspace = true
 [dev-dependencies]
 criterion = "0.5"
 hex = "0.4"
+rand = "0.9"
 mega-evm = { path = ".", features = ["test-utils"] }
 revm-inspectors.workspace = true
 serde_json = "1.0"
