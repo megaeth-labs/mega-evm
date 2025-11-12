@@ -6,7 +6,7 @@
 //!
 //! # Overview
 //!
-//! MegaEVM enforces **6 types of limits**, each with both **transaction-level** and **block-level**
+//! `MegaEVM` enforces **6 types of limits**, each with both **transaction-level** and **block-level**
 //! variants:
 //!
 //! 1. **Gas Limit** - Traditional EVM gas consumption
@@ -138,7 +138,7 @@
 //!     .fit_equivalence();
 //! ```
 //!
-//! ## For MINI_REX Specification (Enhanced with Additional Limits)
+//! ## For `MINI_REX` Specification (Enhanced with Additional Limits)
 //!
 //! ```rust,ignore
 //! use mega_evm::constants::mini_rex;
