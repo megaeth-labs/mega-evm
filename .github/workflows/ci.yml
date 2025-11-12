@@ -31,6 +31,11 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      - name: Run cargo-sort
+        run: |
+          cargo install cargo-sort
+          cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
+
       - name: Run Fmt
         run: cargo fmt --all --check
 

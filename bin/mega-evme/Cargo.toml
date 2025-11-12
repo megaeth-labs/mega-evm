@@ -29,7 +29,7 @@ revm-inspectors.workspace = true
 alloy-consensus = { workspace = true, features = ["serde"] }
 alloy-primitives.workspace = true
 alloy-rpc-types-trace.workspace = true
-alloy-serde = { workspace = true, features = ["default"]}
+alloy-serde = { workspace = true, features = ["default"] }
 
 # op
 op-alloy-consensus.workspace = true
