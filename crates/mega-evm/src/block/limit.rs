@@ -6,8 +6,8 @@
 //!
 //! # Overview
 //!
-//! `MegaEVM` enforces **6 types of limits**, each with both **transaction-level** and **block-level**
-//! variants:
+//! `MegaEVM` enforces **6 types of limits**, each with both **transaction-level** and
+//! **block-level** variants:
 //!
 //! 1. **Gas Limit** - Traditional EVM gas consumption
 //! 2. **Transaction Size Limit** - EIP-2718 encoded transaction size
