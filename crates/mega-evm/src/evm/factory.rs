@@ -1,11 +1,11 @@
 use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
 use core::convert::Infallible;
 use op_revm::L1BlockInfo;
-use revm::{context::result::EVMError, inspector::NoOpInspector, Inspector};
+use revm::{context::result::EVMError, Inspector};
 
 use crate::{
-    DefaultExternalEnvs, ExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError,
+    DefaultExternalEnvs, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -84,69 +84,6 @@ impl<ExtEnvs> MegaEvmFactory<ExtEnvs> {
     }
 }
 
-impl<ExtEnvs> MegaEvmFactory<ExtEnvs>
-where
-    ExtEnvs: ExternalEnvs + Clone,
-{
-    /// Creates a new `MegaEvm` instance with the given configuration.
-    pub fn create_evm_with_config<DB: Database>(
-        &self,
-        db: DB,
-        config: MegaEvmEnvAndSettings,
-    ) -> MegaEvm<DB, NoOpInspector, ExtEnvs> {
-        let MegaEvmEnvAndSettings { evm_env, data_limit, kv_update_limit, compute_gas_limit } =
-            config;
-        let ctx = MegaContext::new(db, evm_env.cfg_env().spec, self.external_envs.clone())
-            .with_tx(MegaTransaction::default())
-            .with_block(evm_env.block_env)
-            .with_cfg(evm_env.cfg_env)
-            .with_chain(L1BlockInfo::default())
-            .with_data_limit(data_limit)
-            .with_kv_update_limit(kv_update_limit)
-            .with_compute_gas_limit(compute_gas_limit);
-        MegaEvm::new(ctx)
-    }
-
-    /// Creates a new `MegaEvm` instance with the given configuration and inspector.
-    pub fn create_evm_with_config_and_inspector<
-        DB: Database,
-        I: Inspector<MegaContext<DB, ExtEnvs>>,
-    >(
-        &self,
-        db: DB,
-        config: MegaEvmEnvAndSettings,
-        inspector: I,
-    ) -> MegaEvm<DB, I, ExtEnvs> {
-        let ctx = self.create_evm_with_config(db, config);
-        ctx.with_inspector(inspector)
-    }
-}
-
-/// Configuration for the `MegaEvm`. This struct provides a collective settings to configure the
-/// `MegaContext`.
-#[derive(Debug, Clone)]
-pub struct MegaEvmEnvAndSettings {
-    /// The EVM environment.
-    pub evm_env: EvmEnv<MegaSpecId>,
-    /// The data limit for one transaction.
-    pub data_limit: u64,
-    /// The KV update limit for one transaction.
-    pub kv_update_limit: u64,
-    /// The compute gas limit for one transaction.
-    pub compute_gas_limit: u64,
-}
-
-impl Default for MegaEvmEnvAndSettings {
-    fn default() -> Self {
-        Self {
-            evm_env: EvmEnv::default(),
-            data_limit: crate::constants::mini_rex::TX_DATA_LIMIT,
-            kv_update_limit: crate::constants::mini_rex::TX_KV_UPDATE_LIMIT,
-            compute_gas_limit: crate::constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
-        }
-    }
-}
-
 impl<ExtEnvs> alloy_evm::EvmFactory for MegaEvmFactory<ExtEnvs>
 where
     ExtEnvs: ExternalEnvs + Clone,
@@ -180,8 +117,14 @@ where
         db: DB,
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
-        let config = MegaEvmEnvAndSettings { evm_env, ..Default::default() };
-        self.create_evm_with_config(db, config)
+        let runtime_limits = EvmTxRuntimeLimits::from_spec(*evm_env.spec_id());
+        let ctx = MegaContext::new(db, evm_env.cfg_env().spec, self.external_envs.clone())
+            .with_tx(MegaTransaction::default())
+            .with_block(evm_env.block_env)
+            .with_cfg(evm_env.cfg_env)
+            .with_chain(L1BlockInfo::default())
+            .with_tx_runtime_limits(runtime_limits);
+        MegaEvm::new(ctx)
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -190,7 +133,6 @@ where
         input: EvmEnv<Self::Spec>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let config = MegaEvmEnvAndSettings { evm_env: input, ..Default::default() };
-        self.create_evm_with_config_and_inspector(db, config, inspector)
+        Self::create_evm(self, db, input).with_inspector(inspector)
     }
 }

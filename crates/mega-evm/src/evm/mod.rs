@@ -24,6 +24,7 @@ mod factory;
 mod host;
 mod instructions;
 mod interfaces;
+mod limit;
 mod precompiles;
 mod result;
 mod spec;
@@ -35,6 +36,7 @@ pub use host::*;
 pub use instructions::*;
 #[allow(unused_imports, unreachable_pub)]
 pub use interfaces::*;
+pub use limit::*;
 pub use precompiles::*;
 pub use result::*;
 pub use spec::*;
@@ -149,6 +151,18 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
             self.inner.precompiles,
         );
         MegaEvm { inner, inspect: true }
+    }
+
+    /// Sets the transaction runtime limits for the EVM.
+    pub fn with_tx_runtime_limits(self, tx_limits: EvmTxRuntimeLimits) -> Self {
+        let inner = revm::context::Evm {
+            ctx: self.inner.ctx.with_tx_runtime_limits(tx_limits),
+            inspector: self.inner.inspector,
+            instruction: self.inner.instruction,
+            precompiles: self.inner.precompiles,
+            frame_stack: self.inner.frame_stack,
+        };
+        Self { inner, inspect: self.inspect }
     }
 }
 

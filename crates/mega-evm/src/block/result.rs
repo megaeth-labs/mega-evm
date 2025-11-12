@@ -90,6 +90,17 @@ pub enum MegaBlockLimitExceededError {
         limit: u64,
     },
 
+    /// Block compute gas limit exceeded.
+    #[error("Block compute gas limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    ComputeGasLimit {
+        /// Compute gas used by block so far
+        block_used: u64,
+        /// Compute gas used by current transaction
+        tx_used: u64,
+        /// Block compute gas limit
+        limit: u64,
+    },
+
     /// Transaction size limit exceeded.
     #[error("Transaction size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
     TransactionSizeLimit {

@@ -5,8 +5,8 @@ use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::mini_rex::{ORACLE_ACCESS_REMAINING_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    ORACLE_CONTRACT_ADDRESS,
+    BlockLimits, DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{
@@ -595,6 +595,7 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
         B256::ZERO,
         Some(B256::ZERO), // Set a beacon block root
         Default::default(),
+        BlockLimits::no_limits(),
     );
 
     // Try Base mainnet which should have the right hardfork configuration
