@@ -1,12 +1,14 @@
 use alloy_consensus::{Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
-use alloy_evm::{block::BlockExecutorFor, Database, FromRecoveredTx, FromTxWithEncoded};
+use alloy_evm::{
+    block::BlockExecutorFor, Database, EvmEnv, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
+};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_op_hardforks::OpHardforks;
 use alloy_primitives::{Bytes, B256};
 use revm::{database::State, inspector::NoOpInspector, Inspector};
 
-use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaEvmEnvAndSettings, MegaTxEnvelope};
+use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaSpecId, MegaTxEnvelope};
 
 /// `MegaETH` block executor factory.
 ///
@@ -83,11 +85,11 @@ where
     /// # Returns
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
-    pub fn create_executor_with_config<'a, DB>(
+    pub fn create_executor<'a, DB>(
         &self,
         db: &'a mut State<DB>,
         block_ctx: MegaBlockExecutionCtx,
-        evm_config: MegaEvmEnvAndSettings,
+        evm_env: EvmEnv<MegaSpecId>,
     ) -> MegaBlockExecutor<
         ChainSpec,
         MegaEvm<&'a mut State<DB>, NoOpInspector, ExtEnvs>,
@@ -96,7 +98,8 @@ where
     where
         DB: Database + 'a,
     {
-        let evm = self.evm_factory.create_evm_with_config(db, evm_config);
+        let runtime_limits = block_ctx.block_limits.to_evm_tx_runtime_limits();
+        let evm = self.evm_factory.create_evm(db, evm_env).with_tx_runtime_limits(runtime_limits);
         MegaBlockExecutor::new(evm, block_ctx, self.spec.clone(), self.receipt_builder.clone())
     }
 
@@ -112,18 +115,22 @@ where
     /// # Returns
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
-    pub fn create_executor_with_config_and_inspector<'a, DB, I>(
+    pub fn create_executor_with_inspector<'a, DB, I>(
         &self,
         db: &'a mut State<DB>,
         block_ctx: MegaBlockExecutionCtx,
-        evm_config: MegaEvmEnvAndSettings,
+        evm_env: EvmEnv<MegaSpecId>,
         inspector: I,
     ) -> MegaBlockExecutor<ChainSpec, MegaEvm<&'a mut State<DB>, I, ExtEnvs>, ReceiptBuilder>
     where
         DB: Database + 'a,
         I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvs>> + 'a,
     {
-        let evm = self.evm_factory.create_evm_with_config_and_inspector(db, evm_config, inspector);
+        let runtime_limits = block_ctx.block_limits.to_evm_tx_runtime_limits();
+        let evm = self
+            .evm_factory
+            .create_evm_with_inspector(db, evm_env, inspector)
+            .with_tx_runtime_limits(runtime_limits);
         MegaBlockExecutor::new(evm, block_ctx, self.spec.clone(), self.receipt_builder.clone())
     }
 }
@@ -174,30 +181,14 @@ pub struct MegaBlockExecutionCtx {
     pub block_limits: BlockLimits,
 }
 
-impl Default for MegaBlockExecutionCtx {
-    fn default() -> Self {
-        Self {
-            parent_hash: B256::ZERO,
-            parent_beacon_block_root: None,
-            extra_data: Bytes::new(),
-            block_limits: BlockLimits::default(),
-        }
-    }
-}
-
 impl MegaBlockExecutionCtx {
     /// Create a new block execution context with default limits.
     pub fn new(
         parent_hash: B256,
         parent_beacon_block_root: Option<B256>,
         extra_data: Bytes,
+        block_limits: BlockLimits,
     ) -> Self {
-        Self { parent_hash, parent_beacon_block_root, extra_data, ..Default::default() }
-    }
-
-    /// Set the block limits.
-    pub fn with_block_limits(mut self, limits: BlockLimits) -> Self {
-        self.block_limits = limits;
-        self
+        Self { parent_hash, parent_beacon_block_root, extra_data, block_limits }
     }
 }

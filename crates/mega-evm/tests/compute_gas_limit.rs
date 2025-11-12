@@ -8,8 +8,8 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    DefaultExternalEnvs, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionError,
 };
 use revm::{
     bytecode::opcode::*,
@@ -47,7 +47,9 @@ fn transact(
     tx: TxEnv,
 ) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
     let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default())
-        .with_compute_gas_limit(compute_gas_limit);
+        .with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(compute_gas_limit),
+        );
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

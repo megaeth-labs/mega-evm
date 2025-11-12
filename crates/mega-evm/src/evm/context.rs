@@ -32,8 +32,8 @@ use std::rc::Rc;
 use core::cell::RefCell;
 
 use crate::{
-    constants, AdditionalLimit, DefaultExternalEnvs, DynamicGasCost, ExternalEnvs, MegaSpecId,
-    VolatileDataAccess, VolatileDataAccessTracker,
+    constants, AdditionalLimit, DefaultExternalEnvs, DynamicGasCost, EvmTxRuntimeLimits,
+    ExternalEnvs, MegaSpecId, VolatileDataAccess, VolatileDataAccessTracker,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -99,10 +99,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
         }
 
+        let tx_limits = EvmTxRuntimeLimits::from_spec(spec);
         Self {
             spec,
             disable_beneficiary: false,
-            additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
+            additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>().saturating_sub(1),
@@ -128,6 +129,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// # Returns
     ///
     /// Returns a new `Context` instance wrapping the provided context.
+    #[deprecated(note = "Use `MegaContext::new` instead")]
     pub fn new_with_context(
         context: OpContext<DB>,
         spec: MegaSpecId,
@@ -150,10 +152,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             }
         }
 
+        let tx_limits = EvmTxRuntimeLimits::from_spec(spec);
         Self {
             spec,
             disable_beneficiary: false,
-            additional_limit: Rc::new(RefCell::new(AdditionalLimit::default())),
+            additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>() - 1,
@@ -303,57 +306,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
         self
     }
 
-    /// Sets the data limit for the EVM.
-    ///
-    /// When the data limit is reached, the transaction will error and halt
-    /// (preserving remaining gas). This limit controls the maximum amount
-    /// of data that can be processed during transaction execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `data_limit` - The maximum amount of data allowed (in bytes)
-    ///
-    /// # Returns
-    ///
-    /// Returns `self` for method chaining.
-    pub fn with_data_limit(self, data_limit: u64) -> Self {
-        self.additional_limit.borrow_mut().data_limit = data_limit;
-        self
-    }
-
-    /// Sets the KV update limit for the EVM. When the KV update limit is reached,
-    /// the transaction will error and halt (preserving remaining gas).
-    ///
-    /// This limit controls the maximum number of key-value storage operations
-    /// (reads, writes, deletes) that can be performed during transaction execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `kv_update_limit` - The maximum number of KV operations allowed
-    ///
-    /// # Returns
-    ///
-    /// Returns `self` for method chaining.
-    pub fn with_kv_update_limit(self, kv_update_limit: u64) -> Self {
-        self.additional_limit.borrow_mut().kv_update_limit = kv_update_limit;
-        self
-    }
-
-    /// Sets the compute gas limit for the EVM. When the compute gas limit is reached,
-    /// the transaction will error and halt (preserving remaining gas).
-    ///
-    /// This limit controls the maximum total compute gas that can be consumed during transaction
-    /// execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `compute_gas_limit` - The maximum total compute gas allowed
-    ///
-    /// # Returns
-    ///
-    /// Returns `self` for method chaining.
-    pub fn with_compute_gas_limit(self, compute_gas_limit: u64) -> Self {
-        self.additional_limit.borrow_mut().compute_gas_limit = compute_gas_limit;
+    /// Sets the transaction limits for the EVM.
+    pub fn with_tx_runtime_limits(mut self, tx_limits: EvmTxRuntimeLimits) -> Self {
+        self.additional_limit = Rc::new(RefCell::new(AdditionalLimit::new(tx_limits)));
         self
     }
 }

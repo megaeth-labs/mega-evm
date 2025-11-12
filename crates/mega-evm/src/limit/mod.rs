@@ -11,7 +11,7 @@ use revm::{
     },
 };
 
-use crate::{constants, MegaHaltReason, MegaTransaction};
+use crate::{EvmTxRuntimeLimits, MegaHaltReason, MegaTransaction};
 
 mod compute_gas;
 mod data_size;
@@ -108,14 +108,15 @@ pub struct LimitUsage {
     pub compute_gas: u64,
 }
 
-impl Default for AdditionalLimit {
-    fn default() -> Self {
+impl AdditionalLimit {
+    /// Creates a new `AdditionalLimit` instance from the given `MegaSpecId`.
+    pub fn new(limits: EvmTxRuntimeLimits) -> Self {
         Self {
             has_exceeded_limit: AdditionalLimitResult::WithinLimit,
             rescued_gas: 0,
-            data_limit: constants::mini_rex::TX_DATA_LIMIT,
-            kv_update_limit: constants::mini_rex::TX_KV_UPDATE_LIMIT,
-            compute_gas_limit: constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
+            data_limit: limits.tx_data_size_limit,
+            kv_update_limit: limits.tx_kv_updates_limit,
+            compute_gas_limit: limits.tx_compute_gas_limit,
             compute_gas_tracker: compute_gas::ComputeGasTracker::new(),
             data_size_tracker: data_size::DataSizeTracker::new(),
             kv_update_counter: kv_update::KVUpdateCounter::new(),
