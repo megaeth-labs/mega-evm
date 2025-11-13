@@ -150,7 +150,7 @@ For each transaction:
 These indicate invalid transactions that can never be included:
 
 - `MegaTxLimitExceededError::TransactionGasLimit` - Gas limit too high
-- `MegaTxLimitExceededError::TransactionSizeLimit` - Transaction too large
+- `MegaTxLimitExceededError::TransactionEncodeSizeLimit` - Transaction too large
 - `MegaTxLimitExceededError::DataAvailabilitySizeLimit` - DA size too large
 
 ### Block-level Errors → Skip and Try Next
@@ -158,9 +158,9 @@ These indicate invalid transactions that can never be included:
 These indicate the transaction doesn't fit in the current block:
 
 - `MegaBlockLimitExceededError::ComputeGasLimit` - Would exceed block compute gas
-- `MegaBlockLimitExceededError::DataLimit` - Would exceed block data limit
+- `MegaBlockLimitExceededError::TransactionDataLimit` - Would exceed block transactions data limit
 - `MegaBlockLimitExceededError::KVUpdateLimit` - Would exceed block KV updates
-- `MegaBlockLimitExceededError::TransactionSizeLimit` - Would exceed block tx size
+- `MegaBlockLimitExceededError::TransactionEncodeSizeLimit` - Would exceed block transactions encode size
 - `MegaBlockLimitExceededError::DataAvailabilitySizeLimit` - Would exceed block DA size
 - `BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas` - Insufficient gas
 
@@ -184,18 +184,18 @@ The MINI_REX specification introduces additional resource limits to prevent spam
 **Required configuration:**
 
 - `block_gas_limit` - From block environment
-- `single_tx_compute_gas_limit` - 1,000,000,000 gas (1 billion)
-- `single_tx_data_limit` - 3,276,800 bytes (3.125 MB)
-- `block_data_limit` - 13,107,200 bytes (12.5 MB)
-- `single_tx_kv_update_limit` - 125,000 operations
+- `tx_compute_gas_limit` - 1,000,000,000 gas (1 billion)
+- `tx_data_limit` - 3,276,800 bytes (3.125 MB)
+- `block_txs_data_limit` - 13,107,200 bytes (12.5 MB)
+- `tx_kv_update_limit` - 125,000 operations
 - `block_kv_update_limit` - 500,000 operations
 
 **Additional limits (optional):**
 
-- `single_tx_gas_limit` - Maximum gas per transaction (e.g., 30M gas)
-- `single_tx_size_limit` - Maximum transaction body size
-- `block_tx_size_limit` - Total transaction size in block
-- `single_tx_da_size_limit` - Maximum DA size per transaction
+- `tx_gas_limit` - Maximum gas per transaction (e.g., 30M gas)
+- `tx_encode_size_limit` - Maximum transaction body size
+- `block_txs_encode_size_limit` - Total transaction size in block
+- `tx_da_size_limit` - Maximum DA size per transaction
 - `block_da_size_limit` - Total DA size in block
 - `block_compute_gas_limit` - Total compute gas in block
 
@@ -311,7 +311,7 @@ Track these metrics for block construction optimization:
 **Resource utilization:**
 
 - Gas utilization (block_gas_used / block_gas_limit)
-- Data utilization (block_data_used / block_data_limit)
+- Data utilization (block_data_used / block_txs_data_limit)
 - KV update utilization (block_kv_updates / block_kv_update_limit)
 
 **Performance:**

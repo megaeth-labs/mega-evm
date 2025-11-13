@@ -35,12 +35,12 @@ pub enum MegaTxLimitExceededError {
         /// Transaction gas limit limit
         limit: u64,
     },
-    /// Transaction size limit exceeded.
-    #[error("Transaction size limit exceeded: tx_size={tx_size} > limit={limit}")]
-    TransactionSizeLimit {
-        /// Transaction size used by current transaction
+    /// Transaction encode size limit exceeded.
+    #[error("Transaction encode size limit exceeded: tx_size={tx_size} > limit={limit}")]
+    TransactionEncodeSizeLimit {
+        /// Transaction encode size used by current transaction
         tx_size: u64,
-        /// Transaction size limit
+        /// Transaction encode size limit
         limit: u64,
     },
 
@@ -66,16 +66,16 @@ impl InvalidTxError for MegaTxLimitExceededError {
 /// execution but before any changes are committed to the database.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MegaBlockLimitExceededError {
-    /// Block data limit exceeded.
+    /// Block transactions data limit exceeded.
     #[error(
-        "Block data limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}"
+        "Block transactions data limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}"
     )]
-    DataLimit {
-        /// Data used by block so far
+    TransactionDataLimit {
+        /// Transaction data used by block so far
         block_used: u64,
-        /// Data used by current transaction
+        /// Transaction data used by current transaction
         tx_used: u64,
-        /// Block data limit
+        /// Block transactions data limit
         limit: u64,
     },
 
@@ -101,14 +101,14 @@ pub enum MegaBlockLimitExceededError {
         limit: u64,
     },
 
-    /// Transaction size limit exceeded.
-    #[error("Transaction size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
-    TransactionSizeLimit {
-        /// Transaction size used by block so far
+    /// Block transactions encode size limit exceeded.
+    #[error("Block transactions encode size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    TransactionEncodeSizeLimit {
+        /// Transaction encode size used by block so far
         block_used: u64,
-        /// Transaction size used by current transaction
+        /// Transaction encode size used by current transaction
         tx_used: u64,
-        /// Transaction size limit
+        /// Block transactions encode size limit
         limit: u64,
     },
 

@@ -54,8 +54,8 @@
 //!
 //! // Configure block limits
 //! let limits = BlockLimits::default()
-//!     .with_block_tx_size_limit(1_000_000)
-//!     .with_block_data_limit(10_000);
+//!     .with_block_txs_encode_size_limit(1_000_000)
+//!     .with_block_txs_data_limit(10_000);
 //!
 //! // Create execution context
 //! let ctx = MegaBlockExecutionCtx::new(parent_hash, parent_beacon_root, extra_data)

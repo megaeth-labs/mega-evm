@@ -147,7 +147,7 @@ fn test_block_custom_data_limit() {
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_data_limit(2_500),
+        BlockLimits::no_limits().with_block_txs_data_limit(2_500),
     ); // 2.5 KB data limit - should fit 1 tx but not 2
 
     // Create block executor
@@ -172,7 +172,11 @@ fn test_block_custom_data_limit() {
     }
     assert!(result2.is_err(), "Second transaction should fail due to block data limit");
     let err_msg = format!("{:?}", result2.unwrap_err());
-    assert!(err_msg.contains("DataLimit"), "Error should mention DataLimit, got: {}", err_msg);
+    assert!(
+        err_msg.contains("TransactionDataLimit"),
+        "Error should mention TransactionDataLimit, got: {}",
+        err_msg
+    );
 }
 
 #[test]
@@ -266,7 +270,9 @@ fn test_block_multiple_transactions_within_limits() {
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_data_limit(10_000).with_block_kv_update_limit(1_000),
+        BlockLimits::no_limits()
+            .with_block_txs_data_limit(10_000)
+            .with_block_kv_update_limit(1_000),
     ); // 10 KB data limit and 1000 KV update limit
 
     // Create block executor
@@ -325,7 +331,7 @@ fn test_block_data_limit_exceeded_mid_block() {
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_data_limit(6_000),
+        BlockLimits::no_limits().with_block_txs_data_limit(6_000),
     ); // 6 KB data limit
 
     // Create block executor
@@ -525,7 +531,7 @@ fn test_block_tx_size_limit_default_unlimited() {
     let block_ctx =
         MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), BlockLimits::no_limits());
     assert_eq!(
-        block_ctx.block_limits.block_tx_size_limit,
+        block_ctx.block_limits.block_txs_encode_size_limit,
         u64::MAX,
         "Default tx size limit should be u64::MAX"
     );
@@ -593,7 +599,7 @@ fn test_block_tx_size_limit_allows_multiple_transactions() {
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_tx_size_limit(tx_size * 5),
+        BlockLimits::no_limits().with_block_txs_encode_size_limit(tx_size * 5),
     );
 
     // Create block executor
@@ -651,7 +657,7 @@ fn test_block_tx_size_limit_exceeded_first_transaction() {
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_tx_size_limit(10),
+        BlockLimits::no_limits().with_block_txs_encode_size_limit(10),
     ); // Very small limit
 
     // Create block executor
@@ -665,8 +671,8 @@ fn test_block_tx_size_limit_exceeded_first_transaction() {
 
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
-        err_msg.contains("TransactionSizeLimit"),
-        "Error should mention TransactionSizeLimit, got: {}",
+        err_msg.contains("TransactionEncodeSizeLimit"),
+        "Error should mention TransactionEncodeSizeLimit, got: {}",
         err_msg
     );
 
@@ -717,7 +723,7 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_tx_size_limit(tx_size * 3),
+        BlockLimits::no_limits().with_block_txs_encode_size_limit(tx_size * 3),
     );
 
     // Create block executor
@@ -738,8 +744,8 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
 
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
-        err_msg.contains("TransactionSizeLimit"),
-        "Error should mention TransactionSizeLimit, got: {}",
+        err_msg.contains("TransactionEncodeSizeLimit"),
+        "Error should mention TransactionEncodeSizeLimit, got: {}",
         err_msg
     );
 
@@ -792,7 +798,7 @@ fn test_block_tx_size_limit_with_varying_sizes() {
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_tx_size_limit(small_size * 2 + large_size),
+        BlockLimits::no_limits().with_block_txs_encode_size_limit(small_size * 2 + large_size),
     );
 
     // Create block executor

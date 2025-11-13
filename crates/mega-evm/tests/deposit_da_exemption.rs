@@ -119,7 +119,7 @@ fn test_deposit_transaction_exempt_from_single_tx_da_limit() {
         Bytes::new(),
         BlockLimits::no_limits()
             .with_block_gas_limit(30_000_000)
-            .with_single_tx_da_size_limit(DA_SIZE_LIMIT)
+            .with_tx_da_size_limit(DA_SIZE_LIMIT)
             .with_block_da_size_limit(DA_SIZE_LIMIT * 10),
     );
 
@@ -134,7 +134,7 @@ fn test_deposit_transaction_exempt_from_single_tx_da_limit() {
     let result = executor.execute_transaction(&deposit_tx);
     assert!(
         result.is_ok(),
-        "Deposit transaction should succeed despite exceeding single_tx_da_size_limit, got error: {:?}",
+        "Deposit transaction should succeed despite exceeding tx_da_size_limit, got error: {:?}",
         result.err()
     );
 
@@ -179,7 +179,7 @@ fn test_regular_transaction_rejected_by_single_tx_da_limit() {
         Bytes::new(),
         BlockLimits::no_limits()
             .with_block_gas_limit(30_000_000)
-            .with_single_tx_da_size_limit(DA_SIZE_LIMIT)
+            .with_tx_da_size_limit(DA_SIZE_LIMIT)
             .with_block_da_size_limit(DA_SIZE_LIMIT * 10),
     );
 
@@ -194,7 +194,7 @@ fn test_regular_transaction_rejected_by_single_tx_da_limit() {
     let result = executor.execute_transaction(&regular_tx);
     assert!(
         result.is_err(),
-        "Regular transaction should be rejected for exceeding single_tx_da_size_limit"
+        "Regular transaction should be rejected for exceeding tx_da_size_limit"
     );
 
     let err_msg = format!("{:?}", result.unwrap_err());
@@ -238,7 +238,7 @@ fn test_deposit_exempt_from_block_da_limit() {
         Bytes::new(),
         BlockLimits::no_limits()
             .with_block_gas_limit(30_000_000)
-            .with_single_tx_da_size_limit(DA_SIZE_LIMIT * 10) // High single tx limit
+            .with_tx_da_size_limit(DA_SIZE_LIMIT * 10) // High single tx limit
             .with_block_da_size_limit(DA_SIZE_LIMIT), // Low block limit
     );
 
@@ -298,7 +298,7 @@ fn test_mixed_deposit_and_regular_transactions() {
         Bytes::new(),
         BlockLimits::no_limits()
             .with_block_gas_limit(30_000_000)
-            .with_single_tx_da_size_limit(DA_SIZE_LIMIT)
+            .with_tx_da_size_limit(DA_SIZE_LIMIT)
             .with_block_da_size_limit(DA_SIZE_LIMIT * 10),
     );
 
@@ -316,7 +316,7 @@ fn test_mixed_deposit_and_regular_transactions() {
     let result2 = executor.execute_transaction(&deposit_tx);
     assert!(result2.is_ok(), "Deposit transaction should succeed despite large DA size");
 
-    // 3. Execute large regular transaction - should fail (exceeds single tx DA limit)
+    // 3. Execute large regular transaction - should fail (exceeds tx DA limit)
     let large_tx = create_regular_transaction_with_large_calldata(1);
     let result3 = executor.execute_transaction(&large_tx);
     assert!(result3.is_err(), "Large regular transaction should fail due to DA size limit");
