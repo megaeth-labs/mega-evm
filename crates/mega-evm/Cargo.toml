@@ -33,7 +33,6 @@ salt.workspace = true
 # misc
 auto_impl.workspace = true
 bitflags.workspace = true
-clap.workspace = true
 delegate.workspace = true
 derive_more.workspace = true
 once_cell.workspace = true

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
 use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
@@ -84,9 +84,9 @@ pub struct Cmd {
     #[arg(long = "input.txs", default_value = "stdin")]
     pub input_txs: String,
 
-    /// Name of ruleset to use.
-    #[arg(long = "state.fork", value_parser, default_value_t = MegaSpecId::MINI_REX)]
-    pub fork: MegaSpecId,
+    /// Name of hardfork to use, possible values: "MiniRex", "Equivalence"
+    #[arg(long = "state.fork", default_value = "MiniRex")]
+    pub fork: String,
 
     /// `ChainID` to use
     #[arg(long = "state.chainid", default_value = "6342")]
@@ -98,6 +98,10 @@ pub struct Cmd {
 }
 
 impl Cmd {
+    fn spec_id(&self) -> MegaSpecId {
+        MegaSpecId::from_str(&self.fork).expect("Invalid hardfork name")
+    }
+
     /// Execute the state transition in three main steps:
     /// 1. Load inputs (alloc, env, txs)
     /// 2. Run EVM state transition
@@ -139,7 +143,7 @@ impl Cmd {
         // Setup configuration
         let mut cfg = CfgEnv::default();
         cfg.chain_id = self.chain_id;
-        cfg.spec = self.fork;
+        cfg.spec = self.spec_id();
 
         // Setup block environment
         let block = self.create_block_env(&inputs.env);
@@ -338,7 +342,7 @@ impl Cmd {
     /// Create initial state from prestate allocation
     fn create_initial_state(&self, alloc: &StateAlloc) -> Result<State<EmptyDB>> {
         // Determine state clear flag based on EVM spec (Spurious Dragon and later)
-        let has_state_clear = self.fork.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON);
+        let has_state_clear = self.spec_id().into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON);
         let mut cache_state = CacheState::new(has_state_clear);
 
         for (address, info) in alloc {
