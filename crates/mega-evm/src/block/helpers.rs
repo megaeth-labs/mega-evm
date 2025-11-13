@@ -43,11 +43,11 @@ impl MegaTransactionExt for MegaTxEnvelope {
     }
 }
 
-/// A wrapper that allows attaching an estimated data availability size.
+/// A wrapper that allows attaching additional information to a transaction.
 #[derive(
     Debug, Clone, derive_more::Deref, derive_more::DerefMut, derive_more::AsRef, derive_more::AsMut,
 )]
-pub struct WithExtraTxInfo<T> {
+pub struct EnrichedMegaTx<T> {
     #[deref]
     #[deref_mut]
     #[as_ref]
@@ -64,14 +64,14 @@ pub struct WithExtraTxInfo<T> {
     pub tx_size: u64,
 }
 
-impl<T> WithExtraTxInfo<T> {
+impl<T> EnrichedMegaTx<T> {
     /// Create a new `WithDASize` wrapper with a known data availability size.
     pub fn new(inner: T, tx_hash: TxHash, da_size: u64, tx_size: u64) -> Self {
         Self { inner, tx_hash, da_size, tx_size }
     }
 }
 
-impl<T: Encodable2718> WithExtraTxInfo<T> {
+impl<T: Encodable2718> EnrichedMegaTx<T> {
     /// Create a new `WithDASize` wrapper and do the computation to estimate the data availability
     /// size.
     pub fn new_slow(inner: T) -> Self {
@@ -84,7 +84,7 @@ impl<T: Encodable2718> WithExtraTxInfo<T> {
     }
 }
 
-impl<T> MegaTransactionExt for WithExtraTxInfo<T> {
+impl<T> MegaTransactionExt for EnrichedMegaTx<T> {
     fn estimated_da_size(&self) -> u64 {
         self.da_size
     }
@@ -98,7 +98,7 @@ impl<T> MegaTransactionExt for WithExtraTxInfo<T> {
     }
 }
 
-impl<T: Typed2718> Typed2718 for WithExtraTxInfo<T> {
+impl<T: Typed2718> Typed2718 for EnrichedMegaTx<T> {
     delegate! {
         to self.inner {
             fn ty(&self) -> u8;
@@ -112,7 +112,7 @@ impl<T: Typed2718> Typed2718 for WithExtraTxInfo<T> {
     }
 }
 
-impl<T: Transaction> Transaction for WithExtraTxInfo<T> {
+impl<T: Transaction> Transaction for EnrichedMegaTx<T> {
     delegate! {
         to self.inner {
             fn chain_id(&self) -> Option<ChainId>;
@@ -142,7 +142,7 @@ impl<T: Transaction> Transaction for WithExtraTxInfo<T> {
     }
 }
 
-impl<Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for WithExtraTxInfo<T> {
+impl<Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for EnrichedMegaTx<T> {
     delegate! {
         to self.inner {
             fn tx(&self) -> &Tx;
@@ -151,7 +151,7 @@ impl<Tx, T: RecoveredTx<Tx>> RecoveredTx<Tx> for WithExtraTxInfo<T> {
     }
 }
 
-impl<Tx, T: IntoTxEnv<Tx>> IntoTxEnv<Tx> for WithExtraTxInfo<T> {
+impl<Tx, T: IntoTxEnv<Tx>> IntoTxEnv<Tx> for EnrichedMegaTx<T> {
     delegate! {
         to self.inner {
             fn into_tx_env(self) -> Tx;
@@ -159,4 +159,4 @@ impl<Tx, T: IntoTxEnv<Tx>> IntoTxEnv<Tx> for WithExtraTxInfo<T> {
     }
 }
 
-impl<T: Copy> Copy for WithExtraTxInfo<T> {}
+impl<T: Copy> Copy for EnrichedMegaTx<T> {}
