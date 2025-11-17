@@ -1,11 +1,12 @@
 use core::cmp::min;
+use std::collections::hash_map::Entry;
 
 use crate::{
     constants::{self, equivalence::CALL_STIPEND},
     AdditionalLimit, ExternalEnvs, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
-use alloy_primitives::{keccak256, Bytes, Log, LogData, B256};
+use alloy_primitives::{keccak256, Address, Bytes, Log, LogData, B256, U256};
 use revm::{
     context::{ContextTr, CreateScheme, Host, JournalTr},
     handler::instructions::{EthInstructions, InstructionProvider},
@@ -18,9 +19,11 @@ use revm::{
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
         popn, require_non_staticcall, resize_memory, CallInput, CallInputs, CallScheme, CallValue,
         CreateInputs, FrameInput, Instruction, InstructionContext, InstructionResult,
-        InstructionTable, InterpreterAction, InterpreterTypes,
+        InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
-    primitives::{self},
+    primitives::{self, StorageKey, KECCAK_EMPTY},
+    state::{Account, Bytecode, EvmStorageSlot},
+    Journal,
 };
 
 /// `MegaInstructions` is the instruction table for `MegaETH`.
@@ -60,7 +63,7 @@ use revm::{
 /// - Gas forwarding: 98/100 rule (2% withheld vs. standard 1.5%)
 /// - Data/KV tracking: 40 bytes + 1 KV update per account creation
 ///
-/// ## CALL Opcode
+/// ## CALL-like Opcode
 /// - Compute gas: Standard call costs
 /// - Storage gas: Dynamic bucket-based costs for new account creation (when transferring to empty
 ///   account)
@@ -125,8 +128,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> InstructionProvider for MegaInstructio
 }
 
 /// Returns the instruction table for the `MegaETH` interpreter.
-const fn instruction_table<WIRE: InterpreterTypes, H: HostExt + ContextTr + ?Sized>(
-) -> [Instruction<WIRE, H>; 256] {
+const fn instruction_table<
+    WIRE: InterpreterTypes<Stack: StackInspectTr>,
+    H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+>() -> [Instruction<WIRE, H>; 256]
+where
+    WIRE::Stack: StackInspectTr,
+{
     use revm::bytecode::opcode::*;
     let mut table = [control::unknown as Instruction<WIRE, H>; 256];
 
@@ -195,7 +203,7 @@ const fn instruction_table<WIRE: InterpreterTypes, H: HostExt + ContextTr + ?Siz
     table[MSTORE as usize] = compute_gas_ext::mstore;
     table[MSTORE8 as usize] = compute_gas_ext::mstore8;
     table[SLOAD as usize] = compute_gas_ext::sload;
-    table[SSTORE as usize] = sstore;
+    table[SSTORE as usize] = additional_limit_ext::sstore;
     table[JUMP as usize] = compute_gas_ext::jump;
     table[JUMPI as usize] = compute_gas_ext::jumpi;
     table[PC as usize] = compute_gas_ext::pc;
@@ -274,18 +282,19 @@ const fn instruction_table<WIRE: InterpreterTypes, H: HostExt + ContextTr + ?Siz
     table[SWAP15 as usize] = compute_gas_ext::swap15;
     table[SWAP16 as usize] = compute_gas_ext::swap16;
 
-    table[LOG0 as usize] = log::<0, H>;
-    table[LOG1 as usize] = log::<1, H>;
-    table[LOG2 as usize] = log::<2, H>;
-    table[LOG3 as usize] = log::<3, H>;
-    table[LOG4 as usize] = log::<4, H>;
+    table[LOG0 as usize] = additional_limit_ext::log::<0, WIRE, H>;
+    table[LOG1 as usize] = additional_limit_ext::log::<1, WIRE, H>;
+    table[LOG2 as usize] = additional_limit_ext::log::<2, WIRE, H>;
+    table[LOG3 as usize] = additional_limit_ext::log::<3, WIRE, H>;
+    table[LOG4 as usize] = additional_limit_ext::log::<4, WIRE, H>;
 
-    table[CREATE as usize] = create::<WIRE, false, H>;
-    table[CREATE2 as usize] = create::<WIRE, true, H>;
-    table[CALL as usize] = call;
-    table[CALLCODE as usize] = compute_gas_ext::call_code;
-    table[DELEGATECALL as usize] = compute_gas_ext::delegate_call;
-    table[STATICCALL as usize] = compute_gas_ext::static_call;
+    table[CREATE as usize] = forward_gas_ext::create;
+    table[CREATE2 as usize] = forward_gas_ext::create2;
+    // table[CREATE2 as usize] = create::<_, true, _>;
+    table[CALL as usize] = forward_gas_ext::call;
+    table[CALLCODE as usize] = forward_gas_ext::call_code;
+    table[DELEGATECALL as usize] = forward_gas_ext::delegate_call;
+    table[STATICCALL as usize] = forward_gas_ext::static_call;
 
     table[INVALID as usize] = compute_gas_ext::invalid;
     table[RETURN as usize] = compute_gas_ext::ret;
@@ -298,47 +307,17 @@ const fn instruction_table<WIRE: InterpreterTypes, H: HostExt + ContextTr + ?Siz
 /// Macro to record compute gas and check if the limit has been exceeded. If the limit is exceeded,
 /// the interpreter halts and returns.
 macro_rules! compute_gas {
-    ($interpreter:expr, $additional_limit:expr, $gas_used:expr) => {
+    ($interpreter:expr, $additional_limit:expr, $gas_used:expr $(,$ret:expr)?) => {
         if $additional_limit.record_compute_gas($gas_used).exceeded_limit() {
             $interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
-            return;
+            return $($ret)?;
         }
     };
 }
 
-/// `LOG` opcode implementation modified from `revm` with compute gas tracking, increased storage
-/// gas costs, and data size limit enforcement.
-///
-/// # Differences from the standard EVM
-///
-/// 1. **Compute Gas Tracking**: Standard LOG gas costs tracked separately as compute gas:
-///    - Base LOG cost: 375 gas
-///    - Per-topic cost: 375 gas per topic
-///    - Per-byte cost: 8 gas per byte of data
-/// 2. **Storage Gas Costs**: Additional storage gas charged for log storage:
-///    - Topic storage: 3,750 gas per topic (10x standard topic cost)
-///    - Data storage: 80 gas per byte (10x standard data cost)
-/// 3. **Data Size Limit**: Checks if total transaction data size exceeds `TX_DATA_LIMIT` (3.125 MB)
-/// 4. **Limit Enforcement**: Halts with `MemoryLimitOOG` when data limit exceeded
-///
-/// # Gas Cost Structure
-///
-/// The total gas cost is split into two categories:
-///
-/// **Compute Gas** (tracked in compute gas tracker):
-/// - LOG base cost: 375 gas
-/// - LOG topics: 375 gas × N topics
-/// - LOG data: 8 gas × `data_length` bytes
-///
-/// **Storage Gas** (for persisting logs):
-/// - Topic storage: 3,750 gas × N topics (10x standard topic cost)
-/// - Data storage: 80 gas × `data_length` bytes (10x standard data cost)
-///
-/// Total gas = Compute gas + Storage gas
-///
-/// # Assumptions
-///
-/// This alternative implementation of `LOG` is only used when the `MINI_REX` spec is enabled.
+/// Standalone `LOG` implementation. See [`additional_limit_ext::log`] and [`storage_gas_ext::log`]
+/// for layered implementation.
+#[deprecated(note = "Use layered implementation in additional_limit_ext::log instead")]
 pub fn log<const N: usize, H: HostExt + ?Sized>(
     context: InstructionContext<'_, H, impl InterpreterTypes>,
 ) {
@@ -403,42 +382,9 @@ pub fn log<const N: usize, H: HostExt + ?Sized>(
     }
 }
 
-/// `SSTORE` opcode implementation modified from `revm` with compute gas tracking,
-/// dynamically-scaled storage gas costs, and limit enforcement.
-///
-/// # Differences from the standard EVM
-///
-/// 1. **Compute Gas Tracking**: Standard SSTORE gas costs tracked separately as compute gas:
-///    - EIP-2200 base costs (100 gas for warm read, 2,900 gas for warm reset, etc.)
-///    - EIP-2929 cold storage access cost (2,100 gas on first access per transaction)
-/// 2. **Dynamic Storage Gas**: Additional storage gas ONLY when setting originally-zero slot to
-///    non-zero:
-///    - Base cost 2,000,000 gas, multiplied by `bucket_capacity / MIN_BUCKET_SIZE`
-///    - Not charged for updating already-non-zero slots or resetting to zero
-/// 3. **Data Size Tracking**: Adds 40 bytes when original ≠ new value AND first write to slot
-/// 4. **KV Update Tracking**: Adds 1 KV update when original ≠ new value AND first write to slot
-/// 5. **Limit Enforcement**: Halts with `OutOfGas` when data (3.125 MB) or KV (1,000) limits
-///    exceeded
-/// 6. **Refund Logic**: Refunds data/KV when slot reset to original value
-///
-/// # Gas Cost Structure
-///
-/// The total gas cost is split into two categories:
-///
-/// **Compute Gas** (tracked in compute gas tracker):
-/// - Warm storage read: 100 gas
-/// - Warm storage reset (non-zero → different non-zero): 2,900 gas
-/// - Setting zero to non-zero: 100 gas (base, before storage gas)
-/// - Cold storage access: +2,100 gas (first access per transaction)
-///
-/// **Storage Gas** (dynamic, bucket-based):
-/// - Only charged when: `original == 0 AND original == present AND new != present`
-/// - Amount: Based on SALT bucket capacity for the storage slot
-///
-/// # Assumptions
-///
-/// This alternative implementation of `SSTORE` is only used when the `MINI_REX` spec is enabled.
-/// so we can safely assume that all features before and including Mini-Rex are enabled.
+/// Standalone `SSTORE` implementation. See [`additional_limit_ext::sstore`] and
+/// [`storage_gas_ext::sstore`] for layered implementation.
+#[deprecated(note = "Use layered implementation in additional_limit_ext::sstore instead")]
 pub fn sstore<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     context: InstructionContext<'_, H, WIRE>,
 ) {
@@ -501,22 +447,9 @@ pub fn sstore<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
     }
 }
 
-/// `CREATE`/`CREATE2` opcode implementation modified from `revm` with increased gas costs and limit
-/// enforcement.
-///
-/// # Differences from the standard EVM
-///
-/// 1. **Dynamic New Account Gas**: Base 2,000,000 gas, multiplied by `bucket_capacity /
-///    MIN_BUCKET_SIZE`
-/// 2. **Additional Create Gas**: Flat 2,000,000 gas fee on top of new account cost
-/// 3. **Data/KV Tracking**: Account creation adds 40 bytes data and 1 KV update
-/// 4. **Contract Code Tracking**: Deployed bytecode size added to transaction data
-/// 5. **Limit Enforcement**: Halts when data or KV limits exceeded
-///
-/// # Assumptions
-///
-/// This alternative implementation of `CREATE`/`CREATE2` is only used when the `MINI_REX` spec is
-/// enabled, so we can safely assume that all features before and including `MINI_REX` are enabled.
+/// Standalone `CREATE`/`CREATE2` implementation. See [`storage_gas_ext::create`] and
+/// [`forward_gas_ext::create`]/[`forward_gas_ext::create2`] for layered implementation.
+#[deprecated(note = "Use layered implementation in forward_gas_ext::create/create2 instead")]
 pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + ContextTr + ?Sized>(
     context: InstructionContext<'_, H, WIRE>,
 ) {
@@ -629,39 +562,9 @@ pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + Conte
     )));
 }
 
-/// `CALL` opcode implementation modified from `revm` with increased new account gas costs, oracle
-/// contract detection, compute gas tracking, and limit enforcement.
-///
-/// # Differences from the standard EVM
-///
-/// 1. **Modified Gas Forwarding (98/100 rule)**: EIP-150's 63/64 rule replaced with 98/100 rule -
-///    only 2% of remaining gas is withheld instead of ~1.5%
-/// 2. **Dynamic New Account Gas**: When calling empty account with transfer, base 2,000,000 gas
-///    multiplied by `bucket_capacity / MIN_BUCKET_SIZE`
-/// 3. **Compute Gas Tracking**: Call cost is recorded in compute gas tracker for separate
-///    accounting
-/// 4. **Oracle Contract Detection**: Detects oracle contract calls and applies gas detention:
-///    - Limits forwarded gas to child call based on oracle access limit (1M gas)
-///    - Detains gas from current interpreter to enforce global limit
-///    - Integrates with global gas detention mechanism (most restrictive limit wins)
-/// 5. **Data/KV Tracking**: Value transfers to empty accounts add 40 bytes data and 2 KV updates
-///    (caller + callee)
-/// 6. **Limit Enforcement**: Operations halt when transaction data or KV limits exceeded
-///
-/// # Gas Detention for Oracle Access
-///
-/// When calling an oracle contract:
-/// 1. Oracle access is detected and marked via `VolatileDataAccessTracker`
-/// 2. Forwarded gas to child call is limited to `ORACLE_ACCESS_REMAINING_GAS` (1M gas)
-/// 3. Current interpreter's remaining gas is detained to enforce the global limit
-/// 4. If already detained by a more restrictive limit (e.g., block env access at 20M), detention is
-///    a no-op
-/// 5. Detained gas is refunded at transaction end - users only pay for actual work
-///
-/// # Assumptions
-///
-/// This alternative implementation of `CALL` is only used when the `MINI_REX` spec is enabled, so
-/// we can safely assume that all features before and including Mini-Rex are enabled.
+/// Standalone `CALL` implementation. See [`volatile_data_ext::call`], [`storage_gas_ext::call`],
+/// and [`forward_gas_ext::call`] for layered implementation.
+#[deprecated(note = "Use layered implementation in forward_gas_ext::call instead")]
 pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
     let additional_limit = context.host.additional_limit().clone();
     let mut additional_limit = additional_limit.borrow_mut();
@@ -749,6 +652,155 @@ pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionCon
             return_memory_offset,
         }),
     )));
+}
+
+/// Call-like and create-like opcode handlers with 98/100 gas forwarding rule.
+///
+/// This module provides wrapper implementations for CALL, CALLCODE, DELEGATECALL, STATICCALL,
+/// CREATE, and CREATE2 opcodes that enforce the 98/100 gas forwarding rule (retaining 2% of
+/// remaining gas in the parent call instead of the standard 1/64).
+///
+/// The wrappers:
+/// 1. Check for value transfer (CALL and CALLCODE only) to account for call stipend
+/// 2. Call the underlying opcode implementation
+/// 3. Cap the forwarded gas to 98% of the parent's remaining gas
+/// 4. Preserve the call stipend (2300 gas) when value is transferred (CALL/CALLCODE only)
+/// 5. Support both Call and Create frame types
+pub mod forward_gas_ext {
+    use super::*;
+
+    /// Macro to wrap call-like and create-like opcodes with 98/100 gas forwarding rule.
+    ///
+    /// This macro generates a wrapper function that:
+    /// 1. Optionally checks for value transfer (`has_transfer`) for CALL opcode
+    /// 2. Calls the wrapped opcode handler
+    /// 3. Caps the forwarded gas to 98/100 of the remaining gas
+    /// 4. Adjusts for call stipend if value is being transferred
+    /// 5. Supports both Call and Create frame types
+    ///
+    /// # Parameters
+    /// - `$fn_name`: Name of the generated function
+    /// - `$opcode_name`: String name of the opcode (for documentation)
+    /// - `$wrapped_fn`: Path to the wrapped instruction implementation
+    /// - `$has_transfer_logic`: Expression to determine if value is being transferred (e.g.,
+    ///   `has_transfer` or `false`)
+    macro_rules! wrap_gas_cap {
+        ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr) => {
+            #[doc = concat!("`", $opcode_name, "` opcode with 98/100 gas forwarding rule.")]
+            #[inline]
+            pub fn $fn_name<
+                WIRE: InterpreterTypes<Stack: StackInspectTr>,
+                H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+            >(
+                mut context: InstructionContext<'_, H, WIRE>,
+            ) {
+                // Determine if there's a value transfer (only applies to CALL opcode).
+                let has_transfer = $has_transfer_logic(&context);
+
+                // Call the wrapped opcode handler.
+                let ctx = InstructionContext::<'_, H, WIRE> {
+                    interpreter: &mut context.interpreter,
+                    host: &mut context.host,
+                };
+                $wrapped_fn(ctx);
+
+                // Cap the forwarded gas to the child call/create to the 98/100 of the remaining
+                // gas.
+                match context.interpreter.bytecode.action() {
+                    Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
+                        // The forwarded gas to the child call should be further restricted to the
+                        // 98/100 of the remaining gas. Here, we first recover the total
+                        // gas left in the parent call and then cap the child call gas
+                        // limit if necessary.
+
+                        // We recover the forwarded gas to the child call from the parent call.
+                        let child_gas = call_inputs.gas_limit as u128;
+                        // There may be a call stipend if there is value to be transferred.
+                        let transfer_gas_stipend =
+                            if has_transfer { gas::CALL_STIPEND as u128 } else { 0 };
+                        let forwarded_gas = child_gas - transfer_gas_stipend; // Safe from underflow
+
+                        // Recover the remaining gas in the parent call before forwarding to the
+                        // child call.
+                        let parent_original_gas_left =
+                            context.interpreter.gas.remaining() as u128 + forwarded_gas;
+
+                        // Calculate the amount of gas that should be returned to the parent call
+                        // under the 98/100 rule.
+                        let forwarded_gas_cap = parent_original_gas_left * 98 / 100;
+                        let capped_forwarded_gas = min(forwarded_gas, forwarded_gas_cap);
+                        let gas_to_return = forwarded_gas - capped_forwarded_gas; // Safe from underflow
+
+                        // Recalculate the child gas
+                        let new_child_gas = capped_forwarded_gas + transfer_gas_stipend;
+
+                        //  Return the gas to the parent call.
+                        context.interpreter.gas.erase_cost(gas_to_return as u64);
+
+                        // Set the child call gas limit to the capped value.
+                        call_inputs.gas_limit = new_child_gas as u64;
+                    }
+                    Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
+                        // The forwarded gas to the child create should be further restricted to the
+                        // 98/100 of the remaining gas. CREATE opcodes don't have a call
+                        // stipend, so the logic is simpler.
+
+                        // We recover the forwarded gas from the parent call.
+                        let child_gas = create_inputs.gas_limit as u128;
+                        let forwarded_gas = child_gas; // No stipend for CREATE
+
+                        // Recover the remaining gas in the parent call before forwarding to the
+                        // child create.
+                        let parent_original_gas_left =
+                            context.interpreter.gas.remaining() as u128 + forwarded_gas;
+
+                        // Calculate the amount of gas that should be returned to the parent call
+                        // under the 98/100 rule.
+                        let forwarded_gas_cap = parent_original_gas_left * 98 / 100;
+                        let capped_forwarded_gas = min(forwarded_gas, forwarded_gas_cap);
+                        let gas_to_return = forwarded_gas - capped_forwarded_gas; // Safe from underflow
+
+                        //  Return the gas to the parent call.
+                        context.interpreter.gas.erase_cost(gas_to_return as u64);
+
+                        // Set the child create gas limit to the capped value.
+                        create_inputs.gas_limit = capped_forwarded_gas as u64;
+                    }
+                    _ => {}
+                }
+            }
+        };
+    }
+
+    // Helper function to check if CALL has value transfer
+    #[inline]
+    fn check_call_has_transfer<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ?Sized,
+    >(
+        context: &InstructionContext<'_, H, WIRE>,
+    ) -> bool {
+        if let Some(value) = context.interpreter.stack.inspect::<2>() {
+            !value.is_zero()
+        } else {
+            false
+        }
+    }
+
+    // Helper function for opcodes without value transfer
+    #[inline]
+    fn no_transfer<WIRE: InterpreterTypes<Stack: StackInspectTr>, H: HostExt + ?Sized>(
+        _context: &InstructionContext<'_, H, WIRE>,
+    ) -> bool {
+        false
+    }
+
+    wrap_gas_cap!(call, "CALL", volatile_data_ext::call, check_call_has_transfer);
+    wrap_gas_cap!(call_code, "CALLCODE", volatile_data_ext::call_code, check_call_has_transfer);
+    wrap_gas_cap!(delegate_call, "DELEGATECALL", volatile_data_ext::delegate_call, no_transfer);
+    wrap_gas_cap!(static_call, "STATICCALL", volatile_data_ext::static_call, no_transfer);
+    wrap_gas_cap!(create, "CREATE", storage_gas_ext::create::<WIRE, false, H>, no_transfer);
+    wrap_gas_cap!(create2, "CREATE2", storage_gas_ext::create::<WIRE, true, H>, no_transfer);
 }
 
 /** Volatile data access opcode handlers with compute gas limit enforcement.
@@ -845,11 +897,433 @@ pub mod volatile_data_ext {
     wrap_op_detain_gas!(extcodesize, "EXTCODESIZE", compute_gas_ext::extcodesize);
     wrap_op_detain_gas!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
     wrap_op_detain_gas!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
+
+    /// Macro to create call-like opcode handlers that check for oracle access and apply gas
+    /// detention.
+    ///
+    /// This macro generates a wrapper function that:
+    /// 1. Extracts the call target address from the stack (at position N from top)
+    /// 2. Calls the original call-like instruction implementation
+    /// 3. Checks if calling the oracle contract and applies compute gas limit if needed
+    ///
+    /// # Oracle Contract Detection
+    ///
+    /// The generated `CALL`, `CALLCODE`, `DELEGATECALL`, and `STATICCALL` implementations add:
+    ///
+    /// **Oracle Detection**: Detects oracle contract calls and applies gas detention:
+    /// - Detects when calling oracle contracts
+    /// - Applies compute gas limit to remaining gas (`ORACLE_ACCESS_REMAINING_GAS` = 1M gas)
+    /// - Integrates with global gas detention mechanism (most restrictive limit wins)
+    ///
+    /// **Compute Gas Limit Enforcement**:
+    /// 1. Oracle access is detected and marked via `VolatileDataAccessTracker`
+    /// 2. Current interpreter's remaining compute gas is limited
+    /// 3. If already detained by a more restrictive limit (e.g., block env access at 20M),
+    ///    detention is a no-op
+    ///
+    /// # Parameters
+    /// - `$fn_name`: Name of the generated function
+    /// - `$opcode_name`: String name of the opcode (for documentation)
+    /// - `$original_fn`: Path to the original instruction implementation
+    /// - `$target_stack_pos`: Position of target address on stack (0 = top, 1 = second from top,
+    ///   etc.)
+    macro_rules! wrap_call_op_oracle_check {
+        ($fn_name:ident, $opcode_name:expr, $original_fn:path, $target_stack_pos:expr) => {
+            #[doc = concat!("`", $opcode_name, "` opcode with oracle access detection and compute gas limit enforcement.")]
+            #[inline]
+            pub fn $fn_name<WIRE: InterpreterTypes<Stack: StackInspectTr>, H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized>(
+                mut context: InstructionContext<'_, H, WIRE>,
+            ) {
+                // Get the call target address from the stack.
+                let Some(target) = context.interpreter.stack.inspect::<$target_stack_pos>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return;
+                };
+                let target = target.into_address();
+
+                let ctx = InstructionContext::<'_, H, WIRE> {
+                    interpreter: &mut context.interpreter,
+                    host: &mut context.host,
+                };
+                $original_fn(ctx);
+
+                // Check if calling the oracle contract and mark it as accessed.
+                // If so, lower the compute gas limit.
+                let additional_limit = context.host.additional_limit().clone();
+                let mut additional_limit = additional_limit.borrow_mut();
+                let mut volatile_data_tracker = context.host.volatile_data_tracker().borrow_mut();
+                if volatile_data_tracker.check_and_mark_oracle_access(&target) {
+                    if let Some(compute_gas_limit) = volatile_data_tracker.get_compute_gas_limit() {
+                        additional_limit.set_compute_gas_limit(compute_gas_limit);
+                    }
+                }
+            }
+        };
+    }
+
+    wrap_call_op_oracle_check!(call, "CALL", storage_gas_ext::call, 1);
+    wrap_call_op_oracle_check!(call_code, "CALLCODE", storage_gas_ext::call_code, 1);
+    wrap_call_op_oracle_check!(delegate_call, "DELEGATECALL", compute_gas_ext::delegate_call, 1);
+    wrap_call_op_oracle_check!(static_call, "STATICCALL", compute_gas_ext::static_call, 1);
 }
+
+/// Extends opcodes with additional limit (kv update limit, data limit, etc.) enforcement.
+pub mod additional_limit_ext {
+    use super::*;
+
+    /// `SSTORE` opcode implementation with data size and KV update limit enforcement.
+    ///
+    /// This wrapper adds limit tracking on top of [`storage_gas_ext::sstore`], which handles
+    /// compute gas tracking and storage gas costs.
+    ///
+    /// # Data Size and KV Update Tracking
+    ///
+    /// When first writing non-zero value to originally-zero slot:
+    /// - Adds 40 bytes to transaction data size
+    /// - Adds 1 KV update count
+    ///
+    /// # Limit Enforcement
+    ///
+    /// Halts with `OutOfGas` when data (3.125 MB) or KV (1,000) limits exceeded.
+    ///
+    /// # Refund Logic
+    ///
+    /// Refunds data/KV when slot reset to original value.
+    pub fn sstore<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        // Load storage slot values before executing the instruction
+        let target_address = context.interpreter.input.target_address();
+        let Some(index) = context.interpreter.stack.inspect::<0>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let storage_slot = context.host.journal_mut().inspect_storage(target_address, index);
+        let (original_value, present_value) = storage_slot
+            .map(|slot| (slot.original_value(), slot.present_value()))
+            .unwrap_or_default();
+        let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let loaded_data = SStoreResult { original_value, present_value, new_value };
+
+        // Execute the original SSTORE instruction
+        storage_gas_ext::sstore(InstructionContext {
+            interpreter: &mut *context.interpreter,
+            host: &mut *context.host,
+        });
+
+        // KV update bomb and data bomb (only when first writing non-zero value to originally zero
+        // slot): check if the number of key-value updates or the total data size will exceed the
+        // limit, if so, halt.
+        let additional_limit = context.host.additional_limit();
+        let mut additional_limit = additional_limit.borrow_mut();
+        if additional_limit.on_sstore(target_address, index, &loaded_data).exceeded_limit() {
+            context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
+        }
+    }
+
+    /// `LOG` opcode implementation with data size limit enforcement.
+    ///
+    /// This wrapper adds data limit tracking on top of [`storage_gas_ext::log`], which handles
+    /// compute gas tracking and storage gas costs.
+    ///
+    /// # Data Size Limit Enforcement
+    ///
+    /// After log emission, checks if total transaction data size exceeds `TX_DATA_LIMIT` (3.125
+    /// MB). Halts when data limit exceeded.
+    pub fn log<
+        const N: usize,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        // Get the log data length before executing the instruction
+        let Some(len) = context.interpreter.stack.inspect::<1>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let len = as_usize_or_fail!(context.interpreter, len);
+
+        // Execute the original LOG instruction
+        storage_gas_ext::log::<N, WIRE, H>(InstructionContext {
+            interpreter: &mut *context.interpreter,
+            host: &mut *context.host,
+        });
+
+        // Record the size of the log topics and data. If the total data size exceeds the limit, we
+        // halt.
+        let additional_limit = context.host.additional_limit();
+        let mut additional_limit = additional_limit.borrow_mut();
+        if additional_limit.on_log(N as u64, len as u64).exceeded_limit() {
+            context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
+        }
+    }
+
+    // TODO: wrap sstore and log opcode handlers, maybe also call-like and create-like opcode
+    // handlers?
+}
+
+/// Extends opcodes with storage gas cost on top of `compute_gas_ext`.
+pub mod storage_gas_ext {
+    use super::*;
+
+    /// Macro to charge storage gas for new account creation before calling the wrapped instruction.
+    ///
+    /// This macro generates a wrapper function that:
+    /// 1. Inspects the target address (stack position 1) and value (stack position 2)
+    /// 2. Checks if the target account is empty and value transfer is non-zero
+    /// 3. Charges storage gas for new account creation if applicable
+    /// 4. Calls the wrapped instruction implementation
+    ///
+    /// # Call Opcode Behavior
+    ///
+    /// The generated `CALL` and `CALLCODE` implementations add:
+    ///
+    /// **Dynamic New Account Gas**: When calling empty account with value transfer:
+    /// - Base cost 2,000,000 gas, multiplied by `bucket_capacity / MIN_BUCKET_SIZE`
+    ///
+    /// # Parameters
+    /// - `$fn_name`: Name of the generated function
+    /// - `$opcode_name`: String name of the opcode (for documentation)
+    /// - `$wrapped_fn`: Path to the wrapped instruction implementation
+    macro_rules! wrap_call_with_storage_gas {
+        ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path) => {
+            #[doc = concat!("`", $opcode_name, "` opcode implementation modified from `revm` with compute gas tracking and dynamically-scaled storage gas costs.")]
+            pub fn $fn_name<
+                WIRE: InterpreterTypes<Stack: StackInspectTr>,
+                H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+            >(
+                mut context: InstructionContext<'_, H, WIRE>,
+            ) {
+                let spec = context.interpreter.runtime_flag.spec_id();
+                let Some(to) = context.interpreter.stack.inspect::<1>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return;
+                };
+                let to = to.into_address();
+                let to_account = context.host.journal_mut().inspect_account_delegated(to);
+                let is_empty =
+                    to_account.map(|account| account.state_clear_aware_is_empty(spec)).unwrap_or(true);
+                let Some(value) = context.interpreter.stack.inspect::<2>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return;
+                };
+                let has_transfer = !value.is_zero();
+                // Charge additional storage gas cost for creating a new account
+                if is_empty && has_transfer {
+                    let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
+                        context.interpreter.halt(InstructionResult::FatalExternalError);
+                        return;
+                    };
+                    gas!(context.interpreter, new_account_storage_gas);
+                }
+
+                // Call the original instruction
+                let ctx = InstructionContext::<'_, H, WIRE> {
+                    interpreter: &mut context.interpreter,
+                    host: &mut context.host,
+                };
+                $wrapped_fn(ctx);
+            }
+        };
+    }
+
+    wrap_call_with_storage_gas!(call, "CALL", compute_gas_ext::call);
+    wrap_call_with_storage_gas!(call_code, "CALLCODE", compute_gas_ext::call_code);
+
+    /// `CREATE`/`CREATE2` opcode implementation modified from `revm` with compute gas tracking and
+    /// dynamically-scaled storage gas costs.
+    ///
+    /// # Differences from the standard EVM
+    ///
+    /// 1. **Dynamic New Account Gas**: Additional storage gas for new account creation:
+    ///    - Base cost 2,000,000 gas, multiplied by `bucket_capacity / MIN_BUCKET_SIZE`
+    ///
+    /// # Assumptions
+    ///
+    /// This alternative implementation of `CREATE`/`CREATE2` is only used when the `MINI_REX` spec
+    /// is enabled, so we can safely assume that all features before and including `MINI_REX`
+    /// are enabled.
+    pub fn create<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        const IS_CREATE2: bool,
+        H: HostExt + ContextTr + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        // The current execution contract (the caller)
+        let creator_address = context.interpreter.input.target_address();
+        // Load the creator account from the journal, this must not be cold loaded since the creator
+        // must have been warmed when the current frame begins.
+        let Ok(creator) = context.host.journal_mut().load_account(creator_address) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+
+        // Calculate the created address
+        let created_address = if IS_CREATE2 {
+            let Some(initcode_offset) = context.interpreter.stack.inspect::<1>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+            let Some(initcode_len) = context.interpreter.stack.inspect::<2>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+            let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
+            let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
+            let code = Bytes::copy_from_slice(
+                context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
+            );
+            let initcode_hash = keccak256(&code);
+
+            let Some(salt) = context.interpreter.stack.inspect::<3>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+
+            creator_address.create2(salt.to_be_bytes(), initcode_hash)
+        } else {
+            creator_address.create(creator.data.info.nonce)
+        };
+
+        // Charge storage gas cost for creating a new account
+        let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(created_address)
+        else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        gas!(context.interpreter, new_account_storage_gas);
+
+        // Call the original create instruction
+        if IS_CREATE2 {
+            compute_gas_ext::create2(context);
+        } else {
+            compute_gas_ext::create(context);
+        }
+    }
+
+    /// `LOG` opcode implementation modified from `revm` with compute gas tracking, increased
+    /// storage gas costs, and data size limit enforcement.
+    ///
+    /// # Differences from the standard EVM
+    ///
+    /// 1. **Storage Gas Costs**: Additional storage gas charged for log storage:
+    ///    - Topic storage: 3,750 gas per topic (10x standard topic cost)
+    ///    - Data storage: 80 gas per byte (10x standard data cost)
+    ///
+    /// # Assumptions
+    ///
+    /// This alternative implementation of `LOG` is only used when the `MINI_REX` spec is enabled.
+    pub fn log<
+        const N: usize,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let Some(len) = context.interpreter.stack.inspect::<1>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let len = as_usize_or_fail!(context.interpreter, len);
+
+        // Charge storage gas cost for log topics and data before instruction execution.
+        let log_storage_cost = {
+            let topic_cost = constants::mini_rex::LOG_TOPIC_STORAGE_GAS.checked_mul(N as u64);
+            let data_cost = constants::mini_rex::LOG_DATA_STORAGE_GAS.checked_mul(len as u64);
+            topic_cost.and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
+        };
+        gas_or_fail!(context.interpreter, log_storage_cost);
+
+        // Execute the original LOG instruction.
+        match N {
+            0 => {
+                compute_gas_ext::log0(context);
+            }
+            1 => {
+                compute_gas_ext::log1(context);
+            }
+            2 => {
+                compute_gas_ext::log2(context);
+            }
+            3 => {
+                compute_gas_ext::log3(context);
+            }
+            4 => {
+                compute_gas_ext::log4(context);
+            }
+            _ => {
+                context.interpreter.halt(InstructionResult::InvalidFEOpcode);
+            }
+        }
+    }
+
+    /// `SSTORE` opcode implementation modified from `revm` with compute gas tracking and
+    /// dynamically-scaled storage gas costs.
+    ///
+    /// # Differences from the standard EVM
+    ///
+    /// 1. **Dynamic Storage Gas**: Additional storage gas ONLY when setting originally-zero slot to
+    ///    non-zero:
+    ///    - Base cost 2,000,000 gas, multiplied by `bucket_capacity / MIN_BUCKET_SIZE`
+    ///    - Not charged for updating already-non-zero slots or resetting to zero
+    ///
+    /// # Assumptions
+    ///
+    /// This alternative implementation of `SSTORE` is only used when the `MINI_REX` spec is
+    /// enabled, so we can safely assume that all features before and including Mini-Rex are
+    /// enabled.
+    pub fn sstore<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        // The address to the underlying execution contract state
+        let target_address = context.interpreter.input.target_address();
+        // The storage slot to write
+        let Some(index) = context.interpreter.stack.inspect::<0>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        // The storage slot values
+        let storage_slot = context.host.journal_mut().inspect_storage(target_address, index);
+        let (original_value, present_value) = storage_slot
+            .map(|slot| (slot.original_value(), slot.present_value()))
+            .unwrap_or_default();
+        let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+
+        // Charge storage gas cost before the instruction is executed
+        if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
+            let Ok(sstore_set_storage_gas) =
+                context.host.sstore_set_storage_gas(target_address, index)
+            else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            gas!(context.interpreter, sstore_set_storage_gas);
+        }
+
+        // Execute the original SSTORE instruction
+        compute_gas_ext::sstore(context);
+    }
+}
+
 /// Compute gas recording implementation. TODO: add more doc
 pub mod compute_gas_ext {
     use super::*;
-    /// TODO: add more doc
+
+    /// Macro to wrap the original instruction implementation with compute gas tracking.
     macro_rules! wrap_op_compute_gas {
         ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
             #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
@@ -870,6 +1344,9 @@ pub mod compute_gas_ext {
                 match context.interpreter.bytecode.action() {
                     Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
                         gas_used = gas_used.saturating_sub(call_inputs.gas_limit);
+                    }
+                    Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
+                        gas_used = gas_used.saturating_sub(create_inputs.gas_limit);
                     }
                     _ => {}
                 }
@@ -1040,4 +1517,105 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(revert, "REVERT", instructions::control::revert);
     wrap_op_compute_gas!(invalid, "INVALID", instructions::control::invalid);
     wrap_op_compute_gas!(selfdestruct, "SELFDESTRUCT", instructions::host::selfdestruct);
+}
+
+/// Trait to inspect the stack elements.
+pub trait StackInspectTr {
+    /// Inspect the N-th element of the stack. The top of the stack is the 0-th element.
+    /// If the stack is too short, return None.
+    fn inspect<const N: usize>(&self) -> Option<U256>;
+}
+
+impl StackInspectTr for Stack {
+    fn inspect<const N: usize>(&self) -> Option<U256> {
+        if N >= self.len() {
+            return None;
+        }
+        let index = self.len() - 1 - N;
+        // SAFETY: the index must be within the bounds of the stack
+        Some(unsafe { *self.data().get_unchecked(index) })
+    }
+}
+
+/// Trait to inspect the journal's internal state without making any changes (e.g., mark warm,
+/// etc.).
+pub trait JournalInspectTr {
+    /// The database error type.
+    type DBError;
+
+    /// Inspect the account at the given address without marking it as warm. If the account is
+    /// EIP-7702 type, it should inspect the delegated account.
+    fn inspect_account_delegated(
+        &mut self,
+        address: Address,
+    ) -> Result<&mut Account, Self::DBError>;
+
+    /// Inspect the storage at the given address and key without marking it as warm.
+    fn inspect_storage(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+    ) -> Result<EvmStorageSlot, Self::DBError>;
+}
+
+impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
+    type DBError = <DB as revm::Database>::Error;
+
+    fn inspect_account_delegated(
+        &mut self,
+        address: Address,
+    ) -> Result<&mut Account, Self::DBError> {
+        let transaction_id = self.transaction_id;
+        let account = match self.inner.state.entry(address) {
+            Entry::Occupied(entry) => {
+                let account = entry.into_mut();
+                if account.info.code_hash != KECCAK_EMPTY && account.info.code.is_none() {
+                    // Load code if not loaded before
+                    account.info.code = Some(self.database.code_by_hash(account.info.code_hash)?);
+                }
+                account
+            }
+            Entry::Vacant(entry) => {
+                let mut account = self
+                    .database
+                    .basic(address)?
+                    .map(|info| info.into())
+                    .unwrap_or_else(|| Account::new_not_existing(transaction_id));
+                // delibrately mark the account as cold since we are only inpecting it, not warming
+                // it.
+                account.mark_cold();
+                entry.insert(account)
+            }
+        };
+
+        // If the account is a delegated account, inspect the delegated account.
+        if let Some(Bytecode::Eip7702(code)) = &account.info.code {
+            let address = code.address();
+            return self.inspect_account_delegated(address);
+        }
+
+        // Load account again to bypass the borrow checker.
+        let account = self.inner.state.get_mut(&address).unwrap();
+        Ok(account)
+    }
+
+    fn inspect_storage(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+    ) -> Result<EvmStorageSlot, Self::DBError> {
+        let transaction_id = self.transaction_id;
+        let account = self.inspect_account_delegated(address)?;
+        if let Some(slot) = account.storage.get(&key) {
+            return Ok(slot.clone());
+        }
+        let slot = self.database.storage(address, key)?;
+        let mut slot = EvmStorageSlot::new(slot, transaction_id);
+        // delibrately mark the slot as cold since we are only inpecting it, not warming it
+        slot.mark_cold();
+        // Load account again to bypass the borrow checker.
+        let account = self.inspect_account_delegated(address)?;
+        account.storage.insert(key, slot.clone());
+        Ok(slot)
+    }
 }
