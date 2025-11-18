@@ -60,6 +60,7 @@ pub fn ensure_oracle_contract_deployed<DB: Database>(
     // Convert the cache account back into a revm account and mark it as touched.
     let mut revm_acc: revm::state::Account = acc_info.into();
     revm_acc.mark_touch();
+    revm_acc.mark_created();
 
     Ok(EvmState::from_iter([(ORACLE_CONTRACT_ADDRESS, revm_acc)]))
 }
@@ -104,6 +105,7 @@ pub fn ensure_high_precision_timestamp_oracle_contract_deployed<DB: Database>(
     // Convert the cache account back into a revm account and mark it as touched.
     let mut revm_acc: revm::state::Account = acc_info.into();
     revm_acc.mark_touch();
+    revm_acc.mark_created();
 
     Ok(EvmState::from_iter([(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, revm_acc)]))
 }
@@ -147,6 +149,7 @@ mod tests {
         // Verify the account in the state changes
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
         assert!(account.is_touched(), "Account should be marked as touched");
+        assert!(account.is_created(), "Account should be marked as created");
 
         // Verify the account info
         let info = &account.info;
@@ -248,6 +251,7 @@ mod tests {
             account.is_touched(),
             "Deployed account must be marked as touched for state changes to take effect"
         );
+        assert!(account.is_created(), "Account should be marked as created");
     }
 
     #[test]
@@ -271,6 +275,7 @@ mod tests {
         let account =
             result.get(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS).expect("Account should exist");
         assert!(account.is_touched(), "Account should be marked as touched");
+        assert!(account.is_created(), "Account should be marked as created");
 
         // Verify the account info
         let info = &account.info;
