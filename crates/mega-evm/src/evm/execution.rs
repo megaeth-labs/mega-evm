@@ -230,6 +230,12 @@ where
                 constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS * tokens_in_calldata;
             initial_and_floor_gas.floor_gas += floor_calldata_storage_gas;
 
+            // MegaETH Rex modification: additional intrinsic storage gas cost
+            // Add 160,000 gas on top of base intrinsic gas for all transactions
+            if ctx.spec.is_enabled(MegaSpecId::REX) {
+                initial_and_floor_gas.initial_gas += constants::rex::TX_INTRINSIC_STORAGE_GAS;
+            }
+
             // If the initial_gas exceeds the tx gas limit, return an error
             if initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {

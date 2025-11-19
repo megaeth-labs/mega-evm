@@ -81,3 +81,10 @@ pub mod mini_rex {
     /// gas).
     pub const ORACLE_ACCESS_REMAINING_COMPUTE_GAS: u64 = 1_000_000;
 }
+
+/// Constants for the `REX` spec.
+pub mod rex {
+    /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.
+    /// This is charged on top of the base 21,000 intrinsic gas for all transactions.
+    pub const TX_INTRINSIC_STORAGE_GAS: u64 = 160_000;
+}
