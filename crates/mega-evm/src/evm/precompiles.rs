@@ -37,6 +37,7 @@ impl MegaPrecompiles {
         let inner = match spec {
             MegaSpecId::EQUIVALENCE => op_revm::precompiles::isthmus(),
             MegaSpecId::MINI_REX => mini_rex(),
+            MegaSpecId::REX => rex(),
         };
 
         Self { inner: EthPrecompiles { precompiles: inner, spec: spec.into_eth_spec() }, spec }
@@ -51,6 +52,11 @@ impl MegaPrecompiles {
         // Custom gas costs will be applied in the run() method
         self.inner.precompiles
     }
+}
+
+/// Precompiles for the `REX` spec.
+pub fn rex() -> &'static Precompiles {
+    mini_rex()
 }
 
 /// Precompiles for the `MINI_REX` spec.

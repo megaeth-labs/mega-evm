@@ -4,6 +4,8 @@
 
 MegaEVM implements a comprehensive resource limit system to prevent spam attacks and ensure fair resource allocation. The system enforces **6 types of limits**, each with both **transaction-level** and **block-level** variants, using a two-phase checking strategy to optimize block construction.
 
+For more about how these limits are accounted, see [RESOURCE_ACCOUNTING.md](./RESOURCE_ACCOUNTING.md).
+
 ## The Six Limit Types
 
 ### Pre-execution Limits

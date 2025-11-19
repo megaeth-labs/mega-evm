@@ -16,11 +16,13 @@ use serde::{Deserialize, Serialize};
 /// corresponding relations are as follows:
 /// - [`SpecId::EQUIVALENCE`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::MINI_REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 #[repr(u8)]
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
 )]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms, missing_docs)]
+#[non_exhaustive]
 pub enum MegaSpecId {
     /// The EVM version when no `MegaETH` harfork is enabled. The behavior of the EVM
     /// should be equivalent to the [`OpSpecId::ISTHMUS`] of the Optimism EVM.
@@ -28,6 +30,9 @@ pub enum MegaSpecId {
     EQUIVALENCE,
     /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
     MINI_REX,
+    /// The EVM version for the *Rex* hardfork of `MegaETH`.
+    #[value(name = "Rex")]
+    REX,
 }
 
 /// String identifiers for `MegaETH` EVM versions.
@@ -37,6 +42,8 @@ pub mod name {
     pub const EQUIVALENCE: &str = "Equivalence";
     /// The string identifier for the *Mini-Rex* version of the `MegaETH` EVM.
     pub const MINI_REX: &str = "MiniRex";
+    /// The string identifier for the *Rex* version of the `MegaETH` EVM.
+    pub const REX: &str = "Rex";
 }
 
 impl MegaSpecId {
@@ -48,7 +55,7 @@ impl MegaSpecId {
     /// Converts the [`SpecId`] into its corresponding [`OpSpecId`].
     pub const fn into_op_spec(self) -> OpSpecId {
         match self {
-            Self::MINI_REX | Self::EQUIVALENCE => OpSpecId::ISTHMUS,
+            Self::MINI_REX | Self::EQUIVALENCE | Self::REX => OpSpecId::ISTHMUS,
         }
     }
 
@@ -67,6 +74,7 @@ impl From<MegaSpecId> for &'static str {
         match spec_id {
             MegaSpecId::EQUIVALENCE => name::EQUIVALENCE,
             MegaSpecId::MINI_REX => name::MINI_REX,
+            MegaSpecId::REX => name::REX,
         }
     }
 }
@@ -79,6 +87,7 @@ impl FromStr for MegaSpecId {
         match s {
             name::EQUIVALENCE => Ok(Self::EQUIVALENCE),
             name::MINI_REX => Ok(Self::MINI_REX),
+            name::REX => Ok(Self::REX),
             _ => Err(UnknownHardfork),
         }
     }
