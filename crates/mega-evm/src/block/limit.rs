@@ -351,6 +351,7 @@ impl BlockLimits {
         match *evm_env.spec_id() {
             MegaSpecId::EQUIVALENCE => Self::no_limits().fit_equivalence(),
             MegaSpecId::MINI_REX => Self::no_limits().fit_mini_rex(),
+            MegaSpecId::REX => Self::no_limits().fit_rex(),
         }
         .with_block_gas_limit(evm_env.block_env.gas_limit)
     }
@@ -379,6 +380,12 @@ impl BlockLimits {
             block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
             ..self
         }
+    }
+
+    /// Fits the block limits to the rex spec. Overrides those limits with the
+    /// `MegaSpecId::REX` spec limits.
+    pub fn fit_rex(self) -> Self {
+        self.fit_mini_rex()
     }
 }
 

@@ -18,6 +18,7 @@ impl EvmTxRuntimeLimits {
         match spec {
             MegaSpecId::EQUIVALENCE => Self::equivalence(),
             MegaSpecId::MINI_REX => Self::mini_rex(),
+            MegaSpecId::REX => Self::rex(),
         }
     }
 
@@ -46,6 +47,11 @@ impl EvmTxRuntimeLimits {
             tx_kv_updates_limit: crate::constants::mini_rex::TX_KV_UPDATE_LIMIT,
             tx_compute_gas_limit: crate::constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
         }
+    }
+
+    /// Limits for the `REX` spec.
+    pub fn rex() -> Self {
+        Self::mini_rex()
     }
 }
 
