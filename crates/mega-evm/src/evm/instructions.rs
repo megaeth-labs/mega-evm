@@ -2,26 +2,23 @@ use core::cmp::min;
 use std::collections::hash_map::Entry;
 
 use crate::{
-    constants::{self, equivalence::CALL_STIPEND},
+    constants::{self},
     AdditionalLimit, ExternalEnvs, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
-use alloy_primitives::{keccak256, Address, Bytes, Log, LogData, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, U256};
 use revm::{
-    context::{ContextTr, CreateScheme, Host, JournalTr},
+    context::{ContextTr, JournalTr},
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
-        self, as_usize_or_fail, check, gas, gas_or_fail,
-        instructions::{
-            self, contract::get_memory_input_and_out_ranges, control, utility::IntoAddress,
-        },
+        as_usize_or_fail, gas, gas_or_fail,
+        instructions::{self, control, utility::IntoAddress},
         interpreter::EthInterpreter,
-        interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag, StackTr},
-        popn, require_non_staticcall, resize_memory, CallInput, CallInputs, CallScheme, CallValue,
-        CreateInputs, FrameInput, Instruction, InstructionContext, InstructionResult,
-        InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
+        interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
+        FrameInput, Instruction, InstructionContext, InstructionResult, InstructionTable,
+        InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
-    primitives::{self, StorageKey, KECCAK_EMPTY},
+    primitives::{StorageKey, KECCAK_EMPTY},
     state::{Account, Bytecode, EvmStorageSlot},
     Journal,
 };
@@ -110,9 +107,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaInstructions<DB, ExtEnvs> {
     pub fn new(spec: MegaSpecId) -> Self {
         let instruction_table = match spec {
             MegaSpecId::EQUIVALENCE => EthInstructions::new_mainnet(),
-            MegaSpecId::MINI_REX => {
-                EthInstructions::new(instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>())
-            }
+            MegaSpecId::MINI_REX => EthInstructions::new(mini_rex::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
+            MegaSpecId::REX => EthInstructions::new(rex::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
         };
         Self { spec, inner: instruction_table }
     }
@@ -127,181 +129,27 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> InstructionProvider for MegaInstructio
     }
 }
 
-/// Returns the instruction table for the `MegaETH` interpreter.
-const fn instruction_table<
-    WIRE: InterpreterTypes<Stack: StackInspectTr>,
-    H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
->() -> [Instruction<WIRE, H>; 256]
-where
-    WIRE::Stack: StackInspectTr,
-{
-    use revm::bytecode::opcode::*;
-    let mut table = [control::unknown as Instruction<WIRE, H>; 256];
+mod rex {
+    use super::*;
 
-    table[STOP as usize] = compute_gas_ext::stop;
-    table[ADD as usize] = compute_gas_ext::add;
-    table[MUL as usize] = compute_gas_ext::mul;
-    table[SUB as usize] = compute_gas_ext::sub;
-    table[DIV as usize] = compute_gas_ext::div;
-    table[SDIV as usize] = compute_gas_ext::sdiv;
-    table[MOD as usize] = compute_gas_ext::rem;
-    table[SMOD as usize] = compute_gas_ext::smod;
-    table[ADDMOD as usize] = compute_gas_ext::addmod;
-    table[MULMOD as usize] = compute_gas_ext::mulmod;
-    table[EXP as usize] = compute_gas_ext::exp;
-    table[SIGNEXTEND as usize] = compute_gas_ext::signextend;
+    /// Returns the instruction table for the `REX` spec.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        use revm::bytecode::opcode::*;
+        let mut table = mini_rex::instruction_table::<WIRE, H>();
 
-    table[LT as usize] = compute_gas_ext::lt;
-    table[GT as usize] = compute_gas_ext::gt;
-    table[SLT as usize] = compute_gas_ext::slt;
-    table[SGT as usize] = compute_gas_ext::sgt;
-    table[EQ as usize] = compute_gas_ext::eq;
-    table[ISZERO as usize] = compute_gas_ext::iszero;
-    table[AND as usize] = compute_gas_ext::bitand;
-    table[OR as usize] = compute_gas_ext::bitor;
-    table[XOR as usize] = compute_gas_ext::bitxor;
-    table[NOT as usize] = compute_gas_ext::not;
-    table[BYTE as usize] = compute_gas_ext::byte;
-    table[SHL as usize] = compute_gas_ext::shl;
-    table[SHR as usize] = compute_gas_ext::shr;
-    table[SAR as usize] = compute_gas_ext::sar;
-    table[CLZ as usize] = compute_gas_ext::clz;
+        // Mini-Rex mistakenly not modifying these three call-like opcodes. They are fixed in Rex
+        table[CALLCODE as usize] = forward_gas_ext::call_code;
+        table[DELEGATECALL as usize] = forward_gas_ext::delegate_call;
+        table[STATICCALL as usize] = forward_gas_ext::static_call;
 
-    table[KECCAK256 as usize] = compute_gas_ext::keccak256;
-
-    table[ADDRESS as usize] = compute_gas_ext::address;
-    table[BALANCE as usize] = volatile_data_ext::balance;
-    table[ORIGIN as usize] = compute_gas_ext::origin;
-    table[CALLER as usize] = compute_gas_ext::caller;
-    table[CALLVALUE as usize] = compute_gas_ext::callvalue;
-    table[CALLDATALOAD as usize] = compute_gas_ext::calldataload;
-    table[CALLDATASIZE as usize] = compute_gas_ext::calldatasize;
-    table[CALLDATACOPY as usize] = compute_gas_ext::calldatacopy;
-    table[CODESIZE as usize] = compute_gas_ext::codesize;
-    table[CODECOPY as usize] = compute_gas_ext::codecopy;
-
-    table[GASPRICE as usize] = compute_gas_ext::gasprice;
-    table[EXTCODESIZE as usize] = volatile_data_ext::extcodesize;
-    table[EXTCODECOPY as usize] = volatile_data_ext::extcodecopy;
-    table[EXTCODEHASH as usize] = volatile_data_ext::extcodehash;
-    table[RETURNDATASIZE as usize] = compute_gas_ext::returndatasize;
-    table[RETURNDATACOPY as usize] = compute_gas_ext::returndatacopy;
-    table[BLOCKHASH as usize] = volatile_data_ext::blockhash;
-    table[COINBASE as usize] = volatile_data_ext::coinbase;
-    table[TIMESTAMP as usize] = volatile_data_ext::timestamp;
-    table[NUMBER as usize] = volatile_data_ext::block_number;
-    table[DIFFICULTY as usize] = volatile_data_ext::difficulty;
-    table[GASLIMIT as usize] = volatile_data_ext::gas_limit_opcode;
-    table[CHAINID as usize] = compute_gas_ext::chainid;
-    table[SELFBALANCE as usize] = compute_gas_ext::selfbalance;
-    table[BASEFEE as usize] = volatile_data_ext::basefee;
-    table[BLOBBASEFEE as usize] = volatile_data_ext::blobbasefee;
-    table[BLOBHASH as usize] = volatile_data_ext::blobhash;
-
-    table[POP as usize] = compute_gas_ext::pop;
-    table[MLOAD as usize] = compute_gas_ext::mload;
-    table[MSTORE as usize] = compute_gas_ext::mstore;
-    table[MSTORE8 as usize] = compute_gas_ext::mstore8;
-    table[SLOAD as usize] = compute_gas_ext::sload;
-    table[SSTORE as usize] = additional_limit_ext::sstore;
-    table[JUMP as usize] = compute_gas_ext::jump;
-    table[JUMPI as usize] = compute_gas_ext::jumpi;
-    table[PC as usize] = compute_gas_ext::pc;
-    table[MSIZE as usize] = compute_gas_ext::msize;
-    table[GAS as usize] = compute_gas_ext::gas;
-    table[JUMPDEST as usize] = compute_gas_ext::jumpdest;
-    table[TLOAD as usize] = compute_gas_ext::tload;
-    table[TSTORE as usize] = compute_gas_ext::tstore;
-    table[MCOPY as usize] = compute_gas_ext::mcopy;
-
-    table[PUSH0 as usize] = compute_gas_ext::push0;
-    table[PUSH1 as usize] = compute_gas_ext::push1;
-    table[PUSH2 as usize] = compute_gas_ext::push2;
-    table[PUSH3 as usize] = compute_gas_ext::push3;
-    table[PUSH4 as usize] = compute_gas_ext::push4;
-    table[PUSH5 as usize] = compute_gas_ext::push5;
-    table[PUSH6 as usize] = compute_gas_ext::push6;
-    table[PUSH7 as usize] = compute_gas_ext::push7;
-    table[PUSH8 as usize] = compute_gas_ext::push8;
-    table[PUSH9 as usize] = compute_gas_ext::push9;
-    table[PUSH10 as usize] = compute_gas_ext::push10;
-    table[PUSH11 as usize] = compute_gas_ext::push11;
-    table[PUSH12 as usize] = compute_gas_ext::push12;
-    table[PUSH13 as usize] = compute_gas_ext::push13;
-    table[PUSH14 as usize] = compute_gas_ext::push14;
-    table[PUSH15 as usize] = compute_gas_ext::push15;
-    table[PUSH16 as usize] = compute_gas_ext::push16;
-    table[PUSH17 as usize] = compute_gas_ext::push17;
-    table[PUSH18 as usize] = compute_gas_ext::push18;
-    table[PUSH19 as usize] = compute_gas_ext::push19;
-    table[PUSH20 as usize] = compute_gas_ext::push20;
-    table[PUSH21 as usize] = compute_gas_ext::push21;
-    table[PUSH22 as usize] = compute_gas_ext::push22;
-    table[PUSH23 as usize] = compute_gas_ext::push23;
-    table[PUSH24 as usize] = compute_gas_ext::push24;
-    table[PUSH25 as usize] = compute_gas_ext::push25;
-    table[PUSH26 as usize] = compute_gas_ext::push26;
-    table[PUSH27 as usize] = compute_gas_ext::push27;
-    table[PUSH28 as usize] = compute_gas_ext::push28;
-    table[PUSH29 as usize] = compute_gas_ext::push29;
-    table[PUSH30 as usize] = compute_gas_ext::push30;
-    table[PUSH31 as usize] = compute_gas_ext::push31;
-    table[PUSH32 as usize] = compute_gas_ext::push32;
-
-    table[DUP1 as usize] = compute_gas_ext::dup1;
-    table[DUP2 as usize] = compute_gas_ext::dup2;
-    table[DUP3 as usize] = compute_gas_ext::dup3;
-    table[DUP4 as usize] = compute_gas_ext::dup4;
-    table[DUP5 as usize] = compute_gas_ext::dup5;
-    table[DUP6 as usize] = compute_gas_ext::dup6;
-    table[DUP7 as usize] = compute_gas_ext::dup7;
-    table[DUP8 as usize] = compute_gas_ext::dup8;
-    table[DUP9 as usize] = compute_gas_ext::dup9;
-    table[DUP10 as usize] = compute_gas_ext::dup10;
-    table[DUP11 as usize] = compute_gas_ext::dup11;
-    table[DUP12 as usize] = compute_gas_ext::dup12;
-    table[DUP13 as usize] = compute_gas_ext::dup13;
-    table[DUP14 as usize] = compute_gas_ext::dup14;
-    table[DUP15 as usize] = compute_gas_ext::dup15;
-    table[DUP16 as usize] = compute_gas_ext::dup16;
-
-    table[SWAP1 as usize] = compute_gas_ext::swap1;
-    table[SWAP2 as usize] = compute_gas_ext::swap2;
-    table[SWAP3 as usize] = compute_gas_ext::swap3;
-    table[SWAP4 as usize] = compute_gas_ext::swap4;
-    table[SWAP5 as usize] = compute_gas_ext::swap5;
-    table[SWAP6 as usize] = compute_gas_ext::swap6;
-    table[SWAP7 as usize] = compute_gas_ext::swap7;
-    table[SWAP8 as usize] = compute_gas_ext::swap8;
-    table[SWAP9 as usize] = compute_gas_ext::swap9;
-    table[SWAP10 as usize] = compute_gas_ext::swap10;
-    table[SWAP11 as usize] = compute_gas_ext::swap11;
-    table[SWAP12 as usize] = compute_gas_ext::swap12;
-    table[SWAP13 as usize] = compute_gas_ext::swap13;
-    table[SWAP14 as usize] = compute_gas_ext::swap14;
-    table[SWAP15 as usize] = compute_gas_ext::swap15;
-    table[SWAP16 as usize] = compute_gas_ext::swap16;
-
-    table[LOG0 as usize] = additional_limit_ext::log::<0, WIRE, H>;
-    table[LOG1 as usize] = additional_limit_ext::log::<1, WIRE, H>;
-    table[LOG2 as usize] = additional_limit_ext::log::<2, WIRE, H>;
-    table[LOG3 as usize] = additional_limit_ext::log::<3, WIRE, H>;
-    table[LOG4 as usize] = additional_limit_ext::log::<4, WIRE, H>;
-
-    table[CREATE as usize] = forward_gas_ext::create;
-    table[CREATE2 as usize] = forward_gas_ext::create2;
-    // table[CREATE2 as usize] = create::<_, true, _>;
-    table[CALL as usize] = forward_gas_ext::call;
-    table[CALLCODE as usize] = forward_gas_ext::call_code;
-    table[DELEGATECALL as usize] = forward_gas_ext::delegate_call;
-    table[STATICCALL as usize] = forward_gas_ext::static_call;
-
-    table[INVALID as usize] = compute_gas_ext::invalid;
-    table[RETURN as usize] = compute_gas_ext::ret;
-    table[REVERT as usize] = compute_gas_ext::revert;
-    table[SELFDESTRUCT as usize] = control::invalid;
-
-    table
+        table
+    }
 }
 
 /// Macro to record compute gas and check if the limit has been exceeded. If the limit is exceeded,
@@ -315,343 +163,181 @@ macro_rules! compute_gas {
     };
 }
 
-/// Standalone `LOG` implementation. See [`additional_limit_ext::log`] and [`storage_gas_ext::log`]
-/// for layered implementation.
-#[deprecated(note = "Use layered implementation in additional_limit_ext::log instead")]
-pub fn log<const N: usize, H: HostExt + ?Sized>(
-    context: InstructionContext<'_, H, impl InterpreterTypes>,
-) {
-    let additional_limit = context.host.additional_limit().clone();
-    let mut additional_limit = additional_limit.borrow_mut();
+mod mini_rex {
+    use super::*;
 
-    require_non_staticcall!(context.interpreter);
+    /// Returns the instruction table for the `MINI_REX` spec.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256] {
+        use revm::bytecode::opcode::*;
+        let mut table = [control::unknown as Instruction<WIRE, H>; 256];
 
-    popn!([offset, len], context.interpreter);
-    let len = as_usize_or_fail!(context.interpreter, len);
-    let log_cost = gas::log_cost(N as u8, len as u64);
-    gas_or_fail!(context.interpreter, log_cost);
-    // Record the compute gas cost
-    compute_gas!(context.interpreter, additional_limit, log_cost.unwrap_or_default());
+        table[STOP as usize] = compute_gas_ext::stop;
+        table[ADD as usize] = compute_gas_ext::add;
+        table[MUL as usize] = compute_gas_ext::mul;
+        table[SUB as usize] = compute_gas_ext::sub;
+        table[DIV as usize] = compute_gas_ext::div;
+        table[SDIV as usize] = compute_gas_ext::sdiv;
+        table[MOD as usize] = compute_gas_ext::rem;
+        table[SMOD as usize] = compute_gas_ext::smod;
+        table[ADDMOD as usize] = compute_gas_ext::addmod;
+        table[MULMOD as usize] = compute_gas_ext::mulmod;
+        table[EXP as usize] = compute_gas_ext::exp;
+        table[SIGNEXTEND as usize] = compute_gas_ext::signextend;
 
-    // MegaETH modification: calculate the storage gas cost for log topics and data
-    let log_storage_cost = {
-        let topic_cost = constants::mini_rex::LOG_TOPIC_STORAGE_GAS.checked_mul(N as u64);
-        let data_cost = constants::mini_rex::LOG_DATA_STORAGE_GAS.checked_mul(len as u64);
-        topic_cost.and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
-    };
-    gas_or_fail!(context.interpreter, log_storage_cost);
+        table[LT as usize] = compute_gas_ext::lt;
+        table[GT as usize] = compute_gas_ext::gt;
+        table[SLT as usize] = compute_gas_ext::slt;
+        table[SGT as usize] = compute_gas_ext::sgt;
+        table[EQ as usize] = compute_gas_ext::eq;
+        table[ISZERO as usize] = compute_gas_ext::iszero;
+        table[AND as usize] = compute_gas_ext::bitand;
+        table[OR as usize] = compute_gas_ext::bitor;
+        table[XOR as usize] = compute_gas_ext::bitxor;
+        table[NOT as usize] = compute_gas_ext::not;
+        table[BYTE as usize] = compute_gas_ext::byte;
+        table[SHL as usize] = compute_gas_ext::shl;
+        table[SHR as usize] = compute_gas_ext::shr;
+        table[SAR as usize] = compute_gas_ext::sar;
+        table[CLZ as usize] = compute_gas_ext::clz;
 
-    let data = if len == 0 {
-        Bytes::new()
-    } else {
-        let gas_remaining_before = context.interpreter.gas.remaining();
+        table[KECCAK256 as usize] = compute_gas_ext::keccak256;
 
-        let offset = as_usize_or_fail!(context.interpreter, offset);
-        resize_memory!(context.interpreter, offset, len);
+        table[ADDRESS as usize] = compute_gas_ext::address;
+        table[BALANCE as usize] = volatile_data_ext::balance;
+        table[ORIGIN as usize] = compute_gas_ext::origin;
+        table[CALLER as usize] = compute_gas_ext::caller;
+        table[CALLVALUE as usize] = compute_gas_ext::callvalue;
+        table[CALLDATALOAD as usize] = compute_gas_ext::calldataload;
+        table[CALLDATASIZE as usize] = compute_gas_ext::calldatasize;
+        table[CALLDATACOPY as usize] = compute_gas_ext::calldatacopy;
+        table[CODESIZE as usize] = compute_gas_ext::codesize;
+        table[CODECOPY as usize] = compute_gas_ext::codecopy;
 
-        // Record the memory expansion compute gas cost
-        let memory_expansion_cost =
-            gas_remaining_before.saturating_sub(context.interpreter.gas.remaining());
-        compute_gas!(context.interpreter, additional_limit, memory_expansion_cost);
+        table[GASPRICE as usize] = compute_gas_ext::gasprice;
+        table[EXTCODESIZE as usize] = volatile_data_ext::extcodesize;
+        table[EXTCODECOPY as usize] = volatile_data_ext::extcodecopy;
+        table[EXTCODEHASH as usize] = volatile_data_ext::extcodehash;
+        table[RETURNDATASIZE as usize] = compute_gas_ext::returndatasize;
+        table[RETURNDATACOPY as usize] = compute_gas_ext::returndatacopy;
+        table[BLOCKHASH as usize] = volatile_data_ext::blockhash;
+        table[COINBASE as usize] = volatile_data_ext::coinbase;
+        table[TIMESTAMP as usize] = volatile_data_ext::timestamp;
+        table[NUMBER as usize] = volatile_data_ext::block_number;
+        table[DIFFICULTY as usize] = volatile_data_ext::difficulty;
+        table[GASLIMIT as usize] = volatile_data_ext::gas_limit_opcode;
+        table[CHAINID as usize] = compute_gas_ext::chainid;
+        table[SELFBALANCE as usize] = compute_gas_ext::selfbalance;
+        table[BASEFEE as usize] = volatile_data_ext::basefee;
+        table[BLOBBASEFEE as usize] = volatile_data_ext::blobbasefee;
+        table[BLOBHASH as usize] = volatile_data_ext::blobhash;
 
-        Bytes::copy_from_slice(context.interpreter.memory.slice_len(offset, len).as_ref())
-    };
-    if context.interpreter.stack.len() < N {
-        context.interpreter.halt(InstructionResult::StackUnderflow);
-        return;
+        table[POP as usize] = compute_gas_ext::pop;
+        table[MLOAD as usize] = compute_gas_ext::mload;
+        table[MSTORE as usize] = compute_gas_ext::mstore;
+        table[MSTORE8 as usize] = compute_gas_ext::mstore8;
+        table[SLOAD as usize] = compute_gas_ext::sload;
+        table[SSTORE as usize] = additional_limit_ext::sstore;
+        table[JUMP as usize] = compute_gas_ext::jump;
+        table[JUMPI as usize] = compute_gas_ext::jumpi;
+        table[PC as usize] = compute_gas_ext::pc;
+        table[MSIZE as usize] = compute_gas_ext::msize;
+        table[GAS as usize] = compute_gas_ext::gas;
+        table[JUMPDEST as usize] = compute_gas_ext::jumpdest;
+        table[TLOAD as usize] = compute_gas_ext::tload;
+        table[TSTORE as usize] = compute_gas_ext::tstore;
+        table[MCOPY as usize] = compute_gas_ext::mcopy;
+
+        table[PUSH0 as usize] = compute_gas_ext::push0;
+        table[PUSH1 as usize] = compute_gas_ext::push1;
+        table[PUSH2 as usize] = compute_gas_ext::push2;
+        table[PUSH3 as usize] = compute_gas_ext::push3;
+        table[PUSH4 as usize] = compute_gas_ext::push4;
+        table[PUSH5 as usize] = compute_gas_ext::push5;
+        table[PUSH6 as usize] = compute_gas_ext::push6;
+        table[PUSH7 as usize] = compute_gas_ext::push7;
+        table[PUSH8 as usize] = compute_gas_ext::push8;
+        table[PUSH9 as usize] = compute_gas_ext::push9;
+        table[PUSH10 as usize] = compute_gas_ext::push10;
+        table[PUSH11 as usize] = compute_gas_ext::push11;
+        table[PUSH12 as usize] = compute_gas_ext::push12;
+        table[PUSH13 as usize] = compute_gas_ext::push13;
+        table[PUSH14 as usize] = compute_gas_ext::push14;
+        table[PUSH15 as usize] = compute_gas_ext::push15;
+        table[PUSH16 as usize] = compute_gas_ext::push16;
+        table[PUSH17 as usize] = compute_gas_ext::push17;
+        table[PUSH18 as usize] = compute_gas_ext::push18;
+        table[PUSH19 as usize] = compute_gas_ext::push19;
+        table[PUSH20 as usize] = compute_gas_ext::push20;
+        table[PUSH21 as usize] = compute_gas_ext::push21;
+        table[PUSH22 as usize] = compute_gas_ext::push22;
+        table[PUSH23 as usize] = compute_gas_ext::push23;
+        table[PUSH24 as usize] = compute_gas_ext::push24;
+        table[PUSH25 as usize] = compute_gas_ext::push25;
+        table[PUSH26 as usize] = compute_gas_ext::push26;
+        table[PUSH27 as usize] = compute_gas_ext::push27;
+        table[PUSH28 as usize] = compute_gas_ext::push28;
+        table[PUSH29 as usize] = compute_gas_ext::push29;
+        table[PUSH30 as usize] = compute_gas_ext::push30;
+        table[PUSH31 as usize] = compute_gas_ext::push31;
+        table[PUSH32 as usize] = compute_gas_ext::push32;
+
+        table[DUP1 as usize] = compute_gas_ext::dup1;
+        table[DUP2 as usize] = compute_gas_ext::dup2;
+        table[DUP3 as usize] = compute_gas_ext::dup3;
+        table[DUP4 as usize] = compute_gas_ext::dup4;
+        table[DUP5 as usize] = compute_gas_ext::dup5;
+        table[DUP6 as usize] = compute_gas_ext::dup6;
+        table[DUP7 as usize] = compute_gas_ext::dup7;
+        table[DUP8 as usize] = compute_gas_ext::dup8;
+        table[DUP9 as usize] = compute_gas_ext::dup9;
+        table[DUP10 as usize] = compute_gas_ext::dup10;
+        table[DUP11 as usize] = compute_gas_ext::dup11;
+        table[DUP12 as usize] = compute_gas_ext::dup12;
+        table[DUP13 as usize] = compute_gas_ext::dup13;
+        table[DUP14 as usize] = compute_gas_ext::dup14;
+        table[DUP15 as usize] = compute_gas_ext::dup15;
+        table[DUP16 as usize] = compute_gas_ext::dup16;
+
+        table[SWAP1 as usize] = compute_gas_ext::swap1;
+        table[SWAP2 as usize] = compute_gas_ext::swap2;
+        table[SWAP3 as usize] = compute_gas_ext::swap3;
+        table[SWAP4 as usize] = compute_gas_ext::swap4;
+        table[SWAP5 as usize] = compute_gas_ext::swap5;
+        table[SWAP6 as usize] = compute_gas_ext::swap6;
+        table[SWAP7 as usize] = compute_gas_ext::swap7;
+        table[SWAP8 as usize] = compute_gas_ext::swap8;
+        table[SWAP9 as usize] = compute_gas_ext::swap9;
+        table[SWAP10 as usize] = compute_gas_ext::swap10;
+        table[SWAP11 as usize] = compute_gas_ext::swap11;
+        table[SWAP12 as usize] = compute_gas_ext::swap12;
+        table[SWAP13 as usize] = compute_gas_ext::swap13;
+        table[SWAP14 as usize] = compute_gas_ext::swap14;
+        table[SWAP15 as usize] = compute_gas_ext::swap15;
+        table[SWAP16 as usize] = compute_gas_ext::swap16;
+
+        table[LOG0 as usize] = additional_limit_ext::log::<0, _, _>;
+        table[LOG1 as usize] = additional_limit_ext::log::<1, _, _>;
+        table[LOG2 as usize] = additional_limit_ext::log::<2, _, _>;
+        table[LOG3 as usize] = additional_limit_ext::log::<3, _, _>;
+        table[LOG4 as usize] = additional_limit_ext::log::<4, _, _>;
+
+        table[CREATE as usize] = forward_gas_ext::create;
+        table[CREATE2 as usize] = forward_gas_ext::create2;
+        table[CALL as usize] = forward_gas_ext::call;
+        table[CALLCODE as usize] = forward_gas_ext::call_code;
+        table[DELEGATECALL as usize] = compute_gas_ext::delegate_call;
+        table[STATICCALL as usize] = compute_gas_ext::static_call;
+
+        table[INVALID as usize] = compute_gas_ext::invalid;
+        table[RETURN as usize] = compute_gas_ext::ret;
+        table[REVERT as usize] = compute_gas_ext::revert;
+        table[SELFDESTRUCT as usize] = control::invalid;
+
+        table
     }
-    let Some(topics) = context.interpreter.stack.popn::<N>() else {
-        context.interpreter.halt(InstructionResult::StackUnderflow);
-        return;
-    };
-
-    let log = Log {
-        address: context.interpreter.input.target_address(),
-        data: LogData::new(topics.into_iter().map(B256::from).collect(), data)
-            .expect("LogData should have <=4 topics"),
-    };
-
-    context.host.log(log);
-
-    /* The above logic is the same as the standard EVM's. The below is the data bomb logic. */
-
-    // Record the size of the log topics and data. If the total data size exceeds the limit, we
-    // halt.
-    if additional_limit.on_log(N as u64, len as u64).exceeded_limit() {
-        context.interpreter.halt(InstructionResult::MemoryLimitOOG);
-    }
-}
-
-/// Standalone `SSTORE` implementation. See [`additional_limit_ext::sstore`] and
-/// [`storage_gas_ext::sstore`] for layered implementation.
-#[deprecated(note = "Use layered implementation in additional_limit_ext::sstore instead")]
-pub fn sstore<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
-    context: InstructionContext<'_, H, WIRE>,
-) {
-    let additional_limit = context.host.additional_limit().clone();
-    let mut additional_limit = additional_limit.borrow_mut();
-
-    require_non_staticcall!(context.interpreter);
-
-    popn!([index, value], context.interpreter);
-
-    let target_address = context.interpreter.input.target_address();
-
-    let Some(state_load) = context.host.sstore(target_address, index, value) else {
-        context.interpreter.halt(InstructionResult::FatalExternalError);
-        return;
-    };
-
-    // EIP-1706 Disable SSTORE with gasleft lower than call stipend. EIP-1706 is guaranteed to be
-    // enabled in mega-evm.
-    if context.interpreter.gas.remaining() <= CALL_STIPEND {
-        context.interpreter.halt(InstructionResult::ReentrancySentryOOG);
-        return;
-    }
-
-    let gas_cost = gas::sstore_cost(
-        context.interpreter.runtime_flag.spec_id(),
-        &state_load.data,
-        state_load.is_cold,
-    );
-    revm::interpreter::gas!(context.interpreter, gas_cost);
-    // Record the compute gas cost
-    compute_gas!(context.interpreter, additional_limit, gas_cost);
-
-    // MegaETH modification: we charge additional storage gas cost for setting a storage slot to a
-    // non-zero value.
-    let loaded_data = &state_load.data;
-    if loaded_data.is_original_zero() &&
-        loaded_data.is_original_eq_present() &&
-        !loaded_data.is_new_eq_present()
-    {
-        // dynamically calculate the gas cost based on the SALT bucket capacity
-        let Ok(sstore_set_storage_gas) = context.host.sstore_set_storage_gas(target_address, index)
-        else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        revm::interpreter::gas!(context.interpreter, sstore_set_storage_gas);
-    }
-
-    context
-        .interpreter
-        .gas
-        .record_refund(gas::sstore_refund(context.interpreter.runtime_flag.spec_id(), loaded_data));
-
-    // KV update bomb and data bomb (only when first writing non-zero value to originally zero
-    // slot): check if the number of key-value updates or the total data size will exceed the
-    // limit, if so, halt.
-    if additional_limit.on_sstore(target_address, index, loaded_data).exceeded_limit() {
-        context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
-    }
-}
-
-/// Standalone `CREATE`/`CREATE2` implementation. See [`storage_gas_ext::create`] and
-/// [`forward_gas_ext::create`]/[`forward_gas_ext::create2`] for layered implementation.
-#[deprecated(note = "Use layered implementation in forward_gas_ext::create/create2 instead")]
-pub fn create<WIRE: InterpreterTypes, const IS_CREATE2: bool, H: HostExt + ContextTr + ?Sized>(
-    context: InstructionContext<'_, H, WIRE>,
-) {
-    require_non_staticcall!(context.interpreter);
-
-    let target_address = context.interpreter.input.target_address();
-    let additional_limit = context.host.additional_limit().clone();
-    let mut additional_limit = additional_limit.borrow_mut();
-
-    // EIP-1014: Skinny CREATE2
-    if IS_CREATE2 {
-        check!(context.interpreter, PETERSBURG);
-    }
-
-    popn!([value, code_offset, len], context.interpreter);
-    let initcode_len = as_usize_or_fail!(context.interpreter, len);
-
-    let mut code = Bytes::new();
-    if initcode_len != 0 {
-        // EIP-3860: Limit and meter initcode
-        // Limit is set as double of max contract bytecode size
-        if initcode_len > context.host.max_initcode_size() {
-            context.interpreter.halt(InstructionResult::CreateInitCodeSizeLimit);
-            return;
-        }
-        let initcode_cost = gas::initcode_cost(initcode_len);
-        revm::interpreter::gas!(context.interpreter, initcode_cost);
-
-        // Record the compute gas cost
-        compute_gas!(context.interpreter, additional_limit, initcode_cost);
-
-        let gas_remaining_before = context.interpreter.gas.remaining();
-
-        let code_offset = as_usize_or_fail!(context.interpreter, code_offset);
-        resize_memory!(context.interpreter, code_offset, initcode_len);
-        code = Bytes::copy_from_slice(
-            context.interpreter.memory.slice_len(code_offset, initcode_len).as_ref(),
-        );
-
-        // Record the memory expansion compute gas cost
-        let memory_expansion_cost =
-            gas_remaining_before.saturating_sub(context.interpreter.gas.remaining());
-        compute_gas!(context.interpreter, additional_limit, memory_expansion_cost);
-    }
-
-    // EIP-1014: Skinny CREATE2
-    // The gas cost of CREATE is retrieved from the host, increased to
-    // [`CREATE_GAS`](constants::mini_rex::CREATE_GAS) initially, and doubling as the
-    // corresponding SALT bucket capacity doubles.
-    let scheme = if IS_CREATE2 {
-        popn!([salt], context.interpreter);
-        // SAFETY: `initcode_len` is reasonable in size as gas for it is already deducted.
-        let create2_cost = gas::create2_cost(initcode_len);
-        gas_or_fail!(context.interpreter, create2_cost);
-        // Record the compute gas cost
-        compute_gas!(context.interpreter, additional_limit, create2_cost.unwrap_or_default());
-
-        // MegaETH modification: gas cost for creating a new account
-        // calculate the created address
-        let init_code_hash = keccak256(&code);
-        let created_address = target_address.create2(salt.to_be_bytes(), init_code_hash);
-        let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(created_address)
-        else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        revm::interpreter::gas!(context.interpreter, new_account_storage_gas);
-
-        CreateScheme::Create2 { salt }
-    } else {
-        let create_cost = gas::CREATE;
-        revm::interpreter::gas!(context.interpreter, create_cost);
-        // Record the compute gas cost
-        compute_gas!(context.interpreter, additional_limit, create_cost);
-
-        // MegaETH modification: gas cost for creating a new account
-        // calculate the created address
-        let Ok(creater) = context.host.journal_mut().load_account(target_address) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        let created_address = target_address.create(creater.data.info.nonce);
-        let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(created_address)
-        else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        // MegaETH modification: add additional gas cost for creating a new contract
-        revm::interpreter::gas!(context.interpreter, new_account_storage_gas);
-        CreateScheme::Create
-    };
-
-    let mut gas_limit = context.interpreter.gas.remaining();
-
-    // EIP-150: Gas cost changes for IO-heavy operations
-    // MegaETH modification: Take remaining gas and keep 98/100 of it.
-    gas_limit -= gas_limit * 2 / 100;
-
-    revm::interpreter::gas!(context.interpreter, gas_limit);
-
-    // Call host to interact with target contract
-    context.interpreter.bytecode.set_action(InterpreterAction::NewFrame(FrameInput::Create(
-        Box::new(CreateInputs {
-            caller: target_address,
-            scheme,
-            value,
-            init_code: code,
-            gas_limit,
-        }),
-    )));
-}
-
-/// Standalone `CALL` implementation. See [`volatile_data_ext::call`], [`storage_gas_ext::call`],
-/// and [`forward_gas_ext::call`] for layered implementation.
-#[deprecated(note = "Use layered implementation in forward_gas_ext::call instead")]
-pub fn call<WIRE: InterpreterTypes, H: HostExt + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
-    let additional_limit = context.host.additional_limit().clone();
-    let mut additional_limit = additional_limit.borrow_mut();
-
-    popn!([local_gas_limit, to, value], context.interpreter);
-    let to = to.into_address();
-    // Max gas limit is not possible in real ethereum situation.
-    let local_gas_limit = u64::try_from(local_gas_limit).unwrap_or(u64::MAX);
-
-    let has_transfer = !value.is_zero();
-    if context.interpreter.runtime_flag.is_static() && has_transfer {
-        context.interpreter.halt(InstructionResult::CallNotAllowedInsideStatic);
-        return;
-    }
-
-    let gas_remaining_before = context.interpreter.gas.remaining();
-    let Some((input, return_memory_offset)) = get_memory_input_and_out_ranges(context.interpreter)
-    else {
-        return;
-    };
-    // Record the memory expansion compute gas cost
-    let memory_expansion_cost =
-        gas_remaining_before.saturating_sub(context.interpreter.gas.remaining());
-    compute_gas!(context.interpreter, additional_limit, memory_expansion_cost);
-
-    let Some(account_load) = context.host.load_account_delegated(to) else {
-        context.interpreter.halt(InstructionResult::FatalExternalError);
-        return;
-    };
-    let is_empty = account_load.data.is_empty;
-
-    let call_cost = interpreter::gas::call_cost(
-        context.interpreter.runtime_flag.spec_id(),
-        has_transfer,
-        account_load,
-    );
-    revm::interpreter::gas!(context.interpreter, call_cost);
-
-    // Record the compute gas cost
-    compute_gas!(context.interpreter, additional_limit, call_cost);
-
-    // MegaETH modification: add additional storage gas cost for creating a new account
-    // This must be charged BEFORE calculating the forwarded gas amount (98/100 rule)
-    if is_empty && has_transfer {
-        let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        revm::interpreter::gas!(context.interpreter, new_account_storage_gas);
-    }
-
-    // EIP-150: Gas cost changes for IO-heavy operations
-    // MegaETH modification: replace 63/64 rule with 98/100 rule
-    let remaining_gas =
-        context.interpreter.gas.remaining() - context.interpreter.gas.remaining() * 2 / 100;
-    let mut gas_limit = min(remaining_gas, local_gas_limit);
-
-    revm::interpreter::gas!(context.interpreter, gas_limit);
-
-    // Add call stipend if there is value to be transferred.
-    if has_transfer {
-        gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
-    }
-
-    // Check if calling the oracle contract and mark it as accessed.
-    // If so, lower the compute gas limit.
-    let mut volatile_data_tracker = context.host.volatile_data_tracker().borrow_mut();
-    if volatile_data_tracker.check_and_mark_oracle_access(&to) {
-        if let Some(compute_gas_limit) = volatile_data_tracker.get_compute_gas_limit() {
-            additional_limit.set_compute_gas_limit(compute_gas_limit);
-        }
-    }
-
-    // Call host to interact with target contract
-    context.interpreter.bytecode.set_action(InterpreterAction::NewFrame(FrameInput::Call(
-        Box::new(CallInputs {
-            input: CallInput::SharedBuffer(input),
-            gas_limit,
-            target_address: to,
-            caller: context.interpreter.input.target_address(),
-            bytecode_address: to,
-            value: CallValue::Transfer(value),
-            scheme: CallScheme::Call,
-            is_static: context.interpreter.runtime_flag.is_static(),
-            return_memory_offset,
-        }),
-    )));
 }
 
 /// Call-like and create-like opcode handlers with 98/100 gas forwarding rule.
@@ -1537,8 +1223,11 @@ impl StackInspectTr for Stack {
     }
 }
 
-/// Trait to inspect the journal's internal state without making any changes (e.g., mark warm,
-/// etc.).
+/// Trait to inspect the journal's internal state without marking any accounts or storage slots as
+/// warm. To improve performance, when journal does not have the account or storage slot, it will be
+/// loaded from the database and cached in the journal. However, since we explicitly mark the
+/// account or storage slot as cold, this pre-loading before executing the original instruction will
+/// make no difference on gas cost.
 pub trait JournalInspectTr {
     /// The database error type.
     type DBError;
@@ -1555,7 +1244,7 @@ pub trait JournalInspectTr {
         &mut self,
         address: Address,
         key: StorageKey,
-    ) -> Result<EvmStorageSlot, Self::DBError>;
+    ) -> Result<&EvmStorageSlot, Self::DBError>;
 }
 
 impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
@@ -1603,19 +1292,24 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         &mut self,
         address: Address,
         key: StorageKey,
-    ) -> Result<EvmStorageSlot, Self::DBError> {
+    ) -> Result<&EvmStorageSlot, Self::DBError> {
         let transaction_id = self.transaction_id;
         let account = self.inspect_account_delegated(address)?;
-        if let Some(slot) = account.storage.get(&key) {
-            return Ok(slot.clone());
+        if account.storage.contains_key(&key) {
+            // Slot already exists, return reference to it
+            // Need to reload account to satisfy borrow checker
+            let account = self.inspect_account_delegated(address)?;
+            return Ok(account.storage.get(&key).unwrap());
         }
+        // Slot doesn't exist, load from DB and insert
         let slot = self.database.storage(address, key)?;
         let mut slot = EvmStorageSlot::new(slot, transaction_id);
         // delibrately mark the slot as cold since we are only inpecting it, not warming it
         slot.mark_cold();
-        // Load account again to bypass the borrow checker.
+        // Load account again to bypass the borrow checker and insert the slot
         let account = self.inspect_account_delegated(address)?;
-        account.storage.insert(key, slot.clone());
-        Ok(slot)
+        account.storage.insert(key, slot);
+        // Return reference to the newly inserted slot
+        Ok(account.storage.get(&key).expect("slot should exist"))
     }
 }
