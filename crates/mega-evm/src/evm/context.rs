@@ -26,6 +26,8 @@ use salt::BucketId;
 
 #[cfg(not(feature = "std"))]
 use alloc::rc::Rc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::rc::Rc;
 

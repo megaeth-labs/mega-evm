@@ -1,5 +1,4 @@
 use core::cmp::min;
-use std::collections::hash_map::Entry;
 
 use crate::{
     constants::{self},
@@ -18,7 +17,7 @@ use revm::{
         FrameInput, Instruction, InstructionContext, InstructionResult, InstructionTable,
         InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
-    primitives::{StorageKey, KECCAK_EMPTY},
+    primitives::{hash_map::Entry, StorageKey, KECCAK_EMPTY},
     state::{Account, Bytecode, EvmStorageSlot},
     Journal,
 };

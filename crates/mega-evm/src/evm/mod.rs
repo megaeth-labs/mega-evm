@@ -30,6 +30,11 @@ mod result;
 mod spec;
 mod state;
 
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
 use alloy_primitives::B256;

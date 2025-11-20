@@ -1,6 +1,5 @@
 //! Definitions of the `MegaETH` EVM versions (`SpecId`).
 
-use clap::ValueEnum;
 use core::{
     fmt::{self, Display},
     str::FromStr,
@@ -20,18 +19,7 @@ use serde::{Deserialize, Serialize};
 /// - [`SpecId::REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 #[repr(u8)]
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Hash,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Default,
-    Serialize,
-    Deserialize,
-    ValueEnum,
+    Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
 )]
 #[allow(non_camel_case_types, clippy::upper_case_acronyms, missing_docs)]
 #[non_exhaustive]
@@ -39,13 +27,10 @@ pub enum MegaSpecId {
     /// The EVM version when no `MegaETH` harfork is enabled. The behavior of the EVM
     /// should be equivalent to the [`OpSpecId::ISTHMUS`] of the Optimism EVM.
     #[default]
-    #[value(name = "Equivalence")]
     EQUIVALENCE,
     /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
-    #[value(name = "MiniRex")]
     MINI_REX,
     /// The EVM version for the *Rex* hardfork of `MegaETH`.
-    #[value(name = "Rex")]
     REX,
 }
 

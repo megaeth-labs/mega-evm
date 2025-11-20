@@ -123,9 +123,9 @@ pub struct Cmd {
     #[arg(long = "trace.output")]
     pub trace_output_file: Option<PathBuf>,
 
-    /// Name of ruleset to use
-    #[arg(long = "state.fork", default_value_t = MegaSpecId::MINI_REX)]
-    pub fork: MegaSpecId,
+    /// Name of hardfork to use, possible values: `MiniRex`, `Equivalence`, `Rex`
+    #[arg(long = "state.fork", default_value = "MiniRex")]
+    pub fork: String,
 
     /// `ChainID` to use
     #[arg(long = "state.chainid", default_value = "6342")]
@@ -184,6 +184,10 @@ struct RunResult {
 }
 
 impl Cmd {
+    fn spec_id(&self) -> MegaSpecId {
+        MegaSpecId::from_str(&self.fork).expect("Invalid hardfork name")
+    }
+
     /// Execute the run command
     pub fn run(&self) -> Result<()> {
         // Step 1: Load bytecode
@@ -257,7 +261,7 @@ impl Cmd {
     /// Create initial state from prestate (if provided) or empty state
     fn create_initial_state(&self, code: &[u8]) -> Result<State<EmptyDB>> {
         // Determine state clear flag based on EVM spec
-        let has_state_clear = self.fork.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON);
+        let has_state_clear = self.spec_id().into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON);
         let mut cache_state = CacheState::new(has_state_clear);
 
         // Load prestate if provided
@@ -340,7 +344,7 @@ impl Cmd {
     fn setup_cfg_env(&self) -> CfgEnv<MegaSpecId> {
         let mut cfg = CfgEnv::default();
         cfg.chain_id = self.chain_id;
-        cfg.spec = self.fork;
+        cfg.spec = self.spec_id();
         cfg
     }
 

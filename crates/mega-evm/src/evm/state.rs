@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap;
+#[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
 use alloy_primitives::B256;
