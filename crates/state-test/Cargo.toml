@@ -24,9 +24,6 @@ alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-serde.workspace = true
 
-# revm 
-revm = { workspace = true, features = ["tracer"] }
-
 # misc
 clap = { workspace = true, features = ["default"] }
 hash-db.workspace = true

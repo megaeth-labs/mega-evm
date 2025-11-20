@@ -26,6 +26,20 @@ pub use limit::*;
 pub use system::*;
 pub use types::*;
 
+/* Re-export of upstream types */
+pub use alloy_consensus;
+pub use alloy_eips;
+pub use alloy_evm;
+pub use alloy_op_evm;
+pub use alloy_op_hardforks;
+pub use alloy_primitives;
+pub use alloy_sol_types;
+pub use op_alloy_consensus;
+pub use op_alloy_flz;
+pub use op_revm;
+pub use revm::{self, context::either::Either, primitives::HashMap};
+pub use salt;
+
 /* Alias of the mega-evm types */
 /// Alias for [`MegaTransaction`]
 pub type Transaction = MegaTransaction;

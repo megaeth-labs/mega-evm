@@ -2,12 +2,12 @@
 
 use alloy_primitives::{address, Bytes, U256};
 use mega_evm::{
+    revm::{
+        bytecode::opcode::{PUSH0, SELFDESTRUCT},
+        context::result::{ExecutionResult, ResultAndState},
+    },
     test_utils::{transact, MemoryDatabase},
     *,
-};
-use revm::{
-    bytecode::opcode::{PUSH0, SELFDESTRUCT},
-    context::result::{ExecutionResult, ResultAndState},
 };
 
 /// Test that verifies the SELFDESTRUCT opcode works normally before the Mini-Rex hardfork.

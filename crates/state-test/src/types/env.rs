@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use alloy_eips::eip4895::Withdrawal;
-use revm::primitives::{Address, B256, U256};
+use mega_evm::revm::primitives::{Address, B256, U256};
 use serde::Deserialize;
 
 /// Environment variables

@@ -3,12 +3,12 @@
 use alloy_primitives::{address, Bytes, U256};
 use core::convert::Infallible;
 use mega_evm::{
+    revm::{
+        bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
+        context::result::{EVMError, ExecutionResult, InvalidTransaction, ResultAndState},
+    },
     test_utils::{right_pad_bytes, transact, BytecodeBuilder, MemoryDatabase},
     *,
-};
-use revm::{
-    bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
-    context::result::{EVMError, ExecutionResult, InvalidTransaction, ResultAndState},
 };
 
 fn deploy_contract(

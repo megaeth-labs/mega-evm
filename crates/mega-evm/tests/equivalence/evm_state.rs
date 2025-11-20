@@ -2,10 +2,10 @@
 
 use alloy_primitives::{address, Bytes, U256};
 use mega_evm::{
+    revm::bytecode::opcode::{INVALID, PUSH0, SLOAD},
     test_utils::{transact, MemoryDatabase},
     *,
 };
-use revm::bytecode::opcode::{INVALID, PUSH0, SLOAD};
 
 /// Test that verifies the EVM state correctly tracks storage access for non-existent storage slots.
 /// This test ensures that when a contract performs an SLOAD operation on a storage slot that

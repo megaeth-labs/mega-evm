@@ -1,4 +1,4 @@
-use revm::primitives::{Bytes, HashMap, StorageKey, StorageValue, U256};
+use mega_evm::revm::primitives::{Bytes, HashMap, StorageKey, StorageValue, U256};
 use serde::{Deserialize, Serialize};
 
 /// Account information
