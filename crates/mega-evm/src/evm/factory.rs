@@ -4,8 +4,8 @@ use op_revm::L1BlockInfo;
 use revm::{context::result::EVMError, Inspector};
 
 use crate::{
-    DefaultExternalEnvs, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, MegaTransactionError,
+    DefaultExternalEnvs, DynPrecompilesBuilder, EvmTxRuntimeLimits, ExternalEnvs, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -39,12 +39,16 @@ use crate::{
 ///
 /// The factory implements [`alloy_evm::EvmFactory`] and provides `MegaETH`-specific
 /// customizations through the configured `external_envs` service and chain specifications.
-#[derive(Debug, Clone)]
+#[derive(derive_more::Debug, Clone)]
 #[non_exhaustive]
 pub struct MegaEvmFactory<ExtEnvs> {
     /// The `external_envs` service to provide deterministic external information during EVM
     /// execution.
     external_envs: ExtEnvs,
+
+    /// A builder function to build dynamic precompiles for the EVM.
+    #[debug(ignore)]
+    dyn_precompiles_builder: Option<DynPrecompilesBuilder>,
 }
 
 impl Default for MegaEvmFactory<DefaultExternalEnvs<Infallible>> {
@@ -70,7 +74,16 @@ impl<ExtEnvs> MegaEvmFactory<ExtEnvs> {
     ///
     /// A new `EvmFactory` instance configured with the provided `external_envs`.
     pub fn new(external_envs: ExtEnvs) -> Self {
-        Self { external_envs }
+        Self { external_envs, dyn_precompiles_builder: None }
+    }
+
+    /// Sets the builder function to build dynamic precompiles for the EVM.
+    pub fn with_dyn_precompiles_builder(
+        mut self,
+        dyn_precompiles_builder: DynPrecompilesBuilder,
+    ) -> Self {
+        self.dyn_precompiles_builder = Some(dyn_precompiles_builder);
+        self
     }
 
     /// Provides a reference to the external environments.
@@ -117,14 +130,20 @@ where
         db: DB,
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
-        let runtime_limits = EvmTxRuntimeLimits::from_spec(*evm_env.spec_id());
-        let ctx = MegaContext::new(db, evm_env.cfg_env().spec, self.external_envs.clone())
+        let spec_id = *evm_env.spec_id();
+        let runtime_limits = EvmTxRuntimeLimits::from_spec(spec_id);
+        let ctx = MegaContext::new(db, spec_id, self.external_envs.clone())
             .with_tx(MegaTransaction::default())
             .with_block(evm_env.block_env)
             .with_cfg(evm_env.cfg_env)
             .with_chain(L1BlockInfo::default())
             .with_tx_runtime_limits(runtime_limits);
-        MegaEvm::new(ctx)
+        MegaEvm::new(ctx).with_dyn_precompiles(
+            self.dyn_precompiles_builder
+                .as_ref()
+                .map(|builder| builder(spec_id))
+                .unwrap_or_default(),
+        )
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
