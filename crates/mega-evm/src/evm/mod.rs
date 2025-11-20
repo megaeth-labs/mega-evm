@@ -28,7 +28,11 @@ mod limit;
 mod precompiles;
 mod result;
 mod spec;
+mod state;
 
+use std::collections::BTreeMap;
+
+use alloy_primitives::B256;
 pub use context::*;
 pub use execution::*;
 pub use factory::*;
@@ -39,11 +43,13 @@ pub use interfaces::*;
 pub use limit::*;
 pub use precompiles::*;
 pub use result::*;
+use salt::BucketId;
 pub use spec::*;
+pub use state::*;
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
-    context::{result::ResultAndState, BlockEnv},
+    context::{result::ResultAndState, BlockEnv, ContextTr},
     handler::{EthFrame, EvmTr},
     inspector::NoOpInspector,
     interpreter::interpreter::EthInterpreter,
@@ -268,5 +274,25 @@ where
             kv_updates,
             compute_gas_used: compute_gas,
         })
+    }
+
+    /// Get the bucket IDs used during transaction execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns the bucket IDs used during transaction execution.
+    pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.ctx_ref().dynamic_storage_gas_cost.borrow().get_bucket_ids()
+    }
+}
+
+impl<DB: Database + BlockHashes, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
+    /// Get the block hashes used during transaction execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns the block hashes used during transaction execution.
+    pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
+        self.db_ref().get_accessed_block_hashes()
     }
 }
