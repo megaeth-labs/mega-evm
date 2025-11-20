@@ -116,7 +116,7 @@ too_long_first_doc_paragraph = "allow"
 [workspace.dependencies]
 # megaeth 
 mega-evm = { path = "./crates/mega-evm", default-features = false }
-salt = { git = "https://github.com/megaeth-labs/salt.git", rev = "ea2c3215de15d580bdb2f6aac675f779ce94f9a7", default-features = false }
+salt = { git = "https://github.com/megaeth-labs/salt.git", branch = "abel/feat/no-std", default-features = false }
 state-test = { path = "./crates/state-test" }
 
 # revm

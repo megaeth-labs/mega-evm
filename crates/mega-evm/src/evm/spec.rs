@@ -31,7 +31,6 @@ pub enum MegaSpecId {
     /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
     MINI_REX,
     /// The EVM version for the *Rex* hardfork of `MegaETH`.
-    #[value(name = "Rex")]
     REX,
 }
 

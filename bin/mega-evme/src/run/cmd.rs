@@ -123,7 +123,7 @@ pub struct Cmd {
     #[arg(long = "trace.output")]
     pub trace_output_file: Option<PathBuf>,
 
-    /// Name of hardfork to use, possible values: "MiniRex", "Equivalence"
+    /// Name of hardfork to use, possible values: `MiniRex`, `Equivalence`, `Rex`
     #[arg(long = "state.fork", default_value = "MiniRex")]
     pub fork: String,
 

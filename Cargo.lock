@@ -232,7 +232,7 @@ dependencies = [
  "cfg-if",
  "const-hex",
  "derive_more",
- "foldhash",
+ "foldhash 0.1.5",
  "hashbrown 0.15.4",
  "indexmap 2.10.0",
  "itoa",
@@ -979,7 +979,7 @@ checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
 [[package]]
 name = "banderwagon"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/salt.git?rev=ea2c3215de15d580bdb2f6aac675f779ce94f9a7#ea2c3215de15d580bdb2f6aac675f779ce94f9a7"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=abel%2Ffeat%2Fno-std#b5c271b3583cbdb168641df94f2b3a2f1198da56"
 dependencies = [
  "ark-ec 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
  "ark-ed-on-bls12-381-bandersnatch",
@@ -2010,6 +2010,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2207,7 +2213,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5971ac85611da7067dbfcabef3c70ebb5606018acd9e2a3903a0da507521e0d5"
 dependencies = [
  "allocator-api2",
- "foldhash",
+ "foldhash 0.1.5",
+ "serde",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
  "serde",
 ]
 
@@ -2562,7 +2580,7 @@ dependencies = [
 [[package]]
 name = "ipa-multipoint"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/salt.git?rev=ea2c3215de15d580bdb2f6aac675f779ce94f9a7#ea2c3215de15d580bdb2f6aac675f779ce94f9a7"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=abel%2Ffeat%2Fno-std#b5c271b3583cbdb168641df94f2b3a2f1198da56"
 dependencies = [
  "banderwagon",
  "hex",
@@ -2704,7 +2722,7 @@ version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 dependencies = [
- "spin",
+ "spin 0.9.8",
 ]
 
 [[package]]
@@ -4396,18 +4414,19 @@ dependencies = [
 [[package]]
 name = "salt"
 version = "1.0.0"
-source = "git+https://github.com/megaeth-labs/salt.git?rev=ea2c3215de15d580bdb2f6aac675f779ce94f9a7#ea2c3215de15d580bdb2f6aac675f779ce94f9a7"
+source = "git+https://github.com/megaeth-labs/salt.git?branch=abel%2Ffeat%2Fno-std#b5c271b3583cbdb168641df94f2b3a2f1198da56"
 dependencies = [
  "auto_impl",
  "banderwagon",
  "blake3",
  "derive_more",
+ "hashbrown 0.16.0",
  "hex",
  "ipa-multipoint",
- "once_cell",
  "rustc-hash",
  "serde",
  "serde_arrays",
+ "spin 0.10.0",
  "thiserror",
  "zerocopy 0.7.35",
 ]
@@ -4729,6 +4748,12 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+
+[[package]]
+name = "spin"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
 
 [[package]]
 name = "spki"
@@ -5744,7 +5769,6 @@ version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
 dependencies = [
- "byteorder",
  "zerocopy-derive 0.7.35",
 ]
 
