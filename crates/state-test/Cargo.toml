@@ -16,7 +16,7 @@ name = "state-test"
 path = "src/main.rs"
 
 [dependencies]
-mega-evm.workspace = true
+mega-evm = { workspace = true, features = ["default"] }
 
 # alloy
 alloy-eips = { workspace = true, features = ["serde"] }
@@ -28,7 +28,7 @@ alloy-serde.workspace = true
 revm = { workspace = true, features = ["tracer"] }
 
 # misc
-clap.workspace = true
+clap = { workspace = true, features = ["default"] }
 hash-db.workspace = true
 indicatif.workspace = true
 k256.workspace = true
