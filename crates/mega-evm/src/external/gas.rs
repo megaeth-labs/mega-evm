@@ -1,3 +1,5 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use core::fmt::Debug;
 use revm::primitives::hash_map::Entry;
 

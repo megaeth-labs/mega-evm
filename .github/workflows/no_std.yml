@@ -1,4 +1,4 @@
-name: CI
+name: no_std support
 on:
   workflow_call:
   workflow_dispatch:
@@ -31,19 +31,10 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Run cargo-sort
+      - name: Check for riscv64imac-unknown-none-elf target
         run: |
-          cargo install cargo-sort
-          cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
+          cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
 
-      - name: Run Fmt
-        run: cargo fmt --all --check
-
-      - name: Run Clippy
-        run: cargo clippy  --workspace --lib --examples --tests --benches --all-features --locked
-
-      - name: Build
-        run: cargo build
-
-      - name: Run Test
-        run: cargo test
+      - name: Check with std feature
+        run: |
+          cargo check -p mega-evm --features std

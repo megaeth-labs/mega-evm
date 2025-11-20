@@ -1,5 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::rc::Rc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use core::cell::RefCell;
 #[cfg(feature = "std")]
 use std::rc::Rc;

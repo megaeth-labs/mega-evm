@@ -1,4 +1,6 @@
 #[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap};
 use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};

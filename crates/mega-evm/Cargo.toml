@@ -22,10 +22,10 @@ alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
 op-alloy-flz.workspace = true
-op-revm = { workspace = true, features = ["dev", "serde"] }
+op-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # revm
-revm.workspace = true
+revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # megaeth
 salt.workspace = true
@@ -43,7 +43,7 @@ thiserror.workspace = true
 criterion.workspace = true
 hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
-rand.workspace = true
+rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

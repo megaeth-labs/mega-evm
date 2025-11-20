@@ -3,6 +3,8 @@
 use core::{cell::RefCell, convert::Infallible, fmt::Debug};
 
 #[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
 use alloc::{rc::Rc, sync::Arc};
 #[cfg(feature = "std")]
 use std::{rc::Rc, sync::Arc};
