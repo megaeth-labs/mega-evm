@@ -17,7 +17,6 @@ use indicatif as _;
 use k256 as _;
 use mega_evm as _;
 use plain_hasher as _;
-use revm as _;
 use serde as _;
 use serde_json as _;
 use thiserror as _;

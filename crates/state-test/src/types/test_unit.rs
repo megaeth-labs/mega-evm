@@ -1,9 +1,9 @@
-use mega_evm::MegaSpecId;
+use mega_evm::{revm::primitives::eip4844, MegaSpecId};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
 use super::{AccountInfo, Env, SpecName, Test, TransactionParts};
-use revm::{
+use mega_evm::revm::{
     context::{block::BlockEnv, cfg::CfgEnv},
     context_interface::block::calc_excess_blob_gas,
     database::CacheState,
@@ -77,7 +77,7 @@ impl TestUnit {
             let code_hash = keccak256(&info.code);
             let bytecode = Bytecode::new_raw_checked(info.code.clone())
                 .unwrap_or_else(|_| Bytecode::new_legacy(info.code.clone()));
-            let acc_info = revm::state::AccountInfo {
+            let acc_info = mega_evm::revm::state::AccountInfo {
                 balance: info.balance,
                 code_hash,
                 code: Some(bytecode),
@@ -116,7 +116,7 @@ impl TestUnit {
         if let Some(current_excess_blob_gas) = self.env.current_excess_blob_gas {
             block.set_blob_excess_gas_and_price(
                 current_excess_blob_gas.to(),
-                revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+                eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
             );
         } else if let (Some(parent_blob_gas_used), Some(parent_excess_blob_gas)) =
             (self.env.parent_blob_gas_used, self.env.parent_excess_blob_gas)
@@ -130,7 +130,7 @@ impl TestUnit {
                         .map(|i| i.to())
                         .unwrap_or(TARGET_BLOB_GAS_PER_BLOCK_CANCUN),
                 ),
-                revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+                eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
             );
         }
 

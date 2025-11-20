@@ -7,20 +7,20 @@ use crate::{
 use alloy_primitives::{address, U256};
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use mega_evm::{
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
-};
-use revm::{
-    context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
-    context_interface::{
-        result::{EVMError, ExecutionResult},
-        Cfg,
+    revm::{
+        context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
+        context_interface::{
+            result::{EVMError, ExecutionResult},
+            Cfg,
+        },
+        database,
+        database::State,
+        database_interface::EmptyDB,
+        inspector::{inspectors::TracerEip3155, InspectCommitEvm},
+        primitives::{hardfork::SpecId, Bytes, B256},
+        ExecuteCommitEvm,
     },
-    database,
-    database::State,
-    database_interface::EmptyDB,
-    inspector::{inspectors::TracerEip3155, InspectCommitEvm},
-    primitives::{hardfork::SpecId, Bytes, B256},
-    ExecuteCommitEvm,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 use serde_json::json;
 use std::{

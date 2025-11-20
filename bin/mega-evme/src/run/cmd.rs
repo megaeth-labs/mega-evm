@@ -7,13 +7,15 @@ use std::{
 use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_rpc_types_trace::geth::GethDefaultTracingOptions;
 use clap::{Parser, ValueEnum};
-use mega_evm::{DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
-use revm::{
-    context::{block::BlockEnv, cfg::CfgEnv, result::ExecutionResult, tx::TxEnv},
-    database::{CacheState, EmptyDB, State},
-    primitives::{hardfork::SpecId, TxKind},
-    state::{Bytecode, EvmState},
-    ExecuteEvm, InspectEvm,
+use mega_evm::{
+    revm::{
+        context::{block::BlockEnv, cfg::CfgEnv, result::ExecutionResult, tx::TxEnv},
+        database::{CacheState, EmptyDB, State},
+        primitives::{eip4844, hardfork::SpecId, TxKind, KECCAK_EMPTY},
+        state::{AccountInfo, Bytecode, EvmState},
+        ExecuteEvm, InspectEvm,
+    },
+    DefaultExternalEnvs, HashMap, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
@@ -240,7 +242,7 @@ impl Cmd {
             let code_hash = bytecode.hash_slow();
 
             // Create account info
-            let account_info = revm::state::AccountInfo {
+            let account_info = AccountInfo {
                 balance: account_state.balance,
                 code_hash,
                 code: Some(bytecode),
@@ -248,8 +250,7 @@ impl Cmd {
             };
 
             // Convert storage HashMap to revm's HashMap
-            let storage: revm::primitives::HashMap<_, _> =
-                account_state.storage.into_iter().collect();
+            let storage: HashMap<_, _> = account_state.storage.into_iter().collect();
 
             // Insert account with storage
             cache_state.insert_account_with_storage(address, account_info, storage);
@@ -275,21 +276,17 @@ impl Cmd {
                 .unwrap_or_else(|_| Bytecode::new_legacy(Bytes::copy_from_slice(code)));
             let code_hash = bytecode.hash_slow();
 
-            let acc_info = revm::state::AccountInfo {
-                balance: U256::ZERO,
-                code_hash,
-                code: Some(bytecode),
-                nonce: 0,
-            };
+            let acc_info =
+                AccountInfo { balance: U256::ZERO, code_hash, code: Some(bytecode), nonce: 0 };
 
             cache_state.insert_account_with_storage(self.receiver, acc_info, Default::default());
         }
 
         // Set balance for sender if specified
         if let Some(balance) = self.sender_balance {
-            let sender_info = revm::state::AccountInfo {
+            let sender_info = AccountInfo {
                 balance,
-                code_hash: revm::primitives::KECCAK_EMPTY,
+                code_hash: KECCAK_EMPTY,
                 code: Some(Bytecode::default()),
                 nonce: 0,
             };
@@ -368,7 +365,7 @@ impl Cmd {
         if let Some(excess_gas) = self.block_blob_excess_gas {
             block.set_blob_excess_gas_and_price(
                 excess_gas,
-                revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+                eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
             );
         }
 

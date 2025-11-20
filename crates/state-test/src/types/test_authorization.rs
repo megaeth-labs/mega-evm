@@ -1,4 +1,4 @@
-use revm::context_interface::transaction::SignedAuthorization;
+use mega_evm::revm::context_interface::transaction::SignedAuthorization;
 use serde::{de::Error, Deserialize, Deserializer, Serialize};
 
 /// Struct for test authorization

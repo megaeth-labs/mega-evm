@@ -6,6 +6,7 @@
 mod cmd;
 
 pub use cmd::Cmd;
+use mega_evm::revm::state::EvmState;
 
 use std::{collections::HashMap, fs, io::Read};
 
@@ -130,7 +131,7 @@ pub struct StateDump {
 
 impl StateDump {
     /// Create a `StateDump` from EVM state
-    pub fn from_evm_state(evm_state: &revm::state::EvmState) -> Self {
+    pub fn from_evm_state(evm_state: &EvmState) -> Self {
         let mut accounts = HashMap::new();
 
         for (address, account) in evm_state {

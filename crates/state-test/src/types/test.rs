@@ -1,6 +1,9 @@
-use revm::{
-    context::tx::TxEnv,
-    primitives::{Address, Bytes, HashMap, TxKind, B256},
+use mega_evm::{
+    revm::{
+        context::tx::TxEnv,
+        primitives::{Address, Bytes, HashMap, TxKind, B256},
+    },
+    Either,
 };
 use serde::Deserialize;
 
@@ -116,10 +119,7 @@ impl Test {
                 .authorization_list
                 .clone()
                 .map(|auth_list| {
-                    auth_list
-                        .into_iter()
-                        .map(|i| revm::context::either::Either::Left(i.into()))
-                        .collect::<Vec<_>>()
+                    auth_list.into_iter().map(|i| Either::Left(i.into())).collect::<Vec<_>>()
                 })
                 .unwrap_or_default(),
             kind: match unit.transaction.to {

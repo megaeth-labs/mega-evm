@@ -6,7 +6,7 @@ pub use receipt::*;
 
 use std::collections::HashMap;
 
-use revm::primitives::{alloy_primitives::Bloom, Address, B256, U256};
+use mega_evm::revm::primitives::{alloy_primitives::Bloom, Address, B256, U256};
 use state_test::types::{AccountInfo, Env};
 
 /// Input data for state transition

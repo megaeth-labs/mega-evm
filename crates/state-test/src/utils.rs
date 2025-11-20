@@ -3,13 +3,15 @@
 use alloy_rlp::{RlpEncodable, RlpMaxEncodedLen};
 use hash_db::Hasher;
 use k256::ecdsa::SigningKey;
-use mega_evm::{MegaHaltReason, MegaTransactionError};
-use plain_hasher::PlainHasher;
-use revm::{
-    context::result::{EVMError, ExecutionResult},
-    database::{EmptyDB, PlainAccount, State},
-    primitives::{keccak256, Address, Log, B256, U256},
+use mega_evm::{
+    revm::{
+        context::result::{EVMError, ExecutionResult},
+        database::{EmptyDB, PlainAccount, State},
+        primitives::{keccak256, Address, Log, B256, U256},
+    },
+    MegaHaltReason, MegaTransactionError,
 };
+use plain_hasher::PlainHasher;
 use std::convert::Infallible;
 use triehash::sec_trie_root;
 
@@ -106,7 +108,7 @@ pub fn recover_address(private_key: &[u8]) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm::primitives::{address, hex};
+    use mega_evm::revm::primitives::{address, hex};
 
     #[test]
     fn sanity_test() {

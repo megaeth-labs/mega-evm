@@ -1,4 +1,4 @@
-use revm::primitives::{alloy_primitives::Bloom, Address, Bytes, B256};
+use mega_evm::revm::primitives::{alloy_primitives::Bloom, Address, Bytes, B256};
 
 /// Transaction log entry
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

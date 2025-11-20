@@ -1,13 +1,17 @@
 //! Tests for the block environment access tracking functionality.
 
+use ::revm::{context::BlockEnv, ExecuteEvm};
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{test_utils::MemoryDatabase, *};
-use revm::{
-    bytecode::opcode::{
-        BASEFEE, BLOCKHASH, CALLER, CHAINID, COINBASE, DIFFICULTY, GASLIMIT, GASPRICE, NUMBER,
-        ORIGIN, POP, PUSH1, STOP, TIMESTAMP,
+use mega_evm::{
+    revm::{
+        bytecode::opcode::{
+            BASEFEE, BLOCKHASH, CALLER, CHAINID, COINBASE, DIFFICULTY, GASLIMIT, GASPRICE, NUMBER,
+            ORIGIN, POP, PUSH1, STOP, TIMESTAMP,
+        },
+        context::{ContextSetters, ContextTr},
     },
-    context::ContextTr,
+    test_utils::MemoryDatabase,
+    *,
 };
 
 /// Test that verifies the EVM correctly tracks block environment access for various opcodes.
@@ -46,7 +50,6 @@ fn test_block_env_tracking_with_evm() {
         context.chain_mut().operator_fee_constant = Some(U256::from(0));
 
         // Set block number to allow BLOCKHASH to work properly
-        use revm::context::{BlockEnv, ContextSetters};
         let block_env = BlockEnv { number: U256::from(10), ..Default::default() };
         context.set_block(block_env);
 
@@ -258,7 +261,6 @@ fn test_block_env_reset_between_transactions() {
 
     // This simulates how the EVM would be used for a new transaction
     // Setting tx should automatically reset the block env access
-    use revm::ExecuteEvm;
     evm.transact_one(tx2).unwrap();
 
     // After setting new transaction, flag should be reset automatically

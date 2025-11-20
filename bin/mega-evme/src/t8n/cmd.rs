@@ -1,13 +1,17 @@
 use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
-use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
-use revm::{
-    context::{block::BlockEnv, cfg::CfgEnv, either::Either, tx::TxEnv},
-    database::{CacheState, EmptyDB, State},
-    primitives::{hardfork::SpecId, Bytes, TxKind, B256},
-    state::Bytecode,
-    ExecuteCommitEvm,
+use mega_evm::{
+    revm::{
+        context::{
+            block::BlockEnv, cfg::CfgEnv, either::Either, result::ExecutionResult, tx::TxEnv,
+        },
+        database::{CacheState, EmptyDB, State},
+        primitives::{eip4844, hardfork::SpecId, Bytes, TxKind, B256},
+        state::{AccountInfo, Bytecode},
+        ExecuteCommitEvm,
+    },
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use state_test::types::Env;
 
@@ -213,8 +217,7 @@ impl Cmd {
                     total_gas_used += tx_gas_used;
 
                     // Determine if execution was successful based on execution result type
-                    let is_success =
-                        matches!(result, revm::context::result::ExecutionResult::Success { .. });
+                    let is_success = matches!(result, ExecutionResult::Success { .. });
 
                     // Only add logs if execution was successful
                     if is_success {
@@ -332,7 +335,7 @@ impl Cmd {
         if let Some(current_excess_blob_gas) = env.current_excess_blob_gas {
             block.set_blob_excess_gas_and_price(
                 current_excess_blob_gas.to(),
-                revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+                eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
             );
         }
 
@@ -350,7 +353,7 @@ impl Cmd {
                 .unwrap_or_else(|_| Bytecode::new_legacy(info.code.clone()));
             let code_hash = bytecode.hash_slow();
 
-            let acc_info = revm::state::AccountInfo {
+            let acc_info = AccountInfo {
                 balance: info.balance,
                 code_hash,
                 code: Some(bytecode),

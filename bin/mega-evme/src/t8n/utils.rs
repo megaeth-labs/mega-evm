@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use revm::{
+use mega_evm::revm::{
     database::{EmptyDB, State},
-    primitives::{alloy_primitives::Bloom, Address, B256},
+    primitives::{alloy_primitives::Bloom, Address, Log, B256},
 };
 use state_test::types::AccountInfo;
 
@@ -14,12 +14,12 @@ pub fn calculate_state_root(state: &State<EmptyDB>) -> B256 {
 }
 
 /// Calculate logs root from all transaction logs
-pub fn calculate_logs_root(logs: &[revm::primitives::Log]) -> B256 {
+pub fn calculate_logs_root(logs: &[Log]) -> B256 {
     state_test::utils::log_rlp_hash(logs)
 }
 
 /// Calculate bloom filter from all transaction logs
-pub fn calculate_logs_bloom(logs: &[revm::primitives::Log]) -> Bloom {
+pub fn calculate_logs_bloom(logs: &[Log]) -> Bloom {
     let mut bloom = Bloom::default();
     for log in logs {
         bloom.accrue_log(log);
