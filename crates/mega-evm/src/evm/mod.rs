@@ -31,11 +31,8 @@ mod spec;
 mod state;
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::collections::BTreeMap;
+use alloc as std;
+use std::{collections::BTreeMap, vec::Vec};
 
 use alloy_primitives::{Address, B256};
 pub use context::*;
@@ -190,7 +187,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     /// # Returns
     ///
     /// A new `Evm` instance with the dynamic precompiles added.
-    pub fn with_dyn_precompiles(self, dyn_precompiles: HashMap<Address, DynPrecompile>) -> Self {
+    fn with_dyn_precompiles(self, dyn_precompiles: HashMap<Address, DynPrecompile>) -> Self {
         let mut precompiles = self.inner.precompiles;
         // Apply the dynamic precompiles to the precompiles map. If the precompile already exists,
         // it will be overridden with the dynamic precompile.

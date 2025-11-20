@@ -141,8 +141,7 @@ where
         MegaEvm::new(ctx).with_dyn_precompiles(
             self.dyn_precompiles_builder
                 .as_ref()
-                .map(|builder| builder(spec_id))
-                .unwrap_or_default(),
+                .map_or_else(Default::default, |builder| builder(spec_id)),
         )
     }
 

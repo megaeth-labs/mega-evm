@@ -4,12 +4,8 @@
 //! gas cost overrides.
 
 #[cfg(not(feature = "std"))]
-use alloc::sync::Arc;
-#[cfg(feature = "std")]
-use std::sync::Arc;
-
-#[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc as std;
+use std::{boxed::Box, string::String, sync::Arc};
 
 use crate::{ExternalEnvs, MegaContext, MegaSpecId};
 use alloy_evm::{
@@ -27,9 +23,6 @@ use revm::{
     precompile::Precompiles,
     primitives::{Address, HashMap},
 };
-
-#[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
 
 /// `MegaETH` precompile provider with custom gas cost overrides.
 #[derive(Debug, Clone)]

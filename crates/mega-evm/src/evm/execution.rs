@@ -1,5 +1,6 @@
 #[cfg(not(feature = "std"))]
-use crate::alloc::string::ToString;
+use alloc as std;
+use std::string::ToString;
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use alloy_primitives::TxKind;

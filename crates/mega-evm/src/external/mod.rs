@@ -3,11 +3,8 @@
 use core::{cell::RefCell, convert::Infallible, fmt::Debug};
 
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
-#[cfg(not(feature = "std"))]
-use alloc::{rc::Rc, sync::Arc};
-#[cfg(feature = "std")]
-use std::{rc::Rc, sync::Arc};
+use alloc as std;
+use std::{boxed::Box, rc::Rc, sync::Arc};
 
 use alloy_primitives::{BlockNumber, U256};
 use auto_impl::auto_impl;

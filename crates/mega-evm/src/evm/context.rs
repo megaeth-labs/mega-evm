@@ -12,8 +12,13 @@
 //! - **Block Environment Access Tracking**: Monitors which block environment data is accessed
 //! - **Spec Management**: Handles different `MegaETH` specification versions
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::{rc::Rc, vec::Vec};
+
 use alloy_evm::Database;
 use alloy_primitives::Address;
+use core::cell::RefCell;
 use delegate::delegate;
 use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
 use revm::{
@@ -23,15 +28,6 @@ use revm::{
     Journal,
 };
 use salt::BucketId;
-
-#[cfg(not(feature = "std"))]
-use alloc::rc::Rc;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::rc::Rc;
-
-use core::cell::RefCell;
 
 use crate::{
     constants, AdditionalLimit, DefaultExternalEnvs, DynamicGasCost, EvmTxRuntimeLimits,

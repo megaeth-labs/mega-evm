@@ -1,5 +1,7 @@
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc as std;
+use std::vec::Vec;
+
 use alloy_primitives::{Address, U256};
 use revm::{
     context::{transaction::AuthorizationTr, Transaction},

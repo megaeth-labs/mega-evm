@@ -1,11 +1,8 @@
 #[cfg(not(feature = "std"))]
-use alloc::rc::Rc;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-use core::cell::RefCell;
-#[cfg(feature = "std")]
-use std::rc::Rc;
+use alloc as std;
+use std::{rc::Rc, vec::Vec};
 
+use core::cell::RefCell;
 use revm::{
     bytecode::OpCode,
     context::{ContextTr, JournalTr},
