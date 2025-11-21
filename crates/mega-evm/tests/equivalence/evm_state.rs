@@ -6,6 +6,7 @@ use mega_evm::{
     test_utils::{transact, MemoryDatabase},
     *,
 };
+use revm::database::StateBuilder;
 
 /// Test that verifies the EVM state correctly tracks storage access for non-existent storage slots.
 /// This test ensures that when a contract performs an SLOAD operation on a storage slot that
@@ -51,4 +52,41 @@ fn test_evm_state_include_failed_tx_reads() {
             .unwrap();
     let storage = &result.state.get(&contract_address).as_ref().unwrap().storage;
     assert!(storage.contains_key(&U256::ZERO));
+}
+
+/// Test that when an existing empty account is called but with no state changes, the account is
+/// still marked as destroyed according to EIP-161: Specification-d. At the end of the transaction,
+/// any account touched by the execution of that transaction which is now empty SHALL instead become
+/// non-existent (i.e. deleted), where an account is considered to be touched when it is involved in
+/// any potentially state-changing operation. This includes, but is not limited to, being the
+/// recipient of a transfer of zero value.
+#[test]
+fn test_state_clear_with_noop_call() {
+    let empty_account = address!("0000000000000000000000000000000000100001");
+    let caller = address!("0000000000000000000000000000000000100000");
+    let mut db = MemoryDatabase::default().account_nonce(empty_account, 0);
+    let mut state = StateBuilder::<MemoryDatabase>::default()
+        .with_database(&mut db)
+        .with_bundle_update()
+        .build();
+
+    // Call the non-existing account with no transfer
+    let result = transact(
+        MegaSpecId::REX,
+        &mut state,
+        caller,
+        Some(empty_account),
+        Bytes::default(),
+        U256::ZERO,
+    )
+    .unwrap();
+    // assert that the non-existing account is marked as touched
+    assert!(result.state.get(&empty_account).unwrap().is_touched());
+
+    // apply the state changes and get the transitions
+    let transitions = state.cache.apply_evm_state(result.state);
+    let (_, transition) =
+        transitions.iter().find(|(address, _)| *address == empty_account).unwrap();
+    // assert that the storage is marked as destroyed
+    assert!(transition.storage_was_destroyed);
 }
