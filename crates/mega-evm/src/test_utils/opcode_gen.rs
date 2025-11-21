@@ -1,7 +1,9 @@
 //! This module provides utility functions to generate EVM bytecode.
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc as std;
+use std::vec::Vec;
+
 use alloy_primitives::{Address, Bytes, U256};
 use revm::bytecode::opcode::{
     DUP1, EQ, INVALID, JUMPDEST, JUMPI, MSTORE, PUSH0, RETURN, REVERT, SSTORE, STOP,

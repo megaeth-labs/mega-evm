@@ -31,13 +31,10 @@ mod spec;
 mod state;
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::collections::BTreeMap;
+use alloc as std;
+use std::{collections::BTreeMap, vec::Vec};
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 pub use context::*;
 pub use execution::*;
 pub use factory::*;
@@ -52,12 +49,16 @@ use salt::BucketId;
 pub use spec::*;
 pub use state::*;
 
-use alloy_evm::{precompiles::PrecompilesMap, Database};
+use alloy_evm::{
+    precompiles::{DynPrecompile, PrecompilesMap},
+    Database,
+};
 use revm::{
     context::{result::ResultAndState, BlockEnv, ContextTr},
     handler::{EthFrame, EvmTr},
     inspector::NoOpInspector,
     interpreter::interpreter::EthInterpreter,
+    primitives::HashMap,
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
@@ -171,6 +172,33 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
             inspector: self.inner.inspector,
             instruction: self.inner.instruction,
             precompiles: self.inner.precompiles,
+            frame_stack: self.inner.frame_stack,
+        };
+        Self { inner, inspect: self.inspect }
+    }
+
+    /// Adds or overrides dynamic precompiles in the EVM.
+    ///
+    /// # Parameters
+    ///
+    /// - `dyn_precompiles`: The dynamic precompiles to add to the EVM, overriding the existing
+    ///   precompiles if they already exist.
+    ///
+    /// # Returns
+    ///
+    /// A new `Evm` instance with the dynamic precompiles added.
+    fn with_dyn_precompiles(self, dyn_precompiles: HashMap<Address, DynPrecompile>) -> Self {
+        let mut precompiles = self.inner.precompiles;
+        // Apply the dynamic precompiles to the precompiles map. If the precompile already exists,
+        // it will be overridden with the dynamic precompile.
+        for (address, dyn_precompile) in dyn_precompiles {
+            precompiles.apply_precompile(&address, move |_| Some(dyn_precompile));
+        }
+        let inner = revm::context::Evm {
+            ctx: self.inner.ctx,
+            inspector: self.inner.inspector,
+            instruction: self.inner.instruction,
+            precompiles,
             frame_stack: self.inner.frame_stack,
         };
         Self { inner, inspect: self.inspect }

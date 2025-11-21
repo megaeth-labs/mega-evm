@@ -180,7 +180,9 @@
 //! - [Block and Transaction Limits Documentation](../../../docs/BLOCK_AND_TX_LIMITS.md)
 
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
+use alloc as std;
+use std::boxed::Box;
+
 use alloy_consensus::Transaction;
 use alloy_evm::{
     block::{BlockExecutionError, BlockValidationError},

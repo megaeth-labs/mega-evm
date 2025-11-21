@@ -1,5 +1,7 @@
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc as std;
+use std::vec::Vec;
+
 use core::fmt::Debug;
 use revm::primitives::hash_map::Entry;
 

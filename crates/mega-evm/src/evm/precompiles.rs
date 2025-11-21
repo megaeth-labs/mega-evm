@@ -4,10 +4,14 @@
 //! gas cost overrides.
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc as std;
+use std::{boxed::Box, string::String, sync::Arc};
 
 use crate::{ExternalEnvs, MegaContext, MegaSpecId};
-use alloy_evm::{precompiles::PrecompilesMap, Database};
+use alloy_evm::{
+    precompiles::{DynPrecompile, PrecompilesMap},
+    Database,
+};
 use delegate::delegate;
 use once_cell::race::OnceBox;
 use op_revm::{OpContext, OpSpecId};
@@ -17,11 +21,8 @@ use revm::{
     handler::{EthPrecompiles, PrecompileProvider},
     interpreter::{InputsImpl, InterpreterResult},
     precompile::Precompiles,
-    primitives::Address,
+    primitives::{Address, HashMap},
 };
-
-#[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
 
 /// `MegaETH` precompile provider with custom gas cost overrides.
 #[derive(Debug, Clone)]
@@ -174,6 +175,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> PrecompileProvider<MegaContext<DB, Ext
         PrecompileProvider::<OpContext<DB>>::contains(self, address)
     }
 }
+
+/// A builder function to build dynamic precompiles for a given [`MegaSpecId`].
+pub type DynPrecompilesBuilder =
+    Arc<dyn Fn(MegaSpecId) -> HashMap<Address, DynPrecompile> + Send + Sync>;
 
 #[cfg(test)]
 mod tests {
