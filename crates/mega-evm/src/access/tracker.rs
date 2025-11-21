@@ -98,6 +98,11 @@ impl VolatileDataAccessTracker {
         self.volatile_data_accessed.block_env_only()
     }
 
+    /// Returns the bitmap of all volatile data accessed during transaction execution.
+    pub fn get_volatile_data_accessed(&self) -> VolatileDataAccess {
+        self.volatile_data_accessed
+    }
+
     /// Marks that a specific type of block environment has been accessed.
     pub fn mark_block_env_accessed(&mut self, access_type: VolatileDataAccess) {
         self.volatile_data_accessed.insert(access_type);
