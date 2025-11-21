@@ -2,3 +2,4 @@
 
 mod block_limits;
 mod deposit_da_exemption;
+mod inspector;
