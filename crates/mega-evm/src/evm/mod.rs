@@ -165,6 +165,21 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
         MegaEvm { inner, inspect: true }
     }
 
+    /// Creates a new `MegaETH` EVM instance with the inspector disabled at runtime.
+    ///
+    /// # Returns
+    ///
+    /// A new `Evm` instance with the inspector disabled.
+    pub fn without_inspector(self) -> MegaEvm<DB, NoOpInspector, ExtEnvs> {
+        let inner = revm::context::Evm::new_with_inspector(
+            self.inner.ctx,
+            NoOpInspector,
+            self.inner.instruction,
+            self.inner.precompiles,
+        );
+        MegaEvm { inner, inspect: false }
+    }
+
     /// Sets the transaction runtime limits for the EVM.
     pub fn with_tx_runtime_limits(self, tx_limits: EvmTxRuntimeLimits) -> Self {
         let inner = revm::context::Evm {
@@ -258,7 +273,10 @@ where
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
     ExtEnvs: ExternalEnvs,
 {
-    /// Execute a transaction and return the outcome.
+    /// Execute a transaction and return the outcome. If the inspector is set, it will be used to
+    /// inspect the transaction.
+    /// Users can use [`MegaEvm::with_inspector`] to set up a custom inspector.
+    /// Users can use [`MegaEvm::without_inspector`] to disable the inspector.
     ///
     /// # Parameters
     ///
@@ -271,7 +289,11 @@ where
         &mut self,
         tx: MegaTransaction,
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
-        let ResultAndState { result, state } = ExecuteEvm::transact(self, tx)?;
+        let ResultAndState { result, state } = if self.inspect {
+            InspectEvm::inspect_tx(self, tx)?
+        } else {
+            ExecuteEvm::transact(self, tx)?
+        };
         let additional_limit = self.ctx().additional_limit.borrow();
         let LimitUsage { data_size, kv_updates, compute_gas } = additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
@@ -293,6 +315,10 @@ where
     /// # Returns
     ///
     /// The outcome of the transaction.
+    #[deprecated(
+        since = "1.0.2",
+        note = "Use `MegaEvm::execute_transaction` instead, which will automatically use the inspector if it is set up"
+    )]
     pub fn inspect_transaction(
         &mut self,
         tx: MegaTransaction,
