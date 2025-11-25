@@ -28,6 +28,8 @@ pub struct MegaTransactionOutcome {
     pub kv_updates: u64,
     /// The compute gas used.
     pub compute_gas_used: u64,
+    /// The state growth used.
+    pub state_growth_used: u64,
 }
 
 /// `MegaETH` transaction validation error type.
@@ -71,6 +73,13 @@ pub enum MegaHaltReason {
         /// The actual compute gas usage
         actual: u64,
     },
+    /// State growth limit exceeded
+    StateGrowthLimitExceeded {
+        /// The configured state growth limit
+        limit: u64,
+        /// The actual state growth usage
+        actual: u64,
+    },
     /// System transaction's callee is not in the whitelist
     SystemTxInvalidCallee {
         /// address called
@@ -112,6 +121,7 @@ impl TryFrom<MegaHaltReason> for EthHaltReason {
             MegaHaltReason::DataLimitExceeded { .. } |
             MegaHaltReason::KVUpdateLimitExceeded { .. } |
             MegaHaltReason::ComputeGasLimitExceeded { .. } |
+            MegaHaltReason::StateGrowthLimitExceeded { .. } |
             MegaHaltReason::SystemTxInvalidCallee { .. } |
             MegaHaltReason::VolatileDataAccessOutOfGas { .. } => Err(value),
         }

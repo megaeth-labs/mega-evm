@@ -162,6 +162,25 @@ macro_rules! compute_gas {
     };
 }
 
+/// Macro to run the inner instruction and abort if the instruction result is an error.
+macro_rules! run_inner_instruction_or_abort {
+    ($inner_fn:path, $context:expr) => {
+        let ctx = InstructionContext::<'_, H, WIRE> {
+            interpreter: &mut *$context.interpreter,
+            host: &mut *$context.host,
+        };
+        $inner_fn(ctx);
+        if $context
+            .interpreter
+            .bytecode
+            .instruction_result()
+            .is_some_and(|result| result.is_error())
+        {
+            return;
+        }
+    };
+}
+
 mod mini_rex {
     use super::*;
 
@@ -327,8 +346,8 @@ mod mini_rex {
         table[CREATE2 as usize] = forward_gas_ext::create2;
         table[CALL as usize] = forward_gas_ext::call;
         table[CALLCODE as usize] = forward_gas_ext::call_code;
-        table[DELEGATECALL as usize] = compute_gas_ext::delegate_call;
-        table[STATICCALL as usize] = compute_gas_ext::static_call;
+        table[DELEGATECALL as usize] = storage_gas_ext::delegate_call;
+        table[STATICCALL as usize] = storage_gas_ext::static_call;
 
         table[INVALID as usize] = compute_gas_ext::invalid;
         table[RETURN as usize] = compute_gas_ext::ret;
@@ -377,17 +396,13 @@ pub mod forward_gas_ext {
                 WIRE: InterpreterTypes<Stack: StackInspectTr>,
                 H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
             >(
-                mut context: InstructionContext<'_, H, WIRE>,
+                context: InstructionContext<'_, H, WIRE>,
             ) {
                 // Determine if there's a value transfer (only applies to CALL opcode).
                 let has_transfer = $has_transfer_logic(&context);
 
                 // Call the wrapped opcode handler.
-                let ctx = InstructionContext::<'_, H, WIRE> {
-                    interpreter: &mut context.interpreter,
-                    host: &mut context.host,
-                };
-                $wrapped_fn(ctx);
+                run_inner_instruction_or_abort!($wrapped_fn, context);
 
                 // Cap the forwarded gas to the child call/create to the 98/100 of the remaining
                 // gas.
@@ -548,16 +563,12 @@ pub mod volatile_data_ext {
         #[doc = concat!("`", $opcode_name, "` opcode with compute gas limit enforcement on volatile data access.")]
         #[inline]
         pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
-            mut context: InstructionContext<'_, H, WIRE>,
+            context: InstructionContext<'_, H, WIRE>,
         ) {
             let volatile_data_tracker = context.host.volatile_data_tracker().clone();
 
             // The volatile data tracker will be marked as accessed in the `Host` hooks.
-            let ctx = InstructionContext::<'_, H, WIRE> {
-                interpreter: &mut context.interpreter,
-                host: &mut context.host,
-            };
-            $original_fn(ctx);
+            run_inner_instruction_or_abort!($original_fn, context);
 
             // Lower compute gas limit if volatile data was accessed.
             // This is a no-op if no volatile data was accessed or if limit is already lower.
@@ -617,7 +628,7 @@ pub mod volatile_data_ext {
             #[doc = concat!("`", $opcode_name, "` opcode with oracle access detection and compute gas limit enforcement.")]
             #[inline]
             pub fn $fn_name<WIRE: InterpreterTypes<Stack: StackInspectTr>, H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized>(
-                mut context: InstructionContext<'_, H, WIRE>,
+                context: InstructionContext<'_, H, WIRE>,
             ) {
                 // Get the call target address from the stack.
                 let Some(target) = context.interpreter.stack.inspect::<$target_stack_pos>() else {
@@ -626,11 +637,8 @@ pub mod volatile_data_ext {
                 };
                 let target = target.into_address();
 
-                let ctx = InstructionContext::<'_, H, WIRE> {
-                    interpreter: &mut context.interpreter,
-                    host: &mut context.host,
-                };
-                $original_fn(ctx);
+                // Call the original instruction
+                run_inner_instruction_or_abort!($original_fn, context);
 
                 // Check if calling the oracle contract and mark it as accessed.
                 // If so, lower the compute gas limit.
@@ -648,8 +656,8 @@ pub mod volatile_data_ext {
 
     wrap_call_op_oracle_check!(call, "CALL", storage_gas_ext::call, 1);
     wrap_call_op_oracle_check!(call_code, "CALLCODE", storage_gas_ext::call_code, 1);
-    wrap_call_op_oracle_check!(delegate_call, "DELEGATECALL", compute_gas_ext::delegate_call, 1);
-    wrap_call_op_oracle_check!(static_call, "STATICCALL", compute_gas_ext::static_call, 1);
+    wrap_call_op_oracle_check!(delegate_call, "DELEGATECALL", storage_gas_ext::delegate_call, 1);
+    wrap_call_op_oracle_check!(static_call, "STATICCALL", storage_gas_ext::static_call, 1);
 }
 
 /// Extends opcodes with additional limit (kv update limit, data limit, etc.) enforcement.
@@ -697,10 +705,7 @@ pub mod additional_limit_ext {
         let loaded_data = SStoreResult { original_value, present_value, new_value };
 
         // Execute the original SSTORE instruction
-        storage_gas_ext::sstore(InstructionContext {
-            interpreter: &mut *context.interpreter,
-            host: &mut *context.host,
-        });
+        run_inner_instruction_or_abort!(storage_gas_ext::sstore, context);
 
         // KV update bomb and data bomb (only when first writing non-zero value to originally zero
         // slot): check if the number of key-value updates or the total data size will exceed the
@@ -736,10 +741,7 @@ pub mod additional_limit_ext {
         let len = as_usize_or_fail!(context.interpreter, len);
 
         // Execute the original LOG instruction
-        storage_gas_ext::log::<N, WIRE, H>(InstructionContext {
-            interpreter: &mut *context.interpreter,
-            host: &mut *context.host,
-        });
+        run_inner_instruction_or_abort!(storage_gas_ext::log::<N, WIRE, H>, context);
 
         // Record the size of the log topics and data. If the total data size exceeds the limit, we
         // halt.
@@ -778,13 +780,13 @@ pub mod storage_gas_ext {
     /// - `$opcode_name`: String name of the opcode (for documentation)
     /// - `$wrapped_fn`: Path to the wrapped instruction implementation
     macro_rules! wrap_call_with_storage_gas {
-        ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path) => {
+        ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr) => {
             #[doc = concat!("`", $opcode_name, "` opcode implementation modified from `revm` with compute gas tracking and dynamically-scaled storage gas costs.")]
             pub fn $fn_name<
                 WIRE: InterpreterTypes<Stack: StackInspectTr>,
                 H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
             >(
-                mut context: InstructionContext<'_, H, WIRE>,
+                context: InstructionContext<'_, H, WIRE>,
             ) {
                 let spec = context.interpreter.runtime_flag.spec_id();
                 let Some(to) = context.interpreter.stack.inspect::<1>() else {
@@ -795,11 +797,15 @@ pub mod storage_gas_ext {
                 let to_account = context.host.journal_mut().inspect_account_delegated(to);
                 let is_empty =
                     to_account.map(|account| account.state_clear_aware_is_empty(spec)).unwrap_or(true);
-                let Some(value) = context.interpreter.stack.inspect::<2>() else {
-                    context.interpreter.halt(InstructionResult::StackUnderflow);
-                    return;
+                let has_transfer = if $has_transfer_logic {
+                    let Some(value) =context.interpreter.stack.inspect::<2>() else {
+                        context.interpreter.halt(InstructionResult::StackUnderflow);
+                        return;
+                    };
+                    !value.is_zero()
+                } else {
+                    false
                 };
-                let has_transfer = !value.is_zero();
                 // Charge additional storage gas cost for creating a new account
                 if is_empty && has_transfer {
                     let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
@@ -810,17 +816,28 @@ pub mod storage_gas_ext {
                 }
 
                 // Call the original instruction
-                let ctx = InstructionContext::<'_, H, WIRE> {
-                    interpreter: &mut context.interpreter,
-                    host: &mut context.host,
-                };
-                $wrapped_fn(ctx);
+                run_inner_instruction_or_abort!($wrapped_fn, context);
+
+                // record the state growth if opcode is successful
+                if matches!(context.interpreter.bytecode.action(), Some(InterpreterAction::NewFrame(_))) {
+                    let additional_limit = context.host.additional_limit();
+                    let mut additional_limit = additional_limit.borrow_mut();
+                    additional_limit.state_growth_tracker.on_message_call(to, is_empty && has_transfer);
+
+                }
             }
         };
     }
 
-    wrap_call_with_storage_gas!(call, "CALL", compute_gas_ext::call);
-    wrap_call_with_storage_gas!(call_code, "CALLCODE", compute_gas_ext::call_code);
+    wrap_call_with_storage_gas!(call, "CALL", compute_gas_ext::call, true);
+    wrap_call_with_storage_gas!(call_code, "CALLCODE", compute_gas_ext::call_code, true);
+    wrap_call_with_storage_gas!(
+        delegate_call,
+        "DELEGATECALL",
+        compute_gas_ext::delegate_call,
+        false
+    );
+    wrap_call_with_storage_gas!(static_call, "STATICCALL", compute_gas_ext::static_call, false);
 
     /// `CREATE`/`CREATE2` opcode implementation modified from `revm` with compute gas tracking and
     /// dynamically-scaled storage gas costs.
@@ -888,9 +905,16 @@ pub mod storage_gas_ext {
 
         // Call the original create instruction
         if IS_CREATE2 {
-            compute_gas_ext::create2(context);
+            run_inner_instruction_or_abort!(compute_gas_ext::create2, context);
         } else {
-            compute_gas_ext::create(context);
+            run_inner_instruction_or_abort!(compute_gas_ext::create, context);
+        }
+
+        // record the state growth if opcode is successful
+        if matches!(context.interpreter.bytecode.action(), Some(InterpreterAction::NewFrame(_))) {
+            let additional_limit = context.host.additional_limit();
+            let mut additional_limit = additional_limit.borrow_mut();
+            additional_limit.state_growth_tracker.on_message_call(created_address, true);
         }
     }
 
@@ -930,19 +954,19 @@ pub mod storage_gas_ext {
         // Execute the original LOG instruction.
         match N {
             0 => {
-                compute_gas_ext::log0(context);
+                run_inner_instruction_or_abort!(compute_gas_ext::log0, context);
             }
             1 => {
-                compute_gas_ext::log1(context);
+                run_inner_instruction_or_abort!(compute_gas_ext::log1, context);
             }
             2 => {
-                compute_gas_ext::log2(context);
+                run_inner_instruction_or_abort!(compute_gas_ext::log2, context);
             }
             3 => {
-                compute_gas_ext::log3(context);
+                run_inner_instruction_or_abort!(compute_gas_ext::log3, context);
             }
             4 => {
-                compute_gas_ext::log4(context);
+                run_inner_instruction_or_abort!(compute_gas_ext::log4, context);
             }
             _ => {
                 context.interpreter.halt(InstructionResult::InvalidFEOpcode);
@@ -1000,7 +1024,17 @@ pub mod storage_gas_ext {
         }
 
         // Execute the original SSTORE instruction
-        compute_gas_ext::sstore(context);
+        run_inner_instruction_or_abort!(compute_gas_ext::sstore, context);
+
+        // record the state growth
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        additional_limit.state_growth_tracker.on_sstore(
+            target_address,
+            index,
+            original_value,
+            present_value,
+            new_value,
+        );
     }
 }
 
@@ -1014,15 +1048,12 @@ pub mod compute_gas_ext {
             #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
             #[inline]
             pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
-                mut context: InstructionContext<'_, H, WIRE>,
+                context: InstructionContext<'_, H, WIRE>,
             ) {
                 let gas_before = context.interpreter.gas.remaining();
 
-                let ctx = InstructionContext::<'_, H, WIRE> {
-                    interpreter: &mut context.interpreter,
-                    host: &mut context.host,
-                };
-                $original_fn(ctx);
+                // Call the original instruction
+                run_inner_instruction_or_abort!($original_fn, context);
 
                 let mut gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
                 // Some of the gas may be forwarded to the child call. We need to substract them.
