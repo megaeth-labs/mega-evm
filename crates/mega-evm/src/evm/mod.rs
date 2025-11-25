@@ -262,8 +262,26 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     /// This is useful when you need to extract the final state after EVM execution
     /// and no longer need the EVM instance.
     #[inline]
+    #[deprecated(note = "Use `into_parts` instead")]
     pub fn into_journaled_state(self) -> Journal<DB> {
         self.inner.ctx.inner.journaled_state
+    }
+
+    /// Consumes the `MegaEvm` instance and returns the inner EVM.
+    ///
+    /// This method is typically used after EVM execution when you need to access
+    /// the underlying EVM components and no longer require the `MegaEvm` wrapper.
+    #[inline]
+    pub fn into_parts(
+        self,
+    ) -> revm::context::Evm<
+        MegaContext<DB, ExtEnvs>,
+        INSP,
+        MegaInstructions<DB, ExtEnvs>,
+        PrecompilesMap,
+        EthFrame<EthInterpreter>,
+    > {
+        self.inner
     }
 }
 
