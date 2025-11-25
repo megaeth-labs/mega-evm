@@ -78,4 +78,10 @@ impl EvmTxRuntimeLimits {
         self.tx_compute_gas_limit = tx_compute_gas_limit;
         self
     }
+
+    /// Sets the maximum state growth limit for a single transaction.
+    pub fn with_tx_state_growth_limit(mut self, tx_state_growth_limit: u64) -> Self {
+        self.tx_state_growth_limit = tx_state_growth_limit;
+        self
+    }
 }
