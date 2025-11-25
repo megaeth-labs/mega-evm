@@ -262,7 +262,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     /// This is useful when you need to extract the final state after EVM execution
     /// and no longer need the EVM instance.
     #[inline]
-    #[deprecated(note = "Use `into_parts` instead")]
+    #[deprecated(note = "Use `into_inner` instead")]
     pub fn into_journaled_state(self) -> Journal<DB> {
         self.inner.ctx.inner.journaled_state
     }
@@ -272,6 +272,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     /// This method is typically used after EVM execution when you need to access
     /// the underlying EVM components and no longer require the `MegaEvm` wrapper.
     #[inline]
+    #[allow(clippy::type_complexity)]
     pub fn into_inner(
         self,
     ) -> revm::context::Evm<
