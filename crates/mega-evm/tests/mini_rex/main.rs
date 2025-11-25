@@ -9,4 +9,5 @@ mod disallow_selfdestruct;
 mod gas;
 mod mega_system_transaction;
 mod oracle;
+mod state_growth_limit;
 mod tx_data_and_kv_update_limit;

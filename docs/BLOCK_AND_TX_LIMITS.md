@@ -2,11 +2,11 @@
 
 ## Overview
 
-MegaEVM implements a comprehensive resource limit system to prevent spam attacks and ensure fair resource allocation. The system enforces **6 types of limits**, each with both **transaction-level** and **block-level** variants, using a two-phase checking strategy to optimize block construction.
+MegaEVM implements a comprehensive resource limit system to prevent spam attacks and ensure fair resource allocation. The system enforces **7 types of limits**, each with both **transaction-level** and **block-level** variants, using a two-phase checking strategy to optimize block construction.
 
 For more about how these limits are accounted, see [RESOURCE_ACCOUNTING.md](./RESOURCE_ACCOUNTING.md).
 
-## The Six Limit Types
+## The Seven Limit Types
 
 ### Pre-execution Limits
 
@@ -51,6 +51,12 @@ These limits depend on actual execution results and are enforced during/after tr
    - **Block-level**: Total storage updates in a block
    - Tracks: SSTORE operations and account updates
 
+7. **State Growth Limit**
+   - **Tx-level**: Maximum state growth a single transaction can create
+   - **Block-level**: Total state growth in a block
+   - Tracks: New accounts created and new storage slots written (net growth)
+   - Uses a **net growth model**: clearing storage slots back to zero reduces the count
+
 ## Two-Level Enforcement
 
 Each limit has two enforcement levels:
@@ -82,7 +88,7 @@ Applies to cumulative resource usage across all transactions in a block. Violati
 - May fit in future blocks
 - Example: Block has 5M gas remaining, transaction needs 10M
 
-### Phase 2: Post-execution Checks (Limits 4-6)
+### Phase 2: Post-execution Checks (Limits 4-7)
 
 **Checked**: During and after transaction execution
 **Purpose**: Enforce limits based on actual execution results
@@ -111,7 +117,7 @@ For each transaction:
   │  └─ Block-level violation? → Skip, try next
   │
   ├─ Step 2: Execute transaction
-  │  └─ If tx-level limits (4-6) exceeded → Transaction fails (status=0)
+  │  └─ If tx-level limits (4-7) exceeded → Transaction fails (status=0)
   │
   ├─ Step 3: Post-execution validation
   │  └─ Block-level violation? → Discard outcome, skip, try next
@@ -162,6 +168,7 @@ These indicate the transaction doesn't fit in the current block:
 - `MegaBlockLimitExceededError::ComputeGasLimit` - Would exceed block compute gas
 - `MegaBlockLimitExceededError::TransactionDataLimit` - Would exceed block transactions data limit
 - `MegaBlockLimitExceededError::KVUpdateLimit` - Would exceed block KV updates
+- `MegaBlockLimitExceededError::StateGrowthLimit` - Would exceed block state growth
 - `MegaBlockLimitExceededError::TransactionEncodeSizeLimit` - Would exceed block transactions encode size
 - `MegaBlockLimitExceededError::DataAvailabilitySizeLimit` - Would exceed block DA size
 - `BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas` - Insufficient gas
@@ -200,6 +207,8 @@ The MINI_REX specification introduces additional resource limits to prevent spam
 - `tx_da_size_limit` - Maximum DA size per transaction
 - `block_da_size_limit` - Total DA size in block
 - `block_compute_gas_limit` - Total compute gas in block
+- `tx_state_growth_limit` - Maximum state growth per transaction
+- `block_state_growth_limit` - Total state growth in block
 
 ## Key Design Principles
 

@@ -1,14 +1,15 @@
 # Resource Accounting
 
-This document specifies how MegaETH tracks resource usage across three independent dimensions: compute gas, data size, and key-value updates. Each resource is tracked separately during transaction execution to enforce the multi-dimensional limits defined in [BLOCK_AND_TX_LIMITS.md](./BLOCK_AND_TX_LIMITS.md).
+This document specifies how MegaETH tracks resource usage across four independent dimensions: compute gas, data size, key-value updates, and state growth. Each resource is tracked separately during transaction execution to enforce the multi-dimensional limits defined in [BLOCK_AND_TX_LIMITS.md](./BLOCK_AND_TX_LIMITS.md).
 
 ## Overview
 
-MegaETH implements a **multi-dimensional resource tracking system** that monitors three independent resource types during transaction execution:
+MegaETH implements a **multi-dimensional resource tracking system** that monitors four independent resource types during transaction execution:
 
 1. **Compute Gas**: Tracks computational work performed by EVM instructions
 2. **Data Size**: Tracks bytes of data that must be transmitted and stored
 3. **KV Updates**: Tracks key-value database operations that modify state
+4. **State Growth**: Tracks new accounts and storage slots created (net growth)
 
 Each resource is tracked independently, and when any limit is exceeded, the transaction halts with `OutOfGas` (remaining gas is preserved and refunded to sender).
 
@@ -166,6 +167,100 @@ The same `target_updated` optimization applies:
 ### Limit Enforcement
 
 When `kv_updates > TX_KV_UPDATES_LIMIT`:
+
+- Transaction execution halts with `OutOfGas` error
+- Remaining gas is preserved (not consumed)
+- Gas is refunded to transaction sender
+
+## State Growth Tracking
+
+State growth tracks the net increase in blockchain state by counting new accounts created and new storage slots written. It uses a **net growth model** where clearing storage slots back to zero reduces the count.
+Note that the net growth model only applies on transaction level, which means clearing a storage slot created in previous transactions does not decrease the state growth tracked count.
+
+### Tracked Operations
+
+State growth distinguishes between **permanent growth** and **frame-aware growth** (can be reverted):
+
+#### Account Creation (Frame-Aware)
+
+| Operation                                   | Growth Count | Notes                                          |
+| ------------------------------------------- | ------------ | ---------------------------------------------- |
+| **CREATE/CREATE2**                          | +1           | New contract account created                   |
+| **CALL with value to empty account**        | +1           | EIP-161: value transfer creates account        |
+| **CALL without value to empty account**     | 0            | EIP-161: no value transfer, no account created |
+| **Transaction to empty account with value** | +1           | Transaction-level account creation             |
+| **Transaction to existing account**         | 0            | Account already exists                         |
+| **Account creation reverted**               | 0            | Frame revert discards the growth               |
+
+#### Storage Slot Creation (Frame-Aware)
+
+State growth tracks transitions based on the **original value** (at transaction start), **present value** (before SSTORE), and **new value** (being written):
+
+| Original | Present | New   | Growth Change | Reason                                     |
+| -------- | ------- | ----- | ------------- | ------------------------------------------ |
+| zero     | zero    | non-0 | **+1**        | First write to empty slot                  |
+| zero     | non-0   | zero  | **-1**        | Clear slot that was empty at tx start      |
+| zero     | non-0   | non-0 | 0             | Already counted when first written         |
+| non-0    | any     | any   | 0             | Slot existed at tx start, no growth change |
+
+**Examples:**
+
+- Slot starts at 0, write 5: **+1** (new storage created)
+- Slot starts at 0, write 5, write 10: **+1** (only counted once)
+- Slot starts at 0, write 5, write 0: **0** (created then cleared in same tx)
+- Slot starts at 5, write 10: **0** (slot already existed at tx start)
+- Slot starts at 0, write 5 in subcall, subcall reverts: **0** (frame revert discards)
+
+### Net Growth Model
+
+The tracker maintains an internal counter that can become negative during execution:
+
+- **Creating state**: Increments the counter (+1 per account/slot)
+- **Clearing state**: Decrements the counter (-1 per slot cleared to zero)
+- **Reported growth**: Clamped to minimum of zero
+
+**Example:**
+
+```
+Transaction creates 3 new storage slots:    total_growth = +3
+Transaction clears 1 slot back to zero:     total_growth = +2
+Transaction clears 2 more slots:            total_growth = 0
+```
+
+### Frame Management
+
+State growth uses a frame stack to properly handle reverts:
+
+1. **Frame Creation**: When a CALL or CREATE is made, a new frame is pushed
+2. **Growth Accumulation**: Growth within a frame is tracked as "discardable"
+3. **On Success**: Frame's growth is merged into parent frame
+4. **On Revert**: Frame's growth is discarded (subtracted from total)
+
+**Example:**
+
+```
+Main transaction starts:                    Frame 0: discardable = 0
+Main creates 2 storage slots:               Frame 0: discardable = 2, total = 2
+Main calls contract A:                      Frame 1: discardable = 0
+Contract A creates 3 storage slots:         Frame 1: discardable = 3, total = 5
+Contract A calls contract B:                Frame 2: discardable = 0
+Contract B creates 1 storage slot:          Frame 2: discardable = 1, total = 6
+Contract B reverts:                         Frame 2 discarded, total = 5
+Contract A completes successfully:          Frame 1 merged to Frame 0, total = 5
+Transaction completes:                      Final growth = 5
+```
+
+### EIP-161 Compliance
+
+The tracker implements EIP-161 account clearing rules for CALL operations:
+
+- **CALL with value to empty account**: Creates account → counts as +1 growth
+- **CALL without value to empty account**: Does NOT create account → no growth
+- **STATICCALL/DELEGATECALL**: Never create accounts → no growth
+
+### Limit Enforcement
+
+When `state_growth > TX_STATE_GROWTH_LIMIT`:
 
 - Transaction execution halts with `OutOfGas` error
 - Remaining gas is preserved (not consumed)

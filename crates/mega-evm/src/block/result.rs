@@ -122,6 +122,17 @@ pub enum MegaBlockLimitExceededError {
         /// Block data availability size limit
         limit: u64,
     },
+
+    /// Block state growth limit exceeded.
+    #[error("Block state growth limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    StateGrowthLimit {
+        /// State growth used by block so far
+        block_used: u64,
+        /// State growth used by current transaction
+        tx_used: u64,
+        /// Block state growth limit
+        limit: u64,
+    },
 }
 
 impl InvalidTxError for MegaBlockLimitExceededError {

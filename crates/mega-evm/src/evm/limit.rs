@@ -10,6 +10,8 @@ pub struct EvmTxRuntimeLimits {
     pub tx_kv_updates_limit: u64,
     /// Maximum compute gas limit for a single transaction.
     pub tx_compute_gas_limit: u64,
+    /// Maximum state growth limit for a single transaction.
+    pub tx_state_growth_limit: u64,
 }
 
 impl EvmTxRuntimeLimits {
@@ -28,6 +30,7 @@ impl EvmTxRuntimeLimits {
             tx_data_size_limit: u64::MAX,
             tx_kv_updates_limit: u64::MAX,
             tx_compute_gas_limit: u64::MAX,
+            tx_state_growth_limit: u64::MAX,
         }
     }
 
@@ -37,6 +40,7 @@ impl EvmTxRuntimeLimits {
             tx_data_size_limit: u64::MAX,
             tx_kv_updates_limit: u64::MAX,
             tx_compute_gas_limit: u64::MAX,
+            tx_state_growth_limit: u64::MAX,
         }
     }
 
@@ -46,6 +50,7 @@ impl EvmTxRuntimeLimits {
             tx_data_size_limit: crate::constants::mini_rex::TX_DATA_LIMIT,
             tx_kv_updates_limit: crate::constants::mini_rex::TX_KV_UPDATE_LIMIT,
             tx_compute_gas_limit: crate::constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
+            tx_state_growth_limit: u64::MAX,
         }
     }
 
@@ -71,6 +76,12 @@ impl EvmTxRuntimeLimits {
     /// Sets the maximum compute gas limit for a single transaction.
     pub fn with_tx_compute_gas_limit(mut self, tx_compute_gas_limit: u64) -> Self {
         self.tx_compute_gas_limit = tx_compute_gas_limit;
+        self
+    }
+
+    /// Sets the maximum state growth limit for a single transaction.
+    pub fn with_tx_state_growth_limit(mut self, tx_state_growth_limit: u64) -> Self {
+        self.tx_state_growth_limit = tx_state_growth_limit;
         self
     }
 }

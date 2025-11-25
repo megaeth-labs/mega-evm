@@ -194,26 +194,21 @@ where
 
             // MegaETH modification: additional storage gas cost for creating account
             let kind = ctx.tx().kind();
-            let new_account = match kind {
-                TxKind::Create => true,
+            let (callee_address, new_account) = match kind {
+                TxKind::Create => {
+                    let tx = ctx.tx();
+                    let caller = tx.caller();
+                    let nonce = tx.nonce();
+                    let created_address = caller.create(nonce);
+                    (created_address, true)
+                }
                 TxKind::Call(address) => {
-                    !ctx.tx().value().is_zero() &&
-                        match ctx.db_mut().basic(address)? {
-                            Some(account) => account.is_empty(),
-                            None => true,
-                        }
+                    let new_account = !ctx.tx().value().is_zero() &&
+                        ctx.db_mut().basic(address)?.is_none_or(|acc| acc.is_empty());
+                    (address, new_account)
                 }
             };
             if new_account {
-                let callee_address = match kind {
-                    TxKind::Create => {
-                        let tx = ctx.tx();
-                        let caller = tx.caller();
-                        let nonce = tx.nonce();
-                        caller.create(nonce)
-                    }
-                    TxKind::Call(address) => address,
-                };
                 initial_and_floor_gas.initial_gas +=
                     ctx.new_account_storage_gas(callee_address).map_err(|_| {
                         let err_str = format!(
@@ -222,6 +217,10 @@ where
                         Self::Error::from_string(err_str)
                     })?;
             }
+
+            // MegaETH modification: update the state growth tracker
+            let state_growth_tracker = &mut ctx.additional_limit.borrow_mut().state_growth_tracker;
+            state_growth_tracker.on_message_call(callee_address, new_account);
 
             // MegaETH MiniRex modification: calldata storage gas costs
             // - Standard tokens: 400 gas per token (vs 4)

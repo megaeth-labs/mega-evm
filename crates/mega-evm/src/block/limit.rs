@@ -326,6 +326,19 @@ pub struct BlockLimits {
     /// rejected with [`MegaBlockLimitExceededError::ComputeGasLimit`], and their state changes
     /// are **not committed**.
     pub block_compute_gas_limit: u64,
+
+    /// Maximum state growth limit for a single transaction.
+    pub tx_state_growth_limit: u64,
+
+    /// Maximum cumulative state growth limit for all transactions in a block.
+    ///
+    /// This limit is checked **after** transaction execution but **before** committing state
+    /// changes. It tracks the total state growth consumed by all transactions in the block.
+    ///
+    /// Transactions that would cause the cumulative block state growth to exceed this limit are
+    /// rejected with [`MegaBlockLimitExceededError::StateGrowthLimit`], and their state changes
+    /// are **not committed**.
+    pub block_state_growth_limit: u64,
 }
 
 impl BlockLimits {
@@ -344,6 +357,8 @@ impl BlockLimits {
             block_kv_update_limit: u64::MAX,
             tx_compute_gas_limit: u64::MAX,
             block_compute_gas_limit: u64::MAX,
+            tx_state_growth_limit: u64::MAX,
+            block_state_growth_limit: u64::MAX,
         }
     }
 
@@ -518,6 +533,25 @@ impl BlockLimits {
         self.block_compute_gas_limit = limit;
         self
     }
+
+    /// Set a custom transaction state growth limit.
+    ///
+    /// This is a builder method that consumes self and returns a new instance
+    /// with the specified transaction state growth limit.
+    pub fn with_tx_state_growth_limit(mut self, limit: u64) -> Self {
+        self.tx_state_growth_limit = limit;
+        self
+    }
+
+    /// Set a custom block state growth limit.
+    ///
+    /// This is a builder method that consumes self and returns a new instance
+    /// with the specified block state growth limit.
+    pub fn with_block_state_growth_limit(mut self, limit: u64) -> Self {
+        self.block_state_growth_limit = limit;
+        self
+    }
+
     /// Create a new block limiter from these limits.
     ///
     /// This converts the limit configuration into a stateful [`BlockLimiter`] that tracks
@@ -542,6 +576,7 @@ impl BlockLimits {
             block_tx_size_used: 0,
             block_da_size_used: 0,
             block_compute_gas_used: 0,
+            block_state_growth_used: 0,
         }
     }
 
@@ -551,6 +586,7 @@ impl BlockLimits {
             tx_data_size_limit: self.tx_data_limit,
             tx_kv_updates_limit: self.tx_kv_update_limit,
             tx_compute_gas_limit: self.tx_compute_gas_limit,
+            tx_state_growth_limit: self.tx_state_growth_limit,
         }
     }
 }
@@ -629,6 +665,9 @@ pub struct BlockLimiter {
 
     /// Cumulative compute gas consumed by all transactions in the block.
     pub block_compute_gas_used: u64,
+
+    /// Cumulative state growth consumed by all transactions in the block.
+    pub block_state_growth_used: u64,
 }
 
 impl BlockLimiter {
@@ -652,6 +691,7 @@ impl BlockLimiter {
             block_tx_size_used: 0,
             block_da_size_used: 0,
             block_compute_gas_used: 0,
+            block_state_growth_used: 0,
         }
     }
 
@@ -906,6 +946,21 @@ impl BlockLimiter {
             }));
         }
         self.block_compute_gas_used += outcome.compute_gas_used;
+
+        // Block state growth limit
+        if self.block_state_growth_used + outcome.state_growth_used >
+            self.limits.block_state_growth_limit
+        {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: outcome.tx.tx().tx_hash(),
+                error: Box::new(MegaBlockLimitExceededError::StateGrowthLimit {
+                    block_used: self.block_state_growth_used,
+                    tx_used: outcome.state_growth_used,
+                    limit: self.limits.block_state_growth_limit,
+                }),
+            }));
+        }
+        self.block_state_growth_used += outcome.state_growth_used;
 
         Ok(())
     }

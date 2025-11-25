@@ -295,13 +295,15 @@ where
             ExecuteEvm::transact(self, tx)?
         };
         let additional_limit = self.ctx().additional_limit.borrow();
-        let LimitUsage { data_size, kv_updates, compute_gas } = additional_limit.get_usage();
+        let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
+            additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
             result,
             state,
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
+            state_growth_used: state_growth,
         })
     }
 
@@ -325,13 +327,15 @@ where
     ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
         let ResultAndState { result, state } = InspectEvm::inspect_tx(self, tx)?;
         let additional_limit = self.ctx().additional_limit.borrow();
-        let LimitUsage { data_size, kv_updates, compute_gas } = additional_limit.get_usage();
+        let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
+            additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
             result,
             state,
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
+            state_growth_used: state_growth,
         })
     }
 

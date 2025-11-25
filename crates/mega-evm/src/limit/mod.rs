@@ -16,10 +16,12 @@ use crate::{EvmTxRuntimeLimits, MegaHaltReason, MegaTransaction};
 mod compute_gas;
 mod data_size;
 mod kv_update;
+mod state_growth;
 
 pub use compute_gas::*;
 pub use data_size::*;
 pub use kv_update::*;
+pub use state_growth::*;
 
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
 ///
@@ -80,6 +82,13 @@ pub struct AdditionalLimit {
     /// execution.
     pub compute_gas_limit: u64,
 
+    /// The state growth limit for the EVM. When the state growth limit is reached, the transaction
+    /// will error and halt (remaining gas will be refunded).
+    ///
+    /// This limit controls the maximum total state growth that can be performed during transaction
+    /// execution, including new accounts and storage slots.
+    pub state_growth_limit: u64,
+
     /// A tracker for the total compute gas consumed during transaction execution.
     ///
     /// This tracker monitors all compute gas consumed during execution.
@@ -95,6 +104,11 @@ pub struct AdditionalLimit {
     /// This counter tracks storage operations and account updates, providing frame-aware
     /// counting that properly handles nested calls and reverts.
     pub kv_update_counter: kv_update::KVUpdateCounter,
+    /// A tracker for the total state growth during transaction execution.
+    ///
+    /// This tracker monitors all state growth during execution, including new accounts and storage
+    /// slots.
+    pub state_growth_tracker: state_growth::StateGrowthTracker,
 }
 
 /// The usage of the additional limits.
@@ -106,6 +120,8 @@ pub struct LimitUsage {
     pub kv_updates: u64,
     /// The compute gas usage.
     pub compute_gas: u64,
+    /// The state growth.
+    pub state_growth: u64,
 }
 
 impl AdditionalLimit {
@@ -117,9 +133,11 @@ impl AdditionalLimit {
             data_limit: limits.tx_data_size_limit,
             kv_update_limit: limits.tx_kv_updates_limit,
             compute_gas_limit: limits.tx_compute_gas_limit,
+            state_growth_limit: limits.tx_state_growth_limit,
             compute_gas_tracker: compute_gas::ComputeGasTracker::new(),
             data_size_tracker: data_size::DataSizeTracker::new(),
             kv_update_counter: kv_update::KVUpdateCounter::new(),
+            state_growth_tracker: state_growth::StateGrowthTracker::new(),
         }
     }
 }
@@ -141,6 +159,7 @@ impl AdditionalLimit {
         self.data_size_tracker.reset();
         self.kv_update_counter.reset();
         self.compute_gas_tracker.reset();
+        self.state_growth_tracker.reset();
     }
 
     /// Gets the usage of the additional limits.
@@ -150,6 +169,7 @@ impl AdditionalLimit {
             data_size: self.data_size_tracker.current_size(),
             kv_updates: self.kv_update_counter.current_count(),
             compute_gas: self.compute_gas_tracker.current_gas_used(),
+            state_growth: self.state_growth_tracker.current_growth(),
         }
     }
 
@@ -191,6 +211,11 @@ impl AdditionalLimit {
             self.has_exceeded_limit = AdditionalLimitResult::ExceedsComputeGasLimit {
                 limit: self.compute_gas_limit,
                 used: self.compute_gas_tracker.current_gas_used(),
+            }
+        } else if self.state_growth_tracker.exceeds_limit(self.state_growth_limit) {
+            self.has_exceeded_limit = AdditionalLimitResult::ExceedsStateGrowthLimit {
+                limit: self.state_growth_limit,
+                used: self.state_growth_tracker.current_growth(),
             }
         }
         self.has_exceeded_limit
@@ -266,6 +291,14 @@ pub enum AdditionalLimitResult {
     /// * `limit` - The configured compute gas limit
     /// * `used` - The current compute gas usage
     ExceedsComputeGasLimit { limit: u64, used: u64 },
+
+    /// Indicates that the state growth limit has been exceeded.
+    ///
+    /// # Fields
+    ///
+    /// * `limit` - The configured state growth limit
+    /// * `used` - The current state growth usage
+    ExceedsStateGrowthLimit { limit: u64, used: u64 },
 }
 
 impl AdditionalLimitResult {
@@ -280,6 +313,9 @@ impl AdditionalLimitResult {
             }
             Self::ExceedsComputeGasLimit { limit, used } => {
                 Some(MegaHaltReason::ComputeGasLimitExceeded { limit: *limit, actual: *used })
+            }
+            Self::ExceedsStateGrowthLimit { limit, used } => {
+                Some(MegaHaltReason::StateGrowthLimitExceeded { limit: *limit, actual: *used })
             }
             Self::WithinLimit => None,
         }
@@ -415,6 +451,7 @@ impl AdditionalLimit {
         // end the current frame and merge into the previous frame
         self.data_size_tracker.end_frame(result.instruction_result(), LAST_FRAME);
         self.kv_update_counter.end_frame(result.instruction_result(), LAST_FRAME);
+        self.state_growth_tracker.end_frame(result.instruction_result(), LAST_FRAME);
 
         let limit_check = self.check_limit();
         if limit_check.exceeded_limit() && !duplicate_return_frame_result {
