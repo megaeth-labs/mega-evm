@@ -425,12 +425,12 @@ fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErro
         let mut evm = MegaEvm::new(evm_context)
             .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
         let res = evm.inspect_tx_commit(tx);
-        let db = evm.into_journaled_state().database;
+        let db = evm.into_inner().ctx.into_inner().journaled_state.database;
         (db, res)
     } else {
         let mut evm = MegaEvm::new(evm_context);
         let res = evm.transact_commit(tx);
-        let db = evm.into_journaled_state().database;
+        let db = evm.into_inner().ctx.into_inner().journaled_state.database;
         (db, res)
     };
     *ctx.elapsed.lock().unwrap() += timer.elapsed();
@@ -475,7 +475,7 @@ fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
 
     let exec_result = evm.inspect_tx_commit(tx);
 
-    let state_after = evm.into_journaled_state().database;
+    let state_after = evm.into_inner().ctx.into_inner().journaled_state.database;
     prune_base_fee_vault_changes(state_after);
 
     println!("\nExecution result: {exec_result:#?}");
