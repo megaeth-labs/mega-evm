@@ -72,6 +72,10 @@
 //! - `(zero, non-zero, zero)`: Clear a slot that was empty at transaction start → **-1**
 //! - Other transitions: No change (slot was already non-zero at transaction start)
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
 use alloy_primitives::{Address, U256};
 use revm::interpreter::InstructionResult;
 
