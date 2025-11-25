@@ -272,7 +272,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     /// This method is typically used after EVM execution when you need to access
     /// the underlying EVM components and no longer require the `MegaEvm` wrapper.
     #[inline]
-    pub fn into_parts(
+    pub fn into_inner(
         self,
     ) -> revm::context::Evm<
         MegaContext<DB, ExtEnvs>,
