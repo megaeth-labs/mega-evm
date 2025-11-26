@@ -102,4 +102,19 @@ pub mod rex {
     /// Actual cost is dynamically scaled by SALT bucket capacity:
     /// `CONTRACT_CREATION_STORAGE_GAS_BASE × (bucket_capacity / MIN_BUCKET_SIZE - 1)`.
     pub const CONTRACT_CREATION_STORAGE_GAS_BASE: u64 = 32_000;
+
+    /// The maximum compute gas limit for a single transaction for the `REX` spec.
+    /// Transactions exceeding this limit halt with `ComputeGasLimitExceeded`, preserving remaining
+    /// gas.
+    pub const TX_COMPUTE_GAS_LIMIT: u64 = 200_000_000;
+
+    /// The maximum state growth limit for a single transaction for the `REX` spec.
+    /// Transactions exceeding this limit halt with `StateGrowthLimitExceeded`, preserving remaining
+    /// gas.
+    pub const TX_STATE_GROWTH_LIMIT: u64 = 1000;
+
+    /// The maximum state growth limit for a block for the `REX` spec.
+    /// Blocks exceeding this limit halt with `StateGrowthLimitExceeded`, preserving remaining
+    /// gas.
+    pub const BLOCK_STATE_GROWTH_LIMIT: u64 = 1000;
 }

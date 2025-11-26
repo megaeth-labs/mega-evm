@@ -46,15 +46,18 @@
 //! ### Transaction-level Enforcement (During Execution)
 //! - **Location**: Enforced in [`crate::evm::limit::AdditionalLimit`]
 //! - **Behavior**: Transaction halts with `OutOfGas`, remaining gas preserved
-//! - **Result**: Transaction fails (status=0) but is **still included in block** (if passes
-//!   block-level checks)
+//! - **Result**: Transaction fails (status=0) but is **still included in block**
 //! - **Reason**: Failed transactions consume resources and must be recorded on-chain
 //!
-//! ### Block-level Enforcement (After Execution)
-//! - **Error**: [`MegaBlockLimitExceededError`]
-//! - **Action**: Discard execution outcome, skip transaction, try next one
-//! - **Reason**: Including this transaction (even with failed status) would exceed block limits
-//! - **Example**: Transaction uses 10MB data, but block only has 5MB remaining
+//! ### Block-level Enforcement (Before Next Transaction)
+//! - The first transaction that causes the block to exceed limits is **allowed to execute and be
+//!   included**
+//! - **Pre-execution check**: Before executing the next transaction, check if block limit has
+//!   already been exceeded
+//! - **Action**: If limit already exceeded, reject transaction before execution
+//! - **Reason**: Maximize block utilization by not wasting valid transaction execution
+//! - **Example**: Block has 10MB data limit. TX1 uses 6MB (included), TX2 uses 8MB (included, total
+//!   14MB exceeds limit), TX3 is rejected before execution
 //!
 //! # Architecture
 //!
@@ -383,6 +386,7 @@ impl BlockLimits {
             tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
             tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
             tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
+            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
             ..self
         }
     }
@@ -395,6 +399,7 @@ impl BlockLimits {
             tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
             tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
             tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
+            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
             block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
             block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
             ..self
@@ -404,7 +409,17 @@ impl BlockLimits {
     /// Fits the block limits to the rex spec. Overrides those limits with the
     /// `MegaSpecId::REX` spec limits.
     pub fn fit_rex(self) -> Self {
-        self.fit_mini_rex()
+        let tx_runtime_limits = EvmTxRuntimeLimits::rex();
+        Self {
+            tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
+            tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
+            tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
+            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
+            block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
+            block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
+            block_state_growth_limit: crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT,
+            ..self
+        }
     }
 }
 
@@ -820,72 +835,101 @@ impl BlockLimiter {
             }
         }
 
+        // Check block-level data limit
+        if self.block_data_used >= self.limits.block_txs_data_limit {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: tx_hash,
+                error: Box::new(MegaBlockLimitExceededError::TransactionDataLimit {
+                    block_used: self.block_data_used,
+                    tx_used: 0,
+                    limit: self.limits.block_txs_data_limit,
+                }),
+            }));
+        }
+
+        // Check block-level kv update limit
+        if self.block_kv_updates_used >= self.limits.block_kv_update_limit {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: tx_hash,
+                error: Box::new(MegaBlockLimitExceededError::KVUpdateLimit {
+                    block_used: self.block_kv_updates_used,
+                    tx_used: 0,
+                    limit: self.limits.block_kv_update_limit,
+                }),
+            }));
+        }
+
+        // Check block-level compute gas limit
+        if self.block_compute_gas_used >= self.limits.block_compute_gas_limit {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: tx_hash,
+                error: Box::new(MegaBlockLimitExceededError::ComputeGasLimit {
+                    block_used: self.block_compute_gas_used,
+                    tx_used: 0,
+                    limit: self.limits.block_compute_gas_limit,
+                }),
+            }));
+        }
+
+        // Check block-level state growth limit
+        if self.block_state_growth_used >= self.limits.block_state_growth_limit {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: tx_hash,
+                error: Box::new(MegaBlockLimitExceededError::StateGrowthLimit {
+                    block_used: self.block_state_growth_used,
+                    tx_used: 0,
+                    limit: self.limits.block_state_growth_limit,
+                }),
+            }));
+        }
+
         Ok(())
     }
 
-    /// Validate transaction result and update usage counters.
+    /// Update usage counters after transaction execution.
     ///
-    /// This method is called **after** transaction execution to:
-    /// 1. Validate that the transaction's resource consumption doesn't exceed block limits
-    /// 2. Update the limiter's cumulative usage counters
+    /// This method is called **after** transaction execution to update the limiter's cumulative
+    /// usage counters. With the new block limit strategy, this method no longer validates limits -
+    /// it only updates counters. The transaction may cause the block to exceed limits, which is
+    /// intentional to maximize block utilization.
     ///
-    /// The following limits are checked:
-    /// - Block data limit (logs, return data, etc.)
-    /// - Block KV update limit (SSTORE operations)
-    ///
-    /// Gas, transaction size, and DA size are **not** checked here (already validated in
-    /// pre-execution), but their usage counters are updated.
-    ///
-    /// **Important**: If this method returns an error, the transaction's state changes should
-    /// **not** be committed to the database.
+    /// This method always succeeds and allows the block to exceed post-execution
+    /// limits (data, KV updates, compute gas, state growth). The exceeded state will be checked
+    /// in `pre_execution_check` before the next transaction to prevent further transactions from
+    /// being added.
     ///
     /// # Parameters
     ///
-    /// - `tx_hash`: Transaction hash for error reporting
-    /// - `gas_used`: Actual gas consumed during execution
-    /// - `tx_size_used`: Transaction's encoded size in bytes (should match pre-execution value)
-    /// - `da_size_used`: Transaction's DA size in bytes (should match pre-execution value)
-    /// - `data_size_used`: Total data generated by execution (logs, return data, etc.)
-    /// - `kv_updates_used`: Number of storage slot updates (SSTORE operations)
+    /// - `outcome`: The transaction execution outcome containing resource usage information
     ///
     /// # Returns
     ///
-    /// - `Ok(())`: Transaction passes all checks; usage counters updated
-    /// - `Err(BlockExecutionError)`: Transaction violates a limit; **do not commit state**
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BlockExecutionError::Validation`] with [`BlockValidationError::InvalidTx`]
-    /// containing [`MegaBlockLimitExceededError`] if the transaction would cause the block
-    /// to exceed:
-    /// - [`MegaBlockLimitExceededError::DataLimit`]: Block data limit
-    /// - [`MegaBlockLimitExceededError::KVUpdateLimit`]: Block KV update limit
+    /// - `Ok(())`: Usage counters updated successfully
     ///
     /// # State Modification
     ///
-    /// On success, this method updates all cumulative usage counters:
+    /// This method updates all cumulative usage counters:
     /// - `block_gas_used += gas_used`
     /// - `block_tx_size_used += tx_size_used`
-    /// - `block_da_size_used += da_size_used`
+    /// - `block_da_size_used += da_size_used` (only for non-deposit transactions)
     /// - `block_data_used += data_size_used`
     /// - `block_kv_updates_used += kv_updates_used`
+    /// - `block_compute_gas_used += compute_gas_used`
+    /// - `block_state_growth_used += state_growth_used`
+    ///
+    /// **Note**: The block may exceed limits after this update. This is intentional - the first
+    /// transaction that causes the block to exceed is allowed to be included.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let result = execute_transaction(tx);
+    /// let outcome = executor.execute_mega_transaction(tx)?;
     ///
-    /// limiter.post_execution_check(
-    ///     tx.hash(),
-    ///     result.gas_used(),
-    ///     tx.encode_2718_len() as u64,
-    ///     tx.estimated_da_size(),
-    ///     result.data_size(),
-    ///     result.kv_updates(),
-    /// )?;
+    /// // This always succeeds and may cause block to exceed limits
+    /// limiter.post_execution_check(&outcome)?;
     ///
-    /// // Only commit if post_execution_check passed
-    /// db.commit(result.state);
+    /// // Commit the transaction state
+    /// executor.commit_execution_outcome(outcome)?;
     /// ```
     pub fn post_execution_check<T: Transaction + MegaTransactionExt>(
         &mut self,
@@ -906,60 +950,20 @@ impl BlockLimiter {
             self.block_da_size_used += outcome.da_size;
         }
 
-        // Block data limit
-        if self.block_data_used + outcome.data_size > self.limits.block_txs_data_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: outcome.tx.tx().tx_hash(),
-                error: Box::new(MegaBlockLimitExceededError::TransactionDataLimit {
-                    block_used: self.block_data_used,
-                    tx_used: outcome.data_size,
-                    limit: self.limits.block_txs_data_limit,
-                }),
-            }));
-        }
+        // Block data limit, no need to check here since we allow the last transaction to exceed the
+        // limit.
         self.block_data_used += outcome.data_size;
 
-        // Block kv updates limit
-        if self.block_kv_updates_used + outcome.kv_updates > self.limits.block_kv_update_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: outcome.tx.tx().tx_hash(),
-                error: Box::new(MegaBlockLimitExceededError::KVUpdateLimit {
-                    block_used: self.block_kv_updates_used,
-                    tx_used: outcome.kv_updates,
-                    limit: self.limits.block_kv_update_limit,
-                }),
-            }));
-        }
+        // Block kv updates limit, no need to check here since we allow the last transaction to
+        // exceed the limit.
         self.block_kv_updates_used += outcome.kv_updates;
 
-        // Block compute gas limit
-        if self.block_compute_gas_used + outcome.compute_gas_used >
-            self.limits.block_compute_gas_limit
-        {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: outcome.tx.tx().tx_hash(),
-                error: Box::new(MegaBlockLimitExceededError::ComputeGasLimit {
-                    block_used: self.block_compute_gas_used,
-                    tx_used: outcome.compute_gas_used,
-                    limit: self.limits.block_compute_gas_limit,
-                }),
-            }));
-        }
+        // Block compute gas limit, no need to check here since we allow the last transaction to
+        // exceed the limit.
         self.block_compute_gas_used += outcome.compute_gas_used;
 
-        // Block state growth limit
-        if self.block_state_growth_used + outcome.state_growth_used >
-            self.limits.block_state_growth_limit
-        {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: outcome.tx.tx().tx_hash(),
-                error: Box::new(MegaBlockLimitExceededError::StateGrowthLimit {
-                    block_used: self.block_state_growth_used,
-                    tx_used: outcome.state_growth_used,
-                    limit: self.limits.block_state_growth_limit,
-                }),
-            }));
-        }
+        // Block state growth limit, no need to check here since we allow the last transaction to
+        // exceed the limit.
         self.block_state_growth_used += outcome.state_growth_used;
 
         Ok(())

@@ -4,13 +4,14 @@
 
 The **Rex** hardfork is the second major upgrade to the MegaETH EVM, building upon the foundation established by MiniRex. While MiniRex successfully addressed the fundamental challenges of operating an ultra-low-fee, high-throughput blockchain through its dual gas model and multi-dimensional resource limits, operational experience revealed opportunities for refinement and bug fixes.
 
-Rex maintains MiniRex's core design principles while introducing three key improvements:
+Rex maintains MiniRex's core design principles while introducing four key improvements:
 
 1. **Optimized Storage Gas Economics**: Refined storage gas formulas that scale more gradually with SALT bucket growth, reducing costs for operations in minimum-sized buckets while maintaining economic sustainability
 2. **Transaction Intrinsic Storage Gas**: Introduction of a 39,000 storage gas for all transactions to ensure baseline cost recovery for transaction processing overhead
-3. **Critical Bug Fixes**: Correction of DELEGATECALL and STATICCALL implementations to properly enforce the 98/100 gas forwarding rule and oracle access detection
+3. **Refined Transaction and Block Limits**: Adjusted transaction compute gas limit to a more practical value and introduced state growth limits at both transaction and block levels for better resource management
+4. **Critical Bug Fixes**: Correction of DELEGATECALL and STATICCALL implementations to properly enforce the 98/100 gas forwarding rule and oracle access detection
 
-These changes preserve MiniRex's security guarantees and economic model while improving cost efficiency and fixing critical vulnerabilities in rarely-used opcodes.
+These changes preserve MiniRex's security guarantees and economic model while improving cost efficiency, resource management, and fixing critical vulnerabilities in rarely-used opcodes.
 
 ## 2. Comprehensive List of Changes
 
@@ -182,6 +183,92 @@ All CALL-like opcodes now properly enforce:
 
 **Compatibility Note:**
 Contracts relying on DELEGATECALL or STATICCALL forwarding 100% of gas will behave differently after Rex activation. This is a security fix, not a feature change.
+
+### 2.4 Refined Transaction and Block Limits
+
+Rex refines the compute gas limit and adds new state growth limits to improve resource management and prevent state bloat.
+
+#### 2.4.1 Transaction Compute Gas Limit
+
+**Limit Change:**
+
+| Spec        | Transaction Compute Gas Limit |
+| ----------- | ----------------------------- |
+| **MiniRex** | 1,000,000,000 gas (1B)        |
+| **Rex**     | **200,000,000 gas (200M)**    |
+
+**Key Differences:**
+
+- **5× decrease** in per-transaction compute gas limit (from 1B to 200M)
+- More realistic limit aligned with actual transaction complexity needs
+
+**Rationale:**
+
+- MiniRex's 1B limit was overly generous and unnecessary for practical use cases
+- 200M provides ample headroom for complex contracts while preventing extreme compute usage
+- Tighter limit improves predictability and resource management
+- Block-level compute gas limit (500M) still allows multiple complex transactions per block
+
+#### 2.4.2 State Growth Limits (NEW)
+
+Rex introduces **state growth limits** as a new dimension of resource control, tracking the number of new state entries created during execution.
+
+**Transaction-level State Growth Limit:**
+
+| Spec        | Transaction State Growth Limit |
+| ----------- | ------------------------------ |
+| **MiniRex** | Unlimited (u64::MAX)           |
+| **Rex**     | **1,000 new state entries**    |
+
+**Block-level State Growth Limit:**
+
+| Spec        | Block State Growth Limit    |
+| ----------- | --------------------------- |
+| **MiniRex** | Unlimited (u64::MAX)        |
+| **Rex**     | **1,000 new state entries** |
+
+**What Counts as State Growth:**
+
+State growth tracks new permanent state entries:
+
+- New storage slots written (SSTORE 0→non-0)
+- New accounts created (EOAs and contracts)
+- New contract code deployed
+
+**Enforcement:**
+
+- **Transaction-level**: Transaction halts with OutOfGas when limit exceeded
+- **Block-level**: Last transaction exceeding limit is included; subsequent transactions rejected in pre-execution
+
+**Rationale:**
+
+- Prevents unbounded state bloat from single transactions or blocks
+- Complements existing KV update limits (which track all writes, not just new entries)
+- 1,000 entry limit balances legitimate use cases with DoS prevention
+
+#### 2.4.3 Limits Summary Table
+
+Complete comparison of all transaction and block limits:
+
+| Limit Dimension  | Level       | MiniRex              | Rex                  | Change        |
+| ---------------- | ----------- | -------------------- | -------------------- | ------------- |
+| **Data Size**    | Transaction | 3.125 MB             | 3.125 MB             | Same          |
+|                  | Block       | 12.5 MB              | 12.5 MB              | Same          |
+| **KV Updates**   | Transaction | 125,000              | 125,000              | Same          |
+|                  | Block       | 500,000              | 500,000              | Same          |
+| **Compute Gas**  | Transaction | 1,000,000,000 (1B)   | **200,000,000**      | ✓ 5× decrease |
+|                  | Block       | Unlimited (u64::MAX) | Unlimited (u64::MAX) | Same          |
+| **State Growth** | Transaction | Unlimited (u64::MAX) | **1,000**            | **NEW**       |
+|                  | Block       | Unlimited (u64::MAX) | **1,000**            | **NEW**       |
+
+**Notes:**
+
+- **Limits 1-3** (Gas, Tx Size, DA Size): Checked in pre-execution only
+- **Limits 4-7** (Data, KV Updates, Compute Gas, State Growth): Checked during/after execution
+- State growth limits provide additional protection beyond KV update limits
+- KV updates track all storage writes (including updates to existing slots)
+- State growth tracks only new permanent state entries (0→non-0 writes, new accounts, new code)
+- Both metrics work together to prevent different types of abuse
 
 ## 3. Specification Mapping
 

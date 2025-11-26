@@ -47,6 +47,7 @@ These limits depend on actual execution results and are enforced during/after tr
    - Includes: transaction data, logs, storage writes, account updates, and contract code
 
 6. **KV Update Limit**
+
    - **Tx-level**: Maximum storage updates a single transaction can perform
    - **Block-level**: Total storage updates in a block
    - Tracks: SSTORE operations and account updates
@@ -97,14 +98,16 @@ Applies to cumulative resource usage across all transactions in a block. Violati
 
 - Transaction **halts** with OutOfGas error
 - Remaining gas is **preserved** (not consumed)
-- Transaction **fails** (status=0) but is **still included** in block if it passes block-level checks
+- Transaction **fails** (status=0) but is **still included** in block
 - Rationale: Failed transactions consume resources and must be recorded on-chain
 
-**Block-level enforcement (after execution):**
+**Block-level enforcement (before next transaction):**
 
-- Check if including the transaction (successful or failed) would exceed block limits
-- If yes: **Discard** execution outcome, **skip** transaction, try next one
-- Example: Transaction uses 10MB data, but block only has 5MB remaining
+- The last transaction that causes the block to exceed limits is **allowed to execute and be included**
+- After that transaction completes, subsequent transactions are **rejected in pre-execution** before they execute
+- Check if block limit has already been exceeded before executing the next transaction
+- If yes: **Reject** transaction before execution, try next one
+- Example: Block has 10MB data limit. TX1 uses 6MB (included), TX2 uses 8MB (included, total 14MB exceeds limit), TX3 is rejected before execution
 
 ## Block Building Workflow
 
@@ -113,18 +116,21 @@ When constructing a block, iterate through transactions in the mempool:
 ```
 For each transaction:
   ├─ Step 1: Pre-execution validation
-  │  ├─ Tx-level violation? → Reject permanently
-  │  └─ Block-level violation? → Skip, try next
+  │  ├─ Check tx-level limits (1-3, 4-7)
+  │  │  └─ Tx-level violation? → Reject permanently
+  │  ├─ Check pre-execution block-level limits (1-3)
+  │  │  └─ Block-level violation? → Skip, try next
+  │  └─ Check post-execution block-level limits (4-7)
+  │     └─ Block already exceeded? → Skip, try next
   │
   ├─ Step 2: Execute transaction
   │  └─ If tx-level limits (4-7) exceeded → Transaction fails (status=0)
   │
-  ├─ Step 3: Post-execution validation
-  │  └─ Block-level violation? → Discard outcome, skip, try next
+  ├─ Step 3: Post-execution update
+  │  └─ Update block usage counters (may exceed limits)
   │
   └─ Step 4: Commit transaction
-     ├─ Include in block (with success or failed receipt)
-     └─ Update block usage counters
+     └─ Include in block (with success or failed receipt)
 ```
 
 ## Transaction Outcomes
@@ -146,10 +152,11 @@ For each transaction:
 
 ### Skipped Transaction (Block-level Limit Exceeded)
 
-- **Execution**: May or may not have executed
+- **Execution**: Not executed (rejected in pre-execution)
 - **Receipt**: Not generated
 - **Block Impact**: No impact on block limits
 - **Next Action**: Defer to future blocks, try next transaction
+- **Note**: For post-execution limits (4-7), this occurs when a previous transaction already caused the block to exceed the limit
 
 ## Error Types and Actions
 
@@ -232,13 +239,14 @@ Failed transactions (that exceed tx-level limits 4-6) are still included in bloc
 - **Post-execution**: Precise enforcement based on actual resource usage
 - Minimizes wasted computation while ensuring accurate limit enforcement
 
-### 4. Block Utilization
+### 4. Block Utilization and Last Transaction Exceeding
 
-The "skip and try next" strategy for block-level violations allows block builders to:
+The limit checking strategy optimizes block utilization:
 
-- Maximize block utilization by trying subsequent transactions
-- Avoid stopping at the first transaction that doesn't fit
-- Include smaller transactions when larger ones exceed limits
+- **Pre-execution limits (1-3)**: Transactions that would exceed are rejected before execution
+- **Post-execution limits (4-7)**: The first transaction that causes the block to exceed is **allowed and included**
+  - This maximizes block utilization by not wasting the execution of a valid transaction
+  - Subsequent transactions are rejected in pre-execution to prevent further exceeding
 
 ### 5. Deposit Transaction Exemptions
 
@@ -338,6 +346,5 @@ The MegaEVM limit system provides a robust framework for resource management:
 2. **Two-level enforcement** distinguishes between invalid transactions and capacity issues
 3. **Two-phase checking** optimizes performance while ensuring accuracy
 4. **Failed transactions are included** to ensure resource accountability
-5. **Skip and try next** strategy maximizes block utilization
 
 This design prevents spam attacks, ensures fair resource allocation, and enables efficient block construction while maintaining compatibility with existing EVM semantics.
