@@ -103,6 +103,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+                spec,
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
@@ -156,6 +157,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+                spec,
                 external_envs.salt_env(),
                 inner.block.number.to::<u64>() - 1,
             ))),
@@ -273,12 +275,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
         external_envs: NewExtEnvs,
     ) -> MegaContext<DB, NewExtEnvs> {
         let parent_block_number = self.inner.block.number.to::<u64>().saturating_sub(1);
+        let spec = self.spec;
         MegaContext {
             inner: self.inner,
-            spec: self.spec,
+            spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
+                spec,
                 external_envs.salt_env(),
                 parent_block_number,
             ))),

@@ -87,4 +87,19 @@ pub mod rex {
     /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.
     /// This is charged on top of the base 21,000 intrinsic gas for all transactions.
     pub const TX_INTRINSIC_STORAGE_GAS: u64 = 39_000;
+
+    /// The base storage gas cost for setting a storage slot to a non-zero value for the `REX` spec.
+    /// Actual cost is dynamically scaled by SALT bucket capacity: `SSTORE_SET_STORAGE_GAS_BASE ×
+    /// (bucket_capacity / MIN_BUCKET_SIZE - 1)`.
+    pub const SSTORE_SET_STORAGE_GAS_BASE: u64 = 20_000;
+
+    /// The base storage gas cost for creating a new account for the `REX` spec.
+    /// Actual cost is dynamically scaled by SALT bucket capacity: `NEW_ACCOUNT_STORAGE_GAS_BASE ×
+    /// (bucket_capacity / MIN_BUCKET_SIZE - 1)`.
+    pub const NEW_ACCOUNT_STORAGE_GAS_BASE: u64 = 25_000;
+
+    /// The base storage gas cost for creating a new contract for the `REX` spec.
+    /// Actual cost is dynamically scaled by SALT bucket capacity:
+    /// `CONTRACT_CREATION_STORAGE_GAS_BASE × (bucket_capacity / MIN_BUCKET_SIZE - 1)`.
+    pub const CONTRACT_CREATION_STORAGE_GAS_BASE: u64 = 32_000;
 }
