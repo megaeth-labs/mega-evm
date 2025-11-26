@@ -250,22 +250,16 @@ State growth tracks new permanent state entries:
 
 Complete comparison of all transaction and block limits:
 
-| Limit Dimension     | Level         | MiniRex              | Rex                | Change        |
-| ------------------- | ------------- | -------------------- | ------------------ | ------------- |
-| **1. Gas**          | Transaction   | 30M (standard)       | 30M (standard)     | Same          |
-|                     | Block         | 500M                 | 500M               | Same          |
-| **2. Tx Size**      | Transaction   | No limit             | No limit           | Same          |
-|                     | Block         | No limit             | No limit           | Same          |
-| **3. DA Size**      | Transaction   | No limit             | No limit           | Same          |
-|                     | Block         | No limit             | No limit           | Same          |
-| **4. Data Size**    | Transaction   | 128 KB               | 128 KB             | Same          |
-|                     | Block         | 50 MB                | 50 MB              | Same          |
-| **5. KV Updates**   | Transaction   | 1,000                | 1,000              | Same          |
-|                     | Block         | 100,000              | 100,000            | Same          |
-| **6. Compute Gas**  | Transaction   | 1,000,000,000 (1B)   | **200,000,000**    | ✓ 5× decrease |
-|                     | Block         | 500M                 | 500M               | Same          |
-| **7. State Growth** | Transaction   | Unlimited (u64::MAX) | **1,000**          | **NEW**       |
-|                     | Block         | Unlimited (u64::MAX) | **1,000**          | **NEW**       |
+| Limit Dimension  | Level       | MiniRex              | Rex                  | Change        |
+| ---------------- | ----------- | -------------------- | -------------------- | ------------- |
+| **Data Size**    | Transaction | 3.125 MB             | 3.125 MB             | Same          |
+|                  | Block       | 12.5 MB              | 12.5 MB              | Same          |
+| **KV Updates**   | Transaction | 125,000              | 125,000              | Same          |
+|                  | Block       | 500,000              | 500,000              | Same          |
+| **Compute Gas**  | Transaction | 1,000,000,000 (1B)   | **200,000,000**      | ✓ 5× decrease |
+|                  | Block       | Unlimited (u64::MAX) | Unlimited (u64::MAX) | Same          |
+| **State Growth** | Transaction | Unlimited (u64::MAX) | **1,000**            | **NEW**       |
+|                  | Block       | Unlimited (u64::MAX) | **1,000**            | **NEW**       |
 
 **Notes:**
 
