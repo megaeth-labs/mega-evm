@@ -36,12 +36,7 @@ impl EvmTxRuntimeLimits {
 
     /// Limits for the `EQUIVALENCE` spec.
     pub fn equivalence() -> Self {
-        Self {
-            tx_data_size_limit: u64::MAX,
-            tx_kv_updates_limit: u64::MAX,
-            tx_compute_gas_limit: u64::MAX,
-            tx_state_growth_limit: u64::MAX,
-        }
+        Self::no_limits()
     }
 
     /// Limits for the `MINI_REX` spec.
@@ -50,13 +45,17 @@ impl EvmTxRuntimeLimits {
             tx_data_size_limit: crate::constants::mini_rex::TX_DATA_LIMIT,
             tx_kv_updates_limit: crate::constants::mini_rex::TX_KV_UPDATE_LIMIT,
             tx_compute_gas_limit: crate::constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
-            tx_state_growth_limit: u64::MAX,
+            ..Self::equivalence()
         }
     }
 
     /// Limits for the `REX` spec.
     pub fn rex() -> Self {
-        Self::mini_rex()
+        Self {
+            tx_compute_gas_limit: crate::constants::rex::TX_COMPUTE_GAS_LIMIT,
+            tx_state_growth_limit: crate::constants::rex::TX_STATE_GROWTH_LIMIT,
+            ..Self::mini_rex()
+        }
     }
 }
 

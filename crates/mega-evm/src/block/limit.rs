@@ -383,6 +383,7 @@ impl BlockLimits {
             tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
             tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
             tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
+            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
             ..self
         }
     }
@@ -395,6 +396,7 @@ impl BlockLimits {
             tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
             tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
             tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
+            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
             block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
             block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
             ..self
@@ -404,7 +406,17 @@ impl BlockLimits {
     /// Fits the block limits to the rex spec. Overrides those limits with the
     /// `MegaSpecId::REX` spec limits.
     pub fn fit_rex(self) -> Self {
-        self.fit_mini_rex()
+        let tx_runtime_limits = EvmTxRuntimeLimits::rex();
+        Self {
+            tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
+            tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
+            tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
+            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
+            block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
+            block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
+            block_state_growth_limit: crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT,
+            ..self
+        }
     }
 }
 
@@ -820,6 +832,54 @@ impl BlockLimiter {
             }
         }
 
+        // Check block-level data limit
+        if self.block_data_used >= self.limits.block_txs_data_limit {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: tx_hash,
+                error: Box::new(MegaBlockLimitExceededError::TransactionDataLimit {
+                    block_used: self.block_data_used,
+                    tx_used: 0,
+                    limit: self.limits.block_txs_data_limit,
+                }),
+            }));
+        }
+
+        // Check block-level kv update limit
+        if self.block_kv_updates_used >= self.limits.block_kv_update_limit {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: tx_hash,
+                error: Box::new(MegaBlockLimitExceededError::KVUpdateLimit {
+                    block_used: self.block_kv_updates_used,
+                    tx_used: 0,
+                    limit: self.limits.block_kv_update_limit,
+                }),
+            }));
+        }
+
+        // Check block-level compute gas limit
+        if self.block_compute_gas_used >= self.limits.block_compute_gas_limit {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: tx_hash,
+                error: Box::new(MegaBlockLimitExceededError::ComputeGasLimit {
+                    block_used: self.block_compute_gas_used,
+                    tx_used: 0,
+                    limit: self.limits.block_compute_gas_limit,
+                }),
+            }));
+        }
+
+        // Check block-level state growth limit
+        if self.block_state_growth_used >= self.limits.block_state_growth_limit {
+            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                hash: tx_hash,
+                error: Box::new(MegaBlockLimitExceededError::StateGrowthLimit {
+                    block_used: self.block_state_growth_used,
+                    tx_used: 0,
+                    limit: self.limits.block_state_growth_limit,
+                }),
+            }));
+        }
+
         Ok(())
     }
 
@@ -906,60 +966,20 @@ impl BlockLimiter {
             self.block_da_size_used += outcome.da_size;
         }
 
-        // Block data limit
-        if self.block_data_used + outcome.data_size > self.limits.block_txs_data_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: outcome.tx.tx().tx_hash(),
-                error: Box::new(MegaBlockLimitExceededError::TransactionDataLimit {
-                    block_used: self.block_data_used,
-                    tx_used: outcome.data_size,
-                    limit: self.limits.block_txs_data_limit,
-                }),
-            }));
-        }
+        // Block data limit, no need to check here since we allow the last transaction to exceed the
+        // limit.
         self.block_data_used += outcome.data_size;
 
-        // Block kv updates limit
-        if self.block_kv_updates_used + outcome.kv_updates > self.limits.block_kv_update_limit {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: outcome.tx.tx().tx_hash(),
-                error: Box::new(MegaBlockLimitExceededError::KVUpdateLimit {
-                    block_used: self.block_kv_updates_used,
-                    tx_used: outcome.kv_updates,
-                    limit: self.limits.block_kv_update_limit,
-                }),
-            }));
-        }
+        // Block kv updates limit, no need to check here since we allow the last transaction to
+        // exceed the limit.
         self.block_kv_updates_used += outcome.kv_updates;
 
-        // Block compute gas limit
-        if self.block_compute_gas_used + outcome.compute_gas_used >
-            self.limits.block_compute_gas_limit
-        {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: outcome.tx.tx().tx_hash(),
-                error: Box::new(MegaBlockLimitExceededError::ComputeGasLimit {
-                    block_used: self.block_compute_gas_used,
-                    tx_used: outcome.compute_gas_used,
-                    limit: self.limits.block_compute_gas_limit,
-                }),
-            }));
-        }
+        // Block compute gas limit, no need to check here since we allow the last transaction to
+        // exceed the limit.
         self.block_compute_gas_used += outcome.compute_gas_used;
 
-        // Block state growth limit
-        if self.block_state_growth_used + outcome.state_growth_used >
-            self.limits.block_state_growth_limit
-        {
-            return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
-                hash: outcome.tx.tx().tx_hash(),
-                error: Box::new(MegaBlockLimitExceededError::StateGrowthLimit {
-                    block_used: self.block_state_growth_used,
-                    tx_used: outcome.state_growth_used,
-                    limit: self.limits.block_state_growth_limit,
-                }),
-            }));
-        }
+        // Block state growth limit, no need to check here since we allow the last transaction to
+        // exceed the limit.
         self.block_state_growth_used += outcome.state_growth_used;
 
         Ok(())
