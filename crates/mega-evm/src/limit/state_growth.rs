@@ -77,7 +77,9 @@ use alloc as std;
 use std::vec::Vec;
 
 use alloy_primitives::{Address, U256};
-use revm::interpreter::InstructionResult;
+use revm::{interpreter::InstructionResult, primitives::hardfork::SpecId};
+
+use crate::JournalInspectTr;
 
 /// A tracker for tracking the net state growth during transaction execution.
 ///
@@ -215,13 +217,37 @@ impl StateGrowthTracker {
     ///
     /// This implements EIP-161's account clearing rules. Calls without value transfer
     /// to empty accounts do not create an account and thus don't count toward state growth.
-    pub(crate) fn on_message_call(&mut self, _address: Address, new_account: bool) {
+    pub(crate) fn record_call<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
+        &mut self,
+        journal: &mut JOURNAL,
+        address: Address,
+        has_transfer: bool,
+    ) {
         self.new_frame();
 
-        if new_account {
+        let to_account =
+            journal.inspect_account_delegated(address).expect("failed to inspect account");
+        let is_empty = to_account.state_clear_aware_is_empty(SpecId::PRAGUE);
+
+        if is_empty && has_transfer {
             self.total_growth += 1;
             self.update_current_frame_discardable_size(1);
         }
+    }
+
+    /// Records the new account creation.
+    ///
+    /// This is invoked when a contract is created via `CREATE` or `CREATE2` or contract creation
+    /// transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `_address` - The address being created (unused, reserved for future use)
+    pub(crate) fn record_create(&mut self) {
+        self.new_frame();
+
+        self.total_growth += 1;
+        self.update_current_frame_discardable_size(1);
     }
 
     /// Hook called when a storage slot is written via `SSTORE`.

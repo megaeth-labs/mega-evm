@@ -195,7 +195,7 @@ where
 
             // MegaETH modification: additional storage gas cost for creating account
             let kind = ctx.tx().kind();
-            let (callee_address, new_account, storage_gas) = match kind {
+            let (callee_address, storage_gas) = match kind {
                 TxKind::Create => {
                     let tx = ctx.tx();
                     let caller = tx.caller();
@@ -210,14 +210,14 @@ where
                         // creation.
                         ctx.new_account_storage_gas(created_address)
                     };
-                    (created_address, true, storage_gas)
+                    (created_address, storage_gas)
                 }
                 TxKind::Call(address) => {
                     let new_account = !ctx.tx().value().is_zero() &&
                         ctx.db_mut().basic(address)?.is_none_or(|acc| acc.is_empty());
                     let storage_gas =
                         if new_account { ctx.new_account_storage_gas(address) } else { Ok(0) };
-                    (address, new_account, storage_gas)
+                    (address, storage_gas)
                 }
             };
             initial_and_floor_gas.initial_gas += storage_gas.map_err(|_| {
@@ -225,10 +225,6 @@ where
                     format!("Failed to get storage gas for callee address: {callee_address}",);
                 Self::Error::from_string(err_str)
             })?;
-
-            // MegaETH modification: update the state growth tracker
-            let state_growth_tracker = &mut ctx.additional_limit.borrow_mut().state_growth_tracker;
-            state_growth_tracker.on_message_call(callee_address, new_account);
 
             // MegaETH MiniRex modification: calldata storage gas costs
             // - Standard tokens: 400 gas per token (vs 4)
@@ -435,7 +431,10 @@ where
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         let additional_limit = self.ctx().additional_limit.clone();
         if is_mini_rex_enabled &&
-            additional_limit.borrow_mut().before_frame_init(&frame_init).exceeded_limit()
+            additional_limit
+                .borrow_mut()
+                .before_frame_init(&frame_init, self.ctx().journal_mut())
+                .exceeded_limit()
         {
             // if the limit is exceeded, create an error frame result and return it directly
             let (gas_limit, return_memory_offset) = match &frame_init.frame_input {
