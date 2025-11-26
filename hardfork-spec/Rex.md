@@ -8,7 +8,7 @@ Rex maintains MiniRex's core design principles while introducing four key improv
 
 1. **Optimized Storage Gas Economics**: Refined storage gas formulas that scale more gradually with SALT bucket growth, reducing costs for operations in minimum-sized buckets while maintaining economic sustainability
 2. **Transaction Intrinsic Storage Gas**: Introduction of a 39,000 storage gas for all transactions to ensure baseline cost recovery for transaction processing overhead
-3. **Enhanced Transaction and Block Limits**: Increased transaction compute gas limit and introduced state growth limits at both transaction and block levels for better resource management
+3. **Refined Transaction and Block Limits**: Adjusted transaction compute gas limit to a more practical value and introduced state growth limits at both transaction and block levels for better resource management
 4. **Critical Bug Fixes**: Correction of DELEGATECALL and STATICCALL implementations to properly enforce the 98/100 gas forwarding rule and oracle access detection
 
 These changes preserve MiniRex's security guarantees and economic model while improving cost efficiency, resource management, and fixing critical vulnerabilities in rarely-used opcodes.
@@ -184,9 +184,9 @@ All CALL-like opcodes now properly enforce:
 **Compatibility Note:**
 Contracts relying on DELEGATECALL or STATICCALL forwarding 100% of gas will behave differently after Rex activation. This is a security fix, not a feature change.
 
-### 2.4 Enhanced Transaction and Block Limits
+### 2.4 Refined Transaction and Block Limits
 
-Rex introduces refined limits for compute gas and adds new state growth limits to improve resource management and prevent state bloat.
+Rex refines the compute gas limit and adds new state growth limits to improve resource management and prevent state bloat.
 
 #### 2.4.1 Transaction Compute Gas Limit
 
@@ -194,19 +194,20 @@ Rex introduces refined limits for compute gas and adds new state growth limits t
 
 | Spec        | Transaction Compute Gas Limit |
 | ----------- | ----------------------------- |
-| **MiniRex** | 100,000,000 gas               |
-| **Rex**     | **200,000,000 gas**           |
+| **MiniRex** | 1,000,000,000 gas (1B)        |
+| **Rex**     | **200,000,000 gas (200M)**    |
 
 **Key Differences:**
 
-- **2× increase** in per-transaction compute gas limit
-- Allows more complex contract executions while maintaining safety
+- **5× decrease** in per-transaction compute gas limit (from 1B to 200M)
+- More realistic limit aligned with actual transaction complexity needs
 
 **Rationale:**
 
-- MiniRex's 100M limit proved restrictive for certain legitimate complex contracts
-- Doubling to 200M provides more headroom while still preventing abuse
-- Block-level limits still provide overall throughput protection
+- MiniRex's 1B limit was overly generous and unnecessary for practical use cases
+- 200M provides ample headroom for complex contracts while preventing extreme compute usage
+- Tighter limit improves predictability and resource management
+- Block-level compute gas limit (500M) still allows multiple complex transactions per block
 
 #### 2.4.2 State Growth Limits (NEW)
 
@@ -249,17 +250,17 @@ State growth tracks new permanent state entries:
 
 Complete comparison of transaction and block limits:
 
-| Limit Type                  | MiniRex              | Rex                  | Change      |
-| --------------------------- | -------------------- | -------------------- | ----------- |
-| **Tx Compute Gas**          | 100,000,000          | **200,000,000**      | ✓ 2× increase |
-| **Tx State Growth**         | Unlimited (u64::MAX) | **1,000**            | **NEW**     |
-| **Block State Growth**      | Unlimited (u64::MAX) | **1,000**            | **NEW**     |
-| **Tx Data Size**            | 128 KB               | 128 KB               | Same        |
-| **Tx KV Updates**           | 1,000                | 1,000                | Same        |
-| **Block Gas**               | 500M                 | 500M                 | Same        |
-| **Block Data**              | 50 MB                | 50 MB                | Same        |
-| **Block KV Updates**        | 100,000              | 100,000              | Same        |
-| **Block Compute Gas**       | 500M                 | 500M                 | Same        |
+| Limit Type             | MiniRex              | Rex             | Change          |
+| ---------------------- | -------------------- | --------------- | --------------- |
+| **Tx Compute Gas**     | 1,000,000,000 (1B)   | **200,000,000** | ✓ 5× decrease   |
+| **Tx State Growth**    | Unlimited (u64::MAX) | **1,000**       | **NEW**         |
+| **Block State Growth** | Unlimited (u64::MAX) | **1,000**       | **NEW**         |
+| **Tx Data Size**       | 128 KB               | 128 KB          | Same            |
+| **Tx KV Updates**      | 1,000                | 1,000           | Same            |
+| **Block Gas**          | 500M                 | 500M            | Same            |
+| **Block Data**         | 50 MB                | 50 MB           | Same            |
+| **Block KV Updates**   | 100,000              | 100,000         | Same            |
+| **Block Compute Gas**  | 500M                 | 500M            | Same            |
 
 **Notes:**
 
