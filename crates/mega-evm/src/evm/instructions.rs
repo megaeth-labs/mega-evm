@@ -345,9 +345,9 @@ mod mini_rex {
         table[CREATE as usize] = forward_gas_ext::create;
         table[CREATE2 as usize] = forward_gas_ext::create2;
         table[CALL as usize] = forward_gas_ext::call;
-        table[CALLCODE as usize] = forward_gas_ext::call_code;
-        table[DELEGATECALL as usize] = storage_gas_ext::delegate_call;
-        table[STATICCALL as usize] = storage_gas_ext::static_call;
+        table[CALLCODE as usize] = compute_gas_ext::call_code;
+        table[DELEGATECALL as usize] = compute_gas_ext::delegate_call;
+        table[STATICCALL as usize] = compute_gas_ext::static_call;
 
         table[INVALID as usize] = compute_gas_ext::invalid;
         table[RETURN as usize] = compute_gas_ext::ret;
@@ -794,9 +794,11 @@ pub mod storage_gas_ext {
                     return;
                 };
                 let to = to.into_address();
-                let to_account = context.host.journal_mut().inspect_account_delegated(to);
-                let is_empty =
-                    to_account.map(|account| account.state_clear_aware_is_empty(spec)).unwrap_or(true);
+                let Ok(to_account) = context.host.journal_mut().inspect_account_delegated(to) else {
+                    context.interpreter.halt(InstructionResult::FatalExternalError);
+                    return;
+                };
+                let is_empty = to_account.state_clear_aware_is_empty(spec);
                 let has_transfer = if $has_transfer_logic {
                     let Some(value) =context.interpreter.stack.inspect::<2>() else {
                         context.interpreter.halt(InstructionResult::StackUnderflow);
@@ -817,14 +819,6 @@ pub mod storage_gas_ext {
 
                 // Call the original instruction
                 run_inner_instruction_or_abort!($wrapped_fn, context);
-
-                // record the state growth if opcode is successful
-                if matches!(context.interpreter.bytecode.action(), Some(InterpreterAction::NewFrame(_))) {
-                    let additional_limit = context.host.additional_limit();
-                    let mut additional_limit = additional_limit.borrow_mut();
-                    additional_limit.state_growth_tracker.on_message_call(to, is_empty && has_transfer);
-
-                }
             }
         };
     }
@@ -916,13 +910,6 @@ pub mod storage_gas_ext {
             run_inner_instruction_or_abort!(compute_gas_ext::create2, context);
         } else {
             run_inner_instruction_or_abort!(compute_gas_ext::create, context);
-        }
-
-        // record the state growth if opcode is successful
-        if matches!(context.interpreter.bytecode.action(), Some(InterpreterAction::NewFrame(_))) {
-            let additional_limit = context.host.additional_limit();
-            let mut additional_limit = additional_limit.borrow_mut();
-            additional_limit.state_growth_tracker.on_message_call(created_address, true);
         }
     }
 
