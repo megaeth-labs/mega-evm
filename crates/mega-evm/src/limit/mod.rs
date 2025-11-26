@@ -11,7 +11,7 @@ use revm::{
     },
 };
 
-use crate::{EvmTxRuntimeLimits, MegaHaltReason, MegaTransaction};
+use crate::{EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaTransaction};
 
 mod compute_gas;
 mod data_size;
@@ -381,22 +381,33 @@ impl AdditionalLimit {
     }
 
     /// Hook called before a new execution frame is initialized.
-    pub(crate) fn before_frame_init(&mut self, frame_init: &FrameInit) -> AdditionalLimitResult {
+    pub(crate) fn before_frame_init<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
+        &mut self,
+        frame_init: &FrameInit,
+        journal: &mut JOURNAL,
+    ) -> AdditionalLimitResult {
         match &frame_init.frame_input {
             FrameInput::Empty => unreachable!(),
             FrameInput::Call(call_inputs) => {
+                let has_transfer = call_inputs.transfers_value();
                 // new frame in data size tracker
-                self.data_size_tracker
-                    .record_call(call_inputs.target_address, call_inputs.transfers_value());
+                self.data_size_tracker.record_call(call_inputs.target_address, has_transfer);
                 // new frame in kv update counter
-                self.kv_update_counter
-                    .record_call(call_inputs.target_address, call_inputs.transfers_value());
+                self.kv_update_counter.record_call(call_inputs.target_address, has_transfer);
+                // new frame in state growth tracker
+                self.state_growth_tracker.record_call(
+                    journal,
+                    call_inputs.target_address,
+                    has_transfer,
+                );
             }
             FrameInput::Create(_) => {
                 // new frame in data size tracker
                 self.data_size_tracker.record_create();
                 // new frame in kv update counter
                 self.kv_update_counter.record_create();
+                // new frame in state growth tracker
+                self.state_growth_tracker.record_create();
             }
         }
 
