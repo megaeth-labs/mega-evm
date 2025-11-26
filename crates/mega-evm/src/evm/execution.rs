@@ -176,6 +176,7 @@ where
 
         let ctx = evm.ctx_mut();
         let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
+        let is_rex_enabled = ctx.spec.is_enabled(MegaSpecId::REX);
         if is_mini_rex_enabled {
             let mut additional_limit = ctx.additional_limit().borrow_mut();
             // record the initial gas cost as compute gas cost
@@ -194,29 +195,36 @@ where
 
             // MegaETH modification: additional storage gas cost for creating account
             let kind = ctx.tx().kind();
-            let (callee_address, new_account) = match kind {
+            let (callee_address, new_account, storage_gas) = match kind {
                 TxKind::Create => {
                     let tx = ctx.tx();
                     let caller = tx.caller();
                     let nonce = tx.nonce();
                     let created_address = caller.create(nonce);
-                    (created_address, true)
+
+                    let storage_gas = if is_rex_enabled {
+                        // Rex spec distinguishes between contract creation and account creation.
+                        ctx.create_contract_storage_gas(created_address)
+                    } else {
+                        // Mini-Rex spec does not distinguish between contract creation and account
+                        // creation.
+                        ctx.new_account_storage_gas(created_address)
+                    };
+                    (created_address, true, storage_gas)
                 }
                 TxKind::Call(address) => {
                     let new_account = !ctx.tx().value().is_zero() &&
                         ctx.db_mut().basic(address)?.is_none_or(|acc| acc.is_empty());
-                    (address, new_account)
+                    let storage_gas =
+                        if new_account { ctx.new_account_storage_gas(address) } else { Ok(0) };
+                    (address, new_account, storage_gas)
                 }
             };
-            if new_account {
-                initial_and_floor_gas.initial_gas +=
-                    ctx.new_account_storage_gas(callee_address).map_err(|_| {
-                        let err_str = format!(
-                            "Failed to get new account gas for callee address: {callee_address}",
-                        );
-                        Self::Error::from_string(err_str)
-                    })?;
-            }
+            initial_and_floor_gas.initial_gas += storage_gas.map_err(|_| {
+                let err_str =
+                    format!("Failed to get storage gas for callee address: {callee_address}",);
+                Self::Error::from_string(err_str)
+            })?;
 
             // MegaETH modification: update the state growth tracker
             let state_growth_tracker = &mut ctx.additional_limit.borrow_mut().state_growth_tracker;

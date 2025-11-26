@@ -8,11 +8,13 @@ use revm::primitives::hash_map::Entry;
 use alloy_primitives::{Address, BlockNumber, B256, U256};
 use revm::{context::BlockEnv, primitives::HashMap};
 
-use crate::{constants, BucketId, SaltEnv};
+use crate::{constants, BucketId, MegaSpecId, SaltEnv};
 
 /// Calculator for dynamic gas costs based on bucket capacity.
 #[derive(Debug)]
 pub struct DynamicGasCost<SaltEnvImpl> {
+    /// The spec id.
+    spec: MegaSpecId,
     /// The parent block number.
     parent_block: BlockNumber,
     /// The external environment for SALT bucket information.
@@ -24,8 +26,8 @@ pub struct DynamicGasCost<SaltEnvImpl> {
 
 impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     /// Creates a new [`SaltBucketCostFeed`].
-    pub fn new(salt_env: SaltEnvImpl, parent_block: BlockNumber) -> Self {
-        Self { parent_block, salt_env, bucket_cost_mulitipers: HashMap::default() }
+    pub fn new(spec: MegaSpecId, salt_env: SaltEnvImpl, parent_block: BlockNumber) -> Self {
+        Self { spec, parent_block, salt_env, bucket_cost_mulitipers: HashMap::default() }
     }
 
     /// Resets the cache of the bucket cost multiplier.
@@ -46,12 +48,15 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         address: Address,
         key: U256,
     ) -> Result<u64, SaltEnvImpl::Error> {
-        let mut gas = constants::mini_rex::SSTORE_SET_STORAGE_GAS;
-
         // increase the gas cost according to the bucket capacity
         let bucket_id = slot_to_bucket_id(address, key);
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
-        gas *= multiplier;
+
+        let gas = if self.spec.is_enabled(MegaSpecId::REX) {
+            constants::rex::SSTORE_SET_STORAGE_GAS_BASE * (multiplier - 1)
+        } else {
+            constants::mini_rex::SSTORE_SET_STORAGE_GAS * multiplier
+        };
 
         Ok(gas)
     }
@@ -59,12 +64,31 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     /// Calculates the gas cost for creating a new account. This overrides the
     /// [`NEWACCOUNT`](revm::interpreter::gas::NEWACCOUNT) gas cost in the original EVM.
     pub fn new_account_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
-        let mut gas = constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS;
-
         // increase the gas cost according to the bucket capacity
         let bucket_id = address_to_bucket_id(address);
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
-        gas *= multiplier;
+
+        let gas = if self.spec.is_enabled(MegaSpecId::REX) {
+            constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1)
+        } else {
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * multiplier
+        };
+
+        Ok(gas)
+    }
+
+    /// Calculates the gas cost for creating a new contract. This overrides the
+    /// [`CREATE`](revm::interpreter::gas::CREATE) gas cost in the original EVM.
+    pub fn create_contract_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
+        // increase the gas cost according to the bucket capacity
+        let bucket_id = address_to_bucket_id(address);
+        let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
+
+        let gas = if self.spec.is_enabled(MegaSpecId::REX) {
+            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE * (multiplier - 1)
+        } else {
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * multiplier
+        };
 
         Ok(gas)
     }

@@ -125,6 +125,9 @@ pub trait HostExt: Host {
     /// The error type for the oracle.
     type Error;
 
+    /// Gets the `MegaSpecId` of the current execution context.
+    fn spec_id(&self) -> MegaSpecId;
+
     /// Gets the `AdditionalLimit` instance. Only used when the `MINI_REX` spec is enabled.
     fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>>;
 
@@ -135,12 +138,21 @@ pub trait HostExt: Host {
     /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
     fn new_account_storage_gas(&self, address: Address) -> Result<u64, Self::Error>;
 
+    /// Gets the gas cost for creating a new contract. Only used when the `REX` spec is
+    /// enabled.
+    fn create_contract_storage_gas(&self, address: Address) -> Result<u64, Self::Error>;
+
     /// Gets the volatile data tracker. Only used when the `MINI_REX` spec is enabled.
     fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>>;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
     type Error = <ExtEnvs::SaltEnv as SaltEnv>::Error;
+
+    #[inline]
+    fn spec_id(&self) -> MegaSpecId {
+        self.spec
+    }
 
     #[inline]
     fn additional_limit(&self) -> &Rc<RefCell<AdditionalLimit>> {
@@ -158,6 +170,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
     fn new_account_storage_gas(&self, address: Address) -> Result<u64, Self::Error> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
         self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(address)
+    }
+
+    #[inline]
+    fn create_contract_storage_gas(&self, address: Address) -> Result<u64, Self::Error> {
+        debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
+        self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(address)
     }
 
     #[inline]

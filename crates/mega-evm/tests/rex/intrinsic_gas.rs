@@ -207,14 +207,9 @@ fn test_rex_intrinsic_gas_contract_creation() {
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
 
-    // Should include the Rex intrinsic storage gas + new account storage gas + other costs
-    // At minimum, it should be more than base + Rex intrinsic + new account storage gas
-    assert!(
-        gas_used >=
-            BASE_INTRINSIC_GAS +
-                constants::rex::TX_INTRINSIC_STORAGE_GAS +
-                constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS
-    );
+    // Should include the Rex intrinsic storage gas + other costs
+    // At minimum, it should be more than base + Rex intrinsic
+    assert!(gas_used >= BASE_INTRINSIC_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS);
 }
 
 /// Tests that `Rex` intrinsic gas is exactly 39,000 more than `MiniRex` for same transaction.
@@ -316,10 +311,7 @@ fn test_rex_intrinsic_gas_new_account_creation() {
     // Rex charges:
     // - Base: 21,000
     // - Rex intrinsic storage gas: 39,000
-    // - New account storage gas: 2,000,000
     // Total: 2,060,000
-    let expected_gas = BASE_INTRINSIC_GAS +
-        constants::rex::TX_INTRINSIC_STORAGE_GAS +
-        constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS;
+    let expected_gas = BASE_INTRINSIC_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS;
     assert_eq!(gas_used, expected_gas);
 }

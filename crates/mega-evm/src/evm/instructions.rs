@@ -859,6 +859,8 @@ pub mod storage_gas_ext {
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) {
+        let spec = context.host.spec_id();
+
         // The current execution contract (the caller)
         let creator_address = context.interpreter.input.target_address();
         // Load the creator account from the journal, this must not be cold loaded since the creator
@@ -895,13 +897,19 @@ pub mod storage_gas_ext {
             creator_address.create(creator.data.info.nonce)
         };
 
-        // Charge storage gas cost for creating a new account
-        let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(created_address)
-        else {
+        // Charge storage gas cost for creating a new contract
+        let create_contract_storage_gas = if spec.is_enabled(MegaSpecId::REX) {
+            // Rex spec distinguishes between contract creation and account creation.
+            context.host.create_contract_storage_gas(created_address)
+        } else {
+            // Mini-Rex spec does not distinguish between contract creation and account creation.
+            context.host.new_account_storage_gas(created_address)
+        };
+        let Ok(create_contract_storage_gas) = create_contract_storage_gas else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
-        gas!(context.interpreter, new_account_storage_gas);
+        gas!(context.interpreter, create_contract_storage_gas);
 
         // Call the original create instruction
         if IS_CREATE2 {
