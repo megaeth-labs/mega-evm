@@ -2,7 +2,7 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Bytes, TxKind, U256};
+use alloy_primitives::{address, keccak256, Bytes, TxKind, U256};
 use mega_evm::{
     address_to_bucket_id,
     constants::{self, rex::*},
@@ -12,14 +12,15 @@ use mega_evm::{
     MegaTransaction, MegaTransactionError,
 };
 use revm::{
+    bytecode::opcode::{CALL, CREATE, CREATE2},
     context::{result::ResultAndState, TxEnv},
     primitives::Address,
 };
 use salt::constant::MIN_BUCKET_SIZE;
 
-pub const CALLER: Address = address!("2000000000000000000000000000000000000002");
-pub const CALLEE: Address = address!("1000000000000000000000000000000000000001");
-pub const NEW_ACCOUNT: Address = address!("3000000000000000000000000000000000000003");
+const CALLER: Address = address!("2000000000000000000000000000000000000002");
+const CALLEE: Address = address!("1000000000000000000000000000000000000001");
+const NEW_ACCOUNT: Address = address!("3000000000000000000000000000000000000003");
 
 /// Base intrinsic gas cost for all transactions
 const BASE_INTRINSIC_GAS: u64 = 21_000;
@@ -27,7 +28,7 @@ const BASE_CREATE_GAS: u64 = 32_000;
 
 /// Executes a transaction on the EVM.
 #[allow(clippy::too_many_arguments)]
-pub fn transact(
+fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     external_envs: &DefaultExternalEnvs,
@@ -139,7 +140,7 @@ fn test_sstore_with_multiplier_charges_storage_gas() {
 
     // Expected storage gas: 20,000 × (2 - 1) = 20,000
     let gas_used = result.result.gas_used();
-    let expected_storage_gas = SSTORE_SET_STORAGE_GAS_BASE * (2 - 1);
+    let expected_storage_gas = SSTORE_SET_STORAGE_GAS_BASE;
 
     assert_eq!(
         gas_used,
@@ -392,7 +393,8 @@ fn test_contract_creation_minimum_bucket() {
 
     // Should not charge REX contract creation storage gas with minimum bucket (default env has
     // MIN_BUCKET_SIZE)
-    let expected_gas = BASE_INTRINSIC_GAS + BASE_CREATE_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS + 46; // bytecode overhead
+    let expected_gas =
+        BASE_INTRINSIC_GAS + BASE_CREATE_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS + 46; // bytecode overhead
     assert_eq!(result.result.gas_used(), expected_gas);
 }
 
@@ -644,4 +646,168 @@ fn test_large_multiplier_linear_scaling() {
     let expected_total = 21_000 + TX_INTRINSIC_STORAGE_GAS + expected_storage_gas;
 
     assert_eq!(result.result.gas_used(), expected_total);
+}
+
+// ========================================================================================
+// Opcode-level tests for CREATE, CREATE2, and CALL
+// ========================================================================================
+
+#[test]
+fn test_create_opcode() {
+    // Test CREATE opcode is executed correctly in REX mode
+    let mut db = MemoryDatabase::default();
+
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000u64));
+
+    // Create a contract that uses CREATE opcode to deploy another contract
+    let deployed_contract = BytecodeBuilder::default().stop().build();
+
+    let code_len = deployed_contract.len();
+    let creator_bytecode = BytecodeBuilder::default()
+        .mstore(0x00, deployed_contract.as_ref())
+        .push_number(code_len as u64)
+        .push_number(0x00_u64)
+        .push_number(0x00_u64)
+        .append(CREATE)
+        .stop()
+        .build();
+
+    db.set_account_code(CALLEE, creator_bytecode);
+
+    let bucket_id = address_to_bucket_id(CALLEE.create(0));
+    let external_envs = DefaultExternalEnvs::default().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * 10,
+    );
+
+    let result = transact(
+        MegaSpecId::REX,
+        &mut db,
+        &external_envs,
+        CALLER,
+        Some(CALLEE),
+        Bytes::new(),
+        U256::ZERO,
+        10_000_000,
+    )
+    .expect("Transaction should succeed");
+
+    assert!(result.result.is_success());
+    assert_eq!(
+        result.result.gas_used(),
+        BASE_INTRINSIC_GAS +
+            constants::rex::TX_INTRINSIC_STORAGE_GAS +
+            constants::equivalence::CREATE +
+            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE * 9 +
+            23, /* bytecode overhead */
+    );
+}
+
+#[test]
+fn test_create2_opcode() {
+    // Test CREATE2 opcode is executed correctly in REX mode
+    let mut db = MemoryDatabase::default();
+
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000u64));
+
+    let deployed_contract = BytecodeBuilder::default().stop().build();
+
+    let code_len = deployed_contract.len();
+    let salt = U256::from(0x42);
+    let creator_bytecode = BytecodeBuilder::default()
+        .mstore(0x00, deployed_contract.as_ref())
+        .push_u256(salt)
+        .push_number(code_len as u64)
+        .push_number(0x00_u64)
+        .push_number(0x00_u64)
+        .append(CREATE2)
+        .stop()
+        .build();
+
+    db.set_account_code(CALLEE, creator_bytecode);
+
+    let bucket_id =
+        address_to_bucket_id(CALLEE.create2(salt.to_be_bytes(), keccak256(&deployed_contract)));
+    let external_envs = DefaultExternalEnvs::default().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * 10,
+    );
+
+    let result = transact(
+        MegaSpecId::REX,
+        &mut db,
+        &external_envs,
+        CALLER,
+        Some(CALLEE),
+        Bytes::new(),
+        U256::ZERO,
+        10_000_000,
+    )
+    .expect("Transaction should succeed");
+
+    assert!(result.result.is_success());
+    assert_eq!(
+        result.result.gas_used(),
+        BASE_INTRINSIC_GAS +
+            constants::rex::TX_INTRINSIC_STORAGE_GAS +
+            constants::equivalence::CREATE +
+            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE * 9 +
+            32, /* bytecode overhead */
+    );
+}
+
+#[test]
+fn test_call_opcode_creates_account() {
+    // Test CALL opcode creating a new account by sending value
+    let mut db = MemoryDatabase::default();
+
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000u64));
+    db.set_account_balance(CALLEE, U256::from(1_000_000u64));
+
+    // Contract that uses CALL opcode to send value to NEW_ACCOUNT
+    let caller_bytecode = BytecodeBuilder::default()
+        .push_number(0x00_u64) // retSize
+        .push_number(0x00_u64) // retOffset
+        .push_number(0x00_u64) // argsSize
+        .push_number(0x00_u64) // argsOffset
+        .push_number(1000_u64) // value to send
+        .push_address(NEW_ACCOUNT) // address
+        .push_number(100_000_u64) // gas
+        .append(CALL)
+        .stop()
+        .build();
+
+    db.set_account_code(CALLEE, caller_bytecode);
+
+    let bucket_id = address_to_bucket_id(NEW_ACCOUNT);
+    let external_envs = DefaultExternalEnvs::default().with_bucket_capacity(
+        bucket_id,
+        0,
+        MIN_BUCKET_SIZE as u64 * 10,
+    );
+
+    let result = transact(
+        MegaSpecId::REX,
+        &mut db,
+        &external_envs,
+        CALLER,
+        Some(CALLEE),
+        Bytes::new(),
+        U256::ZERO,
+        10_000_000,
+    )
+    .expect("Transaction should succeed");
+
+    assert!(result.result.is_success());
+    assert_eq!(
+        result.result.gas_used(),
+        BASE_INTRINSIC_GAS +
+            constants::rex::TX_INTRINSIC_STORAGE_GAS +
+            constants::equivalence::CALLVALUE +
+            constants::equivalence::NEWACCOUNT +
+            constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE * 9 +
+            321, /* bytecode overhead */
+    );
 }
