@@ -207,7 +207,7 @@ Rex refines the compute gas limit and adds new state growth limits to improve re
 - MiniRex's 1B limit was overly generous and unnecessary for practical use cases
 - 200M provides ample headroom for complex contracts while preventing extreme compute usage
 - Tighter limit improves predictability and resource management
-- Block-level compute gas limit (500M) still allows multiple complex transactions per block
+- No block-level compute gas limit exists (unlimited), allowing multiple complex transactions per block
 
 #### 2.4.2 State Growth Limits (NEW)
 
@@ -248,7 +248,7 @@ State growth tracks new permanent state entries:
 
 #### 2.4.3 Limits Summary Table
 
-Complete comparison of all transaction and block limits:
+Complete comparison of some transaction and block limits:
 
 | Limit Dimension  | Level       | MiniRex              | Rex                  | Change        |
 | ---------------- | ----------- | -------------------- | -------------------- | ------------- |
@@ -263,8 +263,7 @@ Complete comparison of all transaction and block limits:
 
 **Notes:**
 
-- **Limits 1-3** (Gas, Tx Size, DA Size): Checked in pre-execution only
-- **Limits 4-7** (Data, KV Updates, Compute Gas, State Growth): Checked during/after execution
+- **Limits (Data, KV Updates, Compute Gas, State Growth)**: Checked during/after execution
 - State growth limits provide additional protection beyond KV update limits
 - KV updates track all storage writes (including updates to existing slots)
 - State growth tracks only new permanent state entries (0→non-0 writes, new accounts, new code)
