@@ -86,5 +86,5 @@ pub mod mini_rex {
 pub mod rex {
     /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.
     /// This is charged on top of the base 21,000 intrinsic gas for all transactions.
-    pub const TX_INTRINSIC_STORAGE_GAS: u64 = 160_000;
+    pub const TX_INTRINSIC_STORAGE_GAS: u64 = 39_000;
 }

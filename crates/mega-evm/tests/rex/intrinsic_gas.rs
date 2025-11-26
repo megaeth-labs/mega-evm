@@ -49,7 +49,7 @@ fn transact(
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
 
-/// Tests that Rex hardfork adds 160,000 gas to base transaction cost for simple transfer.
+/// Tests that Rex hardfork adds 39,000 gas to base transaction cost for simple transfer.
 #[test]
 fn test_rex_intrinsic_gas_simple_transfer() {
     let mut db = MemoryDatabase::default();
@@ -70,11 +70,11 @@ fn test_rex_intrinsic_gas_simple_transfer() {
 
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
-    // Rex: 21,000 (base) + 160,000 (Rex intrinsic storage gas) = 181,000
+    // Rex: 21,000 (base) + 39,000 (Rex intrinsic storage gas) = 60,000
     assert_eq!(gas_used, BASE_INTRINSIC_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS);
 }
 
-/// Tests that `MiniRex` does NOT charge the additional 160,000 intrinsic gas.
+/// Tests that `MiniRex` does NOT charge the additional 39,000 intrinsic gas.
 #[test]
 fn test_mini_rex_no_additional_intrinsic_gas() {
     let mut db = MemoryDatabase::default();
@@ -99,7 +99,7 @@ fn test_mini_rex_no_additional_intrinsic_gas() {
     assert_eq!(gas_used, BASE_INTRINSIC_GAS);
 }
 
-/// Tests that `Equivalence` spec does NOT charge the additional 160,000 intrinsic gas.
+/// Tests that `Equivalence` spec does NOT charge the additional 39,000 intrinsic gas.
 #[test]
 fn test_equivalence_no_additional_intrinsic_gas() {
     let mut db = MemoryDatabase::default();
@@ -149,12 +149,12 @@ fn test_rex_intrinsic_gas_with_calldata() {
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
 
-    // `Rex` inherits `MiniRex` calldata costs and adds 160,000 intrinsic storage gas
+    // `Rex` inherits `MiniRex` calldata costs and adds 39,000 intrinsic storage gas
     // For 100 bytes of non-zero calldata:
     // - MiniRex base cost: 38,600 (from floor gas test calculations)
-    // - Rex intrinsic storage gas: 160,000
-    // Total: 198,600
-    let expected_gas = 198_600;
+    // - Rex intrinsic storage gas: 39,000
+    // Total: 77,600
+    let expected_gas = 77_600;
     assert_eq!(gas_used, expected_gas);
 }
 
@@ -165,7 +165,7 @@ fn test_rex_intrinsic_gas_insufficient_gas_limit() {
     db.set_account_balance(CALLER, U256::from(1_000_000));
     db.set_account_balance(CALLEE, U256::from(100));
 
-    // Set gas limit to just below the Rex intrinsic gas (181,000)
+    // Set gas limit to just below the Rex intrinsic gas (60,000)
     let insufficient_gas_limit = BASE_INTRINSIC_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS - 1;
 
     let res = transact(
@@ -217,7 +217,7 @@ fn test_rex_intrinsic_gas_contract_creation() {
     );
 }
 
-/// Tests that `Rex` intrinsic gas is exactly 160,000 more than `MiniRex` for same transaction.
+/// Tests that `Rex` intrinsic gas is exactly 39,000 more than `MiniRex` for same transaction.
 #[test]
 fn test_rex_vs_mini_rex_gas_difference() {
     let mut db_rex = MemoryDatabase::default();
@@ -262,7 +262,7 @@ fn test_rex_vs_mini_rex_gas_difference() {
     let gas_used_mini_rex = res_mini_rex.result.gas_used();
 
     // For transactions without calldata, the difference should be exactly
-    // the Rex intrinsic storage gas (160,000)
+    // the Rex intrinsic storage gas (39,000)
     assert_eq!(gas_used_rex - gas_used_mini_rex, constants::rex::TX_INTRINSIC_STORAGE_GAS);
 }
 
@@ -287,7 +287,7 @@ fn test_rex_intrinsic_gas_zero_value_transfer() {
 
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
-    // Rex: 21,000 (base) + 160,000 (Rex intrinsic storage gas) = 181,000
+    // Rex: 21,000 (base) + 39,000 (Rex intrinsic storage gas) = 60,000
     assert_eq!(gas_used, BASE_INTRINSIC_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS);
 }
 
@@ -315,9 +315,9 @@ fn test_rex_intrinsic_gas_new_account_creation() {
 
     // Rex charges:
     // - Base: 21,000
-    // - Rex intrinsic storage gas: 160,000
+    // - Rex intrinsic storage gas: 39,000
     // - New account storage gas: 2,000,000
-    // Total: 2,181,000
+    // Total: 2,060,000
     let expected_gas = BASE_INTRINSIC_GAS +
         constants::rex::TX_INTRINSIC_STORAGE_GAS +
         constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS;
