@@ -139,39 +139,38 @@ fn test_block_custom_data_limit() {
     // Create EVM
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
-    // Create block context with VERY LOW custom data limit to ensure second tx fails
-    // Each transaction generates some base data (tx itself + receipt + logs)
-    // We set limit low enough that 2 transactions will exceed it
-    // Using builder pattern to set only the data limit
+    // Create block context with VERY LOW custom data limit
+    // New behavior: The first transaction that exceeds the limit is allowed,
+    // but subsequent transactions are rejected in pre-execution
     let block_ctx = MegaBlockExecutionCtx::new(
         B256::ZERO,
         None,
         Bytes::new(),
         BlockLimits::no_limits().with_block_txs_data_limit(2_500),
-    ); // 2.5 KB data limit - should fit 1 tx but not 2
+    ); // 2.5 KB data limit
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
-    // Execute first transaction (should succeed)
+    // Execute first transaction (should succeed and likely exceed the limit)
     let tx1 = create_transaction(0, 1_000_000);
     let result1 = executor.execute_transaction(&tx1);
     assert!(result1.is_ok(), "First transaction should succeed");
     assert!(result1.unwrap() < tx1.gas_limit(), "Gas used should be less than gas limit");
 
-    // Execute second transaction (should fail due to block data limit)
+    // Execute second transaction (should succeed, causing block to exceed limit)
     let tx2 = create_transaction(1, 1_000_000);
     let result2 = executor.execute_transaction(&tx2);
-    if result2.is_ok() {
-        eprintln!("Second transaction succeeded when it should have failed");
-        eprintln!("Block data limit: 5000");
-        // Note: The transaction might succeed because the actual data generated is less than
-        // expected
-    }
-    assert!(result2.is_err(), "Second transaction should fail due to block data limit");
-    let err_msg = format!("{:?}", result2.unwrap_err());
+    assert!(result2.is_ok(), "Second transaction should succeed (last tx can exceed limit)");
+    assert!(result2.unwrap() < tx2.gas_limit(), "Gas used should be less than gas limit");
+
+    // Execute third transaction (should fail due to block data limit already exceeded)
+    let tx3 = create_transaction(2, 1_000_000);
+    let result3 = executor.execute_transaction(&tx3);
+    assert!(result3.is_err(), "Third transaction should fail due to block data limit");
+    let err_msg = format!("{:?}", result3.unwrap_err());
     assert!(
         err_msg.contains("TransactionDataLimit"),
         "Error should mention TransactionDataLimit, got: {}",
@@ -210,24 +209,28 @@ fn test_block_custom_kv_update_limit() {
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
     // Create block context with custom KV update limit
-    // Set limit to 0 to ensure first transaction exceeds it
-    // Using builder pattern to set only the KV limit
+    // Set limit to 1 to test the new behavior where the first transaction that
+    // exceeds the limit is allowed, but subsequent transactions are rejected
     let block_ctx = MegaBlockExecutionCtx::new(
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_kv_update_limit(0),
-    ); // Zero limit - any transaction will exceed
+        BlockLimits::no_limits().with_block_kv_update_limit(1),
+    ); // Very low limit - first tx will exceed it
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
-    // Execute transaction (should fail due to KV limit of 0)
-    let result = executor.execute_transaction(&create_transaction(0, 10_000_000));
-    assert!(result.is_err(), "Transaction should fail due to block KV update limit of 0");
-    let err_msg = format!("{:?}", result.unwrap_err());
+    // Execute first transaction (should succeed even though it will exceed the limit)
+    let result1 = executor.execute_transaction(&create_transaction(0, 10_000_000));
+    assert!(result1.is_ok(), "First transaction should succeed (last tx can exceed limit)");
+
+    // Execute second transaction (should fail due to KV limit already exceeded)
+    let result2 = executor.execute_transaction(&create_transaction(1, 10_000_000));
+    assert!(result2.is_err(), "Second transaction should fail due to block KV update limit");
+    let err_msg = format!("{:?}", result2.unwrap_err());
     assert!(
         err_msg.contains("KVUpdateLimit"),
         "Error should mention KVUpdateLimit, got: {}",
@@ -326,7 +329,9 @@ fn test_block_data_limit_exceeded_mid_block() {
     // Create EVM
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
-    // Create block context with ~6 KB limit (should fit 2 transactions but not 3)
+    // Create block context with ~6 KB limit
+    // The transaction that causes the block to exceed the limit is allowed,
+    // but the next transaction is rejected
     let block_ctx = MegaBlockExecutionCtx::new(
         B256::ZERO,
         None,
@@ -347,16 +352,20 @@ fn test_block_data_limit_exceeded_mid_block() {
     let result2 = executor.execute_transaction(&create_transaction(1, 1_000_000));
     assert!(result2.is_ok(), "Second transaction should succeed");
 
-    // Execute third transaction (should fail due to block data limit)
+    // Execute third transaction (should succeed, likely causing block to exceed limit)
     let result3 = executor.execute_transaction(&create_transaction(2, 1_000_000));
-    assert!(result3.is_err(), "Third transaction should fail due to block data limit");
+    assert!(result3.is_ok(), "Third transaction should succeed (last tx can exceed limit)");
 
-    // Finish the block - should have 2 receipts
+    // Execute fourth transaction (should fail due to block data limit already exceeded)
+    let result4 = executor.execute_transaction(&create_transaction(3, 1_000_000));
+    assert!(result4.is_err(), "Fourth transaction should fail due to block data limit");
+
+    // Finish the block - should have 3 receipts
     let block_result = executor.finish();
     assert!(block_result.is_ok(), "Block should finish successfully");
 
     let (_, receipts) = block_result.unwrap();
-    assert_eq!(receipts.receipts.len(), 2, "Should have 2 receipts (3rd tx failed)");
+    assert_eq!(receipts.receipts.len(), 3, "Should have 3 receipts (4th tx failed)");
 }
 
 #[test]
@@ -389,44 +398,39 @@ fn test_block_kv_limit_exceeded_mid_block() {
     // Create EVM
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
-    // Create block context with limit of 4 KV updates
-    // This should allow exactly 2 transaction to succeed (each transaction induces 2 KV updates,
-    // sender account info and storage slot)
+    // Create block context with limit of 1 KV update
+    // New behavior: The transaction that causes the block to exceed the limit is allowed,
+    // but the next transaction is rejected
+    // Each transaction induces 2 KV updates (sender account info and storage slot)
     let block_ctx = MegaBlockExecutionCtx::new(
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_kv_update_limit(4),
-    ); // 4 KV update limit
+        BlockLimits::no_limits().with_block_kv_update_limit(1),
+    ); // 1 KV update limit - first tx will exceed it
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
-    // Execute first transaction (should succeed with 1 KV update)
+    // Execute first transaction (should succeed with 2 KV updates, exceeding the limit)
     let tx1 = create_transaction(0, 10_000_000);
     let result1 = executor.execute_transaction(&tx1);
-    assert!(result1.is_ok(), "First transaction should succeed");
+    assert!(result1.is_ok(), "First transaction should succeed (last tx can exceed limit)");
     assert!(result1.unwrap() < tx1.gas_limit(), "Gas used should be less than gas limit");
 
-    // Execute second transaction (should succeed)
+    // Execute second transaction (should fail due to KV limit already exceeded)
     let tx2 = create_transaction(1, 10_000_000);
     let result2 = executor.execute_transaction(&tx2);
-    assert!(result2.is_ok(), "Second transaction should succeed");
-    assert!(result2.unwrap() < tx2.gas_limit(), "Gas used should be less than gas limit");
+    assert!(result2.is_err(), "Second transaction should fail due to block KV update limit");
 
-    // Execute third transaction (should fail due to KV limit)
-    let tx3 = create_transaction(2, 10_000_000);
-    let result3 = executor.execute_transaction(&tx3);
-    assert!(result3.is_err(), "Third transaction should fail due to block KV update limit");
-
-    // Finish the block - should have 2 receipt
+    // Finish the block - should have 1 receipt
     let block_result = executor.finish();
     assert!(block_result.is_ok(), "Block should finish successfully");
 
     let (_, receipts) = block_result.unwrap();
-    assert_eq!(receipts.receipts.len(), 2, "Should have 2 receipts (3rd tx failed)");
+    assert_eq!(receipts.receipts.len(), 1, "Should have 1 receipt (2nd tx failed)");
 }
 
 #[test]
@@ -464,26 +468,28 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     // Create EVM
     let evm = evm_factory.create_evm(&mut state, evm_env);
 
-    // Create block context with VERY low KV update limit (1 update)
-    // This should only allow the account update from the transaction, not the SSTORE
+    // Create block context with VERY low KV update limit
+    // With new behavior, we need to set limit to 0 to ensure no transactions can be added
+    // Setting to 0 means block_kv_updates_used (0) >= limit (0) is true from the start
     let block_ctx = MegaBlockExecutionCtx::new(
         B256::ZERO,
         None,
         Bytes::new(),
-        BlockLimits::no_limits().with_block_kv_update_limit(1),
-    ); // Only 1 KV update allowed
+        BlockLimits::no_limits().with_block_kv_update_limit(0),
+    ); // Zero limit
 
     // Create block executor
     let chain_spec = OpChainHardforks::base_mainnet();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
-    // Execute transaction (should fail due to KV limit)
+    // Execute transaction (should fail due to KV limit of 0)
     let result = executor.execute_transaction(&create_transaction(0, 10_000_000));
-    assert!(result.is_err(), "Transaction should fail due to block KV update limit");
+    assert!(result.is_err(), "Transaction should fail due to block KV update limit of 0");
 
     // Verify storage slot 0 is NOT set in the database
     let db_state = executor.evm_mut().db_mut();
+    let _ = db_state.load_cache_account(CONTRACT);
     let value = db_state.storage(CONTRACT, U256::ZERO).expect("Storage access should not fail");
 
     // The storage should be zero (not 42) since the transaction was not committed
@@ -494,7 +500,7 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     assert!(block_result.is_ok(), "Block should finish successfully");
 
     let (_, receipts) = block_result.unwrap();
-    assert_eq!(receipts.receipts.len(), 0, "Should have 0 receipts (tx failed)");
+    assert_eq!(receipts.receipts.len(), 0, "Should have 0 receipts (tx rejected in pre-execution)");
 }
 
 #[test]
