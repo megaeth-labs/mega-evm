@@ -32,6 +32,17 @@ This repository contains a customized version of the revm EVM implementation spe
 
 For complete MiniRex specification, see **[MiniRex.md](./hardfork-spec/MiniRex.md)**.
 
+### REX Specification (Hardfork)
+
+- **Refined Storage Gas Economics**: Optimized storage gas formulas with gradual scaling (20K-32K base costs vs. MiniRex's 2M)
+- **Transaction Intrinsic Storage Gas**: 39,000 storage gas baseline for all transactions (total 60K with compute gas)
+- **Zero Cost Fresh Storage**: Storage operations in minimum-sized SALT buckets charge 0 storage gas
+- **Separate Contract Creation Cost**: Distinct storage gas for contract creation (32K base) vs. account creation (25K base)
+- **Critical Security Fixes**: DELEGATECALL, STATICCALL, and CALLCODE now properly enforce 98/100 gas forwarding and oracle access detection
+- **MiniRex Foundation**: Inherits all MiniRex features including multidimensional gas model, compute gas detention, and enhanced security
+
+For complete Rex specification, see **[Rex.md](./hardfork-spec/Rex.md)**.
+
 ## Quick Start
 
 ### Basic Usage

@@ -238,7 +238,7 @@ where
             initial_and_floor_gas.floor_gas += floor_calldata_storage_gas;
 
             // MegaETH Rex modification: additional intrinsic storage gas cost
-            // Add 160,000 gas on top of base intrinsic gas for all transactions
+            // Add 39,000 gas on top of base intrinsic gas for all transactions
             if ctx.spec.is_enabled(MegaSpecId::REX) {
                 initial_and_floor_gas.initial_gas += constants::rex::TX_INTRINSIC_STORAGE_GAS;
             }
