@@ -2,3 +2,4 @@
 
 mod intrinsic_gas;
 mod storage_gas;
+mod storage_gas_opcodes;

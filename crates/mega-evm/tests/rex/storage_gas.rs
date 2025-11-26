@@ -17,9 +17,9 @@ use revm::{
 };
 use salt::constant::MIN_BUCKET_SIZE;
 
-const CALLER: Address = address!("2000000000000000000000000000000000000002");
-const CALLEE: Address = address!("1000000000000000000000000000000000000001");
-const NEW_ACCOUNT: Address = address!("3000000000000000000000000000000000000003");
+pub const CALLER: Address = address!("2000000000000000000000000000000000000002");
+pub const CALLEE: Address = address!("1000000000000000000000000000000000000001");
+pub const NEW_ACCOUNT: Address = address!("3000000000000000000000000000000000000003");
 
 /// Base intrinsic gas cost for all transactions
 const BASE_INTRINSIC_GAS: u64 = 21_000;
@@ -27,7 +27,7 @@ const BASE_CREATE_GAS: u64 = 32_000;
 
 /// Executes a transaction on the EVM.
 #[allow(clippy::too_many_arguments)]
-fn transact(
+pub fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     external_envs: &DefaultExternalEnvs,
@@ -195,7 +195,7 @@ fn test_sstore_multiplier_scaling() {
             + 6 // bytecode overhead
             + expected_storage_gas;
 
-        assert_eq!(gas_used, expected_total,);
+        assert_eq!(gas_used, expected_total);
 
         if previous_gas > 0 {
             // Verify gas increased from previous
@@ -292,11 +292,7 @@ fn test_new_account_minimum_bucket_zero_gas() {
     // - 0 (REX account creation with multiplier = 1)
     // Total: 60,000
 
-    assert_eq!(
-        result.result.gas_used(),
-        60_000,
-        "Expected no REX storage gas for account creation with minimum bucket"
-    );
+    assert_eq!(result.result.gas_used(), 60_000);
 }
 
 #[test]
@@ -330,7 +326,7 @@ fn test_new_account_with_multiplier() {
         let expected_storage_gas = NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1);
         let expected_total = 21_000 + TX_INTRINSIC_STORAGE_GAS + expected_storage_gas;
 
-        assert_eq!(result.result.gas_used(), expected_total,);
+        assert_eq!(result.result.gas_used(), expected_total);
     }
 }
 
@@ -363,11 +359,7 @@ fn test_existing_account_no_storage_gas() {
     // Should only charge intrinsic gas, no storage gas for existing account
     let expected_total = 21_000 + TX_INTRINSIC_STORAGE_GAS;
 
-    assert_eq!(
-        result.result.gas_used(),
-        expected_total,
-        "Transfer to existing account should not charge storage gas"
-    );
+    assert_eq!(result.result.gas_used(), expected_total);
 }
 
 #[test]
@@ -400,11 +392,8 @@ fn test_contract_creation_minimum_bucket() {
 
     // Should not charge REX contract creation storage gas with minimum bucket (default env has
     // MIN_BUCKET_SIZE)
-    assert_eq!(
-        result.result.gas_used(),
-        BASE_INTRINSIC_GAS + BASE_CREATE_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS + 46, /* bytecode overhead */
-        "Expected no REX contract creation storage gas with minimum bucket"
-    );
+    let expected_gas = BASE_INTRINSIC_GAS + BASE_CREATE_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS + 46; // bytecode overhead
+    assert_eq!(result.result.gas_used(), expected_gas);
 }
 
 #[test]
@@ -654,5 +643,5 @@ fn test_large_multiplier_linear_scaling() {
     let expected_storage_gas = NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1);
     let expected_total = 21_000 + TX_INTRINSIC_STORAGE_GAS + expected_storage_gas;
 
-    assert_eq!(result.result.gas_used(), expected_total, "Large multiplier should scale linearly");
+    assert_eq!(result.result.gas_used(), expected_total);
 }
