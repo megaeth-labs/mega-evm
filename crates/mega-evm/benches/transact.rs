@@ -8,10 +8,7 @@
 use alloy_evm::Database;
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mega_evm::{
-    test_utils::MemoryDatabase, DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId,
-    MegaTransaction,
-};
+use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
 use revm::{
     context::{result::ResultAndState, tx::TxEnvBuilder},
     database::{CacheDB, EmptyDB},
@@ -45,7 +42,7 @@ fn execute_transaction<DB: Database>(
     callee: Address,
     value: U256,
 ) -> ResultAndState<mega_evm::MegaHaltReason> {
-    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -117,7 +114,7 @@ fn execute_weth9_transfer(
         .account_storage(WETH9_ADDRESS, balance_slot.into(), caller_balance)
         .account_balance(CALLER, U256::from(10).pow(U256::from(18))); // 1 ETH for gas
 
-    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

@@ -16,7 +16,7 @@ use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{ADD, ADDRESS, EXP, GAS, KECCAK256, POP, STATICCALL},
@@ -58,7 +58,7 @@ fn execute_bytecode(
         .account_code(CONTRACT, bytecode.clone())
         .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
 
-    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

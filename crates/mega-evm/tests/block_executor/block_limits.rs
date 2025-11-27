@@ -13,8 +13,8 @@ use alloy_op_hardforks::OpChainHardforks;
 use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, DefaultExternalEnvs, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory,
-    MegaSpecId, MegaTxEnvelope,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaSpecId,
+    MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{ADD, DUP1, LOG0, PUSH0, SLOAD, SSTORE},
@@ -122,8 +122,8 @@ fn test_block_custom_data_limit() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -191,8 +191,8 @@ fn test_block_custom_kv_update_limit() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -251,8 +251,8 @@ fn test_block_multiple_transactions_within_limits() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -312,8 +312,8 @@ fn test_block_data_limit_exceeded_mid_block() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -381,8 +381,8 @@ fn test_block_kv_limit_exceeded_mid_block() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -451,8 +451,8 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -516,8 +516,8 @@ fn test_block_tx_size_limit_default_unlimited() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -579,8 +579,8 @@ fn test_block_tx_size_limit_allows_multiple_transactions() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -641,8 +641,8 @@ fn test_block_tx_size_limit_exceeded_first_transaction() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -703,8 +703,8 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
@@ -776,8 +776,8 @@ fn test_block_tx_size_limit_with_varying_sizes() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();

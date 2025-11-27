@@ -4,12 +4,10 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, keccak256, Bytes, TxKind, U256};
 use mega_evm::{
-    address_to_bucket_id,
     constants::{self, mini_rex::SSTORE_SET_STORAGE_GAS},
-    slot_to_bucket_id,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    DefaultExternalEnvs, EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError,
+    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError, SaltEnv, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2, GAS, LOG0, PUSH0},
@@ -28,13 +26,13 @@ const NESTED_CALLEE: Address = address!("100000000000000000000000000000000000000
 fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
-    external_envs: &DefaultExternalEnvs,
+    external_envs: &TestExternalEnvs,
     caller: Address,
     callee: Option<Address>,
     data: Bytes,
     value: U256,
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
-    let mut context = MegaContext::new(db, spec, external_envs);
+    let mut context = MegaContext::new(db, spec).with_external_envs(external_envs.clone().into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -93,13 +91,10 @@ fn sstore_test_case(
         UpdateMode::Set | UpdateMode::Reset => U256::from(6342),
         UpdateMode::Clear => U256::from(0),
     };
-    let bucket_id = slot_to_bucket_id(CALLEE, storage_key);
+    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
     // An external envs with the given bucket capacity
-    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
-        bucket_id,
-        0,
-        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
-    );
+    let external_envs = TestExternalEnvs::new()
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // a contract that stores a value to the storage slot
     let bytecode = BytecodeBuilder::default().sstore(storage_key, storage_value).stop().build();
@@ -217,9 +212,9 @@ fn test_sstore_cold_then_warm_access() {
     let mut db = MemoryDatabase::default();
 
     let storage_key = U256::from(0);
-    let bucket_id = slot_to_bucket_id(CALLEE, storage_key);
+    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
     let external_envs =
-        DefaultExternalEnvs::new().with_bucket_capacity(bucket_id, 0, MIN_BUCKET_SIZE as u64);
+        TestExternalEnvs::new().with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64);
 
     // Contract that performs two SSTOREs to the same slot:
     // 1. First SSTORE (cold): should charge SSTORE_SET_GAS + COLD_SLOAD_COST
@@ -282,12 +277,9 @@ fn ether_transfer_test_case(
     let mut db = MemoryDatabase::default();
 
     // Determine the bucket for the callee and set up the external envs with the required capacity.
-    let bucket_id = address_to_bucket_id(CALLEE);
-    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
-        bucket_id,
-        0,
-        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
-    );
+    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(CALLEE);
+    let external_envs = TestExternalEnvs::new()
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // Allocate initial balance to the caller.
     db.set_account_balance(CALLER, U256::from(1000));
@@ -372,13 +364,10 @@ fn nested_ether_transfer_test_case(
     let mut db = MemoryDatabase::default();
 
     // Test address and storage slot
-    let bucket_id = address_to_bucket_id(NESTED_CALLEE);
+    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NESTED_CALLEE);
     // An external envs with the given bucket capacity
-    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
-        bucket_id,
-        0,
-        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
-    );
+    let external_envs = TestExternalEnvs::new()
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // allocate some balance to callee, which will transfer the ether to the nested callee
     db.set_account_balance(CALLEE, U256::from(1000));
@@ -464,13 +453,10 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
 
     // Test address and storage slot
     let callee = CALLER.create(0);
-    let bucket_id = address_to_bucket_id(callee);
+    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(callee);
     // An external envs with the given bucket capacity
-    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
-        bucket_id,
-        0,
-        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
-    );
+    let external_envs = TestExternalEnvs::new()
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // constructor code
     let constructor_code = BytecodeBuilder::default().return_with_data([0x00]).build();
@@ -548,13 +534,10 @@ fn nested_create_contract_test_case(
     } else {
         CALLEE.create(0)
     };
-    let bucket_id = address_to_bucket_id(nested_callee);
+    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(nested_callee);
     // An external envs with the given bucket capacity
-    let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
-        bucket_id,
-        0,
-        MIN_BUCKET_SIZE as u64 * (expansion_times + 1),
-    );
+    let external_envs = TestExternalEnvs::new()
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // set the code of the calee that transfers ether to the nested callee
     let mut bytecode = BytecodeBuilder::default();
@@ -681,7 +664,7 @@ fn calldata_test_case<const CALLDATA_LEN: usize>(spec: MegaSpecId, expected_gas_
     let res = transact(
         spec,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         calldata,
@@ -736,7 +719,7 @@ fn log_test_case<const TOPIC_COUNT: usize, const DATA_LEN: usize>(
     let res = transact(
         spec,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         Default::default(),
@@ -833,7 +816,7 @@ fn gas_forward_test_case(spec: MegaSpecId, is_create: bool, approx_expected_forw
     };
     db.set_account_code(CALLEE, bytecode);
 
-    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -897,7 +880,7 @@ fn floor_gas_test_case(spec: MegaSpecId, calldata_size: usize, expected_gas_used
     let res = transact(
         spec,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         calldata,

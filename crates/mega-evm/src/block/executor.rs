@@ -22,12 +22,11 @@ use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
     context::result::ExecutionResult, database::State, handler::EvmTr, DatabaseCommit, Inspector,
 };
-use salt::BucketId;
 
 use crate::{
     ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
-    BlockLimiter, BlockMegaTransactionOutcome, MegaBlockExecutionCtx, MegaSpecId, MegaTransaction,
-    MegaTransactionExt, MegaTransactionOutcome,
+    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaSpecId,
+    MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -125,7 +124,7 @@ impl<'db, DB, C, R, INSP, ExtEnvs>
 where
     DB: Database + 'db,
     C: OpHardforks,
-    ExtEnvs: crate::ExternalEnvs,
+    ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<
         Transaction: Transaction + Encodable2718 + MegaTransactionExt,
@@ -284,7 +283,7 @@ impl<'db, DB, C, R, INSP, ExtEnvs> alloy_evm::block::BlockExecutor
 where
     DB: Database + 'db,
     C: OpHardforks,
-    ExtEnvs: crate::ExternalEnvs,
+    ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<
         Transaction: Transaction + Encodable2718 + MegaTransactionExt,

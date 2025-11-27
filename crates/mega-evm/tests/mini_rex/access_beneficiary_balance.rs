@@ -8,7 +8,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MsgCallMeta},
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, STOP},
@@ -24,9 +24,9 @@ const CALLER_ADDR: Address = address!("0000000000000000000000000000000000100000"
 const CONTRACT_ADDR: Address = address!("0000000000000000000000000000000000100001");
 const NESTED_CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 
-fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, GasInspector, DefaultExternalEnvs> {
+fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, GasInspector, EmptyExternalEnv> {
     let db = CacheDB::<EmptyDB>::default();
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX);
 
     let block_env =
         BlockEnv { beneficiary: BENEFICIARY, number: U256::from(10), ..Default::default() };
@@ -46,7 +46,7 @@ fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
 }
 
 fn execute_tx(
-    evm: &mut MegaEvm<CacheDB<EmptyDB>, GasInspector, DefaultExternalEnvs>,
+    evm: &mut MegaEvm<CacheDB<EmptyDB>, GasInspector, EmptyExternalEnv>,
     caller: Address,
     to: Option<Address>,
     value: U256,
@@ -75,7 +75,7 @@ fn execute_tx(
 }
 
 fn assert_beneficiary_detection(
-    evm: &MegaEvm<CacheDB<EmptyDB>, GasInspector, DefaultExternalEnvs>,
+    evm: &MegaEvm<CacheDB<EmptyDB>, GasInspector, EmptyExternalEnv>,
     result_and_state: &ResultAndState<MegaHaltReason>,
 ) {
     // Transaction should succeed

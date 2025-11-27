@@ -12,8 +12,8 @@ use alloy_op_hardforks::OpChainHardforks;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
-    BlockLimits, DefaultExternalEnvs, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
-    MegaEvmFactory, MegaSpecId, MegaTxEnvelope,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaSpecId,
+    MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{ADD, PUSH0, SLOAD, SSTORE},
@@ -67,8 +67,8 @@ fn test_inspector_works_with_block_executor() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory and block executor factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
     let chain_spec = OpChainHardforks::base_mainnet();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =

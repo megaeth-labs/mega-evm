@@ -1,120 +1,92 @@
-//! External environment oracles for the EVM.
+//! External environment for EVM execution.
+//!
+//! This module provides interfaces for accessing external data sources during EVM execution:
+//! - **SALT**: Bucket capacity information for dynamic gas pricing
+//! - **Oracle**: Storage from the `MegaETH` oracle contract
+//!
+//! # Architecture
+//!
+//! External environments follow a factory pattern:
+//! 1. [`ExternalEnvFactory`] creates block-specific environment instances
+//! 2. [`ExternalEnvs`] bundles SALT and Oracle implementations
+//! 3. Individual oracle methods (e.g., [`SaltEnv::get_bucket_capacity`]) provide data
+//!
+//! Block context is established at factory creation time, not per oracle call, ensuring
+//! consistent state snapshots throughout execution.
 
-use core::{cell::RefCell, convert::Infallible, fmt::Debug};
-
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::{boxed::Box, rc::Rc, sync::Arc};
-
-use alloy_primitives::{BlockNumber, U256};
+use alloy_primitives::BlockNumber;
 use auto_impl::auto_impl;
-use revm::primitives::HashMap;
+use core::fmt::Debug;
 
+mod factory;
 mod gas;
 mod oracle;
 mod salt;
+#[cfg(any(test, feature = "test-utils"))]
+mod test_utils;
 
+pub use factory::*;
 pub use gas::*;
 pub use oracle::*;
 pub use salt::*;
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::*;
 
-/// A collection trait that aggregates all external environments needed by the EVM.
+/// Type-level specification of external environment implementations.
 ///
-/// This trait provides a unified interface to access different external environments,
-/// such as SALT bucket capacity information and potentially other external data sources in the
-/// future. By using this umbrella trait, the EVM can access multiple external data sources
-/// through a single type parameter without needing additional generic parameters.
-///
-/// # Design
-///
-/// Each external environment concern is exposed through an accessor method that returns a
-/// reference to the specific external environment trait (e.g., [`SaltEnv`]). This allows:
-/// - Independent error types for each external environment
-/// - Easy addition of new external environment types without breaking existing code
-/// - Clear separation of concerns
-///
-/// # Example
-///
-/// ```rust,ignore
-/// // Future extensibility example:
-/// trait ExternalEnvs {
-///     type SaltEnv: SaltEnv;
-///     type OtherEnv: OtherEnv;
-///
-///     fn salt_env(&self) -> Self::SaltEnv;
-///     fn other_env(&self) -> Self::OtherEnv;
-/// }
-/// ```
+/// This trait associates concrete SALT and Oracle types, allowing generic code to work
+/// with any compatible environment configuration.
 #[auto_impl(&, Box, Arc)]
-pub trait ExternalEnvs: Debug + Unpin {
-    /// The SALT environment type.
+pub trait ExternalEnvTypes {
+    /// SALT environment implementation for bucket capacity queries.
     type SaltEnv: SaltEnv;
-    /// The Oracle environment type.
+    /// Oracle environment implementation for system contract storage queries.
     type OracleEnv: OracleEnv;
-
-    /// Returns the SALT environment.
-    fn salt_env(&self) -> Self::SaltEnv;
-    /// Returns the Oracle environment.
-    fn oracle_env(&self) -> Self::OracleEnv;
 }
 
-/// Default implementation of [`ExternalEnvs`] that provides no-op implementations for all
-/// external environments.
+/// Tuple implementation for convenient pairing of SALT and Oracle environments.
+impl<A: SaltEnv, B: OracleEnv> ExternalEnvTypes for (A, B) {
+    type SaltEnv = A;
+    type OracleEnv = B;
+}
+
+/// Bundle of external environment instances for a specific execution context.
 ///
-/// This is useful when the EVM does not need to access any additional information from an
-/// external environment.
-#[derive(derive_more::Debug, Clone)]
-pub struct DefaultExternalEnvs<Error = Infallible> {
-    #[debug(ignore)]
-    _phantom: core::marker::PhantomData<Error>,
-    /// Oracle storage for testing purposes. Maps storage slots to their values.
-    oracle_storage: Rc<RefCell<HashMap<U256, U256>>>,
-    /// Bucket capacity storage for testing purposes. Maps (`bucket_id`, `block_number`) to
-    /// capacity.
-    bucket_capacity: Rc<RefCell<HashMap<(BucketId, BlockNumber), u64>>>,
+/// This struct holds concrete SALT and Oracle implementations that are used during
+/// EVM execution. Typically created by [`ExternalEnvFactory::external_envs`] at the
+/// start of block processing.
+#[derive(Debug, Clone)]
+pub struct ExternalEnvs<T: ExternalEnvTypes> {
+    /// SALT environment for bucket capacity queries and dynamic gas calculation.
+    pub salt_env: T::SaltEnv,
+    /// Oracle environment for reading system contract storage.
+    pub oracle_env: T::OracleEnv,
 }
 
-impl Default for DefaultExternalEnvs {
+impl Default for ExternalEnvs<EmptyExternalEnv> {
     fn default() -> Self {
-        Self::new()
+        Self { salt_env: EmptyExternalEnv, oracle_env: EmptyExternalEnv }
     }
 }
 
-impl<Error: Unpin + Clone + 'static> DefaultExternalEnvs<Error> {
-    /// Creates a new [`DefaultExternalEnvs`].
-    pub fn new() -> Self {
-        Self {
-            _phantom: core::marker::PhantomData,
-            oracle_storage: Rc::new(RefCell::new(HashMap::default())),
-            bucket_capacity: Rc::new(RefCell::new(HashMap::default())),
-        }
-    }
+/// No-op external environment for testing or when oracle functionality is disabled.
+///
+/// This implementation:
+/// - Returns minimum bucket capacity for all SALT queries
+/// - Returns `None` for all Oracle storage queries
+/// - Assigns all accounts and storage slots to bucket 0
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyExternalEnv;
 
-    /// Consumes and wraps `self` into an Arc-wrapped boxed instance of the [`ExternalEnvs`]
-    /// trait.
-    pub fn boxed_arc(self) -> Arc<Box<dyn ExternalEnvs<SaltEnv = Self, OracleEnv = Self>>> {
-        Arc::new(self.boxed())
-    }
-
-    /// Consumes and wraps `self` into a boxed instance of the [`ExternalEnvs`] trait.
-    pub fn boxed(self) -> Box<dyn ExternalEnvs<SaltEnv = Self, OracleEnv = Self>> {
-        Box::new(self)
-    }
-}
-
-impl<Error: Unpin + Clone + 'static> ExternalEnvs for DefaultExternalEnvs<Error> {
+impl ExternalEnvTypes for EmptyExternalEnv {
     type SaltEnv = Self;
     type OracleEnv = Self;
-
-    fn salt_env(&self) -> Self::SaltEnv {
-        self.clone()
-    }
-
-    fn oracle_env(&self) -> Self::OracleEnv {
-        self.clone()
-    }
 }
 
-/// Type alias for backwards compatibility.
-#[deprecated(note = "Use `DefaultExternalEnvs` instead")]
-pub type NoOpOracle<Error = Infallible> = DefaultExternalEnvs<Error>;
+impl ExternalEnvFactory for EmptyExternalEnv {
+    type EnvTypes = Self;
+
+    fn external_envs(&self, _block: BlockNumber) -> ExternalEnvs<Self::EnvTypes> {
+        ExternalEnvs { salt_env: *self, oracle_env: *self }
+    }
+}

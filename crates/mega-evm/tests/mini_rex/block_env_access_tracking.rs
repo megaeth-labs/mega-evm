@@ -43,8 +43,7 @@ fn test_block_env_tracking_with_evm() {
         let contract_address = address!("0000000000000000000000000000000000100001");
         db.set_account_code(contract_address, bytecode.into());
 
-        let mut context =
-            MegaContext::new(db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
+        let mut context = MegaContext::new(db, MegaSpecId::MINI_REX);
         // Configure L1BlockInfo to avoid operator fee scalar panic
         context.chain_mut().operator_fee_scalar = Some(U256::from(0));
         context.chain_mut().operator_fee_constant = Some(U256::from(0));
@@ -177,7 +176,7 @@ fn test_multiple_block_env_accesses() {
     ];
     db.set_account_code(contract_address, contract_code.into());
 
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX);
     // Configure L1BlockInfo to avoid operator fee scalar panic
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));
@@ -224,7 +223,7 @@ fn test_block_env_reset_between_transactions() {
     let contract_address = address!("0000000000000000000000000000000000100001");
     db.set_account_code(contract_address, vec![NUMBER, STOP].into());
 
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX);
     // Configure L1BlockInfo to avoid operator fee scalar panic
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));

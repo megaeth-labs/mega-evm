@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 # megaeth
-mega-evm = { workspace = true, features = ["default"] }
+mega-evm = { workspace = true, features = ["default", "test-utils"] }
 state-test.workspace = true
 
 # revm

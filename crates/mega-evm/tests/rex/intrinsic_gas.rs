@@ -4,8 +4,8 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants, test_utils::MemoryDatabase, DefaultExternalEnvs, EVMError, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
+    constants, test_utils::MemoryDatabase, EVMError, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransaction, MegaTransactionError, TestExternalEnvs,
 };
 use revm::{
     context::{result::ResultAndState, TxEnv},
@@ -23,14 +23,14 @@ const BASE_INTRINSIC_GAS: u64 = 21_000;
 fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
-    external_envs: &DefaultExternalEnvs,
+    external_envs: &TestExternalEnvs,
     caller: Address,
     callee: Option<Address>,
     data: Bytes,
     value: U256,
     gas_limit: u64,
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
-    let mut context = MegaContext::new(db, spec, external_envs);
+    let mut context = MegaContext::new(db, spec).with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -59,7 +59,7 @@ fn test_rex_intrinsic_gas_simple_transfer() {
     let res = transact(
         MegaSpecId::REX,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         Bytes::new(),
@@ -84,7 +84,7 @@ fn test_mini_rex_no_additional_intrinsic_gas() {
     let res = transact(
         MegaSpecId::MINI_REX,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         Bytes::new(),
@@ -109,7 +109,7 @@ fn test_equivalence_no_additional_intrinsic_gas() {
     let res = transact(
         MegaSpecId::EQUIVALENCE,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         Bytes::new(),
@@ -137,7 +137,7 @@ fn test_rex_intrinsic_gas_with_calldata() {
     let res = transact(
         MegaSpecId::REX,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         calldata,
@@ -171,7 +171,7 @@ fn test_rex_intrinsic_gas_insufficient_gas_limit() {
     let res = transact(
         MegaSpecId::REX,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         Bytes::new(),
@@ -195,7 +195,7 @@ fn test_rex_intrinsic_gas_contract_creation() {
     let res = transact(
         MegaSpecId::REX,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         None, // None means CREATE
         init_code,
@@ -229,7 +229,7 @@ fn test_rex_vs_mini_rex_gas_difference() {
     let res_rex = transact(
         MegaSpecId::REX,
         &mut db_rex,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         calldata.clone(),
@@ -241,7 +241,7 @@ fn test_rex_vs_mini_rex_gas_difference() {
     let res_mini_rex = transact(
         MegaSpecId::MINI_REX,
         &mut db_mini_rex,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         calldata,
@@ -271,7 +271,7 @@ fn test_rex_intrinsic_gas_zero_value_transfer() {
     let res = transact(
         MegaSpecId::REX,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         Bytes::new(),
@@ -296,7 +296,7 @@ fn test_rex_intrinsic_gas_new_account_creation() {
     let res = transact(
         MegaSpecId::REX,
         &mut db,
-        &DefaultExternalEnvs::new(),
+        &TestExternalEnvs::new(),
         CALLER,
         Some(CALLEE),
         Bytes::new(),

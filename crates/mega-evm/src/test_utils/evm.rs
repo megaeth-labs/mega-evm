@@ -9,8 +9,7 @@ use revm::{
 };
 
 use crate::{
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Executes a transaction on the EVM.
@@ -26,7 +25,7 @@ where
     DB: Database + Debug,
     DB::Error: Send + Sync + Debug + 'static,
 {
-    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

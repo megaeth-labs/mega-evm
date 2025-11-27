@@ -31,7 +31,7 @@ use revm::{
 use crate::{
     constants, create_exceeding_interpreter_result, create_exceeding_limit_frame_result,
     is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
-    mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvs,
+    mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvTypes,
     HostExt, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
     MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
@@ -59,7 +59,7 @@ impl<EVM, ERROR, FRAME> Default for MegaHandler<EVM, ERROR, FRAME> {
 impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
 where
     DB: Database,
-    ExtEnvs: ExternalEnvs,
+    ExtEnvs: ExternalEnvTypes,
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
     ERROR: FromStringError,
 {
@@ -101,7 +101,7 @@ where
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvs> Handler
+impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes> Handler
     for MegaHandler<EVM, ERROR, FRAME>
 where
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
@@ -351,7 +351,7 @@ where
     }
 }
 
-impl<DB, EVM, ERROR, ExtEnvs: ExternalEnvs> InspectorHandler
+impl<DB, EVM, ERROR, ExtEnvs: ExternalEnvTypes> InspectorHandler
     for MegaHandler<EVM, ERROR, EthFrame<EthInterpreter>>
 where
     DB: Database,
@@ -388,7 +388,7 @@ where
     }
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::handler::EvmTr for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::handler::EvmTr for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
 {
@@ -582,7 +582,8 @@ where
     }
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::inspector::InspectorEvmTr for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::inspector::InspectorEvmTr
+    for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,

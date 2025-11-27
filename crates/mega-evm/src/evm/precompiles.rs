@@ -7,7 +7,7 @@
 use alloc as std;
 use std::{boxed::Box, string::String, sync::Arc};
 
-use crate::{ExternalEnvs, MegaContext, MegaSpecId};
+use crate::{ExternalEnvTypes, MegaContext, MegaSpecId};
 use alloy_evm::{
     precompiles::{DynPrecompile, PrecompilesMap},
     Database,
@@ -135,7 +135,7 @@ impl Default for MegaPrecompiles {
     }
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvs> PrecompileProvider<MegaContext<DB, ExtEnvs>>
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB, ExtEnvs>>
     for PrecompilesMap
 {
     type Output = InterpreterResult;
@@ -183,7 +183,7 @@ pub type DynPrecompilesBuilder =
 #[cfg(test)]
 mod tests {
     use super::{kzg_point_evaluation::GAS_COST, MegaPrecompiles};
-    use crate::{test_utils::MemoryDatabase, DefaultExternalEnvs, MegaContext, MegaSpecId};
+    use crate::{test_utils::MemoryDatabase, MegaContext, MegaSpecId};
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
     use alloy_evm::precompiles::PrecompilesMap;
@@ -225,8 +225,7 @@ mod tests {
     #[test]
     fn test_kzg_precompile_sufficient_gas() {
         let mut db = MemoryDatabase::default();
-        let ext_envs = DefaultExternalEnvs::<core::convert::Infallible>::new();
-        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &ext_envs);
+        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX);
         let mut precompiles_map = PrecompilesMap::from_static(
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
@@ -243,8 +242,7 @@ mod tests {
     #[test]
     fn test_kzg_precompile_exact_gas_limit() {
         let mut db = MemoryDatabase::default();
-        let ext_envs = DefaultExternalEnvs::<core::convert::Infallible>::new();
-        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &ext_envs);
+        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX);
         let mut precompiles_map = PrecompilesMap::from_static(
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
@@ -261,8 +259,7 @@ mod tests {
     #[test]
     fn test_kzg_precompile_insufficient_gas() {
         let mut db = MemoryDatabase::default();
-        let ext_envs = DefaultExternalEnvs::<core::convert::Infallible>::new();
-        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &ext_envs);
+        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX);
         let mut precompiles_map = PrecompilesMap::from_static(
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
@@ -283,8 +280,7 @@ mod tests {
     #[test]
     fn test_kzg_precompile_one_below_gas_limit() {
         let mut db = MemoryDatabase::default();
-        let ext_envs = DefaultExternalEnvs::<core::convert::Infallible>::new();
-        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &ext_envs);
+        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX);
         let mut precompiles_map = PrecompilesMap::from_static(
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
@@ -305,8 +301,7 @@ mod tests {
     #[test]
     fn test_kzg_precompile_zero_gas() {
         let mut db = MemoryDatabase::default();
-        let ext_envs = DefaultExternalEnvs::<core::convert::Infallible>::new();
-        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX, &ext_envs);
+        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX);
         let mut precompiles_map = PrecompilesMap::from_static(
             MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
         );
