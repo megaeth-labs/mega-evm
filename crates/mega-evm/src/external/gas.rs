@@ -20,12 +20,12 @@ pub struct DynamicGasCost<SaltEnvImpl> {
     /// The external environment for SALT bucket information.
     salt_env: SaltEnvImpl,
     /// Cache of the bucket cost multiplier for each bucket Id. The multiplier will be used to
-    /// multiple [`SSTORE_SET_GAS`] to get the actual gas cost for setting a storage slot.
+    /// multiply [`SSTORE_SET_GAS`] to get the actual gas cost for setting a storage slot.
     bucket_cost_mulitipers: HashMap<BucketId, u64>,
 }
 
 impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
-    /// Creates a new [`SaltBucketCostFeed`].
+    /// Creates a new [`DynamicGasCost`].
     pub fn new(spec: MegaSpecId, salt_env: SaltEnvImpl, parent_block: BlockNumber) -> Self {
         Self { spec, parent_block, salt_env, bucket_cost_mulitipers: HashMap::default() }
     }

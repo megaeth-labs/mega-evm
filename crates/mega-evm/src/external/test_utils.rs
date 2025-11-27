@@ -50,12 +50,11 @@ impl<Error: Unpin + Clone + 'static> TestExternalEnvs<Error> {
         }
     }
 
-    /// Sets a bucket capacity for a given bucket ID at a specific block for testing purposes.
+    /// Sets a bucket capacity for a given bucket ID for testing purposes.
     ///
     /// # Arguments
     ///
     /// * `bucket_id` - The ID of the SALT bucket
-    /// * `at_block` - The block number at which to set the capacity
     /// * `capacity` - The capacity value to set
     ///
     /// # Returns
