@@ -108,6 +108,15 @@ pub mod rex {
     /// gas.
     pub const TX_COMPUTE_GAS_LIMIT: u64 = 200_000_000;
 
+    /// The maximum data size limit for a single transaction for the `REX` spec.
+    /// Transactions exceeding this limit halt with `DataLimitExceeded`, preserving remaining gas.
+    pub const TX_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024; // Same with the block data limit
+
+    /// The maximum key-value updates limit for a single transaction for the `REX` spec.
+    /// Transactions exceeding this limit halt with `KVUpdateLimitExceeded`, preserving remaining
+    /// gas.
+    pub const TX_KV_UPDATE_LIMIT: u64 = 500_000; // Same with the block kv update limit
+
     /// The maximum state growth limit for a single transaction for the `REX` spec.
     /// Transactions exceeding this limit halt with `StateGrowthLimitExceeded`, preserving remaining
     /// gas.
