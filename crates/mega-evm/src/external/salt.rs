@@ -1,4 +1,4 @@
-//! This module defines the SaltEnv trait, which provides bucket capacity information for dynamic
+//! This module defines the `SaltEnv` trait, which provides bucket capacity information for dynamic
 //! gas pricing. Storage slots and accounts are organized into buckets, and the gas cost scales
 //! with bucket capacity to incentivize efficient resource allocation.
 
