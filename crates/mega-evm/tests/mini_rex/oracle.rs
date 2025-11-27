@@ -569,7 +569,7 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
 
     // Create EVM factory and environment
     let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
-    let evm_factory = MegaEvmFactory::new(external_envs);
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     // Create EVM environment with MiniRex spec
     use revm::context::BlockEnv;

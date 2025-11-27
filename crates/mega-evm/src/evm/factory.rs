@@ -1,11 +1,10 @@
 use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
-use core::convert::Infallible;
 use op_revm::L1BlockInfo;
 use revm::{context::result::EVMError, Inspector};
 
 use crate::{
-    DynPrecompilesBuilder, EvmTxRuntimeLimits, ExternalEnvFactory, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, TestExternalEnvs,
+    DynPrecompilesBuilder, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -51,18 +50,18 @@ pub struct MegaEvmFactory<ExtEnvFactory> {
     dyn_precompiles_builder: Option<DynPrecompilesBuilder>,
 }
 
-impl Default for MegaEvmFactory<TestExternalEnvs<Infallible>> {
+impl Default for MegaEvmFactory<EmptyExternalEnv> {
     /// Creates a new [`EvmFactory`] instance with the default [`DefaultExternalEnvs`].
     ///
     /// This is the recommended way to create a factory when no custom `external_envs` is needed.
     /// The `DefaultExternalEnvs` provides a no-operation implementation that doesn't perform
     /// any external environment queries.
     fn default() -> Self {
-        Self::new(TestExternalEnvs::<Infallible>::new())
+        Self::new()
     }
 }
 
-impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
+impl MegaEvmFactory<EmptyExternalEnv> {
     /// Creates a new [`EvmFactory`] instance with the given `external_envs`.
     ///
     /// # Parameters
@@ -73,10 +72,12 @@ impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
     /// # Returns
     ///
     /// A new `EvmFactory` instance configured with the provided `external_envs`.
-    pub fn new(external_env_factory: ExtEnvFactory) -> Self {
-        Self { external_env_factory, dyn_precompiles_builder: None }
+    pub fn new() -> Self {
+        Self { external_env_factory: EmptyExternalEnv, dyn_precompiles_builder: None }
     }
+}
 
+impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
     /// Sets the builder function to build dynamic precompiles for the EVM.
     pub fn with_dyn_precompiles_builder(
         mut self,
@@ -85,11 +86,29 @@ impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
         self.dyn_precompiles_builder = Some(dyn_precompiles_builder);
         self
     }
+
+    /// Sets the external environment factory for the EVM.
+    ///
+    /// # Parameters
+    ///
+    /// - `external_env_factory`: The external environment factory to use for the EVM.
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
+    pub fn with_external_env_factory<NewExtEnvFactory: ExternalEnvFactory>(
+        self,
+        external_env_factory: NewExtEnvFactory,
+    ) -> MegaEvmFactory<NewExtEnvFactory> {
+        MegaEvmFactory {
+            external_env_factory,
+            dyn_precompiles_builder: self.dyn_precompiles_builder,
+        }
+    }
 }
 
-impl<ExtEnvFactory> alloy_evm::EvmFactory for MegaEvmFactory<ExtEnvFactory>
-where
-    ExtEnvFactory: ExternalEnvFactory + Clone,
+impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
+    for MegaEvmFactory<ExtEnvFactory>
 {
     type Evm<DB: Database, I: Inspector<Self::Context<DB>>> =
         MegaEvm<DB, I, ExtEnvFactory::EnvTypes>;

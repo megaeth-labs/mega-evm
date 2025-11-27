@@ -53,15 +53,15 @@ pub type Precompiles = MegaPrecompiles;
 /// Alias for [`MegaTxType`]
 pub type TxType = MegaTxType;
 /// Alias for [`MegaInstructions`]
-pub type Instructions<DB, ExtEnvs> = MegaInstructions<DB, ExtEnvs>;
+pub type Instructions<DB, ExtEnvTypes> = MegaInstructions<DB, ExtEnvTypes>;
 /// Alias for [`MegaHandler`]
 pub type Handler<EVM, ERROR, FRAME> = MegaHandler<EVM, ERROR, FRAME>;
 /// Alias for [`MegaEvm`]
-pub type Evm<DB, INSP, ExtEnvs> = MegaEvm<DB, INSP, ExtEnvs>;
+pub type Evm<DB, INSP, ExtEnvTypes> = MegaEvm<DB, INSP, ExtEnvTypes>;
 /// Alias for [`MegaEvmFactory`]
-pub type EvmFactory<ExtEnvs> = MegaEvmFactory<ExtEnvs>;
+pub type EvmFactory<ExtEnvFactory> = MegaEvmFactory<ExtEnvFactory>;
 /// Alias for [`MegaContext`]
-pub type Context<DB, ExtEnvs> = MegaContext<DB, ExtEnvs>;
+pub type Context<DB, ExtEnvTypes> = MegaContext<DB, ExtEnvTypes>;
 /// Alias for [`MegaBlockExecutor`]
 pub type BlockExecutor<C, E, R> = MegaBlockExecutor<C, E, R>;
 /// Alias for [`MegaBlockExecutorFactory`]

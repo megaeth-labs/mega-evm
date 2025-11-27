@@ -626,7 +626,7 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use revm::{context::CfgEnv, database::EmptyDB};
 
     #[test]

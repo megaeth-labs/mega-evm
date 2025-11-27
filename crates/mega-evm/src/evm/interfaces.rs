@@ -12,8 +12,8 @@ use revm::{
 };
 
 use crate::{
-    ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason, MegaHandler, MegaSpecId,
-    MegaTransaction, MegaTransactionError,
+    ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason, MegaHandler,
+    MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Implementation of [`alloy_evm::Evm`] for `MegaETH` EVM.

@@ -119,7 +119,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
     }
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvTypes> InstructionProvider for MegaInstructions<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> InstructionProvider
+    for MegaInstructions<DB, ExtEnvs>
+{
     type Context = MegaContext<DB, ExtEnvs>;
     type InterpreterTypes = EthInterpreter;
 
