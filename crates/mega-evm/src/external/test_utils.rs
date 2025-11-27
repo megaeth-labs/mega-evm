@@ -1,3 +1,9 @@
+//! Test utilities for external environment implementations.
+//!
+//! Provides [`TestExternalEnvs`], a configurable mock implementation of SALT and Oracle
+//! environments for use in tests. Unlike [`EmptyExternalEnv`](crate::EmptyExternalEnv),
+//! this implementation allows setting specific bucket capacities and oracle storage values.
+
 use core::{cell::RefCell, convert::Infallible};
 use std::rc::Rc;
 
@@ -6,19 +12,26 @@ use revm::primitives::HashMap;
 
 use crate::{BucketId, ExternalEnvFactory, ExternalEnvTypes, ExternalEnvs, OracleEnv, SaltEnv};
 
-/// Default implementation of [`ExternalEnvs`] that provides no-op implementations for all
-/// external environments.
+/// Configurable external environment implementation for testing.
 ///
-/// This is useful when the EVM does not need to access any additional information from an
-/// external environment.
+/// This struct provides mutable state for bucket capacities and oracle storage, allowing
+/// tests to set up specific scenarios. Bucket IDs are calculated using the real SALT hashing
+/// logic from the `salt` crate.
+///
+/// # Example
+/// ```ignore
+/// let env = TestExternalEnvs::new()
+///     .with_bucket_capacity(123, 512)  // Set bucket 123 to 512 capacity
+///     .with_oracle_storage(U256::ZERO, U256::from(42));  // Set oracle slot 0 to 42
+/// ```
 #[derive(derive_more::Debug, Clone)]
 pub struct TestExternalEnvs<Error = Infallible> {
     #[debug(ignore)]
     _phantom: core::marker::PhantomData<Error>,
-    /// Oracle storage for testing purposes. Maps storage slots to their values.
+    /// Oracle contract storage values. Maps storage slot keys to their values.
     oracle_storage: Rc<RefCell<HashMap<U256, U256>>>,
-    /// Bucket capacity storage for testing purposes. Maps (`bucket_id`, `block_number`) to
-    /// capacity.
+    /// Bucket capacities. Maps bucket IDs to their capacity values.
+    /// Buckets not in this map default to [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
     bucket_capacity: Rc<RefCell<HashMap<BucketId, u64>>>,
 }
 
@@ -41,7 +54,7 @@ impl<'a> From<&'a TestExternalEnvs> for ExternalEnvs<&'a TestExternalEnvs> {
 }
 
 impl<Error: Unpin + Clone + 'static> TestExternalEnvs<Error> {
-    /// Creates a new [`DefaultExternalEnvs`].
+    /// Creates a new test environment with empty bucket capacity and oracle storage.
     pub fn new() -> Self {
         Self {
             _phantom: core::marker::PhantomData,
@@ -50,42 +63,49 @@ impl<Error: Unpin + Clone + 'static> TestExternalEnvs<Error> {
         }
     }
 
-    /// Sets a bucket capacity for a given bucket ID for testing purposes.
+    /// Configures a bucket to have a specific capacity.
+    ///
+    /// This affects the gas multiplier calculation for operations on accounts or storage
+    /// slots mapped to this bucket. The multiplier will be `capacity / MIN_BUCKET_SIZE`.
     ///
     /// # Arguments
     ///
-    /// * `bucket_id` - The ID of the SALT bucket
-    /// * `capacity` - The capacity value to set
+    /// * `bucket_id` - The bucket ID to configure
+    /// * `capacity` - The bucket capacity in number of slots
     ///
     /// # Returns
     ///
-    /// Returns `self` for method chaining.
+    /// `self` for method chaining
     pub fn with_bucket_capacity(self, bucket_id: BucketId, capacity: u64) -> Self {
         self.bucket_capacity.borrow_mut().insert(bucket_id, capacity);
         self
     }
 
-    /// Clears all bucket capacity values.
+    /// Removes all configured bucket capacities.
+    ///
+    /// After calling this, all buckets will return the default minimum capacity.
     pub fn clear_bucket_capacity(&self) {
         self.bucket_capacity.borrow_mut().clear();
     }
 
-    /// Sets an oracle storage slot to a specific value for testing purposes.
+    /// Configures a storage slot in the oracle contract to have a specific value.
     ///
     /// # Arguments
     ///
-    /// * `slot` - The storage slot to set
-    /// * `value` - The value to set at the given slot
+    /// * `slot` - The storage slot key
+    /// * `value` - The value to store
     ///
     /// # Returns
     ///
-    /// Returns `self` for method chaining.
+    /// `self` for method chaining
     pub fn with_oracle_storage(self, slot: U256, value: U256) -> Self {
         self.oracle_storage.borrow_mut().insert(slot, value);
         self
     }
 
-    /// Clears all oracle storage values.
+    /// Removes all configured oracle storage values.
+    ///
+    /// After calling this, all oracle storage queries will return `None`.
     pub fn clear_oracle_storage(&self) {
         self.oracle_storage.borrow_mut().clear();
     }
@@ -105,13 +125,17 @@ impl<Error: Unpin> ExternalEnvTypes for TestExternalEnvs<Error> {
     type OracleEnv = Self;
 }
 
-/// data length of Key of Storage Slot
+/// Length of a storage slot key in bytes (32 bytes for U256).
 const SLOT_KEY_LEN: usize = B256::len_bytes();
-/// data length of Key of Account
+/// Length of an account address in bytes (20 bytes).
 const PLAIN_ACCOUNT_KEY_LEN: usize = Address::len_bytes();
-/// data length of Key of Storage
+/// Length of a combined address+slot key (52 bytes = 20 + 32).
 const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 
+/// SALT environment implementation using real bucket ID hashing.
+///
+/// Bucket IDs are calculated using the SALT hasher from the `salt` crate, which provides
+/// deterministic mapping of accounts and storage slots to buckets.
 impl<Error: Unpin> SaltEnv for TestExternalEnvs<Error> {
     type Error = Error;
 
@@ -124,10 +148,12 @@ impl<Error: Unpin> SaltEnv for TestExternalEnvs<Error> {
             .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64))
     }
 
+    /// Maps accounts to buckets by hashing the address.
     fn bucket_id_for_account(account: Address) -> BucketId {
         salt::state::hasher::bucket_id(account.as_slice())
     }
 
+    /// Maps storage slots to buckets by hashing the concatenation of address and slot key.
     fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
         salt::state::hasher::bucket_id(
             address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
