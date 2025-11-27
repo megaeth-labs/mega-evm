@@ -27,10 +27,9 @@ use revm::{
     database::EmptyDB,
     Journal,
 };
-use salt::BucketId;
 
 use crate::{
-    constants, AdditionalLimit, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
+    constants, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
     ExternalEnvTypes, ExternalEnvs, MegaSpecId, VolatileDataAccess, VolatileDataAccessTracker,
 };
 

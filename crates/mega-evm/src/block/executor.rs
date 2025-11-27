@@ -22,12 +22,11 @@ use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
     context::result::ExecutionResult, database::State, handler::EvmTr, DatabaseCommit, Inspector,
 };
-use salt::BucketId;
 
 use crate::{
     ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
-    BlockLimiter, BlockMegaTransactionOutcome, MegaBlockExecutionCtx, MegaSpecId, MegaTransaction,
-    MegaTransactionExt, MegaTransactionOutcome,
+    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaSpecId,
+    MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.

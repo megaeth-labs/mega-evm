@@ -2,7 +2,7 @@
 //!
 //! This module provides interfaces for accessing external data sources during EVM execution:
 //! - **SALT**: Bucket capacity information for dynamic gas pricing
-//! - **Oracle**: Storage from the MegaETH oracle contract
+//! - **Oracle**: Storage from the `MegaETH` oracle contract
 //!
 //! # Architecture
 //!

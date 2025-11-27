@@ -4,6 +4,8 @@
 //! environments for use in tests. Unlike [`EmptyExternalEnv`](crate::EmptyExternalEnv),
 //! this implementation allows setting specific bucket capacities and oracle storage values.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
 use core::{cell::RefCell, convert::Infallible};
 use std::rc::Rc;
 

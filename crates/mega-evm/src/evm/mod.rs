@@ -45,7 +45,6 @@ pub use interfaces::*;
 pub use limit::*;
 pub use precompiles::*;
 pub use result::*;
-use salt::BucketId;
 pub use spec::*;
 pub use state::*;
 
@@ -62,7 +61,7 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///

@@ -8,7 +8,7 @@ use revm::primitives::hash_map::Entry;
 use alloy_primitives::{Address, BlockNumber, U256};
 use revm::{context::BlockEnv, primitives::HashMap};
 
-use crate::{constants, BucketId, MegaSpecId, SaltEnv};
+use crate::{constants, BucketId, MegaSpecId, SaltEnv, MIN_BUCKET_SIZE};
 
 /// Calculator for dynamic gas costs based on bucket capacity.
 #[derive(Debug)]
@@ -102,7 +102,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
             Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
             Entry::Vacant(vacant_entry) => {
                 let capacity = self.salt_env.get_bucket_capacity(bucket_id)?;
-                let multiplier = capacity / salt::constant::MIN_BUCKET_SIZE as u64;
+                let multiplier = capacity / MIN_BUCKET_SIZE as u64;
                 vacant_entry.insert(multiplier);
                 Ok(multiplier)
             }
