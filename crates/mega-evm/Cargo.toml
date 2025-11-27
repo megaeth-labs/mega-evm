@@ -52,9 +52,7 @@ sha2.workspace = true
 [features]
 default = ["std", "revm/default", "op-revm/default"]
 std = ["revm/std", "op-revm/std"]
-test-utils = [
-	"dep:salt",
-]
+test-utils = ["dep:salt"]
 
 [[bench]]
 name = "transact"
