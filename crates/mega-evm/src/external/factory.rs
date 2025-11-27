@@ -31,8 +31,8 @@ pub trait ExternalEnvFactory {
     /// # Arguments
     ///
     /// * `block` - The block number at which EVM execution will occur. This is the block height
-    ///   specified in [`BlockEnv`](revm::context::BlockEnv), and oracle queries should read
-    ///   state from the parent block (block - 1).
+    ///   specified in [`BlockEnv`](revm::context::BlockEnv), and oracle queries should read state
+    ///   from the parent block (block - 1).
     ///
     /// # Returns
     ///
