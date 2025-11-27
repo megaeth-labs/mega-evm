@@ -56,7 +56,6 @@ impl EvmTxRuntimeLimits {
             tx_kv_updates_limit: crate::constants::rex::TX_KV_UPDATE_LIMIT,
             tx_compute_gas_limit: crate::constants::rex::TX_COMPUTE_GAS_LIMIT,
             tx_state_growth_limit: crate::constants::rex::TX_STATE_GROWTH_LIMIT,
-            ..Self::mini_rex()
         }
     }
 }
