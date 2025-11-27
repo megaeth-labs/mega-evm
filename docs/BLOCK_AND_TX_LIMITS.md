@@ -201,9 +201,9 @@ The MINI_REX specification introduces additional resource limits to prevent spam
 
 - `block_gas_limit` - From block environment
 - `tx_compute_gas_limit` - 1,000,000,000 gas (1 billion)
-- `tx_data_limit` - 3,276,800 bytes (3.125 MB)
+- `tx_data_limit` - 3,276,800 bytes (3.125 MB, 25% of block limit)
 - `block_txs_data_limit` - 13,107,200 bytes (12.5 MB)
-- `tx_kv_update_limit` - 125,000 operations
+- `tx_kv_update_limit` - 125,000 operations (25% of block limit)
 - `block_kv_update_limit` - 500,000 operations
 
 **Additional limits (optional):**
@@ -216,6 +216,37 @@ The MINI_REX specification introduces additional resource limits to prevent spam
 - `block_compute_gas_limit` - Total compute gas in block
 - `tx_state_growth_limit` - Maximum state growth per transaction
 - `block_state_growth_limit` - Total state growth in block
+
+### REX Specification (Production Limits)
+
+The REX specification is the production-ready hardfork with higher transaction-level limits and state growth tracking.
+
+**Required configuration:**
+
+- `block_gas_limit` - From block environment
+- `tx_compute_gas_limit` - 200,000,000 gas (200 million)
+- `tx_data_limit` - 13,107,200 bytes (12.5 MB, same as block limit)
+- `block_txs_data_limit` - 13,107,200 bytes (12.5 MB)
+- `tx_kv_update_limit` - 500,000 operations (same as block limit)
+- `block_kv_update_limit` - 500,000 operations
+- `tx_state_growth_limit` - 1,000 new storage slots
+- `block_state_growth_limit` - 1,000 new storage slots
+
+**Key differences from MINI_REX:**
+
+- Higher compute gas limit per transaction (200M vs 1B)
+- Transaction-level data and KV update limits match block limits (allows single large transaction)
+- Introduces state growth limits to track net new storage slots created
+- Uses a new dynamic storage gas model with SALT bucket capacity scaling
+
+**Additional limits (optional):**
+
+- `tx_gas_limit` - Maximum gas per transaction (e.g., 30M gas)
+- `tx_encode_size_limit` - Maximum transaction body size
+- `block_txs_encode_size_limit` - Total transaction size in block
+- `tx_da_size_limit` - Maximum DA size per transaction
+- `block_da_size_limit` - Total DA size in block
+- `block_compute_gas_limit` - Total compute gas in block
 
 ## Key Design Principles
 
