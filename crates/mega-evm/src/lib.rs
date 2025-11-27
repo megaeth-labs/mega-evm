@@ -38,7 +38,6 @@ pub use op_alloy_consensus;
 pub use op_alloy_flz;
 pub use op_revm;
 pub use revm::{self, context::either::Either, primitives::HashMap};
-pub use salt;
 
 /* Alias of the mega-evm types */
 /// Alias for [`MegaTransaction`]
