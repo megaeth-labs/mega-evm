@@ -4,12 +4,10 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, keccak256, Bytes, TxKind, U256};
 use mega_evm::{
-    address_to_bucket_id,
     constants::{self, mini_rex::SSTORE_SET_STORAGE_GAS},
-    slot_to_bucket_id,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     DefaultExternalEnvs, EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError,
+    MegaTransaction, MegaTransactionError, SaltEnv,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2, GAS, LOG0, PUSH0},
@@ -93,7 +91,7 @@ fn sstore_test_case(
         UpdateMode::Set | UpdateMode::Reset => U256::from(6342),
         UpdateMode::Clear => U256::from(0),
     };
-    let bucket_id = slot_to_bucket_id(CALLEE, storage_key);
+    let bucket_id = DefaultExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
     // An external envs with the given bucket capacity
     let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
         bucket_id,
@@ -217,7 +215,7 @@ fn test_sstore_cold_then_warm_access() {
     let mut db = MemoryDatabase::default();
 
     let storage_key = U256::from(0);
-    let bucket_id = slot_to_bucket_id(CALLEE, storage_key);
+    let bucket_id = DefaultExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
     let external_envs =
         DefaultExternalEnvs::new().with_bucket_capacity(bucket_id, 0, MIN_BUCKET_SIZE as u64);
 
@@ -282,7 +280,7 @@ fn ether_transfer_test_case(
     let mut db = MemoryDatabase::default();
 
     // Determine the bucket for the callee and set up the external envs with the required capacity.
-    let bucket_id = address_to_bucket_id(CALLEE);
+    let bucket_id = DefaultExternalEnvs::<Infallible>::bucket_id_for_account(CALLEE);
     let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
         bucket_id,
         0,
@@ -372,7 +370,7 @@ fn nested_ether_transfer_test_case(
     let mut db = MemoryDatabase::default();
 
     // Test address and storage slot
-    let bucket_id = address_to_bucket_id(NESTED_CALLEE);
+    let bucket_id = DefaultExternalEnvs::<Infallible>::bucket_id_for_account(NESTED_CALLEE);
     // An external envs with the given bucket capacity
     let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
         bucket_id,
@@ -464,7 +462,7 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
 
     // Test address and storage slot
     let callee = CALLER.create(0);
-    let bucket_id = address_to_bucket_id(callee);
+    let bucket_id = DefaultExternalEnvs::<Infallible>::bucket_id_for_account(callee);
     // An external envs with the given bucket capacity
     let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
         bucket_id,
@@ -548,7 +546,7 @@ fn nested_create_contract_test_case(
     } else {
         CALLEE.create(0)
     };
-    let bucket_id = address_to_bucket_id(nested_callee);
+    let bucket_id = DefaultExternalEnvs::<Infallible>::bucket_id_for_account(nested_callee);
     // An external envs with the given bucket capacity
     let external_envs = DefaultExternalEnvs::new().with_bucket_capacity(
         bucket_id,

@@ -2,7 +2,7 @@
 
 use core::fmt::Debug;
 
-use alloy_primitives::BlockNumber;
+use alloy_primitives::{Address, BlockNumber, B256, U256};
 use auto_impl::auto_impl;
 pub use salt::{BucketId, BucketMeta};
 
@@ -35,6 +35,18 @@ pub trait SaltEnv: Debug + Unpin {
         bucket_id: BucketId,
         at_block: BlockNumber,
     ) -> Result<u64, Self::Error>;
+
+    /// Gets the bucket ID for a given account.
+    fn bucket_id_for_account(account: Address) -> BucketId {
+        salt::state::hasher::bucket_id(account.as_slice())
+    }
+
+    /// Gets the bucket ID for a given storage slot.
+    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
+        salt::state::hasher::bucket_id(
+            address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
+        )
+    }
 }
 
 impl<Error: Unpin + Clone + 'static> SaltEnv for DefaultExternalEnvs<Error> {
@@ -82,3 +94,10 @@ impl<Error: Unpin + Clone + 'static> DefaultExternalEnvs<Error> {
         self.bucket_capacity.borrow_mut().clear();
     }
 }
+
+/// data length of Key of Storage Slot
+const SLOT_KEY_LEN: usize = B256::len_bytes();
+/// data length of Key of Account
+const PLAIN_ACCOUNT_KEY_LEN: usize = Address::len_bytes();
+/// data length of Key of Storage
+const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
