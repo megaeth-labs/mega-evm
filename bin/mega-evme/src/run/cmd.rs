@@ -15,7 +15,7 @@ use mega_evm::{
         state::{AccountInfo, Bytecode, EvmState},
         ExecuteEvm, InspectEvm,
     },
-    DefaultExternalEnvs, HashMap, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    HashMap, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
@@ -373,15 +373,14 @@ impl Cmd {
     }
 
     /// Setup external environments with bucket capacity configuration
-    fn setup_external_envs(&self) -> Result<DefaultExternalEnvs> {
-        let mut external_envs = DefaultExternalEnvs::new();
+    fn setup_external_envs(&self) -> Result<TestExternalEnvs> {
+        let mut external_envs = TestExternalEnvs::new();
 
         // Parse and configure bucket capacities
         for bucket_capacity_str in &self.bucket_capacity {
             let (bucket_id, capacity) = super::parse_bucket_capacity(bucket_capacity_str)?;
             // Use the block number from the configuration
-            external_envs =
-                external_envs.with_bucket_capacity(bucket_id, self.block_number, capacity);
+            external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
         }
 
         Ok(external_envs)
@@ -421,7 +420,7 @@ impl Cmd {
     /// Execute transaction with optional tracing
     fn execute_transaction(
         &self,
-        evm_context: MegaContext<&mut State<EmptyDB>, DefaultExternalEnvs>,
+        evm_context: MegaContext<&mut State<EmptyDB>, TestExternalEnvs>,
         tx: MegaTransaction,
     ) -> Result<(ExecutionResult<mega_evm::MegaHaltReason>, EvmState, Option<String>)> {
         if matches!(self.tracer, Some(TracerType::Trace)) {
@@ -491,8 +490,10 @@ impl Cmd {
         let external_envs = self.setup_external_envs()?;
 
         // Create EVM context and transaction
-        let evm_context =
-            MegaContext::new(state, cfg.spec, external_envs).with_cfg(cfg).with_block(block);
+        let evm_context = MegaContext::new(state, cfg.spec)
+            .with_cfg(cfg)
+            .with_block(block)
+            .with_external_envs(external_envs.into());
 
         let mut tx = MegaTransaction::new(tx_env);
         tx.enveloped_tx = Some(Bytes::default());

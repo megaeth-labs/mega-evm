@@ -2,7 +2,7 @@ use core::cmp::min;
 
 use crate::{
     constants::{self},
-    AdditionalLimit, ExternalEnvs, HostExt, MegaContext, MegaSpecId,
+    AdditionalLimit, ExternalEnvTypes, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Address, Bytes, U256};
@@ -90,18 +90,18 @@ use revm::{
 /// This instruction table is only used when the `MINI_REX` spec is enabled, so we can safely assume
 /// that all features before and including Mini-Rex are enabled.
 #[derive(Clone)]
-pub struct MegaInstructions<DB: Database, ExtEnvs: ExternalEnvs> {
+pub struct MegaInstructions<DB: Database, ExtEnvs: ExternalEnvTypes> {
     spec: MegaSpecId,
     inner: EthInstructions<EthInterpreter, MegaContext<DB, ExtEnvs>>,
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvs> core::fmt::Debug for MegaInstructions<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> core::fmt::Debug for MegaInstructions<DB, ExtEnvs> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethInstructions").field("spec", &self.spec).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvs> MegaInstructions<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
     /// Create a new `MegaethInstructions` with the given spec id.
     pub fn new(spec: MegaSpecId) -> Self {
         let instruction_table = match spec {
@@ -119,7 +119,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaInstructions<DB, ExtEnvs> {
     }
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvs> InstructionProvider for MegaInstructions<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> InstructionProvider for MegaInstructions<DB, ExtEnvs> {
     type Context = MegaContext<DB, ExtEnvs>;
     type InterpreterTypes = EthInterpreter;
 

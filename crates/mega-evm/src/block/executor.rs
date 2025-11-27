@@ -125,7 +125,7 @@ impl<'db, DB, C, R, INSP, ExtEnvs>
 where
     DB: Database + 'db,
     C: OpHardforks,
-    ExtEnvs: crate::ExternalEnvs,
+    ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<
         Transaction: Transaction + Encodable2718 + MegaTransactionExt,
@@ -284,7 +284,7 @@ impl<'db, DB, C, R, INSP, ExtEnvs> alloy_evm::block::BlockExecutor
 where
     DB: Database + 'db,
     C: OpHardforks,
-    ExtEnvs: crate::ExternalEnvs,
+    ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<
         Transaction: Transaction + Encodable2718 + MegaTransactionExt,

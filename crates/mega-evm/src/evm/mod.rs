@@ -62,7 +62,7 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{ExternalEnvs, LimitUsage, MegaTransaction};
+use crate::{ExternalEnvTypes, LimitUsage, MegaTransaction};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///
@@ -82,11 +82,11 @@ use crate::{ExternalEnvs, LimitUsage, MegaTransaction};
 /// `MegaETH`-specific customizations through the configured context, instructions, and precompiles.
 #[allow(missing_debug_implementations)]
 #[allow(clippy::type_complexity)]
-pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvs> {
+pub struct MegaEvm<DB: Database, INSP, ExtEnvTypes: ExternalEnvTypes> {
     inner: revm::context::Evm<
-        MegaContext<DB, ExtEnvs>,
+        MegaContext<DB, ExtEnvTypes>,
         INSP,
-        MegaInstructions<DB, ExtEnvs>,
+        MegaInstructions<DB, ExtEnvTypes>,
         PrecompilesMap,
         EthFrame<EthInterpreter>,
     >,
@@ -94,13 +94,17 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvs> {
     inspect: bool,
 }
 
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> core::fmt::Debug for MegaEvm<DB, INSP, ExtEnvs> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::fmt::Debug
+    for MegaEvm<DB, INSP, ExtEnvs>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MegaethEvm").field("inspect", &self.inspect).finish_non_exhaustive()
     }
 }
 
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> core::ops::Deref for MegaEvm<DB, INSP, ExtEnvs> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::ops::Deref
+    for MegaEvm<DB, INSP, ExtEnvs>
+{
     type Target = revm::context::Evm<
         MegaContext<DB, ExtEnvs>,
         INSP,
@@ -114,13 +118,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> core::ops::Deref for MegaEvm<DB,
     }
 }
 
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> core::ops::DerefMut for MegaEvm<DB, INSP, ExtEnvs> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::ops::DerefMut
+    for MegaEvm<DB, INSP, ExtEnvs>
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvs> MegaEvm<DB, NoOpInspector, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     /// Creates a new `MegaETH` EVM instance.
     ///
     /// # Parameters
@@ -145,7 +151,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     }
 }
 
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Creates a new `MegaETH` EVM instance with the given inspector enabled at runtime.
     ///
     /// # Parameters
@@ -220,7 +226,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
     }
 }
 
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Provides a reference to the block environment.
     ///
     /// The block environment contains information about the current block being processed,
@@ -290,7 +296,7 @@ impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
-    ExtEnvs: ExternalEnvs,
+    ExtEnvs: ExternalEnvTypes,
 {
     /// Execute a transaction and return the outcome. If the inspector is set, it will be used to
     /// inspect the transaction.
@@ -368,7 +374,7 @@ where
     }
 }
 
-impl<DB: Database + BlockHashes, INSP, ExtEnvs: ExternalEnvs> MegaEvm<DB, INSP, ExtEnvs> {
+impl<DB: Database + BlockHashes, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Get the block hashes used during transaction execution.
     ///
     /// # Returns

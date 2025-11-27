@@ -5,8 +5,8 @@ use alloc as std;
 use std::rc::Rc;
 
 use crate::{
-    AdditionalLimit, ExternalEnvs, MegaContext, MegaSpecId, OracleEnv, SaltEnv, VolatileDataAccess,
-    VolatileDataAccessTracker, ORACLE_CONTRACT_ADDRESS,
+    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv, SaltEnv,
+    VolatileDataAccess, VolatileDataAccessTracker, ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
@@ -16,7 +16,7 @@ use revm::{
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
 };
 
-impl<DB: Database, ExtEnvs: ExternalEnvs> Host for MegaContext<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> {
     // Block environment related methods - with tracking
     fn basefee(&self) -> U256 {
         self.mark_block_env_accessed(VolatileDataAccess::BASE_FEE);
@@ -146,7 +146,7 @@ pub trait HostExt: Host {
     fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>>;
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvs> HostExt for MegaContext<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
     type Error = <ExtEnvs::SaltEnv as SaltEnv>::Error;
 
     #[inline]

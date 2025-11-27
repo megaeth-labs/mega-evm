@@ -30,14 +30,14 @@ use revm::{
 use salt::BucketId;
 
 use crate::{
-    constants, AdditionalLimit, DefaultExternalEnvs, DynamicGasCost, EvmTxRuntimeLimits,
-    ExternalEnvs, MegaSpecId, VolatileDataAccess, VolatileDataAccessTracker,
+    constants, AdditionalLimit, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
+    ExternalEnvTypes, ExternalEnvs, MegaSpecId, VolatileDataAccess, VolatileDataAccessTracker,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
 /// trait to be used as the context for the [`crate::Evm`].
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
-pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
+pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// The inner context.
     #[deref]
     #[deref_mut]
@@ -64,14 +64,14 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvs> {
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
 }
 
-impl Default for MegaContext<EmptyDB, DefaultExternalEnvs> {
+impl Default for MegaContext<EmptyDB, EmptyExternalEnv> {
     fn default() -> Self {
-        Self::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE, DefaultExternalEnvs::default())
+        Self::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
     }
 }
 
 /* Constructors */
-impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
+impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
     /// Creates a new `Context` with the given database, specification, and oracle.
     ///
     /// This constructor initializes a new `MegaETH` EVM context with default settings.
@@ -87,7 +87,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// # Returns
     ///
     /// Returns a new `Context` instance with default configuration.
-    pub fn new(db: DB, spec: MegaSpecId, external_envs: ExtEnvs) -> Self {
+    pub fn new(db: DB, spec: MegaSpecId) -> Self {
         let mut inner =
             revm::Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
 
@@ -104,15 +104,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
-                external_envs.salt_env(),
+                EmptyExternalEnv,
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
-            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
+            oracle_env: Rc::new(RefCell::new(EmptyExternalEnv)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
             inner,
         }
     }
+}
 
+impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// Creates a new `Context` from an existing `OpContext`.
     ///
     /// This constructor is useful when you already have a configured `OpContext`
@@ -132,7 +134,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     pub fn new_with_context(
         context: OpContext<DB>,
         spec: MegaSpecId,
-        external_envs: ExtEnvs,
+        external_envs: ExternalEnvs<ExtEnvTypes>,
     ) -> Self {
         let mut inner = context;
 
@@ -158,10 +160,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
-                external_envs.salt_env(),
+                external_envs.salt_env,
                 inner.block.number.to::<u64>() - 1,
             ))),
-            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
+            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
             inner,
         }
@@ -179,7 +181,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// # Returns
     ///
     /// Returns a new `Context` with the updated database type.
-    pub fn with_db<ODB: Database>(self, db: ODB) -> MegaContext<ODB, ExtEnvs> {
+    pub fn with_db<ODB: Database>(self, db: ODB) -> MegaContext<ODB, ExtEnvTypes> {
         MegaContext {
             inner: self.inner.with_db(db),
             spec: self.spec,
@@ -270,10 +272,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
     /// # Returns
     ///
     /// Returns `self` for method chaining.
-    pub fn with_external_envs<NewExtEnvs: ExternalEnvs>(
+    pub fn with_external_envs<NewExtEnvTypes: ExternalEnvTypes>(
         self,
-        external_envs: NewExtEnvs,
-    ) -> MegaContext<DB, NewExtEnvs> {
+        external_envs: ExternalEnvs<NewExtEnvTypes>,
+    ) -> MegaContext<DB, NewExtEnvTypes> {
         let parent_block_number = self.inner.block.number.to::<u64>().saturating_sub(1);
         let spec = self.spec;
         MegaContext {
@@ -283,10 +285,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
             additional_limit: self.additional_limit,
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
-                external_envs.salt_env(),
+                external_envs.salt_env,
                 parent_block_number,
             ))),
-            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env())),
+            oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
         }
     }
@@ -316,7 +318,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
 }
 
 /* Getters */
-impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Gets the `MegaETH` specification ID.
     ///
     /// Returns the specification version currently configured for this context.
@@ -371,7 +373,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
 }
 
 /* Block Environment Access Tracking */
-impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Returns the bitmap of block environment data accessed during transaction execution.
     ///
     /// This method provides information about which block environment fields
@@ -407,7 +409,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
 }
 
 /* Beneficiary Access Tracking */
-impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Disables the beneficiary reward.
     pub fn disable_beneficiary(&mut self) {
         self.disable_beneficiary = true;
@@ -444,7 +446,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
 }
 
 /* Hooks */
-impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Resets the internal state for a new block.
     ///
     /// This method is called when transitioning to a new block and updates
@@ -478,7 +480,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> MegaContext<DB, ExtEnvs> {
 /// maintaining the MegaETH-specific functionality. The trait provides access
 /// to the core EVM context components like transaction, block, configuration,
 /// database, journal, and chain information.
-impl<DB: Database, ExtEnvs: ExternalEnvs> ContextTr for MegaContext<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtEnvs> {
     type Block = BlockEnv;
     type Tx = crate::MegaTransaction;
     type Cfg = CfgEnv<OpSpecId>;
@@ -512,7 +514,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvs> ContextTr for MegaContext<DB, ExtEnvs>
 ///
 /// This implementation provides methods to update the context state, with
 /// special handling for transaction updates to reset internal state.
-impl<DB: Database, ExtEnvs: ExternalEnvs> ContextSetters for MegaContext<DB, ExtEnvs> {
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextSetters for MegaContext<DB, ExtEnvs> {
     delegate! {
         to self.inner {
             fn set_block(&mut self, block: Self::Block);
@@ -624,17 +626,13 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DefaultExternalEnvs;
+    
     use revm::{context::CfgEnv, database::EmptyDB};
 
     #[test]
     fn test_with_cfg_updates_spec() {
         // Create context with initial spec
-        let mut context = MegaContext::new(
-            EmptyDB::default(),
-            MegaSpecId::EQUIVALENCE,
-            DefaultExternalEnvs::default(),
-        );
+        let mut context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE);
 
         // Verify initial state
         assert_eq!(context.mega_spec(), MegaSpecId::EQUIVALENCE);
@@ -653,11 +651,7 @@ mod tests {
 
     #[test]
     fn test_with_cfg_spec_consistency() {
-        let context = MegaContext::new(
-            EmptyDB::default(),
-            MegaSpecId::EQUIVALENCE,
-            DefaultExternalEnvs::default(),
-        );
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE);
 
         // Test multiple spec transitions
         let specs_to_test = [MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE];

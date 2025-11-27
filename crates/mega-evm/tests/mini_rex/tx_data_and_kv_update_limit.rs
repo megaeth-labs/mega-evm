@@ -12,8 +12,8 @@ use alloy_eips::{
 use alloy_primitives::{address, bytes, Address, Bytes, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    DefaultExternalEnvs, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
     STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
@@ -41,12 +41,11 @@ fn transact(
     tx: TxEnv,
 ) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
 {
-    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default())
-        .with_tx_runtime_limits(
-            EvmTxRuntimeLimits::no_limits()
-                .with_tx_data_size_limit(data_limit)
-                .with_tx_kv_updates_limit(kv_update_limit),
-        );
+    let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(data_limit)
+            .with_tx_kv_updates_limit(kv_update_limit),
+    );
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -948,13 +947,11 @@ fn test_limits_reset_across_multiple_transactions() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(10000));
 
     // Create context once and reuse it for multiple transactions
-    let mut context =
-        MegaContext::new(&mut db, MegaSpecId::MINI_REX, DefaultExternalEnvs::default())
-            .with_tx_runtime_limits(
-                EvmTxRuntimeLimits::no_limits()
-                    .with_tx_data_size_limit(u64::MAX)
-                    .with_tx_kv_updates_limit(u64::MAX),
-            );
+    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(u64::MAX)
+            .with_tx_kv_updates_limit(u64::MAX),
+    );
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

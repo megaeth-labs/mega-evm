@@ -9,7 +9,7 @@
 
 use alloy_primitives::{address, Bytes, U256};
 use mega_evm::{
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, VolatileDataAccess,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::{BASEFEE, CALLER, NUMBER, POP, STOP, TIMESTAMP},
@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_account_code(&mut db, contract3_address, contract3_code.into());
 
     // Create EVM instance with properly configured L1BlockInfo
-    let mut context = MegaContext::new(db, spec, DefaultExternalEnvs::default());
+    let mut context = MegaContext::new(db, spec);
     // Set operator fee fields to zero to avoid panic in MINI_REX (ISTHMUS) spec
     context.chain_mut().operator_fee_scalar = Some(U256::from(0));
     context.chain_mut().operator_fee_constant = Some(U256::from(0));

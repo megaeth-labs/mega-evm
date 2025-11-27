@@ -101,7 +101,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         match self.bucket_cost_mulitipers.entry(bucket_id) {
             Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
             Entry::Vacant(vacant_entry) => {
-                let capacity = self.salt_env.get_bucket_capacity(bucket_id, self.parent_block)?;
+                let capacity = self.salt_env.get_bucket_capacity(bucket_id)?;
                 let multiplier = capacity / salt::constant::MIN_BUCKET_SIZE as u64;
                 vacant_entry.insert(multiplier);
                 Ok(multiplier)

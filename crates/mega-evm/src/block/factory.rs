@@ -66,13 +66,13 @@ where
     }
 }
 
-impl<ChainSpec, ExtEnvs, ReceiptBuilder>
-    MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvs>, ReceiptBuilder>
+impl<ChainSpec, ExtEnvFactory, ReceiptBuilder>
+    MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvFactory>, ReceiptBuilder>
 where
     ChainSpec: OpHardforks + Clone,
     ReceiptBuilder: OpReceiptBuilder<Transaction: Transaction + Encodable2718> + Clone,
     crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>,
-    ExtEnvs: crate::ExternalEnvs + Clone,
+    ExtEnvFactory: crate::ExternalEnvFactory + Clone,
 {
     /// Create a new block executor.
     ///
@@ -92,7 +92,7 @@ where
         evm_env: EvmEnv<MegaSpecId>,
     ) -> MegaBlockExecutor<
         ChainSpec,
-        MegaEvm<&'a mut State<DB>, NoOpInspector, ExtEnvs>,
+        MegaEvm<&'a mut State<DB>, NoOpInspector, ExtEnvFactory::EnvTypes>,
         ReceiptBuilder,
     >
     where
@@ -121,10 +121,14 @@ where
         block_ctx: MegaBlockExecutionCtx,
         evm_env: EvmEnv<MegaSpecId>,
         inspector: I,
-    ) -> MegaBlockExecutor<ChainSpec, MegaEvm<&'a mut State<DB>, I, ExtEnvs>, ReceiptBuilder>
+    ) -> MegaBlockExecutor<
+        ChainSpec,
+        MegaEvm<&'a mut State<DB>, I, ExtEnvFactory::EnvTypes>,
+        ReceiptBuilder,
+    >
     where
         DB: Database + 'a,
-        I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvs>> + 'a,
+        I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvFactory::EnvTypes>> + 'a,
     {
         let runtime_limits = block_ctx.block_limits.to_evm_tx_runtime_limits();
         let evm = self
@@ -135,17 +139,17 @@ where
     }
 }
 
-impl<ChainSpec, ExtEnvs, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
-    for MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvs>, ReceiptBuilder>
+impl<ChainSpec, ExtEnvFactory, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
+    for MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvFactory>, ReceiptBuilder>
 where
     ReceiptBuilder: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
     ChainSpec: OpHardforks + Clone,
-    ExtEnvs: crate::ExternalEnvs + Clone,
+    ExtEnvFactory: crate::ExternalEnvFactory + Clone,
     crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>
         + FromTxWithEncoded<ReceiptBuilder::Transaction>,
     Self: 'static,
 {
-    type EvmFactory = crate::MegaEvmFactory<ExtEnvs>;
+    type EvmFactory = crate::MegaEvmFactory<ExtEnvFactory>;
     type ExecutionCtx<'a> = MegaBlockExecutionCtx;
     type Transaction = ReceiptBuilder::Transaction;
     type Receipt = ReceiptBuilder::Receipt;

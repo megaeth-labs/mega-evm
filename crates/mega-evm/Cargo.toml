@@ -28,7 +28,7 @@ op-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # megaeth
-salt.workspace = true
+salt = { workspace = true, optional = true }
 
 # misc
 auto_impl.workspace = true
@@ -45,13 +45,16 @@ hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
 rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors.workspace = true
+salt.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 
 [features]
 default = ["std", "revm/default", "op-revm/default"]
 std = ["revm/std", "op-revm/std"]
-test-utils = []
+test-utils = [
+	"dep:salt",
+]
 
 [[bench]]
 name = "transact"

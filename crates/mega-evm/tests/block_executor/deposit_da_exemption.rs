@@ -11,7 +11,7 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_op_hardforks::OpChainHardforks;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, DefaultExternalEnvs, MegaBlockExecutionCtx,
+    test_utils::MemoryDatabase, BlockLimits, TestExternalEnvs, MegaBlockExecutionCtx,
     MegaBlockExecutor, MegaEvmFactory, MegaSpecId, MegaTransactionExt, MegaTxEnvelope,
 };
 use op_alloy_consensus::TxDeposit;
@@ -96,7 +96,7 @@ fn test_deposit_transaction_exempt_from_single_tx_da_limit() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new(external_envs);
 
     // Create EVM environment
@@ -156,7 +156,7 @@ fn test_regular_transaction_rejected_by_single_tx_da_limit() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new(external_envs);
 
     // Create EVM environment
@@ -215,7 +215,7 @@ fn test_deposit_exempt_from_block_da_limit() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new(external_envs);
 
     // Create EVM environment
@@ -275,7 +275,7 @@ fn test_mixed_deposit_and_regular_transactions() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory
-    let external_envs = DefaultExternalEnvs::<Infallible>::new();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new(external_envs);
 
     // Create EVM environment

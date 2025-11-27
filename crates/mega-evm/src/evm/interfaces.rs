@@ -12,7 +12,7 @@ use revm::{
 };
 
 use crate::{
-    ExternalEnvs, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason, MegaHandler, MegaSpecId,
+    ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason, MegaHandler, MegaSpecId,
     MegaTransaction, MegaTransactionError,
 };
 
@@ -21,7 +21,7 @@ use crate::{
 /// This implementation provides the core EVM interface required by the Alloy EVM framework,
 /// enabling seamless integration with Alloy-based applications while providing `MegaETH`-specific
 /// customizations and optimizations.
-impl<DB, INSP, ExtEnvs: ExternalEnvs> alloy_evm::Evm for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> alloy_evm::Evm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
@@ -111,7 +111,7 @@ where
     }
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::ExecuteEvm for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::ExecuteEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
 {
@@ -146,7 +146,7 @@ where
     }
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::ExecuteCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::ExecuteCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database + DatabaseCommit,
 {
@@ -155,7 +155,7 @@ where
     }
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::InspectEvm for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::InspectEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
@@ -173,14 +173,14 @@ where
     }
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::InspectCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::InspectCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database + DatabaseCommit,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
 }
 
-impl<DB, INSP, ExtEnvs: ExternalEnvs> revm::SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs>
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
 {

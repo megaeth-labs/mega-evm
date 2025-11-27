@@ -14,7 +14,7 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::mini_rex::{BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::*,
@@ -32,10 +32,8 @@ const NESTED_CONTRACT: Address = address!("1000000000000000000000000000000000000
 fn execute_bytecode(
     db: &mut MemoryDatabase,
     gas_limit: u64,
-) -> (
-    ExecutionResult<MegaHaltReason>,
-    MegaEvm<&mut MemoryDatabase, NoOpInspector, DefaultExternalEnvs>,
-) {
+) -> (ExecutionResult<MegaHaltReason>, MegaEvm<&mut MemoryDatabase, NoOpInspector, TestExternalEnvs>)
+{
     execute_bytecode_with_inspector::<NoOpInspector>(db, gas_limit, NoOpInspector)
 }
 
@@ -43,14 +41,15 @@ fn execute_bytecode(
 /// Helper to create and execute a transaction with given bytecode and gas price, committing state
 fn execute_bytecode_with_inspector<
     'a,
-    INSP: Inspector<MegaContext<&'a mut MemoryDatabase, DefaultExternalEnvs>>,
+    INSP: Inspector<MegaContext<&'a mut MemoryDatabase, TestExternalEnvs>>,
 >(
     db: &'a mut MemoryDatabase,
     gas_limit: u64,
     inspector: INSP,
-) -> (ExecutionResult<MegaHaltReason>, MegaEvm<&'a mut MemoryDatabase, INSP, DefaultExternalEnvs>) {
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
-    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX, external_envs);
+) -> (ExecutionResult<MegaHaltReason>, MegaEvm<&'a mut MemoryDatabase, INSP, TestExternalEnvs>) {
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+    let mut context =
+        MegaContext::new(db, MegaSpecId::MINI_REX).with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

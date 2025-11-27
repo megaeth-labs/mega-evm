@@ -5,8 +5,8 @@ use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::mini_rex::{ORACLE_ACCESS_REMAINING_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, DefaultExternalEnvs, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, ORACLE_CONTRACT_ADDRESS,
+    BlockLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{
@@ -26,21 +26,19 @@ const CALLEE: alloy_primitives::Address = address!("1000000000000000000000000000
 /// Returns a tuple of `(ExecutionResult, MegaEvm, oracle_accessed: bool)`.
 fn execute_transaction<
     'a,
-    INSP: Inspector<
-        MegaContext<&'a mut MemoryDatabase, &'a DefaultExternalEnvs<std::convert::Infallible>>,
-    >,
+    INSP: Inspector<MegaContext<&'a mut MemoryDatabase, &'a TestExternalEnvs<std::convert::Infallible>>>,
 >(
     spec: MegaSpecId,
     db: &'a mut MemoryDatabase,
-    external_envs: &'a DefaultExternalEnvs<std::convert::Infallible>,
+    external_envs: &'a TestExternalEnvs<std::convert::Infallible>,
     inspector: INSP,
     target: alloy_primitives::Address,
 ) -> (
     ExecutionResult<MegaHaltReason>,
-    MegaEvm<&'a mut MemoryDatabase, INSP, &'a DefaultExternalEnvs<std::convert::Infallible>>,
+    MegaEvm<&'a mut MemoryDatabase, INSP, &'a TestExternalEnvs<std::convert::Infallible>>,
     bool,
 ) {
-    let mut context = MegaContext::new(db, spec, external_envs);
+    let mut context = MegaContext::new(db, spec).with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -96,7 +94,7 @@ fn test_oracle_access_detected_on_call() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, bytecode);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
@@ -129,7 +127,7 @@ fn test_oracle_access_not_detected_on_regular_call() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, bytecode);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, _evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
     assert!(result.is_success(), "Transaction should succeed");
@@ -145,7 +143,7 @@ fn test_oracle_access_not_detected_without_call() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, bytecode);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, _evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
     assert!(result.is_success(), "Transaction should succeed");
@@ -170,7 +168,7 @@ fn test_oracle_access_not_detected_in_equivalence_spec() {
     db.set_account_code(CALLEE, bytecode);
 
     // Oracle detection only works in MINI_REX spec, not EQUIVALENCE
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, _evm, oracle_accessed) = execute_transaction(
         MegaSpecId::EQUIVALENCE,
         &mut db,
@@ -198,7 +196,7 @@ fn test_oracle_access_detected_with_explicit_zero_value() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, bytecode);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, _evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
     assert!(result.is_success(), "Transaction should succeed");
@@ -225,7 +223,7 @@ fn test_oracle_access_detected_on_multiple_calls() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, bytecode);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, _evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
     assert!(result.is_success(), "Transaction should succeed");
@@ -277,7 +275,7 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
     db.set_account_storage(INTERMEDIATE_CONTRACT, U256::ZERO, U256::from(0x2333u64));
     db.set_account_code(INTERMEDIATE_CONTRACT, intermediate_code);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, _evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
@@ -326,7 +324,7 @@ fn test_no_gas_limiting_without_oracle_access() {
     db.set_account_code(INTERMEDIATE_CONTRACT, intermediate_code);
     db.set_account_code(OTHER_CONTRACT, Bytes::new()); // Empty contract
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
     assert!(result.is_success(), "Transaction should succeed");
@@ -374,7 +372,7 @@ fn test_oracle_contract_code_subject_to_gas_limit() {
     db.set_account_storage(ORACLE_CONTRACT_ADDRESS, U256::ZERO, U256::from(0x2333u64));
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, _, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
@@ -438,7 +436,7 @@ fn test_oracle_storage_sload_uses_oracle_env() {
     db.set_account_code(CALLEE, main_code);
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new()
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new()
         .with_oracle_storage(test_slot, oracle_value);
 
     let (result, _evm, oracle_accessed) =
@@ -498,7 +496,7 @@ fn test_oracle_storage_sload_fallback_to_database() {
     db.set_account_storage(ORACLE_CONTRACT_ADDRESS, test_slot, db_value);
 
     // Create external envs WITHOUT setting oracle storage (so it returns None)
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
     let (result, _evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
@@ -533,7 +531,7 @@ fn test_oracle_storage_sload_direct_call() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new()
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new()
         .with_oracle_storage(test_slot, oracle_value);
 
     // Call the oracle contract DIRECTLY as the transaction target
@@ -570,7 +568,7 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
     let mut state = State::builder().with_database(&mut db).build();
 
     // Create EVM factory and environment
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let evm_factory = MegaEvmFactory::new(external_envs);
 
     // Create EVM environment with MiniRex spec
@@ -694,7 +692,7 @@ fn test_progressive_restriction_block_env_then_oracle() {
     db.set_account_code(CALLEE, main_code);
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
     let (result, evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
@@ -748,7 +746,7 @@ fn test_order_independent_oracle_then_block_env() {
     db.set_account_code(CALLEE, main_code);
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
 
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
     let (result, evm, oracle_accessed) =
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
@@ -768,7 +766,7 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
     // (VolatileDataAccessOutOfGas with Oracle type), it does NOT consume all gas.
     // Instead, detained gas is refunded and gas_used reflects only actual work performed.
     let mut db = MemoryDatabase::default();
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
     // Contract that calls the oracle then tries expensive work that exceeds the 1M oracle limit
     let mut builder = BytecodeBuilder::default()
@@ -817,7 +815,7 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     // limit (1M from oracle), and detained gas is properly refunded.
 
     let mut db = MemoryDatabase::default();
-    let external_envs = DefaultExternalEnvs::<std::convert::Infallible>::new();
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
     // Contract that accesses TIMESTAMP (20M limit), then calls oracle (1M limit),
     // then tries expensive work that exceeds the 1M limit
