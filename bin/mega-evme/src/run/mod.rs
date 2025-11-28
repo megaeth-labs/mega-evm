@@ -4,8 +4,10 @@
 //! similar to go-ethereum's `evm run` command.
 
 mod cmd;
+mod common;
 
-pub use cmd::Cmd;
+pub use cmd::*;
+pub use common::*;
 use mega_evm::revm::state::EvmState;
 
 use std::{collections::HashMap, fs, io::Read};

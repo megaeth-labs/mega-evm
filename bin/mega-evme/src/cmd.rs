@@ -9,6 +9,8 @@ pub enum MainCmd {
     T8n(crate::t8n::Cmd),
     /// Run arbitrary EVM bytecode
     Run(crate::run::Cmd),
+    /// Run arbitrary transaction
+    Tx(crate::tx::Cmd),
 }
 
 /// Error types for the main command system
@@ -20,8 +22,8 @@ pub enum Error {
     /// T8n tool error
     #[error("T8n error: {0}")]
     T8n(#[from] crate::t8n::T8nError),
-    /// Run tool error
-    #[error("Run error: {0}")]
+    /// Run/Tx tool error (`TxError` is an alias to `RunError`)
+    #[error("Run/Tx error: {0}")]
     Run(#[from] crate::run::RunError),
 }
 
@@ -34,6 +36,10 @@ impl MainCmd {
                 Ok(())
             }
             Self::Run(cmd) => {
+                cmd.run()?;
+                Ok(())
+            }
+            Self::Tx(cmd) => {
                 cmd.run()?;
                 Ok(())
             }

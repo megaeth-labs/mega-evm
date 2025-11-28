@@ -6,13 +6,14 @@
 use clap::Parser;
 
 mod cmd;
-pub use cmd::*;
-
-/// T8N (state transition) module containing all transition-related functionality
-pub mod t8n;
-
 /// Run module for executing arbitrary EVM bytecode
 pub mod run;
+/// T8N (state transition) module containing all transition-related functionality
+pub mod t8n;
+/// TX module for executing arbitrary transactions
+pub mod tx;
+
+pub use cmd::*;
 
 fn main() -> Result<(), Error> {
     set_thread_panic_hook();

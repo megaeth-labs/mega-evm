@@ -3001,6 +3001,7 @@ version = "0.0.1"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
  "alloy-serde",
  "clap",

@@ -28,7 +28,7 @@ op-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # megaeth
-salt = { workspace = true, optional = true }
+salt = { workspace = true, feature = ["test-bucket-resize"], optional = true }
 
 # misc
 auto_impl.workspace = true
