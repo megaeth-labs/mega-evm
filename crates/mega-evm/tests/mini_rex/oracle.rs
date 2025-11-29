@@ -509,7 +509,7 @@ fn test_oracle_storage_sload_fallback_to_database() {
 }
 
 /// Test that SLOAD works correctly when transaction directly calls the oracle contract.
-/// Note: Oracle access tracking only occurs via CALL instruction, not direct transaction calls.
+/// Oracle access tracking now occurs for both CALL instructions and direct transaction calls.
 #[test]
 fn test_oracle_storage_sload_direct_call() {
     // Storage slot and value to test with
@@ -546,8 +546,8 @@ fn test_oracle_storage_sload_direct_call() {
     // Verify the transaction succeeded
     assert!(result.is_success(), "Transaction should succeed");
 
-    // Verify oracle was NOT accessed (oracle access tracking only happens via CALL instruction)
-    assert!(!oracle_accessed, "Oracle access should NOT be tracked for direct transaction calls");
+    // Verify oracle WAS accessed (oracle access tracking now happens at frame level)
+    assert!(oracle_accessed, "Oracle access should be tracked for direct transaction calls");
 }
 
 /// Test that the oracle contract is deployed when mini-rex activates via block executor.
@@ -856,5 +856,78 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
         gas_used < 1_000_000_000,
         "gas_used should be much less than gas_limit, proving detained gas was refunded. Got: {}",
         gas_used
+    );
+}
+
+/// Test that transactions from the mega system address are exempted from oracle access tracking.
+/// This ensures system operations can call the oracle without gas detention.
+#[test]
+fn test_mega_system_address_exempted_from_oracle_tracking() {
+    use mega_evm::MEGA_SYSTEM_ADDRESS;
+
+    // Create oracle contract code that performs some operations
+    let oracle_code = BytecodeBuilder::default()
+        .push_number(0u8)
+        .push_number(0u8)
+        .append(RETURN)
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
+
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+
+    // Create a transaction from MEGA_SYSTEM_ADDRESS directly calling the oracle
+    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX)
+        .with_external_envs((&external_envs).into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+
+    let tx = TxEnv {
+        caller: MEGA_SYSTEM_ADDRESS,
+        kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        data: Default::default(),
+        value: U256::ZERO,
+        gas_limit: TX_COMPUTE_GAS_LIMIT + 100_000, // More than compute limit
+        gas_price: 0,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = result_envelope.result;
+
+    // Get oracle_accessed flag
+    let oracle_accessed = evm
+        .ctx
+        .volatile_data_tracker
+        .try_borrow()
+        .map(|tracker| tracker.has_accessed_oracle())
+        .unwrap_or(false);
+
+    // Verify transaction succeeded
+    assert!(result.is_success(), "Transaction from mega system address should succeed");
+
+    // Key assertion: Oracle access should NOT be tracked for mega system address
+    assert!(
+        !oracle_accessed,
+        "Oracle access should NOT be tracked for transactions from MEGA_SYSTEM_ADDRESS"
+    );
+
+    // Verify compute gas limit was NOT applied (gas should not be limited to 1M)
+    let compute_gas_limit = evm
+        .ctx
+        .volatile_data_tracker
+        .try_borrow()
+        .and_then(|tracker| Ok(tracker.get_compute_gas_limit()))
+        .unwrap_or(None);
+
+    assert!(
+        compute_gas_limit.is_none(),
+        "Compute gas limit should NOT be set for mega system address transactions"
     );
 }

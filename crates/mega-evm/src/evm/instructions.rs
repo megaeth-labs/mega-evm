@@ -64,7 +64,8 @@ use revm::{
 /// - Storage gas: Dynamic bucket-based costs for new account creation (when transferring to empty
 ///   account)
 /// - Gas forwarding: 98/100 rule (2% withheld vs. standard 1.5%)
-/// - Oracle detection: Applies gas detention when calling oracle contracts
+/// - Oracle detection: Handled at frame level (in `frame_init`), applies gas detention for both
+///   direct transaction calls and internal CALL operations
 /// - Data/KV tracking: 40 bytes + 2 KV updates when transferring to empty account
 ///
 /// ## Volatile Data Access Opcodes
@@ -497,10 +498,10 @@ pub mod forward_gas_ext {
         false
     }
 
-    wrap_gas_cap!(call, "CALL", volatile_data_ext::call, check_call_has_transfer);
-    wrap_gas_cap!(call_code, "CALLCODE", volatile_data_ext::call_code, check_call_has_transfer);
-    wrap_gas_cap!(delegate_call, "DELEGATECALL", volatile_data_ext::delegate_call, no_transfer);
-    wrap_gas_cap!(static_call, "STATICCALL", volatile_data_ext::static_call, no_transfer);
+    wrap_gas_cap!(call, "CALL", storage_gas_ext::call, check_call_has_transfer);
+    wrap_gas_cap!(call_code, "CALLCODE", storage_gas_ext::call_code, check_call_has_transfer);
+    wrap_gas_cap!(delegate_call, "DELEGATECALL", storage_gas_ext::delegate_call, no_transfer);
+    wrap_gas_cap!(static_call, "STATICCALL", storage_gas_ext::static_call, no_transfer);
     wrap_gas_cap!(create, "CREATE", storage_gas_ext::create::<WIRE, false, H>, no_transfer);
     wrap_gas_cap!(create2, "CREATE2", storage_gas_ext::create::<WIRE, true, H>, no_transfer);
 }
@@ -595,71 +596,6 @@ pub mod volatile_data_ext {
     wrap_op_detain_gas!(extcodesize, "EXTCODESIZE", compute_gas_ext::extcodesize);
     wrap_op_detain_gas!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
     wrap_op_detain_gas!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
-
-    /// Macro to create call-like opcode handlers that check for oracle access and apply gas
-    /// detention.
-    ///
-    /// This macro generates a wrapper function that:
-    /// 1. Extracts the call target address from the stack (at position N from top)
-    /// 2. Calls the original call-like instruction implementation
-    /// 3. Checks if calling the oracle contract and applies compute gas limit if needed
-    ///
-    /// # Oracle Contract Detection
-    ///
-    /// The generated `CALL`, `CALLCODE`, `DELEGATECALL`, and `STATICCALL` implementations add:
-    ///
-    /// **Oracle Detection**: Detects oracle contract calls and applies gas detention:
-    /// - Detects when calling oracle contracts
-    /// - Applies compute gas limit to remaining gas (`ORACLE_ACCESS_REMAINING_GAS` = 1M gas)
-    /// - Integrates with global gas detention mechanism (most restrictive limit wins)
-    ///
-    /// **Compute Gas Limit Enforcement**:
-    /// 1. Oracle access is detected and marked via `VolatileDataAccessTracker`
-    /// 2. Current interpreter's remaining compute gas is limited
-    /// 3. If already detained by a more restrictive limit (e.g., block env access at 20M),
-    ///    detention is a no-op
-    ///
-    /// # Parameters
-    /// - `$fn_name`: Name of the generated function
-    /// - `$opcode_name`: String name of the opcode (for documentation)
-    /// - `$original_fn`: Path to the original instruction implementation
-    /// - `$target_stack_pos`: Position of target address on stack (0 = top, 1 = second from top,
-    ///   etc.)
-    macro_rules! wrap_call_op_oracle_check {
-        ($fn_name:ident, $opcode_name:expr, $original_fn:path, $target_stack_pos:expr) => {
-            #[doc = concat!("`", $opcode_name, "` opcode with oracle access detection and compute gas limit enforcement.")]
-            #[inline]
-            pub fn $fn_name<WIRE: InterpreterTypes<Stack: StackInspectTr>, H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized>(
-                context: InstructionContext<'_, H, WIRE>,
-            ) {
-                // Get the call target address from the stack.
-                let Some(target) = context.interpreter.stack.inspect::<$target_stack_pos>() else {
-                    context.interpreter.halt(InstructionResult::StackUnderflow);
-                    return;
-                };
-                let target = target.into_address();
-
-                // Call the original instruction
-                run_inner_instruction_or_abort!($original_fn, context);
-
-                // Check if calling the oracle contract and mark it as accessed.
-                // If so, lower the compute gas limit.
-                let additional_limit = context.host.additional_limit().clone();
-                let mut additional_limit = additional_limit.borrow_mut();
-                let mut volatile_data_tracker = context.host.volatile_data_tracker().borrow_mut();
-                if volatile_data_tracker.check_and_mark_oracle_access(&target) {
-                    if let Some(compute_gas_limit) = volatile_data_tracker.get_compute_gas_limit() {
-                        additional_limit.set_compute_gas_limit(compute_gas_limit);
-                    }
-                }
-            }
-        };
-    }
-
-    wrap_call_op_oracle_check!(call, "CALL", storage_gas_ext::call, 1);
-    wrap_call_op_oracle_check!(call_code, "CALLCODE", storage_gas_ext::call_code, 1);
-    wrap_call_op_oracle_check!(delegate_call, "DELEGATECALL", storage_gas_ext::delegate_call, 1);
-    wrap_call_op_oracle_check!(static_call, "STATICCALL", storage_gas_ext::static_call, 1);
 }
 
 /// Extends opcodes with additional limit (kv update limit, data limit, etc.) enforcement.
@@ -753,9 +689,6 @@ pub mod additional_limit_ext {
             context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
         }
     }
-
-    // TODO: wrap sstore and log opcode handlers, maybe also call-like and create-like opcode
-    // handlers?
 }
 
 /// Extends opcodes with storage gas cost on top of `compute_gas_ext`.
