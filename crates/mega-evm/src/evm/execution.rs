@@ -179,24 +179,10 @@ where
         let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         let is_rex_enabled = ctx.spec.is_enabled(MegaSpecId::REX);
         if is_mini_rex_enabled {
-            // let mut additional_limit = ctx.additional_limit().borrow_mut();
-            // // record the initial gas cost as compute gas cost, limit exceeding will be captured
-            // in // `frame_init` function.
-            // additional_limit.record_compute_gas(initial_and_floor_gas.initial_gas);
-            // drop(additional_limit);
             let mut additional_limit = ctx.additional_limit().borrow_mut();
-            // record the initial gas cost as compute gas cost
-            if additional_limit
-                .record_compute_gas(initial_and_floor_gas.initial_gas)
-                .exceeded_limit()
-            {
-                // TODO: can we custom error?
-                return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
-                    gas_limit: additional_limit.compute_gas_limit,
-                    initial_gas: initial_and_floor_gas.initial_gas,
-                }
-                .into());
-            }
+            // record the initial gas cost as compute gas cost, limit exceeding will be captured in
+            // `frame_init` function.
+            additional_limit.record_compute_gas(initial_and_floor_gas.initial_gas);
             drop(additional_limit);
 
             // MegaETH MiniRex modification: calldata storage gas costs
@@ -270,6 +256,7 @@ where
         evm: &mut Self::Evm,
         init_and_floor_gas: &InitialAndFloorGas,
     ) -> Result<FrameResult, Self::Error> {
+        // Check if the initial gas exceeds the tx gas limit, if so, we halt with out of gas
         let ctx = evm.ctx();
         let tx = ctx.tx();
         if tx.gas_limit() < init_and_floor_gas.initial_gas {
