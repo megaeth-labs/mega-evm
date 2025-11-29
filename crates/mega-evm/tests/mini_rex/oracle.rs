@@ -866,11 +866,8 @@ fn test_mega_system_address_exempted_from_oracle_tracking() {
     use mega_evm::MEGA_SYSTEM_ADDRESS;
 
     // Create oracle contract code that performs some operations
-    let oracle_code = BytecodeBuilder::default()
-        .push_number(0u8)
-        .push_number(0u8)
-        .append(RETURN)
-        .build();
+    let oracle_code =
+        BytecodeBuilder::default().push_number(0u8).push_number(0u8).append(RETURN).build();
 
     let mut db = MemoryDatabase::default();
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
@@ -878,8 +875,8 @@ fn test_mega_system_address_exempted_from_oracle_tracking() {
     let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
     // Create a transaction from MEGA_SYSTEM_ADDRESS directly calling the oracle
-    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX)
-        .with_external_envs((&external_envs).into());
+    let mut context =
+        MegaContext::new(&mut db, MegaSpecId::MINI_REX).with_external_envs((&external_envs).into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -923,7 +920,7 @@ fn test_mega_system_address_exempted_from_oracle_tracking() {
         .ctx
         .volatile_data_tracker
         .try_borrow()
-        .and_then(|tracker| Ok(tracker.get_compute_gas_limit()))
+        .map(|tracker| tracker.get_compute_gas_limit())
         .unwrap_or(None);
 
     assert!(
