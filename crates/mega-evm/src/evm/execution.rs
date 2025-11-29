@@ -3,7 +3,7 @@ use alloc as std;
 use std::string::ToString;
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
-use alloy_primitives::TxKind;
+use alloy_primitives::{Bytes, TxKind};
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -23,7 +23,8 @@ use revm::{
     inspector::{InspectorEvmTr, InspectorHandler},
     interpreter::{
         gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
-        FrameInput, Gas, InitialAndFloorGas, InstructionResult, InterpreterAction,
+        CallOutcome, CreateOutcome, FrameInput, Gas, InitialAndFloorGas, InstructionResult,
+        InterpreterAction, InterpreterResult,
     },
     Inspector, Journal,
 };
@@ -179,19 +180,36 @@ where
         let is_rex_enabled = ctx.spec.is_enabled(MegaSpecId::REX);
         if is_mini_rex_enabled {
             let mut additional_limit = ctx.additional_limit().borrow_mut();
-            // record the initial gas cost as compute gas cost
-            if additional_limit
-                .record_compute_gas(initial_and_floor_gas.initial_gas)
-                .exceeded_limit()
-            {
-                // TODO: can we custom error?
+            // record the initial gas cost as compute gas cost, limit exceeding will be captured in
+            // `frame_init` function.
+            additional_limit.record_compute_gas(initial_and_floor_gas.initial_gas);
+            drop(additional_limit);
+
+            // MegaETH MiniRex modification: calldata storage gas costs
+            // - Standard tokens: 400 gas per token (vs 4)
+            // - EIP-7623 floor: 100x increase for transaction data floor cost
+            let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
+            let calldata_storage_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * tokens_in_calldata;
+            initial_and_floor_gas.initial_gas += calldata_storage_gas;
+            let floor_calldata_storage_gas =
+                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS * tokens_in_calldata;
+            initial_and_floor_gas.floor_gas += floor_calldata_storage_gas;
+
+            // MegaETH Rex modification: additional intrinsic storage gas cost
+            // Add 39,000 gas on top of base intrinsic gas for all transactions
+            if ctx.spec.is_enabled(MegaSpecId::REX) {
+                initial_and_floor_gas.initial_gas += constants::rex::TX_INTRINSIC_STORAGE_GAS;
+            }
+
+            // If the initial_gas exceeds the tx gas limit, return an error
+            if initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
-                    gas_limit: additional_limit.compute_gas_limit,
+                    gas_limit: ctx.tx().gas_limit(),
                     initial_gas: initial_and_floor_gas.initial_gas,
                 }
                 .into());
             }
-            drop(additional_limit);
 
             // MegaETH modification: additional storage gas cost for creating account
             let kind = ctx.tx().kind();
@@ -225,35 +243,38 @@ where
                     format!("Failed to get storage gas for callee address: {callee_address}",);
                 Self::Error::from_string(err_str)
             })?;
-
-            // MegaETH MiniRex modification: calldata storage gas costs
-            // - Standard tokens: 400 gas per token (vs 4)
-            // - EIP-7623 floor: 100x increase for transaction data floor cost
-            let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
-            let calldata_storage_gas =
-                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * tokens_in_calldata;
-            initial_and_floor_gas.initial_gas += calldata_storage_gas;
-            let floor_calldata_storage_gas =
-                constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS * tokens_in_calldata;
-            initial_and_floor_gas.floor_gas += floor_calldata_storage_gas;
-
-            // MegaETH Rex modification: additional intrinsic storage gas cost
-            // Add 39,000 gas on top of base intrinsic gas for all transactions
-            if ctx.spec.is_enabled(MegaSpecId::REX) {
-                initial_and_floor_gas.initial_gas += constants::rex::TX_INTRINSIC_STORAGE_GAS;
-            }
-
-            // If the initial_gas exceeds the tx gas limit, return an error
-            if initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
-                return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
-                    gas_limit: ctx.tx().gas_limit(),
-                    initial_gas: initial_and_floor_gas.initial_gas,
-                }
-                .into());
-            }
         }
 
         Ok(initial_and_floor_gas)
+    }
+
+    /// This function copies the logic from `revm::handler::Handler::execution` to and
+    /// add new account storage gas
+    #[inline]
+    fn execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        // Check if the initial gas exceeds the tx gas limit, if so, we halt with out of gas
+        let ctx = evm.ctx();
+        let tx = ctx.tx();
+        if tx.gas_limit() < init_and_floor_gas.initial_gas {
+            // If not sufficient gas, we halt with out of gas
+            let oog_frame_result = gen_oog_frame_result(tx.kind(), tx.gas_limit());
+            return Ok(oog_frame_result);
+        }
+
+        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        // Create first frame action
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+
+        // Run execution loop
+        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
+
+        // Handle last frame result
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
     }
 
     fn reward_beneficiary(
@@ -631,5 +652,27 @@ where
             self.inner.frame_stack.get(),
             &mut self.inner.instruction,
         )
+    }
+}
+
+fn gen_oog_frame_result(tx_kind: TxKind, gas_limit: u64) -> FrameResult {
+    // If not sufficient gas, we halt with out of gas
+    match tx_kind {
+        TxKind::Call(_address) => FrameResult::Call(CallOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::OutOfGas,
+                Bytes::new(),
+                Gas::new_spent(gas_limit),
+            ),
+            Default::default(),
+        )),
+        TxKind::Create => FrameResult::Create(CreateOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::OutOfGas,
+                Bytes::new(),
+                Gas::new_spent(gas_limit),
+            ),
+            None,
+        )),
     }
 }

@@ -922,6 +922,89 @@ fn test_precompile_exact_compute_gas_limit() {
 }
 
 // ============================================================================
+// INITIAL GAS LIMIT TESTS
+// ============================================================================
+
+#[test]
+fn test_initial_gas_exceeds_compute_gas_limit() {
+    // Test that a transaction with sufficient tx gas limit but whose initial gas
+    // (intrinsic gas) alone exceeds the compute gas limit is halted (not rejected).
+    // This should produce a receipt with status=0.
+
+    let bytecode = BytecodeBuilder::default().append(STOP).build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    // Transaction with high tx gas limit
+    let tx = TxEnvBuilder::new()
+        .caller(CALLER)
+        .call(CONTRACT)
+        .gas_limit(100_000) // Enough for tx validation
+        .build_fill();
+
+    // Set compute gas limit to less than intrinsic gas (21,000)
+    // This should cause the transaction to halt during first frame init
+    let compute_gas_limit = 20_000;
+    let (result, compute_gas_used) =
+        transact(MegaSpecId::MINI_REX, &mut db, compute_gas_limit, tx).unwrap();
+
+    // Should halt (not reject), producing a receipt
+    assert!(is_compute_gas_limit_exceeded(&result));
+
+    // Verify the halt reason contains correct info
+    let (halt_limit, halt_actual) = get_compute_gas_limit_info(&result).unwrap();
+    assert_eq!(halt_limit, compute_gas_limit);
+    assert!(halt_actual > halt_limit);
+    assert_eq!(compute_gas_used, halt_actual);
+}
+
+#[test]
+fn test_initial_gas_with_calldata_exceeds_compute_gas_limit() {
+    // Test transaction where initial gas with calldata costs exceeds compute limit
+
+    let bytecode = BytecodeBuilder::default().append(STOP).build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_code(CONTRACT, bytecode.clone());
+
+    // Transaction with large calldata to increase initial gas
+    // 1000 bytes of non-zero data
+    let calldata = Bytes::from(vec![1u8; 1000]);
+    let tx = TxEnvBuilder::new()
+        .caller(CALLER)
+        .call(CONTRACT)
+        .data(calldata)
+        .gas_limit(10_000_000) // Enough for tx validation
+        .build_fill();
+
+    // First, measure actual initial gas with unlimited compute limit
+    let (_, actual_initial_gas) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, tx.clone()).unwrap();
+
+    // Reset db
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    // Set compute gas limit to less than initial gas
+    let compute_gas_limit = actual_initial_gas - 10_000;
+    let (result, compute_gas_used) =
+        transact(MegaSpecId::MINI_REX, &mut db, compute_gas_limit, tx).unwrap();
+
+    // Should halt (not reject), producing a receipt
+    assert!(is_compute_gas_limit_exceeded(&result));
+
+    // Verify the halt reason contains correct info
+    let (halt_limit, halt_actual) = get_compute_gas_limit_info(&result).unwrap();
+    assert_eq!(halt_limit, compute_gas_limit);
+    assert!(halt_actual > halt_limit);
+    assert_eq!(compute_gas_used, halt_actual);
+}
+
+// ============================================================================
 // EDGE CASE TESTS
 // ============================================================================
 
@@ -935,9 +1018,9 @@ fn test_compute_gas_limit_zero() {
 
     let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(1_000_000).build_fill();
 
-    // With zero compute gas limit, should fail at validation (can't cover intrinsic 21000)
-    let result = transact(MegaSpecId::MINI_REX, &mut db, 0, tx);
-    assert!(result.is_err());
+    // With zero compute gas limit, should halt (not reject) because initial gas exceeds limit
+    let (result, _) = transact(MegaSpecId::MINI_REX, &mut db, 0, tx).unwrap();
+    assert!(is_compute_gas_limit_exceeded(&result));
 }
 
 #[test]
@@ -950,9 +1033,9 @@ fn test_compute_gas_limit_one() {
 
     let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).build_fill();
 
-    // With limit of 1, should fail at validation (can't cover intrinsic 21000)
-    let result = transact(MegaSpecId::MINI_REX, &mut db, 1, tx);
-    assert!(result.is_err());
+    // With limit of 1, should halt (not reject) because initial gas exceeds limit
+    let (result, _) = transact(MegaSpecId::MINI_REX, &mut db, 1, tx).unwrap();
+    assert!(is_compute_gas_limit_exceeded(&result));
 }
 
 #[test]
