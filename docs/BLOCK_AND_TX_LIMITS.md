@@ -96,14 +96,10 @@ Applies to cumulative resource usage across all transactions in a block. Violati
 
 **Transaction-level enforcement (during execution):**
 
-- Limits are checked during **frame initialization** (first frame for the transaction)
-- If initial gas/data/KV updates alone exceed limits → Transaction **halts** immediately
-- If limits exceeded during execution → Transaction **halts** with OutOfGas error
+- Transaction **halts** with OutOfGas error
 - Remaining gas is **preserved** (not consumed)
 - Transaction **fails** (status=0) but is **still included** in block
 - Rationale: Failed transactions consume resources and must be recorded on-chain
-
-**Important**: Even if a transaction's initial gas (intrinsic + calldata + storage costs) exceeds the compute gas limit, it will **halt** (not be rejected). This ensures all valid transactions that pass standard gas limit validation produce receipts.
 
 **Block-level enforcement (before next transaction):**
 
@@ -329,11 +325,6 @@ Maintain separate queues for different transaction states:
 - Tracks gas consumption from EVM instructions during execution
 - Separate from standard gas limit
 - Used to prevent computationally expensive transactions
-- **Initial gas recording**: Base intrinsic gas (21,000) is recorded as compute gas during validation
-- **Storage gas exclusion**: Storage-related gas costs (calldata storage gas, Rex intrinsic storage gas, account creation storage gas) are NOT counted as compute gas
-- **Enforcement timing**: Compute gas limit is checked during frame initialization, not during validation
-  - If initial compute gas alone exceeds limit → transaction halts with ComputeGasLimitExceeded
-  - If compute gas exceeds limit during execution → transaction halts with ComputeGasLimitExceeded
 
 ### Data Size Tracking
 
