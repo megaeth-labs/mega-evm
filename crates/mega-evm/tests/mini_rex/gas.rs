@@ -948,7 +948,7 @@ fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
 
     // Override gas limit in the test
     let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX)
-        .with_external_envs(external_envs.clone().into());
+        .with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -995,7 +995,7 @@ fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
     let insufficient_gas_limit = 60_000;
 
     let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX)
-        .with_external_envs(external_envs.clone().into());
+        .with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
