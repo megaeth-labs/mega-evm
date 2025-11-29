@@ -33,7 +33,7 @@ use crate::{
     is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
     mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvTypes,
     HostExt, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
-    MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    MegaTransactionError, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -430,6 +430,24 @@ where
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         let additional_limit = self.ctx().additional_limit.clone();
+
+        // Check if this is a call to the oracle contract and mark it as accessed.
+        // This handles both direct transaction calls and internal CALL operations.
+        if is_mini_rex_enabled {
+            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                // Mega system address is exempted from volatile data access enforcement.
+                if call_inputs.caller != MEGA_SYSTEM_ADDRESS {
+                    let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
+                    let mut tracker = volatile_data_tracker.borrow_mut();
+                    if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
+                        if let Some(compute_gas_limit) = tracker.get_compute_gas_limit() {
+                            additional_limit.borrow_mut().set_compute_gas_limit(compute_gas_limit);
+                        }
+                    }
+                }
+            }
+        }
+
         if is_mini_rex_enabled &&
             additional_limit
                 .borrow_mut()
