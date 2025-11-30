@@ -191,12 +191,23 @@ Any operation that accesses the beneficiary account triggers gas limiting:
 
 #### 2.8.3 Oracle Contract Access
 
-**Trigger Condition**:
-Any CALL, CALLCODE, DELEGATECALL, or STATICCALL instruction or transaction targeting the [oracle contract address](../docs/ORACLE_SERVICE.md).
+**Trigger Conditions:**
+Oracle contract access is detected at the frame initialization level, tracking:
+
+| Trigger Type                | Description                                                      |
+| --------------------------- | ---------------------------------------------------------------- |
+| **Direct transaction call** | Transaction's `to` address is the oracle contract                |
+| **Internal CALL operations** | CALL, CALLCODE, DELEGATECALL, or STATICCALL targeting oracle     |
+
+**Detection Location:**
+Frame-level detection in `frame_init` handler, ensuring comprehensive tracking of both direct and nested oracle calls.
+
+**Exemption:**
+Transactions sent from the mega system address (`0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`) are exempted from oracle access tracking to enable system operations.
 
 **Behavior:**
 
-- The whole transaction's remaining compute gas is limited to at most `1_000_000` immediately after accessing oracle contract, if the current remaining compute gas is larger.
+- The whole transaction's remaining compute gas is limited to at most `1_000_000` immediately after oracle contract access is detected, if the current remaining compute gas is larger.
 
 ## 3. Specification Mapping
 
@@ -244,7 +255,8 @@ The semantics of MiniRex spec are inherited and customized from:
 - Accessing volatile data triggers compute gas limiting to support parallel execution:
   - **Block environment opcodes** (20M compute gas limit): NUMBER, TIMESTAMP, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, PREVRANDAO, BLOCKHASH, BLOBBASEFEE, BLOBHASH
   - **Beneficiary account access** (20M compute gas limit): Operations on beneficiary address including BALANCE, SELFBALANCE, EXTCODECOPY, EXTCODESIZE, EXTCODEHASH, or transactions involving beneficiary
-  - **Oracle contract access** (1M compute gas limit): CALL-family instructions targeting oracle contract at `0x6342000000000000000000000000000000000001`
+  - **Oracle contract access** (1M compute gas limit): Direct transaction calls or CALL-family instructions targeting oracle contract at `0x6342000000000000000000000000000000000001`
+  - **System exemption**: Transactions from mega system address (`0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`) are exempt from oracle tracking
   - **Most restrictive limit applies**: When multiple volatile data types are accessed, the minimum limit (1M for oracle, 20M for block env/beneficiary) applies globally
 - Excess gas beyond limit is "detained" and refunded at transaction end
 - Applications should use volatile data access only for essential decision-making, not extensive computation

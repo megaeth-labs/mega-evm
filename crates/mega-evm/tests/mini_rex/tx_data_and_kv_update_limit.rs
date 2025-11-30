@@ -693,10 +693,10 @@ fn test_data_limit_just_not_exceed() {
 #[test]
 fn test_data_limit_just_exceed() {
     let mut db = MemoryDatabase::default();
-    // the data size is 110 bytes for the intrinsic data of a transaction, 312 bytes for the caller
+    // the data size is 110 bytes for the intrinsic data of a transaction, 40 bytes for the caller
     // account info update
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
-    transact(
+    let (res, data_size, _) = transact(
         MegaSpecId::MINI_REX,
         &mut db,
         BASE_TX_SIZE  // base tx
@@ -705,7 +705,16 @@ fn test_data_limit_just_exceed() {
         u64::MAX,
         tx,
     )
-    .expect_err("should error");
+    .expect("should succeed with halt");
+
+    // Should halt (not error) with DataLimitExceeded
+    assert!(matches!(
+        res.result,
+        ExecutionResult::Halt { reason: MegaHaltReason::DataLimitExceeded { .. }, .. }
+    ));
+
+    // Verify the data size tracked
+    assert_eq!(data_size, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE);
 }
 
 /// Test that KV update limit enforcement works correctly when the limit is not exceeded.

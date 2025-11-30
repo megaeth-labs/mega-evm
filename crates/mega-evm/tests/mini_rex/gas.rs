@@ -924,3 +924,97 @@ fn test_floor_gas_empty_calldata() {
 fn test_floor_gas_minimal_calldata() {
     floor_gas_test_case(MegaSpecId::MINI_REX, 1, 21_440);
 }
+
+/// Tests that insufficient gas for account creation storage gas results in OOG (not invalid tx).
+/// This transaction has enough gas for intrinsic costs but not for account creation storage.
+#[test]
+fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
+    use mega_evm::SaltEnv;
+    use std::convert::Infallible;
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(10_000_000));
+
+    let new_account = address!("9000000000000000000000000000000000000009");
+    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(new_account);
+    let multiplier = 10u64;
+    let external_envs = TestExternalEnvs::new()
+        .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+
+    // MiniRex account creation storage gas: 2,000,000 × 10 = 20,000,000
+    // Intrinsic: 21,000
+    // Set gas limit to cover intrinsic but not storage: 22,000
+    let insufficient_gas_limit = 22_000;
+
+    // Override gas limit in the test
+    let mut context =
+        MegaContext::new(&mut db, MegaSpecId::MINI_REX).with_external_envs(external_envs.into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(new_account),
+        data: Bytes::new(),
+        value: U256::from(1),
+        gas_limit: insufficient_gas_limit,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let res = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+
+    // Transaction should succeed but execution should be OOG
+    assert!(!res.result.is_success());
+    assert!(res.result.is_halt());
+    assert_eq!(res.result.gas_used(), insufficient_gas_limit);
+}
+
+/// Tests that insufficient gas for contract creation storage gas results in OOG (not invalid tx).
+#[test]
+fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
+    use mega_evm::SaltEnv;
+    use std::convert::Infallible;
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(10_000_000));
+
+    // Empty init code to minimize calldata gas
+    let init_code = Bytes::new();
+    let created_address = CALLER.create(0);
+    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(created_address);
+    let multiplier = 10u64;
+    let external_envs = TestExternalEnvs::new()
+        .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+
+    // MiniRex contract creation storage gas: 2,000,000 × 10 = 20,000,000
+    // Base intrinsic for CREATE: 21,000 + 32,000 (CREATE base) = 53,000
+    // Set gas limit to cover intrinsic but not storage: 60,000
+    let insufficient_gas_limit = 60_000;
+
+    let mut context =
+        MegaContext::new(&mut db, MegaSpecId::MINI_REX).with_external_envs(external_envs.into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let tx = TxEnv {
+        caller: CALLER,
+        kind: TxKind::Create,
+        data: init_code,
+        value: U256::ZERO,
+        gas_limit: insufficient_gas_limit,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let res = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+
+    // Transaction should succeed but execution should be OOG
+    assert!(!res.result.is_success());
+    assert!(res.result.is_halt());
+    assert_eq!(res.result.gas_used(), insufficient_gas_limit);
+}
