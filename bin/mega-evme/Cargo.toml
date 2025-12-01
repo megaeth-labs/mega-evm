@@ -22,20 +22,28 @@ mega-evm = { workspace = true, features = ["default", "test-utils"] }
 state-test.workspace = true
 
 # revm
-revm-inspectors.workspace = true
+revm-inspectors = { workspace = true, features = ["std"] }
 
 # alloy
 alloy-consensus = { workspace = true, features = ["serde"] }
+alloy-eips.workspace = true
+alloy-network.workspace = true
 alloy-primitives.workspace = true
+alloy-provider = { workspace = true, features = ["reqwest"] }
 alloy-rpc-types-eth.workspace = true
 alloy-rpc-types-trace.workspace = true
 alloy-serde = { workspace = true, features = ["default"] }
+alloy-transport-http = { workspace = true, features = ["reqwest"] }
 
 # op
 op-alloy-consensus.workspace = true
+op-alloy-network.workspace = true
+op-alloy-rpc-types.workspace = true
 
 # misc
 clap = { workspace = true, features = ["default"] }
+reqwest = "0.12"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }

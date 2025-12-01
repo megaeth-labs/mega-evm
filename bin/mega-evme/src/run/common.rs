@@ -1,6 +1,6 @@
 //! Common argument groups and functions shared between run and tx commands
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_trace::geth::GethDefaultTracingOptions;
@@ -8,26 +8,39 @@ use clap::Parser;
 use mega_evm::{
     revm::{
         context::{block::BlockEnv, cfg::CfgEnv, result::ExecutionResult},
-        database::{CacheState, EmptyDB, State},
-        primitives::{eip4844, hardfork::SpecId, KECCAK_EMPTY},
+        primitives::{eip4844, HashMap, KECCAK_EMPTY},
         state::{AccountInfo, Bytecode, EvmState},
         ExecuteEvm, InspectEvm,
     },
-    HashMap, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
-use super::{parse_bucket_capacity, Result, RunError, StateDump, TracerType};
+use super::{parse_bucket_capacity, EvmeState, Result, RunError, StateDump, TracerType};
 
 /// Pre-execution state configuration arguments
 #[derive(Parser, Debug, Clone)]
 pub struct PreStateArgs {
+    /// Fork state from a remote RPC endpoint.
+    #[arg(long = "fork")]
+    pub fork: bool,
+
+    /// Block number of the state (post-block state) to fork from. If not specified, the latest
+    /// block is used. Only used if `fork` is true.
+    #[arg(long = "fork.block")]
+    pub fork_block: Option<u64>,
+
+    /// RPC URL to use for the fork. Only used if `fork` is true.
+    #[arg(long = "fork.rpc", default_value = "http://localhost:8545")]
+    pub fork_rpc: String,
+
     /// JSON file with prestate (genesis) config
     #[arg(long = "prestate")]
     pub prestate: Option<PathBuf>,
 
     /// Balance to allocate to the sender account
-    /// If not specified, sender balance is not set (remains at 0)
+    /// If not specified, sender balance is not set (fallback to `prestate` if specified,
+    /// otherwise 0)
     #[arg(long = "sender.balance", visible_aliases = ["from.balance"])]
     pub sender_balance: Option<U256>,
 }
@@ -37,7 +50,7 @@ pub struct PreStateArgs {
 pub struct EnvArgs {
     /// Name of hardfork to use, possible values: `MiniRex`, `Equivalence`, `Rex`
     #[arg(long = "state.fork", default_value = "MiniRex")]
-    pub fork: String,
+    pub hardfork: String,
 
     /// `ChainID` to use
     #[arg(long = "state.chainid", default_value = "6342")]
@@ -57,7 +70,7 @@ pub struct EnvArgs {
     pub block_timestamp: u64,
 
     /// Block gas limit
-    #[arg(long = "block.gaslimit", default_value = "30000000")]
+    #[arg(long = "block.gaslimit", default_value = "10000000000")]
     pub block_gas_limit: u64,
 
     /// Block base fee per gas (EIP-1559)
@@ -85,6 +98,12 @@ pub struct EnvArgs {
     /// Example: --bucket-capacity 123:1000000 --bucket-capacity 456:2000000
     #[arg(long = "bucket-capacity", value_name = "BUCKET_ID:CAPACITY")]
     pub bucket_capacity: Vec<String>,
+}
+
+impl EnvArgs {
+    pub fn spec_id(&self) -> MegaSpecId {
+        spec_id(&self.hardfork)
+    }
 }
 
 /// State dump configuration arguments
@@ -133,59 +152,56 @@ pub fn spec_id(fork: &str) -> MegaSpecId {
     MegaSpecId::from_str(fork).expect("Invalid hardfork name")
 }
 
-/// Load prestate from JSON file and populate cache state
-pub fn load_prestate(prestate_path: &Path, cache_state: &mut CacheState) -> Result<()> {
-    // Read and parse JSON file using serde
-    let prestate_content = std::fs::read_to_string(prestate_path)?;
-    let state_dump: StateDump = serde_json::from_str(&prestate_content)
-        .map_err(|e| RunError::InvalidInput(format!("Failed to parse prestate JSON: {}", e)))?;
-
-    // Iterate over all accounts in prestate
-    for (address, account_state) in state_dump.accounts {
-        // Create bytecode from code bytes
-        let bytecode = if account_state.code.is_empty() {
-            Bytecode::default()
-        } else {
-            Bytecode::new_raw_checked(account_state.code.clone())
-                .unwrap_or_else(|_| Bytecode::new_legacy(account_state.code.clone()))
-        };
-        let code_hash = bytecode.hash_slow();
-
-        // Create account info
-        let account_info = AccountInfo {
-            balance: account_state.balance,
-            code_hash,
-            code: Some(bytecode),
-            nonce: account_state.nonce,
-        };
-
-        // Convert storage HashMap to revm's HashMap
-        let storage: HashMap<_, _> = account_state.storage.into_iter().collect();
-
-        // Insert account with storage
-        cache_state.insert_account_with_storage(address, account_info, storage);
-    }
-
-    Ok(())
-}
-
-/// Create initial state from prestate (if provided) or empty state
-pub fn create_initial_state(
+/// Load prestate from file and sender balance into prestate maps
+pub fn load_prestate(
     prestate_args: &PreStateArgs,
-    env_args: &EnvArgs,
     sender: Address,
-) -> Result<State<EmptyDB>> {
-    // Determine state clear flag based on EVM spec
-    let spec = spec_id(&env_args.fork);
-    let has_state_clear = spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON);
-    let mut cache_state = CacheState::new(has_state_clear);
+) -> Result<(HashMap<Address, AccountInfo>, HashMap<Address, HashMap<U256, U256>>)> {
+    // Collect prestate overrides
+    let mut prestate = HashMap::default();
+    let mut storage = HashMap::default();
 
-    // Load prestate if provided
+    // Load prestate from JSON file if provided
     if let Some(ref prestate_path) = prestate_args.prestate {
-        load_prestate(prestate_path, &mut cache_state)?;
+        let prestate_content = std::fs::read_to_string(prestate_path)?;
+        let state_dump: StateDump = serde_json::from_str(&prestate_content)
+            .map_err(|e| RunError::InvalidInput(format!("Failed to parse prestate JSON: {}", e)))?;
+
+        // Convert StateDump to prestate maps
+        for (address, account_state) in state_dump.accounts {
+            // Create bytecode from code bytes
+            let bytecode = if account_state.code.is_empty() {
+                Bytecode::default()
+            } else {
+                Bytecode::new_raw_checked(account_state.code.clone())
+                    .unwrap_or_else(|_| Bytecode::new_legacy(account_state.code.clone()))
+            };
+            let code_hash = bytecode.hash_slow();
+            assert_eq!(
+                code_hash, account_state.code_hash,
+                "Code hash mismatch for account {}",
+                address
+            );
+
+            // Create account info
+            let account_info = AccountInfo {
+                balance: account_state.balance,
+                code_hash,
+                code: Some(bytecode),
+                nonce: account_state.nonce,
+            };
+
+            prestate.insert(address, account_info);
+
+            // Store storage - convert to revm HashMap
+            if !account_state.storage.is_empty() {
+                let revm_storage: HashMap<U256, U256> = account_state.storage.into_iter().collect();
+                storage.insert(address, revm_storage);
+            }
+        }
     }
 
-    // Set balance for sender if specified
+    // Set balance for sender if specified (overrides prestate)
     if let Some(balance) = prestate_args.sender_balance {
         let sender_info = AccountInfo {
             balance,
@@ -193,17 +209,36 @@ pub fn create_initial_state(
             code: Some(Bytecode::default()),
             nonce: 0,
         };
-        cache_state.insert_account_with_storage(sender, sender_info, Default::default());
+        prestate.insert(sender, sender_info);
     }
 
-    Ok(State::builder().with_cached_prestate(cache_state).with_bundle_update().build())
+    Ok((prestate, storage))
+}
+
+/// Create initial state from prestate and optional provider
+pub async fn create_initial_state<N, P>(
+    provider: Option<P>,
+    fork_block: Option<u64>,
+    prestate: HashMap<Address, AccountInfo>,
+    storage: HashMap<Address, HashMap<U256, U256>>,
+) -> Result<EvmeState<N, P>>
+where
+    N: alloy_network::Network,
+    P: alloy_provider::Provider<N> + Clone + std::fmt::Debug,
+{
+    // Create the appropriate state based on whether provider is provided
+    if let Some(provider) = provider {
+        EvmeState::new_forked(provider, fork_block, prestate, storage).await
+    } else {
+        Ok(EvmeState::new_empty(prestate, storage))
+    }
 }
 
 /// Setup configuration environment
 pub fn setup_cfg_env(env_args: &EnvArgs) -> CfgEnv<MegaSpecId> {
     let mut cfg = CfgEnv::default();
     cfg.chain_id = env_args.chain_id;
-    cfg.spec = spec_id(&env_args.fork);
+    cfg.spec = spec_id(&env_args.hardfork);
     cfg
 }
 
@@ -277,11 +312,15 @@ pub fn dump_state(evm_state: &EvmState, dump_args: &StateDumpArgs) -> Result<()>
 }
 
 /// Execute transaction with optional tracing
-pub fn execute_transaction(
-    evm_context: MegaContext<&mut State<EmptyDB>, TestExternalEnvs>,
+pub fn execute_transaction<N, P>(
+    evm_context: MegaContext<&mut EvmeState<N, P>, TestExternalEnvs>,
     tx: MegaTransaction,
     trace_args: &TraceArgs,
-) -> Result<(ExecutionResult<mega_evm::MegaHaltReason>, EvmState, Option<String>)> {
+) -> Result<(ExecutionResult<mega_evm::MegaHaltReason>, EvmState, Option<String>)>
+where
+    N: alloy_network::Network,
+    P: alloy_provider::Provider<N> + std::fmt::Debug,
+{
     if matches!(trace_args.tracer, Some(TracerType::Trace)) {
         // Execute with tracing inspector
         let config = TracingInspectorConfig::all();

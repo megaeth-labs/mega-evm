@@ -34,6 +34,7 @@ pub use alloy_op_evm;
 pub use alloy_op_hardforks;
 pub use alloy_primitives;
 pub use alloy_sol_types;
+pub use alloy_hardforks;
 pub use op_alloy_consensus;
 pub use op_alloy_flz;
 pub use op_revm;

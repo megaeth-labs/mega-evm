@@ -16,6 +16,7 @@ workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
+alloy-hardforks.workspace = true
 alloy-op-evm.workspace = true
 alloy-op-hardforks.workspace = true
 alloy-primitives.workspace = true
@@ -25,7 +26,7 @@ op-alloy-flz.workspace = true
 op-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # revm
-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
+revm = { workspace = true, features = ["dev", "serde", "kzg-rs", "alloydb"] }
 
 # megaeth
 salt = { workspace = true, feature = ["test-bucket-resize"], optional = true }

@@ -9,12 +9,14 @@ use clap::Parser;
 use mega_evm::{
     revm::{
         context::{result::ExecutionResult, tx::TxEnv},
-        database::{EmptyDB, State},
         primitives::TxKind,
         state::EvmState,
+        DatabaseRef,
     },
     MegaContext, MegaTransaction,
 };
+
+use crate::run::EvmeState;
 
 use super::{load_input, Result};
 
@@ -44,7 +46,7 @@ pub struct Cmd {
     pub tx_type: u8,
 
     /// Gas limit for the evm
-    #[arg(long = "gas", default_value = "10000000")]
+    #[arg(long = "gas", default_value = "1000000000")]
     pub gas: u64,
 
     /// Price set for the evm (gas price)
@@ -62,6 +64,10 @@ pub struct Cmd {
     /// The transaction receiver (execution context)
     #[arg(long = "receiver", visible_aliases = ["to"], default_value = "0x0000000000000000000000000000000000000000")]
     pub receiver: Address,
+
+    /// The transaction nonce
+    #[arg(long = "nonce")]
+    pub nonce: Option<u64>,
 
     /// Indicates the action should be create rather than call
     #[arg(long = "create")]
@@ -90,13 +96,27 @@ struct TxResult {
 
 impl Cmd {
     /// Execute the tx command
-    pub fn run(&self) -> Result<()> {
+    pub async fn run(&self) -> Result<()> {
         // Step 1: Load input data
         let input = load_input(self.input.clone(), self.inputfile.clone())?;
 
         // Step 2: Setup initial state and environment
-        let mut state =
-            crate::run::create_initial_state(&self.prestate_args, &self.env_args, self.sender)?;
+        // Load prestate from file and sender balance
+        let (prestate, storage) = crate::run::load_prestate(&self.prestate_args, self.sender)?;
+
+        // Create provider if forking
+        let provider = if self.prestate_args.fork {
+            let url = self.prestate_args.fork_rpc.parse().map_err(|e| {
+                crate::run::RunError::RpcError(format!("Invalid RPC URL '{}': {}", self.prestate_args.fork_rpc, e))
+            })?;
+            eprintln!("Forking from RPC {}", self.prestate_args.fork_rpc);
+            Some(alloy_provider::ProviderBuilder::new().connect_http(url))
+        } else {
+            None
+        };
+
+        // Create initial state with provider (if any)
+        let mut state = crate::run::create_initial_state(provider, self.prestate_args.fork_block, prestate, storage).await?;
 
         // Step 3: Execute transaction
         let start = Instant::now();
@@ -111,7 +131,11 @@ impl Cmd {
     }
 
     /// Setup transaction environment
-    fn setup_tx_env(&self, input: &[u8]) -> TxEnv {
+    fn setup_tx_env<N, P>(&self, state: &EvmeState<N, P>, input: &[u8]) -> TxEnv
+    where
+        N: alloy_network::Network,
+        P: alloy_provider::Provider<N> + std::fmt::Debug,
+    {
         // Determine transaction data and kind based on create mode
         let (data, kind) = if self.create {
             // In create mode, input is the init code
@@ -120,6 +144,11 @@ impl Cmd {
             // In call mode, input is calldata
             (Bytes::copy_from_slice(input), TxKind::Call(self.receiver))
         };
+
+        // Get nonce from state
+        let nonce = self
+            .nonce
+            .unwrap_or_else(|| state.basic_ref(self.sender).unwrap().unwrap_or_default().nonce);
 
         TxEnv {
             caller: self.sender,
@@ -130,7 +159,7 @@ impl Cmd {
             tx_type: self.tx_type,
             gas_limit: self.gas,
             data,
-            nonce: 0,
+            nonce,
             value: self.value,
             access_list: Default::default(),
             authorization_list: Vec::new(),
@@ -141,15 +170,19 @@ impl Cmd {
 
     /// Execute EVM with the given state and input. State changes will not be committed to
     /// the state database.
-    fn execute(
+    fn execute<N, P>(
         &self,
-        state: &mut State<EmptyDB>,
+        state: &mut EvmeState<N, P>,
         input: &[u8],
-    ) -> Result<(ExecutionResult<mega_evm::MegaHaltReason>, EvmState, Option<String>)> {
+    ) -> Result<(ExecutionResult<mega_evm::MegaHaltReason>, EvmState, Option<String>)>
+    where
+        N: alloy_network::Network,
+        P: alloy_provider::Provider<N> + std::fmt::Debug,
+    {
         // Setup configuration, block, transaction environments, and external environments
         let cfg = crate::run::setup_cfg_env(&self.env_args);
         let block = crate::run::setup_block_env(&self.env_args);
-        let tx_env = self.setup_tx_env(input);
+        let tx_env = self.setup_tx_env(state, input);
         let external_envs = crate::run::setup_external_envs(&self.env_args.bucket_capacity)?;
 
         // Create EVM context and transaction

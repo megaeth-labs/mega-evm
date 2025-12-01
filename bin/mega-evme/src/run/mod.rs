@@ -5,10 +5,13 @@
 
 mod cmd;
 mod common;
+mod state;
 
 pub use cmd::*;
 pub use common::*;
+pub use state::*;
 use mega_evm::revm::state::EvmState;
+
 
 use std::{collections::HashMap, fs, io::Read};
 
@@ -32,7 +35,14 @@ pub enum RunError {
     /// Invalid input
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// RPC error
+    #[error("RPC error: {0}")]
+    RpcError(String),
 }
+
+// Implement DBErrorMarker to allow RunError to be used as Database error type
+impl mega_evm::revm::database::DBErrorMarker for RunError {}
 
 /// Result type for the run command
 pub type Result<T> = std::result::Result<T, RunError>;

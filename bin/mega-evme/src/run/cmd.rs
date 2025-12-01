@@ -8,14 +8,13 @@ use clap::{Parser, ValueEnum};
 use mega_evm::{
     revm::{
         context::{result::ExecutionResult, tx::TxEnv},
-        database::{EmptyDB, State},
         primitives::TxKind,
         state::{AccountInfo, Bytecode, EvmState},
     },
     MegaContext, MegaTransaction,
 };
 
-use super::{load_code, load_input, Result};
+use super::{load_code, load_input, EvmeState, Result};
 
 /// Tracer type for execution analysis
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -108,7 +107,7 @@ struct RunResult {
 
 impl Cmd {
     /// Execute the run command
-    pub fn run(&self) -> Result<()> {
+    pub async fn run(&self) -> Result<()> {
         // Step 1: Load bytecode
         let code = load_code(self.code.clone(), self.codefile.clone())?;
 
@@ -119,7 +118,40 @@ impl Cmd {
         )?;
 
         // Step 3: Setup initial state and environment
-        let mut state = self.create_initial_state(&code)?;
+        // Load prestate from file and sender balance
+        let (mut prestate, storage) = super::load_prestate(&self.prestate_args, self.sender)?;
+
+        // Run-specific: If not in create mode, set the code at the receiver address
+        if !self.create && !code.is_empty() {
+            let bytecode = Bytecode::new_raw_checked(Bytes::copy_from_slice(&code))
+                .unwrap_or_else(|_| Bytecode::new_legacy(Bytes::copy_from_slice(&code)));
+            let code_hash = bytecode.hash_slow();
+
+            let acc_info =
+                AccountInfo { balance: U256::ZERO, code_hash, code: Some(bytecode), nonce: 0 };
+
+            // Insert account into prestate
+            prestate.insert(self.receiver, acc_info);
+        }
+
+        // Create provider if forking
+        let provider = if self.prestate_args.fork {
+            let url = self.prestate_args.fork_rpc.parse().map_err(|e| {
+                super::RunError::RpcError(format!(
+                    "Invalid RPC URL '{}': {}",
+                    self.prestate_args.fork_rpc, e
+                ))
+            })?;
+            eprintln!("Forking from RPC {}", self.prestate_args.fork_rpc);
+            Some(alloy_provider::ProviderBuilder::new().connect_http(url))
+        } else {
+            None
+        };
+
+        // Create initial state with provider (if any)
+        let mut state =
+            super::create_initial_state(provider, self.prestate_args.fork_block, prestate, storage)
+                .await?;
 
         // Step 4: Execute bytecode
         let result = if self.bench {
@@ -134,35 +166,17 @@ impl Cmd {
         Ok(())
     }
 
-    /// Create initial state from prestate (if provided) or empty state
-    fn create_initial_state(&self, code: &[u8]) -> Result<State<EmptyDB>> {
-        // Use shared function to create initial state
-        let mut state =
-            super::create_initial_state(&self.prestate_args, &self.env_args, self.sender)?;
-
-        // Run-specific: If not in create mode, set the code at the receiver address
-        if !self.create && !code.is_empty() {
-            let bytecode = Bytecode::new_raw_checked(Bytes::copy_from_slice(code))
-                .unwrap_or_else(|_| Bytecode::new_legacy(Bytes::copy_from_slice(code)));
-            let code_hash = bytecode.hash_slow();
-
-            let acc_info =
-                AccountInfo { balance: U256::ZERO, code_hash, code: Some(bytecode), nonce: 0 };
-
-            // Get mutable access to cache state
-            state.cache.insert_account_with_storage(self.receiver, acc_info, Default::default());
-        }
-
-        Ok(state)
-    }
-
     /// Execute bytecode once
-    fn execute_once(
+    fn execute_once<N, P>(
         &self,
-        state: &mut State<EmptyDB>,
+        state: &mut EvmeState<N, P>,
         code: &[u8],
         input: &[u8],
-    ) -> Result<RunResult> {
+    ) -> Result<RunResult>
+    where
+        N: alloy_network::Network,
+        P: alloy_provider::Provider<N> + std::fmt::Debug,
+    {
         let start = Instant::now();
 
         let (exec_result, evm_state, trace_data) = self.execute(state, code, input)?;
@@ -173,12 +187,16 @@ impl Cmd {
     }
 
     /// Execute bytecode multiple times for benchmarking
-    fn execute_benchmark(
+    fn execute_benchmark<N, P>(
         &self,
-        state: &mut State<EmptyDB>,
+        state: &mut EvmeState<N, P>,
         code: &[u8],
         input: &[u8],
-    ) -> Result<RunResult> {
+    ) -> Result<RunResult>
+    where
+        N: alloy_network::Network,
+        P: alloy_provider::Provider<N> + std::fmt::Debug,
+    {
         // Warm-up run
         let (exec_result, evm_state, trace_data) = self.execute(state, code, input)?;
 
@@ -230,12 +248,16 @@ impl Cmd {
 
     /// Execute EVM with the given state, code, and input. State changes will not be committed to
     /// the state database.
-    fn execute(
+    fn execute<N, P>(
         &self,
-        state: &mut State<EmptyDB>,
+        state: &mut EvmeState<N, P>,
         code: &[u8],
         input: &[u8],
-    ) -> Result<(ExecutionResult<mega_evm::MegaHaltReason>, EvmState, Option<String>)> {
+    ) -> Result<(ExecutionResult<mega_evm::MegaHaltReason>, EvmState, Option<String>)>
+    where
+        N: alloy_network::Network,
+        P: alloy_provider::Provider<N> + std::fmt::Debug,
+    {
         // Setup configuration, block, transaction environments, and external environments
         let cfg = super::setup_cfg_env(&self.env_args);
         let block = super::setup_block_env(&self.env_args);

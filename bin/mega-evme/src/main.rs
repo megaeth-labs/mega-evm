@@ -6,6 +6,8 @@
 use clap::Parser;
 
 mod cmd;
+/// Replay module for fetching and executing transactions from RPC
+pub mod replay;
 /// Run module for executing arbitrary EVM bytecode
 pub mod run;
 /// T8N (state transition) module containing all transition-related functionality
@@ -15,9 +17,10 @@ pub mod tx;
 
 pub use cmd::*;
 
-fn main() -> Result<(), Error> {
+#[tokio::main]
+async fn main() -> Result<(), Error> {
     set_thread_panic_hook();
-    MainCmd::parse().run().inspect_err(|e| println!("{e:?}"))
+    MainCmd::parse().run().await.inspect_err(|e| println!("{e:?}"))
 }
 
 /// Sets thread panic hook, useful for having tests that panic.

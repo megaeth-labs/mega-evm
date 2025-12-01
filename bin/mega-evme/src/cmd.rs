@@ -11,6 +11,8 @@ pub enum MainCmd {
     Run(crate::run::Cmd),
     /// Run arbitrary transaction
     Tx(crate::tx::Cmd),
+    /// Replay a transaction from RPC
+    Replay(crate::replay::Cmd),
 }
 
 /// Error types for the main command system
@@ -25,22 +27,29 @@ pub enum Error {
     /// Run/Tx tool error (`TxError` is an alias to `RunError`)
     #[error("Run/Tx error: {0}")]
     Run(#[from] crate::run::RunError),
+    /// Replay tool error
+    #[error("Replay error: {0}")]
+    Replay(#[from] crate::replay::ReplayError),
 }
 
 impl MainCmd {
     /// Execute the main command
-    pub fn run(&self) -> Result<(), Error> {
+    pub async fn run(&self) -> Result<(), Error> {
         match self {
             Self::T8n(cmd) => {
                 cmd.run()?;
                 Ok(())
             }
             Self::Run(cmd) => {
-                cmd.run()?;
+                cmd.run().await?;
                 Ok(())
             }
             Self::Tx(cmd) => {
-                cmd.run()?;
+                cmd.run().await?;
+                Ok(())
+            }
+            Self::Replay(cmd) => {
+                cmd.run().await?;
                 Ok(())
             }
         }
