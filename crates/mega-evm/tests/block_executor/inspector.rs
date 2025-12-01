@@ -70,8 +70,8 @@ fn test_inspector_works_with_block_executor() {
     use mega_evm::MegaHardfork;
     let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);

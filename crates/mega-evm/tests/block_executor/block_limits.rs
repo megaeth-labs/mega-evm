@@ -151,8 +151,8 @@ fn test_block_custom_data_limit() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -223,8 +223,8 @@ fn test_block_custom_kv_update_limit() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -286,8 +286,8 @@ fn test_block_multiple_transactions_within_limits() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -350,8 +350,8 @@ fn test_block_data_limit_exceeded_mid_block() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -423,8 +423,8 @@ fn test_block_kv_limit_exceeded_mid_block() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -495,8 +495,8 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -562,8 +562,8 @@ fn test_block_tx_size_limit_default_unlimited() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -631,8 +631,8 @@ fn test_block_tx_size_limit_allows_multiple_transactions() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -692,8 +692,8 @@ fn test_block_tx_size_limit_exceeded_first_transaction() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -761,8 +761,8 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -839,8 +839,8 @@ fn test_block_tx_size_limit_with_varying_sizes() {
     // Create block executor with MiniRex hardfork activated
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 

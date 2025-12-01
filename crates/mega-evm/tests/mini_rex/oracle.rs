@@ -598,8 +598,8 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
     // Configure hardforks with MiniRex activated at timestamp 0
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
 
     // Create receipt builder (use concrete OpAlloyReceiptBuilder type)
     use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;

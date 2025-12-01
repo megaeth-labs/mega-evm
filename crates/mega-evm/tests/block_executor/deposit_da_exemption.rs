@@ -125,8 +125,8 @@ fn test_deposit_transaction_exempt_from_single_tx_da_limit() {
 
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -188,8 +188,8 @@ fn test_regular_transaction_rejected_by_single_tx_da_limit() {
 
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -250,8 +250,8 @@ fn test_deposit_exempt_from_block_da_limit() {
 
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -313,8 +313,8 @@ fn test_mixed_deposit_and_regular_transactions() {
 
     use alloy_hardforks::ForkCondition;
     use mega_evm::MegaHardfork;
-    let chain_spec = MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
