@@ -2166,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "0.0.1"
+version = "1.0.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -2199,7 +2199,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evme"
-version = "0.0.1"
+version = "1.0.1"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -3487,7 +3487,7 @@ dependencies = [
 
 [[package]]
 name = "state-test"
-version = "0.0.1"
+version = "1.0.1"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
