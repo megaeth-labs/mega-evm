@@ -4,11 +4,10 @@ use alloy_evm::{
     block::BlockExecutorFor, Database, EvmEnv, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
 };
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-use alloy_op_hardforks::OpHardforks;
 use alloy_primitives::{Bytes, B256};
 use revm::{database::State, inspector::NoOpInspector, Inspector};
 
-use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaSpecId, MegaTxEnvelope};
+use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaHardforks, MegaSpecId, MegaTxEnvelope};
 
 /// `MegaETH` block executor factory.
 ///
@@ -19,7 +18,7 @@ use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaSpecId, MegaTxEnvelope}
 ///
 /// # Generic Parameters
 ///
-/// - `ChainSpec`: The chain specification implementing [`OpHardforks`]
+/// - `Hardforks`: The hardforks implementing [`MegaHardforks`]
 /// - `EvmF`: The EVM factory type implementing [`alloy_evm::EvmFactory`]
 /// - `ReceiptBuilder`: The receipt builder implementing [`OpReceiptBuilder`] to build op-stack
 ///   receipts
@@ -30,13 +29,13 @@ use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaSpecId, MegaTxEnvelope}
 /// to the underlying Optimism EVM implementation while providing MegaETH-specific
 /// customizations through the configured chain specification and EVM factory.
 #[derive(Debug, Clone)]
-pub struct MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> {
+pub struct MegaBlockExecutorFactory<Hardforks, EvmF, ReceiptBuilder> {
     receipt_builder: ReceiptBuilder,
-    spec: ChainSpec,
+    hardforks: Hardforks,
     evm_factory: EvmF,
 }
 
-impl<ChainSpec, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>
+impl<Hardforks, EvmF, ReceiptBuilder> MegaBlockExecutorFactory<Hardforks, EvmF, ReceiptBuilder>
 where
     ReceiptBuilder: OpReceiptBuilder,
 {
@@ -51,8 +50,8 @@ where
     /// # Returns
     ///
     /// A new `BlockExecutorFactory` instance configured with the provided parameters.
-    pub fn new(spec: ChainSpec, evm_factory: EvmF, receipt_builder: ReceiptBuilder) -> Self {
-        Self { receipt_builder, spec, evm_factory }
+    pub fn new(hardforks: Hardforks, evm_factory: EvmF, receipt_builder: ReceiptBuilder) -> Self {
+        Self { receipt_builder, hardforks, evm_factory }
     }
 
     /// Returns a reference to the EVM factory.
@@ -66,10 +65,10 @@ where
     }
 }
 
-impl<ChainSpec, ExtEnvFactory, ReceiptBuilder>
-    MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvFactory>, ReceiptBuilder>
+impl<Hardforks, ExtEnvFactory, ReceiptBuilder>
+    MegaBlockExecutorFactory<Hardforks, crate::MegaEvmFactory<ExtEnvFactory>, ReceiptBuilder>
 where
-    ChainSpec: OpHardforks + Clone,
+    Hardforks: MegaHardforks + Clone,
     ReceiptBuilder: OpReceiptBuilder<Transaction: Transaction + Encodable2718> + Clone,
     crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>,
     ExtEnvFactory: crate::ExternalEnvFactory + Clone,
@@ -91,7 +90,7 @@ where
         block_ctx: MegaBlockExecutionCtx,
         evm_env: EvmEnv<MegaSpecId>,
     ) -> MegaBlockExecutor<
-        ChainSpec,
+        Hardforks,
         MegaEvm<&'a mut State<DB>, NoOpInspector, ExtEnvFactory::EnvTypes>,
         ReceiptBuilder,
     >
@@ -100,7 +99,7 @@ where
     {
         let runtime_limits = block_ctx.block_limits.to_evm_tx_runtime_limits();
         let evm = self.evm_factory.create_evm(db, evm_env).with_tx_runtime_limits(runtime_limits);
-        MegaBlockExecutor::new(evm, block_ctx, self.spec.clone(), self.receipt_builder.clone())
+        MegaBlockExecutor::new(evm, block_ctx, self.hardforks.clone(), self.receipt_builder.clone())
     }
 
     /// Create a new block executor with an inspector.
@@ -122,7 +121,7 @@ where
         evm_env: EvmEnv<MegaSpecId>,
         inspector: I,
     ) -> MegaBlockExecutor<
-        ChainSpec,
+        Hardforks,
         MegaEvm<&'a mut State<DB>, I, ExtEnvFactory::EnvTypes>,
         ReceiptBuilder,
     >
@@ -135,15 +134,15 @@ where
             .evm_factory
             .create_evm_with_inspector(db, evm_env, inspector)
             .with_tx_runtime_limits(runtime_limits);
-        MegaBlockExecutor::new(evm, block_ctx, self.spec.clone(), self.receipt_builder.clone())
+        MegaBlockExecutor::new(evm, block_ctx, self.hardforks.clone(), self.receipt_builder.clone())
     }
 }
 
-impl<ChainSpec, ExtEnvFactory, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
-    for MegaBlockExecutorFactory<ChainSpec, crate::MegaEvmFactory<ExtEnvFactory>, ReceiptBuilder>
+impl<Hardforks, ExtEnvFactory, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
+    for MegaBlockExecutorFactory<Hardforks, crate::MegaEvmFactory<ExtEnvFactory>, ReceiptBuilder>
 where
     ReceiptBuilder: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
-    ChainSpec: OpHardforks + Clone,
+    Hardforks: MegaHardforks + Clone,
     ExtEnvFactory: crate::ExternalEnvFactory + Clone,
     crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>
         + FromTxWithEncoded<ReceiptBuilder::Transaction>,
@@ -167,7 +166,7 @@ where
         DB: Database + 'a,
         I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<&'a mut State<DB>>> + 'a,
     {
-        MegaBlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
+        MegaBlockExecutor::new(evm, ctx, &self.hardforks, &self.receipt_builder)
     }
 }
 

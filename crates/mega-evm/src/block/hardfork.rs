@@ -1,14 +1,15 @@
-use alloy_hardforks::{hardfork, EthereumHardfork, ForkCondition, Hardfork};
+use alloy_hardforks::{hardfork, EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork};
 use alloy_op_hardforks::{OpHardfork, OpHardforks};
 use alloy_primitives::{BlockNumber, BlockTimestamp, U256};
 use auto_impl::auto_impl;
-use revm::primitives::HashMap;
+
+use crate::MegaSpecId;
 
 hardfork! {
     /// The name of MegaETH hardforks. It is expected to mix with [`EthereumHardfork`] and
     /// [`OpHardfork`].
     #[derive(serde::Serialize, serde::Deserialize)]
-    MegaethHardfork {
+    MegaHardfork {
         /// The first hardfork.
         MiniRex,
         /// The second hardfork.
@@ -16,12 +17,22 @@ hardfork! {
     }
 }
 
+impl MegaHardfork {
+    /// Gets the `MegaSpecId` associated with this hardfork.
+    pub fn spec_id(&self) -> MegaSpecId {
+        match self {
+            MegaHardfork::MiniRex => MegaSpecId::MINI_REX,
+            MegaHardfork::Rex => MegaSpecId::REX,
+        }
+    }
+}
+
 /// Extends [`OpHardforks`] with MegaETH helper methods.
 #[auto_impl(&, Box, Arc)]
-pub trait MegaethHardforks: OpHardforks {
+pub trait MegaHardforks: OpHardforks {
     /// Retrieves [`ForkCondition`] by a [`MegaethHardfork`]. If `fork` is not present, returns
     /// [`ForkCondition::Never`].
-    fn megaeth_fork_activation(&self, fork: MegaethHardfork) -> ForkCondition;
+    fn megaeth_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
 
     /// Returns `true` if the given [`MegaethHardfork`] is the hardfork to be activated at the
     /// given timestamp. One special case is that if the current block is the first block of the
@@ -31,7 +42,7 @@ pub trait MegaethHardforks: OpHardforks {
     /// initialization logic should be applied. This helper method is used for this purpose.
     fn first_hardfork_block(
         &self,
-        fork: MegaethHardfork,
+        fork: MegaHardfork,
         parent_timestamp: BlockTimestamp,
         current_number_and_timestamp: (BlockNumber, BlockTimestamp),
     ) -> bool {
@@ -41,25 +52,50 @@ pub trait MegaethHardforks: OpHardforks {
                 !self.megaeth_fork_activation(fork).active_at_timestamp(parent_timestamp))
     }
 
+    /// Gets the expected `MegaSpecId` for a block with the given timestamp.
+    fn spec_id(&self, timestamp: BlockTimestamp) -> MegaSpecId {
+        // Newer hardforks should be checked first
+        if self.is_rex_active_at_timestamp(timestamp) {
+            MegaSpecId::REX
+        } else if self.is_mini_rex_active_at_timestamp(timestamp) {
+            MegaSpecId::MINI_REX
+        } else {
+            MegaSpecId::EQUIVALENCE
+        }
+    }
+
     /// Returns `true` if [`MegaethHardfork::MiniRex`] is active at given block timestamp.
     fn is_mini_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.megaeth_fork_activation(MegaethHardfork::MiniRex).active_at_timestamp(timestamp)
+        self.megaeth_fork_activation(MegaHardfork::MiniRex).active_at_timestamp(timestamp)
     }
 
     /// Returns `true` if [`MegaethHardfork::Rex`] is active at given block timestamp.
     fn is_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.megaeth_fork_activation(MegaethHardfork::Rex).active_at_timestamp(timestamp)
+        self.megaeth_fork_activation(MegaHardfork::Rex).active_at_timestamp(timestamp)
     }
 }
 
+/// Configuration of the hardforks for MegaETH. It by default includes no `MegaHardfork` but
+/// includes all hardforks before and including Optimism Isthmus. Optimism Isthmus is the hardfork
+/// where MegaETH is established.
 #[derive(Debug, Clone)]
 pub struct MegaHardforkConfig {
-    hardforks: HashMap<Box<dyn Hardfork>, ForkCondition>,
+    hardforks: Vec<(Box<dyn Hardfork>, ForkCondition)>,
 }
 
 impl Default for MegaHardforkConfig {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<I, H> From<I> for MegaHardforkConfig
+where
+    I: Iterator<Item = (H, ForkCondition)>,
+    H: Hardfork + 'static,
+{
+    fn from(iter: I) -> Self {
+        Self { hardforks: iter.map(|(h, c)| (Box::new(h) as Box<dyn Hardfork>, c)).collect() }
     }
 }
 
@@ -69,7 +105,7 @@ impl MegaHardforkConfig {
     /// MegaETH is established.
     pub fn new() -> Self {
         Self {
-            hardforks: HashMap::from_iter([
+            hardforks: vec![
                 (EthereumHardfork::Frontier.boxed(), ForkCondition::Block(0)),
                 (EthereumHardfork::Homestead.boxed(), ForkCondition::Block(0)),
                 (EthereumHardfork::Dao.boxed(), ForkCondition::Block(0)),
@@ -100,13 +136,59 @@ impl MegaHardforkConfig {
                 (OpHardfork::Holocene.boxed(), ForkCondition::Timestamp(0)),
                 (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
                 (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
-            ]),
+            ],
         }
+    }
+
+    /// Creates a new hardfork configuration with the given hardfork and condition.
+    pub fn with(mut self, hardfork: impl Hardfork, condition: ForkCondition) -> Self {
+        self.insert(hardfork, condition);
+        self
     }
 
     /// Inserts a new hardfork into the configuration. If the hardfork is already present, it will
     /// be overwritten.
     pub fn insert(&mut self, hardfork: impl Hardfork, condition: ForkCondition) {
-        self.hardforks.push((Box::new(hardfork), condition));
+        let index = self.hardforks.iter().position(|(h, _)| h.name() == hardfork.name());
+        if let Some(index) = index {
+            self.hardforks[index] = (Box::new(hardfork), condition);
+        } else {
+            self.hardforks.push((Box::new(hardfork), condition));
+        }
+    }
+
+    /// Gets `ForkCondition` by a [`Hardfork`]. If the hardfork is not present, returns `None`.
+    pub fn get(&self, hardfork: impl Hardfork) -> Option<&ForkCondition> {
+        self.hardforks
+            .iter()
+            .find(|(h, _)| h.name() == hardfork.name())
+            .map(|(_, condition)| condition)
+    }
+}
+
+impl EthereumHardforks for MegaHardforkConfig {
+    fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
+        match self.get(fork) {
+            Some(condition) => *condition,
+            None => ForkCondition::Never,
+        }
+    }
+}
+
+impl OpHardforks for MegaHardforkConfig {
+    fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
+        match self.get(fork) {
+            Some(condition) => *condition,
+            None => ForkCondition::Never,
+        }
+    }
+}
+
+impl MegaHardforks for MegaHardforkConfig {
+    fn megaeth_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
+        match self.get(fork) {
+            Some(condition) => *condition,
+            None => ForkCondition::Never,
+        }
     }
 }

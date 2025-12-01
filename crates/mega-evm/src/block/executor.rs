@@ -25,8 +25,8 @@ use revm::{
 
 use crate::{
     ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
-    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaSpecId,
-    MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
+    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
+    MegaSpecId, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -49,7 +49,7 @@ use crate::{
 /// The delegation ensures minimal overhead while maintaining full compatibility with
 /// the Optimism EVM infrastructure.
 pub struct MegaBlockExecutor<C, E, R: OpReceiptBuilder> {
-    chain_spec: C,
+    hardforks: C,
     receipt_builder: R,
     ctx: MegaBlockExecutionCtx,
     evm: E,
@@ -67,9 +67,9 @@ impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> 
     }
 }
 
-impl<C, E, R> MegaBlockExecutor<C, E, R>
+impl<H, E, R> MegaBlockExecutor<H, E, R>
 where
-    C: OpHardforks + Clone,
+    H: MegaHardforks + Clone,
     E: alloy_evm::Evm<Tx: FromRecoveredTx<R::Transaction>>,
     R: OpReceiptBuilder,
 {
@@ -79,25 +79,27 @@ where
     ///
     /// - `evm`: The EVM instance to use for transaction execution
     /// - `ctx`: The block execution context for tracking access patterns
-    /// - `spec`: The chain specification implementing [`OpHardforks`]
+    /// - `hardforks`: The hardforks configuration implementing [`MegaHardforks`]
     /// - `receipt_builder`: The receipt builder for processing transaction receipts
     ///
     /// # Returns
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
-    pub fn new(evm: E, ctx: MegaBlockExecutionCtx, spec: C, receipt_builder: R) -> Self {
+    pub fn new(evm: E, ctx: MegaBlockExecutionCtx, hardforks: H, receipt_builder: R) -> Self {
+        // TODO: add sanity check to ensure the spec id matches the hardfork
+
         // do some safety check on hardforks
         let timestamp = evm.block().timestamp.saturating_to();
         assert!(
-            spec.is_regolith_active_at_timestamp(timestamp),
+            hardforks.is_regolith_active_at_timestamp(timestamp),
             "mega-evm assumes Regolith hardfork is not active"
         );
         assert!(
-            spec.is_canyon_active_at_timestamp(timestamp),
+            hardforks.is_canyon_active_at_timestamp(timestamp),
             "mega-evm assumes Canyon hardfork is always active"
         );
         assert!(
-            spec.is_isthmus_active_at_timestamp(timestamp),
+            hardforks.is_isthmus_active_at_timestamp(timestamp),
             "mega-evm assumes Isthmus hardfork is always active"
         );
 
@@ -108,13 +110,13 @@ where
         );
 
         Self {
-            chain_spec: spec.clone(),
+            hardforks: hardforks.clone(),
             receipt_builder,
             receipts: Vec::new(),
             block_limiter: ctx.block_limits.to_block_limiter(),
             ctx,
             evm,
-            system_caller: SystemCaller::new(spec),
+            system_caller: SystemCaller::new(hardforks),
         }
     }
 
@@ -374,7 +376,7 @@ where
         mut self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
         let balance_increments =
-            post_block_balance_increments::<Header>(&self.chain_spec, self.evm.block(), &[], None);
+            post_block_balance_increments::<Header>(&self.hardforks, self.evm.block(), &[], None);
         // increment balances
         self.evm
             .db_mut()

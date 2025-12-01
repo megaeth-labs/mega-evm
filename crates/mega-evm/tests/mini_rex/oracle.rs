@@ -5,8 +5,8 @@ use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::mini_rex::{ORACLE_ACCESS_REMAINING_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
+    BlockLimits, MegaContext, MegaEvm, MegaHaltReason, MegaHardforkConfig, MegaSpecId,
+    MegaTransaction, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{
@@ -597,7 +597,7 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
     );
 
     // Try Base mainnet which should have the right hardfork configuration
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
 
     // Create receipt builder (use concrete OpAlloyReceiptBuilder type)
     use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;

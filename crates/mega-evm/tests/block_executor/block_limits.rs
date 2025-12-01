@@ -9,12 +9,11 @@ use alloy_consensus::{Signed, Transaction, TxLegacy};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_op_hardforks::OpChainHardforks;
 use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaSpecId,
-    MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
+    MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{ADD, DUP1, LOG0, PUSH0, SLOAD, SSTORE},
@@ -150,7 +149,7 @@ fn test_block_custom_data_limit() {
     ); // 2.5 KB data limit
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -219,7 +218,7 @@ fn test_block_custom_kv_update_limit() {
     ); // Very low limit - first tx will exceed it
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -279,7 +278,7 @@ fn test_block_multiple_transactions_within_limits() {
     ); // 10 KB data limit and 1000 KV update limit
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -340,7 +339,7 @@ fn test_block_data_limit_exceeded_mid_block() {
     ); // 6 KB data limit
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -410,7 +409,7 @@ fn test_block_kv_limit_exceeded_mid_block() {
     ); // 1 KV update limit - first tx will exceed it
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -479,7 +478,7 @@ fn test_block_no_state_commit_on_limit_exceeded() {
     ); // Zero limit
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -543,7 +542,7 @@ fn test_block_tx_size_limit_default_unlimited() {
     );
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -609,7 +608,7 @@ fn test_block_tx_size_limit_allows_multiple_transactions() {
     );
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -667,7 +666,7 @@ fn test_block_tx_size_limit_exceeded_first_transaction() {
     ); // Very small limit
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -733,7 +732,7 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
     );
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -808,7 +807,7 @@ fn test_block_tx_size_limit_with_varying_sizes() {
     );
 
     // Create block executor
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec = MegaHardforkConfig::default();
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
