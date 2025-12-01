@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use alloy_consensus::BlockHeader;
+use alloy_network::TransactionResponse;
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Block;
@@ -198,6 +199,7 @@ impl Cmd {
         // Step x: Setup EVM and Block executor
         // Step 5: Execute transactions with inspector
         let result = if self.use_v1_0_1 {
+            eprintln!("execute tx v1.0.1");
             self.execute_transactions_v1_0_1(
                 &mut database,
                 &parent_block,
@@ -298,6 +300,7 @@ impl Cmd {
         }
 
         // Execute target transaction
+        block_executor.inspector_mut().fuse();
         let outcome = block_executor
             .execute_mega_transaction(target_tx.as_recovered())
             .map_err(ReplayError::BlockExecutionError)?;
@@ -377,15 +380,19 @@ impl Cmd {
         let spec_v1 = match self.env_args.spec_id() {
             MegaSpecId::EQUIVALENCE => mega_evm_v1::MegaSpecId::EQUIVALENCE,
             MegaSpecId::MINI_REX => mega_evm_v1::MegaSpecId::MINI_REX,
-            _ => return Err(ReplayError::RunError(run::RunError::ExecutionError(
-                format!("Unsupported spec id for v1.0.1: {:?}", self.env_args.spec_id())
-            ))),
+            _ => {
+                return Err(ReplayError::RunError(run::RunError::ExecutionError(format!(
+                    "Unsupported spec id for v1.0.1: {:?}",
+                    self.env_args.spec_id()
+                ))))
+            }
         };
 
         // Note: FixedHardfork is shared between versions, but spec types differ
         // We need to create a separate FixedHardfork for v1.0.1
         let chain_spec_v1 = FixedHardforkV1 { spec: spec_v1 };
-        let external_env_factory_v1: mega_evm_v1::DefaultExternalEnvs = mega_evm_v1::DefaultExternalEnvs::new();
+        let external_env_factory_v1: mega_evm_v1::DefaultExternalEnvs =
+            mega_evm_v1::DefaultExternalEnvs::new();
         let evm_factory_v1 = mega_evm_v1::MegaEvmFactory::new(external_env_factory_v1);
         let block_executor_factory_v1 = mega_evm_v1::MegaBlockExecutorFactory::new(
             chain_spec_v1,
@@ -394,8 +401,12 @@ impl Cmd {
         );
 
         let block_limits_v1 = match spec_v1 {
-            mega_evm_v1::MegaSpecId::EQUIVALENCE => mega_evm_v1::BlockLimits::no_limits().fit_equivalence(),
-            mega_evm_v1::MegaSpecId::MINI_REX => mega_evm_v1::BlockLimits::no_limits().fit_mini_rex(),
+            mega_evm_v1::MegaSpecId::EQUIVALENCE => {
+                mega_evm_v1::BlockLimits::no_limits().fit_equivalence()
+            }
+            mega_evm_v1::MegaSpecId::MINI_REX => {
+                mega_evm_v1::BlockLimits::no_limits().fit_mini_rex()
+            }
             _ => unreachable!(),
         };
 
@@ -415,12 +426,13 @@ impl Cmd {
 
         // Create state and block executor with inspector using v1.0.1
         use mega_evm::revm::database::StateBuilder;
-        let mut state_v1 =
-            StateBuilder::new().with_database(database).with_bundle_update().build();
+        let mut state_v1 = StateBuilder::new().with_database(database).with_bundle_update().build();
 
         // Convert EvmEnv to match what v1.0.1 expects
-        use mega_evm::alloy_evm::EvmEnv as EvmEnvCurrent;
-        use mega_evm::revm::context::{cfg::CfgEnv, BlockEnv as RevmBlockEnv};
+        use mega_evm::{
+            alloy_evm::EvmEnv as EvmEnvCurrent,
+            revm::context::{cfg::CfgEnv, BlockEnv as RevmBlockEnv},
+        };
 
         let mut cfg_v1 = CfgEnv::default();
         cfg_v1.chain_id = evm_env.cfg_env.chain_id;
@@ -448,7 +460,9 @@ impl Cmd {
         );
 
         // Apply pre-execution changes
-        block_executor_v1.apply_pre_execution_changes().map_err(ReplayError::BlockExecutionError)?;
+        block_executor_v1
+            .apply_pre_execution_changes()
+            .map_err(ReplayError::BlockExecutionError)?;
 
         // Execute preceding transactions
         for tx_hash in preceeding_transactions {
@@ -467,6 +481,7 @@ impl Cmd {
         }
 
         // Execute target transaction
+        block_executor_v1.inspector_mut().fuse();
         let outcome = block_executor_v1
             .execute_mega_transaction(target_tx.as_recovered())
             .map_err(ReplayError::BlockExecutionError)?;
@@ -522,13 +537,7 @@ impl Cmd {
         // The structures are the same, but the HaltReason type parameter differs
         let exec_result_current = match exec_result {
             ExecutionResult::Success { reason, gas_used, gas_refunded, logs, output } => {
-                ExecutionResult::Success {
-                    reason,
-                    gas_used,
-                    gas_refunded,
-                    logs,
-                    output,
-                }
+                ExecutionResult::Success { reason, gas_used, gas_refunded, logs, output }
             }
             ExecutionResult::Revert { gas_used, output } => {
                 ExecutionResult::Revert { gas_used, output }
@@ -538,13 +547,10 @@ impl Cmd {
                 // Since we can't directly convert between enum types from different versions,
                 // we'll use a generic halt reason from the base revm type
                 use mega_evm::EthHaltReason;
-                let reason_current = mega_evm::MegaHaltReason::Base(
-                    mega_evm::OpHaltReason::Base(EthHaltReason::PrecompileError)
-                );
-                ExecutionResult::Halt {
-                    reason: reason_current,
-                    gas_used,
-                }
+                let reason_current = mega_evm::MegaHaltReason::Base(mega_evm::OpHaltReason::Base(
+                    EthHaltReason::PrecompileError,
+                ));
+                ExecutionResult::Halt { reason: reason_current, gas_used }
             }
         };
 

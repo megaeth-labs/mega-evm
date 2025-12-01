@@ -117,6 +117,11 @@ where
             system_caller: SystemCaller::new(spec),
         }
     }
+
+    /// Get a mutable reference to the inspector.
+    pub fn inspector_mut(&mut self) -> &mut <E as alloy_evm::Evm>::Inspector {
+        self.evm.inspector_mut()
+    }
 }
 
 impl<'db, DB, C, R, INSP, ExtEnvs>
