@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use alloy_consensus::BlockHeader;
-use alloy_network::TransactionResponse;
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Block;
@@ -28,7 +27,7 @@ use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
-use crate::run;
+use crate::{common::FixedHardfork, run};
 
 use super::{ReplayError, Result};
 
@@ -71,16 +70,6 @@ struct ReplayResult {
     trace_data: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct FixedHardfork {
-    pub spec: MegaSpecId,
-}
-
-impl FixedHardfork {
-    pub fn new(spec: MegaSpecId) -> Self {
-        Self { spec }
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 struct FixedHardforkV1 {
@@ -98,26 +87,6 @@ impl EthereumHardforks for FixedHardforkV1 {
 }
 
 impl OpHardforks for FixedHardforkV1 {
-    fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
-        if fork <= OpHardfork::Isthmus {
-            ForkCondition::Timestamp(0)
-        } else {
-            ForkCondition::Never
-        }
-    }
-}
-
-impl EthereumHardforks for FixedHardfork {
-    fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
-        if fork <= EthereumHardfork::Prague {
-            ForkCondition::Timestamp(0)
-        } else {
-            ForkCondition::Never
-        }
-    }
-}
-
-impl OpHardforks for FixedHardfork {
     fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
         if fork <= OpHardfork::Isthmus {
             ForkCondition::Timestamp(0)
@@ -145,7 +114,7 @@ impl Cmd {
             .get_transaction_by_hash(self.tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {}", e)))?
-            .ok_or_else(|| ReplayError::TransactionNotFound(self.tx_hash.to_string()))?;
+            .ok_or_else(|| ReplayError::TransactionNotFound(self.tx_hash))?;
 
         eprintln!("Transaction found in block {:?}", target_tx.block_number);
 
@@ -155,7 +124,7 @@ impl Cmd {
                 (block_number - 1, block_number, false)
             } else {
                 let latest_block_number =
-                    provider.get_block_number().await.map_err(ReplayError::RpcTransportError)?;
+                    provider.get_block_number().await.map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?;
                 (latest_block_number, latest_block_number, true)
             };
 
@@ -174,12 +143,12 @@ impl Cmd {
         let parent_block = provider
             .get_block_by_number(state_base_block_number.into())
             .await
-            .map_err(ReplayError::RpcTransportError)?
+            .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
             .ok_or(ReplayError::BlockNotFound(state_base_block_number))?;
         let block = provider
             .get_block_by_number(block_number.into())
             .await
-            .map_err(ReplayError::RpcTransportError)?
+            .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
         let block_env = self.retrieve_block_env(&block).await?;
         let cfg_env = run::setup_cfg_env(&self.env_args);
@@ -281,41 +250,41 @@ impl Cmd {
         );
 
         // Apply pre-execution changes
-        block_executor.apply_pre_execution_changes().map_err(ReplayError::BlockExecutionError)?;
+        block_executor.apply_pre_execution_changes().map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
         // Execute preceding transactions
         for tx_hash in preceeding_transactions {
             let tx = provider
                 .get_transaction_by_hash(tx_hash)
                 .await
-                .map_err(ReplayError::RpcTransportError)?
-                .ok_or(ReplayError::TransactionNotFound(tx_hash.to_string()))?;
+                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
+                .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
             let tx = tx.as_recovered();
             let outcome = block_executor
                 .execute_mega_transaction(tx)
-                .map_err(ReplayError::BlockExecutionError)?;
+                .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
             block_executor
                 .commit_execution_outcome(outcome)
-                .map_err(ReplayError::BlockExecutionError)?;
+                .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         }
 
         // Execute target transaction
         block_executor.inspector_mut().fuse();
         let outcome = block_executor
             .execute_mega_transaction(target_tx.as_recovered())
-            .map_err(ReplayError::BlockExecutionError)?;
+            .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
         block_executor
             .commit_execution_outcome(outcome)
-            .map_err(ReplayError::BlockExecutionError)?;
+            .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
         let duration = start.elapsed();
 
         // Obtain receipt
         let block_result = block_executor
             .apply_post_execution_changes()
-            .map_err(ReplayError::BlockExecutionError)?;
+            .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         let receipt = block_result.receipts.last().unwrap().clone();
 
         // Generate trace only if tracing is enabled
@@ -381,10 +350,10 @@ impl Cmd {
             MegaSpecId::EQUIVALENCE => mega_evm_v1::MegaSpecId::EQUIVALENCE,
             MegaSpecId::MINI_REX => mega_evm_v1::MegaSpecId::MINI_REX,
             _ => {
-                return Err(ReplayError::RunError(run::RunError::ExecutionError(format!(
+                return Err(ReplayError::ExecutionError(format!(
                     "Unsupported spec id for v1.0.1: {:?}",
                     self.env_args.spec_id()
-                ))))
+                )))
             }
         };
 
@@ -462,41 +431,41 @@ impl Cmd {
         // Apply pre-execution changes
         block_executor_v1
             .apply_pre_execution_changes()
-            .map_err(ReplayError::BlockExecutionError)?;
+            .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
         // Execute preceding transactions
         for tx_hash in preceeding_transactions {
             let tx = provider
                 .get_transaction_by_hash(tx_hash)
                 .await
-                .map_err(ReplayError::RpcTransportError)?
-                .ok_or(ReplayError::TransactionNotFound(tx_hash.to_string()))?;
+                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
+                .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
             let tx = tx.as_recovered();
             let outcome = block_executor_v1
                 .execute_mega_transaction(tx)
-                .map_err(ReplayError::BlockExecutionError)?;
+                .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
             block_executor_v1
                 .commit_execution_outcome(outcome)
-                .map_err(ReplayError::BlockExecutionError)?;
+                .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         }
 
         // Execute target transaction
         block_executor_v1.inspector_mut().fuse();
         let outcome = block_executor_v1
             .execute_mega_transaction(target_tx.as_recovered())
-            .map_err(ReplayError::BlockExecutionError)?;
+            .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
         block_executor_v1
             .commit_execution_outcome(outcome)
-            .map_err(ReplayError::BlockExecutionError)?;
+            .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
         let duration = start.elapsed();
 
         // Obtain receipt
         let block_result = block_executor_v1
             .apply_post_execution_changes()
-            .map_err(ReplayError::BlockExecutionError)?;
+            .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         let receipt = block_result.receipts.last().unwrap().clone();
 
         // Generate trace only if tracing is enabled
@@ -584,10 +553,10 @@ impl Cmd {
     fn output_results(&self, result: &ReplayResult) -> Result<()> {
         // Serialize and print receipt as JSON
         let receipt_json = serde_json::to_string_pretty(&result.receipt).map_err(|e| {
-            ReplayError::RunError(run::RunError::ExecutionError(format!(
+            ReplayError::Other(format!(
                 "Failed to serialize receipt: {}",
                 e
-            )))
+            ))
         })?;
         println!("{}", receipt_json);
 
@@ -600,10 +569,10 @@ impl Cmd {
             if let Some(ref output_file) = self.trace_args.trace_output_file {
                 // Write trace to file
                 std::fs::write(output_file, trace).map_err(|e| {
-                    ReplayError::RunError(run::RunError::ExecutionError(format!(
+                    ReplayError::Other(format!(
                         "Failed to write trace to file: {}",
                         e
-                    )))
+                    ))
                 })?;
                 eprintln!();
                 eprintln!("Trace written to: {}", output_file.display());
@@ -617,7 +586,7 @@ impl Cmd {
 
         // Dump state if requested
         if self.dump_args.dump {
-            run::dump_state(&result.state, &self.dump_args).map_err(ReplayError::RunError)?;
+            run::dump_state(&result.state, &self.dump_args)?;
         }
 
         Ok(())

@@ -21,15 +21,12 @@ pub enum Error {
     /// Custom error with static message
     #[error("Custom error: {0}")]
     Custom(&'static str),
-    /// T8n tool error
+    /// Evme error (used by run, tx, and replay commands)
+    #[error("{0}")]
+    Evme(#[from] crate::common::EvmeError),
+    /// T8n tool error (wrapped in EvmeError::Other)
     #[error("T8n error: {0}")]
     T8n(#[from] crate::t8n::T8nError),
-    /// Run/Tx tool error (`TxError` is an alias to `RunError`)
-    #[error("Run/Tx error: {0}")]
-    Run(#[from] crate::run::RunError),
-    /// Replay tool error
-    #[error("Replay error: {0}")]
-    Replay(#[from] crate::replay::ReplayError),
 }
 
 impl MainCmd {
@@ -37,7 +34,7 @@ impl MainCmd {
     pub async fn run(&self) -> Result<(), Error> {
         match self {
             Self::T8n(cmd) => {
-                cmd.run()?;
+                cmd.run().map_err(|e| Error::Evme(crate::common::EvmeError::Other(e.to_string())))?;
                 Ok(())
             }
             Self::Run(cmd) => {

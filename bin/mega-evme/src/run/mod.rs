@@ -5,11 +5,12 @@
 
 mod cmd;
 mod common;
-mod state;
 
 pub use cmd::*;
 pub use common::*;
-pub use state::*;
+
+// Re-export EvmeState from common module
+pub use crate::common::EvmeState;
 use mega_evm::revm::state::EvmState;
 
 
@@ -17,35 +18,8 @@ use std::{collections::HashMap, fs, io::Read};
 
 use alloy_primitives::{hex, Address, Bytes, B256, U256};
 
-/// Error types for the run command
-#[derive(Debug, thiserror::Error)]
-pub enum RunError {
-    /// Failed to read file
-    #[error("Failed to read file: {0}")]
-    FileRead(#[from] std::io::Error),
-
-    /// Invalid hex string
-    #[error("Invalid hex string: {0}")]
-    InvalidHex(#[from] hex::FromHexError),
-
-    /// EVM execution error
-    #[error("EVM execution error: {0}")]
-    ExecutionError(String),
-
-    /// Invalid input
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-
-    /// RPC error
-    #[error("RPC error: {0}")]
-    RpcError(String),
-}
-
-// Implement DBErrorMarker to allow RunError to be used as Database error type
-impl mega_evm::revm::database::DBErrorMarker for RunError {}
-
-/// Result type for the run command
-pub type Result<T> = std::result::Result<T, RunError>;
+// Re-export EvmeError and Result from common module
+pub use crate::common::{EvmeError as RunError, Result};
 
 /// Load code bytes from an argument or a file. If the file is a dash (-), read from stdin.
 /// Priority: arg (positional) > file. Returns error if neither is provided.

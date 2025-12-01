@@ -10,7 +10,7 @@ use mega_evm::revm::{
     Database, DatabaseCommit, DatabaseRef,
 };
 
-use super::{Result, RunError};
+use super::{EvmeError, Result};
 
 /// Backend database type with generic provider and network
 #[derive(Debug)]
@@ -110,7 +110,7 @@ where
             let latest_block = provider
                 .get_block_number()
                 .await
-                .map_err(|e| RunError::RpcError(format!("Failed to fetch latest block: {}", e)))?;
+                .map_err(|e| EvmeError::RpcError(format!("Failed to fetch latest block: {}", e)))?;
             BlockNumber::from(latest_block)
         };
 
@@ -139,7 +139,7 @@ where
     N: Network,
     P: Provider<N> + std::fmt::Debug,
 {
-    type Error = RunError;
+    type Error = EvmeError;
 
     fn basic(&mut self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first
@@ -151,7 +151,7 @@ where
         match &mut self.backend {
             EvmeBackend::Empty(db) => Ok(db.basic(address).unwrap()),
             EvmeBackend::Forked(db) => db.basic(address).map_err(|e| {
-                RunError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
+                EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
             }),
         }
     }
@@ -169,7 +169,7 @@ where
         match &mut self.backend {
             EvmeBackend::Empty(db) => Ok(db.code_by_hash(code_hash).unwrap()),
             EvmeBackend::Forked(db) => db.code_by_hash(code_hash).map_err(|e| {
-                RunError::RpcError(format!("Failed to fetch code by hash {}: {:?}", code_hash, e))
+                EvmeError::RpcError(format!("Failed to fetch code by hash {}: {:?}", code_hash, e))
             }),
         }
     }
@@ -186,7 +186,7 @@ where
         match &mut self.backend {
             EvmeBackend::Empty(db) => Ok(db.storage(address, index).unwrap()),
             EvmeBackend::Forked(db) => db.storage(address, index).map_err(|e| {
-                RunError::RpcError(format!(
+                EvmeError::RpcError(format!(
                     "Failed to fetch storage for {} at slot {}: {:?}",
                     address, index, e
                 ))
@@ -201,7 +201,7 @@ where
         match &mut self.backend {
             EvmeBackend::Empty(db) => Ok(db.block_hash(number).unwrap()),
             EvmeBackend::Forked(db) => db.block_hash(number).map_err(|e| {
-                RunError::RpcError(format!(
+                EvmeError::RpcError(format!(
                     "Failed to fetch block hash for block {}: {:?}",
                     number, e
                 ))
@@ -215,7 +215,7 @@ where
     N: Network,
     P: Provider<N> + std::fmt::Debug,
 {
-    type Error = RunError;
+    type Error = EvmeError;
 
     fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first
@@ -227,7 +227,7 @@ where
         match &self.backend {
             EvmeBackend::Empty(db) => Ok(db.basic_ref(address).unwrap()),
             EvmeBackend::Forked(db) => db.basic_ref(address).map_err(|e| {
-                RunError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
+                EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
             }),
         }
     }
@@ -245,7 +245,7 @@ where
         match &self.backend {
             EvmeBackend::Empty(db) => Ok(db.code_by_hash_ref(code_hash).unwrap()),
             EvmeBackend::Forked(db) => db.code_by_hash_ref(code_hash).map_err(|e| {
-                RunError::RpcError(format!("Failed to fetch code by hash {}: {:?}", code_hash, e))
+                EvmeError::RpcError(format!("Failed to fetch code by hash {}: {:?}", code_hash, e))
             }),
         }
     }
@@ -262,7 +262,7 @@ where
         match &self.backend {
             EvmeBackend::Empty(db) => Ok(db.storage_ref(address, index).unwrap()),
             EvmeBackend::Forked(db) => db.storage_ref(address, index).map_err(|e| {
-                RunError::RpcError(format!(
+                EvmeError::RpcError(format!(
                     "Failed to fetch storage for {} at slot {}: {:?}",
                     address, index, e
                 ))
@@ -277,7 +277,7 @@ where
         match &self.backend {
             EvmeBackend::Empty(db) => Ok(db.block_hash_ref(number).unwrap()),
             EvmeBackend::Forked(db) => db.block_hash_ref(number).map_err(|e| {
-                RunError::RpcError(format!(
+                EvmeError::RpcError(format!(
                     "Failed to fetch block hash for block {}: {:?}",
                     number, e
                 ))

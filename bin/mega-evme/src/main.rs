@@ -6,6 +6,7 @@
 use clap::Parser;
 
 mod cmd;
+mod common;
 /// Replay module for fetching and executing transactions from RPC
 pub mod replay;
 /// Run module for executing arbitrary EVM bytecode
@@ -16,9 +17,10 @@ pub mod t8n;
 pub mod tx;
 
 pub use cmd::*;
+pub use common::*;
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> std::result::Result<(), Error> {
     set_thread_panic_hook();
     MainCmd::parse().run().await.inspect_err(|e| println!("{e:?}"))
 }
