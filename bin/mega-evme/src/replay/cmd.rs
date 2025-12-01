@@ -6,7 +6,6 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Block;
 use alloy_rpc_types_trace::geth::GethDefaultTracingOptions;
 use clap::Parser;
-use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use mega_evm::{
     alloy_evm::{block::BlockExecutor, EvmEnv},
     alloy_hardforks::{EthereumHardfork, ForkCondition},
@@ -21,8 +20,12 @@ use mega_evm::{
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaSpecId,
     TestExternalEnvs,
 };
+
+// Import v1.0.1 types with aliases
+use mega_evm_v1_0_1 as mega_evm_v1;
 use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
+use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
 use crate::run;
 
@@ -51,6 +54,10 @@ pub struct Cmd {
     /// Trace configuration
     #[command(flatten)]
     pub trace_args: run::TraceArgs,
+
+    /// Use v1.0.1 of the mega-evm crate
+    #[arg(long = "use-v1-0-1")]
+    pub use_v1_0_1: bool,
 }
 
 /// Execution result with optional trace data and state
@@ -71,6 +78,31 @@ pub struct FixedHardfork {
 impl FixedHardfork {
     pub fn new(spec: MegaSpecId) -> Self {
         Self { spec }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FixedHardforkV1 {
+    pub spec: mega_evm_v1::MegaSpecId,
+}
+
+impl EthereumHardforks for FixedHardforkV1 {
+    fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
+        if fork <= EthereumHardfork::Prague {
+            ForkCondition::Timestamp(0)
+        } else {
+            ForkCondition::Never
+        }
+    }
+}
+
+impl OpHardforks for FixedHardforkV1 {
+    fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
+        if fork <= OpHardfork::Isthmus {
+            ForkCondition::Timestamp(0)
+        } else {
+            ForkCondition::Never
+        }
     }
 }
 
@@ -164,6 +196,51 @@ impl Cmd {
         }
 
         // Step x: Setup EVM and Block executor
+        // Step 5: Execute transactions with inspector
+        let result = if self.use_v1_0_1 {
+            self.execute_transactions_v1_0_1(
+                &mut database,
+                &parent_block,
+                &block,
+                evm_env,
+                &provider,
+                preceeding_transactions,
+                &target_tx,
+            )
+            .await?
+        } else {
+            self.execute_transactions(
+                &mut database,
+                &parent_block,
+                &block,
+                evm_env,
+                &provider,
+                preceeding_transactions,
+                &target_tx,
+            )
+            .await?
+        };
+
+        // Step 6: Output results
+        self.output_results(&result)?;
+
+        Ok(())
+    }
+
+    /// Execute transactions with block executor and optional tracing
+    async fn execute_transactions<P>(
+        &self,
+        database: &mut run::EvmeState<op_alloy_network::Optimism, P>,
+        parent_block: &Block<Transaction>,
+        block: &Block<Transaction>,
+        evm_env: mega_evm::alloy_evm::EvmEnv<MegaSpecId>,
+        provider: &P,
+        preceeding_transactions: Vec<B256>,
+        target_tx: &Transaction,
+    ) -> Result<ReplayResult>
+    where
+        P: alloy_provider::Provider<op_alloy_network::Optimism> + std::fmt::Debug,
+    {
         let chain_spec = FixedHardfork::new(self.env_args.spec_id());
         let external_env_factory = TestExternalEnvs::default();
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_env_factory);
@@ -184,7 +261,8 @@ impl Cmd {
             block.header.extra_data().clone(),
             block_limits,
         );
-        // Step 5: Execute transactions with inspector (trace will be generated only if enabled)
+
+        // Execute transactions with inspector (trace will be generated only if enabled)
         let start = Instant::now();
 
         // Setup tracing inspector
@@ -192,15 +270,16 @@ impl Cmd {
         let mut inspector = TracingInspector::new(config);
 
         // Create state and block executor with inspector
-        let mut state =
-            StateBuilder::new().with_database(&mut database).with_bundle_update().build();
-        let mut block_executor =
-            block_executor_factory.create_executor_with_inspector(&mut state, block_ctx, evm_env, &mut inspector);
+        let mut state = StateBuilder::new().with_database(database).with_bundle_update().build();
+        let mut block_executor = block_executor_factory.create_executor_with_inspector(
+            &mut state,
+            block_ctx,
+            evm_env,
+            &mut inspector,
+        );
 
         // Apply pre-execution changes
-        block_executor
-            .apply_pre_execution_changes()
-            .map_err(ReplayError::BlockExecutionError)?;
+        block_executor.apply_pre_execution_changes().map_err(ReplayError::BlockExecutionError)?;
 
         // Execute preceding transactions
         for tx_hash in preceeding_transactions {
@@ -258,28 +337,225 @@ impl Cmd {
             };
 
             // Generate the geth trace
-            let geth_trace = geth_builder.geth_traces(exec_result.gas_used(), Bytes::from(output), opts);
+            let geth_trace =
+                geth_builder.geth_traces(exec_result.gas_used(), Bytes::from(output), opts);
 
             // Format as JSON
-            Some(serde_json::to_string_pretty(&geth_trace)
-                .unwrap_or_else(|e| format!("Error serializing trace: {}", e)))
+            Some(
+                serde_json::to_string_pretty(&geth_trace)
+                    .unwrap_or_else(|e| format!("Error serializing trace: {}", e)),
+            )
         } else {
             None
         };
 
-        let result = ReplayResult {
+        Ok(ReplayResult {
             exec_result,
             state: evm_state,
             exec_time: duration,
-            original_tx: target_tx,
+            original_tx: target_tx.clone(),
             receipt,
             trace_data,
+        })
+    }
+
+    /// Execute transactions with block executor and optional tracing (using mega-evm v1.0.1)
+    async fn execute_transactions_v1_0_1<P>(
+        &self,
+        database: &mut run::EvmeState<op_alloy_network::Optimism, P>,
+        parent_block: &Block<Transaction>,
+        block: &Block<Transaction>,
+        evm_env: mega_evm::alloy_evm::EvmEnv<MegaSpecId>,
+        provider: &P,
+        preceeding_transactions: Vec<B256>,
+        target_tx: &Transaction,
+    ) -> Result<ReplayResult>
+    where
+        P: alloy_provider::Provider<op_alloy_network::Optimism> + std::fmt::Debug,
+    {
+        // Convert MegaSpecId to v1.0.1 equivalent
+        let spec_v1 = match self.env_args.spec_id() {
+            MegaSpecId::EQUIVALENCE => mega_evm_v1::MegaSpecId::EQUIVALENCE,
+            MegaSpecId::MINI_REX => mega_evm_v1::MegaSpecId::MINI_REX,
+            _ => return Err(ReplayError::RunError(run::RunError::ExecutionError(
+                format!("Unsupported spec id for v1.0.1: {:?}", self.env_args.spec_id())
+            ))),
         };
 
-        // Step 6: Output results
-        self.output_results(&result)?;
+        // Note: FixedHardfork is shared between versions, but spec types differ
+        // We need to create a separate FixedHardfork for v1.0.1
+        let chain_spec_v1 = FixedHardforkV1 { spec: spec_v1 };
+        let external_env_factory_v1: mega_evm_v1::DefaultExternalEnvs = mega_evm_v1::DefaultExternalEnvs::new();
+        let evm_factory_v1 = mega_evm_v1::MegaEvmFactory::new(external_env_factory_v1);
+        let block_executor_factory_v1 = mega_evm_v1::MegaBlockExecutorFactory::new(
+            chain_spec_v1,
+            evm_factory_v1,
+            mega_evm::alloy_op_evm::block::OpAlloyReceiptBuilder::default(),
+        );
 
-        Ok(())
+        let block_limits_v1 = match spec_v1 {
+            mega_evm_v1::MegaSpecId::EQUIVALENCE => mega_evm_v1::BlockLimits::no_limits().fit_equivalence(),
+            mega_evm_v1::MegaSpecId::MINI_REX => mega_evm_v1::BlockLimits::no_limits().fit_mini_rex(),
+            _ => unreachable!(),
+        };
+
+        let block_ctx_v1 = mega_evm_v1::MegaBlockExecutionCtx::new(
+            parent_block.hash(),
+            block.header.parent_beacon_block_root(),
+            block.header.extra_data().clone(),
+            block_limits_v1,
+        );
+
+        // Execute transactions with inspector (trace will be generated only if enabled)
+        let start = Instant::now();
+
+        // Setup tracing inspector
+        let config = TracingInspectorConfig::all();
+        let mut inspector = TracingInspector::new(config);
+
+        // Create state and block executor with inspector using v1.0.1
+        use mega_evm::revm::database::StateBuilder;
+        let mut state_v1 =
+            StateBuilder::new().with_database(database).with_bundle_update().build();
+
+        // Convert EvmEnv to match what v1.0.1 expects
+        use mega_evm::alloy_evm::EvmEnv as EvmEnvCurrent;
+        use mega_evm::revm::context::{cfg::CfgEnv, BlockEnv as RevmBlockEnv};
+
+        let mut cfg_v1 = CfgEnv::default();
+        cfg_v1.chain_id = evm_env.cfg_env.chain_id;
+        cfg_v1.spec = spec_v1;
+
+        let evm_env_v1 = EvmEnvCurrent::new(
+            cfg_v1,
+            RevmBlockEnv {
+                number: evm_env.block_env.number,
+                beneficiary: evm_env.block_env.beneficiary,
+                timestamp: evm_env.block_env.timestamp,
+                gas_limit: evm_env.block_env.gas_limit,
+                basefee: evm_env.block_env.basefee,
+                difficulty: evm_env.block_env.difficulty,
+                prevrandao: evm_env.block_env.prevrandao,
+                blob_excess_gas_and_price: evm_env.block_env.blob_excess_gas_and_price,
+            },
+        );
+
+        let mut block_executor_v1 = block_executor_factory_v1.create_executor_with_inspector(
+            &mut state_v1,
+            block_ctx_v1,
+            evm_env_v1,
+            &mut inspector,
+        );
+
+        // Apply pre-execution changes
+        block_executor_v1.apply_pre_execution_changes().map_err(ReplayError::BlockExecutionError)?;
+
+        // Execute preceding transactions
+        for tx_hash in preceeding_transactions {
+            let tx = provider
+                .get_transaction_by_hash(tx_hash)
+                .await
+                .map_err(ReplayError::RpcTransportError)?
+                .ok_or(ReplayError::TransactionNotFound(tx_hash.to_string()))?;
+            let tx = tx.as_recovered();
+            let outcome = block_executor_v1
+                .execute_mega_transaction(tx)
+                .map_err(ReplayError::BlockExecutionError)?;
+            block_executor_v1
+                .commit_execution_outcome(outcome)
+                .map_err(ReplayError::BlockExecutionError)?;
+        }
+
+        // Execute target transaction
+        let outcome = block_executor_v1
+            .execute_mega_transaction(target_tx.as_recovered())
+            .map_err(ReplayError::BlockExecutionError)?;
+        let exec_result = outcome.inner.result.clone();
+        let evm_state = outcome.inner.state.clone();
+        block_executor_v1
+            .commit_execution_outcome(outcome)
+            .map_err(ReplayError::BlockExecutionError)?;
+
+        let duration = start.elapsed();
+
+        // Obtain receipt
+        let block_result = block_executor_v1
+            .apply_post_execution_changes()
+            .map_err(ReplayError::BlockExecutionError)?;
+        let receipt = block_result.receipts.last().unwrap().clone();
+
+        // Generate trace only if tracing is enabled
+        let trace_data = if matches!(self.trace_args.tracer, Some(crate::run::TracerType::Trace)) {
+            // Generate GethTrace
+            let geth_builder = inspector.geth_builder();
+
+            // Create GethDefaultTracingOptions based on CLI arguments
+            let opts = GethDefaultTracingOptions {
+                disable_storage: Some(self.trace_args.trace_disable_storage),
+                disable_memory: Some(self.trace_args.trace_disable_memory),
+                disable_stack: Some(self.trace_args.trace_disable_stack),
+                enable_return_data: Some(self.trace_args.trace_enable_return_data),
+                ..Default::default()
+            };
+
+            // Get output for trace generation
+            let output = match &exec_result {
+                ExecutionResult::Success { output, .. } => output.data().to_vec(),
+                ExecutionResult::Revert { output, .. } => output.to_vec(),
+                _ => Vec::new(),
+            };
+
+            // Generate the geth trace
+            let geth_trace =
+                geth_builder.geth_traces(exec_result.gas_used(), Bytes::from(output), opts);
+
+            // Format as JSON
+            Some(
+                serde_json::to_string_pretty(&geth_trace)
+                    .unwrap_or_else(|e| format!("Error serializing trace: {}", e)),
+            )
+        } else {
+            None
+        };
+
+        // Convert ExecutionResult from v1.0.1 to current version
+        // The structures are the same, but the HaltReason type parameter differs
+        let exec_result_current = match exec_result {
+            ExecutionResult::Success { reason, gas_used, gas_refunded, logs, output } => {
+                ExecutionResult::Success {
+                    reason,
+                    gas_used,
+                    gas_refunded,
+                    logs,
+                    output,
+                }
+            }
+            ExecutionResult::Revert { gas_used, output } => {
+                ExecutionResult::Revert { gas_used, output }
+            }
+            ExecutionResult::Halt { reason: _, gas_used } => {
+                // Convert MegaHaltReason - this is the tricky part
+                // Since we can't directly convert between enum types from different versions,
+                // we'll use a generic halt reason from the base revm type
+                use mega_evm::EthHaltReason;
+                let reason_current = mega_evm::MegaHaltReason::Base(
+                    mega_evm::OpHaltReason::Base(EthHaltReason::PrecompileError)
+                );
+                ExecutionResult::Halt {
+                    reason: reason_current,
+                    gas_used,
+                }
+            }
+        };
+
+        Ok(ReplayResult {
+            exec_result: exec_result_current,
+            state: evm_state,
+            exec_time: duration,
+            original_tx: target_tx.clone(),
+            receipt,
+            trace_data,
+        })
     }
 
     async fn retrieve_block_env(&self, block: &Block<Transaction>) -> Result<BlockEnv> {
