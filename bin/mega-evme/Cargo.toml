@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 # megaeth
 mega-evm = { workspace = true, features = ["default", "test-utils"] }
-mega-evm-v1_0_1 = { package = "mega-evm", git = "https://github.com/megaeth-labs/mega-evm.git", rev = "v1.0.1", features = ["default", "test-utils"] }
+mega-evm-v1_0_1 = { package = "mega-evm", git = "https://github.com/megaeth-labs/mega-evm.git", branch = "william/fix/v1.0.1-inspector", features = ["default", "test-utils"] }
 state-test.workspace = true
 
 # revm
