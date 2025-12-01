@@ -8,7 +8,6 @@ use std::convert::Infallible;
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_op_hardforks::OpChainHardforks;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::MemoryDatabase, BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
@@ -124,7 +123,10 @@ fn test_deposit_transaction_exempt_from_single_tx_da_limit() {
             .with_block_da_size_limit(DA_SIZE_LIMIT * 10),
     );
 
-    let chain_spec = MegaHardforkConfig::default();
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec = MegaHardforkConfig::default()
+        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -184,7 +186,10 @@ fn test_regular_transaction_rejected_by_single_tx_da_limit() {
             .with_block_da_size_limit(DA_SIZE_LIMIT * 10),
     );
 
-    let chain_spec = MegaHardforkConfig::default();
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec = MegaHardforkConfig::default()
+        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -243,7 +248,10 @@ fn test_deposit_exempt_from_block_da_limit() {
             .with_block_da_size_limit(DA_SIZE_LIMIT), // Low block limit
     );
 
-    let chain_spec = MegaHardforkConfig::default();
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec = MegaHardforkConfig::default()
+        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 
@@ -303,7 +311,10 @@ fn test_mixed_deposit_and_regular_transactions() {
             .with_block_da_size_limit(DA_SIZE_LIMIT * 10),
     );
 
-    let chain_spec = MegaHardforkConfig::default();
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec = MegaHardforkConfig::default()
+        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
 

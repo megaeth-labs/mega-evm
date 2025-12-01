@@ -21,20 +21,20 @@ impl MegaHardfork {
     /// Gets the `MegaSpecId` associated with this hardfork.
     pub fn spec_id(&self) -> MegaSpecId {
         match self {
-            MegaHardfork::MiniRex => MegaSpecId::MINI_REX,
-            MegaHardfork::Rex => MegaSpecId::REX,
+            Self::MiniRex => MegaSpecId::MINI_REX,
+            Self::Rex => MegaSpecId::REX,
         }
     }
 }
 
-/// Extends [`OpHardforks`] with MegaETH helper methods.
+/// Extends [`OpHardforks`] with `MegaETH` helper methods.
 #[auto_impl(&, Box, Arc)]
 pub trait MegaHardforks: OpHardforks {
-    /// Retrieves [`ForkCondition`] by a [`MegaethHardfork`]. If `fork` is not present, returns
+    /// Retrieves [`ForkCondition`] by a [`MegaHardfork`]. If `fork` is not present, returns
     /// [`ForkCondition::Never`].
     fn megaeth_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
 
-    /// Returns `true` if the given [`MegaethHardfork`] is the hardfork to be activated at the
+    /// Returns `true` if the given [`MegaHardfork`] is the hardfork to be activated at the
     /// given timestamp. One special case is that if the current block is the first block of the
     /// chain and it activates the hardfork, we should return `true`.
     ///
@@ -64,20 +64,20 @@ pub trait MegaHardforks: OpHardforks {
         }
     }
 
-    /// Returns `true` if [`MegaethHardfork::MiniRex`] is active at given block timestamp.
+    /// Returns `true` if [`MegaHardfork::MiniRex`] is active at given block timestamp.
     fn is_mini_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.megaeth_fork_activation(MegaHardfork::MiniRex).active_at_timestamp(timestamp)
     }
 
-    /// Returns `true` if [`MegaethHardfork::Rex`] is active at given block timestamp.
+    /// Returns `true` if [`MegaHardfork::Rex`] is active at given block timestamp.
     fn is_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.megaeth_fork_activation(MegaHardfork::Rex).active_at_timestamp(timestamp)
     }
 }
 
-/// Configuration of the hardforks for MegaETH. It by default includes no `MegaHardfork` but
+/// Configuration of the hardforks for `MegaETH`. It by default includes no `MegaHardfork` but
 /// includes all hardforks before and including Optimism Isthmus. Optimism Isthmus is the hardfork
-/// where MegaETH is established.
+/// where `MegaETH` is established.
 #[derive(Debug, Clone)]
 pub struct MegaHardforkConfig {
     hardforks: Vec<(Box<dyn Hardfork>, ForkCondition)>,
@@ -102,7 +102,7 @@ where
 impl MegaHardforkConfig {
     /// Creates a new hardfork configuration with the default hardforks, i.e., all hardforks before
     /// and including Optimism Isthmus are enabled. Optimism Isthmus is the hardfork where
-    /// MegaETH is established.
+    /// `MegaETH` is established.
     pub fn new() -> Self {
         Self {
             hardforks: vec![

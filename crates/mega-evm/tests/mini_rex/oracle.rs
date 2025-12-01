@@ -555,7 +555,6 @@ fn test_oracle_storage_sload_direct_call() {
 #[test]
 fn test_oracle_contract_deployed_on_mini_rex_activation() {
     use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
-    use alloy_op_hardforks::OpChainHardforks;
     use alloy_primitives::B256;
     use mega_evm::{
         MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaSpecId,
@@ -596,8 +595,11 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
         BlockLimits::no_limits(),
     );
 
-    // Try Base mainnet which should have the right hardfork configuration
-    let chain_spec = MegaHardforkConfig::default();
+    // Configure hardforks with MiniRex activated at timestamp 0
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec = MegaHardforkConfig::default()
+        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
 
     // Create receipt builder (use concrete OpAlloyReceiptBuilder type)
     use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
