@@ -430,7 +430,8 @@ pub mod forward_gas_ext {
 
                         // Calculate the amount of gas that should be returned to the parent call
                         // under the 98/100 rule.
-                        let forwarded_gas_cap = parent_original_gas_left * 98 / 100;
+                        let forwarded_gas_cap =
+                            parent_original_gas_left - parent_original_gas_left * 2 / 100;
                         let capped_forwarded_gas = min(forwarded_gas, forwarded_gas_cap);
                         let gas_to_return = forwarded_gas - capped_forwarded_gas; // Safe from underflow
 
@@ -459,7 +460,8 @@ pub mod forward_gas_ext {
 
                         // Calculate the amount of gas that should be returned to the parent call
                         // under the 98/100 rule.
-                        let forwarded_gas_cap = parent_original_gas_left * 98 / 100;
+                        let forwarded_gas_cap =
+                            parent_original_gas_left - parent_original_gas_left * 2 / 100;
                         let capped_forwarded_gas = min(forwarded_gas, forwarded_gas_cap);
                         let gas_to_return = forwarded_gas - capped_forwarded_gas; // Safe from underflow
 
