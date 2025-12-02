@@ -7,14 +7,14 @@ use alloy_rpc_types_eth::Block;
 use alloy_rpc_types_trace::geth::GethDefaultTracingOptions;
 use clap::Parser;
 use mega_evm::{
-    alloy_evm::{block::BlockExecutor, EvmEnv},
+    alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
     alloy_hardforks::{EthereumHardfork, ForkCondition},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     alloy_op_hardforks::{EthereumHardforks, OpHardfork, OpHardforks},
     revm::{
-        context::{result::ExecutionResult, BlockEnv},
+        context::{result::ExecutionResult, BlockEnv, ContextTr},
         context_interface::block::BlobExcessGasAndPrice,
-        database::StateBuilder,
+        database::{states::bundle_state::BundleRetention, StateBuilder},
         state::EvmState,
     },
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaSpecId,
@@ -70,7 +70,6 @@ struct ReplayResult {
     trace_data: Option<String>,
 }
 
-
 #[derive(Debug, Clone, Copy)]
 struct FixedHardforkV1 {
     pub spec: mega_evm_v1::MegaSpecId,
@@ -123,8 +122,10 @@ impl Cmd {
             if let Some(block_number) = target_tx.block_number {
                 (block_number - 1, block_number, false)
             } else {
-                let latest_block_number =
-                    provider.get_block_number().await.map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?;
+                let latest_block_number = provider
+                    .get_block_number()
+                    .await
+                    .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?;
                 (latest_block_number, latest_block_number, true)
             };
 
@@ -250,7 +251,9 @@ impl Cmd {
         );
 
         // Apply pre-execution changes
-        block_executor.apply_pre_execution_changes().map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
+        block_executor
+            .apply_pre_execution_changes()
+            .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
         // Execute preceding transactions
         for tx_hash in preceeding_transactions {
@@ -282,9 +285,11 @@ impl Cmd {
         let duration = start.elapsed();
 
         // Obtain receipt
-        let block_result = block_executor
-            .apply_post_execution_changes()
+        let (evm, block_result) = block_executor
+            .finish()
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
+        let (db, _evm_env) = evm.finish();
+        db.merge_transitions(BundleRetention::Reverts);
         let receipt = block_result.receipts.last().unwrap().clone();
 
         // Generate trace only if tracing is enabled
@@ -552,12 +557,8 @@ impl Cmd {
     /// Output execution results
     fn output_results(&self, result: &ReplayResult) -> Result<()> {
         // Serialize and print receipt as JSON
-        let receipt_json = serde_json::to_string_pretty(&result.receipt).map_err(|e| {
-            ReplayError::Other(format!(
-                "Failed to serialize receipt: {}",
-                e
-            ))
-        })?;
+        let receipt_json = serde_json::to_string_pretty(&result.receipt)
+            .map_err(|e| ReplayError::Other(format!("Failed to serialize receipt: {}", e)))?;
         println!("{}", receipt_json);
 
         // Print execution time to stderr
@@ -569,10 +570,7 @@ impl Cmd {
             if let Some(ref output_file) = self.trace_args.trace_output_file {
                 // Write trace to file
                 std::fs::write(output_file, trace).map_err(|e| {
-                    ReplayError::Other(format!(
-                        "Failed to write trace to file: {}",
-                        e
-                    ))
+                    ReplayError::Other(format!("Failed to write trace to file: {}", e))
                 })?;
                 eprintln!();
                 eprintln!("Trace written to: {}", output_file.display());
