@@ -241,7 +241,7 @@ pub struct BlockLimits {
     /// Maximum encoded size (in bytes) for a single transaction.
     ///
     /// This limit applies to the transaction's EIP-2718 encoded size. Transactions exceeding
-    /// this size will be rejected with [`MegaTxLimitExceededError::TransactionSizeLimit`].
+    /// this size will be rejected with [`MegaTxLimitExceededError::TransactionEncodeSizeLimit`].
     ///
     /// Default: `u64::MAX` (effectively unlimited)
     pub tx_encode_size_limit: u64,
@@ -252,7 +252,7 @@ pub struct BlockLimits {
     /// availability limits, see [`block_da_size_limit`](Self::block_da_size_limit).
     ///
     /// Transactions that would cause the cumulative block transaction size to exceed this
-    /// limit are rejected with [`MegaBlockLimitExceededError::TransactionSizeLimit`].
+    /// limit are rejected with [`MegaBlockLimitExceededError::TransactionEncodeSizeLimit`].
     ///
     /// Default: `u64::MAX` (effectively unlimited)
     pub block_txs_encode_size_limit: u64,

@@ -16,6 +16,7 @@ workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
+alloy-hardforks.workspace = true
 alloy-op-evm.workspace = true
 alloy-op-hardforks.workspace = true
 alloy-primitives.workspace = true

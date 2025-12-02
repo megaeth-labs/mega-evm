@@ -2970,6 +2970,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-evm",
+ "alloy-hardforks",
  "alloy-op-evm",
  "alloy-op-hardforks",
  "alloy-primitives",
