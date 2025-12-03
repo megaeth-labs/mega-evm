@@ -1,18 +1,19 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
+use std::{boxed::Box, string::ToString};
+
 use alloy_evm::{
     block::{BlockExecutionError, BlockValidationError},
     Evm,
 };
 use alloy_hardforks::EthereumHardforks;
-use alloy_primitives::{map::foldhash::HashMapExt, Address, B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use revm::{
     context_interface::result::ResultAndState,
     database::State,
     state::{Account, EvmState},
     Database,
 };
-use std::string::ToString;
 
 /// Applies the pre-block call to the [EIP-2935] blockhashes contract, using the given block,
 /// chain specification, and EVM.
@@ -115,7 +116,7 @@ pub(crate) fn transact_balance_increments<DB: Database>(
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
     let balances = balances.into_iter();
-    let mut state = EvmState::with_capacity(balances.size_hint().0);
+    let mut state = EvmState::default();
 
     for (address, balance_increment) in balances {
         if balance_increment == 0 {

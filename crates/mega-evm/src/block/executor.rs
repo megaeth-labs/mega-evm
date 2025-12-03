@@ -7,10 +7,9 @@ use alloy_eips::{Encodable2718, Typed2718};
 pub use alloy_evm::block::CommitChanges;
 use alloy_evm::{
     block::{
-        state_changes::post_block_balance_increments,
-        BlockExecutionError, BlockExecutionResult, ExecutableTx,
-        OnStateHook, StateChangePostBlockSource,
-        StateChangePreBlockSource, StateChangeSource, SystemCaller,
+        state_changes::post_block_balance_increments, BlockExecutionError, BlockExecutionResult,
+        ExecutableTx, OnStateHook, StateChangePostBlockSource, StateChangePreBlockSource,
+        StateChangeSource, SystemCaller,
     },
     eth::receipt_builder::ReceiptBuilderCtx,
     Database, Evm as _, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv, RecoveredTx,

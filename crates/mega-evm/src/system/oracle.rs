@@ -153,10 +153,9 @@ mod tests {
         let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy the oracle contract
-        let result =
-            transact_deploy_oracle_contract(&hardforks, 0, &mut state)
-                .expect("Deployment should succeed")
-                .expect("Should return state");
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
 
         // Verify that state changes were returned
         assert_eq!(result.len(), 1, "Should have state changes for one account");
