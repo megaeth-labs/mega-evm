@@ -181,13 +181,19 @@ mod tests {
             .increment_balances(balance_increments.clone())
             .expect("increment_balances should succeed");
 
-        // Method 2: Our approach
+        // Method 2: Refactored approach (transact + commit, matching the actual usage pattern)
+        // The refactoring separates increment_balances into two steps:
+        // 1. transact_balance_increments() - produces EvmState delta
+        // 2. commit() - integrates the delta and fixes status transitions
+        // This allows extracting the intermediate state for system_caller.on_state() hooks
         let result_state = transact_balance_increments(balance_increments.clone(), &mut state2)
             .expect("transact_balance_increments should succeed")
             .expect("Should return state");
+
+        // Commit the state changes (this applies proper status transitions via apply_evm_state)
         state2.commit(result_state);
 
-        // Now verify that both states have identical results
+        // Verify final states match after both approaches
         for (addr, _expected_increment) in balance_increments {
             let account1 = state1.load_cache_account(addr).expect("Should load from state1");
             let account2 = state2.load_cache_account(addr).expect("Should load from state2");
@@ -204,6 +210,11 @@ mod tests {
             assert_eq!(
                 info1.code_hash, info2.code_hash,
                 "Code hash for {:?} should be identical",
+                addr
+            );
+            assert_eq!(
+                account1.status, account2.status,
+                "Account status for {:?} should be identical after both methods",
                 addr
             );
         }
