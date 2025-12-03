@@ -10,6 +10,8 @@ use revm::{
     state::{Account, Bytecode, EvmState},
 };
 
+use crate::MegaHardforks;
+
 /// The address of the oracle system contract.
 pub const ORACLE_CONTRACT_ADDRESS: Address = address!("0x6342000000000000000000000000000000000001");
 
@@ -35,9 +37,15 @@ sol! {
 /// Ensures the oracle contract is deployed in the designated address and returns the state changes.
 /// Note that the database `db` is not modified in this function. The caller is responsible to
 /// commit the changes to database.
-pub fn ensure_oracle_contract_deployed<DB: Database>(
+pub fn transact_deploy_oracle_contract<DB: Database>(
+    hardforks: impl MegaHardforks,
+    block_timestamp: u64,
     db: &mut State<DB>,
-) -> Result<EvmState, DB::Error> {
+) -> Result<Option<EvmState>, DB::Error> {
+    if !hardforks.is_mini_rex_active_at_timestamp(block_timestamp) {
+        return Ok(None);
+    }
+
     // Load the oracle contract account from the cache
     let acc = db.load_cache_account(ORACLE_CONTRACT_ADDRESS)?;
 
@@ -45,10 +53,10 @@ pub fn ensure_oracle_contract_deployed<DB: Database>(
     if let Some(account_info) = acc.account_info() {
         if account_info.code_hash == ORACLE_CONTRACT_CODE_HASH {
             // Although we do not need to update the account, we need to mark it as read
-            return Ok(EvmState::from_iter([(
+            return Ok(Some(EvmState::from_iter([(
                 ORACLE_CONTRACT_ADDRESS,
                 Account { info: account_info, ..Default::default() },
-            )]));
+            )])));
         }
     }
 
@@ -62,7 +70,7 @@ pub fn ensure_oracle_contract_deployed<DB: Database>(
     revm_acc.mark_touch();
     revm_acc.mark_created();
 
-    Ok(EvmState::from_iter([(ORACLE_CONTRACT_ADDRESS, revm_acc)]))
+    Ok(Some(EvmState::from_iter([(ORACLE_CONTRACT_ADDRESS, revm_acc)])))
 }
 
 /// The address of the high precision timestamp oracle contract.
@@ -80,9 +88,15 @@ pub const HIGH_PRECISION_TIMESTAMP_ORACLE_CODE: Bytes = bytes!("0x60806040523480
 /// Ensures the high precision timestamp oracle contract is deployed in the designated address and
 /// returns the state changes. Note that the database `db` is not modified in this function. The
 /// caller is responsible to commit the changes to database.
-pub fn ensure_high_precision_timestamp_oracle_contract_deployed<DB: Database>(
+pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
+    hardforks: impl MegaHardforks,
+    block_timestamp: u64,
     db: &mut State<DB>,
-) -> Result<EvmState, DB::Error> {
+) -> Result<Option<EvmState>, DB::Error> {
+    if !hardforks.is_mini_rex_active_at_timestamp(block_timestamp) {
+        return Ok(None);
+    }
+
     // Load the high precision timestamp oracle contract account from the cache
     let acc = db.load_cache_account(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS)?;
 
@@ -90,10 +104,10 @@ pub fn ensure_high_precision_timestamp_oracle_contract_deployed<DB: Database>(
     if let Some(account_info) = acc.account_info() {
         if account_info.code_hash == HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH {
             // Although we do not need to update the account, we need to mark it as read
-            return Ok(EvmState::from_iter([(
+            return Ok(Some(EvmState::from_iter([(
                 HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
                 Account { info: account_info, ..Default::default() },
-            )]));
+            )])));
         }
     }
 
@@ -107,11 +121,13 @@ pub fn ensure_high_precision_timestamp_oracle_contract_deployed<DB: Database>(
     revm_acc.mark_touch();
     revm_acc.mark_created();
 
-    Ok(EvmState::from_iter([(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, revm_acc)]))
+    Ok(Some(EvmState::from_iter([(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, revm_acc)])))
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::MegaHardforkConfig;
+
     use super::*;
     use alloy_primitives::keccak256;
     use revm::{database::InMemoryDB, state::AccountInfo};
@@ -134,10 +150,13 @@ mod tests {
         // Create a fresh in-memory database
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy the oracle contract
         let result =
-            ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
+            transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+                .expect("Deployment should succeed")
+                .expect("Should return state");
 
         // Verify that state changes were returned
         assert_eq!(result.len(), 1, "Should have state changes for one account");
@@ -182,10 +201,12 @@ mod tests {
         );
 
         let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy should return state with the account marked as read
-        let result =
-            ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
         assert_eq!(
             result.len(),
             1,
@@ -217,10 +238,12 @@ mod tests {
         );
 
         let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy should update the contract with correct code
-        let result =
-            ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
 
         // Verify that state changes were returned (contract was updated)
         assert_eq!(result.len(), 1, "Should have state changes to update the contract");
@@ -238,10 +261,12 @@ mod tests {
         // Create a fresh in-memory database
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy the oracle contract
-        let result =
-            ensure_oracle_contract_deployed(&mut state).expect("Deployment should succeed");
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
 
         // Get the account from result
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist in result");
@@ -259,10 +284,12 @@ mod tests {
         // Create a fresh in-memory database
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy the high precision timestamp oracle contract
-        let result = ensure_high_precision_timestamp_oracle_contract_deployed(&mut state)
-            .expect("Deployment should succeed");
+        let result = transact_deploy_high_precision_timestamp_oracle(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
 
         // Verify that state changes were returned
         assert_eq!(result.len(), 1, "Should have state changes for one account");

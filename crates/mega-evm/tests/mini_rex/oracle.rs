@@ -606,7 +606,7 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
     let receipt_builder = OpAlloyReceiptBuilder::default();
 
     // Create block executor
-    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec.clone(), receipt_builder);
 
     // Call apply_pre_execution_changes which triggers oracle deployment in block.rs:284-292
     executor.apply_pre_execution_changes().expect("Pre-execution changes should succeed");
@@ -637,8 +637,9 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
 
     // Verify that calling deploy_oracle_contract again returns state with account marked as read
     // (proving the contract is already deployed)
-    use mega_evm::ensure_oracle_contract_deployed;
-    let result = ensure_oracle_contract_deployed(db_ref).expect("Should not error");
+    use mega_evm::transact_deploy_oracle_contract;
+    let result =
+        transact_deploy_oracle_contract(&chain_spec, 0, db_ref).expect("Should not error").unwrap();
     assert_eq!(
         result.len(),
         1,
