@@ -1,32 +1,35 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{borrow::Cow, boxed::Box, collections::BTreeMap, vec::Vec};
+use std::{boxed::Box, collections::BTreeMap, vec::Vec};
 
 use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};
 pub use alloy_evm::block::CommitChanges;
 use alloy_evm::{
     block::{
-        state_changes::{balance_increment_state, post_block_balance_increments},
-        BlockExecutionError, BlockExecutionResult, BlockValidationError, ExecutableTx, OnStateHook,
-        StateChangePostBlockSource, StateChangeSource, SystemCaller,
+        state_changes::post_block_balance_increments, BlockExecutionError, BlockExecutionResult,
+        ExecutableTx, OnStateHook, StateChangePostBlockSource, StateChangePreBlockSource,
+        StateChangeSource, SystemCaller,
     },
     eth::receipt_builder::ReceiptBuilderCtx,
     Database, Evm as _, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv, RecoveredTx,
 };
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-use alloy_op_hardforks::OpHardforks;
 use alloy_primitives::B256;
 use op_alloy_consensus::OpDepositReceipt;
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
-    context::result::ExecutionResult, database::State, handler::EvmTr, DatabaseCommit, Inspector,
+    context::result::{ExecResultAndState, ExecutionResult},
+    database::State,
+    handler::EvmTr,
+    DatabaseCommit, Inspector,
 };
 
 use crate::{
-    ensure_high_precision_timestamp_oracle_contract_deployed, ensure_oracle_contract_deployed,
+    block::eips, transact_deploy_high_precision_timestamp_oracle, transact_deploy_oracle_contract,
     BlockLimiter, BlockMegaTransactionOutcome, BucketId, HostExt, MegaBlockExecutionCtx,
-    MegaHardforks, MegaSpecId, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
+    MegaHardforks, MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt,
+    MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -143,7 +146,7 @@ impl<'db, DB, C, R, INSP, ExtEnvs>
     MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
     DB: Database + 'db,
-    C: OpHardforks,
+    C: MegaHardforks,
     ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<
@@ -151,6 +154,131 @@ where
         Receipt: TxReceipt,
     >,
 {
+    /// Make pre-execution changes on the state. Note that the execution result is not
+    /// committed to the block executor's inner state.
+    pub fn pre_execution_changes(
+        &mut self,
+    ) -> Result<Vec<MegaSystemCallOutcome>, BlockExecutionError> {
+        let mut outcomes = Vec::new();
+
+        // In MegaETH, the Spurious Dragon hardfork is always active, so we can safely set the state
+        // clear flag to true.
+        self.evm.db_mut().set_state_clear_flag(true);
+
+        // EIP-2935
+        let result_and_state = eips::transact_blockhashes_contract_call(
+            &self.hardforks,
+            self.ctx.parent_hash,
+            &mut self.evm,
+        )?;
+        if let Some(ExecResultAndState { state, .. }) = result_and_state {
+            outcomes.push(MegaSystemCallOutcome {
+                source: StateChangeSource::PreBlock(StateChangePreBlockSource::BlockHashesContract),
+                state,
+            });
+        }
+
+        // EIP-4788
+        let result_and_state = eips::transact_beacon_root_contract_call(
+            &self.hardforks,
+            self.ctx.parent_beacon_block_root,
+            &mut self.evm,
+        )?;
+        if let Some(ExecResultAndState { state, .. }) = result_and_state {
+            outcomes.push(MegaSystemCallOutcome {
+                source: StateChangeSource::PreBlock(StateChangePreBlockSource::BeaconRootContract),
+                state,
+            });
+        }
+
+        // In MegaETH, the Isthmus hardfork is always active, which means the Canyon hardfork has
+        // already activated and the create2 deployer is already deployed, so we can safely assume
+        // that `ensure_create2_deployer` function will never be called.
+
+        // MiniRex hardfork: oracle contract
+        let result_and_state = transact_deploy_oracle_contract(
+            &self.hardforks,
+            self.evm.block().timestamp.saturating_to(),
+            self.evm.db_mut(),
+        )
+        .map_err(BlockExecutionError::other)?;
+        if let Some(state) = result_and_state {
+            outcomes.push(MegaSystemCallOutcome {
+                // We tentatively use `StateChangeSource::Transaction(0)` as state change source as
+                // there is no specific source defined for this oracle contract in alloy. This may
+                // change in the future.
+                source: StateChangeSource::Transaction(0),
+                state,
+            });
+        }
+
+        // MiniRex hardfork: high precision timestamp oracle contract
+        let result_and_state = transact_deploy_high_precision_timestamp_oracle(
+            &self.hardforks,
+            self.evm.block().timestamp.saturating_to(),
+            self.evm.db_mut(),
+        )
+        .map_err(BlockExecutionError::other)?;
+        if let Some(state) = result_and_state {
+            outcomes
+                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
+        }
+
+        Ok(outcomes)
+    }
+
+    /// Make pre-execution changes on the state. Note that the execution result is not
+    /// committed to the block executor's inner state.
+    pub fn post_execution_changes(
+        &mut self,
+    ) -> Result<Vec<MegaSystemCallOutcome>, BlockExecutionError> {
+        let mut outcomes = Vec::new();
+
+        // post block balance increments
+        let balance_increments =
+            post_block_balance_increments::<Header>(&self.hardforks, self.evm.block(), &[], None);
+        // self.evm
+        //     .db_mut()
+        //     .increment_balances(balance_increments.clone())
+        //     .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
+        // let state = balance_increment_state(&balance_increments, self.evm.db_mut())?;
+        let state = eips::transact_balance_increments(balance_increments, self.evm.db_mut())
+            .map_err(BlockExecutionError::other)?;
+        if let Some(state) = state {
+            outcomes.push(MegaSystemCallOutcome {
+                source: StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
+                state,
+            });
+        }
+
+        Ok(outcomes)
+    }
+
+    /// Commit the system call outcomes to the internal state of the block executor.
+    pub fn commit_system_call_outcomes(
+        &mut self,
+        outcomes: Vec<MegaSystemCallOutcome>,
+    ) -> Result<(), BlockExecutionError> {
+        for outcome in outcomes {
+            self.system_caller.on_state(outcome.source, &outcome.state);
+            self.evm.db_mut().commit(outcome.state);
+        }
+
+        Ok(())
+    }
+
+    /// Alias to [`MegaBlockExecutor::run_transaction`].
+    #[deprecated(note = "use `execute_transaction` instead")]
+    pub fn execute_mega_transaction<Tx>(
+        &mut self,
+        tx: Tx,
+    ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+    {
+        self.run_transaction(tx)
+    }
+
     /// Execute a transaction with a commit condition function without committing the execution
     /// result to the block executor's inner state.
     ///
@@ -162,7 +290,7 @@ where
     ///
     /// Returns the execution outcome of the transaction. Note that the execution result is not
     /// committed to the block executor's inner state.
-    pub fn execute_mega_transaction<Tx>(
+    pub fn run_transaction<Tx>(
         &mut self,
         tx: Tx,
     ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
@@ -302,7 +430,7 @@ impl<'db, DB, C, R, INSP, ExtEnvs> alloy_evm::block::BlockExecutor
     for MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
     DB: Database + 'db,
-    C: OpHardforks,
+    C: MegaHardforks,
     ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
     R: OpReceiptBuilder<
@@ -321,46 +449,8 @@ where
     /// `alloy_op_evm::OpBlockExecutor::apply_pre_execution_changes`. Changes there should be
     /// synced.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
-        // In MegaETH, the Spurious Dragon hardfork is always active, so we can safely set the state
-        // clear flag to true.
-        self.evm.db_mut().set_state_clear_flag(true);
-
-        self.system_caller.apply_blockhashes_contract_call(self.ctx.parent_hash, &mut self.evm)?;
-        self.system_caller
-            .apply_beacon_root_contract_call(self.ctx.parent_beacon_block_root, &mut self.evm)?;
-
-        // In MegaETH, the Isthmus hardfork is always active, which means the Canyon hardfork has
-        // already activated and the create2 deployer is already deployed, so we can safely assume
-        // that `ensure_create2_deployer` function will never be called.
-
-        // If the MiniRex hardfork is active, we need to ensure the oracle contract is deployed.
-        if self.evm.ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            // System oracle contract, which is the centralized storage of oracle data for all
-            // oracle services.
-            let state = ensure_oracle_contract_deployed(self.evm_mut().db_mut())
-                .map_err(BlockExecutionError::other)?;
-            // Invoke the state hook with state changes. We tentatively use
-            // `StateChangeSource::Transaction(0)` as state change source as there is no specific
-            // source defined for this oracle contract in alloy. This may change in the
-            // future.
-            self.system_caller.on_state(StateChangeSource::Transaction(0), &state);
-
-            // commit changes to database
-            self.evm.db_mut().commit(state);
-
-            // High precision timestamp oracle service
-            let state =
-                ensure_high_precision_timestamp_oracle_contract_deployed(self.evm_mut().db_mut())
-                    .map_err(BlockExecutionError::other)?;
-            // Invoke the state hook with state changes. We tentatively use
-            // `StateChangeSource::Transaction(0)` as state change source as there is no specific
-            // source defined for this oracle contract in alloy. This may change in the
-            // future.
-            self.system_caller.on_state(StateChangeSource::Transaction(0), &state);
-
-            // commit changes to database
-            self.evm.db_mut().commit(state);
-        }
+        let outcomes = self.pre_execution_changes()?;
+        self.commit_system_call_outcomes(outcomes)?;
 
         Ok(())
     }
@@ -373,7 +463,7 @@ where
         tx: impl ExecutableTx<Self>,
         f: impl FnOnce(&ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>) -> CommitChanges,
     ) -> Result<Option<u64>, BlockExecutionError> {
-        let outcome = self.execute_mega_transaction(tx)?;
+        let outcome = self.run_transaction(tx)?;
         if f(&outcome.result).should_commit() {
             let gas_used = self.commit_execution_outcome(outcome)?;
             Ok(Some(gas_used))
@@ -388,22 +478,8 @@ where
     fn finish(
         mut self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        let balance_increments =
-            post_block_balance_increments::<Header>(&self.hardforks, self.evm.block(), &[], None);
-        // increment balances
-        self.evm
-            .db_mut()
-            .increment_balances(balance_increments.clone())
-            .map_err(|_| BlockValidationError::IncrementBalanceFailed)?;
-        // call state hook with changes due to balance increments.
-        self.system_caller.try_on_state_with(|| {
-            balance_increment_state(&balance_increments, self.evm.db_mut()).map(|state| {
-                (
-                    StateChangeSource::PostBlock(StateChangePostBlockSource::BalanceIncrements),
-                    Cow::Owned(state),
-                )
-            })
-        })?;
+        let outcomes = self.post_execution_changes()?;
+        self.commit_system_call_outcomes(outcomes)?;
 
         let gas_used = self.receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or_default();
         Ok((
