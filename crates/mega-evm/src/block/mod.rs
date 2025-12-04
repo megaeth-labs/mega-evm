@@ -81,6 +81,7 @@
 //! - Support for parallel execution through access tracking
 //! - Optimized gas calculations for modified opcodes
 
+mod eips;
 mod executor;
 mod factory;
 mod hardfork;

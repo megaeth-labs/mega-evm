@@ -1,3 +1,4 @@
+use alloy_evm::block::StateChangeSource;
 pub use alloy_evm::InvalidTxError;
 use alloy_primitives::Address;
 pub use op_revm::{OpHaltReason, OpTransactionError};
@@ -30,6 +31,15 @@ pub struct MegaTransactionOutcome {
     pub compute_gas_used: u64,
     /// The state growth used.
     pub state_growth_used: u64,
+}
+
+/// The execution outcome of system call in `MegaETH`.
+#[derive(Debug, Clone)]
+pub struct MegaSystemCallOutcome {
+    /// Source of the state change
+    pub source: StateChangeSource,
+    /// The post-call evm state
+    pub state: EvmState,
 }
 
 /// `MegaETH` transaction validation error type.

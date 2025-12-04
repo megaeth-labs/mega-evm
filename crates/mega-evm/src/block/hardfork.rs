@@ -144,6 +144,20 @@ impl MegaHardforkConfig {
         }
     }
 
+    /// Sets all `MegaHardfork` to be activated at timestamp 0.
+    pub fn with_all_activated(mut self) -> Self {
+        self.insert(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+        self.insert(MegaHardfork::Rex, ForkCondition::Timestamp(0));
+        self
+    }
+
+    /// Removes a `MegaHardfork` from the configuration, i.e., equivalent to setting the fork
+    /// condition to [`ForkCondition::Never`].
+    pub fn without(mut self, hardfork: MegaHardfork) -> Self {
+        self.hardforks.retain(|(h, _)| h.name() != hardfork.name());
+        self
+    }
+
     /// Creates a new hardfork configuration with the given hardfork and condition.
     pub fn with(mut self, hardfork: impl Hardfork, condition: ForkCondition) -> Self {
         self.insert(hardfork, condition);
