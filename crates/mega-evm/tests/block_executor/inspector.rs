@@ -8,12 +8,11 @@ use std::convert::Infallible;
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_evm::{block::BlockExecutor, EvmEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_op_hardforks::OpChainHardforks;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaSpecId,
-    MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{ADD, PUSH0, SLOAD, SSTORE},
@@ -66,10 +65,13 @@ fn test_inspector_works_with_block_executor() {
 
     let mut state = State::builder().with_database(&mut db).build();
 
-    // Create EVM factory and block executor factory
+    // Create EVM factory and block executor factory with MiniRex hardfork activated
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
     let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-    let chain_spec = OpChainHardforks::base_mainnet();
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
