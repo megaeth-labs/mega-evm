@@ -1,13 +1,13 @@
 use mega_evm::{
     alloy_hardforks::{EthereumHardfork, ForkCondition},
     alloy_op_hardforks::{EthereumHardforks, OpHardfork, OpHardforks},
-    MegaSpecId,
+    MegaHardfork, MegaHardforks, MegaSpecId,
 };
 
 /// Fixed hardfork configuration for replay
 #[derive(Debug, Clone, Copy)]
 pub struct FixedHardfork {
-    pub spec: MegaSpecId,
+    spec: MegaSpecId,
 }
 
 impl FixedHardfork {
@@ -30,6 +30,17 @@ impl EthereumHardforks for FixedHardfork {
 impl OpHardforks for FixedHardfork {
     fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
         if fork <= OpHardfork::Isthmus {
+            ForkCondition::Timestamp(0)
+        } else {
+            ForkCondition::Never
+        }
+    }
+}
+
+impl MegaHardforks for FixedHardfork {
+    fn megaeth_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
+        let mapped_spec = fork.spec_id();
+        if mapped_spec <= self.spec {
             ForkCondition::Timestamp(0)
         } else {
             ForkCondition::Never

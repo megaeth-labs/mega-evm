@@ -3536,12 +3536,12 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "1.1.1"
+version = "1.0.1"
+source = "git+https://github.com/megaeth-labs/mega-evm.git?branch=william%2Ffix%2Fv1.0.1-inspector#76d4aad9be1451efed538b3b2af3a6e8bf0b3099"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-evm",
- "alloy-hardforks",
  "alloy-op-evm",
  "alloy-op-hardforks",
  "alloy-primitives",
@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3579,7 +3579,7 @@ dependencies = [
  "delegate",
  "derive_more",
  "hex",
- "mega-evm 1.1.0",
+ "mega-evm 1.1.1",
  "once_cell",
  "op-alloy-consensus",
  "op-alloy-flz",
@@ -3609,7 +3609,7 @@ dependencies = [
  "alloy-transport-http",
  "clap",
  "mega-evm 1.0.1",
- "mega-evm 1.1.0",
+ "mega-evm 1.1.1",
  "op-alloy-consensus",
  "op-alloy-network",
  "op-alloy-rpc-types",
@@ -3620,6 +3620,7 @@ dependencies = [
  "state-test",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5963,7 +5964,7 @@ dependencies = [
  "hash-db",
  "indicatif",
  "k256",
- "mega-evm 1.1.0",
+ "mega-evm 1.1.1",
  "plain_hasher",
  "serde",
  "serde_json",

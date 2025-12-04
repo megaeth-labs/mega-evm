@@ -4,25 +4,20 @@ use std::{
 };
 
 use alloy_primitives::{hex, Address, Bytes, U256};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use mega_evm::{
     revm::{
         context::{result::ExecutionResult, tx::TxEnv},
         primitives::TxKind,
-        state::{AccountInfo, Bytecode, EvmState},
+        state::{Account, AccountInfo, Bytecode, EvmState},
     },
     MegaContext, MegaTransaction,
 };
 
 use super::{load_code, load_input, EvmeState, Result};
 
-/// Tracer type for execution analysis
-#[derive(Debug, Clone, Copy, ValueEnum)]
-#[non_exhaustive]
-pub enum TracerType {
-    /// Enable execution tracing (opcode-level trace in Geth format)
-    Trace,
-}
+// Re-export TracerType from common module
+pub use crate::common::TracerType;
 
 /// Run arbitrary EVM bytecode
 #[derive(Parser, Debug)]
@@ -119,7 +114,7 @@ impl Cmd {
 
         // Step 3: Setup initial state and environment
         // Load prestate from file and sender balance
-        let (mut prestate, storage) = super::load_prestate(&self.prestate_args, self.sender)?;
+        let mut prestate = self.prestate_args.load_prestate(&self.sender)?;
 
         // Run-specific: If not in create mode, set the code at the receiver address
         if !self.create && !code.is_empty() {
@@ -131,7 +126,7 @@ impl Cmd {
                 AccountInfo { balance: U256::ZERO, code_hash, code: Some(bytecode), nonce: 0 };
 
             // Insert account into prestate
-            prestate.insert(self.receiver, acc_info);
+            prestate.insert(self.receiver, Account::from(acc_info));
         }
 
         // Create provider if forking
@@ -149,9 +144,10 @@ impl Cmd {
         };
 
         // Create initial state with provider (if any)
-        let mut state =
-            super::create_initial_state(provider, self.prestate_args.fork_block, prestate, storage)
-                .await?;
+        let mut state = self
+            .prestate_args
+            .create_initial_state::<op_alloy_network::Optimism>(&self.sender)
+            .await?;
 
         // Step 4: Execute bytecode
         let result = if self.bench {
@@ -259,10 +255,10 @@ impl Cmd {
         P: alloy_provider::Provider<N> + std::fmt::Debug,
     {
         // Setup configuration, block, transaction environments, and external environments
-        let cfg = super::setup_cfg_env(&self.env_args);
-        let block = super::setup_block_env(&self.env_args);
+        let cfg = self.env_args.create_cfg_env()?;
+        let block = self.env_args.create_block_env()?;
         let tx_env = self.setup_tx_env(code, input);
-        let external_envs = super::setup_external_envs(&self.env_args.bucket_capacity)?;
+        let external_envs = self.env_args.create_external_envs()?;
 
         // Create EVM context and transaction
         let evm_context = MegaContext::new(state, cfg.spec)
@@ -331,7 +327,7 @@ impl Cmd {
 
         // Dump state if requested
         if self.dump_args.dump {
-            super::dump_state(&exec_result.state, &self.dump_args)?;
+            self.dump_args.dump_evm_state(&exec_result.state)?;
         }
 
         Ok(())

@@ -1,6 +1,6 @@
 use alloy_primitives::{hex::FromHexError, BlockNumber, TxHash};
 use alloy_provider::transport::TransportError;
-use mega_evm::alloy_evm::block::BlockExecutionError;
+use mega_evm::{alloy_evm::block::BlockExecutionError, revm::bytecode::BytecodeDecodeError};
 
 /// Error types for the replay command
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +20,10 @@ pub enum EvmeError {
     /// Block execution error
     #[error("Block execution error: {0}")]
     BlockExecutionError(#[from] BlockExecutionError),
+
+    /// Invalid bytecode
+    #[error("Invalid bytecode: {0}")]
+    InvalidBytecode(#[from] BytecodeDecodeError),
 
     /// Failed to read file
     #[error("Failed to read file: {0}")]

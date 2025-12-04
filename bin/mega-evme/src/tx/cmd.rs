@@ -102,12 +102,15 @@ impl Cmd {
 
         // Step 2: Setup initial state and environment
         // Load prestate from file and sender balance
-        let (prestate, storage) = crate::run::load_prestate(&self.prestate_args, self.sender)?;
+        let prestate = self.prestate_args.load_prestate(&self.sender)?;
 
         // Create provider if forking
         let provider = if self.prestate_args.fork {
             let url = self.prestate_args.fork_rpc.parse().map_err(|e| {
-                crate::run::RunError::RpcError(format!("Invalid RPC URL '{}': {}", self.prestate_args.fork_rpc, e))
+                crate::run::RunError::RpcError(format!(
+                    "Invalid RPC URL '{}': {}",
+                    self.prestate_args.fork_rpc, e
+                ))
             })?;
             eprintln!("Forking from RPC {}", self.prestate_args.fork_rpc);
             Some(alloy_provider::ProviderBuilder::new().connect_http(url))
@@ -116,7 +119,10 @@ impl Cmd {
         };
 
         // Create initial state with provider (if any)
-        let mut state = crate::run::create_initial_state(provider, self.prestate_args.fork_block, prestate, storage).await?;
+        let mut state = self
+            .prestate_args
+            .create_initial_state::<op_alloy_network::Optimism>(&self.sender)
+            .await?;
 
         // Step 3: Execute transaction
         let start = Instant::now();
@@ -180,10 +186,10 @@ impl Cmd {
         P: alloy_provider::Provider<N> + std::fmt::Debug,
     {
         // Setup configuration, block, transaction environments, and external environments
-        let cfg = crate::run::setup_cfg_env(&self.env_args);
-        let block = crate::run::setup_block_env(&self.env_args);
+        let cfg = self.env_args.create_cfg_env()?;
+        let block = self.env_args.create_block_env()?;
         let tx_env = self.setup_tx_env(state, input);
-        let external_envs = crate::run::setup_external_envs(&self.env_args.bucket_capacity)?;
+        let external_envs = self.env_args.create_external_envs()?;
 
         // Create EVM context and transaction
         let evm_context = MegaContext::new(state, cfg.spec)
@@ -232,7 +238,7 @@ impl Cmd {
 
         // Dump state if requested
         if self.dump_args.dump {
-            crate::run::dump_state(&exec_result.state, &self.dump_args)?;
+            self.dump_args.dump_evm_state(&exec_result.state)?;
         }
 
         Ok(())
