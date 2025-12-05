@@ -33,6 +33,7 @@ pub enum TracerType {
     /// Enable call tracing (tracks call frames in nested tree structure)
     Call,
     /// Enable pre-state tracing (retrieves account state before execution)
+    #[value(alias = "prestate")]
     PreState,
 }
 
