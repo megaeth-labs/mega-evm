@@ -109,6 +109,7 @@ impl Cmd {
             provider.clone(),
             Some(state_base_block_number),
             Default::default(),
+            Default::default(), // block_hashes - not used in replay
         )
         .await?;
 

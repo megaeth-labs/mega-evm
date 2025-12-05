@@ -19,7 +19,7 @@ use super::{load_hex, EvmeError, Result};
 #[command(next_help_heading = "Transaction Options")]
 pub struct TxArgs {
     /// Transaction type (0=Legacy, 1=EIP-2930, 2=EIP-1559, etc.)
-    #[arg(long = "tx-type", default_value = "0")]
+    #[arg(long = "tx-type", visible_aliases = ["type", "ty"], default_value = "0")]
     pub tx_type: u8,
 
     /// Gas limit for the evm
@@ -27,7 +27,7 @@ pub struct TxArgs {
     pub gas: u64,
 
     /// Price set for the evm (gas price)
-    #[arg(long = "basefee", visible_aliases = ["gas-price", "price"], default_value = "0")]
+    #[arg(long = "basefee", visible_aliases = ["gas-price", "price", "base-fee"], default_value = "0")]
     pub basefee: u64,
 
     /// Gas priority fee (EIP-1559)
@@ -55,15 +55,15 @@ pub struct TxArgs {
     pub value: U256,
 
     /// Transaction data (input) as hex string
-    #[arg(long = "input")]
+    #[arg(long = "input", visible_aliases = ["data"])]
     pub input: Option<String>,
 
     /// File containing transaction data (input). If '-' is specified, input is read from stdin
-    #[arg(long = "inputfile")]
+    #[arg(long = "inputfile", visible_aliases = ["datafile", "input-file", "data-file"])]
     pub inputfile: Option<String>,
 
     /// Source hash for deposit transactions (tx-type 126)
-    #[arg(long = "source-hash", value_name = "HASH")]
+    #[arg(long = "source-hash", visible_aliases = ["sourcehash"], value_name = "HASH")]
     pub source_hash: Option<B256>,
 
     /// Amount of ETH to mint for deposit transactions (wei)
@@ -71,11 +71,11 @@ pub struct TxArgs {
     pub mint: Option<u128>,
 
     /// EIP-7702 authorization in format `AUTHORITY:NONCE->DELEGATION` (can be repeated)
-    #[arg(long = "auth", value_name = "AUTH")]
+    #[arg(long = "auth", visible_aliases = ["authorization"], value_name = "AUTH")]
     pub auth: Vec<String>,
 
     /// EIP-2930 access list entry in format `ADDRESS` or `ADDRESS:KEY1,KEY2,...` (can be repeated)
-    #[arg(long = "access", value_name = "ACCESS")]
+    #[arg(long = "access", visible_aliases = ["accesslist", "access-list"], value_name = "ACCESS")]
     pub access: Vec<String>,
 }
 
@@ -118,11 +118,6 @@ impl TxArgs {
         if self.create && self.receiver.is_some() {
             return Err(EvmeError::InvalidInput(
                 "--receiver must not be set when --create is specified".to_string(),
-            ));
-        }
-        if !self.create && self.receiver.is_none() {
-            return Err(EvmeError::InvalidInput(
-                "--receiver is required when --create is not specified".to_string(),
             ));
         }
 
