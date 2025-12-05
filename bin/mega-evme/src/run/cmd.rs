@@ -67,7 +67,7 @@ impl Cmd {
             let bytecode = Bytecode::new_raw_checked(code.clone())
                 .unwrap_or_else(|_| Bytecode::new_legacy(code.clone()));
             // Override the code at the receiver address
-            state.set_account_code(self.tx_args.receiver()?, bytecode);
+            state.set_account_code(self.tx_args.receiver(), bytecode);
         }
 
         // Step 3: Execute bytecode

@@ -104,7 +104,8 @@ impl TxArgs {
         }
 
         // 2. priority_fee must not be set when tx_type is legacy or eip2930
-        if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) && self.priority_fee.is_some()
+        if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) &&
+            self.priority_fee.is_some()
         {
             return Err(EvmeError::InvalidInput(
                 "--priority-fee is not valid for legacy (0) or EIP-2930 (1) transactions"
@@ -131,9 +132,10 @@ impl TxArgs {
             ));
         }
 
-        // 5. access should only be set when tx_type supports access lists (EIP-2930, EIP-1559, EIP-7702)
-        if !self.access.is_empty()
-            && !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702)
+        // 5. access should only be set when tx_type supports access lists (EIP-2930, EIP-1559,
+        //    EIP-7702)
+        if !self.access.is_empty() &&
+            !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702)
         {
             return Err(EvmeError::InvalidInput(
                 "--access is only valid for EIP-2930 (1), EIP-1559 (2), or EIP-7702 (4) transactions"
@@ -271,6 +273,8 @@ impl TxArgs {
     /// Parses authorization list from `--auth` for EIP-7702 transactions.
     /// Parses access list from `--access` for EIP-2930/EIP-1559/EIP-7702 transactions.
     pub fn create_tx_env(&self, chain_id: u64) -> Result<TxEnv> {
+        self.validate()?;
+
         let data = load_hex(self.input.clone(), self.inputfile.clone())?.unwrap_or_default();
         let kind = if self.create { TxKind::Create } else { TxKind::Call(self.receiver()) };
         let authorization_list =

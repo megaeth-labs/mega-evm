@@ -98,7 +98,7 @@ impl Cmd {
             self.env_args.block.block_number,
             self.env_args.block.block_timestamp,
             self.tx_args.sender,
-            if self.tx_args.create { None } else { Some(self.tx_args.receiver()?) },
+            if self.tx_args.create { None } else { Some(self.tx_args.receiver()) },
             contract_address,
             self.tx_args.effective_gas_price()?,
         );
