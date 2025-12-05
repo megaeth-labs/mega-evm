@@ -129,7 +129,6 @@ cargo run --example block_env_tracking
 ## Documentation
 
 - **[ARCH.md](ARCH.md)**: Detailed implementation architecture and technical specifications
-- **[DEV.md](DEV.md)**: Development guide and testing information
 
 ## License
 
