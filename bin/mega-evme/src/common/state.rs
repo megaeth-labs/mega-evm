@@ -29,7 +29,7 @@ pub struct PreStateArgs {
     pub fork_block: Option<u64>,
 
     /// RPC URL to use for the fork. Only used if `fork` is true.
-    #[arg(long = "fork.rpc", default_value = "http://localhost:8545")]
+    #[arg(long = "fork.rpc", default_value = "http://localhost:8545", env = "RPC_URL")]
     pub fork_rpc: String,
 
     /// JSON file with prestate (genesis) config
