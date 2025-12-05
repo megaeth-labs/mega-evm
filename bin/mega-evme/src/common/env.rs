@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use clap::{Args, Parser};
 use mega_evm::{
     alloy_evm::Database,
@@ -20,11 +20,11 @@ use super::{EvmeError, Result};
 #[command(next_help_heading = "Chain Options")]
 pub struct ChainArgs {
     /// Name of hardfork to use, possible values: `MiniRex`, `Equivalence`, `Rex`
-    #[arg(long = "state.fork", default_value = "MiniRex")]
+    #[arg(long = "hardfork", visible_aliases = ["spec"], default_value = "MiniRex")]
     pub hardfork: String,
 
     /// `ChainID` to use
-    #[arg(long = "state.chainid", default_value = "6342")]
+    #[arg(long = "chain-id", visible_aliases = ["chainid"], default_value = "6342")]
     pub chain_id: u64,
 }
 
@@ -53,7 +53,7 @@ pub struct BlockEnvArgs {
     pub block_number: u64,
 
     /// Block coinbase/beneficiary address
-    #[arg(long = "block.coinbase", default_value = "0x0000000000000000000000000000000000000000")]
+    #[arg(long = "block.coinbase", visible_aliases = ["block.beneficiary"], default_value = "0x0000000000000000000000000000000000000000")]
     pub block_coinbase: Address,
 
     /// Block timestamp
@@ -61,11 +61,11 @@ pub struct BlockEnvArgs {
     pub block_timestamp: u64,
 
     /// Block gas limit
-    #[arg(long = "block.gaslimit", default_value = "10000000000")]
+    #[arg(long = "block.gaslimit", visible_aliases = ["block.gas-limit", "block.gas"], default_value = "10000000000")]
     pub block_gas_limit: u64,
 
     /// Block base fee per gas (EIP-1559)
-    #[arg(long = "block.basefee", default_value = "0")]
+    #[arg(long = "block.basefee", visible_aliases = ["block.base-fee"], default_value = "0")]
     pub block_basefee: u64,
 
     /// Block difficulty
@@ -75,12 +75,13 @@ pub struct BlockEnvArgs {
     /// Block prevrandao (replaces difficulty post-merge). Required for post-merge blocks.
     #[arg(
         long = "block.prevrandao",
+        visible_aliases = ["block.random"],
         default_value = "0x0000000000000000000000000000000000000000000000000000000000000000"
     )]
-    pub block_prevrandao: Option<String>,
+    pub block_prevrandao: B256,
 
     /// Excess blob gas for EIP-4844. Required for Cancun and later forks.
-    #[arg(long = "block.blobexcessgas", default_value = "0")]
+    #[arg(long = "block.blobexcessgas", visible_aliases = ["block.blob-excess-gas"], default_value = "0")]
     pub block_blob_excess_gas: Option<u64>,
 }
 
@@ -94,10 +95,7 @@ impl BlockEnvArgs {
             gas_limit: self.block_gas_limit,
             basefee: self.block_basefee,
             difficulty: self.block_difficulty,
-            prevrandao: self.block_prevrandao.as_ref().and_then(|s| {
-                let trimmed = s.trim().trim_start_matches("0x");
-                alloy_primitives::FixedBytes::from_str(trimmed).ok()
-            }),
+            prevrandao: Some(self.block_prevrandao),
             blob_excess_gas_and_price: None,
         };
 

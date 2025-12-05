@@ -78,15 +78,15 @@ pub struct TraceArgs {
     pub trace_call_with_log: bool,
 
     /// Show state diff instead of prestate (pre-state tracer only)
-    #[arg(long = "trace.prestate.diff-mode")]
+    #[arg(long = "trace.prestate.diff-mode", visible_aliases = ["trace.pre-state.diff-mode"])]
     pub trace_prestate_diff_mode: bool,
 
     /// Disable code in prestate output (pre-state tracer only)
-    #[arg(long = "trace.prestate.disable-code")]
+    #[arg(long = "trace.prestate.disable-code", visible_aliases = ["trace.pre-state.disable-code"])]
     pub trace_prestate_disable_code: bool,
 
     /// Disable storage in prestate output (pre-state tracer only)
-    #[arg(long = "trace.prestate.disable-storage")]
+    #[arg(long = "trace.prestate.disable-storage", visible_aliases = ["trace.pre-state.disable-storage"])]
     pub trace_prestate_disable_storage: bool,
 }
 

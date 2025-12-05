@@ -1,6 +1,6 @@
 //! State management for mega-evme with optional RPC forking support
 
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use alloy_network::Network;
 use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
@@ -33,9 +33,15 @@ pub struct PreStateArgs {
     #[arg(long = "fork.rpc", default_value = "http://localhost:8545", env = "RPC_URL")]
     pub fork_rpc: String,
 
-    /// JSON file with prestate (genesis) config
-    #[arg(long = "prestate")]
+    /// JSON file with prestate (genesis) config. This overrides the state in the
+    /// forked remote state (if applicable).
+    #[arg(long = "prestate", visible_aliases = ["pre-state"])]
     pub prestate: Option<PathBuf>,
+
+    /// History block hashes to serve `BLOCKHASH` opcode. This overrides the block hashes in the
+    /// forked remote state (if applicable). This is a list of `block_number:block_hash` pairs.
+    #[arg(long = "block-hashes", visible_aliases = ["blockhashes"])]
+    pub block_hashes: Vec<String>,
 
     /// Balance to allocate to the sender account
     /// If not specified, sender balance is not set (fallback to `prestate` if specified,
@@ -45,6 +51,35 @@ pub struct PreStateArgs {
 }
 
 impl PreStateArgs {
+    /// Parse block hashes from CLI arguments.
+    ///
+    /// Each entry should be in the format `block_number:block_hash`.
+    pub fn parse_block_hashes(&self) -> Result<HashMap<u64, B256>> {
+        let mut map = HashMap::default();
+        for entry in &self.block_hashes {
+            let (num_str, hash_str) = entry.split_once(':').ok_or_else(|| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid block hash entry '{}': expected format 'block_number:block_hash'",
+                    entry
+                ))
+            })?;
+            let block_num: u64 = num_str.trim().parse().map_err(|e| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid block number '{}' in entry '{}': {}",
+                    num_str, entry, e
+                ))
+            })?;
+            let block_hash = B256::from_str(hash_str.trim()).map_err(|e| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid block hash '{}' in entry '{}': {}",
+                    hash_str, entry, e
+                ))
+            })?;
+            map.insert(block_num, block_hash);
+        }
+        Ok(map)
+    }
+
     /// Load prestate as [`EvmState`] from file if provided
     pub fn load_prestate(&self, sender: &Address) -> Result<EvmState> {
         let mut prestate = if let Some(pre_state_path) = &self.prestate {
@@ -108,11 +143,14 @@ impl PreStateArgs {
         // Load prestate
         let prestate = self.load_prestate(sender)?;
 
+        // Parse block hashes
+        let block_hashes = self.parse_block_hashes()?;
+
         // Create the appropriate state based on whether provider is provided
         if let Some(provider) = provider {
-            EvmeState::new_forked(provider, self.fork_block, prestate).await
+            EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await
         } else {
-            Ok(EvmeState::new_empty(prestate))
+            Ok(EvmeState::new_empty(prestate, block_hashes))
         }
     }
 }
@@ -253,6 +291,8 @@ where
     prestate: EvmState,
     /// Code hash to bytecode map (extracted from prestate accounts)
     code_map: HashMap<alloy_primitives::B256, Bytecode>,
+    /// Block hash overrides (block number -> block hash)
+    block_hashes: HashMap<u64, B256>,
 }
 
 impl<N, P> EvmeState<N, P>
@@ -260,8 +300,8 @@ where
     N: Network,
     P: Provider<N>,
 {
-    /// Creates a new empty state with optional prestate overrides
-    pub fn new_empty(prestate: EvmState) -> Self {
+    /// Creates a new empty state with optional prestate overrides and block hash overrides
+    pub fn new_empty(prestate: EvmState, block_hashes: HashMap<u64, B256>) -> Self {
         // Extract code hash → bytecode mappings from prestate
         let code_map: HashMap<_, _> = prestate
             .values()
@@ -270,7 +310,7 @@ where
             })
             .collect();
 
-        Self { backend: EvmeBackend::Empty(EmptyDB::default()), prestate, code_map }
+        Self { backend: EvmeBackend::Empty(EmptyDB::default()), prestate, code_map, block_hashes }
     }
 
     /// Inserts an account override
@@ -336,11 +376,13 @@ where
     N: Network,
     P: Provider<N>,
 {
-    /// Create a new forked state from a provider with optional prestate overrides
+    /// Create a new forked state from a provider with optional prestate overrides and block hash
+    /// overrides
     pub async fn new_forked(
         provider: P,
         fork_block: Option<u64>,
         prestate: EvmState,
+        block_hashes: HashMap<u64, B256>,
     ) -> Result<Self> {
         // Determine block number
         let block_num = if let Some(block_num) = fork_block {
@@ -372,7 +414,7 @@ where
             })
             .collect();
 
-        Ok(Self { backend: EvmeBackend::Forked(Box::new(db)), prestate, code_map })
+        Ok(Self { backend: EvmeBackend::Forked(Box::new(db)), prestate, code_map, block_hashes })
     }
 }
 
@@ -440,6 +482,12 @@ where
         &mut self,
         number: u64,
     ) -> std::result::Result<alloy_primitives::B256, Self::Error> {
+        // Check block hash overrides first
+        if let Some(hash) = self.block_hashes.get(&number) {
+            return Ok(*hash);
+        }
+
+        // Query backend database
         match &mut self.backend {
             EvmeBackend::Empty(db) => Ok(db.block_hash(number).unwrap()),
             EvmeBackend::Forked(db) => db.block_hash(number).map_err(|e| {
@@ -516,6 +564,12 @@ where
         &self,
         number: u64,
     ) -> std::result::Result<alloy_primitives::B256, Self::Error> {
+        // Check block hash overrides first
+        if let Some(hash) = self.block_hashes.get(&number) {
+            return Ok(*hash);
+        }
+
+        // Query backend database
         match &self.backend {
             EvmeBackend::Empty(db) => Ok(db.block_hash_ref(number).unwrap()),
             EvmeBackend::Forked(db) => db.block_hash_ref(number).map_err(|e| {
