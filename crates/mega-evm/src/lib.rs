@@ -30,6 +30,7 @@ pub use types::*;
 pub use alloy_consensus;
 pub use alloy_eips;
 pub use alloy_evm;
+pub use alloy_hardforks;
 pub use alloy_op_evm;
 pub use alloy_op_hardforks;
 pub use alloy_primitives;

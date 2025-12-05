@@ -9,6 +9,10 @@ pub enum MainCmd {
     T8n(crate::t8n::Cmd),
     /// Run arbitrary EVM bytecode
     Run(crate::run::Cmd),
+    /// Run arbitrary transaction
+    Tx(crate::tx::Cmd),
+    /// Replay a transaction from RPC
+    Replay(crate::replay::Cmd),
 }
 
 /// Error types for the main command system
@@ -17,24 +21,33 @@ pub enum Error {
     /// Custom error with static message
     #[error("Custom error: {0}")]
     Custom(&'static str),
-    /// T8n tool error
+    /// Evme error (used by run, tx, and replay commands)
+    #[error("{0}")]
+    Evme(#[from] crate::common::EvmeError),
+    /// T8n tool error (wrapped in `EvmeError::Other`)
     #[error("T8n error: {0}")]
     T8n(#[from] crate::t8n::T8nError),
-    /// Run tool error
-    #[error("Run error: {0}")]
-    Run(#[from] crate::run::RunError),
 }
 
 impl MainCmd {
     /// Execute the main command
-    pub fn run(&self) -> Result<(), Error> {
+    pub async fn run(&self) -> Result<(), Error> {
         match self {
             Self::T8n(cmd) => {
-                cmd.run()?;
+                cmd.run()
+                    .map_err(|e| Error::Evme(crate::common::EvmeError::Other(e.to_string())))?;
                 Ok(())
             }
             Self::Run(cmd) => {
-                cmd.run()?;
+                cmd.run().await?;
+                Ok(())
+            }
+            Self::Tx(cmd) => {
+                cmd.run().await?;
+                Ok(())
+            }
+            Self::Replay(cmd) => {
+                cmd.run().await?;
                 Ok(())
             }
         }

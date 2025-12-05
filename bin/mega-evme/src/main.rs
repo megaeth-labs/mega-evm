@@ -6,17 +6,23 @@
 use clap::Parser;
 
 mod cmd;
-pub use cmd::*;
-
-/// T8N (state transition) module containing all transition-related functionality
-pub mod t8n;
-
+mod common;
+/// Replay module for fetching and executing transactions from RPC
+pub mod replay;
 /// Run module for executing arbitrary EVM bytecode
 pub mod run;
+/// T8N (state transition) module containing all transition-related functionality
+pub mod t8n;
+/// TX module for executing arbitrary transactions
+pub mod tx;
 
-fn main() -> Result<(), Error> {
+pub use cmd::*;
+pub use common::*;
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Error> {
     set_thread_panic_hook();
-    MainCmd::parse().run().inspect_err(|e| println!("{e:?}"))
+    MainCmd::parse().run().await.inspect_err(|e| println!("{e:?}"))
 }
 
 /// Sets thread panic hook, useful for having tests that panic.
