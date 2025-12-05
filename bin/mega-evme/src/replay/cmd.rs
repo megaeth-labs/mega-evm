@@ -150,11 +150,7 @@ impl Cmd {
                 preceding_transactions,
                 &target_tx,
                 self.chain_args.spec_id()?,
-                self.trace_args.tracer,
-                self.trace_args.trace_disable_storage,
-                self.trace_args.trace_disable_memory,
-                self.trace_args.trace_disable_stack,
-                self.trace_args.trace_enable_return_data,
+                &self.trace_args,
             )
             .await?
         } else {
@@ -261,6 +257,21 @@ impl Cmd {
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
+        let result_and_state = mega_evm::revm::context::result::ResultAndState {
+            result: exec_result.clone(),
+            state: evm_state.clone(),
+        };
+
+        // Generate trace only if tracing is enabled
+        let trace_data = self.trace_args.is_tracing_enabled().then(|| {
+            self.trace_args.generate_trace(
+                block_executor.inspector(),
+                &result_and_state,
+                block_executor.evm().db_ref(),
+            )
+        });
+
+        // Commit transaction outcome
         block_executor
             .commit_transaction_outcome(outcome)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
@@ -274,12 +285,6 @@ impl Cmd {
         let (db, _evm_env) = evm.finish();
         db.merge_transitions(BundleRetention::Reverts);
         let receipt_envelope = block_result.receipts.last().unwrap().clone();
-
-        // Generate trace only if tracing is enabled
-        let trace_data = self
-            .trace_args
-            .is_tracing_enabled()
-            .then(|| self.trace_args.generate_trace(&inspector, &exec_result));
 
         // Convert OpReceiptEnvelope to TransactionReceipt
         let from = target_tx.inner.inner.signer();

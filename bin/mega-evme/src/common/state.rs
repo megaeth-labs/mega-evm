@@ -18,6 +18,7 @@ use super::{EvmeError, Result};
 
 /// Pre-execution state configuration arguments
 #[derive(Parser, Debug, Clone)]
+#[command(next_help_heading = "State Options")]
 pub struct PreStateArgs {
     /// Fork state from a remote RPC endpoint.
     #[arg(long = "fork")]
@@ -129,6 +130,7 @@ pub fn convert_evm_state_to_json(evm_state: &EvmState) -> Result<String> {
 
 /// State dump configuration arguments
 #[derive(Parser, Debug, Clone)]
+#[command(next_help_heading = "State Dump Options")]
 pub struct StateDumpArgs {
     /// Dumps the state after the run
     #[arg(long = "dump")]

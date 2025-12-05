@@ -16,13 +16,14 @@ use super::{load_hex, EvmeError, Result};
 
 /// Transaction configuration arguments
 #[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Transaction Options")]
 pub struct TxArgs {
     /// Transaction type (0=Legacy, 1=EIP-2930, 2=EIP-1559, etc.)
     #[arg(long = "tx-type", default_value = "0")]
     pub tx_type: u8,
 
     /// Gas limit for the evm
-    #[arg(long = "gas", default_value = "10000000")]
+    #[arg(long = "gas", visible_aliases = ["gas-limit"], default_value = "10000000")]
     pub gas: u64,
 
     /// Price set for the evm (gas price)

@@ -17,6 +17,7 @@ use super::{EvmeError, Result};
 
 /// Chain configuration arguments (hardfork and chain ID)
 #[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Chain Options")]
 pub struct ChainArgs {
     /// Name of hardfork to use, possible values: `MiniRex`, `Equivalence`, `Rex`
     #[arg(long = "state.fork", default_value = "MiniRex")]
@@ -45,6 +46,7 @@ impl ChainArgs {
 
 /// Block environment configuration arguments
 #[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Block Options")]
 pub struct BlockEnvArgs {
     /// Block number
     #[arg(long = "block.number", default_value = "1")]
@@ -113,6 +115,7 @@ impl BlockEnvArgs {
 
 /// External environment configuration arguments (SALT bucket capacity)
 #[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "External Environment Options")]
 pub struct ExtEnvArgs {
     /// Bucket capacity configuration in format "`bucket_id:capacity`"
     /// Can be specified multiple times for different buckets.

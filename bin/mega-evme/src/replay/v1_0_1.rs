@@ -6,7 +6,6 @@ use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_primitives::{Bytes, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
-use alloy_rpc_types_trace::geth::GethDefaultTracingOptions;
 use mega_evm::{
     alloy_evm::{block::BlockExecutor, EvmEnv},
     alloy_hardforks::{EthereumHardfork, ForkCondition},
@@ -25,8 +24,8 @@ use op_alloy_rpc_types::Transaction;
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeOutcome},
-    run::{self, TracerType},
+    common::{op_receipt_to_tx_receipt, EvmeOutcome, TraceArgs},
+    run,
 };
 
 use super::{ReplayError, ReplayOutcome, Result};
@@ -68,11 +67,7 @@ pub(super) async fn execute_transactions_v1_0_1<P>(
     preceding_transactions: Vec<B256>,
     target_tx: &Transaction,
     spec_id: MegaSpecId,
-    tracer: Option<TracerType>,
-    trace_disable_storage: bool,
-    trace_disable_memory: bool,
-    trace_disable_stack: bool,
-    trace_enable_return_data: bool,
+    trace_args: &TraceArgs,
 ) -> Result<ReplayOutcome>
 where
     P: Provider<op_alloy_network::Optimism> + std::fmt::Debug,
@@ -185,6 +180,7 @@ where
         .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
     let exec_result = outcome.inner.result.clone();
     let evm_state = outcome.inner.state.clone();
+
     block_executor_v1
         .commit_execution_outcome(outcome)
         .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
@@ -197,20 +193,11 @@ where
         .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
     let receipt_envelope = block_result.receipts.last().unwrap().clone();
 
-    // Generate trace only if tracing is enabled
-    #[allow(clippy::if_then_some_else_none)] // Complex closure, keep explicit for readability
-    let trace_data = if tracer.is_some() {
-        // Generate GethTrace
+    // Generate trace only if tracing is enabled (after block_executor releases inspector)
+    // Note: v1.0.1 only supports the default struct logger tracer
+    let trace_data = trace_args.is_tracing_enabled().then(|| {
         let geth_builder = inspector.geth_builder();
-
-        // Create GethDefaultTracingOptions based on CLI arguments
-        let opts = GethDefaultTracingOptions {
-            disable_storage: Some(trace_disable_storage),
-            disable_memory: Some(trace_disable_memory),
-            disable_stack: Some(trace_disable_stack),
-            enable_return_data: Some(trace_enable_return_data),
-            ..Default::default()
-        };
+        let opts = trace_args.create_geth_options();
 
         // Get output for trace generation
         let output = match &exec_result {
@@ -224,13 +211,9 @@ where
             geth_builder.geth_traces(exec_result.gas_used(), Bytes::from(output), opts);
 
         // Format as JSON
-        Some(
-            serde_json::to_string_pretty(&geth_trace)
-                .unwrap_or_else(|e| format!("Error serializing trace: {}", e)),
-        )
-    } else {
-        None
-    };
+        serde_json::to_string_pretty(&geth_trace)
+            .unwrap_or_else(|e| format!("Error serializing trace: {}", e))
+    });
 
     // Convert ExecutionResult from v1.0.1 to current version
     // The structures are the same, but the HaltReason type parameter differs
