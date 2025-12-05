@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use alloy_consensus::BlockHeader;
+use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_primitives::{Bytes, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
@@ -12,8 +12,9 @@ use mega_evm::{
     alloy_hardforks::{EthereumHardfork, ForkCondition},
     alloy_op_hardforks::{EthereumHardforks, OpHardfork, OpHardforks},
     revm::{
-        context::{cfg::CfgEnv, result::ExecutionResult, BlockEnv as RevmBlockEnv},
+        context::{cfg::CfgEnv, result::ExecutionResult, BlockEnv as RevmBlockEnv, ContextTr},
         database::StateBuilder,
+        DatabaseRef,
     },
     MegaSpecId,
 };
@@ -23,9 +24,12 @@ use mega_evm_v1_0_1 as mega_evm_v1;
 use op_alloy_rpc_types::Transaction;
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
-use crate::run::{self, TracerType};
+use crate::{
+    common::{op_receipt_to_tx_receipt, EvmeOutcome},
+    run::{self, TracerType},
+};
 
-use super::{ReplayError, ReplayResult, Result};
+use super::{ReplayError, ReplayOutcome, Result};
 
 #[derive(Debug, Clone, Copy)]
 struct FixedHardforkV1 {
@@ -68,7 +72,7 @@ pub(super) async fn execute_transactions_v1_0_1<P>(
     trace_disable_memory: bool,
     trace_disable_stack: bool,
     trace_enable_return_data: bool,
-) -> Result<ReplayResult>
+) -> Result<ReplayOutcome>
 where
     P: Provider<op_alloy_network::Optimism> + std::fmt::Debug,
 {
@@ -168,6 +172,12 @@ where
     }
 
     // Execute target transaction
+    let pre_execution_nonce = block_executor_v1
+        .evm()
+        .db_ref()
+        .basic_ref(target_tx.as_recovered().signer())?
+        .map(|acc| acc.nonce)
+        .unwrap_or(0);
     block_executor_v1.inspector_mut().fuse();
     let outcome = block_executor_v1
         .execute_mega_transaction(target_tx.as_recovered())
@@ -180,11 +190,11 @@ where
 
     let duration = start.elapsed();
 
-    // Obtain receipt
+    // Obtain receipt envelope
     let block_result = block_executor_v1
         .apply_post_execution_changes()
         .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
-    let receipt = block_result.receipts.last().unwrap().clone();
+    let receipt_envelope = block_result.receipts.last().unwrap().clone();
 
     // Generate trace only if tracing is enabled
     let trace_data = if matches!(tracer, Some(TracerType::Trace)) {
@@ -208,7 +218,8 @@ where
         };
 
         // Generate the geth trace
-        let geth_trace = geth_builder.geth_traces(exec_result.gas_used(), Bytes::from(output), opts);
+        let geth_trace =
+            geth_builder.geth_traces(exec_result.gas_used(), Bytes::from(output), opts);
 
         // Format as JSON
         Some(
@@ -240,12 +251,33 @@ where
         }
     };
 
-    Ok(ReplayResult {
-        exec_result: exec_result_current,
-        state: evm_state,
-        exec_time: duration,
+    // Convert OpReceiptEnvelope to TransactionReceipt
+    let from = target_tx.inner.inner.signer();
+    let to = target_tx.inner.inner.to();
+    let contract_address = if to.is_none() && receipt_envelope.is_success() {
+        Some(from.create(pre_execution_nonce))
+    } else {
+        None
+    };
+    let receipt = op_receipt_to_tx_receipt(
+        &receipt_envelope,
+        block.number(),
+        block.header.timestamp(),
+        from,
+        to,
+        contract_address,
+        target_tx.inner.effective_gas_price.unwrap_or(0),
+    );
+
+    Ok(ReplayOutcome {
+        outcome: EvmeOutcome {
+            pre_execution_nonce,
+            exec_result: exec_result_current,
+            state: evm_state,
+            exec_time: duration,
+            trace_data,
+        },
         original_tx: target_tx.clone(),
         receipt,
-        trace_data,
     })
 }

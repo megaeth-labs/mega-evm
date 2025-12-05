@@ -1,29 +1,28 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use alloy_consensus::BlockHeader;
-use alloy_primitives::{Bytes, B256, U256};
+use alloy_consensus::{BlockHeader, Transaction as _};
+use alloy_primitives::{B256, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Block;
-use alloy_rpc_types_trace::geth::GethDefaultTracingOptions;
 use clap::Parser;
 use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
-        context::{result::ExecutionResult, BlockEnv},
+        context::{BlockEnv, ContextTr},
         context_interface::block::BlobExcessGasAndPrice,
         database::{states::bundle_state::BundleRetention, StateBuilder},
-        state::EvmState,
+        DatabaseRef,
     },
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaSpecId,
-    TestExternalEnvs,
 };
 
-use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::Transaction;
-use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
-use crate::{common::FixedHardfork, run, EvmeState};
+use crate::{
+    common::{op_receipt_to_tx_receipt, EvmeOutcome, FixedHardfork, OpTxReceipt},
+    run, EvmeState,
+};
 
 use super::{v1_0_1, ReplayError, Result};
 
@@ -39,9 +38,13 @@ pub struct Cmd {
     pub rpc: String,
 
     // Shared argument groups
-    /// Environment configuration
+    /// Chain configuration (hardfork and chain ID)
     #[command(flatten)]
-    pub env_args: run::EnvArgs,
+    pub chain_args: run::ChainArgs,
+
+    /// External environment configuration (bucket capacities)
+    #[command(flatten)]
+    pub ext_args: run::ExtEnvArgs,
 
     /// State dump configuration
     #[command(flatten)]
@@ -56,15 +59,15 @@ pub struct Cmd {
     pub use_v1_0_1: bool,
 }
 
-/// Execution result with optional trace data and state
+/// Replay-specific execution outcome
 #[allow(dead_code)]
-pub(super) struct ReplayResult {
-    pub exec_result: ExecutionResult<mega_evm::MegaHaltReason>,
-    pub state: EvmState,
-    pub exec_time: Duration,
+pub(super) struct ReplayOutcome {
+    /// Common execution outcome
+    pub outcome: EvmeOutcome,
+    /// The original transaction that was replayed
     pub original_tx: Transaction,
-    pub receipt: OpReceiptEnvelope,
-    pub trace_data: Option<String>,
+    /// The transaction receipt
+    pub receipt: OpTxReceipt,
 }
 
 impl Cmd {
@@ -121,7 +124,7 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
         let block_env = self.retrieve_block_env(&block).await?;
-        let cfg_env = self.env_args.create_cfg_env()?;
+        let cfg_env = self.chain_args.create_cfg_env()?;
         let evm_env = EvmEnv::new(cfg_env, block_env);
 
         // Step 6: fetch preceding transactions
@@ -146,7 +149,7 @@ impl Cmd {
                 &provider,
                 preceeding_transactions,
                 &target_tx,
-                self.env_args.spec_id()?,
+                self.chain_args.spec_id()?,
                 self.trace_args.tracer,
                 self.trace_args.trace_disable_storage,
                 self.trace_args.trace_disable_memory,
@@ -183,23 +186,23 @@ impl Cmd {
         provider: &P,
         preceeding_transactions: Vec<B256>,
         target_tx: &Transaction,
-    ) -> Result<ReplayResult>
+    ) -> Result<ReplayOutcome>
     where
         P: alloy_provider::Provider<op_alloy_network::Optimism> + std::fmt::Debug,
     {
-        let chain_spec = FixedHardfork::new(self.env_args.spec_id()?);
-        let external_env_factory = TestExternalEnvs::default();
+        let chain_spec = FixedHardfork::new(self.chain_args.spec_id()?);
+        let external_env_factory = self.ext_args.create_external_envs()?;
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_env_factory);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             chain_spec,
             evm_factory,
             OpAlloyReceiptBuilder::default(),
         );
-        let block_limits = match self.env_args.spec_id()? {
+        let block_limits = match self.chain_args.spec_id()? {
             MegaSpecId::EQUIVALENCE => BlockLimits::no_limits().fit_equivalence(),
             MegaSpecId::MINI_REX => BlockLimits::no_limits().fit_mini_rex(),
             MegaSpecId::REX => BlockLimits::no_limits().fit_rex(),
-            _ => panic!("Unsupported spec id: {:?}", self.env_args.spec_id()),
+            _ => panic!("Unsupported spec id: {:?}", self.chain_args.spec_id()),
         };
         let block_ctx = MegaBlockExecutionCtx::new(
             parent_block.hash(),
@@ -212,8 +215,7 @@ impl Cmd {
         let start = Instant::now();
 
         // Setup tracing inspector
-        let config = TracingInspectorConfig::all();
-        let mut inspector = TracingInspector::new(config);
+        let mut inspector = self.trace_args.create_inspector();
 
         // Create state and block executor with inspector
         let mut state = StateBuilder::new().with_database(database).with_bundle_update().build();
@@ -238,75 +240,75 @@ impl Cmd {
                 .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
             let tx = tx.as_recovered();
             let outcome = block_executor
-                .execute_mega_transaction(tx)
+                .run_transaction(tx)
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
             block_executor
-                .commit_execution_outcome(outcome)
+                .commit_transaction_outcome(outcome)
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         }
 
         // Execute target transaction
+        let pre_execution_nonce = block_executor
+            .evm()
+            .db_ref()
+            .basic_ref(target_tx.as_recovered().signer())?
+            .map(|acc| acc.nonce)
+            .unwrap_or(0);
         block_executor.inspector_mut().fuse();
         let outcome = block_executor
-            .execute_mega_transaction(target_tx.as_recovered())
+            .run_transaction(target_tx.as_recovered())
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
         block_executor
-            .commit_execution_outcome(outcome)
+            .commit_transaction_outcome(outcome)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
         let duration = start.elapsed();
 
-        // Obtain receipt
+        // Obtain receipt envelope
         let (evm, block_result) = block_executor
             .finish()
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         let (db, _evm_env) = evm.finish();
         db.merge_transitions(BundleRetention::Reverts);
-        let receipt = block_result.receipts.last().unwrap().clone();
+        let receipt_envelope = block_result.receipts.last().unwrap().clone();
 
         // Generate trace only if tracing is enabled
-        let trace_data = if matches!(self.trace_args.tracer, Some(crate::run::TracerType::Trace)) {
-            // Generate GethTrace
-            let geth_builder = inspector.geth_builder();
-
-            // Create GethDefaultTracingOptions based on CLI arguments
-            let opts = GethDefaultTracingOptions {
-                disable_storage: Some(self.trace_args.trace_disable_storage),
-                disable_memory: Some(self.trace_args.trace_disable_memory),
-                disable_stack: Some(self.trace_args.trace_disable_stack),
-                enable_return_data: Some(self.trace_args.trace_enable_return_data),
-                ..Default::default()
-            };
-
-            // Get output for trace generation
-            let output = match &exec_result {
-                ExecutionResult::Success { output, .. } => output.data().to_vec(),
-                ExecutionResult::Revert { output, .. } => output.to_vec(),
-                _ => Vec::new(),
-            };
-
-            // Generate the geth trace
-            let geth_trace =
-                geth_builder.geth_traces(exec_result.gas_used(), Bytes::from(output), opts);
-
-            // Format as JSON
-            Some(
-                serde_json::to_string_pretty(&geth_trace)
-                    .unwrap_or_else(|e| format!("Error serializing trace: {}", e)),
-            )
+        let trace_data = if self.trace_args.is_tracing_enabled() {
+            Some(self.trace_args.generate_trace(&inspector, &exec_result))
         } else {
             None
         };
 
-        Ok(ReplayResult {
-            exec_result,
-            state: evm_state,
-            exec_time: duration,
+        // Convert OpReceiptEnvelope to TransactionReceipt
+        let from = target_tx.inner.inner.signer();
+        let to = target_tx.inner.inner.to();
+        let contract_address = if to.is_none() && receipt_envelope.is_success() {
+            Some(from.create(pre_execution_nonce))
+        } else {
+            None
+        };
+        let receipt = op_receipt_to_tx_receipt(
+            &receipt_envelope,
+            block.number(),
+            block.header.timestamp(),
+            from,
+            to,
+            contract_address,
+            target_tx.inner.effective_gas_price.unwrap_or(0),
+        );
+
+        Ok(ReplayOutcome {
+            outcome: EvmeOutcome {
+                pre_execution_nonce,
+                exec_result,
+                state: evm_state,
+                exec_time: duration,
+                trace_data,
+            },
             original_tx: target_tx.clone(),
             receipt,
-            trace_data,
         })
     }
 
@@ -327,7 +329,7 @@ impl Cmd {
     }
 
     /// Output execution results
-    fn output_results(&self, result: &ReplayResult) -> Result<()> {
+    fn output_results(&self, result: &ReplayOutcome) -> Result<()> {
         // Serialize and print receipt as JSON
         let receipt_json = serde_json::to_string_pretty(&result.receipt)
             .map_err(|e| ReplayError::Other(format!("Failed to serialize receipt: {}", e)))?;
@@ -335,10 +337,10 @@ impl Cmd {
 
         // Print execution time to stderr
         eprintln!();
-        eprintln!("execution time:  {:?}", result.exec_time);
+        eprintln!("execution time:  {:?}", result.outcome.exec_time);
 
         // Output trace data if available
-        if let Some(ref trace) = result.trace_data {
+        if let Some(ref trace) = result.outcome.trace_data {
             if let Some(ref output_file) = self.trace_args.trace_output_file {
                 // Write trace to file
                 std::fs::write(output_file, trace).map_err(|e| {
@@ -356,7 +358,7 @@ impl Cmd {
 
         // Dump state if requested
         if self.dump_args.dump {
-            self.dump_args.dump_evm_state(&result.state)?;
+            self.dump_args.dump_evm_state(&result.outcome.state)?;
         }
 
         Ok(())

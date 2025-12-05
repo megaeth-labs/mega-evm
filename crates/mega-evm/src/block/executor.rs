@@ -268,7 +268,6 @@ where
     }
 
     /// Alias to [`MegaBlockExecutor::run_transaction`].
-    #[deprecated(note = "use `execute_transaction` instead")]
     pub fn execute_mega_transaction<Tx>(
         &mut self,
         tx: Tx,
@@ -336,6 +335,17 @@ where
         Ok(BlockMegaTransactionOutcome { tx, tx_size, da_size, depositor, inner: outcome })
     }
 
+    /// Alias to [`MegaBlockExecutor::commit_transaction_outcome`].
+    pub fn commit_execution_outcome<Tx>(
+        &mut self,
+        outcome: BlockMegaTransactionOutcome<Tx>,
+    ) -> Result<u64, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+    {
+        self.commit_transaction_outcome(outcome)
+    }
+
     /// Commit the execution outcome of a transaction.
     ///
     /// This method commits the execution outcome of a transaction to the block executor's inner
@@ -348,7 +358,7 @@ where
     /// # Returns
     ///
     /// Returns the gas used by the transaction.
-    pub fn commit_execution_outcome<Tx>(
+    pub fn commit_transaction_outcome<Tx>(
         &mut self,
         outcome: BlockMegaTransactionOutcome<Tx>,
     ) -> Result<u64, BlockExecutionError>

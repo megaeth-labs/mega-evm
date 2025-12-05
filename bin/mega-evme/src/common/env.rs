@@ -1,22 +1,23 @@
 //! Environment configuration for mega-evme
 
-use std::{path::PathBuf, str::FromStr};
+use std::str::FromStr;
 
 use alloy_primitives::{Address, U256};
-use clap::Parser;
+use clap::{Args, Parser};
 use mega_evm::{
+    alloy_evm::Database,
     revm::{
         context::{block::BlockEnv, cfg::CfgEnv},
         primitives::eip4844,
     },
-    MegaSpecId, TestExternalEnvs,
+    MegaContext, MegaSpecId, TestExternalEnvs,
 };
 
 use super::{EvmeError, Result};
 
-/// Environment configuration arguments (chain config, block env, SALT bucket capacity)
-#[derive(Parser, Debug, Clone)]
-pub struct EnvArgs {
+/// Chain configuration arguments (hardfork and chain ID)
+#[derive(Args, Debug, Clone)]
+pub struct ChainArgs {
     /// Name of hardfork to use, possible values: `MiniRex`, `Equivalence`, `Rex`
     #[arg(long = "state.fork", default_value = "MiniRex")]
     pub hardfork: String,
@@ -24,8 +25,27 @@ pub struct EnvArgs {
     /// `ChainID` to use
     #[arg(long = "state.chainid", default_value = "6342")]
     pub chain_id: u64,
+}
 
-    // BlockEnv configuration
+impl ChainArgs {
+    /// Gets the spec ID from the hardfork name
+    pub fn spec_id(&self) -> Result<MegaSpecId> {
+        MegaSpecId::from_str(&self.hardfork)
+            .map_err(|e| EvmeError::InvalidInput(format!("Invalid hardfork name: {:?}", e)))
+    }
+
+    /// Creates [`CfgEnv`].
+    pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
+        let mut cfg = CfgEnv::default();
+        cfg.chain_id = self.chain_id;
+        cfg.spec = self.spec_id()?;
+        Ok(cfg)
+    }
+}
+
+/// Block environment configuration arguments
+#[derive(Args, Debug, Clone)]
+pub struct BlockEnvArgs {
     /// Block number
     #[arg(long = "block.number", default_value = "1")]
     pub block_number: u64,
@@ -60,30 +80,9 @@ pub struct EnvArgs {
     /// Excess blob gas for EIP-4844. Required for Cancun and later forks.
     #[arg(long = "block.blobexcessgas", default_value = "0")]
     pub block_blob_excess_gas: Option<u64>,
-
-    // SALT bucket capacity configuration
-    /// Bucket capacity configuration in format "`bucket_id:capacity`"
-    /// Can be specified multiple times for different buckets.
-    /// Example: --bucket-capacity 123:1000000 --bucket-capacity 456:2000000
-    #[arg(long = "bucket-capacity", value_name = "BUCKET_ID:CAPACITY")]
-    pub bucket_capacity: Vec<String>,
 }
 
-impl EnvArgs {
-    /// Gets the spec ID from the hardfork name
-    pub fn spec_id(&self) -> Result<MegaSpecId> {
-        MegaSpecId::from_str(&self.hardfork)
-            .map_err(|e| EvmeError::InvalidInput(format!("Invalid hardfork name: {:?}", e)))
-    }
-
-    /// Creates [`CfgEnv`].
-    pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
-        let mut cfg = CfgEnv::default();
-        cfg.chain_id = self.chain_id;
-        cfg.spec = self.spec_id()?;
-        Ok(cfg)
-    }
-
+impl BlockEnvArgs {
     /// Creates [`BlockEnv`].
     pub fn create_block_env(&self) -> Result<BlockEnv> {
         let mut block = BlockEnv {
@@ -110,7 +109,19 @@ impl EnvArgs {
 
         Ok(block)
     }
+}
 
+/// External environment configuration arguments (SALT bucket capacity)
+#[derive(Args, Debug, Clone)]
+pub struct ExtEnvArgs {
+    /// Bucket capacity configuration in format "`bucket_id:capacity`"
+    /// Can be specified multiple times for different buckets.
+    /// Example: --bucket-capacity 123:1000000 --bucket-capacity 456:2000000
+    #[arg(long = "bucket-capacity", value_name = "BUCKET_ID:CAPACITY")]
+    pub bucket_capacity: Vec<String>,
+}
+
+impl ExtEnvArgs {
     /// Creates [`TestExternalEnvs`].
     pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
         let mut external_envs = TestExternalEnvs::new();
@@ -122,6 +133,59 @@ impl EnvArgs {
         }
 
         Ok(external_envs)
+    }
+}
+
+/// Environment configuration arguments (chain config, block env, SALT bucket capacity)
+#[derive(Parser, Debug, Clone)]
+pub struct EnvArgs {
+    /// Chain configuration
+    #[command(flatten)]
+    pub chain: ChainArgs,
+
+    /// Block environment configuration
+    #[command(flatten)]
+    pub block: BlockEnvArgs,
+
+    /// External environment configuration
+    #[command(flatten)]
+    pub ext: ExtEnvArgs,
+}
+
+impl EnvArgs {
+    /// Gets the spec ID from the hardfork name
+    pub fn spec_id(&self) -> Result<MegaSpecId> {
+        self.chain.spec_id()
+    }
+
+    /// Creates [`CfgEnv`].
+    pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
+        self.chain.create_cfg_env()
+    }
+
+    /// Creates [`BlockEnv`].
+    pub fn create_block_env(&self) -> Result<BlockEnv> {
+        self.block.create_block_env()
+    }
+
+    /// Creates [`TestExternalEnvs`].
+    pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
+        self.ext.create_external_envs()
+    }
+
+    /// Creates a [`MegaContext`] with all environment configurations.
+    pub fn create_evm_context<DB: Database>(
+        &self,
+        db: DB,
+    ) -> Result<MegaContext<DB, TestExternalEnvs>> {
+        let cfg = self.create_cfg_env()?;
+        let block = self.create_block_env()?;
+        let external_envs = self.create_external_envs()?;
+
+        Ok(MegaContext::new(db, cfg.spec)
+            .with_cfg(cfg)
+            .with_block(block)
+            .with_external_envs(external_envs.into()))
     }
 }
 

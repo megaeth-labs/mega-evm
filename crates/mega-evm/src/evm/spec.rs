@@ -1,6 +1,5 @@
 //! Definitions of the `MegaETH` EVM versions (`SpecId`).
 
-use alloy_hardforks::EthereumHardfork;
 use core::{
     fmt::{self, Display},
     str::FromStr,
