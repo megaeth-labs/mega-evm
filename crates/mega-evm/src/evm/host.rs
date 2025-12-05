@@ -89,6 +89,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
     }
 
     fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
+        // ParallelEvm need record the `read_version` of the oracle slot, so we need to
+        // call `sload()` here to invoke `storage()` of `Database`.
+        let inner_value = self.inner.sload(address, key);
         if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
             // if the oracle env provides a value, return it. Otherwise, fallback to the inner
             // context.
@@ -96,7 +99,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
                 return Some(StateLoad::new(value, true));
             }
         }
-        self.inner.sload(address, key)
+        inner_value
     }
 
     fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
