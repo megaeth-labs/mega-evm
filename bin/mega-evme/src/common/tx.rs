@@ -1,12 +1,11 @@
 //! Transaction configuration for mega-evme
 
-use std::path::PathBuf;
-
 use alloy_primitives::{Address, Bytes, B256, U256};
 use clap::Args;
 use mega_evm::{
+    alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization},
     op_revm::transaction::deposit::DepositTransactionParts,
-    revm::{context::tx::TxEnv, context_interface::transaction::SignedAuthorization, primitives::TxKind},
+    revm::{context::tx::TxEnv, primitives::TxKind},
     Either, MegaTransaction, MegaTxType,
 };
 
@@ -67,9 +66,9 @@ pub struct TxArgs {
     #[arg(long = "mint")]
     pub mint: Option<u128>,
 
-    /// JSON file containing authorization list for EIP-7702 transactions (tx-type 4)
-    #[arg(long = "auth-file", value_name = "PATH")]
-    pub auth_file: Option<PathBuf>,
+    /// EIP-7702 authorization in format `AUTHORITY:NONCE->DELEGATION` (can be repeated)
+    #[arg(long = "auth", value_name = "AUTH")]
+    pub auth: Vec<String>,
 }
 
 impl TxArgs {
@@ -79,7 +78,7 @@ impl TxArgs {
     /// - `source_hash` and `mint` are only set for deposit transactions (tx-type 126)
     /// - `priority_fee` is not set for legacy or EIP-2930 transactions
     /// - `receiver` must exist when `create` is false, must not exist when `create` is true
-    /// - `auth_file` is only set for EIP-7702 transactions (tx-type 4)
+    /// - `auth` is only set for EIP-7702 transactions (tx-type 4)
     pub fn validate(&self) -> Result<()> {
         // 1. source_hash and mint should only be set when tx_type is deposit
         if self.tx_type != 126 && (self.source_hash.is_some() || self.mint.is_some()) {
@@ -114,27 +113,71 @@ impl TxArgs {
             ));
         }
 
-        // 4. auth_file should only be set when tx_type is EIP-7702
-        if self.tx_type != 4 && self.auth_file.is_some() {
+        // 4. auth should only be set when tx_type is EIP-7702
+        if self.tx_type != 4 && !self.auth.is_empty() {
             return Err(EvmeError::InvalidInput(
-                "--auth-file is only valid for EIP-7702 transactions (--tx-type 4)".to_string(),
+                "--auth is only valid for EIP-7702 transactions (--tx-type 4)".to_string(),
             ));
         }
 
         Ok(())
     }
 
-    /// Loads authorization list from JSON file.
-    fn load_authorization_list(&self) -> Result<Vec<SignedAuthorization>> {
-        match &self.auth_file {
-            Some(path) => {
-                let content = std::fs::read_to_string(path)?;
-                serde_json::from_str(&content).map_err(|e| {
-                    EvmeError::InvalidInput(format!("Failed to parse authorization list: {}", e))
-                })
-            }
-            None => Ok(Vec::new()),
+    /// Parses authorization list from CLI arguments.
+    ///
+    /// Format: `AUTHORITY:NONCE->DELEGATION`
+    /// - AUTHORITY: Address of the EOA delegating control
+    /// - NONCE: Authorization nonce (decimal or 0x-prefixed hex)
+    /// - DELEGATION: Address of the contract to delegate to
+    fn parse_authorization_list(&self, chain_id: u64) -> Result<Vec<RecoveredAuthorization>> {
+        self.auth
+            .iter()
+            .map(|s| Self::parse_authorization(s, chain_id))
+            .collect()
+    }
+
+    /// Parses a single authorization string.
+    fn parse_authorization(s: &str, chain_id: u64) -> Result<RecoveredAuthorization> {
+        // Split by "->" to get authority:nonce and delegation
+        let parts: Vec<&str> = s.split("->").collect();
+        if parts.len() != 2 {
+            return Err(EvmeError::InvalidInput(format!(
+                "Invalid authorization format '{}'. Expected: AUTHORITY:NONCE->DELEGATION",
+                s
+            )));
         }
+
+        let delegation: Address = parts[1].trim().parse().map_err(|_| {
+            EvmeError::InvalidInput(format!("Invalid delegation address: {}", parts[1].trim()))
+        })?;
+
+        // Split authority:nonce
+        let auth_parts: Vec<&str> = parts[0].split(':').collect();
+        if auth_parts.len() != 2 {
+            return Err(EvmeError::InvalidInput(format!(
+                "Invalid authorization format '{}'. Expected: AUTHORITY:NONCE->DELEGATION",
+                s
+            )));
+        }
+
+        let authority: Address = auth_parts[0].trim().parse().map_err(|_| {
+            EvmeError::InvalidInput(format!("Invalid authority address: {}", auth_parts[0].trim()))
+        })?;
+
+        let nonce: u64 = if auth_parts[1].trim().starts_with("0x") {
+            u64::from_str_radix(auth_parts[1].trim().trim_start_matches("0x"), 16).map_err(|_| {
+                EvmeError::InvalidInput(format!("Invalid nonce: {}", auth_parts[1].trim()))
+            })?
+        } else {
+            auth_parts[1].trim().parse().map_err(|_| {
+                EvmeError::InvalidInput(format!("Invalid nonce: {}", auth_parts[1].trim()))
+            })?
+        };
+
+        Ok(RecoveredAuthorization::new_unchecked(
+            Authorization { chain_id: U256::from(chain_id), address: delegation, nonce },
+            RecoveredAuthority::Valid(authority),
+        ))
     }
 
     /// Returns the receiver address.
@@ -168,14 +211,14 @@ impl TxArgs {
     /// Creates a [`TxEnv`] from the transaction arguments.
     ///
     /// Loads input data from `--input` or `--inputfile` arguments.
-    /// Loads authorization list from `--auth-file` for EIP-7702 transactions.
+    /// Parses authorization list from `--auth` for EIP-7702 transactions.
     pub fn create_tx_env(&self, chain_id: u64) -> Result<TxEnv> {
         let data = load_hex(self.input.clone(), self.inputfile.clone())?.unwrap_or_default();
         let kind = if self.create { TxKind::Create } else { TxKind::Call(self.receiver()?) };
         let authorization_list = self
-            .load_authorization_list()?
+            .parse_authorization_list(chain_id)?
             .into_iter()
-            .map(Either::Left)
+            .map(Either::Right)
             .collect();
 
         Ok(TxEnv {

@@ -123,23 +123,25 @@ mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
 
 #### EIP-7702 Transaction Options (tx-type 4)
 
-| Option               | Default | Description                                           |
-| -------------------- | ------- | ----------------------------------------------------- |
-| `--auth-file <PATH>` | -       | JSON file containing signed authorization list        |
+| Option          | Default | Description                                                    |
+| --------------- | ------- | -------------------------------------------------------------- |
+| `--auth <AUTH>` | -       | Authorization in format `AUTHORITY:NONCE->DELEGATION` (repeatable) |
 
-The authorization list JSON file should contain an array of signed authorizations:
+- **AUTHORITY**: Address of the EOA delegating control
+- **NONCE**: Authorization nonce (decimal or 0x-prefixed hex)
+- **DELEGATION**: Address of the contract to delegate to
 
-```json
-[
-  {
-    "chainId": "0x1",
-    "address": "0x...",
-    "nonce": "0x0",
-    "yParity": "0x0",
-    "r": "0x...",
-    "s": "0x..."
-  }
-]
+```bash
+# Single authorization
+mega-evme tx --tx-type 4 \
+  --auth "0xAuthority:0->0xDelegateContract" \
+  --receiver 0x...
+
+# Multiple authorizations
+mega-evme tx --tx-type 4 \
+  --auth "0xAuthority1:0->0xDelegate1" \
+  --auth "0xAuthority2:1->0xDelegate2" \
+  --receiver 0x...
 ```
 
 #### Fork Options
