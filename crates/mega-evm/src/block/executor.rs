@@ -140,6 +140,11 @@ where
     pub fn inspector_mut(&mut self) -> &mut INSP {
         self.evm.inspector_mut()
     }
+
+    /// Gets a reference to the inspector in the `MegaEVM`.
+    pub fn inspector(&self) -> &INSP {
+        self.evm.inspector()
+    }
 }
 
 impl<'db, DB, C, R, INSP, ExtEnvs>
