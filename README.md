@@ -80,14 +80,22 @@ let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
 ## Command Line Tool: `mega-evme`
 
-The `mega-evme` binary provides a command-line interface for executing arbitrary EVM bytecode, similar to go-ethereum's `evm` tool.
+The `mega-evme` binary provides a command-line interface for executing and debugging EVM transactions, similar to go-ethereum's `evm` tool.
 
 ### Installation
 
 ```bash
-cargo build --release
+cargo build --release -p mega-evme
 # Binary will be at ./target/release/mega-evme
 ```
+
+### Commands
+
+| Command  | Description                                     |
+| -------- | ----------------------------------------------- |
+| `run`    | Execute arbitrary EVM bytecode directly         |
+| `tx`     | Run a transaction with full transaction context |
+| `replay` | Replay an existing transaction from RPC         |
 
 ### Basic Usage
 
@@ -95,16 +103,27 @@ cargo build --release
 # Execute bytecode directly
 mega-evme run 0x60016000526001601ff3
 
-# Execute bytecode from file
-mega-evme run --codefile contract.hex
+# Run a transaction with state forking
+mega-evme tx --fork --fork.rpc https://rpc.example.com \
+  --receiver 0x1234... --input 0x...
 
-# Execute with custom parameters
-mega-evme run 0x60016000526001601ff3 \
-  --gas 1000000 \
-  --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+# Replay a transaction from RPC
+mega-evme replay 0xTxHash --rpc https://rpc.example.com
 ```
 
-More details can be found [here](bin/mega-evme/src/run/README.md).
+### Transaction Types
+
+The `tx` command supports multiple transaction types with type-specific options:
+
+| Type | Name     | Specific Options                                |
+| ---- | -------- | ----------------------------------------------- |
+| 0    | Legacy   | -                                               |
+| 1    | EIP-2930 | `--access ADDRESS:KEY1,KEY2,...`                |
+| 2    | EIP-1559 | `--priority-fee`, `--access`                    |
+| 4    | EIP-7702 | `--auth AUTHORITY:NONCE->DELEGATION`, `--access`|
+| 126  | Deposit  | `--source-hash`, `--mint`                       |
+
+For detailed documentation, see [mega-evme README](bin/mega-evme/README.md).
 
 ## Development
 
