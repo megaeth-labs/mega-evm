@@ -87,11 +87,11 @@ impl Cmd {
     fn output_results(&self, outcome: &EvmeOutcome) -> Result<()> {
         // Create transaction receipt
         // TODO: support deposit_nonce and deposit_receipt_version for deposit transactions
-        let op_receipt = outcome.to_op_receipt(self.tx_args.tx_type(), outcome.pre_execution_nonce);
+        let op_receipt = outcome.to_op_receipt(self.tx_args.tx_type()?, outcome.pre_execution_nonce);
 
         // Determine contract address for CREATE transactions
         let contract_address = if self.tx_args.create && op_receipt.is_success() {
-            Some(self.tx_args.sender.create(self.tx_args.nonce.unwrap_or(0)))
+            Some(self.tx_args.sender.create(outcome.pre_execution_nonce))
         } else {
             None
         };

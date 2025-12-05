@@ -64,7 +64,7 @@ pub(super) async fn execute_transactions_v1_0_1<P>(
     block: &Block<Transaction>,
     evm_env: EvmEnv<MegaSpecId>,
     provider: &P,
-    preceeding_transactions: Vec<B256>,
+    preceding_transactions: Vec<B256>,
     target_tx: &Transaction,
     spec_id: MegaSpecId,
     tracer: Option<TracerType>,
@@ -156,7 +156,7 @@ where
         .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
     // Execute preceding transactions
-    for tx_hash in preceeding_transactions {
+    for tx_hash in preceding_transactions {
         let tx = provider
             .get_transaction_by_hash(tx_hash)
             .await
@@ -239,14 +239,66 @@ where
         ExecutionResult::Revert { gas_used, output } => {
             ExecutionResult::Revert { gas_used, output }
         }
-        ExecutionResult::Halt { reason: _, gas_used } => {
-            // Convert MegaHaltReason - this is the tricky part
-            // Since we can't directly convert between enum types from different versions,
-            // we'll use a generic halt reason from the base revm type
+        ExecutionResult::Halt { reason, gas_used } => {
+            // Convert MegaHaltReason from v1.0.1 to current version
+            // We need to map the halt reasons appropriately
             use mega_evm::EthHaltReason;
-            let reason_current = mega_evm::MegaHaltReason::Base(mega_evm::OpHaltReason::Base(
-                EthHaltReason::PrecompileError,
-            ));
+            use mega_evm_v1::MegaHaltReason as MegaHaltReasonV1;
+
+            let reason_current = match reason {
+                MegaHaltReasonV1::Base(op_reason) => {
+                    use mega_evm_v1::OpHaltReason as OpHaltReasonV1;
+                    match op_reason {
+                        OpHaltReasonV1::Base(eth_reason) => {
+                            use mega_evm_v1::EthHaltReason as EthHaltReasonV1;
+                            let eth_current = match eth_reason {
+                                EthHaltReasonV1::OutOfGas(og) => EthHaltReason::OutOfGas(og),
+                                EthHaltReasonV1::OpcodeNotFound => EthHaltReason::OpcodeNotFound,
+                                EthHaltReasonV1::InvalidFEOpcode => EthHaltReason::InvalidFEOpcode,
+                                EthHaltReasonV1::InvalidJump => EthHaltReason::InvalidJump,
+                                EthHaltReasonV1::NotActivated => EthHaltReason::NotActivated,
+                                EthHaltReasonV1::StackUnderflow => EthHaltReason::StackUnderflow,
+                                EthHaltReasonV1::StackOverflow => EthHaltReason::StackOverflow,
+                                EthHaltReasonV1::OutOfOffset => EthHaltReason::OutOfOffset,
+                                EthHaltReasonV1::CreateCollision => EthHaltReason::CreateCollision,
+                                EthHaltReasonV1::PrecompileError => EthHaltReason::PrecompileError,
+                                EthHaltReasonV1::NonceOverflow => EthHaltReason::NonceOverflow,
+                                EthHaltReasonV1::CreateContractSizeLimit => {
+                                    EthHaltReason::CreateContractSizeLimit
+                                }
+                                EthHaltReasonV1::CreateContractStartingWithEF => {
+                                    EthHaltReason::CreateContractStartingWithEF
+                                }
+                                EthHaltReasonV1::CreateInitCodeSizeLimit => {
+                                    EthHaltReason::CreateInitCodeSizeLimit
+                                }
+                                EthHaltReasonV1::OverflowPayment => EthHaltReason::OverflowPayment,
+                                EthHaltReasonV1::StateChangeDuringStaticCall => {
+                                    EthHaltReason::StateChangeDuringStaticCall
+                                }
+                                EthHaltReasonV1::CallNotAllowedInsideStatic => {
+                                    EthHaltReason::CallNotAllowedInsideStatic
+                                }
+                                EthHaltReasonV1::OutOfFunds => EthHaltReason::OutOfFunds,
+                                EthHaltReasonV1::CallTooDeep => EthHaltReason::CallTooDeep,
+                                // These variants exist in v1.0.1 but not in current version,
+                                // fall back to a generic error
+                                #[allow(unreachable_patterns)]
+                                _ => EthHaltReason::PrecompileError,
+                            };
+                            mega_evm::MegaHaltReason::Base(mega_evm::OpHaltReason::Base(
+                                eth_current,
+                            ))
+                        }
+                        OpHaltReasonV1::FailedDeposit => {
+                            mega_evm::MegaHaltReason::Base(mega_evm::OpHaltReason::FailedDeposit)
+                        }
+                    }
+                }
+                // Any other MegaHaltReason variants in v1.0.1 map to compute gas limit exceeded
+                #[allow(unreachable_patterns)]
+                _ => mega_evm::MegaHaltReason::ComputeGasLimitExceeded { limit: 0, actual: 0 },
+            };
             ExecutionResult::Halt { reason: reason_current, gas_used }
         }
     };

@@ -128,13 +128,13 @@ impl Cmd {
         let evm_env = EvmEnv::new(cfg_env, block_env);
 
         // Step 6: fetch preceding transactions
-        let mut preceeding_transactions = vec![];
+        let mut preceding_transactions = vec![];
         if !is_pending {
             for tx in block.transactions.hashes() {
                 if tx == self.tx_hash {
                     break;
                 }
-                preceeding_transactions.push(tx);
+                preceding_transactions.push(tx);
             }
         }
 
@@ -147,7 +147,7 @@ impl Cmd {
                 &block,
                 evm_env,
                 &provider,
-                preceeding_transactions,
+                preceding_transactions,
                 &target_tx,
                 self.chain_args.spec_id()?,
                 self.trace_args.tracer,
@@ -164,7 +164,7 @@ impl Cmd {
                 &block,
                 evm_env,
                 &provider,
-                preceeding_transactions,
+                preceding_transactions,
                 &target_tx,
             )
             .await?
@@ -184,7 +184,7 @@ impl Cmd {
         block: &Block<Transaction>,
         evm_env: mega_evm::alloy_evm::EvmEnv<MegaSpecId>,
         provider: &P,
-        preceeding_transactions: Vec<B256>,
+        preceding_transactions: Vec<B256>,
         target_tx: &Transaction,
     ) -> Result<ReplayOutcome>
     where
@@ -232,7 +232,7 @@ impl Cmd {
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
         // Execute preceding transactions
-        for tx_hash in preceeding_transactions {
+        for tx_hash in preceding_transactions {
             let tx = provider
                 .get_transaction_by_hash(tx_hash)
                 .await

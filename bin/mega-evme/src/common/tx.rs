@@ -7,7 +7,7 @@ use mega_evm::{
     MegaTransaction, TxType,
 };
 
-use super::{load_hex, Result};
+use super::{load_hex, EvmeError, Result};
 
 /// Transaction configuration arguments
 #[derive(Args, Debug, Clone)]
@@ -59,24 +59,25 @@ pub struct TxArgs {
 
 impl TxArgs {
     /// Converts the transaction type to a [`TxType`].
-    pub fn tx_type(&self) -> TxType {
+    pub fn tx_type(&self) -> Result<TxType> {
         match self.tx_type {
-            0 => TxType::Legacy,
-            1 => TxType::Eip2930,
-            2 => TxType::Eip1559,
-            4 => TxType::Eip7702,
-            _ => panic!("Unsupported transaction type: {}", self.tx_type),
+            0 => Ok(TxType::Legacy),
+            1 => Ok(TxType::Eip2930),
+            2 => Ok(TxType::Eip1559),
+            4 => Ok(TxType::Eip7702),
+            _ => Err(EvmeError::UnsupportedTxType(self.tx_type)),
         }
     }
 
     /// Calculates the effective gas price for the transaction.
     pub fn effective_gas_price(&self) -> u128 {
-        match self.tx_type() {
-            TxType::Legacy => self.basefee as u128,
-            TxType::Eip2930 => self.basefee as u128,
-            TxType::Eip1559 => self.basefee as u128 + self.priority_fee.unwrap_or(0) as u128,
-            TxType::Eip7702 => self.basefee as u128 + self.priority_fee.unwrap_or(0) as u128,
-            TxType::Deposit => 0,
+        match self.tx_type {
+            0 => self.basefee as u128,                                            // Legacy
+            1 => self.basefee as u128,                                            // EIP-2930
+            2 => self.basefee as u128 + self.priority_fee.unwrap_or(0) as u128,   // EIP-1559
+            4 => self.basefee as u128 + self.priority_fee.unwrap_or(0) as u128,   // EIP-7702
+            126 => 0,                                                              // Deposit
+            _ => self.basefee as u128,                                            // Default to basefee
         }
     }
 

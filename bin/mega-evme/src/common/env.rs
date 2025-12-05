@@ -128,7 +128,7 @@ impl ExtEnvArgs {
 
         // Parse and configure bucket capacities
         for bucket_capacity_str in &self.bucket_capacity {
-            let (bucket_id, capacity) = parse_bucket_capacity(&bucket_capacity_str)?;
+            let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
             external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
         }
 

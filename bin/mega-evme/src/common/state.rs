@@ -210,7 +210,13 @@ impl AccountState {
         } else {
             Bytecode::new_raw_checked(self.code).map_err(EvmeError::InvalidBytecode)?
         };
-        assert_eq!(bytecode.hash_slow(), self.code_hash, "Code hash {} mismatch", self.code_hash);
+        let computed_hash = bytecode.hash_slow();
+        if computed_hash != self.code_hash {
+            return Err(EvmeError::CodeHashMismatch {
+                expected: self.code_hash,
+                computed: computed_hash,
+            });
+        }
 
         let info = AccountInfo::new(self.balance, self.nonce, self.code_hash, bytecode);
         let storage =

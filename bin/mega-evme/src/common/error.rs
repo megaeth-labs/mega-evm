@@ -1,4 +1,4 @@
-use alloy_primitives::{hex::FromHexError, BlockNumber, TxHash};
+use alloy_primitives::{hex::FromHexError, BlockNumber, TxHash, B256};
 use alloy_provider::transport::TransportError;
 use mega_evm::{alloy_evm::block::BlockExecutionError, revm::bytecode::BytecodeDecodeError};
 
@@ -44,6 +44,19 @@ pub enum EvmeError {
     /// RPC error
     #[error("RPC error: {0}")]
     RpcError(String),
+
+    /// Unsupported transaction type
+    #[error("Unsupported transaction type: {0}")]
+    UnsupportedTxType(u8),
+
+    /// Code hash mismatch
+    #[error("Code hash mismatch: expected {expected}, computed {computed}")]
+    CodeHashMismatch {
+        /// Expected code hash from prestate
+        expected: B256,
+        /// Computed code hash from bytecode
+        computed: B256,
+    },
 
     /// Other error
     #[error("Other error: {0}")]
