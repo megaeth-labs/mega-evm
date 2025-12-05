@@ -121,6 +121,28 @@ mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
 | `--source-hash <HASH>` | -       | Source hash identifying the deposit (B256)       |
 | `--mint <AMOUNT>`      | -       | Amount of ETH to mint to sender (wei)            |
 
+#### EIP-2930 Access List Options (tx-type 1, 2, 4)
+
+| Option              | Default | Description                                                     |
+| ------------------- | ------- | --------------------------------------------------------------- |
+| `--access <ACCESS>` | -       | Access list entry in format `ADDRESS` or `ADDRESS:KEY1,KEY2,...` (repeatable) |
+
+- **ADDRESS**: The accessed contract address
+- **KEY1,KEY2,...**: Comma-separated storage keys (B256 hex values)
+
+```bash
+# Access list with address only
+mega-evme tx --tx-type 1 \
+  --access "0x1234567890abcdef1234567890abcdef12345678" \
+  --receiver 0x...
+
+# Access list with storage keys
+mega-evme tx --tx-type 2 \
+  --access "0xContractAddr:0x0000000000000000000000000000000000000000000000000000000000000001" \
+  --access "0xAnotherAddr:0x02,0x03" \
+  --receiver 0x...
+```
+
 #### EIP-7702 Transaction Options (tx-type 4)
 
 | Option          | Default | Description                                                    |
