@@ -1,11 +1,13 @@
 //! Transaction configuration for mega-evme
 
+use std::path::PathBuf;
+
 use alloy_primitives::{Address, Bytes, B256, U256};
 use clap::Args;
 use mega_evm::{
     op_revm::transaction::deposit::DepositTransactionParts,
-    revm::{context::tx::TxEnv, primitives::TxKind},
-    MegaTransaction, MegaTxType,
+    revm::{context::tx::TxEnv, context_interface::transaction::SignedAuthorization, primitives::TxKind},
+    Either, MegaTransaction, MegaTxType,
 };
 
 use super::{load_hex, EvmeError, Result};
@@ -64,6 +66,10 @@ pub struct TxArgs {
     /// Amount of ETH to mint for deposit transactions (wei)
     #[arg(long = "mint")]
     pub mint: Option<u128>,
+
+    /// JSON file containing authorization list for EIP-7702 transactions (tx-type 4)
+    #[arg(long = "auth-file", value_name = "PATH")]
+    pub auth_file: Option<PathBuf>,
 }
 
 impl TxArgs {
@@ -73,6 +79,7 @@ impl TxArgs {
     /// - `source_hash` and `mint` are only set for deposit transactions (tx-type 126)
     /// - `priority_fee` is not set for legacy or EIP-2930 transactions
     /// - `receiver` must exist when `create` is false, must not exist when `create` is true
+    /// - `auth_file` is only set for EIP-7702 transactions (tx-type 4)
     pub fn validate(&self) -> Result<()> {
         // 1. source_hash and mint should only be set when tx_type is deposit
         if self.tx_type != 126 && (self.source_hash.is_some() || self.mint.is_some()) {
@@ -107,7 +114,27 @@ impl TxArgs {
             ));
         }
 
+        // 4. auth_file should only be set when tx_type is EIP-7702
+        if self.tx_type != 4 && self.auth_file.is_some() {
+            return Err(EvmeError::InvalidInput(
+                "--auth-file is only valid for EIP-7702 transactions (--tx-type 4)".to_string(),
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Loads authorization list from JSON file.
+    fn load_authorization_list(&self) -> Result<Vec<SignedAuthorization>> {
+        match &self.auth_file {
+            Some(path) => {
+                let content = std::fs::read_to_string(path)?;
+                serde_json::from_str(&content).map_err(|e| {
+                    EvmeError::InvalidInput(format!("Failed to parse authorization list: {}", e))
+                })
+            }
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Returns the receiver address.
@@ -141,9 +168,15 @@ impl TxArgs {
     /// Creates a [`TxEnv`] from the transaction arguments.
     ///
     /// Loads input data from `--input` or `--inputfile` arguments.
+    /// Loads authorization list from `--auth-file` for EIP-7702 transactions.
     pub fn create_tx_env(&self, chain_id: u64) -> Result<TxEnv> {
         let data = load_hex(self.input.clone(), self.inputfile.clone())?.unwrap_or_default();
         let kind = if self.create { TxKind::Create } else { TxKind::Call(self.receiver()?) };
+        let authorization_list = self
+            .load_authorization_list()?
+            .into_iter()
+            .map(Either::Left)
+            .collect();
 
         Ok(TxEnv {
             caller: self.sender,
@@ -157,7 +190,7 @@ impl TxArgs {
             nonce: self.nonce.unwrap_or(0),
             value: self.value,
             access_list: Default::default(),
-            authorization_list: Vec::new(),
+            authorization_list,
             kind,
             chain_id: Some(chain_id),
         })

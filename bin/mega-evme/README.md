@@ -102,7 +102,7 @@ mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
 
 | Option                   | Default       | Description                                              |
 | ------------------------ | ------------- | -------------------------------------------------------- |
-| `--tx-type <TYPE>`       | 0             | Transaction type (0=Legacy, 1=EIP-2930, 2=EIP-1559, 126=Deposit) |
+| `--tx-type <TYPE>`       | 0             | Transaction type (0=Legacy, 1=EIP-2930, 2=EIP-1559, 4=EIP-7702, 126=Deposit) |
 | `--gas <AMOUNT>`         | 10000000      | Gas limit                                                |
 | `--basefee <AMOUNT>`     | 0             | Gas price (alias: `--gas-price`)                         |
 | `--priorityfee <AMOUNT>` | -             | EIP-1559 priority fee                                    |
@@ -120,6 +120,27 @@ mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
 | ---------------------- | ------- | ------------------------------------------------ |
 | `--source-hash <HASH>` | -       | Source hash identifying the deposit (B256)       |
 | `--mint <AMOUNT>`      | -       | Amount of ETH to mint to sender (wei)            |
+
+#### EIP-7702 Transaction Options (tx-type 4)
+
+| Option               | Default | Description                                           |
+| -------------------- | ------- | ----------------------------------------------------- |
+| `--auth-file <PATH>` | -       | JSON file containing signed authorization list        |
+
+The authorization list JSON file should contain an array of signed authorizations:
+
+```json
+[
+  {
+    "chainId": "0x1",
+    "address": "0x...",
+    "nonce": "0x0",
+    "yParity": "0x0",
+    "r": "0x...",
+    "s": "0x..."
+  }
+]
+```
 
 #### Fork Options
 
