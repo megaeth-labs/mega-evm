@@ -58,6 +58,7 @@ impl OpHardforks for FixedHardforkV1 {
 }
 
 /// Execute transactions with block executor and optional tracing (using mega-evm v1.0.1)
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_transactions_v1_0_1<P>(
     database: &mut run::EvmeState<op_alloy_network::Optimism, P>,
     parent_block: &Block<Transaction>,
@@ -197,7 +198,8 @@ where
     let receipt_envelope = block_result.receipts.last().unwrap().clone();
 
     // Generate trace only if tracing is enabled
-    let trace_data = if matches!(tracer, Some(TracerType::Trace)) {
+    #[allow(clippy::if_then_some_else_none)] // Complex closure, keep explicit for readability
+    let trace_data = if tracer.is_some() {
         // Generate GethTrace
         let geth_builder = inspector.geth_builder();
 
@@ -261,7 +263,6 @@ where
                                 EthHaltReasonV1::StackOverflow => EthHaltReason::StackOverflow,
                                 EthHaltReasonV1::OutOfOffset => EthHaltReason::OutOfOffset,
                                 EthHaltReasonV1::CreateCollision => EthHaltReason::CreateCollision,
-                                EthHaltReasonV1::PrecompileError => EthHaltReason::PrecompileError,
                                 EthHaltReasonV1::NonceOverflow => EthHaltReason::NonceOverflow,
                                 EthHaltReasonV1::CreateContractSizeLimit => {
                                     EthHaltReason::CreateContractSizeLimit
@@ -281,8 +282,8 @@ where
                                 }
                                 EthHaltReasonV1::OutOfFunds => EthHaltReason::OutOfFunds,
                                 EthHaltReasonV1::CallTooDeep => EthHaltReason::CallTooDeep,
-                                // These variants exist in v1.0.1 but not in current version,
-                                // fall back to a generic error
+                                // PrecompileError and any other variants in v1.0.1 map to
+                                // PrecompileError
                                 #[allow(unreachable_patterns)]
                                 _ => EthHaltReason::PrecompileError,
                             };
@@ -306,11 +307,8 @@ where
     // Convert OpReceiptEnvelope to TransactionReceipt
     let from = target_tx.inner.inner.signer();
     let to = target_tx.inner.inner.to();
-    let contract_address = if to.is_none() && receipt_envelope.is_success() {
-        Some(from.create(pre_execution_nonce))
-    } else {
-        None
-    };
+    let contract_address =
+        (to.is_none() && receipt_envelope.is_success()).then(|| from.create(pre_execution_nonce));
     let receipt = op_receipt_to_tx_receipt(
         &receipt_envelope,
         block.number(),

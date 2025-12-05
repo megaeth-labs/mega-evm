@@ -7,7 +7,7 @@ use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::TransactionReceipt;
 use mega_evm::{
     revm::{context::result::ExecutionResult, state::EvmState},
-    TxType,
+    MegaTxType,
 };
 use op_alloy_consensus::{OpDepositReceipt, OpReceiptEnvelope};
 
@@ -34,7 +34,7 @@ impl EvmeOutcome {
     ///
     /// For deposit transactions (type 126), provide `deposit_nonce` and optionally
     /// `deposit_receipt_version` (introduced in Canyon hardfork).
-    pub fn to_op_receipt(&self, tx_type: TxType, state_nonce: u64) -> OpReceiptEnvelope {
+    pub fn to_op_receipt(&self, tx_type: MegaTxType, state_nonce: u64) -> OpReceiptEnvelope {
         // Build base receipt
         let receipt = Receipt {
             status: Eip658Value::Eip658(self.exec_result.is_success()),
@@ -44,11 +44,11 @@ impl EvmeOutcome {
 
         // Wrap in OpReceiptEnvelope based on transaction type
         match tx_type {
-            TxType::Legacy => OpReceiptEnvelope::Legacy(receipt.with_bloom()),
-            TxType::Eip2930 => OpReceiptEnvelope::Eip2930(receipt.with_bloom()),
-            TxType::Eip1559 => OpReceiptEnvelope::Eip1559(receipt.with_bloom()),
-            TxType::Eip7702 => OpReceiptEnvelope::Eip7702(receipt.with_bloom()),
-            TxType::Deposit => {
+            MegaTxType::Legacy => OpReceiptEnvelope::Legacy(receipt.with_bloom()),
+            MegaTxType::Eip2930 => OpReceiptEnvelope::Eip2930(receipt.with_bloom()),
+            MegaTxType::Eip1559 => OpReceiptEnvelope::Eip1559(receipt.with_bloom()),
+            MegaTxType::Eip7702 => OpReceiptEnvelope::Eip7702(receipt.with_bloom()),
+            MegaTxType::Deposit => {
                 let deposit_receipt = OpDepositReceipt {
                     inner: receipt,
                     deposit_nonce: Some(state_nonce),
@@ -60,7 +60,7 @@ impl EvmeOutcome {
     }
 }
 
-/// Convert an OpReceiptEnvelope to an OP transaction receipt.
+/// Convert an [`OpReceiptEnvelope`] to an OP transaction receipt.
 #[allow(clippy::too_many_arguments)]
 pub fn op_receipt_to_tx_receipt(
     receipt: &OpReceiptEnvelope,

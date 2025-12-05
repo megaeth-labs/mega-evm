@@ -4,7 +4,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use clap::Args;
 use mega_evm::{
     revm::{context::tx::TxEnv, primitives::TxKind},
-    MegaTransaction, TxType,
+    MegaTransaction, MegaTxType,
 };
 
 use super::{load_hex, EvmeError, Result};
@@ -58,27 +58,26 @@ pub struct TxArgs {
 }
 
 impl TxArgs {
-    /// Converts the transaction type to a [`TxType`].
-    pub fn tx_type(&self) -> Result<TxType> {
+    /// Converts the transaction type to a [`MegaTxType`].
+    pub fn tx_type(&self) -> Result<MegaTxType> {
         match self.tx_type {
-            0 => Ok(TxType::Legacy),
-            1 => Ok(TxType::Eip2930),
-            2 => Ok(TxType::Eip1559),
-            4 => Ok(TxType::Eip7702),
+            0 => Ok(MegaTxType::Legacy),
+            1 => Ok(MegaTxType::Eip2930),
+            2 => Ok(MegaTxType::Eip1559),
+            4 => Ok(MegaTxType::Eip7702),
             _ => Err(EvmeError::UnsupportedTxType(self.tx_type)),
         }
     }
 
     /// Calculates the effective gas price for the transaction.
-    pub fn effective_gas_price(&self) -> u128 {
-        match self.tx_type {
-            0 => self.basefee as u128,                                            // Legacy
-            1 => self.basefee as u128,                                            // EIP-2930
-            2 => self.basefee as u128 + self.priority_fee.unwrap_or(0) as u128,   // EIP-1559
-            4 => self.basefee as u128 + self.priority_fee.unwrap_or(0) as u128,   // EIP-7702
-            126 => 0,                                                              // Deposit
-            _ => self.basefee as u128,                                            // Default to basefee
-        }
+    pub fn effective_gas_price(&self) -> Result<u128> {
+        Ok(match self.tx_type()? {
+            MegaTxType::Legacy | MegaTxType::Eip2930 => self.basefee as u128,
+            MegaTxType::Eip1559 | MegaTxType::Eip7702 => {
+                self.basefee as u128 + self.priority_fee.unwrap_or(0) as u128
+            }
+            MegaTxType::Deposit => 0,
+        })
     }
 
     /// Creates a [`TxEnv`] from the transaction arguments.

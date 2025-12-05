@@ -11,7 +11,7 @@ pub struct FixedHardfork {
 }
 
 impl FixedHardfork {
-    /// Create a new FixedHardfork with the given spec
+    /// Create a new [`FixedHardfork`] with the given `spec`
     pub fn new(spec: MegaSpecId) -> Self {
         Self { spec }
     }

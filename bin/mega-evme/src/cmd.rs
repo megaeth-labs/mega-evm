@@ -24,7 +24,7 @@ pub enum Error {
     /// Evme error (used by run, tx, and replay commands)
     #[error("{0}")]
     Evme(#[from] crate::common::EvmeError),
-    /// T8n tool error (wrapped in EvmeError::Other)
+    /// T8n tool error (wrapped in `EvmeError::Other`)
     #[error("T8n error: {0}")]
     T8n(#[from] crate::t8n::T8nError),
 }
@@ -34,7 +34,8 @@ impl MainCmd {
     pub async fn run(&self) -> Result<(), Error> {
         match self {
             Self::T8n(cmd) => {
-                cmd.run().map_err(|e| Error::Evme(crate::common::EvmeError::Other(e.to_string())))?;
+                cmd.run()
+                    .map_err(|e| Error::Evme(crate::common::EvmeError::Other(e.to_string())))?;
                 Ok(())
             }
             Self::Run(cmd) => {

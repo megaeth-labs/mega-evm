@@ -235,10 +235,10 @@ where
     /// Local state with no RPC backend
     Empty(EmptyDB),
     /// Forked state from RPC
-    Forked(CacheDB<WrapDatabaseAsync<AlloyDB<N, P>>>),
+    Forked(Box<CacheDB<WrapDatabaseAsync<AlloyDB<N, P>>>>),
 }
 
-/// State database that can be backed by either EmptyDB or AlloyDB (forked from RPC)
+/// State database that can be backed by either [`EmptyDB`] or [`AlloyDB`] (forked from RPC)
 #[derive(Debug)]
 pub struct EvmeState<N, P>
 where
@@ -370,7 +370,7 @@ where
             })
             .collect();
 
-        Ok(Self { backend: EvmeBackend::Forked(db), prestate, code_map })
+        Ok(Self { backend: EvmeBackend::Forked(Box::new(db)), prestate, code_map })
     }
 }
 

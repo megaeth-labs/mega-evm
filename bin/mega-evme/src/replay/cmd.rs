@@ -177,6 +177,7 @@ impl Cmd {
     }
 
     /// Execute transactions with block executor and optional tracing
+    #[allow(clippy::too_many_arguments)]
     async fn execute_transactions<P>(
         &self,
         database: &mut run::EvmeState<op_alloy_network::Optimism, P>,
@@ -275,20 +276,16 @@ impl Cmd {
         let receipt_envelope = block_result.receipts.last().unwrap().clone();
 
         // Generate trace only if tracing is enabled
-        let trace_data = if self.trace_args.is_tracing_enabled() {
-            Some(self.trace_args.generate_trace(&inspector, &exec_result))
-        } else {
-            None
-        };
+        let trace_data = self
+            .trace_args
+            .is_tracing_enabled()
+            .then(|| self.trace_args.generate_trace(&inspector, &exec_result));
 
         // Convert OpReceiptEnvelope to TransactionReceipt
         let from = target_tx.inner.inner.signer();
         let to = target_tx.inner.inner.to();
-        let contract_address = if to.is_none() && receipt_envelope.is_success() {
-            Some(from.create(pre_execution_nonce))
-        } else {
-            None
-        };
+        let contract_address = (to.is_none() && receipt_envelope.is_success())
+            .then(|| from.create(pre_execution_nonce));
         let receipt = op_receipt_to_tx_receipt(
             &receipt_envelope,
             block.number(),
