@@ -46,25 +46,26 @@ pub struct PreStateArgs {
 impl PreStateArgs {
     /// Load prestate as [`EvmState`] from file if provided
     pub fn load_prestate(&self, sender: &Address) -> Result<EvmState> {
-        let Some(pre_state_path) = &self.prestate else {
-            return Ok(HashMap::default());
+        let mut prestate = if let Some(pre_state_path) = &self.prestate {
+            let prestate_content = std::fs::read_to_string(pre_state_path)?;
+            let loaded_prestate: HashMap<Address, AccountState> =
+                serde_json::from_str(&prestate_content).map_err(|e| {
+                    EvmeError::InvalidInput(format!("Failed to parse prestate JSON: {}", e))
+                })?;
+            let mut prestate = EvmState::with_capacity_and_hasher(
+                loaded_prestate.len(),
+                DefaultHashBuilder::default(),
+            );
+            for (address, account_state) in loaded_prestate {
+                let account = account_state.into_account()?;
+                prestate.insert(address, account);
+            }
+            prestate
+        } else {
+            HashMap::default()
         };
 
-        let prestate_content = std::fs::read_to_string(pre_state_path)?;
-        let loaded_prestate: HashMap<Address, AccountState> =
-            serde_json::from_str(&prestate_content).map_err(|e| {
-                EvmeError::InvalidInput(format!("Failed to parse prestate JSON: {}", e))
-            })?;
-        let mut prestate = EvmState::with_capacity_and_hasher(
-            loaded_prestate.len(),
-            DefaultHashBuilder::default(),
-        );
-        for (address, account_state) in loaded_prestate {
-            let account = account_state.into_account()?;
-            prestate.insert(address, account);
-        }
-
-        // Set balance for the sender if specified ( overrides prestate)
+        // Set balance for the sender if specified (overrides prestate)
         if let Some(sender_balance) = &self.sender_balance {
             prestate.entry(*sender).or_default().info.set_balance(*sender_balance);
         }
