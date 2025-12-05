@@ -23,7 +23,7 @@ pub struct TxArgs {
     pub tx_type: u8,
 
     /// Gas limit for the evm
-    #[arg(long = "gas", default_value = "10000000")]
+    #[arg(long = "gas", visible_aliases = ["gas-limit"], default_value = "10000000")]
     pub gas: u64,
 
     /// Price set for the evm (gas price)
