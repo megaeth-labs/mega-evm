@@ -86,7 +86,6 @@ impl Cmd {
     /// Output execution results
     fn output_results(&self, outcome: &EvmeOutcome) -> Result<()> {
         // Create transaction receipt
-        // TODO: support deposit_nonce and deposit_receipt_version for deposit transactions
         let op_receipt =
             outcome.to_op_receipt(self.tx_args.tx_type()?, outcome.pre_execution_nonce);
 
@@ -99,7 +98,7 @@ impl Cmd {
             self.env_args.block.block_number,
             self.env_args.block.block_timestamp,
             self.tx_args.sender,
-            if self.tx_args.create { None } else { Some(self.tx_args.receiver) },
+            if self.tx_args.create { None } else { Some(self.tx_args.receiver()?) },
             contract_address,
             self.tx_args.effective_gas_price()?,
         );

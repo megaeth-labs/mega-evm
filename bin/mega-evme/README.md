@@ -100,19 +100,26 @@ mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
 
 #### Transaction Options
 
-| Option                   | Default       | Description                          |
-| ------------------------ | ------------- | ------------------------------------ |
-| `--tx-type <TYPE>`       | 0             | Transaction type                     |
-| `--gas <AMOUNT>`         | 10000000      | Gas limit                            |
-| `--basefee <AMOUNT>`     | 0             | Gas price (alias: `--gas-price`)     |
-| `--priorityfee <AMOUNT>` | -             | EIP-1559 priority fee                |
-| `--sender <ADDRESS>`     | 0xf39F...2266 | Transaction origin (alias: `--from`) |
-| `--receiver <ADDRESS>`   | 0x0000...0000 | Transaction receiver (alias: `--to`) |
-| `--nonce <NONCE>`        | -             | Transaction nonce                    |
-| `--create`               | false         | Create mode instead of call          |
-| `--value <AMOUNT>`       | 0             | Transaction value                    |
-| `--input <HEX>`          | -             | Transaction calldata                 |
-| `--inputfile <PATH>`     | -             | File containing calldata             |
+| Option                   | Default       | Description                                              |
+| ------------------------ | ------------- | -------------------------------------------------------- |
+| `--tx-type <TYPE>`       | 0             | Transaction type (0=Legacy, 1=EIP-2930, 2=EIP-1559, 126=Deposit) |
+| `--gas <AMOUNT>`         | 10000000      | Gas limit                                                |
+| `--basefee <AMOUNT>`     | 0             | Gas price (alias: `--gas-price`)                         |
+| `--priorityfee <AMOUNT>` | -             | EIP-1559 priority fee                                    |
+| `--sender <ADDRESS>`     | 0xf39F...2266 | Transaction origin (alias: `--from`)                     |
+| `--receiver <ADDRESS>`   | 0x0000...0000 | Transaction receiver (alias: `--to`)                     |
+| `--nonce <NONCE>`        | -             | Transaction nonce                                        |
+| `--create`               | false         | Create mode instead of call                              |
+| `--value <AMOUNT>`       | 0             | Transaction value                                        |
+| `--input <HEX>`          | -             | Transaction calldata                                     |
+| `--inputfile <PATH>`     | -             | File containing calldata                                 |
+
+#### Deposit Transaction Options (tx-type 126)
+
+| Option                 | Default | Description                                      |
+| ---------------------- | ------- | ------------------------------------------------ |
+| `--source-hash <HASH>` | -       | Source hash identifying the deposit (B256)       |
+| `--mint <AMOUNT>`      | -       | Amount of ETH to mint to sender (wei)            |
 
 #### Fork Options
 

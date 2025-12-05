@@ -1,8 +1,9 @@
 //! Transaction configuration for mega-evme
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use clap::Args;
 use mega_evm::{
+    op_revm::transaction::deposit::DepositTransactionParts,
     revm::{context::tx::TxEnv, primitives::TxKind},
     MegaTransaction, MegaTxType,
 };
@@ -21,11 +22,11 @@ pub struct TxArgs {
     pub gas: u64,
 
     /// Price set for the evm (gas price)
-    #[arg(long = "basefee", visible_aliases = ["gas-price"], default_value = "0")]
+    #[arg(long = "basefee", visible_aliases = ["gas-price", "price"], default_value = "0")]
     pub basefee: u64,
 
     /// Gas priority fee (EIP-1559)
-    #[arg(long = "priorityfee")]
+    #[arg(long = "priority-fee", visible_aliases = ["priorityfee", "tip"])]
     pub priority_fee: Option<u64>,
 
     /// The transaction origin
@@ -33,8 +34,8 @@ pub struct TxArgs {
     pub sender: Address,
 
     /// The transaction receiver (execution context)
-    #[arg(long = "receiver", visible_aliases = ["to"], default_value = "0x0000000000000000000000000000000000000000")]
-    pub receiver: Address,
+    #[arg(long = "receiver", visible_aliases = ["to"])]
+    pub receiver: Option<Address>,
 
     /// The transaction nonce
     #[arg(long = "nonce")]
@@ -55,9 +56,65 @@ pub struct TxArgs {
     /// File containing transaction data (input). If '-' is specified, input is read from stdin
     #[arg(long = "inputfile")]
     pub inputfile: Option<String>,
+
+    /// Source hash for deposit transactions (tx-type 126)
+    #[arg(long = "source-hash", value_name = "HASH")]
+    pub source_hash: Option<B256>,
+
+    /// Amount of ETH to mint for deposit transactions (wei)
+    #[arg(long = "mint")]
+    pub mint: Option<u128>,
 }
 
 impl TxArgs {
+    /// Validates transaction arguments for consistency.
+    ///
+    /// Checks:
+    /// - `source_hash` and `mint` are only set for deposit transactions (tx-type 126)
+    /// - `priority_fee` is not set for legacy or EIP-2930 transactions
+    /// - `receiver` must exist when `create` is false, must not exist when `create` is true
+    pub fn validate(&self) -> Result<()> {
+        // 1. source_hash and mint should only be set when tx_type is deposit
+        if self.tx_type != 126 && (self.source_hash.is_some() || self.mint.is_some()) {
+            return Err(EvmeError::InvalidInput(
+                "--source-hash and --mint are only valid for deposit transactions (--tx-type 126)"
+                    .to_string(),
+            ));
+        }
+        if self.tx_type == 126 && self.source_hash.is_none() {
+            return Err(EvmeError::InvalidInput(
+                "--source-hash is required for deposit transactions (--tx-type 126)".to_string(),
+            ));
+        }
+
+        // 2. priority_fee must not be set when tx_type is legacy or eip2930
+        if matches!(self.tx_type, 0 | 1) && self.priority_fee.is_some() {
+            return Err(EvmeError::InvalidInput(
+                "--priority-fee is not valid for legacy (0) or EIP-2930 (1) transactions"
+                    .to_string(),
+            ));
+        }
+
+        // 3. receiver must exist when create is false, must not exist when create is true
+        if self.create && self.receiver.is_some() {
+            return Err(EvmeError::InvalidInput(
+                "--receiver must not be set when --create is specified".to_string(),
+            ));
+        }
+        if !self.create && self.receiver.is_none() {
+            return Err(EvmeError::InvalidInput(
+                "--receiver is required when --create is not specified".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Returns the receiver address.
+    pub fn receiver(&self) -> Result<Address> {
+        self.receiver.ok_or(EvmeError::MissingReceiver)
+    }
+
     /// Converts the transaction type to a [`MegaTxType`].
     pub fn tx_type(&self) -> Result<MegaTxType> {
         match self.tx_type {
@@ -65,6 +122,7 @@ impl TxArgs {
             1 => Ok(MegaTxType::Eip2930),
             2 => Ok(MegaTxType::Eip1559),
             4 => Ok(MegaTxType::Eip7702),
+            126 => Ok(MegaTxType::Deposit),
             _ => Err(EvmeError::UnsupportedTxType(self.tx_type)),
         }
     }
@@ -85,7 +143,7 @@ impl TxArgs {
     /// Loads input data from `--input` or `--inputfile` arguments.
     pub fn create_tx_env(&self, chain_id: u64) -> Result<TxEnv> {
         let data = load_hex(self.input.clone(), self.inputfile.clone())?.unwrap_or_default();
-        let kind = if self.create { TxKind::Create } else { TxKind::Call(self.receiver) };
+        let kind = if self.create { TxKind::Create } else { TxKind::Call(self.receiver()?) };
 
         Ok(TxEnv {
             caller: self.sender,
@@ -112,6 +170,16 @@ impl TxArgs {
         let tx_env = self.create_tx_env(chain_id)?;
         let mut tx = MegaTransaction::new(tx_env);
         tx.enveloped_tx = Some(Bytes::default());
+
+        // Set deposit fields if this is a deposit transaction (type 126)
+        if self.tx_type()? == MegaTxType::Deposit {
+            tx.deposit = DepositTransactionParts {
+                source_hash: self.source_hash.unwrap_or(B256::ZERO),
+                mint: self.mint,
+                is_system_transaction: false,
+            };
+        }
+
         Ok(tx)
     }
 }

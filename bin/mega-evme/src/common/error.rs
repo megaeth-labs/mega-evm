@@ -29,6 +29,10 @@ pub enum EvmeError {
     #[error("Failed to read file: {0}")]
     FileRead(#[from] std::io::Error),
 
+    /// Missing receiver
+    #[error("Missing transaction receiver")]
+    MissingReceiver,
+
     /// Invalid hex string
     #[error("Invalid hex string: {0}")]
     InvalidHex(#[from] FromHexError),
