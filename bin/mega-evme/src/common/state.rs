@@ -40,7 +40,7 @@ pub struct PreStateArgs {
 
     /// History block hashes to serve `BLOCKHASH` opcode. This overrides the block hashes in the
     /// forked remote state (if applicable). This is a list of `block_number:block_hash` pairs.
-    #[arg(long = "block-hashes", visible_aliases = ["blockhashes"])]
+    #[arg(long = "block-hash", visible_aliases = ["blockhash", "block-hashes", "blockhashes"])]
     pub block_hashes: Vec<String>,
 
     /// Balance to allocate to the sender account
