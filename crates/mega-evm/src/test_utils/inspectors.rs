@@ -87,12 +87,12 @@ pub struct TraceNode<ITEM, META> {
     /// Metadata about this call (e.g., call inputs, creation inputs).
     pub meta: META,
     /// Reference to the parent node, if any.
-    pub parent: Option<Pointer<TraceNode<ITEM, META>>>,
+    pub parent: Option<Pointer<Self>>,
     /// Sections of items. There is always one more section than children.
     /// Sections are interleaved with children to maintain chronological order.
     pub sections: Vec<Vec<Pointer<ITEM>>>,
     /// Child nodes representing nested calls.
-    pub childrens: Vec<Pointer<TraceNode<ITEM, META>>>,
+    pub childrens: Vec<Pointer<Self>>,
 }
 
 impl<ITEM, META> TraceNode<ITEM, META> {
