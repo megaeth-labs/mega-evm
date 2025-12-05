@@ -120,11 +120,6 @@ impl TxArgs {
                 "--receiver must not be set when --create is specified".to_string(),
             ));
         }
-        if !self.create && self.receiver.is_none() {
-            return Err(EvmeError::InvalidInput(
-                "--receiver is required when --create is not specified".to_string(),
-            ));
-        }
 
         // 4. auth should only be set when tx_type is EIP-7702
         if tx_type != MegaTxType::Eip7702 && !self.auth.is_empty() {
