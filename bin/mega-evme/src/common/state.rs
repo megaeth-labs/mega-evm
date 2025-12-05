@@ -39,7 +39,8 @@ pub struct PreStateArgs {
     pub prestate: Option<PathBuf>,
 
     /// History block hashes to serve `BLOCKHASH` opcode. This overrides the block hashes in the
-    /// forked remote state (if applicable). This is a list of `block_number:block_hash` pairs.
+    /// forked remote state (if applicable). Each entry should be in the format
+    /// `block_number:block_hash` (can be repeated).
     #[arg(long = "block-hash", visible_aliases = ["blockhash", "block-hashes", "blockhashes"])]
     pub block_hashes: Vec<String>,
 
