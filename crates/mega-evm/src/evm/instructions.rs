@@ -992,7 +992,6 @@ pub mod compute_gas_ext {
                 match context.interpreter.bytecode.action() {
                     Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
                         gas_used = gas_used.saturating_sub(call_inputs.gas_limit);
-                        eprintln!("child call inputs: {:?}", call_inputs);
                     }
                     Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
                         gas_used = gas_used.saturating_sub(create_inputs.gas_limit);
