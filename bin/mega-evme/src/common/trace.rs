@@ -45,29 +45,29 @@ pub struct TraceArgs {
     #[arg(long = "trace")]
     pub trace: bool,
 
+    /// Output file for trace data (if not specified, prints to console)
+    #[arg(long = "trace.output")]
+    pub trace_output_file: Option<PathBuf>,
+
     /// Tracer type to use (defaults to struct logger if not specified)
     #[arg(long = "tracer", value_enum, default_value_t = TracerType::Opcode)]
     pub tracer: TracerType,
 
     /// Disable memory capture in traces (opcode tracer only)
-    #[arg(long = "trace.disable-memory")]
-    pub trace_disable_memory: bool,
+    #[arg(long = "trace.opcode.disable-memory")]
+    pub trace_opcode_disable_memory: bool,
 
     /// Disable stack capture in traces (opcode tracer only)
-    #[arg(long = "trace.disable-stack")]
-    pub trace_disable_stack: bool,
+    #[arg(long = "trace.opcode.disable-stack")]
+    pub trace_opcode_disable_stack: bool,
 
     /// Disable storage capture in traces (opcode tracer only)
-    #[arg(long = "trace.disable-storage")]
-    pub trace_disable_storage: bool,
+    #[arg(long = "trace.opcode.disable-storage")]
+    pub trace_opcode_disable_storage: bool,
 
     /// Enable return data capture in traces (opcode tracer only)
-    #[arg(long = "trace.enable-return-data")]
-    pub trace_enable_return_data: bool,
-
-    /// Output file for trace data (if not specified, prints to console)
-    #[arg(long = "trace.output")]
-    pub trace_output_file: Option<PathBuf>,
+    #[arg(long = "trace.opcode.enable-return-data")]
+    pub trace_opcode_enable_return_data: bool,
 
     /// Only trace top-level call (call tracer only)
     #[arg(long = "trace.call.only-top-call")]
@@ -105,10 +105,10 @@ impl TraceArgs {
     /// Creates [`GethDefaultTracingOptions`] from CLI arguments
     pub fn create_geth_options(&self) -> GethDefaultTracingOptions {
         GethDefaultTracingOptions {
-            disable_storage: Some(self.trace_disable_storage),
-            disable_memory: Some(self.trace_disable_memory),
-            disable_stack: Some(self.trace_disable_stack),
-            enable_return_data: Some(self.trace_enable_return_data),
+            disable_storage: Some(self.trace_opcode_disable_storage),
+            disable_memory: Some(self.trace_opcode_disable_memory),
+            disable_stack: Some(self.trace_opcode_disable_stack),
+            enable_return_data: Some(self.trace_opcode_enable_return_data),
             ..Default::default()
         }
     }

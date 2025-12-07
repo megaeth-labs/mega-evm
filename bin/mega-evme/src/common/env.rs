@@ -20,7 +20,7 @@ use super::{EvmeError, Result};
 #[command(next_help_heading = "Chain Options")]
 pub struct ChainArgs {
     /// Name of hardfork to use, possible values: `MiniRex`, `Equivalence`, `Rex`
-    #[arg(long = "hardfork", visible_aliases = ["spec"], default_value = "MiniRex")]
+    #[arg(long = "hardfork", visible_aliases = ["spec"], default_value = "Rex")]
     pub hardfork: String,
 
     /// `ChainID` to use

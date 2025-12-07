@@ -112,6 +112,6 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
 
 impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     pub(crate) fn on_new_block(&mut self, block: &BlockEnv) {
-        self.reset(block.number.to::<u64>() - 1);
+        self.reset(block.number.to::<u64>().saturating_sub(1));
     }
 }

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use alloy_consensus::{Eip658Value, Receipt};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, BlockHash, TxHash, B256};
 use alloy_rpc_types_eth::TransactionReceipt;
 use mega_evm::{
     revm::{context::result::ExecutionResult, state::EvmState},
@@ -70,6 +70,10 @@ pub fn op_receipt_to_tx_receipt(
     to: Option<Address>,
     contract_address: Option<Address>,
     effective_gas_price: u128,
+    gas_used: u64,
+    transaction_hash: Option<TxHash>, // only used for replay command where tx hash is known
+    block_hash: Option<BlockHash>,    // only used for replay command where block hash is known
+    transaction_index: u64,
 ) -> OpTxReceipt {
     // Map logs to include block/tx metadata
     let mut log_index = 0;
@@ -90,11 +94,11 @@ pub fn op_receipt_to_tx_receipt(
 
     TransactionReceipt {
         inner,
-        transaction_hash: B256::ZERO,
-        transaction_index: Some(0),
-        block_hash: None,
+        transaction_hash: transaction_hash.unwrap_or_default(),
+        transaction_index: Some(transaction_index),
+        block_hash,
         block_number: Some(block_number),
-        gas_used: receipt.cumulative_gas_used(),
+        gas_used,
         effective_gas_price,
         blob_gas_used: None,
         blob_gas_price: None,

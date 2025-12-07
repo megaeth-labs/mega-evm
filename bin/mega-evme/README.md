@@ -100,31 +100,31 @@ mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
 
 #### Transaction Options
 
-| Option                   | Default       | Description                                              |
-| ------------------------ | ------------- | -------------------------------------------------------- |
+| Option                   | Default       | Description                                                                  |
+| ------------------------ | ------------- | ---------------------------------------------------------------------------- |
 | `--tx-type <TYPE>`       | 0             | Transaction type (0=Legacy, 1=EIP-2930, 2=EIP-1559, 4=EIP-7702, 126=Deposit) |
-| `--gas <AMOUNT>`         | 10000000      | Gas limit                                                |
-| `--basefee <AMOUNT>`     | 0             | Gas price (alias: `--gas-price`)                         |
-| `--priorityfee <AMOUNT>` | -             | EIP-1559 priority fee                                    |
-| `--sender <ADDRESS>`     | 0xf39F...2266 | Transaction origin (alias: `--from`)                     |
-| `--receiver <ADDRESS>`   | 0x0000...0000 | Transaction receiver (alias: `--to`)                     |
-| `--nonce <NONCE>`        | -             | Transaction nonce                                        |
-| `--create`               | false         | Create mode instead of call                              |
-| `--value <AMOUNT>`       | 0             | Transaction value                                        |
-| `--input <HEX>`          | -             | Transaction calldata                                     |
-| `--inputfile <PATH>`     | -             | File containing calldata                                 |
+| `--gas <AMOUNT>`         | 10000000      | Gas limit                                                                    |
+| `--basefee <AMOUNT>`     | 0             | Gas price (alias: `--gas-price`)                                             |
+| `--priorityfee <AMOUNT>` | -             | EIP-1559 priority fee                                                        |
+| `--sender <ADDRESS>`     | 0xf39F...2266 | Transaction origin (alias: `--from`)                                         |
+| `--receiver <ADDRESS>`   | 0x0000...0000 | Transaction receiver (alias: `--to`)                                         |
+| `--nonce <NONCE>`        | -             | Transaction nonce                                                            |
+| `--create`               | false         | Create mode instead of call                                                  |
+| `--value <AMOUNT>`       | 0             | Transaction value                                                            |
+| `--input <HEX>`          | -             | Transaction calldata                                                         |
+| `--inputfile <PATH>`     | -             | File containing calldata                                                     |
 
 #### Deposit Transaction Options (tx-type 126)
 
-| Option                 | Default | Description                                      |
-| ---------------------- | ------- | ------------------------------------------------ |
-| `--source-hash <HASH>` | -       | Source hash identifying the deposit (B256)       |
-| `--mint <AMOUNT>`      | -       | Amount of ETH to mint to sender (wei)            |
+| Option                 | Default | Description                                |
+| ---------------------- | ------- | ------------------------------------------ |
+| `--source-hash <HASH>` | -       | Source hash identifying the deposit (B256) |
+| `--mint <AMOUNT>`      | -       | Amount of ETH to mint to sender (wei)      |
 
 #### EIP-2930 Access List Options (tx-type 1, 2, 4)
 
-| Option              | Default | Description                                                     |
-| ------------------- | ------- | --------------------------------------------------------------- |
+| Option              | Default | Description                                                                   |
+| ------------------- | ------- | ----------------------------------------------------------------------------- |
 | `--access <ACCESS>` | -       | Access list entry in format `ADDRESS` or `ADDRESS:KEY1,KEY2,...` (repeatable) |
 
 - **ADDRESS**: The accessed contract address
@@ -145,8 +145,8 @@ mega-evme tx --tx-type 2 \
 
 #### EIP-7702 Transaction Options (tx-type 4)
 
-| Option          | Default | Description                                                    |
-| --------------- | ------- | -------------------------------------------------------------- |
+| Option          | Default | Description                                                        |
+| --------------- | ------- | ------------------------------------------------------------------ |
 | `--auth <AUTH>` | -       | Authorization in format `AUTHORITY:NONCE->DELEGATION` (repeatable) |
 
 - **AUTHORITY**: Address of the EOA delegating control
@@ -188,7 +188,7 @@ mega-evme replay 0x1234...txhash...5678
 mega-evme replay 0x1234...txhash --rpc https://rpc.example.com
 
 # Replay with execution trace
-mega-evme replay 0x1234...txhash --tracer trace
+mega-evme replay 0x1234...txhash --trace
 ```
 
 #### Arguments
@@ -253,14 +253,35 @@ mega-evme run contract.hex \
 
 ### Execution Tracing
 
-| Option                       | Description                              |
-| ---------------------------- | ---------------------------------------- |
-| `--tracer trace`             | Enable Geth-compatible execution tracing |
-| `--trace.disable-memory`     | Disable memory capture in traces         |
-| `--trace.disable-stack`      | Disable stack capture in traces          |
-| `--trace.disable-storage`    | Disable storage capture in traces        |
-| `--trace.enable-return-data` | Enable return data capture               |
-| `--trace.output <PATH>`      | Output file for trace data               |
+| Option                  | Description                                          |
+| ----------------------- | ---------------------------------------------------- |
+| `--trace`               | Enable execution tracing                             |
+| `--trace.output <PATH>` | Output file for trace data                           |
+| `--tracer <Tracer>`     | Use a specific tracer: `opcode`, `call`, `pre-state` |
+
+#### Opcode Tracer Options
+
+| Option                              | Description                       |
+| ----------------------------------- | --------------------------------- |
+| `--trace.opcode.disable-memory`     | Disable memory capture in traces  |
+| `--trace.opcode.disable-stack`      | Disable stack capture in traces   |
+| `--trace.opcode.disable-storage`    | Disable storage capture in traces |
+| `--trace.opcode.enable-return-data` | Enable return data capture        |
+
+#### Call Tracer Options
+
+| Option                       | Description                |
+| ---------------------------- | -------------------------- |
+| `--trace.call.only-top-call` | Only trace top-level call  |
+| `--trace.call.with-log`      | Include logs in call trace |
+
+#### Pre-State Tracer Options
+
+| Option                             | Description                         |
+| ---------------------------------- | ----------------------------------- |
+| `--trace.prestate.diff-mode`       | Show state diff instead of prestate |
+| `--trace.prestate.disable-code`    | Disable code in prestate output     |
+| `--trace.prestate.disable-storage` | Disable storage in prestate output  |
 
 ---
 
@@ -297,7 +318,8 @@ mega-evme tx \
 # Replay a transaction with full execution trace
 mega-evme replay 0xTransactionHash \
   --rpc https://rpc.example.com \
-  --tracer trace \
+  --trace \
+  --tracer opcode \
   --trace.output trace.json
 ```
 

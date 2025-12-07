@@ -72,6 +72,7 @@ pub(super) async fn execute_transactions_v1_0_1<P>(
 where
     P: Provider<op_alloy_network::Optimism> + std::fmt::Debug,
 {
+    let transaction_index = preceding_transactions.len() as u64;
     // Convert MegaSpecId to v1.0.1 equivalent
     let spec_v1 = match spec_id {
         MegaSpecId::EQUIVALENCE => mega_evm_v1::MegaSpecId::EQUIVALENCE,
@@ -181,7 +182,7 @@ where
     let exec_result = outcome.inner.result.clone();
     let evm_state = outcome.inner.state.clone();
 
-    block_executor_v1
+    let gas_used = block_executor_v1
         .commit_execution_outcome(outcome)
         .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
@@ -300,6 +301,10 @@ where
         to,
         contract_address,
         target_tx.inner.effective_gas_price.unwrap_or(0),
+        gas_used,
+        Some(target_tx.inner.inner.tx_hash()),
+        Some(block.hash()),
+        transaction_index,
     );
 
     Ok(ReplayOutcome {

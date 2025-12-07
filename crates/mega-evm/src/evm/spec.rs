@@ -26,11 +26,11 @@ use serde::{Deserialize, Serialize};
 pub enum MegaSpecId {
     /// The EVM version when no `MegaETH` harfork is enabled. The behavior of the EVM
     /// should be equivalent to the [`OpSpecId::ISTHMUS`] of the Optimism EVM.
-    #[default]
     EQUIVALENCE,
     /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
     MINI_REX,
     /// The EVM version for the *Rex* hardfork of `MegaETH`.
+    #[default]
     REX,
 }
 
