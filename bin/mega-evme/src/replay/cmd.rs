@@ -237,6 +237,7 @@ impl Cmd {
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
                 .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
             let tx = tx.as_recovered();
+            println!("Executing preceding transaction: {:?}", tx_hash);
             let outcome = block_executor
                 .run_transaction(tx)
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
@@ -246,6 +247,7 @@ impl Cmd {
         }
 
         // Execute target transaction
+        println!("Executing target transaction");
         let pre_execution_nonce = block_executor
             .evm()
             .db_ref()
