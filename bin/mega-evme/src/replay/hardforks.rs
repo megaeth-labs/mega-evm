@@ -1,0 +1,19 @@
+use mega_evm::{alloy_hardforks::ForkCondition, MegaHardfork, MegaHardforkConfig};
+
+/// Returns the hardfork configuration for a given chain ID.
+pub fn get_hardfork_config(chain_id: u64) -> MegaHardforkConfig {
+    match chain_id {
+        // MegaETH testnet v2
+        6343 => MegaHardforkConfig::new()
+            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
+            .with(MegaHardfork::Rex, ForkCondition::Timestamp(1764694618)),
+        // MegaETH mainnet
+        4326 => MegaHardforkConfig::new()
+            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
+            .with(MegaHardfork::Rex, ForkCondition::Timestamp(1764851939)),
+        // Default: all hardforks enabled at genesis
+        _ => MegaHardforkConfig::new()
+            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
+            .with(MegaHardfork::Rex, ForkCondition::Timestamp(0)),
+    }
+}

@@ -14,14 +14,16 @@ use mega_evm::{
         database::{states::bundle_state::BundleRetention, StateBuilder},
         DatabaseRef,
     },
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaSpecId,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHardforks,
+    MegaSpecId,
 };
 
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
     common::{op_receipt_to_tx_receipt, EvmeOutcome, FixedHardfork, OpTxReceipt},
-    run, EvmeState,
+    replay::get_hardfork_config,
+    run, ChainArgs, EvmeState,
 };
 
 use super::{v1_0_1, ReplayError, Result};
@@ -34,13 +36,8 @@ pub struct Cmd {
     pub tx_hash: B256,
 
     /// RPC URL to fetch transaction from
-    #[arg(long = "rpc", default_value = "http://localhost:8545")]
+    #[arg(long = "rpc", visible_aliases = ["rpc-url"], env = "RPC_URL", default_value = "http://localhost:8545")]
     pub rpc: String,
-
-    // Shared argument groups
-    /// Chain configuration (hardfork and chain ID)
-    #[command(flatten)]
-    pub chain_args: run::ChainArgs,
 
     /// External environment configuration (bucket capacities)
     #[command(flatten)]
@@ -73,7 +70,7 @@ pub(super) struct ReplayOutcome {
 impl Cmd {
     /// Execute the replay command
     pub async fn run(&self) -> Result<()> {
-        // Step 1: Fetch transaction from RPC
+        // Step 0: Build up rpc provider
         let provider = ProviderBuilder::new()
             .disable_recommended_fillers()
             .network::<op_alloy_network::Optimism>()
@@ -81,18 +78,16 @@ impl Cmd {
                 ReplayError::RpcError(format!("Invalid RPC URL '{}': {}", self.rpc, e))
             })?);
 
+        // Step 1: fetch transaction
         eprintln!("Fetching transaction {} from RPC {}", self.tx_hash, self.rpc);
-
-        // Step 2: fetch transaction
         let target_tx = provider
             .get_transaction_by_hash(self.tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {}", e)))?
             .ok_or_else(|| ReplayError::TransactionNotFound(self.tx_hash))?;
-
         eprintln!("Transaction found in block {:?}", target_tx.block_number);
 
-        // Step 3: determine block number to execute the transaction
+        // Step 2: determine block number to execute the transaction
         let (state_base_block_number, block_number, is_pending) =
             if let Some(block_number) = target_tx.block_number {
                 (block_number - 1, block_number, false)
@@ -103,6 +98,25 @@ impl Cmd {
                     .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?;
                 (latest_block_number, latest_block_number, true)
             };
+        let parent_block = provider
+            .get_block_by_number(state_base_block_number.into())
+            .await
+            .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
+            .ok_or(ReplayError::BlockNotFound(state_base_block_number))?;
+        let block = provider
+            .get_block_by_number(block_number.into())
+            .await
+            .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
+            .ok_or(ReplayError::BlockNotFound(block_number))?;
+
+        // Step 3: Obtain chain ID and hardfork
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .map_err(|e| ReplayError::RpcError(format!("Failed to get chain ID: {}", e)))?;
+        let hardforks = get_hardfork_config(chain_id);
+        let hardfork = hardforks.spec_id(block.header.timestamp());
+        let chain_args = ChainArgs { chain_id, hardfork: hardfork.to_string() };
 
         // Step 4: Setup initial state by forking from the parent block
         let mut database = EvmeState::new_forked(
@@ -114,18 +128,9 @@ impl Cmd {
         .await?;
 
         // Step 5: Setup BlockEnv and CfgEnv
-        let parent_block = provider
-            .get_block_by_number(state_base_block_number.into())
-            .await
-            .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
-            .ok_or(ReplayError::BlockNotFound(state_base_block_number))?;
-        let block = provider
-            .get_block_by_number(block_number.into())
-            .await
-            .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
-            .ok_or(ReplayError::BlockNotFound(block_number))?;
+
         let block_env = self.retrieve_block_env(&block).await?;
-        let cfg_env = self.chain_args.create_cfg_env()?;
+        let cfg_env = chain_args.create_cfg_env()?;
         let evm_env = EvmEnv::new(cfg_env, block_env);
 
         // Step 6: fetch preceding transactions
@@ -150,12 +155,13 @@ impl Cmd {
                 &provider,
                 preceding_transactions,
                 &target_tx,
-                self.chain_args.spec_id()?,
+                chain_args.spec_id()?,
                 &self.trace_args,
             )
             .await?
         } else {
             self.execute_transactions(
+                &chain_args,
                 &mut database,
                 &parent_block,
                 &block,
@@ -177,6 +183,7 @@ impl Cmd {
     #[allow(clippy::too_many_arguments)]
     async fn execute_transactions<P>(
         &self,
+        chain_args: &ChainArgs,
         database: &mut run::EvmeState<op_alloy_network::Optimism, P>,
         parent_block: &Block<Transaction>,
         block: &Block<Transaction>,
@@ -188,7 +195,8 @@ impl Cmd {
     where
         P: alloy_provider::Provider<op_alloy_network::Optimism> + std::fmt::Debug,
     {
-        let chain_spec = FixedHardfork::new(self.chain_args.spec_id()?);
+        let transaction_index = preceding_transactions.len() as u64;
+        let chain_spec = FixedHardfork::new(chain_args.spec_id()?);
         let external_env_factory = self.ext_args.create_external_envs()?;
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_env_factory);
         let block_executor_factory = MegaBlockExecutorFactory::new(
@@ -196,11 +204,11 @@ impl Cmd {
             evm_factory,
             OpAlloyReceiptBuilder::default(),
         );
-        let block_limits = match self.chain_args.spec_id()? {
+        let block_limits = match chain_args.spec_id()? {
             MegaSpecId::EQUIVALENCE => BlockLimits::no_limits().fit_equivalence(),
             MegaSpecId::MINI_REX => BlockLimits::no_limits().fit_mini_rex(),
             MegaSpecId::REX => BlockLimits::no_limits().fit_rex(),
-            _ => panic!("Unsupported spec id: {:?}", self.chain_args.spec_id()),
+            _ => panic!("Unsupported spec id: {:?}", chain_args.spec_id()),
         };
         let block_ctx = MegaBlockExecutionCtx::new(
             parent_block.hash(),
@@ -273,7 +281,7 @@ impl Cmd {
         });
 
         // Commit transaction outcome
-        block_executor
+        let gas_used = block_executor
             .commit_transaction_outcome(outcome)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
@@ -300,6 +308,10 @@ impl Cmd {
             to,
             contract_address,
             target_tx.inner.effective_gas_price.unwrap_or(0),
+            gas_used,
+            Some(target_tx.inner.inner.tx_hash()),
+            Some(block.hash()),
+            transaction_index,
         );
 
         Ok(ReplayOutcome {

@@ -101,6 +101,10 @@ impl Cmd {
             if self.tx_args.create { None } else { Some(self.tx_args.receiver()) },
             contract_address,
             self.tx_args.effective_gas_price()?,
+            outcome.exec_result.gas_used(),
+            None,
+            None,
+            0,
         );
 
         // Serialize and print receipt as JSON
