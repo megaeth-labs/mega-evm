@@ -56,6 +56,26 @@ pub enum MegaTxLimitExceededError {
     },
 }
 
+impl MegaTxLimitExceededError {
+    /// The amount of the resource used by the current transaction.
+    pub fn usage(&self) -> u64 {
+        match self {
+            Self::TransactionGasLimit { tx_gas_limit, .. } => *tx_gas_limit,
+            Self::TransactionEncodeSizeLimit { tx_size, .. } => *tx_size,
+            Self::DataAvailabilitySizeLimit { da_size, .. } => *da_size,
+        }
+    }
+
+    /// The limit of the resource.
+    pub fn limit(&self) -> u64 {
+        match self {
+            Self::TransactionGasLimit { limit, .. } |
+            Self::TransactionEncodeSizeLimit { limit, .. } |
+            Self::DataAvailabilitySizeLimit { limit, .. } => *limit,
+        }
+    }
+}
+
 impl InvalidTxError for MegaTxLimitExceededError {
     fn is_nonce_too_low(&self) -> bool {
         false
@@ -133,6 +153,44 @@ pub enum MegaBlockLimitExceededError {
         /// Block state growth limit
         limit: u64,
     },
+}
+
+impl MegaBlockLimitExceededError {
+    /// The total amount of the resource used by the block so far.
+    pub fn block_used(&self) -> u64 {
+        match self {
+            Self::TransactionDataLimit { block_used, .. } |
+            Self::KVUpdateLimit { block_used, .. } |
+            Self::ComputeGasLimit { block_used, .. } |
+            Self::TransactionEncodeSizeLimit { block_used, .. } |
+            Self::DataAvailabilitySizeLimit { block_used, .. } |
+            Self::StateGrowthLimit { block_used, .. } => *block_used,
+        }
+    }
+
+    /// The amount of the resource used by the current transaction.
+    pub fn tx_used(&self) -> u64 {
+        match self {
+            Self::TransactionDataLimit { tx_used, .. } |
+            Self::KVUpdateLimit { tx_used, .. } |
+            Self::ComputeGasLimit { tx_used, .. } |
+            Self::TransactionEncodeSizeLimit { tx_used, .. } |
+            Self::DataAvailabilitySizeLimit { tx_used, .. } |
+            Self::StateGrowthLimit { tx_used, .. } => *tx_used,
+        }
+    }
+
+    /// The limit of the resource.
+    pub fn limit(&self) -> u64 {
+        match self {
+            Self::TransactionDataLimit { limit, .. } |
+            Self::KVUpdateLimit { limit, .. } |
+            Self::ComputeGasLimit { limit, .. } |
+            Self::TransactionEncodeSizeLimit { limit, .. } |
+            Self::DataAvailabilitySizeLimit { limit, .. } |
+            Self::StateGrowthLimit { limit, .. } => *limit,
+        }
+    }
 }
 
 impl InvalidTxError for MegaBlockLimitExceededError {
