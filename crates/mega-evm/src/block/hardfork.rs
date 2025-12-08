@@ -36,7 +36,7 @@ impl MegaHardfork {
 pub trait MegaHardforks: OpHardforks {
     /// Retrieves [`ForkCondition`] by a [`MegaHardfork`]. If `fork` is not present, returns
     /// [`ForkCondition::Never`].
-    fn megaeth_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
+    fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
 
     /// Returns `true` if the given [`MegaHardfork`] is the hardfork to be activated at the
     /// given timestamp. One special case is that if the current block is the first block of the
@@ -51,9 +51,9 @@ pub trait MegaHardforks: OpHardforks {
         current_number_and_timestamp: (BlockNumber, BlockTimestamp),
     ) -> bool {
         let (current_number, current_timestamp) = current_number_and_timestamp;
-        self.megaeth_fork_activation(fork).active_at_timestamp(current_timestamp) &&
+        self.mega_fork_activation(fork).active_at_timestamp(current_timestamp) &&
             (current_number == 1 ||
-                !self.megaeth_fork_activation(fork).active_at_timestamp(parent_timestamp))
+                !self.mega_fork_activation(fork).active_at_timestamp(parent_timestamp))
     }
 
     /// Gets the expected `MegaSpecId` for a block with the given timestamp.
@@ -70,12 +70,12 @@ pub trait MegaHardforks: OpHardforks {
 
     /// Returns `true` if [`MegaHardfork::MiniRex`] is active at given block timestamp.
     fn is_mini_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.megaeth_fork_activation(MegaHardfork::MiniRex).active_at_timestamp(timestamp)
+        self.mega_fork_activation(MegaHardfork::MiniRex).active_at_timestamp(timestamp)
     }
 
     /// Returns `true` if [`MegaHardfork::Rex`] is active at given block timestamp.
     fn is_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.megaeth_fork_activation(MegaHardfork::Rex).active_at_timestamp(timestamp)
+        self.mega_fork_activation(MegaHardfork::Rex).active_at_timestamp(timestamp)
     }
 }
 
@@ -203,7 +203,7 @@ impl OpHardforks for MegaHardforkConfig {
 }
 
 impl MegaHardforks for MegaHardforkConfig {
-    fn megaeth_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
+    fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
         match self.get(fork) {
             Some(condition) => *condition,
             None => ForkCondition::Never,

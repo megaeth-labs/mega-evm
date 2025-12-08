@@ -38,7 +38,7 @@ impl OpHardforks for FixedHardfork {
 }
 
 impl MegaHardforks for FixedHardfork {
-    fn megaeth_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
+    fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
         let mapped_spec = fork.spec_id();
         if mapped_spec <= self.spec {
             ForkCondition::Timestamp(0)
