@@ -56,6 +56,26 @@ pub enum MegaTxLimitExceededError {
     },
 }
 
+impl MegaTxLimitExceededError {
+    /// The amount of the resource used by the current transaction.
+    pub fn usage(&self) -> u64 {
+        match self {
+            Self::TransactionGasLimit { tx_gas_limit, .. } => *tx_gas_limit,
+            Self::TransactionEncodeSizeLimit { tx_size, .. } => *tx_size,
+            Self::DataAvailabilitySizeLimit { da_size, .. } => *da_size,
+        }
+    }
+
+    /// The limit of the resource.
+    pub fn limit(&self) -> u64 {
+        match self {
+            Self::TransactionGasLimit { limit, .. } |
+            Self::TransactionEncodeSizeLimit { limit, .. } |
+            Self::DataAvailabilitySizeLimit { limit, .. } => *limit,
+        }
+    }
+}
+
 impl InvalidTxError for MegaTxLimitExceededError {
     fn is_nonce_too_low(&self) -> bool {
         false
