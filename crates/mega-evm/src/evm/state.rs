@@ -33,9 +33,9 @@ impl<DB: Database> BlockHashes for State<DB> {
 /// created in the same transaction, i.e., if `SelfDestructed` flag is set, it must be "created ->
 /// selfdestructed" in the same transaction and `Created` flag is also set. When merging `EvmState`s
 /// (base `EvmState` <- new `EvmState`), we are doing this for each account:
-/// - If the `SelfDestructed` (and `Created`) flag is set in the account status of the new `EvmState`,
-///   do nothing, because the account must be created in the same transaction, and creating and
-///   selfdestructing in the same transaction is a no-op.
+/// - If the `SelfDestructed` (and `Created`) flag is set in the account status of the new
+///   `EvmState`, do nothing, because the account must be created in the same transaction, and
+///   creating and selfdestructing in the same transaction is a no-op.
 /// - Otherwise, we override the corresponding account and storage slots in the base `EvmState`.
 ///
 /// We merge the state even if the account is not marked as `Touched`. This is because we may need
