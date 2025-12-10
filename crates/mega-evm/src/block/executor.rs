@@ -55,13 +55,14 @@ pub struct MegaBlockExecutor<H, E, R: OpReceiptBuilder> {
     hardforks: H,
     receipt_builder: R,
     ctx: MegaBlockExecutionCtx,
-    evm: E,
-
-    block_limiter: BlockLimiter,
-
     system_caller: SystemCaller<H>,
 
-    receipts: Vec<R::Receipt>,
+    /// The inner evm instance.
+    pub evm: E,
+    /// The block limiter for tracking the limit usage.
+    pub block_limiter: BlockLimiter,
+    /// The receipts for the transactions in the block.
+    pub receipts: Vec<R::Receipt>,
 }
 
 impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> {
