@@ -3,6 +3,7 @@ use std::time::Instant;
 use alloy_primitives::hex;
 use clap::Parser;
 use mega_evm::revm::{context::result::ExecutionResult, state::Bytecode, DatabaseRef};
+use tracing::{debug, info, trace, warn};
 
 use super::{load_hex, Result, RunError};
 use crate::common::EvmeOutcome;
@@ -47,34 +48,47 @@ impl Cmd {
     /// Execute the run command
     pub async fn run(&self) -> Result<()> {
         // Step 1: Load bytecode
+        info!("Loading bytecode");
         let code = load_hex(self.code.clone(), self.codefile.clone())?.ok_or_else(|| {
             RunError::InvalidInput(
                 "No code provided. Use --codefile or provide code as argument".to_string(),
             )
         })?;
+        debug!(code_len = code.len(), "Bytecode loaded");
 
         // Step 2: Setup initial state and environment
-        // Create initial state with provider (if any)
+        info!("Setting up initial state");
         let mut state = self
             .prestate_args
             .create_initial_state::<op_alloy_network::Optimism>(&self.tx_args.sender)
             .await?;
+        debug!(sender = %self.tx_args.sender, "State initialized");
+
         let pre_execution_nonce =
             state.basic_ref(self.tx_args.sender)?.map(|acc| acc.nonce).unwrap_or(0);
+        debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Run-specific: If not in create mode, set the code at the receiver address
         if !self.tx_args.create && !code.is_empty() {
             let bytecode = Bytecode::new_raw_checked(code.clone())
                 .unwrap_or_else(|_| Bytecode::new_legacy(code.clone()));
-            // Override the code at the receiver address
+            debug!(receiver = %self.tx_args.receiver(), "Setting code at receiver address");
             state.set_account_code(self.tx_args.receiver(), bytecode);
         }
 
         // Step 3: Execute bytecode
-        // Create transaction
+        info!("Executing transaction");
         let mut tx = self.tx_args.create_tx(self.env_args.chain.chain_id)?;
+        debug!(
+            tx_type = tx.base.tx_type,
+            gas_limit = tx.base.gas_limit,
+            value = %tx.base.value,
+            "Transaction created"
+        );
+
         // In create mode, prepend code to input data
         if self.tx_args.create {
+            debug!("Create mode: prepending code to input data");
             tx.base.data = [code.as_ref(), tx.base.data.as_ref()].concat().into();
         }
 
@@ -85,6 +99,19 @@ impl Cmd {
             self.trace_args.execute_transaction(evm_context, tx)?;
         let exec_time = start.elapsed();
 
+        // Log execution result
+        match &exec_result {
+            ExecutionResult::Success { gas_used, .. } => {
+                info!(gas_used, "Execution succeeded");
+            }
+            ExecutionResult::Revert { gas_used, .. } => {
+                warn!(gas_used, "Execution reverted");
+            }
+            ExecutionResult::Halt { reason, gas_used } => {
+                warn!(?reason, gas_used, "Execution halted");
+            }
+        }
+
         let outcome = EvmeOutcome {
             pre_execution_nonce,
             exec_result,
@@ -94,6 +121,7 @@ impl Cmd {
         };
 
         // Step 4: Output results (including state dump if requested)
+        trace!("Writing output results");
         self.output_results(&outcome)?;
 
         Ok(())
@@ -101,50 +129,38 @@ impl Cmd {
 
     /// Output execution results
     fn output_results(&self, outcome: &EvmeOutcome) -> Result<()> {
-        // Extract output from execution result
-        let output = match &outcome.exec_result {
-            ExecutionResult::Success { output, .. } => output.data(),
-            ExecutionResult::Revert { output, .. } => output.as_ref(),
-            ExecutionResult::Halt { .. } => &[],
+        println!();
+        println!("execution time:  {:?}", outcome.exec_time);
+        println!();
+        println!("=== Execution Output ===");
+        println!("EVM gas used:    {}", outcome.exec_result.gas_used());
+        match &outcome.exec_result {
+            ExecutionResult::Success { output, .. } => {
+                println!("0x{}", hex::encode(output.data()));
+            }
+            ExecutionResult::Revert { output, .. } => {
+                println!("Revert: 0x{}", hex::encode(output.as_ref()));
+            }
+            ExecutionResult::Halt { reason, .. } => {
+                println!("Halt: {:?}", reason);
+            }
         };
-
-        // Print execution output
-        if output.is_empty() {
-            println!("0x");
-        } else {
-            println!("0x{}", hex::encode(output));
-        }
-
-        // Print error if any
-        let error = match &outcome.exec_result {
-            ExecutionResult::Success { .. } => None,
-            ExecutionResult::Revert { .. } => Some("Revert"),
-            ExecutionResult::Halt { reason, .. } => Some(&format!("Halt: {:?}", reason) as &str),
-        };
-
-        if let Some(err) = error {
-            eprintln!(" error: {}", err);
-        }
 
         // Print statistics
-        eprintln!();
-        eprintln!("EVM gas used:    {}", outcome.exec_result.gas_used());
-        eprintln!("execution time:  {:?}", outcome.exec_time);
 
         // Output trace data if available
         if let Some(ref trace) = outcome.trace_data {
+            println!();
+            println!("=== Execution Trace ===");
             if let Some(ref output_file) = self.trace_args.trace_output_file {
                 // Write trace to file
                 std::fs::write(output_file, trace).map_err(|e| {
                     super::RunError::ExecutionError(format!("Failed to write trace to file: {}", e))
                 })?;
-                eprintln!();
-                eprintln!("Trace written to: {}", output_file.display());
+                println!("Trace written to: {}", output_file.display());
             } else {
                 // Print trace to console
-                eprintln!();
-                eprintln!("=== Execution Trace ===");
-                eprintln!("{}", trace);
+                println!("{}", trace);
             }
         }
 

@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use mega_evm::revm::{context::result::ExecutionResult, state::EvmState, DatabaseRef};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     common::{op_receipt_to_tx_receipt, EvmeOutcome},
@@ -39,18 +40,36 @@ impl Cmd {
     /// Execute the tx command
     pub async fn run(&self) -> Result<()> {
         // Step 1: Setup initial state and environment
-        // Create initial state with provider (if any)
+        info!("Setting up initial state");
         let mut state = self
             .prestate_args
             .create_initial_state::<op_alloy_network::Optimism>(&self.tx_args.sender)
             .await?;
+        debug!(sender = %self.tx_args.sender, "State initialized");
+
         let pre_execution_nonce =
             state.basic_ref(self.tx_args.sender)?.map(|acc| acc.nonce).unwrap_or(0);
+        debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Step 2: Execute transaction
+        info!("Executing transaction");
         let start = Instant::now();
         let (exec_result, evm_state, trace_data) = self.execute(&mut state)?;
         let exec_time = start.elapsed();
+
+        // Log execution result
+        match &exec_result {
+            ExecutionResult::Success { gas_used, .. } => {
+                info!(gas_used, "Execution succeeded");
+            }
+            ExecutionResult::Revert { gas_used, .. } => {
+                warn!(gas_used, "Execution reverted");
+            }
+            ExecutionResult::Halt { reason, gas_used } => {
+                warn!(?reason, gas_used, "Execution halted");
+            }
+        }
+
         let outcome = EvmeOutcome {
             pre_execution_nonce,
             exec_result,
@@ -60,6 +79,7 @@ impl Cmd {
         };
 
         // Step 3: Output results (including state dump if requested)
+        trace!("Writing output results");
         self.output_results(&outcome)?;
 
         Ok(())
@@ -77,6 +97,13 @@ impl Cmd {
     {
         // Create transaction and EVM context
         let tx = self.tx_args.create_tx(self.env_args.chain.chain_id)?;
+        debug!(
+            tx_type = tx.base.tx_type,
+            gas_limit = tx.base.gas_limit,
+            value = %tx.base.value,
+            "Transaction created"
+        );
+
         let evm_context = self.env_args.create_evm_context(state)?;
 
         // Execute transaction
@@ -107,30 +134,31 @@ impl Cmd {
             0,
         );
 
+        // Print execution time to stderr
+        println!();
+        println!("execution time:  {:?}", outcome.exec_time);
+
         // Serialize and print receipt as JSON
+        println!();
+        println!("=== Receipt ===");
         let receipt_json = serde_json::to_string_pretty(&receipt).map_err(|e| {
             super::TxError::ExecutionError(format!("Failed to serialize receipt: {}", e))
         })?;
         println!("{}", receipt_json);
 
-        // Print execution time to stderr
-        eprintln!();
-        eprintln!("execution time:  {:?}", outcome.exec_time);
-
         // Output trace data if available
         if let Some(ref trace) = outcome.trace_data {
+            println!();
+            println!("=== Execution Trace ===");
             if let Some(ref output_file) = self.trace_args.trace_output_file {
                 // Write trace to file
                 std::fs::write(output_file, trace).map_err(|e| {
                     super::TxError::ExecutionError(format!("Failed to write trace to file: {}", e))
                 })?;
-                eprintln!();
-                eprintln!("Trace written to: {}", output_file.display());
+                println!("Trace written to: {}", output_file.display());
             } else {
                 // Print trace to console
-                eprintln!();
-                eprintln!("=== Execution Trace ===");
-                eprintln!("{}", trace);
+                println!("{}", trace);
             }
         }
 

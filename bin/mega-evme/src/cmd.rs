@@ -1,10 +1,25 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use tracing::error;
 
-/// Main command enumeration for the mega-evme CLI tool
+use crate::common::LogArgs;
+
+/// Main CLI for the mega-evme tool
 #[derive(Parser, Debug)]
-#[command(infer_subcommands = true, version = "0.1")]
+#[command(name = "mega-evme", infer_subcommands = true, version = "0.1")]
+pub struct MainCmd {
+    /// Logging configuration
+    #[command(flatten)]
+    pub log: LogArgs,
+
+    /// Subcommand to execute
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+/// Available subcommands
+#[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
-pub enum MainCmd {
+pub enum Commands {
     /// State transition tool
     T8n(crate::t8n::Cmd),
     /// Run arbitrary EVM bytecode
@@ -31,25 +46,33 @@ pub enum Error {
 
 impl MainCmd {
     /// Execute the main command
-    pub async fn run(&self) -> Result<(), Error> {
-        match self {
-            Self::T8n(cmd) => {
+    pub async fn run(self) -> Result<(), Error> {
+        // Initialize logging first
+        self.log.init();
+
+        match self.command {
+            Commands::T8n(cmd) => {
                 cmd.run()
                     .map_err(|e| Error::Evme(crate::common::EvmeError::Other(e.to_string())))?;
                 Ok(())
             }
-            Self::Run(cmd) => {
+            Commands::Run(cmd) => {
                 cmd.run().await?;
                 Ok(())
             }
-            Self::Tx(cmd) => {
+            Commands::Tx(cmd) => {
                 cmd.run().await?;
                 Ok(())
             }
-            Self::Replay(cmd) => {
+            Commands::Replay(cmd) => {
                 cmd.run().await?;
                 Ok(())
             }
         }
+        .inspect_err(|e| {
+            error!(err = ?e, "Error executing command");
+            eprintln!("{e}");
+            std::process::exit(1);
+        })
     }
 }

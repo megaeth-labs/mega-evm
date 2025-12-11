@@ -20,6 +20,7 @@ use mega_evm::{
     MegaContext, MegaEvm, MegaHaltReason, MegaTransaction, TestExternalEnvs,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
+use tracing::{debug, info, trace};
 
 use super::{EvmeError, EvmeState};
 
@@ -138,6 +139,7 @@ impl TraceArgs {
     ) -> String {
         let geth_builder = inspector.geth_builder();
         let opts = self.create_geth_options();
+        debug!(opts = ?opts, "Generating default opcode trace");
 
         // Get output for trace generation
         let output = match exec_result {
@@ -163,6 +165,7 @@ impl TraceArgs {
     ) -> String {
         let geth_builder = inspector.geth_builder();
         let config = self.create_call_config();
+        debug!(config = ?config, "Generating call trace");
 
         // Generate the call trace
         let call_frame: CallFrame = geth_builder.geth_call_traces(config, exec_result.gas_used());
@@ -181,6 +184,7 @@ impl TraceArgs {
     ) -> String {
         let geth_builder = inspector.geth_builder();
         let config = self.create_prestate_config();
+        debug!(config = ?config, "Generating prestate trace");
 
         // Generate the prestate trace using the database
         match geth_builder.geth_prestate_traces(result_and_state, &config, prestate) {
@@ -198,6 +202,7 @@ impl TraceArgs {
         result_and_state: &ResultAndState<MegaHaltReason>,
         prestate: impl DatabaseRef,
     ) -> String {
+        info!(tracer = ?self.tracer, "Generating trace");
         match self.tracer {
             TracerType::Opcode => self.generate_default_trace(inspector, &result_and_state.result),
             TracerType::Call => self.generate_call_trace(inspector, &result_and_state.result),
@@ -218,6 +223,7 @@ impl TraceArgs {
         P: alloy_provider::Provider<N> + std::fmt::Debug,
     {
         if self.is_tracing_enabled() {
+            info!(tracer = ?self.tracer, "Evm executing with tracing");
             // Execute with tracing inspector
             let mut inspector = self.create_inspector();
             let mut evm = MegaEvm::new(evm_context).with_inspector(&mut inspector);
@@ -225,17 +231,21 @@ impl TraceArgs {
             let result_and_state = evm
                 .inspect_tx(tx)
                 .map_err(|e| EvmeError::ExecutionError(format!("EVM execution failed: {:?}", e)))?;
+            trace!(result_and_state = ?result_and_state, "Evm execution result and state");
 
             // Generate trace string based on tracer type
             let trace_str = self.generate_trace(evm.inspector, &result_and_state, evm.db_ref());
+            trace!(trace_str = ?trace_str, "Generated trace");
 
             Ok((result_and_state.result, result_and_state.state, Some(trace_str)))
         } else {
+            info!("Evm executing without tracing");
             // Execute without tracing
             let mut evm = MegaEvm::new(evm_context);
             let result_and_state = evm
                 .transact(tx)
                 .map_err(|e| EvmeError::ExecutionError(format!("EVM execution failed: {:?}", e)))?;
+            trace!(result_and_state = ?result_and_state, "Evm execution result and state");
 
             Ok((result_and_state.result, result_and_state.state, None))
         }

@@ -11,6 +11,7 @@ use mega_evm::{
     revm::{context::tx::TxEnv, primitives::TxKind},
     Either, MegaTransaction, MegaTxType,
 };
+use tracing::{debug, trace};
 
 use super::{load_hex, EvmeError, Result};
 
@@ -190,6 +191,7 @@ impl TxArgs {
             })?
         };
 
+        trace!(string = %s, chain_id = %chain_id, authority = %authority, delegation = %delegation, nonce = %nonce, "Parsed authorization");
         Ok(RecoveredAuthorization::new_unchecked(
             Authorization { chain_id: U256::from(chain_id), address: delegation, nonce },
             RecoveredAuthority::Valid(authority),
@@ -224,6 +226,7 @@ impl TxArgs {
                 })
                 .collect();
 
+            trace!(string = %s, address = %address, storage_keys = ?storage_keys, "Parsed access list item");
             Ok(AccessListItem { address, storage_keys: storage_keys? })
         } else {
             // No storage keys, just address
@@ -231,6 +234,7 @@ impl TxArgs {
                 EvmeError::InvalidInput(format!("Invalid access list address: {}", s.trim()))
             })?;
 
+            trace!(string = %s, address = %address, "Parsed access list item");
             Ok(AccessListItem { address, storage_keys: Vec::new() })
         }
     }
@@ -277,7 +281,7 @@ impl TxArgs {
             self.parse_authorization_list(chain_id)?.into_iter().map(Either::Right).collect();
         let access_list = self.parse_access_list()?;
 
-        Ok(TxEnv {
+        let tx = TxEnv {
             caller: self.sender,
             gas_price: self.basefee as u128,
             gas_priority_fee: self.priority_fee.map(|pf| pf as u128),
@@ -292,7 +296,9 @@ impl TxArgs {
             authorization_list,
             kind,
             chain_id: Some(chain_id),
-        })
+        };
+        debug!(tx = ?tx, "Creating TxEnv");
+        Ok(tx)
     }
 
     /// Creates a [`MegaTransaction`] from the transaction arguments.

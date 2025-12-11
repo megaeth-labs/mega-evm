@@ -12,6 +12,7 @@ use mega_evm::{
     },
     MegaContext, MegaSpecId, TestExternalEnvs,
 };
+use tracing::{debug, trace};
 
 use super::{EvmeError, Result};
 
@@ -40,6 +41,7 @@ impl ChainArgs {
         let mut cfg = CfgEnv::default();
         cfg.chain_id = self.chain_id;
         cfg.spec = self.spec_id()?;
+        debug!(cfg = ?cfg, "Evm CfgEnv created");
         Ok(cfg)
     }
 }
@@ -106,6 +108,7 @@ impl BlockEnvArgs {
                 eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
             );
         }
+        debug!(block = ?block, "Evm BlockEnv created");
 
         Ok(block)
     }
@@ -132,6 +135,7 @@ impl ExtEnvArgs {
             let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
             external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
         }
+        debug!(external_envs = ?external_envs, "Evm TestExternalEnvs created");
 
         Ok(external_envs)
     }
@@ -209,5 +213,6 @@ pub fn parse_bucket_capacity(s: &str) -> Result<(u32, u64)> {
         .parse::<u64>()
         .map_err(|e| EvmeError::InvalidInput(format!("Invalid capacity '{}': {}", parts[1], e)))?;
 
+    trace!(string = %s, bucket_id = %bucket_id, capacity = %capacity, "Parsed bucket capacity");
     Ok((bucket_id, capacity))
 }

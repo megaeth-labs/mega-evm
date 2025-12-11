@@ -12,7 +12,7 @@ use mega_evm::revm::{
     state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot},
     Database, DatabaseRef,
 };
-use tracing::debug;
+use tracing::{debug, info, trace};
 
 use super::{EvmeError, Result};
 
@@ -56,6 +56,7 @@ impl PreStateArgs {
     ///
     /// Each entry should be in the format `block_number:block_hash`.
     pub fn parse_block_hashes(&self) -> Result<HashMap<u64, B256>> {
+        debug!("Parsing block hashes");
         let mut map = HashMap::default();
         for entry in &self.block_hashes {
             let (num_str, hash_str) = entry.split_once(':').ok_or_else(|| {
@@ -78,17 +79,20 @@ impl PreStateArgs {
             })?;
             map.insert(block_num, block_hash);
         }
+        trace!(block_hashes = ?map, "Block hashes parsed");
         Ok(map)
     }
 
     /// Load prestate as [`EvmState`] from file if provided
     pub fn load_prestate(&self, sender: &Address) -> Result<EvmState> {
         let mut prestate = if let Some(pre_state_path) = &self.prestate {
+            info!(prestate_path = ?pre_state_path, "Loading prestate from file");
             let prestate_content = std::fs::read_to_string(pre_state_path)?;
             let loaded_prestate: HashMap<Address, AccountState> =
                 serde_json::from_str(&prestate_content).map_err(|e| {
                     EvmeError::InvalidInput(format!("Failed to parse prestate JSON: {}", e))
                 })?;
+            trace!(loaded_prestate = ?loaded_prestate, "Prestate loaded from file");
             let mut prestate = EvmState::with_capacity_and_hasher(
                 loaded_prestate.len(),
                 DefaultHashBuilder::default(),
@@ -97,13 +101,16 @@ impl PreStateArgs {
                 let account = account_state.into_account()?;
                 prestate.insert(address, account);
             }
+            trace!(prestate = ?prestate, "Prestate loaded");
             prestate
         } else {
+            debug!("No prestate file provided");
             HashMap::default()
         };
 
         // Set balance for the sender if specified (overrides prestate)
         if let Some(sender_balance) = &self.sender_balance {
+            info!(sender = %sender, sender_balance = %sender_balance, "Overriding sender balance");
             prestate.entry(*sender).or_default().info.set_balance(*sender_balance);
         }
 
@@ -116,16 +123,17 @@ impl PreStateArgs {
         N: alloy_network::Network + Sized,
     {
         if self.fork {
+            debug!(rpc_url = %self.fork_rpc, "Forking state from RPC");
             let url = self.fork_rpc.parse().map_err(|e| {
                 EvmeError::Other(format!("Invalid RPC URL '{}': {}", self.fork_rpc, e))
             })?;
-            debug!("Forking from RPC {}", self.fork_rpc);
             let provider = alloy_provider::ProviderBuilder::new()
                 .disable_recommended_fillers()
                 .network::<N>()
                 .connect_http(url);
             Ok(Some(DynProvider::new(provider)))
         } else {
+            debug!("No forking state specified");
             Ok(None)
         }
     }
@@ -149,8 +157,10 @@ impl PreStateArgs {
 
         // Create the appropriate state based on whether provider is provided
         if let Some(provider) = provider {
+            debug!("Creating forked state");
             EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await
         } else {
+            debug!("Creating local state");
             Ok(EvmeState::new_empty(prestate, block_hashes))
         }
     }
@@ -183,6 +193,7 @@ pub struct StateDumpArgs {
 impl StateDumpArgs {
     /// Serializes [`EvmState`] as JSON string.
     pub fn serialize_evm_state(&self, evm_state: &EvmState) -> Result<String> {
+        trace!(evm_state = ?evm_state, "Serializing EVM state");
         let account_states = evm_state
             .iter()
             .map(|(address, account)| (address, AccountState::from_account(account.clone())))
@@ -194,21 +205,23 @@ impl StateDumpArgs {
 
     /// Dumps [`EvmState`] as JSON string to file or console.
     pub fn dump_evm_state(&self, evm_state: &EvmState) -> Result<()> {
+        debug!("Dumping EVM state");
         let state_json = self.serialize_evm_state(evm_state)?;
 
         // Output to file or console
+        println!();
+        println!("=== State Dump ===");
         if let Some(ref output_file) = self.dump_output_file {
+            debug!(output_file = ?output_file, "Writing dumped state to file");
             // Write state to file
             std::fs::write(output_file, state_json).map_err(|e| {
                 EvmeError::ExecutionError(format!("Failed to write state to file: {}", e))
             })?;
-            eprintln!();
-            eprintln!("State dump written to: {}", output_file.display());
+            println!("State dump written to: {}", output_file.display());
         } else {
+            debug!("Printing dumped state to console");
             // Print state to console
-            eprintln!();
-            eprintln!("=== State Dump ===");
-            eprintln!("{}", state_json);
+            println!("{}", state_json);
         }
 
         Ok(())
@@ -221,17 +234,17 @@ impl StateDumpArgs {
 pub struct AccountState {
     /// Account balance
     /// U256 from ruint already uses quantity format (0x-prefixed hex without leading zeros)
-    pub balance: U256,
+    pub balance: Option<U256>,
     /// Account nonce (uses `alloy_serde::quantity` for standard Ethereum format)
-    #[serde(with = "alloy_serde::quantity")]
-    pub nonce: u64,
+    #[serde(default, with = "alloy_serde::quantity::opt")]
+    pub nonce: Option<u64>,
     /// Account code (hex string with 0x prefix)
-    pub code: Bytes,
+    pub code: Option<Bytes>,
     /// Code hash
     /// B256 already uses hex format with 0x prefix (always 32 bytes)
-    pub code_hash: B256,
+    pub code_hash: Option<B256>,
     /// Storage slots (uses quantity format for keys and values)
-    pub storage: HashMap<U256, U256>,
+    pub storage: Option<HashMap<U256, U256>>,
 }
 
 impl AccountState {
@@ -241,27 +254,44 @@ impl AccountState {
         let code = code.map(|c| c.bytecode().to_vec()).unwrap_or_default().into();
         let storage =
             account.storage.into_iter().map(|(slot, value)| (slot, value.present_value)).collect();
-        Self { balance, nonce, code, code_hash, storage }
+        Self {
+            balance: Some(balance),
+            nonce: Some(nonce),
+            code: Some(code),
+            code_hash: Some(code_hash),
+            storage: Some(storage),
+        }
     }
 
     /// Converts into [`Account`].
     pub fn into_account(self) -> Result<Account> {
-        let bytecode = if self.code.is_empty() {
+        let code = self.code.unwrap_or_default();
+        let bytecode = if code.is_empty() {
             Bytecode::default()
         } else {
-            Bytecode::new_raw_checked(self.code).map_err(EvmeError::InvalidBytecode)?
+            Bytecode::new_raw_checked(code).map_err(EvmeError::InvalidBytecode)?
         };
         let computed_hash = bytecode.hash_slow();
-        if computed_hash != self.code_hash {
-            return Err(EvmeError::CodeHashMismatch {
-                expected: self.code_hash,
-                computed: computed_hash,
-            });
+        if let Some(code_hash) = self.code_hash {
+            if computed_hash != code_hash {
+                return Err(EvmeError::CodeHashMismatch {
+                    expected: code_hash,
+                    computed: computed_hash,
+                });
+            }
         }
 
-        let info = AccountInfo::new(self.balance, self.nonce, self.code_hash, bytecode);
-        let storage =
-            self.storage.into_iter().map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0)));
+        let info = AccountInfo::new(
+            self.balance.unwrap_or_default(),
+            self.nonce.unwrap_or_default(),
+            computed_hash,
+            bytecode,
+        );
+        let storage = self
+            .storage
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0)));
         Ok(Account::from(info).with_storage(storage))
     }
 }
@@ -429,15 +459,24 @@ where
     fn basic(&mut self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first
         if let Some(account) = self.prestate.get(&address) {
+            trace!(address = %address, account = ?account, "Loaded account basic from prestate");
             return Ok(Some(account.info.clone()));
         }
 
         // Query backend database
         match &mut self.backend {
-            EvmeBackend::Empty(db) => Ok(db.basic(address).unwrap()),
-            EvmeBackend::Forked(db) => db.basic(address).map_err(|e| {
-                EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-            }),
+            EvmeBackend::Empty(db) => {
+                let account = db.basic(address).unwrap();
+                trace!(address = %address, account = ?account, "Loaded account basic from empty state");
+                Ok(account)
+            }
+            EvmeBackend::Forked(db) => {
+                let account = db.basic(address).map_err(|e| {
+                    EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
+                })?;
+                trace!(address = %address, account = ?account, "Loaded account basic from forked state");
+                Ok(account)
+            }
         }
     }
 
@@ -447,15 +486,27 @@ where
     ) -> std::result::Result<Bytecode, Self::Error> {
         // Check code_map first (for prestate accounts)
         if let Some(code) = self.code_map.get(&code_hash) {
+            trace!(code_hash = %code_hash, code = ?code, "Loaded code by hash from prestate");
             return Ok(code.clone());
         }
 
         // Query backend database
         match &mut self.backend {
-            EvmeBackend::Empty(db) => Ok(db.code_by_hash(code_hash).unwrap()),
-            EvmeBackend::Forked(db) => db.code_by_hash(code_hash).map_err(|e| {
-                EvmeError::RpcError(format!("Failed to fetch code by hash {}: {:?}", code_hash, e))
-            }),
+            EvmeBackend::Empty(db) => {
+                let code = db.code_by_hash(code_hash).unwrap();
+                trace!(code_hash = %code_hash, code = ?code, "Loaded code by hash from empty state");
+                Ok(code)
+            }
+            EvmeBackend::Forked(db) => {
+                let code = db.code_by_hash(code_hash).map_err(|e| {
+                    EvmeError::RpcError(format!(
+                        "Failed to fetch code by hash {}: {:?}",
+                        code_hash, e
+                    ))
+                })?;
+                trace!(code_hash = %code_hash, code = ?code, "Loaded code by hash from forked state");
+                Ok(code)
+            }
         }
     }
 
@@ -463,19 +514,28 @@ where
         // Check storage overrides first
         if let Some(account) = self.prestate.get(&address) {
             if let Some(slot) = account.storage.get(&index) {
+                trace!(address = %address, index = %index, slot = %slot.present_value, "Loaded storage from prestate");
                 return Ok(slot.present_value);
             }
         }
 
         // Query backend database
         match &mut self.backend {
-            EvmeBackend::Empty(db) => Ok(db.storage(address, index).unwrap()),
-            EvmeBackend::Forked(db) => db.storage(address, index).map_err(|e| {
-                EvmeError::RpcError(format!(
-                    "Failed to fetch storage for {} at slot {}: {:?}",
-                    address, index, e
-                ))
-            }),
+            EvmeBackend::Empty(db) => {
+                let storage = db.storage(address, index).unwrap();
+                trace!(address = %address, index = %index, storage = %storage, "Loaded storage from empty state");
+                Ok(storage)
+            }
+            EvmeBackend::Forked(db) => {
+                let storage = db.storage(address, index).map_err(|e| {
+                    EvmeError::RpcError(format!(
+                        "Failed to fetch storage for {} at slot {}: {:?}",
+                        address, index, e
+                    ))
+                })?;
+                trace!(address = %address, index = %index, storage = %storage, "Loaded storage from forked state");
+                Ok(storage)
+            }
         }
     }
 
@@ -485,18 +545,27 @@ where
     ) -> std::result::Result<alloy_primitives::B256, Self::Error> {
         // Check block hash overrides first
         if let Some(hash) = self.block_hashes.get(&number) {
+            trace!(number = %number, hash = %hash, "Loaded block hash from provided overrides");
             return Ok(*hash);
         }
 
         // Query backend database
         match &mut self.backend {
-            EvmeBackend::Empty(db) => Ok(db.block_hash(number).unwrap()),
-            EvmeBackend::Forked(db) => db.block_hash(number).map_err(|e| {
-                EvmeError::RpcError(format!(
-                    "Failed to fetch block hash for block {}: {:?}",
-                    number, e
-                ))
-            }),
+            EvmeBackend::Empty(db) => {
+                let hash = db.block_hash(number).unwrap();
+                trace!(number = %number, hash = %hash, "Loaded block hash from empty state");
+                Ok(hash)
+            }
+            EvmeBackend::Forked(db) => {
+                let hash = db.block_hash(number).map_err(|e| {
+                    EvmeError::RpcError(format!(
+                        "Failed to fetch block hash for block {}: {:?}",
+                        number, e
+                    ))
+                })?;
+                trace!(number = %number, hash = %hash, "Loaded block hash from forked state");
+                Ok(hash)
+            }
         }
     }
 }
@@ -511,15 +580,24 @@ where
     fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first
         if let Some(account) = self.prestate.get(&address) {
+            trace!(address = %address, account = ?account, "Loaded account basic from prestate");
             return Ok(Some(account.info.clone()));
         }
 
         // Query backend database
         match &self.backend {
-            EvmeBackend::Empty(db) => Ok(db.basic_ref(address).unwrap()),
-            EvmeBackend::Forked(db) => db.basic_ref(address).map_err(|e| {
-                EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-            }),
+            EvmeBackend::Empty(db) => {
+                let account = db.basic_ref(address).unwrap();
+                trace!(address = %address, account = ?account, "Loaded account basic from empty state");
+                Ok(account)
+            }
+            EvmeBackend::Forked(db) => {
+                let account = db.basic_ref(address).map_err(|e| {
+                    EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
+                })?;
+                trace!(address = %address, account = ?account, "Loaded account basic from forked state");
+                Ok(account)
+            }
         }
     }
 
@@ -534,10 +612,21 @@ where
 
         // Query backend database
         match &self.backend {
-            EvmeBackend::Empty(db) => Ok(db.code_by_hash_ref(code_hash).unwrap()),
-            EvmeBackend::Forked(db) => db.code_by_hash_ref(code_hash).map_err(|e| {
-                EvmeError::RpcError(format!("Failed to fetch code by hash {}: {:?}", code_hash, e))
-            }),
+            EvmeBackend::Empty(db) => {
+                let code = db.code_by_hash_ref(code_hash).unwrap();
+                trace!(code_hash = %code_hash, code = ?code, "Loaded code by hash from empty state");
+                Ok(code)
+            }
+            EvmeBackend::Forked(db) => {
+                let code = db.code_by_hash_ref(code_hash).map_err(|e| {
+                    EvmeError::RpcError(format!(
+                        "Failed to fetch code by hash {}: {:?}",
+                        code_hash, e
+                    ))
+                })?;
+                trace!(code_hash = %code_hash, code = ?code, "Loaded code by hash from forked state");
+                Ok(code)
+            }
         }
     }
 
@@ -551,13 +640,21 @@ where
 
         // Query backend database
         match &self.backend {
-            EvmeBackend::Empty(db) => Ok(db.storage_ref(address, index).unwrap()),
-            EvmeBackend::Forked(db) => db.storage_ref(address, index).map_err(|e| {
-                EvmeError::RpcError(format!(
-                    "Failed to fetch storage for {} at slot {}: {:?}",
-                    address, index, e
-                ))
-            }),
+            EvmeBackend::Empty(db) => {
+                let storage = db.storage_ref(address, index).unwrap();
+                trace!(address = %address, index = %index, storage = %storage, "Loaded storage from empty state");
+                Ok(storage)
+            }
+            EvmeBackend::Forked(db) => {
+                let storage = db.storage_ref(address, index).map_err(|e| {
+                    EvmeError::RpcError(format!(
+                        "Failed to fetch storage for {} at slot {}: {:?}",
+                        address, index, e
+                    ))
+                })?;
+                trace!(address = %address, index = %index, storage = %storage, "Loaded storage from forked state");
+                Ok(storage)
+            }
         }
     }
 
@@ -567,18 +664,27 @@ where
     ) -> std::result::Result<alloy_primitives::B256, Self::Error> {
         // Check block hash overrides first
         if let Some(hash) = self.block_hashes.get(&number) {
+            trace!(number = %number, hash = %hash, "Loaded block hash from provided overrides");
             return Ok(*hash);
         }
 
         // Query backend database
         match &self.backend {
-            EvmeBackend::Empty(db) => Ok(db.block_hash_ref(number).unwrap()),
-            EvmeBackend::Forked(db) => db.block_hash_ref(number).map_err(|e| {
-                EvmeError::RpcError(format!(
-                    "Failed to fetch block hash for block {}: {:?}",
-                    number, e
-                ))
-            }),
+            EvmeBackend::Empty(db) => {
+                let hash = db.block_hash_ref(number).unwrap();
+                trace!(number = %number, hash = %hash, "Loaded block hash from empty state");
+                Ok(hash)
+            }
+            EvmeBackend::Forked(db) => {
+                let hash = db.block_hash_ref(number).map_err(|e| {
+                    EvmeError::RpcError(format!(
+                        "Failed to fetch block hash for block {}: {:?}",
+                        number, e
+                    ))
+                })?;
+                trace!(number = %number, hash = %hash, "Loaded block hash from forked state");
+                Ok(hash)
+            }
         }
     }
 }

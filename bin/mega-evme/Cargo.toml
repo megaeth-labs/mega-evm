@@ -49,3 +49,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "std", "ansi"] }
