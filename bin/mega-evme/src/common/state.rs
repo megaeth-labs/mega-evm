@@ -221,17 +221,17 @@ impl StateDumpArgs {
 pub struct AccountState {
     /// Account balance
     /// U256 from ruint already uses quantity format (0x-prefixed hex without leading zeros)
-    pub balance: U256,
+    pub balance: Option<U256>,
     /// Account nonce (uses `alloy_serde::quantity` for standard Ethereum format)
-    #[serde(with = "alloy_serde::quantity")]
-    pub nonce: u64,
+    #[serde(default, with = "alloy_serde::quantity::opt")]
+    pub nonce: Option<u64>,
     /// Account code (hex string with 0x prefix)
-    pub code: Bytes,
+    pub code: Option<Bytes>,
     /// Code hash
     /// B256 already uses hex format with 0x prefix (always 32 bytes)
-    pub code_hash: B256,
+    pub code_hash: Option<B256>,
     /// Storage slots (uses quantity format for keys and values)
-    pub storage: HashMap<U256, U256>,
+    pub storage: Option<HashMap<U256, U256>>,
 }
 
 impl AccountState {
@@ -241,27 +241,44 @@ impl AccountState {
         let code = code.map(|c| c.bytecode().to_vec()).unwrap_or_default().into();
         let storage =
             account.storage.into_iter().map(|(slot, value)| (slot, value.present_value)).collect();
-        Self { balance, nonce, code, code_hash, storage }
+        Self {
+            balance: Some(balance),
+            nonce: Some(nonce),
+            code: Some(code),
+            code_hash: Some(code_hash),
+            storage: Some(storage),
+        }
     }
 
     /// Converts into [`Account`].
     pub fn into_account(self) -> Result<Account> {
-        let bytecode = if self.code.is_empty() {
+        let code = self.code.unwrap_or_default();
+        let bytecode = if code.is_empty() {
             Bytecode::default()
         } else {
-            Bytecode::new_raw_checked(self.code).map_err(EvmeError::InvalidBytecode)?
+            Bytecode::new_raw_checked(code).map_err(EvmeError::InvalidBytecode)?
         };
         let computed_hash = bytecode.hash_slow();
-        if computed_hash != self.code_hash {
-            return Err(EvmeError::CodeHashMismatch {
-                expected: self.code_hash,
-                computed: computed_hash,
-            });
+        if let Some(code_hash) = self.code_hash {
+            if computed_hash != code_hash {
+                return Err(EvmeError::CodeHashMismatch {
+                    expected: code_hash,
+                    computed: computed_hash,
+                });
+            }
         }
 
-        let info = AccountInfo::new(self.balance, self.nonce, self.code_hash, bytecode);
-        let storage =
-            self.storage.into_iter().map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0)));
+        let info = AccountInfo::new(
+            self.balance.unwrap_or_default(),
+            self.nonce.unwrap_or_default(),
+            computed_hash,
+            bytecode,
+        );
+        let storage = self
+            .storage
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0)));
         Ok(Account::from(info).with_storage(storage))
     }
 }
