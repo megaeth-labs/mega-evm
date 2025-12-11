@@ -9,7 +9,7 @@ use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
-        context::{BlockEnv, ContextTr},
+        context::{result::ExecutionResult, BlockEnv, ContextTr},
         context_interface::block::BlobExcessGasAndPrice,
         database::{states::bundle_state::BundleRetention, StateBuilder},
         DatabaseRef,
@@ -17,6 +17,7 @@ use mega_evm::{
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHardforks,
     MegaSpecId,
 };
+use tracing::{debug, info, trace, warn};
 
 use op_alloy_rpc_types::Transaction;
 
@@ -71,6 +72,7 @@ impl Cmd {
     /// Execute the replay command
     pub async fn run(&self) -> Result<()> {
         // Step 0: Build up rpc provider
+        info!(rpc = %self.rpc, "Connecting to RPC");
         let provider = ProviderBuilder::new()
             .disable_recommended_fillers()
             .network::<op_alloy_network::Optimism>()
@@ -79,13 +81,13 @@ impl Cmd {
             })?);
 
         // Step 1: fetch transaction
-        eprintln!("Fetching transaction {} from RPC {}", self.tx_hash, self.rpc);
+        info!(tx_hash = %self.tx_hash, "Fetching transaction");
         let target_tx = provider
             .get_transaction_by_hash(self.tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {}", e)))?
             .ok_or_else(|| ReplayError::TransactionNotFound(self.tx_hash))?;
-        eprintln!("Transaction found in block {:?}", target_tx.block_number);
+        debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         // Step 2: determine block number to execute the transaction
         let (state_base_block_number, block_number, is_pending) =
@@ -98,6 +100,13 @@ impl Cmd {
                     .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?;
                 (latest_block_number, latest_block_number, true)
             };
+        debug!(
+            state_base_block = state_base_block_number,
+            block = block_number,
+            is_pending,
+            "Block numbers determined"
+        );
+
         let parent_block = provider
             .get_block_by_number(state_base_block_number.into())
             .await
@@ -117,8 +126,10 @@ impl Cmd {
         let hardforks = get_hardfork_config(chain_id);
         let hardfork = hardforks.spec_id(block.header.timestamp());
         let chain_args = ChainArgs { chain_id, hardfork: hardfork.to_string() };
+        debug!(chain_id, hardfork = %hardfork, "Chain configuration");
 
         // Step 4: Setup initial state by forking from the parent block
+        info!(fork_block = state_base_block_number, "Forking state from parent block");
         let mut database = EvmeState::new_forked(
             provider.clone(),
             Some(state_base_block_number),
@@ -128,7 +139,6 @@ impl Cmd {
         .await?;
 
         // Step 5: Setup BlockEnv and CfgEnv
-
         let block_env = self.retrieve_block_env(&block).await?;
         let cfg_env = chain_args.create_cfg_env()?;
         let evm_env = EvmEnv::new(cfg_env, block_env);
@@ -143,10 +153,11 @@ impl Cmd {
                 preceding_transactions.push(tx);
             }
         }
+        info!(preceding_count = preceding_transactions.len(), "Executing preceding transactions");
 
         // Step 7: Execute transactions with inspector
         let result = if self.use_v1_0_1 {
-            eprintln!("execute tx v1.0.1");
+            debug!("Using v1.0.1 execution path");
             v1_0_1::execute_transactions_v1_0_1(
                 &mut database,
                 &parent_block,
@@ -174,6 +185,7 @@ impl Cmd {
         };
 
         // Step 8: Output results
+        trace!("Writing output results");
         self.output_results(&result)?;
 
         Ok(())
@@ -196,6 +208,8 @@ impl Cmd {
         P: alloy_provider::Provider<op_alloy_network::Optimism> + std::fmt::Debug,
     {
         let transaction_index = preceding_transactions.len() as u64;
+        debug!(transaction_index, "Setting up block executor");
+
         let chain_spec = FixedHardfork::new(chain_args.spec_id()?);
         let external_env_factory = self.ext_args.create_external_envs()?;
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_env_factory);
@@ -238,34 +252,54 @@ impl Cmd {
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
 
         // Execute preceding transactions
-        for tx_hash in preceding_transactions {
+        for tx_hash in &preceding_transactions {
+            debug!(tx_hash = %tx_hash, "Executing preceding transaction");
             let tx = provider
-                .get_transaction_by_hash(tx_hash)
+                .get_transaction_by_hash(*tx_hash)
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
-                .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
+                .ok_or(ReplayError::TransactionNotFound(*tx_hash))?;
             let tx = tx.as_recovered();
             let outcome = block_executor
                 .run_transaction(tx)
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
+            trace!(tx_hash = %tx_hash, outcome = ?outcome, "Preceding transaction executed");
             block_executor
                 .commit_transaction_outcome(outcome)
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         }
+        debug!(preceding_count = preceding_transactions.len(), "Preceding transactions executed");
 
         // Execute target transaction
+        info!("Executing target transaction");
         let pre_execution_nonce = block_executor
             .evm()
             .db_ref()
             .basic_ref(target_tx.as_recovered().signer())?
             .map(|acc| acc.nonce)
             .unwrap_or(0);
+
         block_executor.inspector_mut().fuse();
         let outcome = block_executor
             .run_transaction(target_tx.as_recovered())
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
+        trace!(tx_hash = %target_tx.inner.inner.tx_hash(), outcome = ?outcome, "Target transaction executed");
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
+
+        // Log execution result
+        match &exec_result {
+            ExecutionResult::Success { gas_used, .. } => {
+                info!(gas_used, "Execution succeeded");
+            }
+            ExecutionResult::Revert { gas_used, .. } => {
+                warn!(gas_used, "Execution reverted");
+            }
+            ExecutionResult::Halt { reason, gas_used } => {
+                warn!(?reason, gas_used, "Execution halted");
+            }
+        }
+
         let result_and_state = mega_evm::revm::context::result::ResultAndState {
             result: exec_result.clone(),
             state: evm_state.clone(),
@@ -294,6 +328,7 @@ impl Cmd {
         let (db, _evm_env) = evm.finish();
         db.merge_transitions(BundleRetention::Reverts);
         let receipt_envelope = block_result.receipts.last().unwrap().clone();
+        trace!(receipt = ?receipt_envelope, "Receipt envelope obtained");
 
         // Convert OpReceiptEnvelope to TransactionReceipt
         let from = target_tx.inner.inner.signer();
@@ -345,29 +380,30 @@ impl Cmd {
 
     /// Output execution results
     fn output_results(&self, result: &ReplayOutcome) -> Result<()> {
+        // Print execution time to stderr
+        println!();
+        println!("execution time:  {:?}", result.outcome.exec_time);
+
         // Serialize and print receipt as JSON
+        println!();
+        println!("=== Receipt ===");
         let receipt_json = serde_json::to_string_pretty(&result.receipt)
             .map_err(|e| ReplayError::Other(format!("Failed to serialize receipt: {}", e)))?;
         println!("{}", receipt_json);
 
-        // Print execution time to stderr
-        eprintln!();
-        eprintln!("execution time:  {:?}", result.outcome.exec_time);
-
         // Output trace data if available
         if let Some(ref trace) = result.outcome.trace_data {
+            println!();
+            println!("=== Execution Trace ===");
             if let Some(ref output_file) = self.trace_args.trace_output_file {
                 // Write trace to file
                 std::fs::write(output_file, trace).map_err(|e| {
                     ReplayError::Other(format!("Failed to write trace to file: {}", e))
                 })?;
-                eprintln!();
-                eprintln!("Trace written to: {}", output_file.display());
+                println!("Trace written to: {}", output_file.display());
             } else {
                 // Print trace to console
-                eprintln!();
-                eprintln!("=== Execution Trace ===");
-                eprintln!("{}", trace);
+                println!("{}", trace);
             }
         }
 
