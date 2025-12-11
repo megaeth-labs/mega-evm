@@ -27,6 +27,7 @@ hardfork! {
 
 impl MegaHardfork {
     /// Gets the `MegaSpecId` associated with this hardfork.
+    #[allow(clippy::match_same_arms)]
     pub fn spec_id(&self) -> MegaSpecId {
         match self {
             Self::MiniRex => MegaSpecId::MINI_REX,
