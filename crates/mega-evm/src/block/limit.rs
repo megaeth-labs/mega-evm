@@ -383,7 +383,7 @@ impl BlockLimits {
     pub fn fit_equivalence(self) -> Self {
         let tx_runtime_limits = EvmTxRuntimeLimits::equivalence();
         Self {
-            tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
+            tx_data_limit: tx_runtime_limits.tx_data_size_limit,
             tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
             tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
             tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
@@ -396,7 +396,7 @@ impl BlockLimits {
     pub fn fit_mini_rex(self) -> Self {
         let tx_runtime_limits = EvmTxRuntimeLimits::mini_rex();
         Self {
-            tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
+            tx_data_limit: tx_runtime_limits.tx_data_size_limit,
             tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
             tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
             tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
@@ -411,7 +411,7 @@ impl BlockLimits {
     pub fn fit_rex(self) -> Self {
         let tx_runtime_limits = EvmTxRuntimeLimits::rex();
         Self {
-            tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
+            tx_data_limit: tx_runtime_limits.tx_data_size_limit,
             tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
             tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
             tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
