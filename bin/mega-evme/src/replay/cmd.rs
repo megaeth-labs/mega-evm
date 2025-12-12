@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{str::FromStr, time::Instant};
 
 use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_primitives::{B256, U256};
@@ -14,15 +14,15 @@ use mega_evm::{
         database::{states::bundle_state::BundleRetention, StateBuilder},
         DatabaseRef,
     },
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHardforks,
-    MegaSpecId,
+    BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
+    MegaEvmFactory, MegaHardforks, MegaSpecId,
 };
 use tracing::{debug, info, trace, warn};
 
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeOutcome, FixedHardfork, OpTxReceipt},
+    common::{op_receipt_to_tx_receipt, EvmeOutcome, OpTxReceipt},
     replay::get_hardfork_config,
     run, ChainArgs, EvmeState,
 };
@@ -57,8 +57,8 @@ pub struct Cmd {
     pub use_v1_0_1: bool,
 
     /// Override the spec to use (default: auto-detect from chain ID and block timestamp)
-    #[arg(long = "spec")]
-    pub spec: Option<String>,
+    #[arg(long = "spec", value_name = "SPEC")]
+    pub spec_override: Option<String>,
 }
 
 /// Replay-specific execution outcome
@@ -127,14 +127,9 @@ impl Cmd {
             .get_chain_id()
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to get chain ID: {}", e)))?;
-        let spec = match &self.spec {
-            Some(spec) => spec.clone(),
-            None => {
-                let hardforks = get_hardfork_config(chain_id);
-                hardforks.spec_id(block.header.timestamp()).to_string()
-            }
-        };
-        let chain_args = ChainArgs { chain_id, spec: spec.clone() };
+        let hardforks = get_hardfork_config(chain_id);
+        let spec = hardforks.spec_id(block.header.timestamp());
+        let chain_args = ChainArgs { chain_id, spec: spec.to_string() };
         debug!(chain_id, spec = %spec, "Chain configuration");
 
         // Step 4: Setup initial state by forking from the parent block
@@ -181,7 +176,7 @@ impl Cmd {
             .await?
         } else {
             self.execute_transactions(
-                &chain_args,
+                hardforks,
                 &mut database,
                 &parent_block,
                 &block,
@@ -204,7 +199,7 @@ impl Cmd {
     #[allow(clippy::too_many_arguments)]
     async fn execute_transactions<P>(
         &self,
-        chain_args: &ChainArgs,
+        hardforks: impl MegaHardforks,
         database: &mut run::EvmeState<op_alloy_network::Optimism, P>,
         parent_block: &Block<Transaction>,
         block: &Block<Transaction>,
@@ -219,20 +214,27 @@ impl Cmd {
         let transaction_index = preceding_transactions.len() as u64;
         debug!(transaction_index, "Setting up block executor");
 
-        let chain_spec = FixedHardfork::new(chain_args.spec_id()?);
         let external_env_factory = self.ext_args.create_external_envs()?;
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_env_factory);
         let block_executor_factory = MegaBlockExecutorFactory::new(
-            chain_spec,
+            &hardforks,
             evm_factory,
             OpAlloyReceiptBuilder::default(),
         );
-        let block_limits = match chain_args.spec_id()? {
-            MegaSpecId::EQUIVALENCE => BlockLimits::no_limits().fit_equivalence(),
-            MegaSpecId::MINI_REX => BlockLimits::no_limits().fit_mini_rex(),
-            MegaSpecId::REX => BlockLimits::no_limits().fit_rex(),
-            _ => panic!("Unsupported spec id: {:?}", chain_args.spec_id()),
-        };
+        let mut block_limits = BlockLimits::from_hardfork_and_block_gas_limit(
+            hardforks.hardfork(block.header.timestamp()).ok_or(ReplayError::Other(format!(
+                "No `MegaHardfork` active at block timestamp: {}",
+                block.header.timestamp()
+            )))?,
+            block.header.gas_limit(),
+        );
+        if let Some(spec_override) = &self.spec_override {
+            debug!(spec_override = %spec_override, "Overriding EVM spec");
+            block_limits = block_limits.with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(
+                MegaSpecId::from_str(spec_override)
+                    .map_err(|e| ReplayError::Other(format!("Invalid spec: {:?}", e)))?,
+            ));
+        }
         let block_ctx = MegaBlockExecutionCtx::new(
             parent_block.hash(),
             block.header.parent_beacon_block_root(),

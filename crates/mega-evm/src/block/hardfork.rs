@@ -63,6 +63,22 @@ pub trait MegaHardforks: OpHardforks {
                 !self.mega_fork_activation(fork).active_at_timestamp(parent_timestamp))
     }
 
+    /// Gets the latest `MegaHardfork` that is active at the given timestamp. If no `MegaHardfork`
+    /// is active at the given timestamp, returns `None`.
+    fn hardfork(&self, timestamp: u64) -> Option<MegaHardfork> {
+        if self.is_rex_active_at_timestamp(timestamp) {
+            Some(MegaHardfork::Rex)
+        } else if self.is_mini_rex_2_active_at_timestamp(timestamp) {
+            Some(MegaHardfork::MiniRex2)
+        } else if self.is_mini_rex_1_active_at_timestamp(timestamp) {
+            Some(MegaHardfork::MiniRex1)
+        } else if self.is_mini_rex_active_at_timestamp(timestamp) {
+            Some(MegaHardfork::MiniRex)
+        } else {
+            None
+        }
+    }
+
     /// Gets the expected `MegaSpecId` for a block with the given timestamp.
     fn spec_id(&self, timestamp: BlockTimestamp) -> MegaSpecId {
         // Newer hardforks should be checked first

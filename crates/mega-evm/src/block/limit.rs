@@ -189,17 +189,19 @@ use std::boxed::Box;
 use alloy_consensus::Transaction;
 use alloy_evm::{
     block::{BlockExecutionError, BlockValidationError},
-    EvmEnv, RecoveredTx,
+    RecoveredTx,
 };
 use alloy_primitives::TxHash;
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 
 use crate::{
-    BlockMegaTransactionOutcome, EvmTxRuntimeLimits, MegaBlockLimitExceededError, MegaSpecId,
+    BlockMegaTransactionOutcome, EvmTxRuntimeLimits, MegaBlockLimitExceededError, MegaHardfork,
     MegaTransactionExt, MegaTxLimitExceededError,
 };
 
-/// Configuration for block-level resource limits.
+/// Configuration for block-level resource limits. The block-level resource limits are associated
+/// with a specific `MegaHardfork` instead of a `MegaSpecId`. In constrast, `EvmTxRuntimeLimits` is
+/// associated with a `MegaSpecId`.
 ///
 /// This struct defines the thresholds for various resource limits that govern transaction
 /// inclusion and block construction. Limits are categorized into two groups:
@@ -365,65 +367,40 @@ impl BlockLimits {
         }
     }
 
-    /// Creates a new block limits instance from an EVM environment. This method will use the
-    /// appropriate spec limits and set the block gas limit from the EVM environment. Other
-    /// unspecified limits will be set to unlimited. This method is useful for
-    /// replaying a block.
-    pub fn from_evm_env(evm_env: &EvmEnv<MegaSpecId>) -> Self {
-        match *evm_env.spec_id() {
-            MegaSpecId::EQUIVALENCE => Self::no_limits().fit_equivalence(),
-            MegaSpecId::MINI_REX => Self::no_limits().fit_mini_rex(),
-            MegaSpecId::REX => Self::no_limits().fit_rex(),
-        }
-        .with_block_gas_limit(evm_env.block_env.gas_limit)
-    }
-
-    /// Fits the block limits to the equivalence spec. Overrides those limits with the
-    /// `MegaSpecId::EQUIVALENCE` spec limits.
-    pub fn fit_equivalence(self) -> Self {
-        let tx_runtime_limits = EvmTxRuntimeLimits::equivalence();
-        Self {
-            tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
-            tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
-            tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
-            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
-            ..self
-        }
-    }
-
-    /// Fits the block limits to the mini-rex spec. Overrides those limits with the
-    /// `MegaSpecId::MINI_REX` spec limits.
-    pub fn fit_mini_rex(self) -> Self {
-        let tx_runtime_limits = EvmTxRuntimeLimits::mini_rex();
-        Self {
-            tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
-            tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
-            tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
-            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
-            block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
-            block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
-            ..self
-        }
-    }
-
-    /// Fits the block limits to the rex spec. Overrides those limits with the
-    /// `MegaSpecId::REX` spec limits.
-    pub fn fit_rex(self) -> Self {
-        let tx_runtime_limits = EvmTxRuntimeLimits::rex();
-        Self {
-            tx_da_size_limit: tx_runtime_limits.tx_data_size_limit,
-            tx_kv_update_limit: tx_runtime_limits.tx_kv_updates_limit,
-            tx_compute_gas_limit: tx_runtime_limits.tx_compute_gas_limit,
-            tx_state_growth_limit: tx_runtime_limits.tx_state_growth_limit,
-            block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
-            block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
-            block_state_growth_limit: crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT,
-            ..self
+    /// Creates a new block limits instance from a hardfork and a block gas limit.
+    pub fn from_hardfork_and_block_gas_limit(hardfork: MegaHardfork, block_gas_limit: u64) -> Self {
+        let spec = hardfork.spec_id();
+        let tx_runtime_limits = EvmTxRuntimeLimits::from_spec(spec);
+        let limits = Self::no_limits()
+            .with_tx_runtime_limits(tx_runtime_limits)
+            .with_block_gas_limit(block_gas_limit);
+        match hardfork {
+            MegaHardfork::Rex => Self {
+                block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
+                block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
+                block_state_growth_limit: crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT,
+                ..limits
+            },
+            MegaHardfork::MiniRex | MegaHardfork::MiniRex2 => Self {
+                block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
+                block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
+                ..limits
+            },
+            MegaHardfork::MiniRex1 => limits,
         }
     }
 }
 
 impl BlockLimits {
+    /// Sets the related fields
+    pub fn with_tx_runtime_limits(mut self, limits: EvmTxRuntimeLimits) -> Self {
+        self.tx_data_limit = limits.tx_data_size_limit;
+        self.tx_kv_update_limit = limits.tx_kv_updates_limit;
+        self.tx_compute_gas_limit = limits.tx_compute_gas_limit;
+        self.tx_state_growth_limit = limits.tx_state_growth_limit;
+        self
+    }
+
     /// Set a custom transaction gas limit.
     ///
     /// This is a builder method that consumes self and returns a new instance
