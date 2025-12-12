@@ -366,4 +366,4 @@ State files use JSON format with Ethereum quantity encoding:
 ## See Also
 
 - [run Command Documentation](src/run/README.md)
-- [MiniRex Specification](../../hardfork-spec/MiniRex.md)
+- [MiniRex Specification](../../specs/MiniRex.md)

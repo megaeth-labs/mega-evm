@@ -12,14 +12,23 @@ This repository contains a customized version of the revm EVM implementation spe
 - **Optimism EVM**: [op-revm v8.1.0 (v83)](https://github.com/bluealloy/op-revm)
 - **Alloy EVM**: [alloy-evm v0.15.0](https://github.com/alloy-rs/core)
 
+## Terminology: Spec vs Hardfork
+
+This codebase distinguishes between two related concepts:
+
+- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`
+- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`
+
+Multiple hardforks can map to the same spec. For example, both `MiniRex` and `MiniRex2` hardforks use the `MINI_REX` spec.
+
 ## Key Features
 
-### EQUIVALENCE Specification
+### EQUIVALENCE Spec
 
 - **Optimism Compatibility**: Maintains full compatibility with Optimism Isthmus EVM
 - **Parallel Execution Support**: Block environment access tracking for conflict detection
 
-### MINI_REX Specification (Hardfork)
+### MINI_REX Spec
 
 - **Multidimensional Gas Model**: Independent tracking for compute gas (1B), data size (3.125 MB), and KV updates (125K)
 - **Compute Gas Tracking**: Separate limit for computational work with gas detention for volatile data access
@@ -30,9 +39,9 @@ This repository contains a customized version of the revm EVM implementation spe
 - **Gas Detention**: Volatile data access (block env, beneficiary, oracle) triggers gas limiting with refunds
 - **Enhanced Security**: Comprehensive limit enforcement preserving remaining gas on limit violations
 
-For complete MiniRex specification, see **[MiniRex.md](./hardfork-spec/MiniRex.md)**.
+For complete MiniRex specification, see **[MiniRex.md](./specs/MiniRex.md)**.
 
-### REX Specification (Hardfork)
+### REX Spec
 
 - **Refined Storage Gas Economics**: Optimized storage gas formulas with gradual scaling (20K-32K base costs vs. MiniRex's 2M)
 - **Transaction Intrinsic Storage Gas**: 39,000 storage gas baseline for all transactions (total 60K with compute gas)
@@ -41,7 +50,7 @@ For complete MiniRex specification, see **[MiniRex.md](./hardfork-spec/MiniRex.m
 - **Critical Security Fixes**: DELEGATECALL, STATICCALL, and CALLCODE now properly enforce 98/100 gas forwarding and oracle access detection
 - **MiniRex Foundation**: Inherits all MiniRex features including multidimensional gas model, compute gas detention, and enhanced security
 
-For complete Rex specification, see **[Rex.md](./hardfork-spec/Rex.md)**.
+For complete Rex specification, see **[Rex.md](./specs/Rex.md)**.
 
 ## Quick Start
 
