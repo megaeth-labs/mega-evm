@@ -16,13 +16,13 @@ use tracing::{debug, trace};
 
 use super::{EvmeError, Result};
 
-/// Chain configuration arguments (hardfork and chain ID)
+/// Chain configuration arguments (spec and chain ID)
 #[derive(Args, Debug, Clone)]
 #[command(next_help_heading = "Chain Options")]
 pub struct ChainArgs {
-    /// Name of hardfork to use, possible values: `MiniRex`, `Equivalence`, `Rex`
-    #[arg(long = "hardfork", visible_aliases = ["spec"], default_value = "Rex")]
-    pub hardfork: String,
+    /// Name of spec to use, possible values: `MiniRex`, `Equivalence`, `Rex`
+    #[arg(long = "spec", default_value = "Rex")]
+    pub spec: String,
 
     /// `ChainID` to use
     #[arg(long = "chain-id", visible_aliases = ["chainid"], default_value = "6342")]
@@ -30,10 +30,10 @@ pub struct ChainArgs {
 }
 
 impl ChainArgs {
-    /// Gets the spec ID from the hardfork name
+    /// Gets the spec ID from the spec name
     pub fn spec_id(&self) -> Result<MegaSpecId> {
-        MegaSpecId::from_str(&self.hardfork)
-            .map_err(|e| EvmeError::InvalidInput(format!("Invalid hardfork name: {:?}", e)))
+        MegaSpecId::from_str(&self.spec)
+            .map_err(|e| EvmeError::InvalidInput(format!("Invalid spec name: {:?}", e)))
     }
 
     /// Creates [`CfgEnv`].
@@ -158,7 +158,7 @@ pub struct EnvArgs {
 }
 
 impl EnvArgs {
-    /// Gets the spec ID from the hardfork name
+    /// Gets the spec ID from the spec name
     pub fn spec_id(&self) -> Result<MegaSpecId> {
         self.chain.spec_id()
     }

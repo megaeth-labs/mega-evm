@@ -55,6 +55,10 @@ pub struct Cmd {
     /// Use v1.0.1 of the mega-evm crate
     #[arg(long = "use-v1-0-1")]
     pub use_v1_0_1: bool,
+
+    /// Override the spec to use (default: auto-detect from chain ID and block timestamp)
+    #[arg(long = "spec")]
+    pub spec: Option<String>,
 }
 
 /// Replay-specific execution outcome
@@ -118,15 +122,20 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
 
-        // Step 3: Obtain chain ID and hardfork
+        // Step 3: Obtain chain ID and spec
         let chain_id = provider
             .get_chain_id()
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to get chain ID: {}", e)))?;
-        let hardforks = get_hardfork_config(chain_id);
-        let hardfork = hardforks.spec_id(block.header.timestamp());
-        let chain_args = ChainArgs { chain_id, hardfork: hardfork.to_string() };
-        debug!(chain_id, hardfork = %hardfork, "Chain configuration");
+        let spec = match &self.spec {
+            Some(spec) => spec.clone(),
+            None => {
+                let hardforks = get_hardfork_config(chain_id);
+                hardforks.spec_id(block.header.timestamp()).to_string()
+            }
+        };
+        let chain_args = ChainArgs { chain_id, spec: spec.clone() };
+        debug!(chain_id, spec = %spec, "Chain configuration");
 
         // Step 4: Setup initial state by forking from the parent block
         info!(fork_block = state_base_block_number, "Forking state from parent block");

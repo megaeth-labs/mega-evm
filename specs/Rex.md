@@ -1,8 +1,8 @@
-# Rex Hardfork Specification
+# Rex Specification
 
 ## 1. Introduction
 
-Rex is the second hardfork of MegaETH EVM. It modifies MiniRex in four areas:
+Rex is the second spec of MegaETH EVM. It modifies MiniRex in four areas:
 
 1. **Storage Gas Economics**: New formulas using `base × (multiplier - 1)` instead of `base × multiplier`
 2. **Transaction Intrinsic Storage Gas**: All transactions pay 39,000 additional storage gas

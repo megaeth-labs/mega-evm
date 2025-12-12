@@ -1,4 +1,4 @@
-# MiniRex Hardfork Specification
+# MiniRex Specification
 
 ## 1. Introduction
 
@@ -194,10 +194,10 @@ Any operation that accesses the beneficiary account triggers gas limiting:
 **Trigger Conditions:**
 Oracle contract access is detected at the frame initialization level, tracking:
 
-| Trigger Type                | Description                                                      |
-| --------------------------- | ---------------------------------------------------------------- |
-| **Direct transaction call** | Transaction's `to` address is the oracle contract                |
-| **Internal CALL operations** | CALL, CALLCODE, DELEGATECALL, or STATICCALL targeting oracle     |
+| Trigger Type                 | Description                                                  |
+| ---------------------------- | ------------------------------------------------------------ |
+| **Direct transaction call**  | Transaction's `to` address is the oracle contract            |
+| **Internal CALL operations** | CALL, CALLCODE, DELEGATECALL, or STATICCALL targeting oracle |
 
 **Detection Location:**
 Frame-level detection in `frame_init` handler, ensuring comprehensive tracking of both direct and nested oracle calls.
