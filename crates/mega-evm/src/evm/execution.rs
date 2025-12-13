@@ -20,7 +20,9 @@ use revm::{
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr, Handler,
         ItemOrResult,
     },
-    inspector::{InspectorEvmTr, InspectorHandler},
+    inspector::{
+        handler::frame_end, inspect_instructions, InspectorEvmTr, InspectorFrame, InspectorHandler,
+    },
     interpreter::{
         gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
         CallOutcome, CreateOutcome, FrameInput, Gas, InitialAndFloorGas, InstructionResult,
@@ -97,6 +99,125 @@ where
 
         // Call the `on_new_tx` hook to initialize the transaction context.
         evm.ctx_mut().on_new_tx();
+
+        Ok(())
+    }
+
+    /// The hook to be called in `revm::handler::Handler::execution` and
+    /// `revm::inspector::InspectorHandler::inspect_execution` to check if the initial gas exceeds
+    /// the tx gas limit, if so, we halt with out of gas.
+    #[inline]
+    fn before_execution(
+        &self,
+        evm: &mut EVM,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<Option<FrameResult>, ERROR> {
+        // Check if the initial gas exceeds the tx gas limit, if so, we halt with out of gas
+        let ctx = evm.ctx();
+        let tx = ctx.tx();
+        if tx.gas_limit() < init_and_floor_gas.initial_gas {
+            // If not sufficient gas, we halt with out of gas
+            let oog_frame_result = gen_oog_frame_result(tx.kind(), tx.gas_limit());
+            return Ok(Some(oog_frame_result));
+        }
+        Ok(None)
+    }
+}
+
+impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+    /// This is the hook to be called in the beginning of the `frame_run` and `inspect_frame_run`
+    /// functions. This function checks if the additional limit is already exceeded, if so, we
+    /// should immediately stop and synthesize an interpreter action and return it.
+    #[inline]
+    fn before_frame_run(
+        ctx: &MegaContext<DB, ExtEnvs>,
+        frame: &EthFrame<EthInterpreter>,
+    ) -> Result<Option<InterpreterAction>, ContextDbError<MegaContext<DB, ExtEnvs>>> {
+        // Check if the additional limit is already exceeded, if so, we should immediately stop
+        // and synthesize an interpreter action.
+        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            let mut additional_limit = ctx.additional_limit.borrow_mut();
+            if additional_limit.check_limit().exceeded_limit() {
+                Ok(Some(InterpreterAction::Return(create_exceeding_interpreter_result(
+                    frame.interpreter.gas,
+                ))))
+            } else {
+                drop(additional_limit);
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// This is the hook to be called in the `frame_run` and `inspect_frame_run`
+    /// functions after the instructions are executed. Apply `MiniRex` additional limits after
+    /// running instructions.
+    ///
+    /// This handles:
+    /// - Charging `CODEDEPOSIT_STORAGE_GAS` for successful create operations
+    /// - Updating additional limits via `after_create_frame_run`
+    /// - Recording gas remaining for later compute gas tracking
+    ///
+    /// Returns `Some(gas_remaining)` if `MiniRex` is enabled and action is a Return,
+    /// for use in `after_frame_run`.
+    #[inline]
+    fn after_frame_run_instructions(
+        ctx: &MegaContext<DB, ExtEnvs>,
+        frame: &EthFrame<EthInterpreter>,
+        action: &mut InterpreterAction,
+    ) -> Result<(), ContextDbError<MegaContext<DB, ExtEnvs>>> {
+        if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            return Ok(());
+        }
+
+        if let InterpreterAction::Return(interpreter_result) = action {
+            // Charge storage gas cost for the number of bytes
+            if frame.data.is_create() && interpreter_result.is_ok() {
+                let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
+                    interpreter_result.output.len() as u64;
+                if !interpreter_result.gas.record_cost(code_deposit_storage_gas) {
+                    interpreter_result.result = InstructionResult::OutOfGas;
+                }
+            }
+
+            // Update additional limits
+            let mut additional_limit = ctx.additional_limit.borrow_mut();
+            if frame.data.is_create() &&
+                additional_limit.after_create_frame_run(interpreter_result).exceeded_limit()
+            {
+                mark_interpreter_result_as_exceeding_limit(interpreter_result);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply `MiniRex` additional limits after frame action processing.
+    ///
+    /// This records compute gas cost induced in frame action processing (e.g., code deposit cost)
+    /// and marks the frame result as exceeding limit if needed.
+    #[inline]
+    fn after_frame_run(
+        ctx: &MegaContext<DB, ExtEnvs>,
+        frame_output: &mut ItemOrResult<FrameInit, FrameResult>,
+        gas_remaining_before_process_action: Option<u64>,
+    ) -> Result<(), ContextDbError<MegaContext<DB, ExtEnvs>>> {
+        if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            return Ok(());
+        }
+
+        // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
+        if let (ItemOrResult::Result(frame_result), Some(gas_remaining_before)) =
+            (frame_output, gas_remaining_before_process_action)
+        {
+            let compute_gas_cost =
+                gas_remaining_before.saturating_sub(frame_result.gas().remaining());
+            let mut additional_limit = ctx.additional_limit.borrow_mut();
+            if additional_limit.record_compute_gas(compute_gas_cost).exceeded_limit() {
+                mark_frame_result_as_exceeding_limit(frame_result);
+            }
+        }
 
         Ok(())
     }
@@ -256,12 +377,7 @@ where
         evm: &mut Self::Evm,
         init_and_floor_gas: &InitialAndFloorGas,
     ) -> Result<FrameResult, Self::Error> {
-        // Check if the initial gas exceeds the tx gas limit, if so, we halt with out of gas
-        let ctx = evm.ctx();
-        let tx = ctx.tx();
-        if tx.gas_limit() < init_and_floor_gas.initial_gas {
-            // If not sufficient gas, we halt with out of gas
-            let oog_frame_result = gen_oog_frame_result(tx.kind(), tx.gas_limit());
+        if let Some(oog_frame_result) = self.before_execution(evm, init_and_floor_gas)? {
             return Ok(oog_frame_result);
         }
 
@@ -407,6 +523,30 @@ where
         self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
         self.execution_result(evm, frame_result)
     }
+
+    /// This function copies the logic from `Handler::execution` to add
+    /// new account storage gas and early OOG check with inspector support.
+    #[inline]
+    fn inspect_execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        if let Some(oog_frame_result) = self.before_execution(evm, init_and_floor_gas)? {
+            return Ok(oog_frame_result);
+        }
+
+        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        // Create first frame action
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+
+        // Run execution loop with inspector
+        let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
+
+        // Handle last frame result
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
+    }
 }
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::handler::EvmTr for MegaEvm<DB, INSP, ExtEnvs>
@@ -512,52 +652,18 @@ where
         let context = &mut self.inner.ctx;
         let instructions = &mut self.inner.instruction;
 
-        let is_mini_rex_enabled = context.spec.is_enabled(MegaSpecId::MINI_REX);
-
-        // Check if the additional limit is already exceeded, if so, we should immediately stop
-        // and synthesize an interpreter action.
-        let mut action = if is_mini_rex_enabled {
-            let mut additional_limit = context.additional_limit.borrow_mut();
-            if additional_limit.check_limit().exceeded_limit() {
-                InterpreterAction::Return(create_exceeding_interpreter_result(
-                    frame.interpreter.gas,
-                ))
-            } else {
-                drop(additional_limit);
-                frame.interpreter.run_plain(instructions.instruction_table(), context)
-            }
+        // Before frame_run Hook
+        let mut action = if let Some(action) = Self::before_frame_run(context, frame)? {
+            action
         } else {
             frame.interpreter.run_plain(instructions.instruction_table(), context)
         };
 
-        // Apply additional limits and storage gas cost only when the `MINI_REX` spec is enabled.
-        if is_mini_rex_enabled {
-            if let InterpreterAction::Return(interpreter_result) = &mut action {
-                // charge storage gas cost for the number of bytes
-                if frame.data.is_create() && interpreter_result.is_ok() {
-                    // if the creation is successful, charge the storage gas cost for the
-                    // number of bytes.
-                    let code_deposit_storage_gas = constants::mini_rex::CODEDEPOSIT_STORAGE_GAS *
-                        interpreter_result.output.len() as u64;
-                    if !interpreter_result.gas.record_cost(code_deposit_storage_gas) {
-                        // if out of gas, set the instruction result to OOG
-                        interpreter_result.result = InstructionResult::OutOfGas;
-                    }
-                }
-
-                // update additional limits
-                let mut additional_limit = context.additional_limit.borrow_mut();
-                if frame.data.is_create() &&
-                    additional_limit.after_create_frame_run(interpreter_result).exceeded_limit()
-                {
-                    // if exceeded the limit, set the instruction result
-                    mark_interpreter_result_as_exceeding_limit(interpreter_result);
-                }
-            }
-        }
+        // After frame_run instructions Hook
+        Self::after_frame_run_instructions(context, frame, &mut action)?;
 
         // Record gas remaining before frame action processing
-        let gas_remaining_before = match (&action, is_mini_rex_enabled) {
+        let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::MINI_REX)) {
             (InterpreterAction::Return(interpreter_result), true) => {
                 Some(interpreter_result.gas.remaining())
             }
@@ -574,17 +680,8 @@ where
                 }
             })?;
 
-        // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
-        if let (ItemOrResult::Result(frame_result), Some(gas_remaining_before), true) =
-            (&mut frame_output, gas_remaining_before, is_mini_rex_enabled)
-        {
-            let compute_gas_cost =
-                gas_remaining_before.saturating_sub(frame_result.gas().remaining());
-            let mut additional_limit = self.ctx().additional_limit.borrow_mut();
-            if additional_limit.record_compute_gas(compute_gas_cost).exceeded_limit() {
-                mark_frame_result_as_exceeding_limit(frame_result);
-            }
-        }
+        // After frame_run Hook
+        Self::after_frame_run(context, &mut frame_output, gas_remaining_before)?;
 
         Ok(frame_output)
     }
@@ -652,6 +749,59 @@ where
             self.inner.frame_stack.get(),
             &mut self.inner.instruction,
         )
+    }
+
+    /// This method copies the logic from `MegaEvm::frame_run` with inspector support.
+    /// It adds the same additional limit checks while using `inspect_instructions` instead of
+    /// `run_plain`.
+    #[inline]
+    fn inspect_frame_run(
+        &mut self,
+    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
+        let (ctx, inspector, frame, instructions) = self.ctx_inspector_frame_instructions();
+
+        let mut action = if let Some(action) = Self::before_frame_run(ctx, frame)? {
+            action
+        } else {
+            inspect_instructions(
+                ctx,
+                frame.interpreter(),
+                inspector,
+                instructions.instruction_table(),
+            )
+        };
+
+        // Apply additional limits and storage gas cost
+        Self::after_frame_run_instructions(ctx, frame, &mut action)?;
+
+        // Record gas remaining before frame action processing
+        let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) {
+            (InterpreterAction::Return(interpreter_result), true) => {
+                Some(interpreter_result.gas.remaining())
+            }
+            _ => None,
+        };
+
+        // Process the frame action, it may need to create a new frame or return the current frame
+        // result.
+        let mut frame_output = frame
+            .process_next_action::<_, ContextDbError<Self::Context>>(ctx, action)
+            .inspect(|i| {
+                if i.is_result() {
+                    frame.set_finished(true);
+                }
+            })?;
+
+        // After frame_run Hook
+        Self::after_frame_run(ctx, &mut frame_output, gas_remaining_before)?;
+
+        // Call frame_end for inspector callback
+        if let ItemOrResult::Result(frame_result) = &mut frame_output {
+            let (ctx, inspector, frame) = self.ctx_inspector_frame();
+            frame_end(ctx, inspector, frame.frame_input(), frame_result);
+        }
+
+        Ok(frame_output)
     }
 }
 
