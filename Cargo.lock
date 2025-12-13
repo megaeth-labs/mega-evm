@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3588,7 +3588,7 @@ dependencies = [
  "delegate",
  "derive_more",
  "hex",
- "mega-evm 1.1.1",
+ "mega-evm 1.2.0",
  "once_cell",
  "op-alloy-consensus",
  "op-alloy-flz",
@@ -3605,7 +3605,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evme"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3618,7 +3618,7 @@ dependencies = [
  "alloy-transport-http",
  "clap",
  "mega-evm 1.0.1",
- "mega-evm 1.1.1",
+ "mega-evm 1.2.0",
  "op-alloy-consensus",
  "op-alloy-network",
  "op-alloy-rpc-types",
@@ -5982,7 +5982,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "state-test"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -5992,7 +5992,7 @@ dependencies = [
  "hash-db",
  "indicatif",
  "k256",
- "mega-evm 1.1.1",
+ "mega-evm 1.2.0",
  "plain_hasher",
  "serde",
  "serde_json",
