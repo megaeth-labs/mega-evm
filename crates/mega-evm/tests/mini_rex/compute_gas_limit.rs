@@ -537,6 +537,123 @@ fn test_compute_gas_resets_across_transactions() {
     assert!(variance < gas1 / 10, "Gas variance too large: {} vs {}", gas1, gas2);
 }
 
+/// Test that compute gas limit is reset between transactions after volatile data access.
+///
+/// This verifies the fix for the bug where `set_compute_gas_limit()` would lower the limit
+/// when volatile data (like oracle) was accessed, but the lowered limit would persist
+/// incorrectly to subsequent transactions on the SAME EVM instance.
+///
+/// The test uses a contract that consumes >1M compute gas for TX2. Without the fix,
+/// TX2 would fail with `ComputeGasLimitExceeded` because the limit would be stuck at 1M
+/// from the oracle access in TX1.
+#[test]
+fn test_compute_gas_limit_resets_after_volatile_access() {
+    use mega_evm::{
+        constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS, MegaTransaction,
+        ORACLE_CONTRACT_ADDRESS,
+    };
+    use revm::ExecuteEvm;
+
+    // Contract 1: Calls the oracle, which lowers compute_gas_limit to 1M
+    let oracle_caller = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // return memory args
+        .push_number(0u8) // value: 0 wei
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    // Contract 2: Expensive contract that uses >1M compute gas via SHA3 operations.
+    // Each SHA3 with 32 bytes costs 36 gas + 6 per word = 42 gas. But the memory expansion
+    // and iterations add up. We use a loop of 30000 SHA3 operations to exceed 1M compute gas.
+    // Without the fix, this would fail because the limit would be stuck at 1M.
+    let mut expensive_builder = BytecodeBuilder::default();
+    // Store a value in memory first
+    expensive_builder = expensive_builder.push_number(0xdeadbeefu32).push_number(0u8).append(MSTORE);
+    // Do many SHA3 operations on the same memory region
+    for _ in 0..30000 {
+        expensive_builder = expensive_builder
+            .push_number(32u8) // size
+            .push_number(0u8) // offset
+            .append(KECCAK256)
+            .append(POP); // discard result
+    }
+    let expensive_contract = expensive_builder.append(STOP).build();
+
+    let compute_gas_limit: u64 = 10_000_000; // 10M
+
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+        .account_code(CONTRACT, oracle_caller)
+        .account_code(CONTRACT2, expensive_contract);
+
+    // Create a SINGLE EVM instance that will be used for both transactions
+    let mut context = MegaContext::new(db, MegaSpecId::MINI_REX).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(compute_gas_limit),
+    );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+
+    // TX1: Call oracle contract - this lowers compute_gas_limit to 1M
+    let tx1 = MegaTransaction {
+        base: TxEnvBuilder::new().caller(CALLER).call(CONTRACT).build_fill(),
+        enveloped_tx: Some(Bytes::new()),
+        ..Default::default()
+    };
+    let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1).unwrap();
+    assert!(result1.result.is_success(), "TX1 should succeed");
+
+    // Verify TX1 lowered the compute_gas_limit to oracle limit
+    assert_eq!(
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        "TX1 should have lowered compute_gas_limit to oracle access limit"
+    );
+
+    // TX2: Expensive contract that uses >1M compute gas on the SAME EVM instance.
+    // If the limit wasn't reset, this would fail with ComputeGasLimitExceeded.
+    let tx2 = MegaTransaction {
+        base: TxEnvBuilder::new().caller(CALLER).call(CONTRACT2).build_fill(),
+        enveloped_tx: Some(Bytes::new()),
+        ..Default::default()
+    };
+    let result2 = evm.transact_one(tx2).unwrap();
+
+    // Get the compute gas used by TX2
+    let compute_gas_used = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
+
+    // Verify TX2 used more than the oracle limit (1M)
+    assert!(
+        compute_gas_used > ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        "TX2 should use more compute gas than oracle limit: {} > {}",
+        compute_gas_used,
+        ORACLE_ACCESS_REMAINING_COMPUTE_GAS
+    );
+
+    // TX2 should succeed because the limit was reset to 10M
+    assert!(
+        result2.is_success(),
+        "TX2 should succeed because compute_gas_limit was reset to {}. Used {} gas. \
+         Without the fix, it would fail because the limit would be stuck at {}",
+        compute_gas_limit,
+        compute_gas_used,
+        ORACLE_ACCESS_REMAINING_COMPUTE_GAS
+    );
+
+    // Verify the limit is at the original value (not stuck at oracle limit)
+    let actual_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit;
+    assert_eq!(
+        actual_limit, compute_gas_limit,
+        "compute_gas_limit should be reset to original value ({}), not stuck at oracle limit ({})",
+        compute_gas_limit, ORACLE_ACCESS_REMAINING_COMPUTE_GAS
+    );
+}
+
 // ============================================================================
 // SPEC COMPARISON TESTS
 // ============================================================================

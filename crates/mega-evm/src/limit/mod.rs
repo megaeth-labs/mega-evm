@@ -60,6 +60,11 @@ pub struct AdditionalLimit {
     /// The total remaining gas after the limit exceeds.
     pub rescued_gas: u64,
 
+    /// The original limits set by the EVM. Some of the limits may be overridden (such as the
+    /// compute gas limit) during transaction execution. We keep the original limits to be able to
+    /// reset the limits before each transaction.
+    pub limits: EvmTxRuntimeLimits,
+
     /// The data limit for the EVM. When the data limit is reached, the transaction will error and
     /// halt (remaining gas is preserved).
     ///
@@ -130,6 +135,7 @@ impl AdditionalLimit {
         Self {
             has_exceeded_limit: AdditionalLimitResult::WithinLimit,
             rescued_gas: 0,
+            limits,
             data_limit: limits.tx_data_size_limit,
             kv_update_limit: limits.tx_kv_updates_limit,
             compute_gas_limit: limits.tx_compute_gas_limit,
@@ -139,6 +145,14 @@ impl AdditionalLimit {
             kv_update_counter: kv_update::KVUpdateCounter::new(),
             state_growth_tracker: state_growth::StateGrowthTracker::new(),
         }
+    }
+
+    /// Resets to the original [`EvmTxRuntimeLimits`].
+    pub fn reset_limits(&mut self) {
+        self.data_limit = self.limits.tx_data_size_limit;
+        self.compute_gas_limit = self.limits.tx_compute_gas_limit;
+        self.kv_update_limit = self.limits.tx_kv_updates_limit;
+        self.state_growth_limit = self.limits.tx_state_growth_limit;
     }
 }
 
@@ -156,6 +170,7 @@ impl AdditionalLimit {
     pub fn reset(&mut self) {
         self.has_exceeded_limit = AdditionalLimitResult::WithinLimit;
         self.rescued_gas = 0;
+        self.reset_limits();
         self.data_size_tracker.reset();
         self.kv_update_counter.reset();
         self.compute_gas_tracker.reset();
