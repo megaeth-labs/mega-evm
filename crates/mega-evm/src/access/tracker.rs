@@ -130,6 +130,7 @@ impl VolatileDataAccessTracker {
     /// restrictive limit was already in place.
     pub fn check_and_mark_oracle_access(&mut self, address: &Address) -> bool {
         if address == &ORACLE_CONTRACT_ADDRESS {
+            println!("Oracle contract accessed");
             self.volatile_data_accessed.insert(VolatileDataAccess::ORACLE);
             self.apply_or_create_limit(constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS);
             true
