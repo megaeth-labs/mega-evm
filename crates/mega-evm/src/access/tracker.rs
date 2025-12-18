@@ -154,6 +154,7 @@ impl VolatileDataAccessTracker {
     /// Resets all access tracking for a new transaction.
     pub fn reset(&mut self) {
         self.volatile_data_accessed = VolatileDataAccess::empty();
+        println!("Resetting volatile data access tracker");
         self.compute_gas_limit = None;
     }
 }
