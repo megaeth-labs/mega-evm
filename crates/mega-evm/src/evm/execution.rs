@@ -600,6 +600,10 @@ where
                 if call_inputs.caller != MEGA_SYSTEM_ADDRESS {
                     let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
                     let mut tracker = volatile_data_tracker.borrow_mut();
+                    println!(
+                        "Checking and marking oracle access for address: {:?}",
+                        call_inputs.target_address
+                    );
                     if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
                         if let Some(compute_gas_limit) = tracker.get_compute_gas_limit() {
                             additional_limit.borrow_mut().set_compute_gas_limit(compute_gas_limit);
