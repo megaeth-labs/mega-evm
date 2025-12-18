@@ -90,6 +90,7 @@ impl VolatileDataAccessTracker {
     /// Returns the compute gas limit for the accessed volatile data.
     /// Returns None if no volatile data has been accessed.
     pub fn get_compute_gas_limit(&self) -> Option<u64> {
+        println!("Getting compute gas limit: {:?}", self.compute_gas_limit);
         self.compute_gas_limit
     }
 
