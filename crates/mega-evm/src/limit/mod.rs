@@ -11,7 +11,7 @@ use revm::{
     },
 };
 
-use crate::{EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaTransaction};
+use crate::{EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction};
 
 mod compute_gas;
 mod data_size;
@@ -167,10 +167,18 @@ impl AdditionalLimit {
     ///
     /// This method clears both the data size tracker and KV update counter,
     /// preparing the limit system for a new execution context.
-    pub fn reset(&mut self) {
+    ///
+    /// The `spec` parameter is used to determine if the limits should be reset.
+    /// Starting from [`MegaSpecId::REX1`], the limits are reset to their original values
+    /// between transactions. This is to ensure that the limits are not carried over
+    /// from the previous transaction (e.g., when volatile data is accessed and the
+    /// compute gas limit is lowered).
+    pub fn reset(&mut self, spec: MegaSpecId) {
         self.has_exceeded_limit = AdditionalLimitResult::WithinLimit;
         self.rescued_gas = 0;
-        self.reset_limits();
+        if spec.is_enabled(MegaSpecId::REX1) {
+            self.reset_limits();
+        }
         self.data_size_tracker.reset();
         self.kv_update_counter.reset();
         self.compute_gas_tracker.reset();

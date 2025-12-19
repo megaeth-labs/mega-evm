@@ -22,6 +22,8 @@ hardfork! {
         MiniRex2,
         /// The fourth hardfork.
         Rex,
+        /// The fifth hardfork (first patch to Rex).
+        Rex1,
     }
 }
 
@@ -34,6 +36,7 @@ impl MegaHardfork {
             Self::MiniRex1 => MegaSpecId::EQUIVALENCE,
             Self::MiniRex2 => MegaSpecId::MINI_REX,
             Self::Rex => MegaSpecId::REX,
+            Self::Rex1 => MegaSpecId::REX1,
         }
     }
 }
@@ -66,7 +69,9 @@ pub trait MegaHardforks: OpHardforks {
     /// Gets the latest `MegaHardfork` that is active at the given timestamp. If no `MegaHardfork`
     /// is active at the given timestamp, returns `None`.
     fn hardfork(&self, timestamp: u64) -> Option<MegaHardfork> {
-        if self.is_rex_active_at_timestamp(timestamp) {
+        if self.is_rex_1_active_at_timestamp(timestamp) {
+            Some(MegaHardfork::Rex1)
+        } else if self.is_rex_active_at_timestamp(timestamp) {
             Some(MegaHardfork::Rex)
         } else if self.is_mini_rex_2_active_at_timestamp(timestamp) {
             Some(MegaHardfork::MiniRex2)
@@ -82,7 +87,9 @@ pub trait MegaHardforks: OpHardforks {
     /// Gets the expected `MegaSpecId` for a block with the given timestamp.
     fn spec_id(&self, timestamp: BlockTimestamp) -> MegaSpecId {
         // Newer hardforks should be checked first
-        if self.is_rex_active_at_timestamp(timestamp) {
+        if self.is_rex_1_active_at_timestamp(timestamp) {
+            MegaSpecId::REX1
+        } else if self.is_rex_active_at_timestamp(timestamp) {
             MegaSpecId::REX
         } else if self.is_mini_rex_2_active_at_timestamp(timestamp) {
             MegaSpecId::MINI_REX
@@ -113,6 +120,11 @@ pub trait MegaHardforks: OpHardforks {
     /// Returns `true` if [`MegaHardfork::Rex`] is active at given block timestamp.
     fn is_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.mega_fork_activation(MegaHardfork::Rex).active_at_timestamp(timestamp)
+    }
+
+    /// Returns `true` if [`MegaHardfork::Rex1`] is active at given block timestamp.
+    fn is_rex_1_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.mega_fork_activation(MegaHardfork::Rex1).active_at_timestamp(timestamp)
     }
 }
 
@@ -187,6 +199,7 @@ impl MegaHardforkConfig {
         self.insert(MegaHardfork::MiniRex1, ForkCondition::Timestamp(0));
         self.insert(MegaHardfork::MiniRex2, ForkCondition::Timestamp(0));
         self.insert(MegaHardfork::Rex, ForkCondition::Timestamp(0));
+        self.insert(MegaHardfork::Rex1, ForkCondition::Timestamp(0));
         self
     }
 

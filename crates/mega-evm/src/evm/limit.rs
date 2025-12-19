@@ -20,7 +20,7 @@ impl EvmTxRuntimeLimits {
         match spec {
             MegaSpecId::EQUIVALENCE => Self::equivalence(),
             MegaSpecId::MINI_REX => Self::mini_rex(),
-            MegaSpecId::REX => Self::rex(),
+            MegaSpecId::REX | MegaSpecId::REX1 => Self::rex(),
         }
     }
 
