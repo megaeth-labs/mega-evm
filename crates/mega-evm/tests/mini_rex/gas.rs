@@ -1018,3 +1018,27 @@ fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
     assert!(res.result.is_halt());
     assert_eq!(res.result.gas_used(), insufficient_gas_limit);
 }
+
+#[test]
+fn test_deploy() {
+    let mut expensive_builder = BytecodeBuilder::default();
+    // Store a value in memory first
+    expensive_builder = expensive_builder
+        .push_number(0xdeadbeefu32)
+        .push_number(0u8)
+        .append(revm::bytecode::opcode::MSTORE);
+    // Do many SHA3 operations on the same memory region
+    for _ in 0..30000 {
+        expensive_builder = expensive_builder
+            .push_number(32u8) // size
+            .push_number(0u8) // offset
+            .append(revm::bytecode::opcode::KECCAK256)
+            .append(revm::bytecode::opcode::POP); // discard result
+    }
+    let expensive_contract = expensive_builder.stop().build();
+    let initcode = BytecodeBuilder::default().return_with_data(expensive_contract).build();
+
+    use std::{fs::File, io::Write};
+    let mut file = File::create("initcode.bin").expect("Failed to create file");
+    file.write_all(&initcode).expect("Failed to write initcode to file");
+}
