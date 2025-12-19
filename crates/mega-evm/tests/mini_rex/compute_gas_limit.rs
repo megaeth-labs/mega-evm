@@ -571,7 +571,8 @@ fn test_compute_gas_limit_resets_after_volatile_access() {
     // Without the fix, this would fail because the limit would be stuck at 1M.
     let mut expensive_builder = BytecodeBuilder::default();
     // Store a value in memory first
-    expensive_builder = expensive_builder.push_number(0xdeadbeefu32).push_number(0u8).append(MSTORE);
+    expensive_builder =
+        expensive_builder.push_number(0xdeadbeefu32).push_number(0u8).append(MSTORE);
     // Do many SHA3 operations on the same memory region
     for _ in 0..30000 {
         expensive_builder = expensive_builder
