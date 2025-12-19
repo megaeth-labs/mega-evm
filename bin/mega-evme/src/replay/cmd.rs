@@ -184,6 +184,7 @@ impl Cmd {
             )
             .await?
         } else {
+            println!("cfg_env = {:?}", evm_env.cfg_env);
             self.execute_transactions(
                 hardforks,
                 &mut database,
