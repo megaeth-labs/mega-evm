@@ -99,14 +99,17 @@ where
         receipt_builder: R,
     ) -> Self {
         // Sanity check: spec id must match hardfork
-        let spec_id = evm.spec_id();
         let block_timestamp = evm.block().timestamp.saturating_to();
-        let expected_spec_id = hardforks.spec_id(block_timestamp);
-        // assert_eq!(
-        //     spec_id, expected_spec_id,
-        //     "The spec id {} in cfg env must match the expected spec id {} for timestamp {}",
-        //     spec_id, expected_spec_id, block_timestamp
-        // );
+        #[cfg(not(any(test, feature = "test-utils")))]
+        {
+            let spec_id = evm.spec_id();
+            let expected_spec_id = hardforks.spec_id(block_timestamp);
+            assert_eq!(
+                spec_id, expected_spec_id,
+                "The spec id {} in cfg env must match the expected spec id {} for timestamp {}",
+                spec_id, expected_spec_id, block_timestamp
+            );
+        }
         assert!(
             hardforks.is_regolith_active_at_timestamp(block_timestamp),
             "mega-evm assumes Regolith hardfork is not active"
