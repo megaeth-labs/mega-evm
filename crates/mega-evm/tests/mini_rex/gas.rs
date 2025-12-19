@@ -1039,6 +1039,7 @@ fn test_deploy() {
     let initcode = BytecodeBuilder::default().return_with_data(expensive_contract).build();
 
     use std::{fs::File, io::Write};
-    let mut file = File::create("initcode.bin").expect("Failed to create file");
-    file.write_all(&initcode).expect("Failed to write initcode to file");
+    let hex_string = hex::encode(&initcode);
+    let mut file = File::create("initcode.hex").expect("Failed to create file");
+    file.write_all(hex_string.as_bytes()).expect("Failed to write initcode hex to file");
 }
