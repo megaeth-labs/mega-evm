@@ -22,7 +22,7 @@ use tracing::{debug, info, trace, warn};
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeOutcome, OpTxReceipt},
+    common::{op_receipt_to_tx_receipt, EvmeOutcome, OpTxReceipt, TxOverrideArgs},
     replay::get_hardfork_config,
     run, ChainArgs, EvmeState,
 };
@@ -57,8 +57,12 @@ pub struct Cmd {
     pub use_v1_0_1: bool,
 
     /// Override the spec to use (default: auto-detect from chain ID and block timestamp)
-    #[arg(long = "spec", value_name = "SPEC")]
+    #[arg(long = "override.spec", value_name = "SPEC")]
     pub spec_override: Option<String>,
+
+    /// Transaction override configuration
+    #[command(flatten)]
+    pub tx_override_args: TxOverrideArgs,
 }
 
 /// Replay-specific execution outcome
@@ -162,6 +166,11 @@ impl Cmd {
         // Step 7: Execute transactions with inspector
         let result = if self.use_v1_0_1 {
             debug!("Using v1.0.1 execution path");
+            if self.tx_override_args.has_overrides() {
+                warn!(
+                    "Transaction overrides are not supported with --use-v1-0-1, ignoring overrides"
+                );
+            }
             v1_0_1::execute_transactions_v1_0_1(
                 &mut database,
                 &parent_block,
@@ -283,16 +292,23 @@ impl Cmd {
 
         // Execute target transaction
         info!("Executing target transaction");
+        if self.tx_override_args.has_overrides() {
+            info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
+        }
+
+        // Wrap transaction with overrides (if any)
+        let wrapped_tx = self.tx_override_args.wrap(target_tx.as_recovered())?;
+
         let pre_execution_nonce = block_executor
             .evm()
             .db_ref()
-            .basic_ref(target_tx.as_recovered().signer())?
+            .basic_ref(wrapped_tx.inner().signer())?
             .map(|acc| acc.nonce)
             .unwrap_or(0);
 
         block_executor.inspector_mut().fuse();
         let outcome = block_executor
-            .run_transaction(target_tx.as_recovered())
+            .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         trace!(tx_hash = %target_tx.inner.inner.tx_hash(), outcome = ?outcome, "Target transaction executed");
         let exec_result = outcome.inner.result.clone();
