@@ -7,6 +7,7 @@ mod outcome;
 mod state;
 mod trace;
 mod tx;
+mod tx_override;
 
 pub use env::*;
 pub use error::*;
@@ -17,3 +18,4 @@ pub use outcome::*;
 pub use state::*;
 pub use trace::*;
 pub use tx::*;
+pub use tx_override::*;

@@ -203,6 +203,28 @@ mega-evme replay 0x1234...txhash --trace
 | ------------- | --------------------- | --------------------------------- |
 | `--rpc <URL>` | http://localhost:8545 | RPC URL to fetch transaction from |
 
+#### Transaction Override Options
+
+Override transaction fields when replaying. Useful for testing "what-if" scenarios.
+
+| Option                       | Description                                 |
+| ---------------------------- | ------------------------------------------- |
+| `--override.gas-limit <GAS>` | Override transaction gas limit              |
+| `--override.value <WEI>`     | Override transaction value (in wei)         |
+| `--override.input <HEX>`     | Override transaction input data (hex)       |
+| `--override.input-file <FILE>` | Override input data from file (hex content) |
+
+```bash
+# Replay with reduced gas limit
+mega-evme replay 0x1234...txhash --override.gas-limit 100000
+
+# Replay with different input data
+mega-evme replay 0x1234...txhash --override.input 0xabcdef
+
+# Replay with input from file
+mega-evme replay 0x1234...txhash --override.input-file calldata.hex
+```
+
 ---
 
 ## Common Options
