@@ -27,9 +27,8 @@ use revm::{
 
 use crate::{
     block::eips, transact_deploy_high_precision_timestamp_oracle, transact_deploy_oracle_contract,
-    BlockLimiter, BlockMegaTransactionOutcome, BucketId, HostExt, MegaBlockExecutionCtx,
-    MegaHardforks, MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt,
-    MegaTransactionOutcome,
+    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
+    MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -99,14 +98,18 @@ where
         receipt_builder: R,
     ) -> Self {
         // Sanity check: spec id must match hardfork
-        let spec_id = evm.spec_id();
         let block_timestamp = evm.block().timestamp.saturating_to();
-        let expected_spec_id = hardforks.spec_id(block_timestamp);
-        assert_eq!(
-            spec_id, expected_spec_id,
-            "The spec id {} in cfg env must match the expected spec id {} for timestamp {}",
-            spec_id, expected_spec_id, block_timestamp
-        );
+        #[cfg(not(any(test, feature = "test-utils")))]
+        {
+            use crate::HostExt;
+            let spec_id = evm.spec_id();
+            let expected_spec_id = hardforks.spec_id(block_timestamp);
+            assert_eq!(
+                spec_id, expected_spec_id,
+                "The spec id {} in cfg env must match the expected spec id {} for timestamp {}",
+                spec_id, expected_spec_id, block_timestamp
+            );
+        }
         assert!(
             hardforks.is_regolith_active_at_timestamp(block_timestamp),
             "mega-evm assumes Regolith hardfork is not active"

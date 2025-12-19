@@ -212,7 +212,7 @@ impl Cmd {
         database: &mut run::EvmeState<op_alloy_network::Optimism, P>,
         parent_block: &Block<Transaction>,
         block: &Block<Transaction>,
-        evm_env: mega_evm::alloy_evm::EvmEnv<MegaSpecId>,
+        mut evm_env: mega_evm::alloy_evm::EvmEnv<MegaSpecId>,
         provider: &P,
         preceding_transactions: Vec<B256>,
         target_tx: &Transaction,
@@ -237,13 +237,15 @@ impl Cmd {
             )))?,
             block.header.gas_limit(),
         );
+
         if let Some(spec_override) = &self.spec_override {
-            debug!(spec_override = %spec_override, "Overriding EVM spec");
-            block_limits = block_limits.with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(
-                MegaSpecId::from_str(spec_override)
-                    .map_err(|e| ReplayError::Other(format!("Invalid spec: {:?}", e)))?,
-            ));
+            info!(spec_override = %spec_override, "Overriding EVM spec");
+            let spec = MegaSpecId::from_str(spec_override)
+                .map_err(|e| ReplayError::Other(format!("Invalid spec: {:?}", e)))?;
+            evm_env.cfg_env.spec = spec;
+            block_limits = block_limits.with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
         }
+
         let block_ctx = MegaBlockExecutionCtx::new(
             parent_block.hash(),
             block.header.parent_beacon_block_root(),
