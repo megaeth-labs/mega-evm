@@ -220,12 +220,6 @@ impl Cmd {
     where
         P: alloy_provider::Provider<op_alloy_network::Optimism> + std::fmt::Debug,
     {
-        if let Some(spec_override) = &self.spec_override {
-            info!(spec_override = %spec_override, "Overriding EVM spec");
-            evm_env.cfg_env.spec = MegaSpecId::from_str(spec_override)
-                .map_err(|e| ReplayError::Other(format!("Invalid spec: {:?}", e)))?;
-        }
-
         let transaction_index = preceding_transactions.len() as u64;
         debug!(transaction_index, "Setting up block executor");
 
@@ -243,6 +237,14 @@ impl Cmd {
             )))?,
             block.header.gas_limit(),
         );
+
+        if let Some(spec_override) = &self.spec_override {
+            info!(spec_override = %spec_override, "Overriding EVM spec");
+            let spec = MegaSpecId::from_str(spec_override)
+                .map_err(|e| ReplayError::Other(format!("Invalid spec: {:?}", e)))?;
+            evm_env.cfg_env.spec = spec;
+            block_limits = block_limits.with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
+        }
 
         let block_ctx = MegaBlockExecutionCtx::new(
             parent_block.hash(),

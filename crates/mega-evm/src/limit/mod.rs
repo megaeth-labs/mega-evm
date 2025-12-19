@@ -174,7 +174,6 @@ impl AdditionalLimit {
     /// from the previous transaction (e.g., when volatile data is accessed and the
     /// compute gas limit is lowered).
     pub fn reset(&mut self, spec: MegaSpecId) {
-        println!("resetting limits: {:?}", spec);
         self.has_exceeded_limit = AdditionalLimitResult::WithinLimit;
         self.rescued_gas = 0;
         if spec.is_enabled(MegaSpecId::REX1) {
