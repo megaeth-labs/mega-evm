@@ -1035,11 +1035,11 @@ fn test_deploy() {
             .append(revm::bytecode::opcode::KECCAK256)
             .append(revm::bytecode::opcode::POP); // discard result
     }
-    let expensive_contract = expensive_builder.stop().build();
-    let initcode = BytecodeBuilder::default().return_with_data(expensive_contract).build();
+    let expensive_contract =
+        expensive_builder.return_with_data(Bytes::from_iter(vec![0x23; 1])).stop().build();
 
     use std::{fs::File, io::Write};
-    let hex_string = hex::encode(&initcode);
+    let hex_string = hex::encode(&expensive_contract);
     let mut file = File::create("initcode.hex").expect("Failed to create file");
     file.write_all(hex_string.as_bytes()).expect("Failed to write initcode hex to file");
 }
