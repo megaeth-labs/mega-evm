@@ -5,6 +5,7 @@
 Rex1 is the first patch to the Rex hardfork. It addresses a bug in the compute gas limit handling between transactions within the same block.
 
 **Key Change:**
+
 - **Compute Gas Limit Reset**: The transaction's compute gas limit is now properly reset between transactions, preventing the lowered limit from volatile data access in one transaction from affecting subsequent transactions.
 
 ## 2. Background
@@ -34,10 +35,10 @@ Rex1 ensures that the compute gas limit is reset to its original configured valu
 
 ### 3.1 Compute Gas Limit Reset
 
-| Spec       | Behavior |
-| ---------- | -------- |
-| **Pre-Rex1** | Compute gas limit persists across transactions within the same block |
-| **Rex1**   | Compute gas limit resets to configured value at the start of each transaction |
+| Spec         | Behavior                                                                      |
+| ------------ | ----------------------------------------------------------------------------- |
+| **Pre-Rex1** | Compute gas limit persists across transactions within the same block          |
+| **Rex1**     | Compute gas limit resets to configured value at the start of each transaction |
 
 ### 3.2 What Gets Reset
 
@@ -62,20 +63,7 @@ The semantics of Rex1 spec are inherited from:
 
 - **Rex1** → **Rex** → **MiniRex** → **Optimism Isthmus** → **Ethereum Prague**
 
-## 5. Migration Impact
-
-### 5.1 For Node Operators
-
-Rex1 is a bug fix that ensures correct isolation between transactions. After Rex1 activation:
-
-- Transactions that previously failed due to inherited compute gas limits will now succeed
-- Block production becomes more predictable as transactions are properly isolated
-
-### 5.2 For Applications
-
-No application changes are required. Rex1 only fixes a bug that caused unexpected failures. Applications that were working around this issue by avoiding oracle access in early block transactions may now remove such workarounds.
-
-## 6. References
+## 5. References
 
 - [Rex Specification](Rex.md)
 - [MiniRex Specification](MiniRex.md)
