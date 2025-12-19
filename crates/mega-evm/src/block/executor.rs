@@ -101,6 +101,7 @@ where
         let block_timestamp = evm.block().timestamp.saturating_to();
         #[cfg(not(any(test, feature = "test-utils")))]
         {
+            use crate::HostExt;
             let spec_id = evm.spec_id();
             let expected_spec_id = hardforks.spec_id(block_timestamp);
             assert_eq!(
