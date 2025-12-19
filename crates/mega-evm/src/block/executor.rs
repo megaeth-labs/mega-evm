@@ -27,7 +27,7 @@ use revm::{
 
 use crate::{
     block::eips, transact_deploy_high_precision_timestamp_oracle, transact_deploy_oracle_contract,
-    BlockLimiter, BlockMegaTransactionOutcome, BucketId, HostExt, MegaBlockExecutionCtx,
+    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx,
     MegaHardforks, MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt,
     MegaTransactionOutcome,
 };
