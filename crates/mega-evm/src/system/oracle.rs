@@ -15,14 +15,41 @@ use crate::MegaHardforks;
 /// The address of the oracle system contract.
 pub const ORACLE_CONTRACT_ADDRESS: Address = address!("0x6342000000000000000000000000000000000001");
 
-/// The code of the oracle contract. It is retrieved from
-/// `../../system-contracts/artifacts/Oracle.json`.
+/// The keccak256 signature of the `Hint(bytes32,bytes)` event emitted by the oracle contract.
+///
+/// This event is used to send hints from on-chain contracts to the off-chain oracle service
+/// backend (the sequencer). When the EVM detects a log from the oracle contract with this
+/// signature as `topic[0]`, it invokes [`OracleEnv::on_hint`] with the user-defined topic
+/// and data.
+///
+/// The event has two topics:
+/// - `topic[0]`: This signature hash (identifies the log as a hint event)
+/// - `topic[1]`: User-defined hint topic (passed to `on_hint`)
+///
+/// See [`OracleEnv::on_hint`] for more details on the hint mechanism.
+///
+/// [`OracleEnv::on_hint`]: crate::OracleEnv::on_hint
+pub const ORACLE_HINT_EVENT_SIGHASH: B256 =
+    b256!("0x94a55b5dc535df5958093e3e051eecc6a33dfa721f7d345975ac53705dde0e47");
+
+/// The code of the oracle contract (version 1.0.0, pre-Rex2).
+/// It is retrieved from `../../system-contracts/artifacts/Oracle.json`.
 pub const ORACLE_CONTRACT_CODE: Bytes =
     bytes!("0x608060405234801561000f575f5ffd5b506004361061006f575f3560e01c80637eba7ba61161004d5780637eba7ba614610118578063a21e2d6914610138578063fbc0d03514610158575f5ffd5b806301caec13146100735780630dc9b5da1461008857806354fd4d50146100d9575b5f5ffd5b610086610081366004610324565b61016b565b005b6100af7f000000000000000000000000a887dcb9d5f39ef79272801d05abdf707cfbbd1d81565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020015b60405180910390f35b604080518082018252600581527f312e302e30000000000000000000000000000000000000000000000000000000602082015290516100d09190610390565b61012a6101263660046103e3565b5490565b6040519081526020016100d0565b61014b6101463660046103fa565b6101e6565b6040516100d09190610439565b61008661016636600461047b565b61025c565b8281146101b2576040517f5b7232fa000000000000000000000000000000000000000000000000000000008152600481018490526024810182905260440160405180910390fd5b8382845f5b818110156101d457602081028381013590850135556001016101b7565b505050506101e061026b565b50505050565b60608167ffffffffffffffff8111156102015761020161049b565b60405190808252806020026020018201604052801561022a578160200160208202803683370190505b5090506020810183835f5b818110156102525760208102838101355490850152600101610235565b5050505092915050565b80825561026761026b565b5050565b3373ffffffffffffffffffffffffffffffffffffffff7f000000000000000000000000a887dcb9d5f39ef79272801d05abdf707cfbbd1d16146102da576040517f5e742c5a00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b565b5f5f83601f8401126102ec575f5ffd5b50813567ffffffffffffffff811115610303575f5ffd5b6020830191508360208260051b850101111561031d575f5ffd5b9250929050565b5f5f5f5f60408587031215610337575f5ffd5b843567ffffffffffffffff81111561034d575f5ffd5b610359878288016102dc565b909550935050602085013567ffffffffffffffff811115610378575f5ffd5b610384878288016102dc565b95989497509550505050565b602081525f82518060208401528060208501604085015e5f6040828501015260407fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0601f83011684010191505092915050565b5f602082840312156103f3575f5ffd5b5035919050565b5f5f6020838503121561040b575f5ffd5b823567ffffffffffffffff811115610421575f5ffd5b61042d858286016102dc565b90969095509350505050565b602080825282518282018190525f918401906040840190835b81811015610470578351835260209384019390920191600101610452565b509095945050505050565b5f5f6040838503121561048c575f5ffd5b50508035926020909101359150565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52604160045260245ffdfea26469706673582212205bb66f27c8ccdec3b5bbd6071d5f516754488531634a3ad38e6c7ffacf47a02464736f6c634300081e0033");
 
-/// The code hash of the oracle contract.
+/// The code hash of the oracle contract (version 1.0.0, pre-Rex2).
 pub const ORACLE_CONTRACT_CODE_HASH: B256 =
     b256!("0xe9b044afb735a0f569faeb248088b4f267578f60722f87d06ec3867b250a2c34");
+
+/// The code of the oracle contract (version 1.1.0, Rex2+).
+/// This version includes the `sendHint` function for the oracle hint mechanism.
+/// It is retrieved from `../../system-contracts/artifacts/Oracle.json`.
+pub const ORACLE_CONTRACT_CODE_REX2: Bytes =
+    bytes!("0x608060405234801561000f575f5ffd5b506004361061007a575f3560e01c806366cdf82f1161005857806366cdf82f146101235780637eba7ba614610136578063a21e2d6914610156578063fbc0d03514610176575f5ffd5b806301caec131461007e5780630dc9b5da1461009357806354fd4d50146100e4575b5f5ffd5b61009161008c366004610381565b610189565b005b6100ba7f000000000000000000000000a887dcb9d5f39ef79272801d05abdf707cfbbd1d81565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020015b60405180910390f35b604080518082018252600581527f312e312e30000000000000000000000000000000000000000000000000000000602082015290516100db91906103ed565b610091610131366004610440565b610204565b6101486101443660046104b7565b5490565b6040519081526020016100db565b6101696101643660046104ce565b610243565b6040516100db919061050d565b61009161018436600461054f565b6102b9565b8281146101d0576040517f5b7232fa000000000000000000000000000000000000000000000000000000008152600481018490526024810182905260440160405180910390fd5b8382845f5b818110156101f257602081028381013590850135556001016101d5565b505050506101fe6102c8565b50505050565b827f94a55b5dc535df5958093e3e051eecc6a33dfa721f7d345975ac53705dde0e47838360405161023692919061056f565b60405180910390a2505050565b60608167ffffffffffffffff81111561025e5761025e6105bb565b604051908082528060200260200182016040528015610287578160200160208202803683370190505b5090506020810183835f5b818110156102af5760208102838101355490850152600101610292565b5050505092915050565b8082556102c46102c8565b5050565b3373ffffffffffffffffffffffffffffffffffffffff7f000000000000000000000000a887dcb9d5f39ef79272801d05abdf707cfbbd1d1614610337576040517f5e742c5a00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b565b5f5f83601f840112610349575f5ffd5b50813567ffffffffffffffff811115610360575f5ffd5b6020830191508360208260051b850101111561037a575f5ffd5b9250929050565b5f5f5f5f60408587031215610394575f5ffd5b843567ffffffffffffffff8111156103aa575f5ffd5b6103b687828801610339565b909550935050602085013567ffffffffffffffff8111156103d5575f5ffd5b6103e187828801610339565b95989497509550505050565b602081525f82518060208401528060208501604085015e5f6040828501015260407fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0601f83011684010191505092915050565b5f5f5f60408486031215610452575f5ffd5b83359250602084013567ffffffffffffffff81111561046f575f5ffd5b8401601f8101861361047f575f5ffd5b803567ffffffffffffffff811115610495575f5ffd5b8660208284010111156104a6575f5ffd5b939660209190910195509293505050565b5f602082840312156104c7575f5ffd5b5035919050565b5f5f602083850312156104df575f5ffd5b823567ffffffffffffffff8111156104f5575f5ffd5b61050185828601610339565b90969095509350505050565b602080825282518282018190525f918401906040840190835b81811015610544578351835260209384019390920191600101610526565b509095945050505050565b5f5f60408385031215610560575f5ffd5b50508035926020909101359150565b60208152816020820152818360408301375f818301604090810191909152601f9092017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0160101919050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52604160045260245ffdfea2646970667358221220518df74885b3c204d9376834d3751e195307a2387ac9398314baf546368c709164736f6c634300081e0033");
+
+/// The code hash of the oracle contract (version 1.1.0, Rex2+).
+pub const ORACLE_CONTRACT_CODE_HASH_REX2: B256 =
+    b256!("0xdd8e1233628abbef630abba2988495b1d3a078633be19c19ffedd200d602ec64");
 
 sol! {
     /// The Solidity interface for the oracle contract.
@@ -37,6 +64,10 @@ sol! {
 /// Ensures the oracle contract is deployed in the designated address and returns the state changes.
 /// Note that the database `db` is not modified in this function. The caller is responsible to
 /// commit the changes to database.
+///
+/// The deployed bytecode depends on the active hardfork:
+/// - Pre-Rex2: v1.0.0 bytecode (without `sendHint` function)
+/// - Rex2+: v1.1.0 bytecode (with `sendHint` function for oracle hints)
 pub fn transact_deploy_oracle_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
@@ -46,12 +77,20 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
         return Ok(None);
     }
 
+    // Select the appropriate bytecode based on hardfork
+    let (target_code, target_code_hash) = if hardforks.is_rex_2_active_at_timestamp(block_timestamp)
+    {
+        (ORACLE_CONTRACT_CODE_REX2.clone(), ORACLE_CONTRACT_CODE_HASH_REX2)
+    } else {
+        (ORACLE_CONTRACT_CODE.clone(), ORACLE_CONTRACT_CODE_HASH)
+    };
+
     // Load the oracle contract account from the cache
     let acc = db.load_cache_account(ORACLE_CONTRACT_ADDRESS)?;
 
-    // If the contract is already deployed, return early
+    // If the contract is already deployed with the correct code, return early
     if let Some(account_info) = acc.account_info() {
-        if account_info.code_hash == ORACLE_CONTRACT_CODE_HASH {
+        if account_info.code_hash == target_code_hash {
             // Although we do not need to update the account, we need to mark it as read
             return Ok(Some(EvmState::from_iter([(
                 ORACLE_CONTRACT_ADDRESS,
@@ -62,8 +101,8 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
 
     // Update the account info with the contract code
     let mut acc_info = acc.account_info().unwrap_or_default();
-    acc_info.code_hash = ORACLE_CONTRACT_CODE_HASH;
-    acc_info.code = Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE));
+    acc_info.code_hash = target_code_hash;
+    acc_info.code = Some(Bytecode::new_raw(target_code));
 
     // Convert the cache account back into a revm account and mark it as touched.
     let mut revm_acc: revm::state::Account = acc_info.into();
@@ -126,7 +165,7 @@ pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
 
 #[cfg(test)]
 mod tests {
-    use crate::MegaHardforkConfig;
+    use crate::{MegaHardfork, MegaHardforkConfig};
 
     use super::*;
     use alloy_primitives::keccak256;
@@ -134,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_oracle_contract_code_hash_matches() {
-        // Compute the keccak256 hash of the oracle contract code
+        // Compute the keccak256 hash of the oracle contract code (v1.0.0, pre-Rex2)
         let computed_hash = keccak256(&ORACLE_CONTRACT_CODE);
 
         // Verify it matches the hardcoded constant
@@ -146,10 +185,24 @@ mod tests {
     }
 
     #[test]
+    fn test_oracle_contract_code_hash_rex2_matches() {
+        // Compute the keccak256 hash of the oracle contract code (v1.1.0, Rex2+)
+        let computed_hash = keccak256(&ORACLE_CONTRACT_CODE_REX2);
+
+        // Verify it matches the hardcoded constant
+        assert_eq!(
+            computed_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
+            "Oracle contract Rex2 code hash mismatch: computed {}, expected {}",
+            computed_hash, ORACLE_CONTRACT_CODE_HASH_REX2
+        );
+    }
+
+    #[test]
     fn test_deploy_oracle_contract_on_fresh_db() {
         // Create a fresh in-memory database
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
+        // with_all_activated() includes Rex2, so we expect Rex2 bytecode
         let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy the oracle contract
@@ -169,10 +222,10 @@ mod tests {
         assert!(account.is_touched(), "Account should be marked as touched");
         assert!(account.is_created(), "Account should be marked as created");
 
-        // Verify the account info
+        // Verify the account info (Rex2 bytecode)
         let info = &account.info;
         assert_eq!(
-            info.code_hash, ORACLE_CONTRACT_CODE_HASH,
+            info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
             "Code hash should match the expected value"
         );
         assert!(info.code.is_some(), "Code should be set");
@@ -180,29 +233,30 @@ mod tests {
         let code = info.code.as_ref().unwrap();
         assert_eq!(
             code.original_bytes(),
-            ORACLE_CONTRACT_CODE,
+            ORACLE_CONTRACT_CODE_REX2,
             "Code bytes should match the expected value"
         );
     }
 
     #[test]
     fn test_deploy_oracle_contract_idempotent() {
-        // Create a database with the oracle contract already deployed correctly
+        // Create a database with the oracle contract already deployed correctly (Rex2 bytecode)
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             ORACLE_CONTRACT_ADDRESS,
             AccountInfo {
                 balance: revm::primitives::U256::ZERO,
                 nonce: 0,
-                code_hash: ORACLE_CONTRACT_CODE_HASH,
-                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE)),
+                code_hash: ORACLE_CONTRACT_CODE_HASH_REX2,
+                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX2)),
             },
         );
 
         let mut state = State::builder().with_database(&mut db).build();
+        // with_all_activated() includes Rex2
         let hardforks = MegaHardforkConfig::default().with_all_activated();
 
-        // Deploy should return state with the account marked as read
+        // Deploy should return state with the account marked as read (no update needed)
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
             .expect("Should return state");
@@ -214,7 +268,10 @@ mod tests {
 
         // Verify the account is in the result
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
-        assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH, "Code hash should match");
+        assert_eq!(
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
+            "Code hash should match Rex2 bytecode"
+        );
     }
 
     #[test]
@@ -237,9 +294,10 @@ mod tests {
         );
 
         let mut state = State::builder().with_database(&mut db).build();
+        // with_all_activated() includes Rex2
         let hardforks = MegaHardforkConfig::default().with_all_activated();
 
-        // Deploy should update the contract with correct code
+        // Deploy should update the contract with correct code (Rex2 bytecode)
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
             .expect("Should return state");
@@ -250,8 +308,8 @@ mod tests {
         // Verify the updated account has the correct code hash
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
         assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH,
-            "Code hash should be updated to correct value"
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
+            "Code hash should be updated to Rex2 bytecode"
         );
     }
 
@@ -275,6 +333,82 @@ mod tests {
             account.is_touched(),
             "Deployed account must be marked as touched for state changes to take effect"
         );
+        assert!(account.is_created(), "Account should be marked as created");
+    }
+
+    #[test]
+    fn test_deploy_oracle_contract_pre_rex2() {
+        // Create a fresh in-memory database
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+        // Activate all hardforks except Rex2
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex2);
+
+        // Deploy the oracle contract
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        // Verify that the v1.0.0 (pre-Rex2) bytecode is deployed
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH,
+            "Should deploy v1.0.0 bytecode pre-Rex2"
+        );
+    }
+
+    #[test]
+    fn test_deploy_oracle_contract_rex2() {
+        // Create a fresh in-memory database
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+        // Activate all hardforks including Rex2
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        // Deploy the oracle contract
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        // Verify that the v1.1.0 (Rex2) bytecode is deployed
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
+            "Should deploy v1.1.0 bytecode on Rex2"
+        );
+    }
+
+    #[test]
+    fn test_deploy_oracle_contract_upgrade_to_rex2() {
+        // Create a database with the pre-Rex2 oracle contract already deployed
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            ORACLE_CONTRACT_ADDRESS,
+            AccountInfo {
+                balance: revm::primitives::U256::ZERO,
+                nonce: 0,
+                code_hash: ORACLE_CONTRACT_CODE_HASH,
+                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE)),
+            },
+        );
+
+        let mut state = State::builder().with_database(&mut db).build();
+        // Activate all hardforks including Rex2
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        // Deploy should upgrade the contract to Rex2 bytecode
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        // Verify that the contract was upgraded to v1.1.0
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
+            "Should upgrade to v1.1.0 bytecode on Rex2 activation"
+        );
+        assert!(account.is_touched(), "Account should be marked as touched");
         assert!(account.is_created(), "Account should be marked as created");
     }
 

@@ -7,18 +7,27 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use core::{cell::RefCell, convert::Infallible};
-use std::rc::Rc;
+use std::{rc::Rc, vec::Vec};
 
-use alloy_primitives::{Address, BlockNumber, B256, U256};
+use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
 use revm::primitives::HashMap;
 
 use crate::{BucketId, ExternalEnvFactory, ExternalEnvTypes, ExternalEnvs, OracleEnv, SaltEnv};
 
+/// A recorded oracle hint from `on_hint` calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedHint {
+    /// The user-defined hint topic.
+    pub topic: B256,
+    /// The hint data.
+    pub data: Bytes,
+}
+
 /// Configurable external environment implementation for testing.
 ///
-/// This struct provides mutable state for bucket capacities and oracle storage, allowing
-/// tests to set up specific scenarios. Bucket IDs are calculated using the real SALT hashing
-/// logic from the `salt` crate.
+/// This struct provides mutable state for bucket capacities, oracle storage, and recorded hints,
+/// allowing tests to set up specific scenarios and verify hint mechanism behavior. Bucket IDs are
+/// calculated using the real SALT hashing logic from the `salt` crate.
 ///
 /// # Example
 /// ```ignore
@@ -35,6 +44,8 @@ pub struct TestExternalEnvs<Error = Infallible> {
     /// Bucket capacities. Maps bucket IDs to their capacity values.
     /// Buckets not in this map default to [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
     bucket_capacity: Rc<RefCell<HashMap<BucketId, u64>>>,
+    /// Recorded hints from `on_hint` calls. Used for testing the hint mechanism.
+    recorded_hints: Rc<RefCell<Vec<RecordedHint>>>,
 }
 
 impl Default for TestExternalEnvs {
@@ -62,7 +73,20 @@ impl<Error: Unpin + Clone + 'static> TestExternalEnvs<Error> {
             _phantom: core::marker::PhantomData,
             oracle_storage: Rc::new(RefCell::new(HashMap::default())),
             bucket_capacity: Rc::new(RefCell::new(HashMap::default())),
+            recorded_hints: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+
+    /// Returns all recorded hints from `on_hint` calls.
+    ///
+    /// This is useful for testing that the hint mechanism is working correctly.
+    pub fn recorded_hints(&self) -> Vec<RecordedHint> {
+        self.recorded_hints.borrow().clone()
+    }
+
+    /// Clears all recorded hints.
+    pub fn clear_recorded_hints(&self) {
+        self.recorded_hints.borrow_mut().clear();
     }
 
     /// Configures a bucket to have a specific capacity.
@@ -166,5 +190,9 @@ impl<Error: Unpin> SaltEnv for TestExternalEnvs<Error> {
 impl<Error: Unpin> OracleEnv for TestExternalEnvs<Error> {
     fn get_oracle_storage(&self, slot: U256) -> Option<U256> {
         self.oracle_storage.borrow().get(&slot).copied()
+    }
+
+    fn on_hint(&self, topic: B256, data: Bytes) {
+        self.recorded_hints.borrow_mut().push(RecordedHint { topic, data });
     }
 }

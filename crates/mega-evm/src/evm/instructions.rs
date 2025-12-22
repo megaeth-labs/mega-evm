@@ -111,10 +111,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
-            MegaSpecId::REX | MegaSpecId::REX1 => EthInstructions::new(rex::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
+            MegaSpecId::REX | MegaSpecId::REX1 | MegaSpecId::REX2 => {
+                EthInstructions::new(rex::instruction_table::<
+                    EthInterpreter,
+                    MegaContext<DB, ExtEnvs>,
+                >())
+            }
         };
         Self { spec, inner: instruction_table }
     }

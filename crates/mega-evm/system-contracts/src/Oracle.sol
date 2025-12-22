@@ -19,6 +19,22 @@ contract Oracle is ISemver {
     /// @param valuesLength The length of the values array.
     error InvalidLength(uint256 slotsLength, uint256 valuesLength);
 
+    /// @notice Emitted a hint to the off-chain oracle service backend.
+    /// @dev This event enables on-chain contracts to communicate with the sequencer's oracle
+    /// service. The MegaETH EVM intercepts logs with this event signature from the oracle
+    /// contract and forwards them to the oracle service backend via `OracleEnv::on_hint`.
+    ///
+    /// The hint mechanism allows contracts to signal which data they will need from the oracle,
+    /// enabling the oracle service to prefetch or prepare data before it's requested.
+    ///
+    /// Event topics:
+    /// - topic[0]: Event signature hash (keccak256("Hint(bytes32,bytes)"))
+    /// - topic[1]: User-defined hint topic identifying what data is needed
+    ///
+    /// @param topic A user-defined identifier for the type of data being requested.
+    /// @param data Arbitrary data providing additional context for the hint.
+    event Hint(bytes32 indexed topic, bytes data);
+
     /// @notice Restricts function access to the system address only.
     /// @dev Reverts with NotSystemAddress if caller is not MEGA_SYSTEM_ADDRESS.
     modifier onlySystemAddress() {
@@ -37,13 +53,31 @@ contract Oracle is ISemver {
     /// @notice Returns the semantic version of this contract.
     /// @return version string in semver format.
     function version() external pure returns (string memory) {
-        return "1.0.0";
+        return "1.1.0";
     }
 
     /// @notice Initializes the Oracle contract with the system address.
     /// @param _megaSystemAddress The address authorized to modify oracle data.
     constructor(address _megaSystemAddress) {
         MEGA_SYSTEM_ADDRESS = _megaSystemAddress;
+    }
+
+    /// @notice Sends a hint to the off-chain oracle service backend.
+    /// @dev This function can be called by any contract to signal the oracle service about
+    /// upcoming data needs. The hint is intercepted by the MegaETH EVM during execution and
+    /// forwarded to the oracle service backend.
+    ///
+    /// Example use case: A contract that needs price data from an oracle can first send a hint
+    /// indicating which price feeds it will query, allowing the oracle service to prefetch
+    /// the data before the actual oracle read occurs.
+    ///
+    /// The order of hints and oracle reads is preserved: if a transaction emits a hint and
+    /// then reads oracle data, the hint is guaranteed to be processed before the read.
+    ///
+    /// @param topic A user-defined identifier for the type of hint (e.g., price feed ID).
+    /// @param data Additional context data for the hint (e.g., parameters, timestamps).
+    function sendHint(bytes32 topic, bytes calldata data) external {
+        emit Hint(topic, data);
     }
 
     /// @notice Reads a value from a specific storage slot.
