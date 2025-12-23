@@ -17,6 +17,8 @@ use crate::{BucketId, ExternalEnvFactory, ExternalEnvTypes, ExternalEnvs, Oracle
 /// A recorded oracle hint from `on_hint` calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedHint {
+    /// The sender address who called `sendHint`.
+    pub from: Address,
     /// The user-defined hint topic.
     pub topic: B256,
     /// The hint data.
@@ -192,7 +194,7 @@ impl<Error: Unpin> OracleEnv for TestExternalEnvs<Error> {
         self.oracle_storage.borrow().get(&slot).copied()
     }
 
-    fn on_hint(&self, topic: B256, data: Bytes) {
-        self.recorded_hints.borrow_mut().push(RecordedHint { topic, data });
+    fn on_hint(&self, from: Address, topic: B256, data: Bytes) {
+        self.recorded_hints.borrow_mut().push(RecordedHint { from, topic, data });
     }
 }

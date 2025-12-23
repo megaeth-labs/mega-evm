@@ -91,14 +91,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
     fn log(&mut self, log: Log) {
         // Oracle Hint Mechanism (Rex2+):
         //
-        // When enabled, the EVM intercepts `Hint(bytes32 indexed topic, bytes data)` events
-        // emitted by the oracle contract and forwards them to the oracle service backend via
-        // `OracleEnv::on_hint`. This allows on-chain contracts to signal the oracle service
-        // about upcoming data needs, enabling prefetching or preparation of oracle data.
+        // When enabled, the EVM intercepts `Hint(address indexed from, bytes32 indexed topic,
+        // bytes data)` events emitted by the oracle contract and forwards them to the oracle
+        // service backend via `OracleEnv::on_hint`. This allows on-chain contracts to signal the
+        // oracle service about upcoming data needs, enabling prefetching or preparation of oracle
+        // data.
         //
-        // The hint event has exactly 2 topics:
+        // The hint event has exactly 3 topics:
         //   - topic[0]: Event signature hash (ORACLE_HINT_EVENT_SIGHASH)
-        //   - topic[1]: User-defined hint topic (passed to on_hint)
+        //   - topic[1]: Sender address who called sendHint (indexed, passed to on_hint as `from`)
+        //   - topic[2]: User-defined hint topic (indexed, passed to on_hint as `topic`)
         //
         // The log data contains the ABI-encoded `bytes data` parameter:
         //   - bytes[0..32]: offset to bytes data (always 0x20)
@@ -109,10 +111,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         // processed before those reads, allowing the oracle service to prepare data in time.
         if self.spec.is_enabled(MegaSpecId::REX2) && log.address == ORACLE_CONTRACT_ADDRESS {
             let topics = log.topics();
-            if topics.len() == 2 && topics[0] == ORACLE_HINT_EVENT_SIGHASH {
+            if topics.len() == 3 && topics[0] == ORACLE_HINT_EVENT_SIGHASH {
+                // Extract the sender address from topic[1] (last 20 bytes of B256)
+                let from = Address::from_slice(&topics[1][12..]);
+                let topic = topics[2];
                 // Decode the ABI-encoded bytes data from the log
                 let hint_data = decode_abi_bytes(&log.data.data);
-                self.oracle_env.borrow().on_hint(topics[1], hint_data);
+                self.oracle_env.borrow().on_hint(from, topic, hint_data);
             }
         }
         self.inner.log(log)

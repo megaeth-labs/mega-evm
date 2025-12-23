@@ -232,8 +232,8 @@ contract OracleTest is Test {
     function testHintEventSignature() public pure {
         // Verify the Hint event signature matches the expected value in the Rust code
         // (ORACLE_HINT_EVENT_SIGHASH in src/system/oracle.rs)
-        bytes32 expectedSighash = 0x94a55b5dc535df5958093e3e051eecc6a33dfa721f7d345975ac53705dde0e47;
-        bytes32 computedSighash = keccak256("Hint(bytes32,bytes)");
+        bytes32 expectedSighash = 0x66fb93a1a31643ba6f5b14509e18f3f7b426927b61e0c6c4a9622895388982f1;
+        bytes32 computedSighash = keccak256("Hint(address,bytes32,bytes)");
         assertEq(computedSighash, expectedSighash, "Hint event signature mismatch");
     }
 
@@ -241,9 +241,10 @@ contract OracleTest is Test {
         bytes32 topic = bytes32(uint256(0x1234));
         bytes memory data = hex"deadbeef";
 
-        // Expect the Hint event to be emitted
-        vm.expectEmit(true, false, false, true);
-        emit Oracle.Hint(topic, data);
+        // Expect the Hint event to be emitted with msg.sender as the from address
+        // Both 'from' and 'topic' are indexed, so we check topics 1 and 2
+        vm.expectEmit(true, true, false, true);
+        emit Oracle.Hint(address(this), topic, data);
 
         oracle.sendHint(topic, data);
     }
@@ -254,8 +255,9 @@ contract OracleTest is Test {
         bytes memory data = hex"cafebabe";
 
         vm.prank(user);
-        vm.expectEmit(true, false, false, true);
-        emit Oracle.Hint(topic, data);
+        // Both 'from' and 'topic' are indexed, so we check topics 1 and 2
+        vm.expectEmit(true, true, false, true);
+        emit Oracle.Hint(user, topic, data);
 
         oracle.sendHint(topic, data);
     }

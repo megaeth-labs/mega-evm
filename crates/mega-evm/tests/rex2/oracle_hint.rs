@@ -1,9 +1,9 @@
 //! Tests for the oracle hint mechanism introduced in Rex2.
 //!
 //! The hint mechanism allows on-chain contracts to send signals to the off-chain oracle
-//! service backend via the `Hint(bytes32 indexed topic, bytes data)` event emitted by
-//! the oracle contract. The EVM intercepts these events and forwards them to the oracle
-//! service via `OracleEnv::on_hint`.
+//! service backend via the `Hint(address indexed from, bytes32 indexed topic, bytes data)`
+//! event emitted by the oracle contract. The EVM intercepts these events and forwards them
+//! to the oracle service via `OracleEnv::on_hint`.
 
 use alloy_primitives::{address, bytes, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{sol, SolCall};
@@ -13,7 +13,7 @@ use mega_evm::{
     ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2, ORACLE_HINT_EVENT_SIGHASH,
 };
 use revm::{
-    bytecode::opcode::{CALL, GAS, LOG2, MSTORE, PUSH0},
+    bytecode::opcode::{CALL, GAS, LOG3, MSTORE, PUSH0},
     context::TxEnv,
     inspector::NoOpInspector,
 };
@@ -66,9 +66,15 @@ fn execute_transaction_with_data(
     result_envelope.result
 }
 
-/// Creates bytecode that emits a LOG2 event with the given topics.
-/// LOG2 takes: offset, size, topic0, topic1 from stack (topic1 at top)
-fn create_log2_bytecode(topic0: B256, topic1: B256, data: &[u8]) -> Bytes {
+/// Creates bytecode that emits a LOG3 event with the given topics.
+/// LOG3 takes: offset, size, topic0, topic1, topic2 from stack (topic2 at top)
+/// For the Hint event: topic0=signature, topic1=from address, topic2=user topic
+fn create_log3_bytecode(
+    topic0: B256,
+    topic1_from: alloy_primitives::Address,
+    topic2_topic: B256,
+    data: &[u8],
+) -> Bytes {
     let mut builder = BytecodeBuilder::default();
 
     // Store data in memory at offset 0
@@ -81,12 +87,16 @@ fn create_log2_bytecode(topic0: B256, topic1: B256, data: &[u8]) -> Bytes {
         }
     }
 
+    // Convert address to B256 (left-padded with zeros)
+    let from_as_b256 = B256::left_padding_from(topic1_from.as_slice());
+
     builder
-        .push_bytes(topic1.as_slice()) // topic1 (user-defined topic)
+        .push_bytes(topic2_topic.as_slice()) // topic2 (user-defined topic)
+        .push_bytes(from_as_b256.as_slice()) // topic1 (from address, padded to 32 bytes)
         .push_bytes(topic0.as_slice()) // topic0 (event signature)
         .push_number(data.len() as u8) // size
         .push_number(0u8) // offset
-        .append(LOG2)
+        .append(LOG3)
         .stop()
         .build()
 }
@@ -192,9 +202,10 @@ fn test_on_hint_called_on_rex2() {
 
     assert!(result.is_success(), "Transaction should succeed");
 
-    // Verify that on_hint was called with the correct topic and data
+    // Verify that on_hint was called with the correct from, topic and data
     let hints = external_envs.recorded_hints();
     assert_eq!(hints.len(), 1, "Should have recorded exactly one hint");
+    assert_eq!(hints[0].from, CALLEE, "Hint from should be the caller contract");
     assert_eq!(hints[0].topic, user_topic, "Hint topic should match");
     assert_eq!(hints[0].data, hint_data, "Hint data should match");
 }
@@ -229,9 +240,11 @@ fn test_on_hint_not_called_on_rex1() {
 fn test_on_hint_not_called_for_non_oracle_contract() {
     let user_topic = B256::from_slice(&[0x42u8; 32]);
     let hint_data = bytes!("deadbeef");
+    let fake_from = address!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
     // CALLEE (not oracle) emits a log that looks like a Hint event
-    let callee_code = create_log2_bytecode(ORACLE_HINT_EVENT_SIGHASH, user_topic, &hint_data);
+    let callee_code =
+        create_log3_bytecode(ORACLE_HINT_EVENT_SIGHASH, fake_from, user_topic, &hint_data);
 
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, callee_code);
@@ -272,11 +285,13 @@ fn test_multiple_hints_recorded() {
 
     assert!(result.is_success(), "Transaction should succeed");
 
-    // Verify that both hints were recorded
+    // Verify that both hints were recorded with correct from addresses
     let hints = external_envs.recorded_hints();
     assert_eq!(hints.len(), 2, "Should have recorded two hints");
+    assert_eq!(hints[0].from, CALLEE, "First hint from should be the caller contract");
     assert_eq!(hints[0].topic, topic1, "First hint topic should match");
     assert_eq!(hints[0].data, data1, "First hint data should match");
+    assert_eq!(hints[1].from, CALLEE, "Second hint from should be the caller contract");
     assert_eq!(hints[1].topic, topic2, "Second hint topic should match");
     assert_eq!(hints[1].data, data2, "Second hint data should match");
 }
@@ -305,9 +320,10 @@ fn test_on_hint_direct_oracle_call() {
 
     assert!(result.is_success(), "Transaction should succeed");
 
-    // Verify that on_hint was called
+    // Verify that on_hint was called with CALLER as the from address (direct call)
     let hints = external_envs.recorded_hints();
     assert_eq!(hints.len(), 1, "Should have recorded exactly one hint");
+    assert_eq!(hints[0].from, CALLER, "Hint from should be the transaction caller");
     assert_eq!(hints[0].topic, user_topic, "Hint topic should match");
     assert_eq!(hints[0].data, hint_data, "Hint data should match");
 }

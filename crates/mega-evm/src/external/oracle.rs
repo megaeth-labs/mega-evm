@@ -2,7 +2,7 @@
 
 use core::fmt::Debug;
 
-use alloy_primitives::{Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use auto_impl::auto_impl;
 
 use crate::EmptyExternalEnv;
@@ -29,9 +29,14 @@ pub trait OracleEnv: Debug + Unpin {
     /// Receives hints emitted on-chain by the oracle contract via logs. A hint is a signal sent
     /// from on-chain to the oracle service backend (on the sequencer).
     ///
-    /// Hint logs have exactly two topics:
-    /// - `topic[0]`: internal hint type identifier (used by the oracle contract)
-    /// - `topic[1]`: user-defined hint topic (passed to this method as `topic`)
+    /// Hint logs have exactly three topics:
+    /// - `topic[0]`: event signature hash (used by the oracle contract)
+    /// - `topic[1]`: the sender address who called `sendHint` (passed to this method as `from`)
+    /// - `topic[2]`: user-defined hint topic (passed to this method as `topic`)
+    ///
+    /// The `from` address is useful for off-chain access control, as the `msg.sender` cannot be
+    /// faked. On-chain access control can be enforced in a periphery contract which directly
+    /// calls `sendHint`.
     ///
     /// The order of hinting ([`Self::on_hint`]) and oracle reading ([`Self::get_oracle_storage`])
     /// is guaranteed preserved, i.e., if the on-chain transaction emits a hint log first and then
@@ -40,7 +45,7 @@ pub trait OracleEnv: Debug + Unpin {
     /// One example application is telling the off-chain oracle service which data needs to be
     /// fetched before it provides any oracle data. Handling hints is completely optional for the
     /// oracle service backend.
-    fn on_hint(&self, _topic: B256, _data: Bytes) {}
+    fn on_hint(&self, _from: Address, _topic: B256, _data: Bytes) {}
 }
 
 impl OracleEnv for EmptyExternalEnv {

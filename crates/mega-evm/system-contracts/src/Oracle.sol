@@ -28,12 +28,16 @@ contract Oracle is ISemver {
     /// enabling the oracle service to prefetch or prepare data before it's requested.
     ///
     /// Event topics:
-    /// - topic[0]: Event signature hash (keccak256("Hint(bytes32,bytes)"))
-    /// - topic[1]: User-defined hint topic identifying what data is needed
+    /// - topic[0]: Event signature hash (keccak256("Hint(address,bytes32,bytes)"))
+    /// - topic[1]: The direct caller of `sendHint` (indexed)
+    /// - topic[2]: User-defined hint topic identifying what data is needed (indexed)
     ///
+    /// @param from The direct caller of `sendHint`, i.e., the account who sends the hint. 
+    ///             This is useful for off-chain access control as the `msg.sender` cannot be faked. 
+    ///             On-chain access control can be enforced in a periphery contract which directly calls `sendHint`.
     /// @param topic A user-defined identifier for the type of data being requested.
     /// @param data Arbitrary data providing additional context for the hint.
-    event Hint(bytes32 indexed topic, bytes data);
+    event Hint(address indexed from, bytes32 indexed topic, bytes data);
 
     /// @notice Restricts function access to the system address only.
     /// @dev Reverts with NotSystemAddress if caller is not MEGA_SYSTEM_ADDRESS.
@@ -77,7 +81,7 @@ contract Oracle is ISemver {
     /// @param topic A user-defined identifier for the type of hint (e.g., price feed ID).
     /// @param data Additional context data for the hint (e.g., parameters, timestamps).
     function sendHint(bytes32 topic, bytes calldata data) external {
-        emit Hint(topic, data);
+        emit Hint(msg.sender, topic, data);
     }
 
     /// @notice Reads a value from a specific storage slot.
