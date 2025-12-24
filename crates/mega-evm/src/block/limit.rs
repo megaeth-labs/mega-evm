@@ -818,7 +818,6 @@ impl BlockLimiter {
                 hash: tx_hash,
                 error: Box::new(MegaBlockLimitExceededError::TransactionDataLimit {
                     block_used: self.block_data_used,
-                    tx_used: 0,
                     limit: self.limits.block_txs_data_limit,
                 }),
             }));
@@ -830,7 +829,6 @@ impl BlockLimiter {
                 hash: tx_hash,
                 error: Box::new(MegaBlockLimitExceededError::KVUpdateLimit {
                     block_used: self.block_kv_updates_used,
-                    tx_used: 0,
                     limit: self.limits.block_kv_update_limit,
                 }),
             }));
@@ -842,7 +840,6 @@ impl BlockLimiter {
                 hash: tx_hash,
                 error: Box::new(MegaBlockLimitExceededError::ComputeGasLimit {
                     block_used: self.block_compute_gas_used,
-                    tx_used: 0,
                     limit: self.limits.block_compute_gas_limit,
                 }),
             }));
@@ -854,7 +851,6 @@ impl BlockLimiter {
                 hash: tx_hash,
                 error: Box::new(MegaBlockLimitExceededError::StateGrowthLimit {
                     block_used: self.block_state_growth_used,
-                    tx_used: 0,
                     limit: self.limits.block_state_growth_limit,
                 }),
             }));
