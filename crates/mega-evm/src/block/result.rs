@@ -82,41 +82,33 @@ impl InvalidTxError for MegaTxLimitExceededError {
     }
 }
 
-/// Error type for block-level limit exceeded. These errors are only thrown after the transaction
-/// execution but before any changes are committed to the database.
+/// Error type for block-level limit exceeded. These errors are thrown when the block has already
+/// exceeded its limit (from a previous transaction) and no more transactions can be added.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MegaBlockLimitExceededError {
-    /// Block transactions data limit exceeded.
-    #[error(
-        "Block transactions data limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}"
-    )]
+    /// Block transactions data limit reached.
+    #[error("Block transactions data limit reached: block_used={block_used} >= limit={limit}")]
     TransactionDataLimit {
         /// Transaction data used by block so far
         block_used: u64,
-        /// Transaction data used by current transaction
-        tx_used: u64,
         /// Block transactions data limit
         limit: u64,
     },
 
-    /// Block KV update limit exceeded.
-    #[error("Block KV update limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    /// Block KV update limit reached.
+    #[error("Block KV update limit reached: block_used={block_used} >= limit={limit}")]
     KVUpdateLimit {
         /// KV updates used by block so far
         block_used: u64,
-        /// KV updates used by current transaction
-        tx_used: u64,
         /// Block KV update limit
         limit: u64,
     },
 
-    /// Block compute gas limit exceeded.
-    #[error("Block compute gas limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    /// Block compute gas limit reached.
+    #[error("Block compute gas limit reached: block_used={block_used} >= limit={limit}")]
     ComputeGasLimit {
         /// Compute gas used by block so far
         block_used: u64,
-        /// Compute gas used by current transaction
-        tx_used: u64,
         /// Block compute gas limit
         limit: u64,
     },
@@ -143,13 +135,11 @@ pub enum MegaBlockLimitExceededError {
         limit: u64,
     },
 
-    /// Block state growth limit exceeded.
-    #[error("Block state growth limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    /// Block state growth limit reached.
+    #[error("Block state growth limit reached: block_used={block_used} >= limit={limit}")]
     StateGrowthLimit {
         /// State growth used by block so far
         block_used: u64,
-        /// State growth used by current transaction
-        tx_used: u64,
         /// Block state growth limit
         limit: u64,
     },
@@ -165,18 +155,6 @@ impl MegaBlockLimitExceededError {
             Self::TransactionEncodeSizeLimit { block_used, .. } |
             Self::DataAvailabilitySizeLimit { block_used, .. } |
             Self::StateGrowthLimit { block_used, .. } => *block_used,
-        }
-    }
-
-    /// The amount of the resource used by the current transaction.
-    pub fn tx_used(&self) -> u64 {
-        match self {
-            Self::TransactionDataLimit { tx_used, .. } |
-            Self::KVUpdateLimit { tx_used, .. } |
-            Self::ComputeGasLimit { tx_used, .. } |
-            Self::TransactionEncodeSizeLimit { tx_used, .. } |
-            Self::DataAvailabilitySizeLimit { tx_used, .. } |
-            Self::StateGrowthLimit { tx_used, .. } => *tx_used,
         }
     }
 
