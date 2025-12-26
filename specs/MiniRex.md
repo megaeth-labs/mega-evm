@@ -131,6 +131,8 @@ MiniRex enforces the following resource limits.
 
 Other limits are left unlimited.
 
+**Note**: The max total gas limit for either a single transaction or a whole block is not limited by the EVM spec; it is a chain-configurable parameter.
+
 ### 2.7 Oracle Contract
 
 The oracle contract (as defined in [ORACLE_SERVICE.md](../docs/ORACLE_SERVICE.md)) will be deployed as pre-execution state changes in the first block of MiniRex hardfork at address `0x6342000000000000000000000000000000000001`.
