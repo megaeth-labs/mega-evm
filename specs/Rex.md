@@ -129,6 +129,8 @@ Rex unifies the behaviors of all CALL-like opcodes.
 - Transaction compute gas limit: 1B → 200M (5× decrease)
 - Block compute gas limit: Unlimited (unchanged)
 
+**Note**: The max total gas limit (storage + compute gas) is unlimited.
+
 #### 2.4.3 State Growth Limits
 
 | Spec        | Transaction Limit    | Block Limit          |
@@ -165,6 +167,7 @@ Rex unifies the behaviors of all CALL-like opcodes.
 - All limits checked during/after execution
 - KV updates: all storage writes (including updates to existing slots)
 - State growth: only new entries (0→non-0 writes, new accounts, new code)
+- The max total gas limit for either a single transaction or a whole block is not limited by the EVM spec; it is a chain-configurable parameter.
 
 ## 3. Specification Mapping
 
