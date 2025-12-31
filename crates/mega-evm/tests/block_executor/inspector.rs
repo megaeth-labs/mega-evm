@@ -391,8 +391,8 @@ fn test_inspector_early_return_create_with_additional_limits() {
     let mut executor = block_executor_factory
         .create_executor_with_inspector(&mut state, block_ctx, evm_env, inspector);
 
-    // Execute contract creation transaction - this triggers the CREATE that the inspector intercepts
-    // Init code is just STOP (0x00)
+    // Execute contract creation transaction - this triggers the CREATE that the inspector
+    // intercepts Init code is just STOP (0x00)
     // Use higher gas limit to cover MiniRex initial gas costs for CREATE transactions
     let init_code = Bytes::from(vec![0x00]);
     let tx = create_deploy_transaction(0, 10_000_000, init_code);
