@@ -196,6 +196,17 @@ impl AdditionalLimit {
         }
     }
 
+    /// Called when inspector intercepts and skips a call/create.
+    ///
+    /// Pushes an empty frame to all trackers so `frame_return_result` can pop them
+    /// to keep stacks aligned.
+    #[inline]
+    pub(crate) fn on_inspector_intercept(&mut self) {
+        self.data_size_tracker.on_inspector_intercept();
+        self.kv_update_counter.on_inspector_intercept();
+        self.state_growth_tracker.on_inspector_intercept();
+    }
+
     /// Sets the compute gas limit to a new value.
     /// This is used to dynamically lower the compute gas limit when volatile data is accessed.
     /// The new limit must be lower than the current limit.

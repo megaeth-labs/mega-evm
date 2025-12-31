@@ -160,6 +160,14 @@ impl StateGrowthTracker {
     pub(crate) const fn exceeds_limit(&self, limit: u64) -> bool {
         self.current_growth() > limit
     }
+
+    /// Called when inspector intercepts and skips a call/create.
+    ///
+    /// Pushes an empty frame so `end_frame` can pop it to keep the stack aligned.
+    #[inline]
+    pub(crate) fn on_inspector_intercept(&mut self) {
+        self.frame_stack.push(FrameInfo { discardable: 0 });
+    }
 }
 
 impl StateGrowthTracker {
