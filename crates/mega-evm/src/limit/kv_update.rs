@@ -61,6 +61,18 @@ impl KVUpdateCounter {
     pub(crate) const fn exceeds_limit(&self, limit: u64) -> bool {
         self.current_count() > limit
     }
+
+    /// Called when inspector intercepts and skips a call/create.
+    ///
+    /// Pushes an empty frame so `end_frame` can pop it to keep the stack aligned.
+    #[inline]
+    pub(crate) fn on_inspector_intercept(&mut self) {
+        self.frame_stack.push(super::data_size::FrameInfo {
+            discardable: 0,
+            target_address: None,
+            target_updated: false,
+        });
+    }
 }
 
 impl KVUpdateCounter {

@@ -21,7 +21,8 @@ use revm::{
         ItemOrResult,
     },
     inspector::{
-        handler::frame_end, inspect_instructions, InspectorEvmTr, InspectorFrame, InspectorHandler,
+        handler::{frame_end, frame_start},
+        inspect_instructions, InspectorEvmTr, InspectorFrame, InspectorHandler,
     },
     interpreter::{
         gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
@@ -749,6 +750,45 @@ where
             self.inner.frame_stack.get(),
             &mut self.inner.instruction,
         )
+    }
+
+    /// Override `inspect_frame_init` to handle the case when inspector returns early.
+    ///
+    /// When an inspector's `call` or `create` hook returns `Some(outcome)`, the default
+    /// implementation returns early without calling `frame_init`. This means no frame is
+    /// pushed to the additional limit trackers. However, `frame_return_result` will still
+    /// be called and expect to pop a frame.
+    ///
+    /// To keep the frame stacks aligned, we push a dummy frame when inspector returns early.
+    #[inline]
+    fn inspect_frame_init(
+        &mut self,
+        mut frame_init: <Self::Frame as FrameTr>::FrameInit,
+    ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
+        let (ctx, inspector) = self.ctx_inspector();
+
+        // Check if inspector wants to skip this call/create
+        if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            // Inspector intercepted this call/create - notify additional limit trackers
+            if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+                ctx.additional_limit.borrow_mut().on_inspector_intercept();
+            }
+            frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
+            return Ok(ItemOrResult::Result(output));
+        }
+
+        // Normal path - delegate to frame_init (which pushes a real frame)
+        let frame_input = frame_init.frame_input.clone();
+        if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
+            let (ctx, inspector) = self.ctx_inspector();
+            frame_end(ctx, inspector, &frame_input, &mut output);
+            return Ok(ItemOrResult::Result(output));
+        }
+
+        // Frame created successfully - initialize the interpreter
+        let (ctx, inspector, frame) = self.ctx_inspector_frame();
+        inspector.initialize_interp(frame.interpreter(), ctx);
+        Ok(ItemOrResult::Item(frame))
     }
 
     /// This method copies the logic from `MegaEvm::frame_run` with inspector support.
