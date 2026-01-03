@@ -928,6 +928,7 @@ impl BlockLimiter {
     ///
     /// This mirrors [`post_execution_check`](Self::post_execution_check) but takes precomputed
     /// resource usage values instead of a full execution outcome.
+    #[allow(clippy::too_many_arguments)]
     pub fn post_execution_update_raw(
         &mut self,
         gas_used: u64,
