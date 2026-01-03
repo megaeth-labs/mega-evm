@@ -910,35 +910,73 @@ impl BlockLimiter {
     ) -> Result<(), BlockExecutionError> {
         let is_deposit = outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
 
+        self.post_execution_update_raw(
+            outcome.result.gas_used(),
+            outcome.tx_size,
+            outcome.da_size,
+            outcome.data_size,
+            outcome.kv_updates,
+            outcome.compute_gas_used,
+            outcome.state_growth_used,
+            is_deposit,
+        );
+
+        Ok(())
+    }
+
+    /// Update usage counters after transaction execution using raw values.
+    ///
+    /// This mirrors [`post_execution_check`](Self::post_execution_check) but takes precomputed
+    /// resource usage values instead of a full execution outcome.
+    pub fn post_execution_update_raw(
+        &mut self,
+        gas_used: u64,
+        tx_size: u64,
+        da_size: u64,
+        tx_data: u64,
+        kv_updates: u64,
+        compute_gas_used: u64,
+        state_growth_used: u64,
+        is_deposit: bool,
+    ) {
         // Block gas limit. No need to check here since it's checked before transaction execution.
-        self.block_gas_used += outcome.result.gas_used();
+        self.block_gas_used += gas_used;
 
         // Block tx size limit, no need to check here since it's checked before transaction
         // execution.
-        self.block_tx_size_used += outcome.tx_size;
+        self.block_tx_size_used += tx_size;
 
         // Block da size limit, no need to check here since it's checked before transaction
         // execution. Only appliable for non-deposit transactions.
         if !is_deposit {
-            self.block_da_size_used += outcome.da_size;
+            self.block_da_size_used += da_size;
         }
 
         // Block data limit, no need to check here since we allow the last transaction to exceed the
         // limit.
-        self.block_data_used += outcome.data_size;
+        self.block_data_used += tx_data;
 
         // Block kv updates limit, no need to check here since we allow the last transaction to
         // exceed the limit.
-        self.block_kv_updates_used += outcome.kv_updates;
+        self.block_kv_updates_used += kv_updates;
 
         // Block compute gas limit, no need to check here since we allow the last transaction to
         // exceed the limit.
-        self.block_compute_gas_used += outcome.compute_gas_used;
+        self.block_compute_gas_used += compute_gas_used;
 
         // Block state growth limit, no need to check here since we allow the last transaction to
         // exceed the limit.
-        self.block_state_growth_used += outcome.state_growth_used;
+        self.block_state_growth_used += state_growth_used;
+    }
 
-        Ok(())
+    /// Returns true if any block-level limit has been reached or exceeded.
+    pub fn is_block_limit_exceeded(&self) -> bool {
+        self.block_gas_used >= self.limits.block_gas_limit ||
+            self.block_tx_size_used >= self.limits.block_txs_encode_size_limit ||
+            self.block_da_size_used >= self.limits.block_da_size_limit ||
+            self.block_data_used >= self.limits.block_txs_data_limit ||
+            self.block_kv_updates_used >= self.limits.block_kv_update_limit ||
+            self.block_compute_gas_used >= self.limits.block_compute_gas_limit ||
+            self.block_state_growth_used >= self.limits.block_state_growth_limit
     }
 }
