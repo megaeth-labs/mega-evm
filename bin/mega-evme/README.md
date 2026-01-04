@@ -244,7 +244,7 @@ These options are available across all commands.
 
 | Option                 | Default | Description                               |
 | ---------------------- | ------- | ----------------------------------------- |
-| `--state.fork <FORK>`  | MiniRex | Hardfork: `MiniRex`, `Equivalence`, `Rex` |
+| `--state.fork <FORK>`  | MiniRex | Hardfork: `MiniRex`, `Equivalence`, `Rex`, `Rex1`, `Rex2` |
 | `--state.chainid <ID>` | 6342    | Chain ID                                  |
 
 ### Block Environment

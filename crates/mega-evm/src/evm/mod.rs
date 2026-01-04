@@ -13,10 +13,13 @@
 //!
 //! # EVM Specifications
 //!
-//! `MegaETH` supports two EVM specifications:
+//! `MegaETH` supports multiple EVM specifications:
 //!
-//! - **`EQUIVALENCE`**: Maintains equivalence with Optimism Isthmus EVM (default)
+//! - **`EQUIVALENCE`**: Maintains equivalence with Optimism Isthmus EVM
 //! - **`MINI_REX`**: Enhanced version with quadratic LOG costs and disabled SELFDESTRUCT
+//! - **`REX`**: Fixes `MiniRex` call opcode inconsistencies and refines storage gas
+//! - **`REX1`**: Resets compute gas limits between transactions
+//! - **`REX2`**: Re-enables SELFDESTRUCT with EIP-6780 semantics
 
 mod context;
 mod execution;

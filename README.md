@@ -16,8 +16,8 @@ This repository contains a customized version of the revm EVM implementation spe
 
 This codebase distinguishes between two related concepts:
 
-- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`
-- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`
+- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`
+- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`
 
 Multiple hardforks can map to the same spec. For example, both `MiniRex` and `MiniRex2` hardforks use the `MINI_REX` spec.
 
@@ -51,6 +51,20 @@ For complete MiniRex specification, see **[MiniRex.md](./specs/MiniRex.md)**.
 - **MiniRex Foundation**: Inherits all MiniRex features including multidimensional gas model, compute gas detention, and enhanced security
 
 For complete Rex specification, see **[Rex.md](./specs/Rex.md)**.
+
+### REX1 Spec
+
+- **Limit Reset Fix**: Resets compute gas limits at the start of each transaction
+- **No Other Behavioral Changes**: Inherits Rex semantics fully
+
+For complete Rex1 specification, see **[Rex1.md](./specs/Rex1.md)**.
+
+### REX2 Spec
+
+- **SELFDESTRUCT Restored**: Re-enabled with EIP-6780 semantics
+- **Rex1 Baseline**: Inherits Rex1 behavior for all other features
+
+For complete Rex2 specification, see **[Rex2.md](./specs/Rex2.md)**.
 
 ## Quick Start
 

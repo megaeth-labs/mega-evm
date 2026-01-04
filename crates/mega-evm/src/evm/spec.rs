@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 /// - [`SpecId::MINI_REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX1`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::REX2`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 #[repr(u8)]
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
@@ -33,8 +34,10 @@ pub enum MegaSpecId {
     /// The EVM version for the *Rex* hardfork of `MegaETH`.
     REX,
     /// The EVM version for the *Rex1* hardfork of `MegaETH`.
-    #[default]
     REX1,
+    /// The EVM version for the *Rex2* hardfork of `MegaETH`.
+    #[default]
+    REX2,
 }
 
 /// String identifiers for `MegaETH` EVM versions.
@@ -48,6 +51,8 @@ pub mod name {
     pub const REX: &str = "Rex";
     /// The string identifier for the *Rex1* version of the `MegaETH` EVM.
     pub const REX1: &str = "Rex1";
+    /// The string identifier for the *Rex2* version of the `MegaETH` EVM.
+    pub const REX2: &str = "Rex2";
 }
 
 impl MegaSpecId {
@@ -59,7 +64,9 @@ impl MegaSpecId {
     /// Converts the [`SpecId`] into its corresponding [`OpSpecId`].
     pub const fn into_op_spec(self) -> OpSpecId {
         match self {
-            Self::MINI_REX | Self::EQUIVALENCE | Self::REX | Self::REX1 => OpSpecId::ISTHMUS,
+            Self::MINI_REX | Self::EQUIVALENCE | Self::REX | Self::REX1 | Self::REX2 => {
+                OpSpecId::ISTHMUS
+            }
         }
     }
 
@@ -80,6 +87,7 @@ impl From<MegaSpecId> for &'static str {
             MegaSpecId::MINI_REX => name::MINI_REX,
             MegaSpecId::REX => name::REX,
             MegaSpecId::REX1 => name::REX1,
+            MegaSpecId::REX2 => name::REX2,
         }
     }
 }
@@ -94,6 +102,7 @@ impl FromStr for MegaSpecId {
             name::MINI_REX => Ok(Self::MINI_REX),
             name::REX => Ok(Self::REX),
             name::REX1 => Ok(Self::REX1),
+            name::REX2 => Ok(Self::REX2),
             _ => Err(UnknownHardfork),
         }
     }

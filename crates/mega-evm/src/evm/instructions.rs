@@ -45,8 +45,9 @@ use revm::{
 /// - Data limit enforcement: Halts when total transaction data exceeds 3.125 MB
 ///
 /// ## SELFDESTRUCT Opcode
-/// - Completely disabled in Mini-Rex spec
-/// - Halts with `InvalidFEOpcode` to prevent permanent contract destruction
+/// - Disabled in Mini-Rex, Rex, and Rex1 specs
+/// - Re-enabled in Rex2 with EIP-6780 semantics
+/// - When disabled, halts with `InvalidFEOpcode` to prevent contract destruction
 ///
 /// ## SSTORE Opcode
 /// - Compute gas: Standard EIP-2200/EIP-2929 costs
@@ -88,8 +89,8 @@ use revm::{
 ///
 /// # Assumptions
 ///
-/// This instruction table is only used when the `MINI_REX` spec is enabled, so we can safely assume
-/// that all features before and including Mini-Rex are enabled.
+/// This instruction table is only used when the `MINI_REX` spec (or later) is enabled, so we can
+/// safely assume that all features before and including Mini-Rex are enabled.
 #[derive(Clone)]
 pub struct MegaInstructions<DB: Database, ExtEnvs: ExternalEnvTypes> {
     spec: MegaSpecId,
@@ -115,6 +116,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
+            MegaSpecId::REX2 => EthInstructions::new(rex2::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
         };
         Self { spec, inner: instruction_table }
     }
@@ -134,7 +139,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> InstructionProvider
 mod rex {
     use super::*;
 
-    /// Returns the instruction table for the `REX` spec.
+    /// Returns the instruction table for the `REX` and `REX1` specs.
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
@@ -149,6 +154,26 @@ mod rex {
         table[CALLCODE as usize] = forward_gas_ext::call_code;
         table[DELEGATECALL as usize] = forward_gas_ext::delegate_call;
         table[STATICCALL as usize] = forward_gas_ext::static_call;
+
+        table
+    }
+}
+
+mod rex2 {
+    use super::*;
+
+    /// Returns the instruction table for the `REX2` spec.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        use revm::bytecode::opcode::*;
+        let mut table = rex::instruction_table::<WIRE, H>();
+
+        table[SELFDESTRUCT as usize] = compute_gas_ext::selfdestruct;
 
         table
     }

@@ -100,6 +100,9 @@ mega-evme run 0x60016000526001601ff3 --gas 5000000
 
 - `--state.fork <FORK>`: EVM fork/spec (default: mini-rex)
   - `mini-rex`: MegaETH MiniRex hardfork
+  - `rex`: MegaETH Rex hardfork
+  - `rex1`: MegaETH Rex1 hardfork
+  - `rex2`: MegaETH Rex2 hardfork
   - `equivalence`: Optimism Isthmus compatibility mode
 - `--state.chainid <ID>`: Chain ID (default: 6342)
 
