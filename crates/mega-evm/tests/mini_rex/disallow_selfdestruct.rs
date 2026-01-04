@@ -1,4 +1,4 @@
-//! Tests for the disabled SELFDESTRUCT opcode after Mini-Rex hardfork.
+//! Tests for the disabled SELFDESTRUCT opcode in the Mini-Rex spec.
 
 use alloy_primitives::{address, Bytes, U256};
 use mega_evm::{

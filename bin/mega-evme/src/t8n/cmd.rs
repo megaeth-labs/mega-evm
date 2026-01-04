@@ -88,7 +88,7 @@ pub struct Cmd {
     #[arg(long = "input.txs", default_value = "stdin")]
     pub input_txs: String,
 
-    /// Name of hardfork to use, possible values: `Rex`, `MiniRex`, `Equivalence`
+    /// Name of hardfork to use, possible values: `Rex`, `Rex1`, `Rex2`, `MiniRex`, `Equivalence`
     #[arg(long = "state.fork", default_value = "MiniRex")]
     pub fork: String,
 

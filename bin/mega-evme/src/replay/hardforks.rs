@@ -9,20 +9,23 @@ pub fn get_hardfork_config(chain_id: u64) -> MegaHardforkConfig {
             .with(MegaHardfork::MiniRex1, ForkCondition::Never)
             .with(MegaHardfork::MiniRex2, ForkCondition::Never)
             .with(MegaHardfork::Rex, ForkCondition::Timestamp(1764694618))
-            .with(MegaHardfork::Rex1, ForkCondition::Never),
+            .with(MegaHardfork::Rex1, ForkCondition::Never)
+            .with(MegaHardfork::Rex2, ForkCondition::Never),
         // MegaETH mainnet
         4326 => MegaHardforkConfig::new()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
             .with(MegaHardfork::MiniRex1, ForkCondition::Timestamp(1764845637))
             .with(MegaHardfork::MiniRex2, ForkCondition::Timestamp(1764849932))
             .with(MegaHardfork::Rex, ForkCondition::Timestamp(1764851940))
-            .with(MegaHardfork::Rex1, ForkCondition::Never),
+            .with(MegaHardfork::Rex1, ForkCondition::Never)
+            .with(MegaHardfork::Rex2, ForkCondition::Never),
         // Default: all hardforks enabled at genesis
         _ => MegaHardforkConfig::new()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
             .with(MegaHardfork::MiniRex1, ForkCondition::Timestamp(0))
             .with(MegaHardfork::MiniRex2, ForkCondition::Timestamp(0))
             .with(MegaHardfork::Rex, ForkCondition::Timestamp(0))
-            .with(MegaHardfork::Rex1, ForkCondition::Timestamp(0)),
+            .with(MegaHardfork::Rex1, ForkCondition::Timestamp(0))
+            .with(MegaHardfork::Rex2, ForkCondition::Timestamp(0)),
     }
 }
