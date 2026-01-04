@@ -971,7 +971,7 @@ impl BlockLimiter {
     }
 
     /// Returns true if any block-level limit has been reached or exceeded.
-    pub fn is_block_limit_exceeded(&self) -> bool {
+    pub fn is_block_limit_reached(&self) -> bool {
         self.block_gas_used >= self.limits.block_gas_limit ||
             self.block_tx_size_used >= self.limits.block_txs_encode_size_limit ||
             self.block_da_size_used >= self.limits.block_da_size_limit ||
