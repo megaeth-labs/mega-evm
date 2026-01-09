@@ -290,7 +290,7 @@ where
                 if *top_value == magic_value {
                     if self.seen_magic_value {
                         // Subsequent read: override the value in place
-                        *top_value = U256::from(0x647fb7270fdc2u64);
+                        *top_value = U256::from(0);
                         println!("Overriding SLOAD value to 0x647fb7270fdc2");
                     } else {
                         // First read: mark as seen, don't modify
