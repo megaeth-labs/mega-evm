@@ -276,7 +276,7 @@ impl CustomInspector {
     /// Reset the seen_magic_value flag.
     /// Called before each transaction via CombinedInspector::fuse().
     pub fn reset(&mut self) {
-        self.seen_magic_value = true;
+        self.seen_magic_value = false;
     }
 }
 
