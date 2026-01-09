@@ -9,6 +9,7 @@ use alloy_rpc_types_trace::geth::{
 use clap::{Parser, ValueEnum};
 use mega_evm::{
     revm::{
+        bytecode::opcode::SLOAD,
         context::{
             result::{ExecutionResult, ResultAndState},
             ContextTr,
@@ -267,6 +268,8 @@ impl TraceArgs {
 pub struct CustomInspector {
     /// Tracks if we've seen the magic SLOAD value in this transaction
     seen_magic_value: bool,
+    /// The opcode that was just executed (captured in step, used in step_end)
+    current_opcode: u8,
 }
 
 impl CustomInspector {
@@ -281,16 +284,21 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CustomInspector
 where
     CTX: ContextTr,
 {
+    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        // Capture the opcode before it executes (PC advances after execution)
+        self.current_opcode = interp.bytecode.opcode();
+    }
+
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
-        // SLOAD opcode = 0x54
-        if interp.bytecode.opcode() == 0x54 {
+        // Check the opcode that was captured in step (not current PC which has advanced)
+        if self.current_opcode == SLOAD {
             // Check the value that was just pushed to stack
             if let Some(top_value) = interp.stack.top() {
                 let magic_value = U256::from(0x647fb72723817u64);
                 if *top_value == magic_value {
                     if self.seen_magic_value {
                         // Subsequent read: override the value in place
-                        *top_value = U256::from(0);
+                        *top_value = U256::from(0x647fb7270fdc2u64);
                         println!("Overriding SLOAD value to 0x647fb7270fdc2");
                     } else {
                         // First read: mark as seen, don't modify
