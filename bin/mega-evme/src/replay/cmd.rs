@@ -22,7 +22,7 @@ use tracing::{debug, info, trace, warn};
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeOutcome, OpTxReceipt, TxOverrideArgs},
+    common::{op_receipt_to_tx_receipt, CombinedInspector, EvmeOutcome, OpTxReceipt, TxOverrideArgs},
     replay::get_hardfork_config,
     run, ChainArgs, EvmeState,
 };
@@ -256,8 +256,9 @@ impl Cmd {
         // Execute transactions with inspector (trace will be generated only if enabled)
         let start = Instant::now();
 
-        // Setup tracing inspector
-        let mut inspector = self.trace_args.create_inspector();
+        // Setup combined inspector (tracing + custom)
+        let tracing_inspector = self.trace_args.create_inspector();
+        let mut inspector = CombinedInspector::new(tracing_inspector);
 
         // Create state and block executor with inspector
         let mut state = StateBuilder::new().with_database(database).with_bundle_update().build();
@@ -337,7 +338,7 @@ impl Cmd {
         // Generate trace only if tracing is enabled
         let trace_data = self.trace_args.is_tracing_enabled().then(|| {
             self.trace_args.generate_trace(
-                block_executor.inspector(),
+                block_executor.inspector().tracing_inspector(),
                 &result_and_state,
                 block_executor.evm().db_ref(),
             )

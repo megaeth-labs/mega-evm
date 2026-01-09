@@ -7,6 +7,7 @@ use alloy_rpc_types_trace::geth::{
     CallConfig, CallFrame, GethDefaultTracingOptions, PreStateConfig,
 };
 use clap::{Parser, ValueEnum};
+use alloy_primitives::{Address, U256};
 use mega_evm::{
     revm::{
         context::{
@@ -14,8 +15,14 @@ use mega_evm::{
             ContextTr,
         },
         database::DatabaseRef,
+        inspector::JournalExt,
+        interpreter::{
+            interpreter::EthInterpreter,
+            interpreter_types::{Jumps, StackTr},
+            CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
+        },
         state::EvmState,
-        ExecuteEvm, InspectEvm,
+        ExecuteEvm, InspectEvm, Inspector,
     },
     MegaContext, MegaEvm, MegaHaltReason, MegaTransaction, TestExternalEnvs,
 };
@@ -249,5 +256,144 @@ impl TraceArgs {
 
             Ok((result_and_state.result, result_and_state.state, None))
         }
+    }
+}
+
+/// Custom inspector that overrides SLOAD values.
+///
+/// When SLOAD returns 0x647fb72723817:
+/// - First occurrence in a transaction: pass through unchanged
+/// - Subsequent occurrences: override to 0x647fb7270fdc2
+#[derive(Debug, Default)]
+pub struct CustomInspector {
+    /// Tracks if we've seen the magic SLOAD value in this transaction
+    seen_magic_value: bool,
+}
+
+impl CustomInspector {
+    /// Reset the seen_magic_value flag.
+    /// Called before each transaction via CombinedInspector::fuse().
+    pub fn reset(&mut self) {
+        self.seen_magic_value = false;
+    }
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for CustomInspector
+where
+    CTX: ContextTr,
+{
+    fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        // SLOAD opcode = 0x54
+        if interp.bytecode.opcode() == 0x54 {
+            // Check the value that was just pushed to stack
+            if let Some(top_value) = interp.stack.top() {
+                let magic_value = U256::from(0x647fb72723817u64);
+                if *top_value == magic_value {
+                    if self.seen_magic_value {
+                        // Subsequent read: override the value in place
+                        *top_value = U256::from(0x647fb7270fdc2u64);
+                    } else {
+                        // First read: mark as seen, don't modify
+                        self.seen_magic_value = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Combined inspector that wraps a TracingInspector and a CustomInspector.
+///
+/// Delegates all inspector methods to both inner inspectors.
+#[derive(Debug)]
+pub struct CombinedInspector {
+    /// The tracing inspector for recording execution traces.
+    pub tracing: TracingInspector,
+    /// The custom inspector (currently noop).
+    pub custom: CustomInspector,
+}
+
+impl CombinedInspector {
+    /// Create a new combined inspector from the given tracing inspector.
+    pub fn new(tracing: TracingInspector) -> Self {
+        Self { tracing, custom: CustomInspector::default() }
+    }
+
+    /// Get a reference to the tracing inspector.
+    pub fn tracing_inspector(&self) -> &TracingInspector {
+        &self.tracing
+    }
+
+    /// Get a mutable reference to the tracing inspector.
+    pub fn tracing_inspector_mut(&mut self) -> &mut TracingInspector {
+        &mut self.tracing
+    }
+
+    /// Fuse the tracing inspector and reset the custom inspector.
+    /// Called before each target transaction.
+    pub fn fuse(&mut self) {
+        self.tracing.fuse();
+        self.custom.reset();
+    }
+}
+
+impl<CTX> Inspector<CTX> for CombinedInspector
+where
+    CTX: ContextTr,
+    CTX::Journal: JournalExt,
+{
+    fn initialize_interp(
+        &mut self,
+        interp: &mut Interpreter<EthInterpreter>,
+        context: &mut CTX,
+    ) {
+        self.tracing.initialize_interp(interp, context);
+        self.custom.initialize_interp(interp, context);
+    }
+
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, context: &mut CTX) {
+        self.tracing.step(interp, context);
+        self.custom.step(interp, context);
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter<EthInterpreter>, context: &mut CTX) {
+        self.tracing.step_end(interp, context);
+        self.custom.step_end(interp, context);
+    }
+
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        let outcome = self.tracing.call(context, inputs);
+        if outcome.is_some() {
+            return outcome;
+        }
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::call(&mut self.custom, context, inputs)
+    }
+
+    fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        self.tracing.call_end(context, inputs, outcome);
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::call_end(&mut self.custom, context, inputs, outcome);
+    }
+
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        let outcome = self.tracing.create(context, inputs);
+        if outcome.is_some() {
+            return outcome;
+        }
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::create(&mut self.custom, context, inputs)
+    }
+
+    fn create_end(
+        &mut self,
+        context: &mut CTX,
+        inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        self.tracing.create_end(context, inputs, outcome);
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::create_end(&mut self.custom, context, inputs, outcome);
+    }
+
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        <TracingInspector as Inspector<CTX>>::selfdestruct(&mut self.tracing, contract, target, value);
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::selfdestruct(&mut self.custom, contract, target, value);
     }
 }
