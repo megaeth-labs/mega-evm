@@ -276,7 +276,7 @@ impl CustomInspector {
     /// Reset the seen_magic_value flag.
     /// Called before each transaction via CombinedInspector::fuse().
     pub fn reset(&mut self) {
-        self.seen_magic_value = false;
+        self.seen_magic_value = true;
     }
 }
 
@@ -294,7 +294,7 @@ where
         if self.current_opcode == SLOAD {
             // Check the value that was just pushed to stack
             if let Some(top_value) = interp.stack.top() {
-                let magic_value = U256::from(0x647fb72723817u64);
+                let magic_value = U256::from(0x647fb7270fdc2u64);
                 if *top_value == magic_value {
                     if self.seen_magic_value {
                         // Subsequent read: override the value in place
