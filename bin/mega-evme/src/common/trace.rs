@@ -2,12 +2,11 @@
 
 use std::path::PathBuf;
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_trace::geth::{
     CallConfig, CallFrame, GethDefaultTracingOptions, PreStateConfig,
 };
 use clap::{Parser, ValueEnum};
-use alloy_primitives::{Address, U256};
 use mega_evm::{
     revm::{
         context::{
@@ -292,6 +291,7 @@ where
                     if self.seen_magic_value {
                         // Subsequent read: override the value in place
                         *top_value = U256::from(0x647fb7270fdc2u64);
+                        println!("Overriding SLOAD value to 0x647fb7270fdc2");
                     } else {
                         // First read: mark as seen, don't modify
                         self.seen_magic_value = true;
@@ -342,11 +342,7 @@ where
     CTX: ContextTr,
     CTX::Journal: JournalExt,
 {
-    fn initialize_interp(
-        &mut self,
-        interp: &mut Interpreter<EthInterpreter>,
-        context: &mut CTX,
-    ) {
+    fn initialize_interp(&mut self, interp: &mut Interpreter<EthInterpreter>, context: &mut CTX) {
         self.tracing.initialize_interp(interp, context);
         self.custom.initialize_interp(interp, context);
     }
@@ -371,7 +367,12 @@ where
 
     fn call_end(&mut self, context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
         self.tracing.call_end(context, inputs, outcome);
-        <CustomInspector as Inspector<CTX, EthInterpreter>>::call_end(&mut self.custom, context, inputs, outcome);
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::call_end(
+            &mut self.custom,
+            context,
+            inputs,
+            outcome,
+        );
     }
 
     fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
@@ -379,7 +380,11 @@ where
         if outcome.is_some() {
             return outcome;
         }
-        <CustomInspector as Inspector<CTX, EthInterpreter>>::create(&mut self.custom, context, inputs)
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::create(
+            &mut self.custom,
+            context,
+            inputs,
+        )
     }
 
     fn create_end(
@@ -389,11 +394,26 @@ where
         outcome: &mut CreateOutcome,
     ) {
         self.tracing.create_end(context, inputs, outcome);
-        <CustomInspector as Inspector<CTX, EthInterpreter>>::create_end(&mut self.custom, context, inputs, outcome);
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::create_end(
+            &mut self.custom,
+            context,
+            inputs,
+            outcome,
+        );
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
-        <TracingInspector as Inspector<CTX>>::selfdestruct(&mut self.tracing, contract, target, value);
-        <CustomInspector as Inspector<CTX, EthInterpreter>>::selfdestruct(&mut self.custom, contract, target, value);
+        <TracingInspector as Inspector<CTX>>::selfdestruct(
+            &mut self.tracing,
+            contract,
+            target,
+            value,
+        );
+        <CustomInspector as Inspector<CTX, EthInterpreter>>::selfdestruct(
+            &mut self.custom,
+            contract,
+            target,
+            value,
+        );
     }
 }
