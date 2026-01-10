@@ -98,9 +98,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         }
         let state_load = self.inner.sload(address, key);
         state_load.map(|mut state_load| {
-            if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
-                state_load.is_cold = true;
-            }
+            // if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
+            //     state_load.is_cold = true;
+            // }
             state_load
         })
     }
