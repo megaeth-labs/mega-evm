@@ -96,7 +96,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
                 return Some(StateLoad::new(value, true));
             }
         }
-        self.inner.sload(address, key)
+        let state_load = self.inner.sload(address, key);
+        state_load.map(|mut state_load| {
+            state_load.is_cold = true;
+            state_load
+        })
     }
 
     fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {

@@ -290,23 +290,23 @@ where
     }
 
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
-        // Check the opcode that was captured in step (not current PC which has advanced)
-        if self.current_opcode == SLOAD {
-            // Check the value that was just pushed to stack
-            if let Some(top_value) = interp.stack.top() {
-                let magic_value = U256::from(0x647fb72723817u64);
-                if *top_value == magic_value {
-                    if self.seen_magic_value {
-                        // Subsequent read: override the value in place
-                        *top_value = U256::from(0x647fb72724817u64);
-                        println!("Overriding SLOAD value to 0x647fb7270fdc2");
-                    } else {
-                        // First read: mark as seen, don't modify
-                        self.seen_magic_value = true;
-                    }
-                }
-            }
-        }
+        // // Check the opcode that was captured in step (not current PC which has advanced)
+        // if self.current_opcode == SLOAD {
+        //     // Check the value that was just pushed to stack
+        //     if let Some(top_value) = interp.stack.top() {
+        //         let magic_value = U256::from(0x647fb72723817u64);
+        //         if *top_value == magic_value {
+        //             if self.seen_magic_value {
+        //                 // Subsequent read: override the value in place
+        //                 *top_value = U256::from(0x647fb72724817u64);
+        //                 println!("Overriding SLOAD value to 0x647fb7270fdc2");
+        //             } else {
+        //                 // First read: mark as seen, don't modify
+        //                 self.seen_magic_value = true;
+        //             }
+        //         }
+        //     }
+        // }
     }
 }
 
