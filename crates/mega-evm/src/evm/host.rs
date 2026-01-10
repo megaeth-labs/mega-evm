@@ -93,10 +93,23 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             // if the oracle env provides a value, return it. Otherwise, fallback to the inner
             // context.
             if let Some(value) = self.oracle_env.borrow().get_oracle_storage(key) {
+                // Accessing oracle contract storage is forced to be cold access, since it always
+                // reads from the outside world (oracle_env).
                 return Some(StateLoad::new(value, true));
             }
         }
-        self.inner.sload(address, key)
+        let state_load = self.inner.sload(address, key);
+        state_load.map(|mut state_load| {
+            if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
+                // It is indistinguishable to tell whether a storage access of oracle contract is
+                // warm or not even if it is loaded from the inner journal state. This is because
+                // the current execution may be a replay of existing blocks and we cannot know
+                // whether the payload builder read from the oracle_env or not. So we force such
+                // sload always to be cold access to ensure consistent gas cost.
+                state_load.is_cold = true;
+            }
+            state_load
+        })
     }
 
     fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {

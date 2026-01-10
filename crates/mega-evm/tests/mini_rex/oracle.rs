@@ -647,6 +647,69 @@ fn test_oracle_contract_deployed_on_mini_rex_activation() {
     );
 }
 
+/// Test that SLOAD on oracle contract produces identical gas costs whether the value
+/// comes from oracle_env or from state. This verifies the fix that forces all oracle
+/// storage reads to be cold access for determinism in replay scenarios.
+#[test]
+fn test_oracle_sload_determinism_between_oracle_env_and_state() {
+    let test_slot = U256::from(42);
+    let test_value = U256::from(0x1234567890abcdef_u64);
+
+    // Contract that SLOADs oracle storage multiple times
+    let bytecode = BytecodeBuilder::default()
+        .push_u256(test_slot)
+        .append(SLOAD)
+        .push_u256(test_slot)
+        .append(SLOAD)
+        .push_u256(test_slot)
+        .append(SLOAD)
+        .stop()
+        .build();
+
+    // === Execution 1: Read from oracle_env ===
+    let mut db1 = MemoryDatabase::default();
+    db1.set_account_code(ORACLE_CONTRACT_ADDRESS, bytecode.clone());
+
+    let external_envs_with_oracle = TestExternalEnvs::<std::convert::Infallible>::new()
+        .with_oracle_storage(test_slot, test_value);
+
+    let (result1, _, oracle_accessed1) = execute_transaction(
+        MegaSpecId::MINI_REX,
+        &mut db1,
+        &external_envs_with_oracle,
+        NoOpInspector,
+        ORACLE_CONTRACT_ADDRESS,
+    );
+
+    // === Execution 2: Read from state (no oracle_env) ===
+    let mut db2 = MemoryDatabase::default();
+    db2.set_account_code(ORACLE_CONTRACT_ADDRESS, bytecode);
+    db2.set_account_storage(ORACLE_CONTRACT_ADDRESS, test_slot, test_value);
+
+    let external_envs_empty = TestExternalEnvs::<std::convert::Infallible>::new();
+
+    let (result2, _, oracle_accessed2) = execute_transaction(
+        MegaSpecId::MINI_REX,
+        &mut db2,
+        &external_envs_empty,
+        NoOpInspector,
+        ORACLE_CONTRACT_ADDRESS,
+    );
+
+    // === Assert receipts are identical ===
+    assert!(result1.is_success(), "Execution 1 (oracle_env) should succeed");
+    assert!(result2.is_success(), "Execution 2 (state) should succeed");
+    assert_eq!(
+        result1.gas_used(),
+        result2.gas_used(),
+        "Gas used should be identical regardless of data source (oracle_env vs state)"
+    );
+
+    // Both should have accessed the oracle contract
+    assert!(oracle_accessed1, "Execution 1 should access oracle");
+    assert!(oracle_accessed2, "Execution 2 should access oracle");
+}
+
 /// Test progressive restriction: accessing block env (20M limit) then oracle (1M limit)
 /// should further restrict gas to 1M.
 #[test]
