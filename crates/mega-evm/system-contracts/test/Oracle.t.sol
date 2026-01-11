@@ -16,7 +16,7 @@ contract OracleTest is Test {
     }
 
     function testVersion() public view {
-        assertEq(oracle.version(), "1.0.0");
+        assertEq(oracle.version(), "1.1.0");
     }
 
     function testSystemAddress() public view {
@@ -227,5 +227,38 @@ contract OracleTest is Test {
 
         assertEq(oracle.getSlot(slot1), bytes32(uint256(0xcccc)));
         assertEq(oracle.getSlot(slot2), value2);
+    }
+
+    function testHintEventSignature() public pure {
+        // Verify the Hint event signature matches the expected value in the Rust code
+        // (ORACLE_HINT_EVENT_SIGHASH in src/system/oracle.rs)
+        bytes32 expectedSighash = 0x66fb93a1a31643ba6f5b14509e18f3f7b426927b61e0c6c4a9622895388982f1;
+        bytes32 computedSighash = keccak256("Hint(address,bytes32,bytes)");
+        assertEq(computedSighash, expectedSighash, "Hint event signature mismatch");
+    }
+
+    function testSendHint() public {
+        bytes32 topic = bytes32(uint256(0x1234));
+        bytes memory data = hex"deadbeef";
+
+        // Expect the Hint event to be emitted with msg.sender as the from address
+        // Both 'from' and 'topic' are indexed, so we check topics 1 and 2
+        vm.expectEmit(true, true, false, true);
+        emit Oracle.Hint(address(this), topic, data);
+
+        oracle.sendHint(topic, data);
+    }
+
+    function testSendHintFromAnyAddress() public {
+        // sendHint can be called by any address, not just the system address
+        bytes32 topic = bytes32(uint256(0x5678));
+        bytes memory data = hex"cafebabe";
+
+        vm.prank(user);
+        // Both 'from' and 'topic' are indexed, so we check topics 1 and 2
+        vm.expectEmit(true, true, false, true);
+        emit Oracle.Hint(user, topic, data);
+
+        oracle.sendHint(topic, data);
     }
 }

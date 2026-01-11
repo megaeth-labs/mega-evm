@@ -7,6 +7,7 @@ use std::rc::Rc;
 use crate::{
     AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv, SaltEnv,
     VolatileDataAccess, VolatileDataAccessTracker, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_HINT_EVENT_SIGHASH,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
@@ -73,7 +74,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         to self.inner {
             fn chain_id(&self) -> U256;
             fn effective_gas_price(&self) -> U256;
-            fn log(&mut self, log: Log);
             fn caller(&self) -> Address;
             fn max_initcode_size(&self) -> usize;
             fn selfdestruct(&mut self, address: Address, target: Address) -> Option<StateLoad<SelfDestructResult>>;
@@ -86,6 +86,41 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             fn tstore(&mut self, address: Address, key: U256, value: U256);
             fn tload(&mut self, address: Address, key: U256) -> U256;
         }
+    }
+
+    fn log(&mut self, log: Log) {
+        // Oracle Hint Mechanism (Rex2+):
+        //
+        // When enabled, the EVM intercepts `Hint(address indexed from, bytes32 indexed topic,
+        // bytes data)` events emitted by the oracle contract and forwards them to the oracle
+        // service backend via `OracleEnv::on_hint`. This allows on-chain contracts to signal the
+        // oracle service about upcoming data needs, enabling prefetching or preparation of oracle
+        // data.
+        //
+        // The hint event has exactly 3 topics:
+        //   - topic[0]: Event signature hash (ORACLE_HINT_EVENT_SIGHASH)
+        //   - topic[1]: Sender address who called sendHint (indexed, passed to on_hint as `from`)
+        //   - topic[2]: User-defined hint topic (indexed, passed to on_hint as `topic`)
+        //
+        // The log data contains the ABI-encoded `bytes data` parameter:
+        //   - bytes[0..32]: offset to bytes data (always 0x20)
+        //   - bytes[32..64]: length of bytes data
+        //   - bytes[64..]: actual bytes data
+        //
+        // The ordering guarantee is maintained: hints emitted before oracle reads are
+        // processed before those reads, allowing the oracle service to prepare data in time.
+        if self.spec.is_enabled(MegaSpecId::REX2) && log.address == ORACLE_CONTRACT_ADDRESS {
+            let topics = log.topics();
+            if topics.len() == 3 && topics[0] == ORACLE_HINT_EVENT_SIGHASH {
+                // Extract the sender address from topic[1] (last 20 bytes of B256)
+                let from = Address::from_slice(&topics[1][12..]);
+                let topic = topics[2];
+                // Decode the ABI-encoded bytes data from the log
+                let hint_data = decode_abi_bytes(&log.data.data);
+                self.oracle_env.borrow().on_hint(from, topic, hint_data);
+            }
+        }
+        self.inner.log(log)
     }
 
     fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
@@ -195,4 +230,32 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>> {
         &self.volatile_data_tracker
     }
+}
+
+/// Decodes an ABI-encoded `bytes` parameter from Solidity event log data.
+///
+/// The ABI encoding for a single `bytes` parameter in event data is:
+/// - bytes[0..32]: offset to bytes data (always 0x20 for a single dynamic parameter)
+/// - bytes[32..64]: length of bytes data
+/// - bytes[64..]: actual bytes data
+///
+/// Returns empty bytes if the data is malformed or too short.
+fn decode_abi_bytes(data: &Bytes) -> Bytes {
+    // Minimum length: 64 bytes (offset + length)
+    if data.len() < 64 {
+        return Bytes::new();
+    }
+
+    // Read the length from bytes[32..64]
+    let length_bytes: [u8; 32] = data[32..64].try_into().unwrap_or([0u8; 32]);
+    let length = U256::from_be_bytes(length_bytes);
+
+    // Validate length is reasonable
+    let length_usize: usize = length.try_into().unwrap_or(usize::MAX);
+    if length_usize > data.len().saturating_sub(64) {
+        return Bytes::new();
+    }
+
+    // Extract the actual bytes data
+    Bytes::copy_from_slice(&data[64..64 + length_usize])
 }
