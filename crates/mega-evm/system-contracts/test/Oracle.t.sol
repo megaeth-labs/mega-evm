@@ -232,20 +232,21 @@ contract OracleTest is Test {
     function testHintEventSignature() public pure {
         // Verify the Hint event signature matches the expected value in the Rust code
         // (ORACLE_HINT_EVENT_SIGHASH in src/system/oracle.rs)
+        // Note: The Hint event is no longer declared in the Solidity contract, but
+        // the signature is still used by the MegaETH EVM to intercept hint logs.
         bytes32 expectedSighash = 0x66fb93a1a31643ba6f5b14509e18f3f7b426927b61e0c6c4a9622895388982f1;
         bytes32 computedSighash = keccak256("Hint(address,bytes32,bytes)");
         assertEq(computedSighash, expectedSighash, "Hint event signature mismatch");
     }
 
-    function testSendHint() public {
+    function testSendHintIsView() public view {
+        // sendHint is a view function that can be called by any address.
+        // The actual hint mechanism is handled at the EVM level (in host.rs),
+        // not by emitting an event in Solidity.
         bytes32 topic = bytes32(uint256(0x1234));
         bytes memory data = hex"deadbeef";
 
-        // Expect the Hint event to be emitted with msg.sender as the from address
-        // Both 'from' and 'topic' are indexed, so we check topics 1 and 2
-        vm.expectEmit(true, true, false, true);
-        emit Oracle.Hint(address(this), topic, data);
-
+        // This should not revert - sendHint is callable as a view function
         oracle.sendHint(topic, data);
     }
 
@@ -255,10 +256,54 @@ contract OracleTest is Test {
         bytes memory data = hex"cafebabe";
 
         vm.prank(user);
-        // Both 'from' and 'topic' are indexed, so we check topics 1 and 2
-        vm.expectEmit(true, true, false, true);
-        emit Oracle.Hint(user, topic, data);
-
+        // This should not revert
         oracle.sendHint(topic, data);
+    }
+
+    function testEmitLog() public {
+        bytes32 topic = bytes32(uint256(0xabcd));
+        bytes memory data = hex"deadbeef";
+
+        // Expect the Log event to be emitted
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, data);
+
+        oracle.emitLog(topic, data);
+    }
+
+    function testEmitLogFromAnyAddress() public {
+        // emitLog can be called by any address, not just the system address
+        bytes32 topic = bytes32(uint256(0x1234));
+        bytes memory data = hex"cafebabe";
+
+        vm.prank(user);
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, data);
+
+        oracle.emitLog(topic, data);
+    }
+
+    function testEmitLogEmptyData() public {
+        bytes32 topic = bytes32(uint256(0x9999));
+        bytes memory data = "";
+
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, data);
+
+        oracle.emitLog(topic, data);
+    }
+
+    function testEmitLogLargeData() public {
+        bytes32 topic = bytes32(uint256(0x8888));
+        // Create a 256-byte data payload
+        bytes memory data = new bytes(256);
+        for (uint256 i = 0; i < 256; i++) {
+            data[i] = bytes1(uint8(i));
+        }
+
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, data);
+
+        oracle.emitLog(topic, data);
     }
 }

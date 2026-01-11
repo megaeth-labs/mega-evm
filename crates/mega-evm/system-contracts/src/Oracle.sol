@@ -19,25 +19,10 @@ contract Oracle is ISemver {
     /// @param valuesLength The length of the values array.
     error InvalidLength(uint256 slotsLength, uint256 valuesLength);
 
-    /// @notice Emitted a hint to the off-chain oracle service backend.
-    /// @dev This event enables on-chain contracts to communicate with the sequencer's oracle
-    /// service. The MegaETH EVM intercepts logs with this event signature from the oracle
-    /// contract and forwards them to the oracle service backend via `OracleEnv::on_hint`.
-    ///
-    /// The hint mechanism allows contracts to signal which data they will need from the oracle,
-    /// enabling the oracle service to prefetch or prepare data before it's requested.
-    ///
-    /// Event topics:
-    /// - topic[0]: Event signature hash (keccak256("Hint(address,bytes32,bytes)"))
-    /// - topic[1]: The direct caller of `sendHint` (indexed)
-    /// - topic[2]: User-defined hint topic identifying what data is needed (indexed)
-    ///
-    /// @param from The direct caller of `sendHint`, i.e., the account who sends the hint. 
-    ///             This is useful for off-chain access control as the `msg.sender` cannot be faked. 
-    ///             On-chain access control can be enforced in a periphery contract which directly calls `sendHint`.
-    /// @param topic A user-defined identifier for the type of data being requested.
-    /// @param data Arbitrary data providing additional context for the hint.
-    event Hint(address indexed from, bytes32 indexed topic, bytes data);
+	/// @notice Emitted when a log is emitted by the oracle contract.
+	/// @param topic A user-defined identifier for the type of log (e.g., event category).
+	/// @param data Arbitrary data to include in the log.
+    event Log(bytes32 indexed topic, bytes data);
 
     /// @notice Restricts function access to the system address only.
     /// @dev Reverts with NotSystemAddress if caller is not MEGA_SYSTEM_ADDRESS.
@@ -80,8 +65,16 @@ contract Oracle is ISemver {
     ///
     /// @param topic A user-defined identifier for the type of hint (e.g., price feed ID).
     /// @param data Additional context data for the hint (e.g., parameters, timestamps).
-    function sendHint(bytes32 topic, bytes calldata data) external {
-        emit Hint(msg.sender, topic, data);
+    function sendHint(bytes32 topic, bytes calldata data) external view {
+    }
+
+    /// @notice Emits a Log event with the given topic and data.
+    /// @dev This function allows any caller to emit arbitrary log data via the oracle contract.
+    /// The Log event can be used for off-chain indexing, debugging, or signaling purposes.
+    /// @param topic A user-defined identifier for the type of log (e.g., event category).
+    /// @param data Arbitrary data to include in the log.
+    function emitLog(bytes32 topic, bytes calldata data) external {
+        emit Log(topic, data);
     }
 
     /// @notice Reads a value from a specific storage slot.
