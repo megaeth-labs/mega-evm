@@ -1,19 +1,19 @@
 //! Tests for the oracle hint mechanism introduced in Rex2.
 //!
 //! The hint mechanism allows on-chain contracts to send signals to the off-chain oracle
-//! service backend via the `Hint(address indexed from, bytes32 indexed topic, bytes data)`
-//! event emitted by the oracle contract. The EVM intercepts these events and forwards them
-//! to the oracle service via `OracleEnv::on_hint`.
+//! service backend via the `sendHint(bytes32 topic, bytes data)` function on the oracle
+//! contract. The EVM intercepts these calls and forwards them to the oracle service via
+//! `OracleEnv::on_hint`.
 
 use alloy_primitives::{address, bytes, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2, ORACLE_HINT_EVENT_SIGHASH,
+    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
-    bytecode::opcode::{CALL, GAS, LOG3, MSTORE, PUSH0},
+    bytecode::opcode::{CALL, GAS, MSTORE, PUSH0},
     context::TxEnv,
     inspector::NoOpInspector,
 };
@@ -64,41 +64,6 @@ fn execute_transaction_with_data(
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     result_envelope.result
-}
-
-/// Creates bytecode that emits a LOG3 event with the given topics.
-/// LOG3 takes: offset, size, topic0, topic1, topic2 from stack (topic2 at top)
-/// For the Hint event: topic0=signature, topic1=from address, topic2=user topic
-fn create_log3_bytecode(
-    topic0: B256,
-    topic1_from: alloy_primitives::Address,
-    topic2_topic: B256,
-    data: &[u8],
-) -> Bytes {
-    let mut builder = BytecodeBuilder::default();
-
-    // Store data in memory at offset 0
-    if !data.is_empty() {
-        // Store data in 32-byte chunks
-        for (i, chunk) in data.chunks(32).enumerate() {
-            let mut padded = [0u8; 32];
-            padded[..chunk.len()].copy_from_slice(chunk);
-            builder = builder.push_bytes(&padded).push_number((i * 32) as u8).append(MSTORE);
-        }
-    }
-
-    // Convert address to B256 (left-padded with zeros)
-    let from_as_b256 = B256::left_padding_from(topic1_from.as_slice());
-
-    builder
-        .push_bytes(topic2_topic.as_slice()) // topic2 (user-defined topic)
-        .push_bytes(from_as_b256.as_slice()) // topic1 (from address, padded to 32 bytes)
-        .push_bytes(topic0.as_slice()) // topic0 (event signature)
-        .push_number(data.len() as u8) // size
-        .push_number(0u8) // offset
-        .append(LOG3)
-        .stop()
-        .build()
 }
 
 /// Encodes calldata for `sendHint(bytes32 topic, bytes calldata data)`.
@@ -235,31 +200,39 @@ fn test_on_hint_not_called_on_rex1() {
     assert!(hints.is_empty(), "Should NOT have recorded any hints on Rex1");
 }
 
-/// Test that on_hint is NOT called for logs from non-oracle contracts.
+/// Test that on_hint is NOT called for calls to non-oracle contracts.
+/// Even if a contract has a sendHint function, it must be the oracle contract
+/// for the hint to be intercepted.
 #[test]
 fn test_on_hint_not_called_for_non_oracle_contract() {
     let user_topic = B256::from_slice(&[0x42u8; 32]);
     let hint_data = bytes!("deadbeef");
-    let fake_from = address!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+    let fake_oracle = address!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
-    // CALLEE (not oracle) emits a log that looks like a Hint event
-    let callee_code =
-        create_log3_bytecode(ORACLE_HINT_EVENT_SIGHASH, fake_from, user_topic, &hint_data);
-
+    // Deploy the oracle contract bytecode at a non-oracle address
+    // This fake oracle has the same sendHint function, but is not at ORACLE_CONTRACT_ADDRESS
     let mut db = MemoryDatabase::default();
-    db.set_account_code(CALLEE, callee_code);
+    db.set_account_code(fake_oracle, ORACLE_CONTRACT_CODE_REX2.clone());
 
     let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
-    let result = execute_transaction(MegaSpecId::REX2, &mut db, &external_envs, CALLEE);
+    // Call sendHint on the fake oracle contract directly
+    let calldata = encode_send_hint_calldata(user_topic, &hint_data);
+    let result = execute_transaction_with_data(
+        MegaSpecId::REX2,
+        &mut db,
+        &external_envs,
+        fake_oracle,
+        Bytes::from(calldata),
+    );
 
     assert!(result.is_success(), "Transaction should succeed");
 
-    // Verify that on_hint was NOT called (log was not from oracle contract)
+    // Verify that on_hint was NOT called (call was not to the oracle contract address)
     let hints = external_envs.recorded_hints();
     assert!(
         hints.is_empty(),
-        "Should NOT have recorded hints from non-oracle contract"
+        "Should NOT have recorded hints from non-oracle contract address"
     );
 }
 

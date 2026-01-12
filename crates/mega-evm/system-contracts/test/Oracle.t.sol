@@ -229,20 +229,10 @@ contract OracleTest is Test {
         assertEq(oracle.getSlot(slot2), value2);
     }
 
-    function testHintEventSignature() public pure {
-        // Verify the Hint event signature matches the expected value in the Rust code
-        // (ORACLE_HINT_EVENT_SIGHASH in src/system/oracle.rs)
-        // Note: The Hint event is no longer declared in the Solidity contract, but
-        // the signature is still used by the MegaETH EVM to intercept hint logs.
-        bytes32 expectedSighash = 0x66fb93a1a31643ba6f5b14509e18f3f7b426927b61e0c6c4a9622895388982f1;
-        bytes32 computedSighash = keccak256("Hint(address,bytes32,bytes)");
-        assertEq(computedSighash, expectedSighash, "Hint event signature mismatch");
-    }
-
     function testSendHintIsView() public view {
         // sendHint is a view function that can be called by any address.
-        // The actual hint mechanism is handled at the EVM level (in host.rs),
-        // not by emitting an event in Solidity.
+        // The actual hint mechanism is handled at the EVM level (in execution.rs),
+        // which intercepts CALL/STATICCALL to sendHint.
         bytes32 topic = bytes32(uint256(0x1234));
         bytes memory data = hex"deadbeef";
 
