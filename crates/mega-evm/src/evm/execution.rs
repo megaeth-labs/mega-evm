@@ -619,10 +619,11 @@ where
                 if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
                     let input_bytes = call_inputs.input.bytes(self.ctx());
                     if let Ok(call) = Oracle::sendHintCall::abi_decode(&input_bytes) {
-                        self.ctx()
-                            .oracle_env
-                            .borrow()
-                            .on_hint(call_inputs.caller, call.topic, call.data.into());
+                        self.ctx().oracle_env.borrow().on_hint(
+                            call_inputs.caller,
+                            call.topic,
+                            call.data.into(),
+                        );
                     }
                 }
             }

@@ -9,8 +9,8 @@ use alloy_primitives::{address, bytes, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, MSTORE, PUSH0},
@@ -230,10 +230,7 @@ fn test_on_hint_not_called_for_non_oracle_contract() {
 
     // Verify that on_hint was NOT called (call was not to the oracle contract address)
     let hints = external_envs.recorded_hints();
-    assert!(
-        hints.is_empty(),
-        "Should NOT have recorded hints from non-oracle contract address"
-    );
+    assert!(hints.is_empty(), "Should NOT have recorded hints from non-oracle contract address");
 }
 
 /// Test that multiple hints can be recorded from a single transaction.
