@@ -65,9 +65,9 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
     // Select the appropriate bytecode based on hardfork
     let (target_code, target_code_hash) = if hardforks.is_rex_2_active_at_timestamp(block_timestamp)
     {
-        (ORACLE_CONTRACT_CODE_REX2.clone(), ORACLE_CONTRACT_CODE_HASH_REX2)
+        (ORACLE_CONTRACT_CODE_REX2, ORACLE_CONTRACT_CODE_HASH_REX2)
     } else {
-        (ORACLE_CONTRACT_CODE.clone(), ORACLE_CONTRACT_CODE_HASH)
+        (ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH)
     };
 
     // Load the oracle contract account from the cache

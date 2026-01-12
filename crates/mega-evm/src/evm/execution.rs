@@ -622,7 +622,7 @@ where
                         self.ctx().oracle_env.borrow().on_hint(
                             call_inputs.caller,
                             call.topic,
-                            call.data.into(),
+                            call.data,
                         );
                     }
                 }

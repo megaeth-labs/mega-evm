@@ -68,7 +68,7 @@ fn execute_transaction_with_data(
 
 /// Encodes calldata for `sendHint(bytes32 topic, bytes calldata data)`.
 fn encode_send_hint_calldata(topic: B256, data: &[u8]) -> Vec<u8> {
-    sendHintCall { topic: topic.into(), data: Bytes::copy_from_slice(data) }.abi_encode()
+    sendHintCall { topic, data: Bytes::copy_from_slice(data) }.abi_encode()
 }
 
 /// Creates bytecode for a contract that calls `sendHint` on the oracle contract.
@@ -80,7 +80,7 @@ fn create_call_send_hint_bytecode(topic: B256, data: &[u8]) -> Bytes {
     for (i, chunk) in calldata.chunks(32).enumerate() {
         let mut padded = [0u8; 32];
         padded[..chunk.len()].copy_from_slice(chunk);
-        builder = builder.push_bytes(&padded).push_number((i * 32) as u8).append(MSTORE);
+        builder = builder.push_bytes(padded).push_number((i * 32) as u8).append(MSTORE);
     }
 
     // CALL(gas, addr, value, argsOffset, argsSize, retOffset, retSize)
@@ -112,7 +112,7 @@ fn create_call_send_hint_twice_bytecode(
     for (i, chunk) in calldata1.chunks(32).enumerate() {
         let mut padded = [0u8; 32];
         padded[..chunk.len()].copy_from_slice(chunk);
-        builder = builder.push_bytes(&padded).push_number((i * 32) as u8).append(MSTORE);
+        builder = builder.push_bytes(padded).push_number((i * 32) as u8).append(MSTORE);
     }
 
     // First CALL
@@ -130,7 +130,7 @@ fn create_call_send_hint_twice_bytecode(
     for (i, chunk) in calldata2.chunks(32).enumerate() {
         let mut padded = [0u8; 32];
         padded[..chunk.len()].copy_from_slice(chunk);
-        builder = builder.push_bytes(&padded).push_number((i * 32) as u8).append(MSTORE);
+        builder = builder.push_bytes(padded).push_number((i * 32) as u8).append(MSTORE);
     }
 
     // Second CALL
@@ -147,7 +147,7 @@ fn create_call_send_hint_twice_bytecode(
         .build()
 }
 
-/// Test that on_hint is called when Rex2 is enabled and oracle contract emits a Hint event.
+/// Test that `on_hint` is called when Rex2 is enabled and oracle contract emits a Hint event.
 #[test]
 fn test_on_hint_called_on_rex2() {
     let user_topic = B256::from_slice(&[0x42u8; 32]);
@@ -159,7 +159,7 @@ fn test_on_hint_called_on_rex2() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, main_code);
     // Deploy the actual v1.1.0 oracle contract
-    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2.clone());
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2);
 
     let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
@@ -175,7 +175,7 @@ fn test_on_hint_called_on_rex2() {
     assert_eq!(hints[0].data, hint_data, "Hint data should match");
 }
 
-/// Test that on_hint is NOT called when Rex1 is enabled (pre-Rex2).
+/// Test that `on_hint` is NOT called when Rex1 is enabled (pre-Rex2).
 #[test]
 fn test_on_hint_not_called_on_rex1() {
     let user_topic = B256::from_slice(&[0x42u8; 32]);
@@ -187,7 +187,7 @@ fn test_on_hint_not_called_on_rex1() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, main_code);
     // Deploy the actual v1.1.0 oracle contract
-    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2.clone());
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2);
 
     let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
@@ -200,7 +200,7 @@ fn test_on_hint_not_called_on_rex1() {
     assert!(hints.is_empty(), "Should NOT have recorded any hints on Rex1");
 }
 
-/// Test that on_hint is NOT called for calls to non-oracle contracts.
+/// Test that `on_hint` is NOT called for calls to non-oracle contracts.
 /// Even if a contract has a sendHint function, it must be the oracle contract
 /// for the hint to be intercepted.
 #[test]
@@ -212,7 +212,7 @@ fn test_on_hint_not_called_for_non_oracle_contract() {
     // Deploy the oracle contract bytecode at a non-oracle address
     // This fake oracle has the same sendHint function, but is not at ORACLE_CONTRACT_ADDRESS
     let mut db = MemoryDatabase::default();
-    db.set_account_code(fake_oracle, ORACLE_CONTRACT_CODE_REX2.clone());
+    db.set_account_code(fake_oracle, ORACLE_CONTRACT_CODE_REX2);
 
     let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
@@ -247,7 +247,7 @@ fn test_multiple_hints_recorded() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(CALLEE, main_code);
     // Deploy the actual v1.1.0 oracle contract
-    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2.clone());
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2);
 
     let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
@@ -266,7 +266,7 @@ fn test_multiple_hints_recorded() {
     assert_eq!(hints[1].data, data2, "Second hint data should match");
 }
 
-/// Test that on_hint is called when transaction directly targets the oracle contract.
+/// Test that `on_hint` is called when transaction directly targets the oracle contract.
 #[test]
 fn test_on_hint_direct_oracle_call() {
     let user_topic = B256::from_slice(&[0x42u8; 32]);
@@ -274,7 +274,7 @@ fn test_on_hint_direct_oracle_call() {
 
     let mut db = MemoryDatabase::default();
     // Deploy the actual v1.1.0 oracle contract
-    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2.clone());
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2);
 
     let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
 
