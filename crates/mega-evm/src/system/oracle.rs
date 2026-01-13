@@ -37,12 +37,14 @@ pub const ORACLE_CONTRACT_CODE_HASH_REX2: B256 =
 sol! {
     /// The Solidity interface for the oracle contract.
     interface Oracle {
+        function multiCall(bytes[] calldata data) external returns (bytes[] memory results);
         function getSlot(uint256 slot) external view returns (bytes32 value);
         function setSlot(uint256 slot, bytes32 value) external;
         function getSlots(uint256[] calldata slots) external view returns (bytes32[] memory values);
         function setSlots(uint256[] calldata slots, bytes32[] calldata values) external;
         function sendHint(bytes32 topic, bytes calldata data) external view;
         function emitLog(bytes32 topic, bytes calldata data) external;
+        function emitLogs(bytes32 topic, bytes[] calldata dataVector) external;
     }
 }
 

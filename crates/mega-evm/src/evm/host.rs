@@ -73,10 +73,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         to self.inner {
             fn chain_id(&self) -> U256;
             fn effective_gas_price(&self) -> U256;
+            fn log(&mut self, log: Log);
             fn caller(&self) -> Address;
             fn max_initcode_size(&self) -> usize;
             fn selfdestruct(&mut self, address: Address, target: Address) -> Option<StateLoad<SelfDestructResult>>;
-            fn log(&mut self, log: Log);
             fn sstore(
                 &mut self,
                 address: Address,
