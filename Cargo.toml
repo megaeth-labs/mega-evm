@@ -1,6 +1,11 @@
 
 [workspace]
-members = ["bin/mega-evme", "crates/mega-evm", "crates/state-test", "crates/system-contracts"]
+members = [
+    "bin/mega-evme",
+    "crates/mega-evm",
+    "crates/state-test",
+    "crates/system-contracts",
+]
 default-members = ["crates/mega-evm", "crates/state-test", "bin/mega-evme"]
 exclude = []
 
