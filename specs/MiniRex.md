@@ -211,6 +211,16 @@ Transactions sent from the mega system address (`0xA887dCB9D5f39Ef79272801d05Abd
 
 - The whole transaction's remaining compute gas is limited to at most `1_000_000` immediately after oracle contract access is detected, if the current remaining compute gas is larger.
 
+**Storage Access Behavior:**
+
+All SLOAD operations on the oracle contract are forced to use **cold access** (2100 gas) regardless of the EIP-2929 warm/cold access tracking state. This ensures deterministic gas costs during block replay scenarios.
+
+During live execution, oracle data may be provided via `oracle_env` (external oracle environment) or read from on-chain state. Since replayers cannot determine which source the original payload builder used, and `oracle_env` reads are inherently cold, forcing all oracle storage reads to cold access guarantees identical gas costs in both cases.
+
+| Operation                    | Gas Cost           | Notes                                    |
+| ---------------------------- | ------------------ | ---------------------------------------- |
+| **SLOAD on oracle contract** | 2100 gas (cold)    | Always cold, regardless of prior access  |
+
 ## 3. Specification Mapping
 
 The semantics of MiniRex spec are inherited and customized from:
