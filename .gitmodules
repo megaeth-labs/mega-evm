@@ -1,3 +1,3 @@
-[submodule "crates/mega-evm/system-contracts/lib/forge-std"]
-	path = crates/mega-evm/system-contracts/lib/forge-std
+[submodule "crates/system-contracts/lib/forge-std"]
+	path = crates/system-contracts/lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
