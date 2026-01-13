@@ -139,7 +139,7 @@ The oracle contract (as defined in [ORACLE_SERVICE.md](../docs/ORACLE_SERVICE.md
 
 The periphery contract for high-precision timestamp oracle service is also deployed as pre-execution state changes in the first block of MiniRex hardfork at address `0x6342000000000000000000000000000000000002`.
 
-The specific contract code can be found in [system-contracts](../crates/mega-evm/system-contracts/).
+The specific contract code can be found in [system-contracts](../crates/system-contracts/).
 
 ### 2.8 Volatile Data Access Control
 

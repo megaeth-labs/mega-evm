@@ -2,7 +2,7 @@
 pragma solidity ^0.8.0;
 
 import {Test} from "forge-std/Test.sol";
-import {Oracle} from "../src/Oracle.sol";
+import {Oracle} from "../contracts/Oracle.sol";
 
 contract OracleTest is Test {
     Oracle public oracle;

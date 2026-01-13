@@ -2,6 +2,9 @@
 cache/
 out/
 
+# Generated artifact (Oracle.json is created by forge script, versioned files are tracked)
+artifacts/Oracle.json
+
 # Ignores development broadcast logs
 !/broadcast
 /broadcast/*/31337/

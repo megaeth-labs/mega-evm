@@ -1,0 +1,22 @@
+[package]
+name = "mega-system-contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "System contracts for the MegaETH EVM"
+
+[build-dependencies]
+alloy-primitives.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+
+[features]
+default = ["std"]
+std = ["alloy-primitives/std"]

@@ -1,11 +1,12 @@
 [profile.default]
-src = "src"
+src = "contracts"
 out = "out"
 libs = ["lib"]
 solc_version = "0.8.30"
 optimizer = true
 optimizer_runs = 999999
 fs_permissions = [{ access = "read-write", path = "./artifacts" }]
+bytecode_hash = "none"
 
 [fuzz]
 runs = 64
@@ -14,4 +15,4 @@ runs = 64
 
 [lint]
 # Ignore lint warnings in test files
-ignore = ["test/**/*.sol", "script/**/*.sol"]
+ignore = ["test/**/*.sol", "scripts/**/*.sol"]

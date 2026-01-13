@@ -29,6 +29,7 @@ op-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # megaeth
+mega-system-contracts = { workspace = true, default-features = false }
 salt = { workspace = true, features = [], optional = true }
 
 # misc
@@ -52,7 +53,7 @@ sha2.workspace = true
 
 [features]
 default = ["std", "revm/default", "op-revm/default"]
-std = ["revm/std", "op-revm/std", "revm/alloydb"]
+std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
 test-utils = ["dep:salt"]
 
 [[bench]]

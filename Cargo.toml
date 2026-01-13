@@ -1,6 +1,11 @@
 
 [workspace]
-members = ["bin/mega-evme", "crates/mega-evm", "crates/state-test"]
+members = [
+    "bin/mega-evme",
+    "crates/mega-evm",
+    "crates/state-test",
+    "crates/system-contracts",
+]
 default-members = ["crates/mega-evm", "crates/state-test", "bin/mega-evme"]
 exclude = []
 
@@ -114,8 +119,9 @@ significant_drop_tightening = "allow"
 too_long_first_doc_paragraph = "allow"
 
 [workspace.dependencies]
-# megaeth 
+# megaeth
 mega-evm = { path = "./crates/mega-evm", default-features = false }
+mega-system-contracts = { path = "./crates/system-contracts", default-features = false }
 salt = { git = "https://github.com/megaeth-labs/salt.git", rev = "v1.0.0", default-features = false }
 state-test = { path = "./crates/state-test" }
 
