@@ -87,18 +87,9 @@ fn main() {
     let expected: OracleArtifact =
         serde_json::from_str(&expected_content).expect("Failed to parse Oracle-latest.json");
 
-    // Compare bytecode excluding CBOR metadata suffix.
-    // The metadata (IPFS hash) can differ based on file paths while the
-    // functional bytecode remains identical. Look for 'a264' marker.
-    let gen_bc = &generated.deployed_bytecode;
-    let exp_bc = &expected.deployed_bytecode;
-
-    // Find metadata marker and compare only functional bytecode
-    let gen_functional = gen_bc.rfind("a264").map(|i| &gen_bc[..i]).unwrap_or(gen_bc);
-    let exp_functional = exp_bc.rfind("a264").map(|i| &exp_bc[..i]).unwrap_or(exp_bc);
-
+    // Compare bytecode directly (bytecode_hash = "none" ensures deterministic output)
     assert!(
-        gen_functional == exp_functional,
+        generated.deployed_bytecode == expected.deployed_bytecode,
         "\n\
          ╔══════════════════════════════════════════════════════════════╗\n\
          ║  ERROR: Oracle contract bytecode mismatch!                   ║\n\
