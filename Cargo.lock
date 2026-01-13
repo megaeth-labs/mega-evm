@@ -3139,6 +3139,7 @@ dependencies = [
  "derive_more",
  "hex",
  "mega-evm 1.2.5",
+ "mega-system-contracts",
  "once_cell",
  "op-alloy-consensus",
  "op-alloy-flz",
@@ -3150,7 +3151,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "system-contracts",
  "thiserror",
 ]
 
@@ -3182,6 +3182,15 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.20",
+]
+
+[[package]]
+name = "mega-system-contracts"
+version = "1.2.5"
+dependencies = [
+ "alloy-primitives",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5151,15 +5160,6 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
-]
-
-[[package]]
-name = "system-contracts"
-version = "1.2.5"
-dependencies = [
- "alloy-primitives",
- "serde",
- "serde_json",
 ]
 
 [[package]]

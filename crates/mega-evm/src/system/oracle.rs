@@ -16,17 +16,17 @@ use crate::MegaHardforks;
 pub const ORACLE_CONTRACT_ADDRESS: Address = address!("0x6342000000000000000000000000000000000001");
 
 /// The code of the oracle contract (version 1.0.0, pre-Rex2).
-pub use system_contracts::oracle::V1_0_0_CODE as ORACLE_CONTRACT_CODE;
+pub use mega_system_contracts::oracle::V1_0_0_CODE as ORACLE_CONTRACT_CODE;
 
 /// The code hash of the oracle contract (version 1.0.0, pre-Rex2).
-pub use system_contracts::oracle::V1_0_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH;
+pub use mega_system_contracts::oracle::V1_0_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH;
 
 /// The code of the oracle contract (version 1.1.0, Rex2+).
 /// This version includes the `sendHint` function for the oracle hint mechanism.
-pub use system_contracts::oracle::V1_1_0_CODE as ORACLE_CONTRACT_CODE_REX2;
+pub use mega_system_contracts::oracle::V1_1_0_CODE as ORACLE_CONTRACT_CODE_REX2;
 
 /// The code hash of the oracle contract (version 1.1.0, Rex2+).
-pub use system_contracts::oracle::V1_1_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH_REX2;
+pub use mega_system_contracts::oracle::V1_1_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH_REX2;
 
 sol! {
     /// The Solidity interface for the oracle contract.

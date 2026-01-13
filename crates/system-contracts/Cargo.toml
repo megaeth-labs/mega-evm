@@ -1,5 +1,5 @@
 [package]
-name = "system-contracts"
+name = "mega-system-contracts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
