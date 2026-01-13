@@ -16,3 +16,7 @@ alloy-primitives.workspace = true
 alloy-primitives.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
+
+[features]
+default = ["std"]
+std = ["alloy-primitives/std"]

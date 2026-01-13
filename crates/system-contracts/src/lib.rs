@@ -3,6 +3,7 @@
 //! This crate provides bytecode constants for system contracts used by mega-evm.
 //! The bytecode is validated at compile time against the Solidity source.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
 #![warn(unused_crate_dependencies)]
 #![deny(unused_must_use)]
