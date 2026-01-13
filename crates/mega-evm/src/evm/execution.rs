@@ -37,7 +37,8 @@ use crate::{
     is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
     mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvTypes,
     HostExt, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
-    MegaTransactionError, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    MegaTransactionError, Oracle, OracleEnv, SolCall, MEGA_SYSTEM_ADDRESS,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -605,6 +606,24 @@ where
                         if let Some(compute_gas_limit) = tracker.get_compute_gas_limit() {
                             additional_limit.borrow_mut().set_compute_gas_limit(compute_gas_limit);
                         }
+                    }
+                }
+            }
+        }
+
+        // Oracle Hint Mechanism (Rex2+):
+        // Intercept sendHint(bytes32,bytes) calls to the oracle contract and forward them
+        // to the oracle service backend via OracleEnv::on_hint.
+        if self.ctx().spec.is_enabled(MegaSpecId::REX2) {
+            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
+                    let input_bytes = call_inputs.input.bytes(self.ctx());
+                    if let Ok(call) = Oracle::sendHintCall::abi_decode(&input_bytes) {
+                        self.ctx().oracle_env.borrow().on_hint(
+                            call_inputs.caller,
+                            call.topic,
+                            call.data,
+                        );
                     }
                 }
             }
