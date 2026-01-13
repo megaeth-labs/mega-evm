@@ -1,7 +1,7 @@
 //! Build script that validates system contract bytecode.
 //!
 //! This script compiles and deploys the Solidity contracts using Foundry,
-//! then validates that the deployed bytecode matches the frozen artifacts.
+//! then validates that the deployed bytecode matches the frozen constant.
 //! If they differ, the build fails to prevent accidental contract modifications.
 
 use std::{
@@ -12,7 +12,11 @@ use std::{
 
 use serde::Deserialize;
 
-/// Artifact format used by our custom artifacts/Oracle.json
+/// Frozen bytecode for Oracle contract v1.1.0 (Rex2+).
+/// This is the source of truth - any changes to Oracle.sol must match this.
+const EXPECTED_ORACLE_BYTECODE: &str = "0x608060405234801561000f575f5ffd5b50600436106100b9575f3560e01c806366cdf82f116100725780638d4909dc116100585780638d4909dc146101c8578063a21e2d69146101db578063fbc0d035146101fb575f5ffd5b806366cdf82f146101955780637eba7ba6146101a8575f5ffd5b8063138f5ec5116100a2578063138f5ec514610123578063348a0cdc1461013657806354fd4d5014610156575f5ffd5b806301caec13146100bd5780630dc9b5da146100d2575b5f5ffd5b6100d06100cb3660046105db565b61020e565b005b6100f97f000000000000000000000000a887dcb9d5f39ef79272801d05abdf707cfbbd1d81565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020015b60405180910390f35b6100d0610131366004610647565b61028a565b61014961014436600461068f565b6102d4565b60405161011a919061071a565b604080518082018252600581527f312e312e300000000000000000000000000000000000000000000000000000006020820152905161011a919061079b565b6100d06101a33660046107b4565b505050565b6101ba6101b636600461082b565b5490565b60405190815260200161011a565b6100d06101d63660046107b4565b61044b565b6101ee6101e936600461068f565b61045e565b60405161011a9190610842565b6100d0610209366004610884565b6104d4565b828114610256576040517f5b7232fa00000000000000000000000000000000000000000000000000000000815260048101849052602481018290526044015b60405180910390fd5b8382845f5b81811015610278576020810283810135908501355560010161025b565b505050506102846104e3565b50505050565b805f5b818110156102ca576102c2858585848181106102ab576102ab6108a4565b90506020028101906102bd91906108d1565b610554565b60010161028d565b50506101a36104e3565b60608167ffffffffffffffff8111156102ef576102ef610932565b60405190808252806020026020018201604052801561032257816020015b606081526020019060019003908161030d5790505b5090505f5b82811015610444575f8030868685818110610344576103446108a4565b905060200281019061035691906108d1565b60405161036492919061095f565b5f60405180830381855af49150503d805f811461039c576040519150601f19603f3d011682016040523d82523d5f602084013e6103a1565b606091505b50915091508161041c578051156103ba57805181602001fd5b6040517f08c379a000000000000000000000000000000000000000000000000000000000815260206004820152601660248201527f4d756c746963616c6c3a2063616c6c206661696c656400000000000000000000604482015260640161024d565b8084848151811061042f5761042f6108a4565b60209081029190910101525050600101610327565b5092915050565b610456838383610554565b6101a36104e3565b60608167ffffffffffffffff81111561047957610479610932565b6040519080825280602002602001820160405280156104a2578160200160208202803683370190505b5090506020810183835f5b818110156104ca57602081028381013554908501526001016104ad565b5050505092915050565b8082556104df6104e3565b5050565b3373ffffffffffffffffffffffffffffffffffffffff7f000000000000000000000000a887dcb9d5f39ef79272801d05abdf707cfbbd1d1614610552576040517f5e742c5a00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b565b827fda678492695e6a825d786c2375f7fdf3c1dc012451c61c1804227f499b0fc53e838360405161058692919061096e565b60405180910390a2505050565b5f5f83601f8401126105a3575f5ffd5b50813567ffffffffffffffff8111156105ba575f5ffd5b6020830191508360208260051b85010111156105d4575f5ffd5b9250929050565b5f5f5f5f604085870312156105ee575f5ffd5b843567ffffffffffffffff811115610604575f5ffd5b61061087828801610593565b909550935050602085013567ffffffffffffffff81111561062f575f5ffd5b61063b87828801610593565b95989497509550505050565b5f5f5f60408486031215610659575f5ffd5b83359250602084013567ffffffffffffffff811115610676575f5ffd5b61068286828701610593565b9497909650939450505050565b5f5f602083850312156106a0575f5ffd5b823567ffffffffffffffff8111156106b6575f5ffd5b6106c285828601610593565b90969095509350505050565b5f81518084528060208401602086015e5f6020828601015260207fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0601f83011685010191505092915050565b5f602082016020835280845180835260408501915060408160051b8601019250602086015f5b8281101561078f577fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffc087860301845261077a8583516106ce565b94506020938401939190910190600101610740565b50929695505050505050565b602081525f6107ad60208301846106ce565b9392505050565b5f5f5f604084860312156107c6575f5ffd5b83359250602084013567ffffffffffffffff8111156107e3575f5ffd5b8401601f810186136107f3575f5ffd5b803567ffffffffffffffff811115610809575f5ffd5b86602082840101111561081a575f5ffd5b939660209190910195509293505050565b5f6020828403121561083b575f5ffd5b5035919050565b602080825282518282018190525f918401906040840190835b8181101561087957835183526020938401939092019160010161085b565b509095945050505050565b5f5f60408385031215610895575f5ffd5b50508035926020909101359150565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52603260045260245ffd5b5f5f83357fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe1843603018112610904575f5ffd5b83018035915067ffffffffffffffff82111561091e575f5ffd5b6020019150368190038213156105d4575f5ffd5b7f4e487b71000000000000000000000000000000000000000000000000000000005f52604160045260245ffd5b818382375f9101908152919050565b60208152816020820152818360408301375f818301604090810191909152601f9092017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe016010191905056fea2646970667358221220af1d3dbef556839392612429fa5836dad825379cb5e7bd8f077f6f5e340e45f264736f6c634300081e0033";
+
+/// Artifact format produced by the OracleBytecode.s.sol script
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OracleArtifact {
@@ -27,10 +31,6 @@ fn main() {
     println!(
         "cargo::rerun-if-changed={}",
         system_contracts_dir.join("src/Oracle.sol").display()
-    );
-    println!(
-        "cargo::rerun-if-changed={}",
-        system_contracts_dir.join("artifacts/Oracle.json").display()
     );
     println!(
         "cargo::rerun-if-changed={}",
@@ -63,10 +63,7 @@ fn main() {
         }
     }
 
-    // Run the deploy script to generate bytecode with constructor args embedded.
-    // This writes to a temp file which we'll compare against the committed artifact.
-    let temp_artifact = system_contracts_dir.join("artifacts/Oracle.json.tmp");
-
+    // Run the deploy script to generate bytecode with constructor args embedded
     let script_status = Command::new("forge")
         .args([
             "script",
@@ -84,52 +81,28 @@ fn main() {
         panic!("forge script failed");
     }
 
-    // The script writes directly to artifacts/Oracle.json, so we need to:
-    // 1. Read what the script just wrote
-    // 2. Restore the original from git
-    // 3. Compare
-
-    // Read the newly generated artifact
-    let generated_artifact_path = system_contracts_dir.join("artifacts/Oracle.json");
+    // Read the generated artifact
+    let artifact_path = system_contracts_dir.join("artifacts/Oracle.json");
     let generated_content =
-        fs::read_to_string(&generated_artifact_path).expect("Failed to read generated artifact");
+        fs::read_to_string(&artifact_path).expect("Failed to read generated artifact");
     let generated_artifact: OracleArtifact =
         serde_json::from_str(&generated_content).expect("Failed to parse generated artifact");
     let generated_bytecode = &generated_artifact.deployed_bytecode;
 
-    // Restore original artifact from git
-    let _restore_status = Command::new("git")
-        .args(["checkout", "artifacts/Oracle.json"])
-        .current_dir(&system_contracts_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    // Read the expected (committed) artifact
-    let expected_content =
-        fs::read_to_string(&generated_artifact_path).expect("Failed to read expected artifact");
-    let expected_artifact: OracleArtifact =
-        serde_json::from_str(&expected_content).expect("Failed to parse expected artifact");
-    let expected_bytecode = &expected_artifact.deployed_bytecode;
-
-    // Clean up temp file if it exists
-    let _ = fs::remove_file(&temp_artifact);
-
-    // Compare bytecodes
-    if generated_bytecode != expected_bytecode {
+    // Compare against frozen constant
+    if generated_bytecode != EXPECTED_ORACLE_BYTECODE {
         panic!(
             "\n\
              ╔══════════════════════════════════════════════════════════════╗\n\
              ║  ERROR: Oracle contract bytecode mismatch!                   ║\n\
              ║                                                              ║\n\
              ║  The compiled Oracle.sol bytecode does not match the        ║\n\
-             ║  frozen artifact in artifacts/Oracle.json.                  ║\n\
+             ║  frozen constant in build.rs.                               ║\n\
              ║                                                              ║\n\
              ║  If this change is intentional (new spec version):          ║\n\
-             ║    1. cd crates/system-contracts                            ║\n\
-             ║    2. forge script script/OracleBytecode.s.sol              ║\n\
-             ║    3. Update oracle.rs constants to match                   ║\n\
-             ║    4. Commit all changes together                           ║\n\
+             ║    1. Update EXPECTED_ORACLE_BYTECODE in build.rs           ║\n\
+             ║    2. Update ORACLE_CONTRACT_CODE_REX2 in oracle.rs         ║\n\
+             ║    3. Commit all changes together                           ║\n\
              ║                                                              ║\n\
              ║  If this change is accidental:                              ║\n\
              ║    Revert your changes to Oracle.sol                        ║\n\
@@ -137,7 +110,7 @@ fn main() {
              \n\
              Expected (first 100 chars): {}...\n\
              Generated (first 100 chars): {}...\n",
-            &expected_bytecode[..expected_bytecode.len().min(100)],
+            &EXPECTED_ORACLE_BYTECODE[..100],
             &generated_bytecode[..generated_bytecode.len().min(100)]
         );
     }

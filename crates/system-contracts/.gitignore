@@ -2,6 +2,9 @@
 cache/
 out/
 
+# Generated artifacts (bytecode validated at build time via build.rs)
+artifacts/
+
 # Ignores development broadcast logs
 !/broadcast
 /broadcast/*/31337/
