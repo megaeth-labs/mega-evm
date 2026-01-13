@@ -30,6 +30,7 @@ revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # megaeth
 salt = { workspace = true, features = [], optional = true }
+system-contracts.workspace = true
 
 # misc
 auto_impl.workspace = true
@@ -49,10 +50,6 @@ revm-inspectors = { workspace = true, features = ["std"] }
 salt.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-
-[build-dependencies]
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std", "revm/default", "op-revm/default"]

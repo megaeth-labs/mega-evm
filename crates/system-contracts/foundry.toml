@@ -1,5 +1,5 @@
 [profile.default]
-src = "src"
+src = "contracts"
 out = "out"
 libs = ["lib"]
 solc_version = "0.8.30"
@@ -14,4 +14,4 @@ runs = 64
 
 [lint]
 # Ignore lint warnings in test files
-ignore = ["test/**/*.sol", "script/**/*.sol"]
+ignore = ["test/**/*.sol", "scripts/**/*.sol"]
