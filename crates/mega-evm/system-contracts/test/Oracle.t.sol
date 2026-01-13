@@ -258,18 +258,17 @@ contract OracleTest is Test {
         vm.expectEmit(true, false, false, true);
         emit Oracle.Log(topic, data);
 
+        vm.prank(systemAddress);
         oracle.emitLog(topic, data);
     }
 
-    function testEmitLogFromAnyAddress() public {
-        // emitLog can be called by any address, not just the system address
+    function testEmitLogFailsFromNonSystem() public {
+        // emitLog can only be called by the system address
         bytes32 topic = bytes32(uint256(0x1234));
         bytes memory data = hex"cafebabe";
 
         vm.prank(user);
-        vm.expectEmit(true, false, false, true);
-        emit Oracle.Log(topic, data);
-
+        vm.expectRevert(Oracle.NotSystemAddress.selector);
         oracle.emitLog(topic, data);
     }
 
@@ -280,6 +279,7 @@ contract OracleTest is Test {
         vm.expectEmit(true, false, false, true);
         emit Oracle.Log(topic, data);
 
+        vm.prank(systemAddress);
         oracle.emitLog(topic, data);
     }
 
@@ -294,6 +294,181 @@ contract OracleTest is Test {
         vm.expectEmit(true, false, false, true);
         emit Oracle.Log(topic, data);
 
+        vm.prank(systemAddress);
         oracle.emitLog(topic, data);
+    }
+
+    // ============ emitLogs Tests ============
+
+    function testEmitLogs() public {
+        bytes32 topic = bytes32(uint256(0xabcd));
+        bytes[] memory dataVector = new bytes[](2);
+        dataVector[0] = hex"deadbeef";
+        dataVector[1] = hex"cafebabe";
+
+        // Expect two Log events with the same topic
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, dataVector[0]);
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, dataVector[1]);
+
+        vm.prank(systemAddress);
+        oracle.emitLogs(topic, dataVector);
+    }
+
+    function testEmitLogsFailsFromNonSystem() public {
+        bytes32 topic = bytes32(uint256(0x1234));
+        bytes[] memory dataVector = new bytes[](1);
+        dataVector[0] = hex"deadbeef";
+
+        vm.prank(user);
+        vm.expectRevert(Oracle.NotSystemAddress.selector);
+        oracle.emitLogs(topic, dataVector);
+    }
+
+    function testEmitLogsEmptyArray() public {
+        bytes32 topic = bytes32(uint256(0x5678));
+        bytes[] memory dataVector = new bytes[](0);
+
+        // Should not revert with empty array
+        vm.prank(systemAddress);
+        oracle.emitLogs(topic, dataVector);
+    }
+
+    function testEmitLogsMultipleData() public {
+        bytes32 topic = bytes32(uint256(0x9999));
+        bytes[] memory dataVector = new bytes[](5);
+        for (uint256 i = 0; i < 5; i++) {
+            dataVector[i] = abi.encodePacked(uint256(i * 100));
+        }
+
+        // Expect all 5 Log events
+        for (uint256 i = 0; i < 5; i++) {
+            vm.expectEmit(true, false, false, true);
+            emit Oracle.Log(topic, dataVector[i]);
+        }
+
+        vm.prank(systemAddress);
+        oracle.emitLogs(topic, dataVector);
+    }
+
+    // ============ multiCall Tests ============
+
+    function testMultiCallEmptyArray() public {
+        bytes[] memory data = new bytes[](0);
+        bytes[] memory results = oracle.multiCall(data);
+        assertEq(results.length, 0);
+    }
+
+    function testMultiCallSingleCall() public {
+        // Prepare a setSlot call
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(100), bytes32(uint256(0x1234)));
+
+        vm.prank(systemAddress);
+        oracle.multiCall(data);
+
+        // Verify the slot was set
+        assertEq(oracle.getSlot(100), bytes32(uint256(0x1234)));
+    }
+
+    function testMultiCallMultipleCalls() public {
+        // Prepare multiple setSlot calls
+        bytes[] memory data = new bytes[](3);
+        data[0] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(200), bytes32(uint256(0xaaaa)));
+        data[1] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(201), bytes32(uint256(0xbbbb)));
+        data[2] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(202), bytes32(uint256(0xcccc)));
+
+        vm.prank(systemAddress);
+        oracle.multiCall(data);
+
+        // Verify all slots were set
+        assertEq(oracle.getSlot(200), bytes32(uint256(0xaaaa)));
+        assertEq(oracle.getSlot(201), bytes32(uint256(0xbbbb)));
+        assertEq(oracle.getSlot(202), bytes32(uint256(0xcccc)));
+    }
+
+    function testMultiCallAccessControlEnforced() public {
+        // Non-system caller should fail when calling restricted functions via multiCall
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(300), bytes32(uint256(0x1234)));
+
+        vm.prank(user);
+        vm.expectRevert(Oracle.NotSystemAddress.selector);
+        oracle.multiCall(data);
+    }
+
+    function testMultiCallRevertBubbling() public {
+        // When a call fails due to access control, the revert should bubble up
+        bytes[] memory data = new bytes[](2);
+        // First call should succeed (getSlot is not restricted)
+        data[0] = abi.encodeWithSelector(Oracle.getSlot.selector, uint256(0));
+        // Second call should fail (setSlot requires system address)
+        data[1] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(400), bytes32(uint256(0x5678)));
+
+        vm.prank(user);
+        vm.expectRevert(Oracle.NotSystemAddress.selector);
+        oracle.multiCall(data);
+    }
+
+    function testMultiCallMixedOperations() public {
+        // Set a slot first
+        vm.prank(systemAddress);
+        oracle.setSlot(500, bytes32(uint256(0xdead)));
+
+        // Now use multiCall to read and write
+        bytes[] memory data = new bytes[](3);
+        data[0] = abi.encodeWithSelector(Oracle.getSlot.selector, uint256(500));
+        data[1] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(501), bytes32(uint256(0xbeef)));
+        data[2] = abi.encodeWithSelector(Oracle.getSlot.selector, uint256(501));
+
+        vm.prank(systemAddress);
+        bytes[] memory results = oracle.multiCall(data);
+
+        // Verify results
+        assertEq(results.length, 3);
+        assertEq(abi.decode(results[0], (bytes32)), bytes32(uint256(0xdead)));
+        // setSlot returns nothing
+        assertEq(results[1].length, 0);
+        // getSlot should return the newly set value
+        assertEq(abi.decode(results[2], (bytes32)), bytes32(uint256(0xbeef)));
+    }
+
+    function testMultiCallWithEmitLog() public {
+        bytes32 topic = bytes32(uint256(0x7777));
+        bytes memory logData = hex"deadbeef";
+
+        bytes[] memory data = new bytes[](2);
+        data[0] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(600), bytes32(uint256(0x1111)));
+        data[1] = abi.encodeWithSelector(Oracle.emitLog.selector, topic, logData);
+
+        // Expect the Log event
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, logData);
+
+        vm.prank(systemAddress);
+        oracle.multiCall(data);
+
+        // Verify slot was set
+        assertEq(oracle.getSlot(600), bytes32(uint256(0x1111)));
+    }
+
+    function testMultiCallWithEmitLogs() public {
+        bytes32 topic = bytes32(uint256(0x8888));
+        bytes[] memory logDataVector = new bytes[](2);
+        logDataVector[0] = hex"aaaa";
+        logDataVector[1] = hex"bbbb";
+
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encodeWithSelector(Oracle.emitLogs.selector, topic, logDataVector);
+
+        // Expect both Log events
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, logDataVector[0]);
+        vm.expectEmit(true, false, false, true);
+        emit Oracle.Log(topic, logDataVector[1]);
+
+        vm.prank(systemAddress);
+        oracle.multiCall(data);
     }
 }

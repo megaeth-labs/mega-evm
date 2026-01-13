@@ -19,9 +19,9 @@ contract Oracle is ISemver {
     /// @param valuesLength The length of the values array.
     error InvalidLength(uint256 slotsLength, uint256 valuesLength);
 
-	/// @notice Emitted when a log is emitted by the oracle contract.
-	/// @param topic A user-defined identifier for the type of log (e.g., event category).
-	/// @param data Arbitrary data to include in the log.
+    /// @notice Emitted when a log is emitted by the oracle contract.
+    /// @param topic A user-defined identifier for the type of log (e.g., event category).
+    /// @param data Arbitrary data to include in the log.
     event Log(bytes32 indexed topic, bytes data);
 
     /// @notice Restricts function access to the system address only.
@@ -51,6 +51,32 @@ contract Oracle is ISemver {
         MEGA_SYSTEM_ADDRESS = _megaSystemAddress;
     }
 
+    /// @notice Performs a multi-call operation on the current contract itself.
+    /// @dev This function is a convenient utility to pack multiple function calls in this 
+    ///      contract into one single transaction.
+    ///      This function does not have the `onlySystemAddress` access control modifier 
+    ///      since every operation or function to be called have their own access controls.
+    function multiCall(bytes[] calldata data) external returns (bytes[] memory results) {
+        results = new bytes[](data.length);
+        for (uint256 i = 0; i < data.length;) {
+            (bool success, bytes memory result) = address(this).delegatecall(data[i]);
+            if (!success) {
+                // Bubble up the revert reason
+                if (result.length > 0) {
+                    assembly {
+                        revert(add(32, result), mload(result))
+                    }
+                } else {
+                    revert("Multicall: call failed");
+                }
+            }
+            results[i] = result;
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     /// @notice Sends a hint to the off-chain oracle service backend.
     /// @dev This function can be called by any contract to signal the oracle service about
     /// upcoming data needs. The hint is intercepted by the MegaETH EVM during execution and
@@ -65,15 +91,35 @@ contract Oracle is ISemver {
     ///
     /// @param topic A user-defined identifier for the type of hint (e.g., price feed ID).
     /// @param data Additional context data for the hint (e.g., parameters, timestamps).
-    function sendHint(bytes32 topic, bytes calldata data) external view {
-    }
+    function sendHint(bytes32 topic, bytes calldata data) external view {}
 
     /// @notice Emits a Log event with the given topic and data.
-    /// @dev This function allows any caller to emit arbitrary log data via the oracle contract.
+    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS.
     /// The Log event can be used for off-chain indexing, debugging, or signaling purposes.
     /// @param topic A user-defined identifier for the type of log (e.g., event category).
     /// @param data Arbitrary data to include in the log.
-    function emitLog(bytes32 topic, bytes calldata data) external {
+    function emitLog(bytes32 topic, bytes calldata data) public onlySystemAddress {
+        _emitLog(topic, data);
+    }
+
+    /// @notice Emits a Log event with the given topic and data vector.
+    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS.
+    /// The Log event can be used for off-chain indexing, debugging, or signaling purposes.
+    /// @param topic A user-defined identifier for the type of log (e.g., event category).
+    /// @param dataVector Array of arbitrary data to include in the log.
+    function emitLogs(bytes32 topic, bytes[] calldata dataVector) external onlySystemAddress {
+        // Gas optimized loop: avoid redundant SLOADs and function calls.
+        uint256 len = dataVector.length;
+        for (uint256 i = 0; i < len;) {
+            _emitLog(topic, dataVector[i]);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice Emits a Log event with the given topic and data.
+    function _emitLog(bytes32 topic, bytes calldata data) internal {
         emit Log(topic, data);
     }
 
