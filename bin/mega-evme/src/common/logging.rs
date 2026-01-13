@@ -63,13 +63,25 @@ impl LogArgs {
 
         if let Some(ref log_file) = self.log_file {
             // Write logs to file (always without ANSI colors)
-            let file = std::fs::File::create(log_file).expect("Failed to create log file");
-            fmt()
-                .with_env_filter(filter)
-                .with_target(show_target)
-                .with_writer(file)
-                .with_ansi(false)
-                .init();
+            match std::fs::File::create(log_file) {
+                Ok(file) => {
+                    fmt()
+                        .with_env_filter(filter)
+                        .with_target(show_target)
+                        .with_writer(file)
+                        .with_ansi(false)
+                        .init();
+                }
+                Err(e) => {
+                    eprintln!("Failed to create log file '{}': {}", log_file.display(), e);
+                    fmt()
+                        .with_env_filter(filter)
+                        .with_target(show_target)
+                        .with_writer(std::io::stderr)
+                        .with_ansi(!self.log_no_color)
+                        .init();
+                }
+            }
         } else {
             // Write logs to stderr
             fmt()
