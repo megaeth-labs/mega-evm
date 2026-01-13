@@ -29,8 +29,8 @@ op-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # megaeth
-salt = { workspace = true, features = [], optional = true }
 mega-system-contracts = { workspace = true, default-features = false }
+salt = { workspace = true, features = [], optional = true }
 
 # misc
 auto_impl.workspace = true
