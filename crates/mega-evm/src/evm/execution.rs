@@ -4,6 +4,7 @@ use std::string::ToString;
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use alloy_primitives::{Bytes, TxKind};
+use alloy_sol_types::SolCall;
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -36,8 +37,8 @@ use crate::{
     constants, create_exceeding_interpreter_result, create_exceeding_limit_frame_result,
     is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
     mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvTypes,
-    HostExt, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
-    MegaTransactionError, Oracle, OracleEnv, SolCall, MEGA_SYSTEM_ADDRESS,
+    HostExt, IKeylessDeploy, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions,
+    MegaSpecId, MegaTransactionError, OracleEnv, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
     MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
 };
 
@@ -618,12 +619,28 @@ where
             if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
                 if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
                     let input_bytes = call_inputs.input.bytes(self.ctx());
-                    if let Ok(call) = Oracle::sendHintCall::abi_decode(&input_bytes) {
+                    if let Ok(call) = IOracle::sendHintCall::abi_decode(&input_bytes) {
                         self.ctx().oracle_env.borrow().on_hint(
                             call_inputs.caller,
                             call.topic,
                             call.data,
                         );
+                    }
+                }
+            }
+        }
+
+        // Keyless Deploy Interception (Rex2+):
+        // Intercept keylessDeploy(bytes,uint256) calls to the keyless deploy contract.
+        // TODO: Implement sandbox execution
+        if self.ctx().spec.is_enabled(MegaSpecId::REX2) {
+            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                if call_inputs.target_address == KEYLESS_DEPLOY_ADDRESS {
+                    let input_bytes = call_inputs.input.bytes(self.ctx());
+                    if let Ok(_call) = IKeylessDeploy::keylessDeployCall::abi_decode(&input_bytes) {
+                        // TODO: Implement keyless deploy sandbox execution
+                        // For now, let the call proceed to the contract which will revert
+                        // with "KeylessDeploy: not intercepted"
                     }
                 }
             }
