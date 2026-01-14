@@ -3189,6 +3189,7 @@ name = "mega-system-contracts"
 version = "1.2.5"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "serde",
  "serde_json",
 ]
