@@ -78,7 +78,7 @@ contract Oracle is ISemver, IOracle {
     function sendHint(bytes32 topic, bytes calldata data) external view {}
 
     /// @inheritdoc IOracle
-    function emitLog(bytes32 topic, bytes calldata data) public onlySystemAddress {
+    function emitLog(bytes32 topic, bytes calldata data) external onlySystemAddress {
         _emitLog(topic, data);
     }
 
