@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import {ISemver} from "./lib/ISemver.sol";
+import {ISemver} from "./interfaces/ISemver.sol";
+import {IOracle} from "./interfaces/IOracle.sol";
 
 /// @title Oracle
 /// @author MegaETH
 /// @notice Oracle provides a simple interface to directly read and set storage slots.
-contract Oracle is ISemver {
+contract Oracle is ISemver, IOracle {
     /// @notice The address authorized to modify oracle data.
     /// @dev Only this address can call setter functions.
     address public immutable MEGA_SYSTEM_ADDRESS;
@@ -51,11 +52,7 @@ contract Oracle is ISemver {
         MEGA_SYSTEM_ADDRESS = _megaSystemAddress;
     }
 
-    /// @notice Performs a multi-call operation on the current contract itself.
-    /// @dev This function is a convenient utility to pack multiple function calls in this 
-    ///      contract into one single transaction.
-    ///      This function does not have the `onlySystemAddress` access control modifier 
-    ///      since every operation or function to be called have their own access controls.
+    /// @inheritdoc IOracle
     function multiCall(bytes[] calldata data) external returns (bytes[] memory results) {
         results = new bytes[](data.length);
         for (uint256 i = 0; i < data.length;) {
@@ -77,36 +74,15 @@ contract Oracle is ISemver {
         }
     }
 
-    /// @notice Sends a hint to the off-chain oracle service backend.
-    /// @dev This function can be called by any contract to signal the oracle service about
-    /// upcoming data needs. The hint is intercepted by the MegaETH EVM during execution and
-    /// forwarded to the oracle service backend.
-    ///
-    /// Example use case: A contract that needs price data from an oracle can first send a hint
-    /// indicating which price feeds it will query, allowing the oracle service to prefetch
-    /// the data before the actual oracle read occurs.
-    ///
-    /// The order of hints and oracle reads is preserved: if a transaction emits a hint and
-    /// then reads oracle data, the hint is guaranteed to be processed before the read.
-    ///
-    /// @param topic A user-defined identifier for the type of hint (e.g., price feed ID).
-    /// @param data Additional context data for the hint (e.g., parameters, timestamps).
+    /// @inheritdoc IOracle
     function sendHint(bytes32 topic, bytes calldata data) external view {}
 
-    /// @notice Emits a Log event with the given topic and data.
-    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS.
-    /// The Log event can be used for off-chain indexing, debugging, or signaling purposes.
-    /// @param topic A user-defined identifier for the type of log (e.g., event category).
-    /// @param data Arbitrary data to include in the log.
-    function emitLog(bytes32 topic, bytes calldata data) public onlySystemAddress {
+    /// @inheritdoc IOracle
+    function emitLog(bytes32 topic, bytes calldata data) external onlySystemAddress {
         _emitLog(topic, data);
     }
 
-    /// @notice Emits a Log event with the given topic and data vector.
-    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS.
-    /// The Log event can be used for off-chain indexing, debugging, or signaling purposes.
-    /// @param topic A user-defined identifier for the type of log (e.g., event category).
-    /// @param dataVector Array of arbitrary data to include in the log.
+    /// @inheritdoc IOracle
     function emitLogs(bytes32 topic, bytes[] calldata dataVector) external onlySystemAddress {
         // Gas optimized loop: avoid redundant SLOADs and function calls.
         uint256 len = dataVector.length;
@@ -123,28 +99,21 @@ contract Oracle is ISemver {
         emit Log(topic, data);
     }
 
-    /// @notice Reads a value from a specific storage slot.
-    /// @param slot The storage slot to read from.
-    /// @return value The bytes32 value stored at the slot.
+    /// @inheritdoc IOracle
     function getSlot(uint256 slot) external view returns (bytes32 value) {
         assembly {
             value := sload(slot)
         }
     }
 
-    /// @notice Writes a value to a specific storage slot.
-    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS.
-    /// @param slot The storage slot to write to.
-    /// @param value The bytes32 value to store.
+    /// @inheritdoc IOracle
     function setSlot(uint256 slot, bytes32 value) external onlySystemAddress {
         assembly {
             sstore(slot, value)
         }
     }
 
-    /// @notice Reads values from multiple storage slots in a single call.
-    /// @param slots Array of storage slots to read from.
-    /// @return values Array of bytes32 values stored at corresponding slots.
+    /// @inheritdoc IOracle
     function getSlots(uint256[] calldata slots) external view returns (bytes32[] memory values) {
         values = new bytes32[](slots.length);
         assembly {
@@ -159,10 +128,7 @@ contract Oracle is ISemver {
         }
     }
 
-    /// @notice Writes values to multiple storage slots in a single transaction.
-    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS. Arrays must have equal length.
-    /// @param slots Array of storage slots to write to.
-    /// @param values Array of bytes32 values to store at corresponding slots.
+    /// @inheritdoc IOracle
     function setSlots(uint256[] calldata slots, bytes32[] calldata values) external onlySystemAddress {
         if (slots.length != values.length) revert InvalidLength(slots.length, values.length);
         assembly {
