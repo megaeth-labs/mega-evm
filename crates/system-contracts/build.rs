@@ -12,17 +12,17 @@ use std::{
     process::{Command, Stdio},
 };
 
-use alloy_primitives::{hex, keccak256};
+use alloy_primitives::{hex, keccak256, Bytes, B256};
+use semver::Version;
 use serde::Deserialize;
 
 /// Artifact format for system contract JSON files
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ContractArtifact {
-    #[serde(default)]
-    version: String,
-    code_hash: String,
-    deployed_bytecode: String,
+    version: Version,
+    code_hash: B256,
+    deployed_bytecode: Bytes,
 }
 
 /// Configuration for a system contract to be validated and processed
@@ -79,8 +79,8 @@ If this change is intentional (new spec version):
 If this change is accidental:
   Revert your changes to contracts/{name}.sol
 
-Expected:  {expected}
-Generated: {generated}
+Expected:  {expected:x}
+Generated: {generated:x}
 "#,
         expected = expected.code_hash,
         generated = generated.code_hash,
@@ -112,12 +112,10 @@ fn collect_versioned_artifacts(artifacts_dir: &Path, prefix: &str) -> Vec<Contra
             serde_json::from_str(&content).expect("Failed to parse artifact");
 
         // Sanity check, the code hash must match the expected code hash.
-        let bytecode = hex::decode(&artifact.deployed_bytecode).expect("Invalid bytecode hex");
-        let computed_hash = keccak256(&bytecode);
-        let expected_hash = hex::decode(&artifact.code_hash).expect("Invalid code hash hex");
+        let computed_hash = keccak256(&artifact.deployed_bytecode);
         assert!(
-            computed_hash.as_slice() == expected_hash.as_slice(),
-            "Code hash mismatch for artifact {}: expected {}, got {:x}",
+            computed_hash == artifact.code_hash,
+            "Code hash mismatch for artifact {}: expected {:x}, got {:x}",
             filename,
             artifact.code_hash,
             computed_hash
@@ -125,6 +123,9 @@ fn collect_versioned_artifacts(artifacts_dir: &Path, prefix: &str) -> Vec<Contra
 
         versions.push(artifact);
     }
+
+    // Sort by semantic version
+    versions.sort_by_key(|a| a.version.clone());
 
     versions
 }
@@ -146,28 +147,30 @@ fn generate_rust_constants(
     writeln!(file).unwrap();
 
     for artifact in versions {
-        let version_underscore = artifact.version.replace('.', "_");
+        let version_underscore = artifact.version.to_string().replace('.', "_");
         let const_name = format!("V{}", version_underscore);
 
         writeln!(file, "/// {} contract bytecode v{}", config.name, artifact.version).unwrap();
         writeln!(
             file,
             "pub const {}_CODE: Bytes = bytes!(\"{}\");",
-            const_name, artifact.deployed_bytecode
+            const_name,
+            hex::encode(&artifact.deployed_bytecode)
         )
         .unwrap();
         writeln!(file, "/// {} contract code hash v{}", config.name, artifact.version).unwrap();
         writeln!(
             file,
             "pub const {}_CODE_HASH: B256 = b256!(\"{}\");",
-            const_name, artifact.code_hash
+            const_name,
+            hex::encode(artifact.code_hash)
         )
         .unwrap();
         writeln!(file).unwrap();
     }
 
     // Add latest alias
-    let latest_version_underscore = latest.version.replace('.', "_");
+    let latest_version_underscore = latest.version.to_string().replace('.', "_");
     writeln!(file, "/// Latest {} contract bytecode", config.name).unwrap();
     writeln!(file, "pub const LATEST_CODE: Bytes = V{}_CODE;", latest_version_underscore).unwrap();
     writeln!(file, "/// Latest {} contract code hash", config.name).unwrap();
