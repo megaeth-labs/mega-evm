@@ -31,7 +31,7 @@ struct ContractConfig<'a> {
     name: &'a str,
     /// Forge script path (e.g., "scripts/OracleBytecode.s.sol:SaveOracleBytecode")
     script_path: &'a str,
-    /// Output Rust file name (e.g., "oracle_artifacts.rs")
+    /// Output Rust file name (e.g., `oracle_artifacts.rs`)
     output_file: &'a str,
 }
 
