@@ -32,16 +32,16 @@ interface IKeylessDeploy {
     /// @dev The keyless deployment transaction must be a valid RLP-encoded legacy transaction:
     ///      - nonce: any value
     ///      - gasPrice: any value (typically 100 gwei for Nick's Method)
-    ///      - gasLimit: any value (will be overridden by the gasLimit parameter)
+    ///      - gasLimit: any value (will be overridden by the gas limit forwarded to this function)
     ///      - to: must be empty (contract creation)
     ///      - value: any value (typically 0)
     ///      - data: contract creation bytecode
     ///      - v: must be 27 or 28 (pre-EIP-155, no chain ID)
     ///      - r: signature component
     ///      - s: signature component
+    /// @dev The gas limited forwarded to this function is the total gas limit of the transaction.
     /// @param keylessDeploymentTransaction The RLP-encoded pre-EIP-155 signed transaction.
-    /// @param gasLimit The gas limit to use for the contract deployment.
     /// @return deployedAddress The address of the deployed contract.
-    function keylessDeploy(bytes calldata keylessDeploymentTransaction, uint256 gasLimit)
+    function keylessDeploy(bytes calldata keylessDeploymentTransaction)
         external returns (address deployedAddress);
 }

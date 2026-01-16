@@ -17,7 +17,7 @@ contract KeylessDeploy is ISemver, IKeylessDeploy {
     }
 
     /// @inheritdoc IKeylessDeploy
-    function keylessDeploy(bytes calldata keylessDeploymentTransaction, uint256 gasLimit)
+    function keylessDeploy(bytes calldata keylessDeploymentTransaction)
         external
         returns (address deployedAddress)
     {

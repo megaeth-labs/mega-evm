@@ -61,6 +61,10 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /* Internal state variables */
     /// Tracker for sensitive data access (block environment, beneficiary, etc.)
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
+
+    /// Whether this context is currently executing inside a keyless deploy sandbox.
+    /// Used to prevent recursive sandbox creation.
+    pub(crate) in_keyless_deploy_sandbox: Rc<RefCell<bool>>,
 }
 
 impl Default for MegaContext<EmptyDB, EmptyExternalEnv> {
@@ -108,6 +112,7 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
             ))),
             oracle_env: Rc::new(RefCell::new(EmptyExternalEnv)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
+            in_keyless_deploy_sandbox: Rc::new(RefCell::new(false)),
             inner,
         }
     }
@@ -164,6 +169,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
+            in_keyless_deploy_sandbox: Rc::new(RefCell::new(false)),
             inner,
         }
     }
@@ -189,6 +195,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             dynamic_storage_gas_cost: self.dynamic_storage_gas_cost,
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
+            in_keyless_deploy_sandbox: self.in_keyless_deploy_sandbox,
         }
     }
 
@@ -289,6 +296,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
+            in_keyless_deploy_sandbox: self.in_keyless_deploy_sandbox,
         }
     }
 
@@ -327,6 +335,23 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Returns the [`SpecId`] representing the current `MegaETH` specification.
     pub fn mega_spec(&self) -> MegaSpecId {
         self.spec
+    }
+
+    /// Returns whether this context is currently executing inside a keyless deploy sandbox.
+    ///
+    /// When `true`, keyless deploy interception is disabled to prevent
+    /// infinite recursion during sandbox execution.
+    #[inline]
+    pub fn is_in_keyless_deploy_sandbox(&self) -> bool {
+        *self.in_keyless_deploy_sandbox.borrow()
+    }
+
+    /// Sets whether this context is currently executing inside a keyless deploy sandbox.
+    ///
+    /// This is called by the keyless deploy execution to mark when we enter/exit sandbox mode.
+    #[inline]
+    pub(crate) fn set_in_keyless_deploy_sandbox(&self, value: bool) {
+        *self.in_keyless_deploy_sandbox.borrow_mut() = value;
     }
 
     /// Gets the current total data size generated from transaction execution.

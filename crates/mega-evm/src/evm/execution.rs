@@ -36,10 +36,11 @@ use revm::{
 use crate::{
     constants, create_exceeding_interpreter_result, create_exceeding_limit_frame_result,
     is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
-    mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvTypes,
-    HostExt, IKeylessDeploy, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions,
-    MegaSpecId, MegaTransactionError, OracleEnv, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
+    mark_interpreter_result_as_exceeding_limit, sandbox::execute_keyless_deploy_call,
+    sent_from_mega_system_address, ExternalEnvTypes, HostExt, IKeylessDeploy, IOracle, MegaContext,
+    MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError, OracleEnv,
+    KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    ORACLE_CONTRACT_ADDRESS,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -631,16 +632,24 @@ where
         }
 
         // Keyless Deploy Interception (Rex2+):
-        // Intercept keylessDeploy(bytes,uint256) calls to the keyless deploy contract.
-        // TODO: Implement sandbox execution
+        // Intercept keylessDeploy(bytes) calls to the keyless deploy contract.
+        // This executes the deployment in a sandbox and applies filtered state changes.
         if self.ctx().spec.is_enabled(MegaSpecId::REX2) {
-            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                if call_inputs.target_address == KEYLESS_DEPLOY_ADDRESS {
-                    let input_bytes = call_inputs.input.bytes(self.ctx());
-                    if let Ok(_call) = IKeylessDeploy::keylessDeployCall::abi_decode(&input_bytes) {
-                        // TODO: Implement keyless deploy sandbox execution
-                        // For now, let the call proceed to the contract which will revert
-                        // with "KeylessDeploy: not intercepted"
+            // Only intercept if we're not already in a sandbox (prevents infinite recursion)
+            if !self.ctx().is_in_keyless_deploy_sandbox() {
+                if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                    if call_inputs.target_address == KEYLESS_DEPLOY_ADDRESS {
+                        let input_bytes = call_inputs.input.bytes(self.ctx());
+                        if let Ok(call) =
+                            IKeylessDeploy::keylessDeployCall::abi_decode(&input_bytes)
+                        {
+                            let result = execute_keyless_deploy_call(
+                                self.ctx(),
+                                call_inputs,
+                                &call.keylessDeploymentTransaction,
+                            );
+                            return Ok(FrameInitResult::Result(result));
+                        }
                     }
                 }
             }

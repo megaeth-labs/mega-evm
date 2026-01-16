@@ -82,6 +82,13 @@ pub mod mini_rex {
     pub const ORACLE_ACCESS_REMAINING_COMPUTE_GAS: u64 = 1_000_000;
 }
 
+/// Constants for the `REX2` spec.
+pub mod rex2 {
+    /// Fixed overhead gas for the keylessDeploy operation.
+    /// This covers the cost of RLP decoding, signature recovery, and state filtering.
+    pub const KEYLESS_DEPLOY_OVERHEAD_GAS: u64 = 100_000;
+}
+
 /// Constants for the `REX` spec.
 pub mod rex {
     /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.
