@@ -97,9 +97,9 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
         ctx,
         deploy_signer,
         deploy_address,
-        keyless_tx.init_code.clone(),
-        keyless_tx.value,
-        keyless_tx.gas_price,
+        keyless_tx.tx().input.clone(),
+        keyless_tx.tx().value,
+        keyless_tx.tx().gas_price,
         remaining_gas,
     ) {
         Ok(sandbox_result) => {

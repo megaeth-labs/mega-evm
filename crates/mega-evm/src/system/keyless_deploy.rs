@@ -17,10 +17,9 @@
 //!
 //! The deployment address is deterministic: `keccak256(rlp([signer, 0]))[12:]`
 
+use alloy_consensus::{transaction::RlpEcdsaDecodableTx, Signed, TxLegacy};
 use alloy_evm::Database;
-use alloy_primitives::{address, keccak256, Address, Bytes, U256};
-use alloy_rlp::Decodable;
-use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+use alloy_primitives::{address, Address};
 use revm::{
     database::State,
     state::{Account, Bytecode, EvmState},
@@ -85,30 +84,6 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
 // Keyless Deploy Transaction Types and Functions
 // ============================================================================
 
-/// A decoded pre-EIP-155 legacy transaction for keyless deployment.
-///
-/// This represents the RLP-decoded structure of a legacy Ethereum transaction
-/// that uses pre-EIP-155 signature format (v = 27 or 28, no chain ID).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeylessDeployTx {
-    /// Transaction nonce (typically 0 for Nick's Method)
-    pub nonce: u64,
-    /// Gas price in wei
-    pub gas_price: u128,
-    /// Gas limit for the transaction
-    pub gas_limit: u64,
-    /// Value to transfer (typically 0)
-    pub value: U256,
-    /// Contract initialization code
-    pub init_code: Bytes,
-    /// Signature v component (must be 27 or 28 for pre-EIP-155)
-    pub v: u8,
-    /// Signature r component
-    pub r: U256,
-    /// Signature s component
-    pub s: U256,
-}
-
 /// Decodes a pre-EIP-155 legacy transaction from RLP bytes.
 ///
 /// The expected RLP structure is: `[nonce, gasPrice, gasLimit, to, value, data, v, r, s]`
@@ -119,140 +94,32 @@ pub struct KeylessDeployTx {
 /// - The `v` value must be 27 or 28 (pre-EIP-155)
 ///
 /// # Returns
-/// - `Ok(KeylessDeployTx)` if the transaction is valid
+/// - `Ok(Signed<TxLegacy>)` if the transaction is valid
 /// - `Err(KeylessDeployError::InvalidTransaction(...))` if validation fails
-pub fn decode_keyless_tx(rlp_bytes: &[u8]) -> Result<KeylessDeployTx, KeylessDeployError> {
+pub fn decode_keyless_tx(rlp_bytes: &[u8]) -> Result<Signed<TxLegacy>, KeylessDeployError> {
     let mut buf = rlp_bytes;
+    let signed = TxLegacy::rlp_decode_signed(&mut buf)
+        .map_err(|_| KeylessDeployError::MalformedEncoding)?;
 
-    // Decode the RLP list header
-    let header =
-        alloy_rlp::Header::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    if !header.list {
-        return Err(KeylessDeployError::MalformedEncoding);
-    }
-
-    // Decode nonce
-    let nonce = u64::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // Decode gasPrice
-    let gas_price = u128::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // Decode gasLimit
-    let gas_limit = u64::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // Decode 'to' field - must be empty for contract creation
-    let to_header =
-        alloy_rlp::Header::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // For contract creation, 'to' must be an empty string (not a list, payload_length = 0)
-    if to_header.list || to_header.payload_length != 0 {
+    if !signed.tx().to.is_create() {
         return Err(KeylessDeployError::NotContractCreation);
     }
-
-    // Decode value
-    let value = U256::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // Decode init_code (data field)
-    let init_code = Bytes::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // Decode v
-    let v_raw = u64::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // Decode r
-    let r = U256::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // Decode s
-    let s = U256::decode(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
-
-    // Validate v is 27 or 28 (pre-EIP-155)
-    if v_raw != 27 && v_raw != 28 {
+    if signed.tx().chain_id.is_some() {
         return Err(KeylessDeployError::NotPreEIP155);
     }
-
-    Ok(KeylessDeployTx { nonce, gas_price, gas_limit, value, init_code, v: v_raw as u8, r, s })
+    Ok(signed)
 }
 
 /// Recovers the signer address from a keyless deployment transaction.
 ///
-/// This performs ECDSA signature recovery to derive the public key from the
-/// transaction signature, then computes the Ethereum address from the public key.
-///
-/// # Algorithm
-/// 1. Compute the signing hash = keccak256(RLP([nonce, gasPrice, gasLimit, to, value, data]))
-/// 2. Recover the public key from (hash, v, r, s)
-/// 3. Compute address = keccak256(pubkey)[12:]
+/// Uses alloy's built-in signature recovery to derive the signer address
+/// from the signed transaction.
 ///
 /// # Returns
 /// - `Ok(Address)` - The recovered signer address
-/// - `Err(KeylessDeployError::DeploymentFailed)` - If signature recovery fails
-pub fn recover_signer(tx: &KeylessDeployTx) -> Result<Address, KeylessDeployError> {
-    // Build the unsigned transaction RLP for hashing
-    // Structure: [nonce, gasPrice, gasLimit, to, value, data]
-    // Note: 'to' is empty bytes for contract creation
-    let unsigned_tx_rlp = {
-        use alloy_rlp::Encodable;
-
-        let mut buf = Vec::new();
-
-        // We need to encode as a list: [nonce, gasPrice, gasLimit, "", value, data]
-        // First calculate the payload length
-        let nonce_len = tx.nonce.length();
-        let gas_price_len = tx.gas_price.length();
-        let gas_limit_len = tx.gas_limit.length();
-        let to_len = 1_usize; // Empty string is encoded as 0x80 (1 byte)
-        let value_len = tx.value.length();
-        let data_len = tx.init_code.length();
-
-        let payload_length =
-            nonce_len + gas_price_len + gas_limit_len + to_len + value_len + data_len;
-
-        // Encode the list header
-        alloy_rlp::Header { list: true, payload_length }.encode(&mut buf);
-
-        // Encode each field
-        tx.nonce.encode(&mut buf);
-        tx.gas_price.encode(&mut buf);
-        tx.gas_limit.encode(&mut buf);
-        // Empty 'to' field for contract creation
-        buf.push(0x80); // RLP encoding of empty string
-        tx.value.encode(&mut buf);
-        tx.init_code.encode(&mut buf);
-
-        buf
-    };
-
-    // Compute the message hash
-    let msg_hash = keccak256(&unsigned_tx_rlp);
-
-    // Convert r and s to signature bytes (64 bytes total)
-    let mut sig_bytes = [0u8; 64];
-    sig_bytes[..32].copy_from_slice(&tx.r.to_be_bytes::<32>());
-    sig_bytes[32..].copy_from_slice(&tx.s.to_be_bytes::<32>());
-
-    // Recovery ID: v - 27 (v is 27 or 28, so recovery_id is 0 or 1)
-    let recovery_id = RecoveryId::try_from((tx.v - 27) as u8)
-        .map_err(|_| KeylessDeployError::InvalidSignature)?;
-
-    // Create the signature
-    let signature =
-        Signature::from_slice(&sig_bytes).map_err(|_| KeylessDeployError::InvalidSignature)?;
-
-    // Recover the public key
-    let recovered_key = VerifyingKey::recover_from_prehash(&msg_hash[..], &signature, recovery_id)
-        .map_err(|_| KeylessDeployError::InvalidSignature)?;
-
-    // Convert to uncompressed public key point and derive address
-    // The uncompressed point is 65 bytes: 0x04 || x (32 bytes) || y (32 bytes)
-    // We take keccak256 of x || y (skip the 0x04 prefix) and take the last 20 bytes
-    let pubkey_point = recovered_key.to_encoded_point(false);
-    let pubkey_bytes = pubkey_point.as_bytes();
-
-    // Skip the 0x04 prefix (1 byte), hash the remaining 64 bytes
-    let pubkey_hash = keccak256(&pubkey_bytes[1..]);
-
-    // Take the last 20 bytes as the address
-    Ok(Address::from_slice(&pubkey_hash[12..]))
+/// - `Err(KeylessDeployError::InvalidSignature)` - If signature recovery fails
+pub fn recover_signer(signed_tx: &Signed<TxLegacy>) -> Result<Address, KeylessDeployError> {
+    signed_tx.recover_signer().map_err(|_| KeylessDeployError::InvalidSignature)
 }
 
 /// Calculates the deployment address for a contract created by the given signer.
@@ -269,7 +136,7 @@ pub fn calculate_keyless_deploy_address(signer: Address) -> Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, bytes, hex};
+    use alloy_primitives::{address, bytes, hex, U256};
 
     // =========================================================================
     // Test vectors generated using Foundry's `cast` command
@@ -308,25 +175,27 @@ mod tests {
     #[test]
     fn test_decode_create2_factory_deployment() {
         // The canonical CREATE2 factory deployment - a well-known pre-EIP-155 transaction
-        let tx = decode_keyless_tx(CREATE2_FACTORY_TX).expect("should decode CREATE2 factory tx");
+        let signed = decode_keyless_tx(CREATE2_FACTORY_TX).expect("should decode CREATE2 factory tx");
 
+        let tx = signed.tx();
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.gas_price, 100_000_000_000); // 100 gwei
         assert_eq!(tx.gas_limit, 100_000);
         assert_eq!(tx.value, U256::ZERO);
-        assert_eq!(tx.v, 27); // pre-EIP-155
+        // Pre-EIP-155 means chain_id is None
+        assert!(tx.chain_id.is_none());
         // r and s are both 0x2222...22 (deterministic signature for Nick's Method)
         assert_eq!(
-            tx.r,
+            signed.signature().r(),
             U256::from_be_bytes(hex!("2222222222222222222222222222222222222222222222222222222222222222"))
         );
         assert_eq!(
-            tx.s,
+            signed.signature().s(),
             U256::from_be_bytes(hex!("2222222222222222222222222222222222222222222222222222222222222222"))
         );
         // Verify init_code matches CREATE2 factory bytecode
         assert_eq!(
-            tx.init_code,
+            tx.input,
             bytes!("604580600e600039806000f350fe7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3")
         );
     }

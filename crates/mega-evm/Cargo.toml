@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 # alloy
-alloy-consensus.workspace = true
+alloy-consensus = { workspace = true, features = ["k256"] }
 alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-hardforks.workspace = true
@@ -31,10 +31,6 @@ revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 # megaeth
 mega-system-contracts = { workspace = true, default-features = false }
 salt = { workspace = true, features = [], optional = true }
-
-# rlp and crypto
-alloy-rlp.workspace = true
-k256 = { workspace = true, features = ["ecdsa"] }
 
 # misc
 auto_impl.workspace = true
