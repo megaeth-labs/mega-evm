@@ -50,6 +50,8 @@ pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
                 account.status.contains(AccountStatus::Created),
                 "Account is selfdestructed but not created. EIP-6780 must be applied."
             );
+            // we will put an empty (equivalent to non-existent) account in the base state.
+            this.insert(*address, Account::default());
             continue;
         }
 
