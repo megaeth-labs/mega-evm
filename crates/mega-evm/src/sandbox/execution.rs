@@ -3,20 +3,22 @@
 //! This module executes keyless deployment in an isolated sandbox environment
 //! to implement Nick's Method for deterministic contract deployment.
 
+use std::collections::hash_map::Entry;
+
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use revm::{
     context::{ContextTr, JournalTr, TxEnv},
+    database::states::account_status,
     handler::FrameResult,
     interpreter::{CallOutcome, Gas, InstructionResult, InterpreterResult},
     primitives::KECCAK_EMPTY,
-    state::EvmState,
+    state::{AccountStatus, EvmState},
     Database,
 };
 
-use crate::{
-    calculate_keyless_deploy_address, constants, decode_keyless_tx, recover_signer,
-    ExternalEnvTypes, MegaContext, MegaEvm, MegaTransaction,
-};
+use crate::{constants, ExternalEnvTypes, MegaContext, MegaEvm, MegaTransaction};
+
+use super::tx::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer};
 
 use super::{
     error::{encode_error_result, encode_success_result, KeylessDeployError},
@@ -48,18 +50,20 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
         ))
     };
 
-    let make_success = |deployed_address: Address, gas_remaining: u64| -> FrameResult {
-        let mut gas = Gas::new(sandbox_gas_limit);
-        let _ = gas.record_cost(sandbox_gas_limit.saturating_sub(gas_remaining));
-        FrameResult::Call(CallOutcome::new(
-            InterpreterResult::new(
-                InstructionResult::Return,
-                encode_success_result(deployed_address),
-                gas,
-            ),
-            return_memory_offset.clone(),
-        ))
-    };
+    let make_success =
+        |deployed_address: Address, gas_remaining: u64, gas_refunded: i64| -> FrameResult {
+            let mut gas = Gas::new(sandbox_gas_limit);
+            let _ = gas.record_cost(sandbox_gas_limit.saturating_sub(gas_remaining));
+            gas.record_refund(gas_refunded);
+            FrameResult::Call(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    encode_success_result(deployed_address),
+                    gas,
+                ),
+                return_memory_offset.clone(),
+            ))
+        };
 
     // Step 1: Check no ether transfer
     if !call_inputs.value.get().is_zero() {
@@ -104,7 +108,11 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
     ) {
         Ok(sandbox_result) => {
             assert_eq!(sandbox_result.deploy_address, deploy_address, "Deployed address mismatch");
-            make_success(deploy_address, sandbox_result.gas.remaining())
+            make_success(
+                deploy_address,
+                sandbox_result.gas.remaining(),
+                sandbox_result.gas.refunded(),
+            )
         }
         Err(e) => make_error(e, remaining_gas),
     }
@@ -220,6 +228,10 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
 }
 
 /// Applies all state changes from sandbox execution to the parent journal.
+///
+/// Note that we need to merge all accounts into the parent journal, even if they are not
+/// touched or created. This is because we need to know which accounts are read but
+/// not written to obtain `ReadSet` to facilitate stateless witness generation.
 fn apply_sandbox_state<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     sandbox_state: EvmState,
@@ -229,9 +241,60 @@ fn apply_sandbox_state<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
             .journal_mut()
             .load_account(address)
             .map_err(|_| KeylessDeployError::DatabaseError)?;
-        parent_account.data.info = account.info;
-        parent_account.data.storage = account.storage;
-        parent_account.data.status = account.status;
+
+        // Update account in the parent journal with the sandbox account
+        // We discard the sandbox account status since we are consolidating the status into the
+        // parent journal. The only two possible status is `Touched` and `Created`, or no change at
+        // all.
+        let mut account_status = AccountStatus::empty();
+
+        // TODO:
+        if account.is_selfdestructed() || account.is_selfdestructed_locally() {
+            account_status |= AccountStatus::SelfDestructed;
+        }
+
+        // For `AccountInfo`, we only update `balance`, `code_hash`, and `code`. `nonce` is not
+        // updated.
+        let parent_info = &mut parent_account.data.info;
+        // Any change to the balance?
+        if parent_info.balance != account.info.balance {
+            parent_info.balance = account.info.balance;
+            account_status |= AccountStatus::Touched;
+        }
+        // Any change to the code?
+        if parent_info.code_hash != account.info.code_hash {
+            account_status |= AccountStatus::Touched;
+            if parent_info.code_hash == KECCAK_EMPTY &&
+                !account.info.code.as_ref().is_some_and(|code| code.is_eip7702())
+            {
+                // If the code was empty and is now non-empty, it means the account was created.
+                // The only exception is if the code is EIP-7702, in which case the account was only
+                // marked as touched.
+                account_status |= AccountStatus::Created;
+            }
+            parent_info.code_hash = account.info.code_hash;
+            parent_info.code = account.info.code;
+        }
+        // We merge the storage.
+        let parent_storage = &mut parent_account.data.storage;
+        for (slot, value) in account.storage {
+            match parent_storage.entry(slot) {
+                Entry::Vacant(v) => {
+                    if value.is_changed() {
+                        account_status |= AccountStatus::Touched;
+                    }
+                    v.insert(value);
+                }
+                Entry::Occupied(mut v) => {
+                    v.get_mut().present_value = value.present_value;
+                    if v.get().is_changed() {
+                        account_status |= AccountStatus::Touched;
+                    }
+                }
+            }
+        }
+        // We merge the account status.
+        parent_account.data.status |= account_status;
     }
     Ok(())
 }
