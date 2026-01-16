@@ -8,16 +8,20 @@ use revm::{
     context::{ContextTr, JournalTr, TxEnv},
     handler::FrameResult,
     interpreter::{CallOutcome, Gas, InstructionResult, InterpreterResult},
+    primitives::KECCAK_EMPTY,
     state::EvmState,
+    Database,
 };
 
 use crate::{
-    calculate_keyless_deploy_address, constants, decode_keyless_tx, encode_error_result,
-    encode_success_result, recover_signer, ExternalEnvTypes, KeylessDeployError, MegaContext,
-    MegaEvm, MegaTransaction,
+    calculate_keyless_deploy_address, constants, decode_keyless_tx, recover_signer,
+    ExternalEnvTypes, MegaContext, MegaEvm, MegaTransaction,
 };
 
-use super::state::SandboxDb;
+use super::{
+    error::{encode_error_result, encode_success_result, KeylessDeployError},
+    state::SandboxDb,
+};
 
 /// Executes a keyless deploy call and returns the frame result.
 ///
@@ -89,7 +93,7 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
     let deploy_address = calculate_keyless_deploy_address(deploy_signer);
 
     // Step 5: Execute sandbox and apply state changes
-    match execute_keyless_sandbox(
+    match execute_keyless_deploy_sandbox(
         ctx,
         deploy_signer,
         deploy_address,
@@ -115,7 +119,7 @@ struct SandboxResult {
 /// Executes the contract creation in a sandbox environment.
 ///
 /// Uses a type-erased `SandboxDb` to prevent infinite type instantiation.
-fn execute_keyless_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
+fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     deploy_signer: Address,
     deploy_address: Address,
@@ -127,45 +131,45 @@ fn execute_keyless_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     use alloy_evm::Evm;
     use revm::context::result::{ExecutionResult, ResultAndState};
 
-    let gas_cost = U256::from(gas_limit) * U256::from(gas_price);
+    // Extract values we need BEFORE borrowing the journal
+    let mega_spec = ctx.mega_spec();
+    let block = ctx.block().clone();
+    let journal = ctx.journal_mut();
+
+    // Create type-erased sandbox database with split borrows:
+    // - Immutable reference to journal state (for cached accounts)
+    // - Mutable reference to underlying database (for cache misses)
+    let mut sandbox_db = SandboxDb::new(&journal.inner.state, &mut journal.database);
 
     // Check signer balance
-    let signer_account = ctx
-        .journal_mut()
-        .load_account(deploy_signer)
-        .map_err(|_| KeylessDeployError::DeploymentFailed)?;
+    let signer_account = sandbox_db
+        .basic(deploy_signer)
+        .map_err(|_| KeylessDeployError::DatabaseError)?
+        .unwrap_or_default();
 
-    let total_cost = gas_cost.checked_add(value).ok_or(KeylessDeployError::DeploymentFailed)?;
-    if signer_account.data.info.balance < total_cost {
-        return Err(KeylessDeployError::DeploymentFailed);
+    // Ensure signer has enough balance to cover gas cost and value
+    let gas_cost = U256::from(gas_limit) * U256::from(gas_price);
+    let total_cost = gas_cost.checked_add(value).ok_or(KeylessDeployError::InsufficientBalance)?;
+    if signer_account.balance < total_cost {
+        return Err(KeylessDeployError::InsufficientBalance);
     }
 
     // Check deploy address doesn't have code
-    let deploy_account = ctx
-        .journal_mut()
-        .load_account(deploy_address)
-        .map_err(|_| KeylessDeployError::DeploymentFailed)?;
-
-    if deploy_account.data.info.code.as_ref().is_some_and(|c| !c.is_empty()) {
-        return Err(KeylessDeployError::DeploymentFailed);
+    let deploy_account = sandbox_db
+        .basic(deploy_address)
+        .map_err(|_| KeylessDeployError::DatabaseError)?
+        .unwrap_or_default();
+    if deploy_account.code_hash != KECCAK_EMPTY {
+        return Err(KeylessDeployError::ContractAlreadyExists);
     }
-
-    // Extract values we need BEFORE borrowing the journal
-    let spec = ctx.mega_spec();
-    let block = ctx.block().clone();
-
-    // Set sandbox flag to prevent recursive keyless deploy interception
-    ctx.set_in_keyless_deploy_sandbox(true);
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation
     let sandbox_result: Result<(EvmState, Gas), KeylessDeployError> = {
-        // Create type-erased sandbox database from journal
-        // This captures the current state and type-erases the database
-        let sandbox_db = SandboxDb::from_journal(ctx.journal());
-
-        // Create sandbox context with the type-erased database
-        // SandboxDb is a concrete type, so MegaContext<SandboxDb, ...> doesn't recurse
-        let sandbox_ctx = MegaContext::new(sandbox_db, spec).with_block(block);
+        // Create sandbox context with the type-erased database.
+        // SandboxDb is a concrete type, so MegaContext<SandboxDb, ...> doesn't recurse.
+        // Disable sandbox interception to prevent recursive sandbox creation.
+        let sandbox_ctx =
+            MegaContext::new(sandbox_db, mega_spec).with_block(block).with_sandbox_disabled(true);
         let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
 
         // Build and execute CREATE transaction
@@ -183,70 +187,51 @@ fn execute_keyless_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
 
         // Process result and extract what we need
         match result {
-            Ok(ResultAndState { result: exec_result, state: sandbox_state }) => {
-                match exec_result {
-                    ExecutionResult::Success { gas_used, gas_refunded, output, .. } => {
-                        if let revm::context::result::Output::Create(_, Some(created_addr)) = output
-                        {
-                            if created_addr != deploy_address {
-                                Err(KeylessDeployError::DeploymentFailed)
-                            } else {
-                                let mut gas = Gas::new(gas_limit);
-                                let _ = gas.record_cost(gas_used);
-                                gas.record_refund(gas_refunded as i64);
-                                Ok((sandbox_state, gas))
-                            }
+            Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
+                ExecutionResult::Success { gas_used, gas_refunded, output, .. } => {
+                    if let revm::context::result::Output::Create(_, Some(created_addr)) = output {
+                        if created_addr != deploy_address {
+                            // This should never happen - address mismatch indicates a bug
+                            Err(KeylessDeployError::AddressMismatch)
                         } else {
-                            Err(KeylessDeployError::DeploymentFailed)
+                            let mut gas = Gas::new(gas_limit);
+                            let _ = gas.record_cost(gas_used);
+                            gas.record_refund(gas_refunded as i64);
+                            Ok((sandbox_state, gas))
                         }
-                    }
-                    ExecutionResult::Revert { .. } | ExecutionResult::Halt { .. } => {
-                        Err(KeylessDeployError::DeploymentFailed)
+                    } else {
+                        // Contract creation didn't return an address - should never happen
+                        // but we return an error instead of panicking to avoid crashing the node
+                        Err(KeylessDeployError::NoContractCreated)
                     }
                 }
-            }
-            Err(_) => Err(KeylessDeployError::DeploymentFailed),
+                ExecutionResult::Revert { .. } => Err(KeylessDeployError::ExecutionReverted),
+                ExecutionResult::Halt { .. } => Err(KeylessDeployError::ExecutionHalted),
+            },
+            Err(_) => Err(KeylessDeployError::DatabaseError),
         }
     };
 
-    // Clear sandbox flag
-    ctx.set_in_keyless_deploy_sandbox(false);
-
-    // Now we can apply state changes to the parent context
+    // Apply all state changes from sandbox to parent context
     let (sandbox_state, gas) = sandbox_result?;
-    apply_sandbox_state_changes(ctx, &sandbox_state, deploy_signer, deploy_address)?;
+    apply_sandbox_state(ctx, sandbox_state)?;
 
     Ok(SandboxResult { deploy_address, gas })
 }
 
-/// Applies filtered state changes from sandbox to parent journal.
-///
-/// Only updates:
-/// - `deploy_address`: Full state (code, storage, balance, status)
-/// - `deploy_signer`: Balance only (gas deduction + value transfer)
-fn apply_sandbox_state_changes<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
+/// Applies all state changes from sandbox execution to the parent journal.
+fn apply_sandbox_state<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    sandbox_state: &EvmState,
-    deploy_signer: Address,
-    deploy_address: Address,
+    sandbox_state: EvmState,
 ) -> Result<(), KeylessDeployError> {
     for (address, account) in sandbox_state {
-        if *address == deploy_address {
-            let deploy_account = ctx
-                .journal_mut()
-                .load_account(*address)
-                .map_err(|_| KeylessDeployError::DeploymentFailed)?;
-            deploy_account.data.info = account.info.clone();
-            deploy_account.data.storage = account.storage.clone();
-            deploy_account.data.status = account.status;
-        } else if *address == deploy_signer {
-            let signer_account = ctx
-                .journal_mut()
-                .load_account(*address)
-                .map_err(|_| KeylessDeployError::DeploymentFailed)?;
-            signer_account.data.info.balance = account.info.balance;
-            signer_account.data.mark_touch();
-        }
+        let parent_account = ctx
+            .journal_mut()
+            .load_account(address)
+            .map_err(|_| KeylessDeployError::DatabaseError)?;
+        parent_account.data.info = account.info;
+        parent_account.data.storage = account.storage;
+        parent_account.data.status = account.status;
     }
     Ok(())
 }

@@ -62,9 +62,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// Tracker for sensitive data access (block environment, beneficiary, etc.)
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
 
-    /// Whether this context is currently executing inside a keyless deploy sandbox.
-    /// Used to prevent recursive sandbox creation.
-    pub(crate) in_keyless_deploy_sandbox: Rc<RefCell<bool>>,
+    /// Whether sandbox interception is disabled for this context.
+    /// Set to `true` to prevent recursive sandbox creation (e.g., keyless deploy).
+    pub(crate) disable_sandbox: Rc<RefCell<bool>>,
 }
 
 impl Default for MegaContext<EmptyDB, EmptyExternalEnv> {
@@ -112,7 +112,7 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
             ))),
             oracle_env: Rc::new(RefCell::new(EmptyExternalEnv)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
-            in_keyless_deploy_sandbox: Rc::new(RefCell::new(false)),
+            disable_sandbox: Rc::new(RefCell::new(false)),
             inner,
         }
     }
@@ -169,7 +169,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
-            in_keyless_deploy_sandbox: Rc::new(RefCell::new(false)),
+            disable_sandbox: Rc::new(RefCell::new(false)),
             inner,
         }
     }
@@ -195,7 +195,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             dynamic_storage_gas_cost: self.dynamic_storage_gas_cost,
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
-            in_keyless_deploy_sandbox: self.in_keyless_deploy_sandbox,
+            disable_sandbox: self.disable_sandbox,
         }
     }
 
@@ -296,7 +296,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
-            in_keyless_deploy_sandbox: self.in_keyless_deploy_sandbox,
+            disable_sandbox: self.disable_sandbox,
         }
     }
 
@@ -337,21 +337,28 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.spec
     }
 
-    /// Returns whether this context is currently executing inside a keyless deploy sandbox.
+    /// Returns whether sandbox interception is disabled for this context.
     ///
-    /// When `true`, keyless deploy interception is disabled to prevent
+    /// When `true`, sandbox interception (e.g., keyless deploy) is disabled to prevent
     /// infinite recursion during sandbox execution.
     #[inline]
-    pub fn is_in_keyless_deploy_sandbox(&self) -> bool {
-        *self.in_keyless_deploy_sandbox.borrow()
+    pub fn is_sandbox_disabled(&self) -> bool {
+        *self.disable_sandbox.borrow()
     }
 
-    /// Sets whether this context is currently executing inside a keyless deploy sandbox.
-    ///
-    /// This is called by the keyless deploy execution to mark when we enter/exit sandbox mode.
+    /// Sets whether sandbox interception is disabled for this context.
     #[inline]
-    pub(crate) fn set_in_keyless_deploy_sandbox(&self, value: bool) {
-        *self.in_keyless_deploy_sandbox.borrow_mut() = value;
+    pub(crate) fn set_sandbox_disabled(&self, value: bool) {
+        *self.disable_sandbox.borrow_mut() = value;
+    }
+
+    /// Builder method to disable sandbox interception.
+    ///
+    /// Used when creating sandbox contexts to prevent recursive interception.
+    #[inline]
+    pub fn with_sandbox_disabled(self, value: bool) -> Self {
+        self.set_sandbox_disabled(value);
+        self
     }
 
     /// Gets the current total data size generated from transaction execution.

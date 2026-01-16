@@ -7,13 +7,14 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{boxed::Box, string::String};
+use std::string::String;
 
 use alloy_primitives::{map::HashMap, Address, B256};
+use core::cell::RefCell;
 use revm::{
     database::DBErrorMarker,
     primitives::{StorageKey, StorageValue, KECCAK_EMPTY},
-    state::{AccountInfo, Bytecode},
+    state::{AccountInfo, Bytecode, EvmState},
     Database,
 };
 
@@ -30,108 +31,120 @@ impl core::fmt::Display for SandboxDbError {
 impl core::error::Error for SandboxDbError {}
 impl DBErrorMarker for SandboxDbError {}
 
-/// A concrete (non-generic) trait for database operations.
+/// Type-erased database trait for sandbox operations.
 ///
-/// This is used internally by `SandboxDb` to type-erase the underlying database,
-/// preventing infinite type instantiation during monomorphization.
-trait ErasedDatabase: Send + Sync {
-    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, SandboxDbError>;
-    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, SandboxDbError>;
-    fn storage(
-        &mut self,
-        address: Address,
-        index: StorageKey,
-    ) -> Result<StorageValue, SandboxDbError>;
-    fn block_hash(&mut self, number: u64) -> Result<B256, SandboxDbError>;
+/// This trait erases the concrete database type to prevent infinite type
+/// instantiation when creating nested sandboxes.
+///
+/// # Why not `Box<dyn Database>`?
+///
+/// The [`Database`] trait has an associated type `Error`, which makes it not
+/// object-safe. You cannot use `Box<dyn Database>` directly because the compiler
+/// doesn't know what error type to use at runtime:
+///
+/// ```ignore
+/// pub trait Database {
+///     type Error;  // This makes it NOT object-safe
+///     fn basic(&mut self, ...) -> Result<..., Self::Error>;
+/// }
+/// ```
+///
+/// Even `Box<dyn Database<Error = SandboxDbError>>` won't work because the trait
+/// requires `Self::Error` to match exactly - you can't erase a `DB::Error` into
+/// a different type through a trait object.
+///
+/// This `ErasedDatabase` trait solves the problem by:
+/// 1. Having no associated types (all methods return our fixed [`SandboxDbError`])
+/// 2. Converting errors via `.to_string()` in the [`DatabaseWrapper`] implementation
+trait ErasedDatabase {
+    fn basic(&self, address: Address) -> Result<Option<AccountInfo>, SandboxDbError>;
+    fn storage(&self, address: Address, index: StorageKey) -> Result<StorageValue, SandboxDbError>;
+    fn block_hash(&self, number: u64) -> Result<B256, SandboxDbError>;
+    fn code_by_hash(&self, code_hash: B256) -> Result<Bytecode, SandboxDbError>;
 }
 
-/// Wrapper that implements `ErasedDatabase` for any `Database`.
-struct DatabaseWrapper<DB: Database>(DB);
+/// Wrapper that implements [`ErasedDatabase`] for any [`Database`] type.
+///
+/// Uses `RefCell` for interior mutability since `Database` methods take `&mut self`.
+struct DatabaseWrapper<'a, DB> {
+    db: RefCell<&'a mut DB>,
+}
 
-impl<DB: Database + Send + Sync> ErasedDatabase for DatabaseWrapper<DB>
+impl<DB: Database> ErasedDatabase for DatabaseWrapper<'_, DB>
 where
-    DB::Error: core::error::Error + Send + Sync + 'static,
+    DB::Error: core::fmt::Display,
 {
-    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, SandboxDbError> {
-        self.0.basic(address).map_err(|e| SandboxDbError(e.to_string()))
+    #[inline]
+    fn basic(&self, address: Address) -> Result<Option<AccountInfo>, SandboxDbError> {
+        self.db.borrow_mut().basic(address).map_err(|e| SandboxDbError(e.to_string()))
     }
 
-    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, SandboxDbError> {
-        self.0.code_by_hash(code_hash).map_err(|e| SandboxDbError(e.to_string()))
+    #[inline]
+    fn storage(&self, address: Address, index: StorageKey) -> Result<StorageValue, SandboxDbError> {
+        self.db.borrow_mut().storage(address, index).map_err(|e| SandboxDbError(e.to_string()))
     }
 
-    fn storage(
-        &mut self,
-        address: Address,
-        index: StorageKey,
-    ) -> Result<StorageValue, SandboxDbError> {
-        self.0.storage(address, index).map_err(|e| SandboxDbError(e.to_string()))
+    #[inline]
+    fn block_hash(&self, number: u64) -> Result<B256, SandboxDbError> {
+        self.db.borrow_mut().block_hash(number).map_err(|e| SandboxDbError(e.to_string()))
     }
 
-    fn block_hash(&mut self, number: u64) -> Result<B256, SandboxDbError> {
-        self.0.block_hash(number).map_err(|e| SandboxDbError(e.to_string()))
+    #[inline]
+    fn code_by_hash(&self, code_hash: B256) -> Result<Bytecode, SandboxDbError> {
+        self.db.borrow_mut().code_by_hash(code_hash).map_err(|e| SandboxDbError(e.to_string()))
     }
 }
 
 /// A sandbox database for isolated EVM execution.
 ///
 /// Used for keyless deploy sandbox where we need to read from the parent state
-/// directly without cloning or requiring `DB: Clone`.
+/// directly without cloning the entire state upfront.
 ///
-/// **Important**: This type uses internal type erasure to prevent infinite type
-/// instantiation (`SandboxDb<SandboxDb<...>>`) that would cause a compiler ICE.
-/// Unlike a generic approach, `SandboxDb` itself does NOT implement `Database`,
-/// which breaks the recursive type chain.
-pub struct SandboxDb {
-    /// Type-erased database reference.
-    db: Box<dyn ErasedDatabase>,
-    /// Cache of account states loaded from the parent.
-    state_cache: HashMap<Address, Option<AccountInfo>>,
+/// **Important**: This type uses lifetime parameters to hold references to the
+/// parent journal's state and database, avoiding expensive cloning. Values are
+/// cloned lazily only when accessed.
+pub struct SandboxDb<'a> {
+    /// Reference to the parent journal's state.
+    journal_state: &'a EvmState,
+    /// Type-erased reference to the underlying database for cache misses.
+    db: Box<dyn ErasedDatabase + 'a>,
     /// Index from code_hash to address for O(1) bytecode lookup.
     code_index: HashMap<B256, Address>,
 }
 
-impl core::fmt::Debug for SandboxDb {
+impl<'a> core::fmt::Debug for SandboxDb<'a> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SandboxDb").finish_non_exhaustive()
     }
 }
 
-impl SandboxDb {
-    /// Creates a new sandbox database from a database reference.
+impl<'a> SandboxDb<'a> {
+    /// Creates a new sandbox database with references to the journal's state and database.
     ///
-    /// The database is type-erased to prevent infinite type instantiation.
-    #[allow(dead_code)] // Used in tests
-    pub fn new<DB>(db: DB) -> Self
-    where
-        DB: Database + Send + Sync + 'static,
-        DB::Error: core::error::Error + Send + Sync + 'static,
-    {
-        Self {
-            db: Box::new(DatabaseWrapper(db)),
-            state_cache: HashMap::default(),
-            code_index: HashMap::default(),
-        }
-    }
-
-    /// Creates a new sandbox database with pre-populated state from a journal.
+    /// This does NOT clone the state or database - it holds references and clones values
+    /// lazily when accessed. The code_index is built upfront for O(1) bytecode lookup.
     ///
-    /// This captures the current state from the journal. For any state not in the
-    /// journal, the sandbox falls back to returning empty/default values.
+    /// # Arguments
     ///
-    /// **Note**: This does not clone the underlying database. All required accounts
-    /// (deploy signer and deploy address) should be loaded into the journal before
-    /// calling this function.
-    pub fn from_journal<DB>(journal: &revm::Journal<DB>) -> Self
+    /// * `state` - Reference to the journal's cached state
+    /// * `db` - Mutable reference to the underlying database for cache misses
+    ///
+    /// # Split Borrowing
+    ///
+    /// This constructor takes separate references to state and database to allow
+    /// split borrowing at the call site. The caller should do:
+    /// ```ignore
+    /// let journal = ctx.journal_mut();
+    /// let sandbox_db = SandboxDb::new(&journal.inner.state, &mut journal.database);
+    /// ```
+    pub fn new<DB>(state: &'a EvmState, db: &'a mut DB) -> Self
     where
         DB: Database,
+        DB::Error: core::fmt::Display,
     {
-        // Capture state from journal
-        let mut state_cache = HashMap::default();
+        // Build code index for O(1) bytecode lookup
         let mut code_index = HashMap::default();
-
-        for (addr, account) in &journal.inner.state {
-            state_cache.insert(*addr, Some(account.info.clone()));
+        for (addr, account) in state {
             if let Some(code) = &account.info.code {
                 if !code.is_empty() {
                     code_index.insert(account.info.code_hash, *addr);
@@ -139,27 +152,24 @@ impl SandboxDb {
             }
         }
 
-        // Use EmptyDB as fallback - any state not in the cache will return default values
         Self {
-            db: Box::new(DatabaseWrapper(revm::database::EmptyDB::default())),
-            state_cache,
+            journal_state: state,
+            db: Box::new(DatabaseWrapper { db: RefCell::new(db) }),
             code_index,
         }
     }
 }
 
-impl Database for SandboxDb {
+impl Database for SandboxDb<'_> {
     type Error = SandboxDbError;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        // Check cache first
-        if let Some(cached) = self.state_cache.get(&address) {
-            return Ok(cached.clone());
+        // Check journal state first - clone only when accessed
+        if let Some(account) = self.journal_state.get(&address) {
+            return Ok(Some(account.info.clone()));
         }
-        // Fall back to underlying database
-        let result = self.db.basic(address)?;
-        self.state_cache.insert(address, result.clone());
-        Ok(result)
+        // Not found in journal state - query underlying database
+        self.db.basic(address)
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
@@ -167,20 +177,15 @@ impl Database for SandboxDb {
             return Ok(Bytecode::default());
         }
 
-        // Try underlying database first
-        let code = self.db.code_by_hash(code_hash)?;
-        if !code.is_empty() {
-            return Ok(code);
-        }
-
-        // Use index for O(1) lookup of newly created contracts
+        // Use index for O(1) lookup in journal state
         if let Some(addr) = self.code_index.get(&code_hash) {
-            if let Some(Some(account)) = self.state_cache.get(addr) {
-                return Ok(account.code.clone().unwrap_or_default());
+            if let Some(account) = self.journal_state.get(addr) {
+                return Ok(account.info.code.clone().unwrap_or_default());
             }
         }
 
-        Ok(Bytecode::default())
+        // Not found in journal state - query underlying database
+        self.db.code_by_hash(code_hash)
     }
 
     fn storage(
@@ -188,13 +193,18 @@ impl Database for SandboxDb {
         address: Address,
         index: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
-        // Note: For sandbox, we delegate storage to the underlying database
-        // This is a simplified implementation - in production, you might want
-        // to cache storage values from the journal as well
+        // Check journal state for cached storage values
+        if let Some(account) = self.journal_state.get(&address) {
+            if let Some(slot) = account.storage.get(&index) {
+                return Ok(slot.present_value);
+            }
+        }
+        // Not found in journal state - query underlying database
         self.db.storage(address, index)
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        // Block hashes are not stored in journal state - query database
         self.db.block_hash(number)
     }
 }
@@ -202,59 +212,287 @@ impl Database for SandboxDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, U256};
-    use revm::database::EmptyDB;
+    use alloy_primitives::{address, keccak256, Bytes, U256};
+    use revm::{
+        context::JournalTr,
+        database::EmptyDB,
+        state::{AccountStatus, EvmStorageSlot},
+        Journal,
+    };
+
+    const TEST_ADDR_1: Address = address!("1111111111111111111111111111111111111111");
+    const TEST_ADDR_2: Address = address!("2222222222222222222222222222222222222222");
+    const TEST_ADDR_3: Address = address!("3333333333333333333333333333333333333333");
+
+    fn create_test_journal() -> Journal<EmptyDB> {
+        let mut journal = Journal::<EmptyDB>::new(EmptyDB::default());
+        // Add a test account to the journal
+        let account = revm::state::Account {
+            info: AccountInfo {
+                balance: U256::from(1000),
+                nonce: 1,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            },
+            transaction_id: 0,
+            storage: Default::default(),
+            status: AccountStatus::empty(),
+        };
+        journal.inner.state.insert(TEST_ADDR_1, account);
+        journal
+    }
+
+    fn create_journal_with_contract() -> Journal<EmptyDB> {
+        let mut journal = Journal::<EmptyDB>::new(EmptyDB::default());
+
+        // Create bytecode and compute its hash
+        let bytecode_bytes = Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xf3]); // PUSH0 PUSH0 RETURN
+        let bytecode = Bytecode::new_raw(bytecode_bytes.clone());
+        let code_hash = keccak256(&bytecode_bytes);
+
+        // Add contract account with bytecode
+        let contract_account = revm::state::Account {
+            info: AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash,
+                code: Some(bytecode),
+            },
+            transaction_id: 0,
+            storage: Default::default(),
+            status: AccountStatus::empty(),
+        };
+        journal.inner.state.insert(TEST_ADDR_2, contract_account);
+        journal
+    }
+
+    fn create_journal_with_storage() -> Journal<EmptyDB> {
+        let mut journal = Journal::<EmptyDB>::new(EmptyDB::default());
+
+        // Add account with storage
+        let mut storage = HashMap::default();
+        storage.insert(
+            U256::from(1),
+            EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0),
+        );
+        storage.insert(
+            U256::from(100),
+            EvmStorageSlot::new_changed(U256::ZERO, U256::from(999), 0),
+        );
+
+        let account = revm::state::Account {
+            info: AccountInfo {
+                balance: U256::from(5000),
+                nonce: 10,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            },
+            transaction_id: 0,
+            storage,
+            status: AccountStatus::empty(),
+        };
+        journal.inner.state.insert(TEST_ADDR_1, account);
+        journal
+    }
+
+    // ==================== basic() tests ====================
 
     #[test]
-    fn test_sandbox_db_basic() {
-        let empty_db = EmptyDB::default();
-        let mut sandbox = SandboxDb::new(empty_db);
+    fn test_basic_returns_account_from_journal() {
+        let mut journal = create_test_journal();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
 
-        let addr = address!("1111111111111111111111111111111111111111");
-        let result = sandbox.basic(addr).unwrap();
+        let result = sandbox.basic(TEST_ADDR_1).unwrap();
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.balance, U256::from(1000));
+        assert_eq!(info.nonce, 1);
+    }
+
+    #[test]
+    fn test_basic_queries_database_on_cache_miss() {
+        let mut journal = create_test_journal();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        // TEST_ADDR_3 is not in journal, so it queries EmptyDB which returns None
+        let result = sandbox.basic(TEST_ADDR_3).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_sandbox_db_caches_results() {
-        let empty_db = EmptyDB::default();
-        let mut sandbox = SandboxDb::new(empty_db);
+    fn test_basic_returns_contract_account_info() {
+        let mut journal = create_journal_with_contract();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
 
-        let addr = address!("1111111111111111111111111111111111111111");
+        let result = sandbox.basic(TEST_ADDR_2).unwrap();
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.nonce, 1);
+        assert_ne!(info.code_hash, KECCAK_EMPTY);
+    }
 
-        // First call
-        let _ = sandbox.basic(addr).unwrap();
+    // ==================== storage() tests ====================
 
-        // Should be cached now
-        assert!(sandbox.state_cache.contains_key(&addr));
+    #[test]
+    fn test_storage_returns_value_from_journal() {
+        let mut journal = create_journal_with_storage();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        let value = sandbox.storage(TEST_ADDR_1, U256::from(1)).unwrap();
+        assert_eq!(value, U256::from(42));
+
+        let value = sandbox.storage(TEST_ADDR_1, U256::from(100)).unwrap();
+        assert_eq!(value, U256::from(999));
     }
 
     #[test]
-    fn test_sandbox_db_empty_code_hash() {
-        let empty_db = EmptyDB::default();
-        let mut sandbox = SandboxDb::new(empty_db);
+    fn test_storage_returns_zero_for_unset_slot_in_journal() {
+        let mut journal = create_journal_with_storage();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        // Slot 50 is not set in journal storage, queries database (EmptyDB returns zero)
+        let value = sandbox.storage(TEST_ADDR_1, U256::from(50)).unwrap();
+        assert_eq!(value, U256::ZERO);
+    }
+
+    #[test]
+    fn test_storage_queries_database_for_unknown_account() {
+        let mut journal = create_test_journal();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        // TEST_ADDR_3 not in journal, queries EmptyDB which returns zero
+        let value = sandbox.storage(TEST_ADDR_3, U256::from(1)).unwrap();
+        assert_eq!(value, U256::ZERO);
+    }
+
+    // ==================== code_by_hash() tests ====================
+
+    #[test]
+    fn test_code_by_hash_returns_empty_for_keccak_empty() {
+        let mut journal = create_test_journal();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
 
         let code = sandbox.code_by_hash(KECCAK_EMPTY).unwrap();
         assert!(code.is_empty());
     }
 
     #[test]
-    fn test_sandbox_db_storage() {
-        let empty_db = EmptyDB::default();
-        let mut sandbox = SandboxDb::new(empty_db);
+    fn test_code_by_hash_returns_bytecode_from_journal_via_index() {
+        let mut journal = create_journal_with_contract();
 
-        let addr = address!("1111111111111111111111111111111111111111");
-        let value = sandbox.storage(addr, U256::from(1)).unwrap();
-        assert_eq!(value, U256::ZERO);
+        // Get the code hash from the contract account
+        let code_hash = journal.inner.state.get(&TEST_ADDR_2).unwrap().info.code_hash;
+
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        let code = sandbox.code_by_hash(code_hash).unwrap();
+        assert!(!code.is_empty());
+        // Bytecode may have padding, so check it starts with our expected bytes
+        assert!(code.bytes_slice().starts_with(&[0x60, 0x00, 0x60, 0x00, 0xf3]));
     }
 
     #[test]
-    fn test_sandbox_db_block_hash() {
-        let empty_db = EmptyDB::default();
-        let mut sandbox = SandboxDb::new(empty_db);
+    fn test_code_by_hash_queries_database_for_unknown_hash() {
+        let mut journal = create_test_journal();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
 
-        // EmptyDB returns keccak256(number.to_string()) for block hashes
+        // Random hash not in journal - queries EmptyDB which returns empty bytecode
+        let unknown_hash = keccak256(b"unknown code");
+        let code = sandbox.code_by_hash(unknown_hash).unwrap();
+        assert!(code.is_empty());
+    }
+
+    #[test]
+    fn test_code_index_built_correctly() {
+        let mut journal = create_journal_with_contract();
+        let code_hash = journal.inner.state.get(&TEST_ADDR_2).unwrap().info.code_hash;
+
+        let sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        // Verify code_index contains the mapping
+        assert!(sandbox.code_index.contains_key(&code_hash));
+        assert_eq!(sandbox.code_index.get(&code_hash), Some(&TEST_ADDR_2));
+    }
+
+    #[test]
+    fn test_code_index_excludes_empty_code() {
+        let mut journal = create_test_journal();
+        let sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        // Account with no code should not be in code_index
+        assert!(!sandbox.code_index.contains_key(&KECCAK_EMPTY));
+        assert!(sandbox.code_index.is_empty());
+    }
+
+    // ==================== block_hash() tests ====================
+
+    #[test]
+    fn test_block_hash_queries_database() {
+        let mut journal = create_test_journal();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        // Block hash is always queried from database
+        // EmptyDB returns keccak256(block_number)
         let hash = sandbox.block_hash(100).unwrap();
-        assert!(!hash.is_zero()); // Just verify it returns something non-zero
+        assert_ne!(hash, B256::ZERO); // EmptyDB returns non-zero hash
+    }
+
+    #[test]
+    fn test_block_hash_different_blocks_different_hashes() {
+        let mut journal = create_test_journal();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        let hash_100 = sandbox.block_hash(100).unwrap();
+        let hash_200 = sandbox.block_hash(200).unwrap();
+
+        assert_ne!(hash_100, hash_200);
+    }
+
+    // ==================== Multiple accounts tests ====================
+
+    #[test]
+    fn test_multiple_accounts_in_journal() {
+        let mut journal = Journal::<EmptyDB>::new(EmptyDB::default());
+
+        // Add multiple accounts
+        for (i, addr) in [TEST_ADDR_1, TEST_ADDR_2, TEST_ADDR_3].iter().enumerate() {
+            let account = revm::state::Account {
+                info: AccountInfo {
+                    balance: U256::from((i + 1) * 1000),
+                    nonce: i as u64,
+                    code_hash: KECCAK_EMPTY,
+                    code: None,
+                },
+                transaction_id: 0,
+                storage: Default::default(),
+                status: AccountStatus::empty(),
+            };
+            journal.inner.state.insert(*addr, account);
+        }
+
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        // Verify all accounts are accessible
+        let info1 = sandbox.basic(TEST_ADDR_1).unwrap().unwrap();
+        assert_eq!(info1.balance, U256::from(1000));
+
+        let info2 = sandbox.basic(TEST_ADDR_2).unwrap().unwrap();
+        assert_eq!(info2.balance, U256::from(2000));
+
+        let info3 = sandbox.basic(TEST_ADDR_3).unwrap().unwrap();
+        assert_eq!(info3.balance, U256::from(3000));
+    }
+
+    // ==================== Journal priority tests ====================
+
+    #[test]
+    fn test_journal_state_takes_priority_over_database() {
+        let mut journal = create_journal_with_storage();
+        let mut sandbox = SandboxDb::new(&journal.inner.state, &mut journal.database);
+
+        // Storage slot 1 has value 42 in journal
+        // Even if database had a different value, journal takes priority
+        let value = sandbox.storage(TEST_ADDR_1, U256::from(1)).unwrap();
+        assert_eq!(value, U256::from(42));
     }
 }

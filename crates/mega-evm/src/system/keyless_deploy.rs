@@ -28,6 +28,9 @@ use revm::{
 
 use crate::MegaHardforks;
 
+// Re-export error types from sandbox
+pub use crate::sandbox::{encode_error_result, encode_success_result, KeylessDeployError};
+
 /// The address of the keyless deploy system contract.
 pub const KEYLESS_DEPLOY_ADDRESS: Address = address!("0x6342000000000000000000000000000000000003");
 
@@ -86,7 +89,7 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
 ///
 /// This represents the RLP-decoded structure of a legacy Ethereum transaction
 /// that uses pre-EIP-155 signature format (v = 27 or 28, no chain ID).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeylessDeployTx {
     /// Transaction nonce (typically 0 for Nick's Method)
     pub nonce: u64,
@@ -104,53 +107,6 @@ pub struct KeylessDeployTx {
     pub r: U256,
     /// Signature s component
     pub s: U256,
-}
-
-/// Error types for keyless deployment operations.
-///
-/// These map directly to the Solidity errors defined in IKeylessDeploy.
-#[derive(Debug, Clone, Copy)]
-pub enum KeylessDeployError {
-    /// The gas limit for sandbox execution is too low
-    GasLimitLessThanIntrinsic {
-        /// The intrinsic gas required for the operation
-        intrinsic_gas: u64,
-        /// The gas limit provided by the caller
-        provided_gas: u64,
-    },
-    /// The transaction data is malformed (invalid RLP encoding)
-    MalformedEncoding,
-    /// The transaction is not a contract creation (to address is not empty)
-    NotContractCreation,
-    /// The transaction is not pre-EIP-155 (v must be 27 or 28)
-    NotPreEIP155,
-    /// The call tried to transfer ether (maps to NoEtherTransfer)
-    NoEtherTransfer,
-    /// The contract deployment failed (maps to DeploymentFailed)
-    DeploymentFailed,
-}
-
-impl From<InvalidReason> for KeylessDeployError {
-    fn from(reason: InvalidReason) -> Self {
-        match reason {
-            InvalidReason::MalformedEncoding => KeylessDeployError::MalformedEncoding,
-            InvalidReason::NotContractCreation => KeylessDeployError::NotContractCreation,
-            InvalidReason::NotPreEIP155 => KeylessDeployError::NotPreEIP155,
-            _ => KeylessDeployError::DeploymentFailed, // Fallback for any new variants
-        }
-    }
-}
-
-impl KeylessDeployError {
-    /// Converts this error to the corresponding Solidity InvalidReason if applicable.
-    pub fn to_invalid_reason(self) -> Option<InvalidReason> {
-        match self {
-            KeylessDeployError::MalformedEncoding => Some(InvalidReason::MalformedEncoding),
-            KeylessDeployError::NotContractCreation => Some(InvalidReason::NotContractCreation),
-            KeylessDeployError::NotPreEIP155 => Some(InvalidReason::NotPreEIP155),
-            _ => None,
-        }
-    }
 }
 
 /// Decodes a pre-EIP-155 legacy transaction from RLP bytes.
@@ -276,15 +232,15 @@ pub fn recover_signer(tx: &KeylessDeployTx) -> Result<Address, KeylessDeployErro
 
     // Recovery ID: v - 27 (v is 27 or 28, so recovery_id is 0 or 1)
     let recovery_id = RecoveryId::try_from((tx.v - 27) as u8)
-        .map_err(|_| KeylessDeployError::DeploymentFailed)?;
+        .map_err(|_| KeylessDeployError::InvalidSignature)?;
 
     // Create the signature
     let signature =
-        Signature::from_slice(&sig_bytes).map_err(|_| KeylessDeployError::DeploymentFailed)?;
+        Signature::from_slice(&sig_bytes).map_err(|_| KeylessDeployError::InvalidSignature)?;
 
     // Recover the public key
     let recovered_key = VerifyingKey::recover_from_prehash(&msg_hash[..], &signature, recovery_id)
-        .map_err(|_| KeylessDeployError::DeploymentFailed)?;
+        .map_err(|_| KeylessDeployError::InvalidSignature)?;
 
     // Convert to uncompressed public key point and derive address
     // The uncompressed point is 65 bytes: 0x04 || x (32 bytes) || y (32 bytes)
@@ -310,69 +266,135 @@ pub fn calculate_keyless_deploy_address(signer: Address) -> Address {
     signer.create(0)
 }
 
-// ============================================================================
-// ABI Encoding for Errors and Results
-// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{address, bytes, hex};
 
-/// Encodes a successful keyless deploy result as ABI-encoded bytes.
-///
-/// The return type is `address`, which is ABI-encoded as a 32-byte value
-/// with the address right-aligned (first 12 bytes are zeros).
-pub fn encode_success_result(deployed_address: Address) -> Bytes {
-    let mut result = [0u8; 32];
-    result[12..].copy_from_slice(deployed_address.as_slice());
-    Bytes::copy_from_slice(&result)
-}
+    // =========================================================================
+    // Test vectors generated using Foundry's `cast` command
+    // =========================================================================
+    //
+    // Pre-EIP-155 (CREATE2 factory deployment - Nick's Method):
+    //   This is the canonical CREATE2 factory deployment transaction.
+    //   Source: https://github.com/Arachnid/deterministic-deployment-proxy
+    //   Generated/verified with: cast decode-tx <tx>
+    //
+    // Post-EIP-155 transactions generated with:
+    //   cast mktx --private-key 0x0123...def --gas-limit 100000 --gas-price 20gwei \
+    //             --nonce 0 --legacy --chain <chain_id> --create 0x6080604052
+    //
+    // Non-contract creation generated with:
+    //   cast mktx --private-key 0x0123...def --gas-limit 21000 --gas-price 20gwei \
+    //             --nonce 0 --legacy 0x4242424242424242424242424242424242424242
 
-/// Encodes a keyless deploy error as ABI-encoded revert data.
-///
-/// This matches the Solidity error selectors from IKeylessDeploy.sol.
-pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
-    match error {
-        KeylessDeployError::MalformedEncoding => {
-            // InvalidKeylessDeploymentTransaction(InvalidReason.MalformedEncoding)
-            // selector: keccak256("InvalidKeylessDeploymentTransaction(uint8)")[:4]
-            // = 0x5a3c9cf3
-            let mut data = Vec::with_capacity(36);
-            data.extend_from_slice(&[0x5a, 0x3c, 0x9c, 0xf3]); // selector
-            data.extend_from_slice(&[0u8; 31]); // padding
-            data.push(0); // MalformedEncoding = 0
-            Bytes::from(data)
-        }
-        KeylessDeployError::NotContractCreation => {
-            // InvalidKeylessDeploymentTransaction(InvalidReason.NotContractCreation)
-            let mut data = Vec::with_capacity(36);
-            data.extend_from_slice(&[0x5a, 0x3c, 0x9c, 0xf3]); // selector
-            data.extend_from_slice(&[0u8; 31]); // padding
-            data.push(1); // NotContractCreation = 1
-            Bytes::from(data)
-        }
-        KeylessDeployError::NotPreEIP155 => {
-            // InvalidKeylessDeploymentTransaction(InvalidReason.NotPreEIP155)
-            let mut data = Vec::with_capacity(36);
-            data.extend_from_slice(&[0x5a, 0x3c, 0x9c, 0xf3]); // selector
-            data.extend_from_slice(&[0u8; 31]); // padding
-            data.push(2); // NotPreEIP155 = 2
-            Bytes::from(data)
-        }
-        KeylessDeployError::NoEtherTransfer => {
-            // NoEtherTransfer()
-            // selector: keccak256("NoEtherTransfer()")[:4]
-            // = 0x6a12f104
-            Bytes::copy_from_slice(&[0x6a, 0x12, 0xf1, 0x04])
-        }
-        KeylessDeployError::DeploymentFailed => {
-            // DeploymentFailed()
-            // selector: keccak256("DeploymentFailed()")[:4]
-            // = 0x30116425
-            Bytes::copy_from_slice(&[0x30, 0x11, 0x64, 0x25])
-        }
-        KeylessDeployError::GasLimitLessThanIntrinsic { .. } => {
-            // Map to DeploymentFailed() since the Solidity interface doesn't
-            // define a specific error for insufficient gas
-            // selector: keccak256("DeploymentFailed()")[:4]
-            // = 0x30116425
-            Bytes::copy_from_slice(&[0x30, 0x11, 0x64, 0x25])
-        }
+    /// The canonical CREATE2 factory deployment transaction (pre-EIP-155, v=27).
+    /// Signer: 0x3fab184622dc19b6109349b94811493bf2a45362
+    /// Deployed to: 0x4e59b44847b379578588920ca78fbf26c0b4956c
+    const CREATE2_FACTORY_TX: &[u8] = &hex!("f8a58085174876e800830186a08080b853604580600e600039806000f350fe7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf31ba02222222222222222222222222222222222222222222222222222222222222222a02222222222222222222222222222222222222222222222222222222222222222");
+
+    /// Post-EIP-155 transaction with chain ID 1 (v=0x26=38).
+    /// Generated: cast mktx --private-key 0x0123..def --legacy --chain 1 --create 0x6080604052
+    const POST_EIP155_CHAIN_1_TX: &[u8] = &hex!("f856808504a817c800830186a0808085608060405226a0fceb37453e90ac5ec2780748b7a4907b1dcfb87708697de2e6be19831938c77ba0224ee4c1aaa6a1490b4e3a1fbed7c5151668a12b6f6e3227c2692a64cf79e81f");
+
+    /// Post-EIP-155 transaction with chain ID 1337 (v=0x0a95=2709).
+    /// Generated: cast mktx --private-key 0x0123..def --legacy --chain 1337 --create 0x6080604052
+    const POST_EIP155_CHAIN_1337_TX: &[u8] = &hex!("f858808504a817c800830186a08080856080604052820a95a0bea22b3c93e686c12e09c4c519919244bd710de249e2588b22cfb28a2d9ecc22a04b8d3598bae247ce8846aafa41fdaadff2e2154034f5789448bf263d905f20c3");
+
+    /// Non-contract creation transaction (to=0x4242...42, pre-EIP-155, v=27).
+    /// Generated: cast mktx --private-key 0x0123..def --legacy 0x4242424242424242424242424242424242424242
+    const NON_CONTRACT_CREATION_TX: &[u8] = &hex!("f866808504a817c800825208944242424242424242424242424242424242424242808082072ba094a1d148b08c268261581dd9e90478bae0c937e26eec574809876bdd34de82daa03e2fb4dd2cb99703feeb0da3c3a1062a047f0091aa09610c3a7feecfda6f6bad");
+
+    #[test]
+    fn test_decode_create2_factory_deployment() {
+        // The canonical CREATE2 factory deployment - a well-known pre-EIP-155 transaction
+        let tx = decode_keyless_tx(CREATE2_FACTORY_TX).expect("should decode CREATE2 factory tx");
+
+        assert_eq!(tx.nonce, 0);
+        assert_eq!(tx.gas_price, 100_000_000_000); // 100 gwei
+        assert_eq!(tx.gas_limit, 100_000);
+        assert_eq!(tx.value, U256::ZERO);
+        assert_eq!(tx.v, 27); // pre-EIP-155
+        // r and s are both 0x2222...22 (deterministic signature for Nick's Method)
+        assert_eq!(
+            tx.r,
+            U256::from_be_bytes(hex!("2222222222222222222222222222222222222222222222222222222222222222"))
+        );
+        assert_eq!(
+            tx.s,
+            U256::from_be_bytes(hex!("2222222222222222222222222222222222222222222222222222222222222222"))
+        );
+        // Verify init_code matches CREATE2 factory bytecode
+        assert_eq!(
+            tx.init_code,
+            bytes!("604580600e600039806000f350fe7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3")
+        );
+    }
+
+    #[test]
+    fn test_recover_signer_create2_factory() {
+        // Verify we can recover the correct signer from the CREATE2 factory tx
+        let tx = decode_keyless_tx(CREATE2_FACTORY_TX).expect("should decode");
+        let signer = recover_signer(&tx).expect("should recover signer");
+
+        // The canonical CREATE2 factory signer address
+        assert_eq!(signer, address!("3fab184622dc19b6109349b94811493bf2a45362"));
+    }
+
+    #[test]
+    fn test_calculate_create2_factory_deploy_address() {
+        // Verify the deployment address calculation matches the known CREATE2 factory address
+        let tx = decode_keyless_tx(CREATE2_FACTORY_TX).expect("should decode");
+        let signer = recover_signer(&tx).expect("should recover signer");
+        let deploy_address = calculate_keyless_deploy_address(signer);
+
+        // The canonical CREATE2 factory is deployed at this address
+        assert_eq!(deploy_address, address!("4e59b44847b379578588920ca78fbf26c0b4956c"));
+    }
+
+    #[test]
+    fn test_decode_rejects_post_eip155_chain_1() {
+        // Transaction generated with: cast mktx ... --chain 1 --create 0x6080604052
+        // v = 1 * 2 + 35 + 1 = 38 (0x26)
+        let result = decode_keyless_tx(POST_EIP155_CHAIN_1_TX);
+        assert_eq!(result, Err(KeylessDeployError::NotPreEIP155));
+    }
+
+    #[test]
+    fn test_decode_rejects_post_eip155_chain_1337() {
+        // Transaction generated with: cast mktx ... --chain 1337 --create 0x6080604052
+        // v = 1337 * 2 + 35 + 0 = 2709 (0x0a95)
+        let result = decode_keyless_tx(POST_EIP155_CHAIN_1337_TX);
+        assert_eq!(result, Err(KeylessDeployError::NotPreEIP155));
+    }
+
+    #[test]
+    fn test_decode_rejects_non_contract_creation() {
+        // Transaction with to=0x4242...42 (not a contract creation)
+        // Generated with: cast mktx ... --legacy 0x4242424242424242424242424242424242424242
+        let result = decode_keyless_tx(NON_CONTRACT_CREATION_TX);
+        assert_eq!(result, Err(KeylessDeployError::NotContractCreation));
+    }
+
+    #[test]
+    fn test_decode_rejects_malformed_rlp() {
+        // Random bytes, not valid RLP
+        let invalid_rlp = hex!("deadbeef");
+        let result = decode_keyless_tx(&invalid_rlp);
+        assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
+    }
+
+    #[test]
+    fn test_decode_rejects_empty_input() {
+        let result = decode_keyless_tx(&[]);
+        assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
+    }
+
+    #[test]
+    fn test_decode_rejects_truncated_rlp() {
+        // Truncate the CREATE2 factory tx
+        let truncated = &CREATE2_FACTORY_TX[..CREATE2_FACTORY_TX.len() - 10];
+        let result = decode_keyless_tx(truncated);
+        assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
     }
 }

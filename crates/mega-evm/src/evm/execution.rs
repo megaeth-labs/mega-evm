@@ -635,8 +635,8 @@ where
         // Intercept keylessDeploy(bytes) calls to the keyless deploy contract.
         // This executes the deployment in a sandbox and applies filtered state changes.
         if self.ctx().spec.is_enabled(MegaSpecId::REX2) {
-            // Only intercept if we're not already in a sandbox (prevents infinite recursion)
-            if !self.ctx().is_in_keyless_deploy_sandbox() {
+            // Only intercept if sandbox is not disabled (prevents infinite recursion)
+            if !self.ctx().is_sandbox_disabled() {
                 if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
                     if call_inputs.target_address == KEYLESS_DEPLOY_ADDRESS {
                         let input_bytes = call_inputs.input.bytes(self.ctx());
