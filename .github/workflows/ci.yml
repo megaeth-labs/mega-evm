@@ -15,20 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_CI }}
           submodules: recursive
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.PAT_CI }}
-          repository: megaeth-labs/chain-ops
-          sparse-checkout: .github/actions
-          path: chain-ops
-
-      - name: Configure Git credentials
-        uses: ./chain-ops/.github/actions/git_config
-        with:
-          github_pat: ${{ secrets.PAT_CI }}
-
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
