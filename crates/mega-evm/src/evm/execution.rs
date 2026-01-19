@@ -634,9 +634,12 @@ where
         // Keyless Deploy Interception (Rex2+):
         // Intercept keylessDeploy(bytes) calls to the keyless deploy contract.
         // This executes the deployment in a sandbox and applies filtered state changes.
+        // Only intercept TOP-LEVEL calls; internal calls from contracts are NOT intercepted.
         if self.ctx().spec.is_enabled(MegaSpecId::REX2) {
-            // Only intercept if sandbox is not disabled (prevents infinite recursion)
-            if !self.ctx().is_sandbox_disabled() {
+            // Only intercept if:
+            // 1. Sandbox is not disabled (prevents infinite recursion)
+            // 2. This is a top-level call (depth == 0)
+            if !self.ctx().is_sandbox_disabled() && frame_init.depth == 0 {
                 if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
                     if call_inputs.target_address == KEYLESS_DEPLOY_ADDRESS {
                         let input_bytes = call_inputs.input.bytes(self.ctx());

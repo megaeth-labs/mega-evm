@@ -1,12 +1,15 @@
 //! Error types for sandbox execution.
 
-use alloy_primitives::{Address, Bytes};
-use mega_system_contracts::keyless_deploy::InvalidReason;
+use alloy_primitives::Bytes;
+use alloy_sol_types::SolError;
+use mega_system_contracts::keyless_deploy::IKeylessDeploy;
+
+use crate::MegaHaltReason;
 
 /// Error types for keyless deployment operations.
 ///
 /// These map directly to the Solidity errors defined in IKeylessDeploy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeylessDeployError {
     /// The gas limit for sandbox execution is too low
     GasLimitLessThanIntrinsic {
@@ -30,101 +33,73 @@ pub enum KeylessDeployError {
     /// The deploy address already has code (contract already exists)
     ContractAlreadyExists,
     /// The sandbox execution reverted
-    ExecutionReverted,
+    ExecutionReverted {
+        /// The gas used
+        gas_used: u64,
+        /// The output
+        output: Bytes,
+    },
     /// The sandbox execution halted (out of gas, stack overflow, etc.)
-    ExecutionHalted,
+    ExecutionHalted {
+        /// The gas used
+        gas_used: u64,
+        /// The reason
+        reason: MegaHaltReason,
+    },
     /// Contract creation succeeded but no address was returned (unexpected EVM behavior)
     NoContractCreated,
     /// The created contract address doesn't match the expected address (internal bug)
     AddressMismatch,
-    /// Internal database error during sandbox execution
-    DatabaseError,
+    /// Internal error during sandbox execution
+    InternalError(String),
 }
-
-impl From<InvalidReason> for KeylessDeployError {
-    fn from(reason: InvalidReason) -> Self {
-        match reason {
-            InvalidReason::MalformedEncoding => KeylessDeployError::MalformedEncoding,
-            InvalidReason::NotContractCreation => KeylessDeployError::NotContractCreation,
-            InvalidReason::NotPreEIP155 => KeylessDeployError::NotPreEIP155,
-            _ => KeylessDeployError::ExecutionReverted, // Fallback for any new variants
-        }
-    }
-}
-
-impl KeylessDeployError {
-    /// Converts this error to the corresponding Solidity InvalidReason if applicable.
-    pub fn to_invalid_reason(self) -> Option<InvalidReason> {
-        match self {
-            KeylessDeployError::MalformedEncoding => Some(InvalidReason::MalformedEncoding),
-            KeylessDeployError::NotContractCreation => Some(InvalidReason::NotContractCreation),
-            KeylessDeployError::NotPreEIP155 => Some(InvalidReason::NotPreEIP155),
-            _ => None,
-        }
-    }
-}
-
-/// Encodes a successful keyless deploy result as ABI-encoded bytes.
-///
-/// The return type is `address`, which is ABI-encoded as a 32-byte value
-/// with the address right-aligned (first 12 bytes are zeros).
-pub fn encode_success_result(deployed_address: Address) -> Bytes {
-    let mut result = [0u8; 32];
-    result[12..].copy_from_slice(deployed_address.as_slice());
-    Bytes::copy_from_slice(&result)
-}
-
-/// DeploymentFailed() error selector.
-/// selector: keccak256("DeploymentFailed()")[:4] = 0x30116425
-const DEPLOYMENT_FAILED_SELECTOR: [u8; 4] = [0x30, 0x11, 0x64, 0x25];
 
 /// Encodes a keyless deploy error as ABI-encoded revert data.
 ///
-/// This matches the Solidity error selectors from IKeylessDeploy.sol.
+/// Uses the generated Solidity error bindings from IKeylessDeploy.sol.
 pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
     match error {
+        KeylessDeployError::GasLimitLessThanIntrinsic { intrinsic_gas, provided_gas } => {
+            IKeylessDeploy::GasLimitLessThanIntrinsic {
+                intrinsicGas: intrinsic_gas,
+                providedGas: provided_gas,
+            }
+            .abi_encode()
+            .into()
+        }
         KeylessDeployError::MalformedEncoding => {
-            // InvalidKeylessDeploymentTransaction(InvalidReason.MalformedEncoding)
-            // selector: keccak256("InvalidKeylessDeploymentTransaction(uint8)")[:4]
-            // = 0x5a3c9cf3
-            let mut data = Vec::with_capacity(36);
-            data.extend_from_slice(&[0x5a, 0x3c, 0x9c, 0xf3]); // selector
-            data.extend_from_slice(&[0u8; 31]); // padding
-            data.push(0); // MalformedEncoding = 0
-            Bytes::from(data)
+            IKeylessDeploy::MalformedEncoding {}.abi_encode().into()
         }
         KeylessDeployError::NotContractCreation => {
-            // InvalidKeylessDeploymentTransaction(InvalidReason.NotContractCreation)
-            let mut data = Vec::with_capacity(36);
-            data.extend_from_slice(&[0x5a, 0x3c, 0x9c, 0xf3]); // selector
-            data.extend_from_slice(&[0u8; 31]); // padding
-            data.push(1); // NotContractCreation = 1
-            Bytes::from(data)
+            IKeylessDeploy::NotContractCreation {}.abi_encode().into()
         }
-        KeylessDeployError::NotPreEIP155 => {
-            // InvalidKeylessDeploymentTransaction(InvalidReason.NotPreEIP155)
-            let mut data = Vec::with_capacity(36);
-            data.extend_from_slice(&[0x5a, 0x3c, 0x9c, 0xf3]); // selector
-            data.extend_from_slice(&[0u8; 31]); // padding
-            data.push(2); // NotPreEIP155 = 2
-            Bytes::from(data)
-        }
+        KeylessDeployError::NotPreEIP155 => IKeylessDeploy::NotPreEIP155 {}.abi_encode().into(),
         KeylessDeployError::NoEtherTransfer => {
-            // NoEtherTransfer()
-            // selector: keccak256("NoEtherTransfer()")[:4]
-            // = 0x6a12f104
-            Bytes::copy_from_slice(&[0x6a, 0x12, 0xf1, 0x04])
+            IKeylessDeploy::NoEtherTransfer {}.abi_encode().into()
         }
-        // All other errors map to DeploymentFailed() since the Solidity interface
-        // doesn't define specific errors for them
-        KeylessDeployError::GasLimitLessThanIntrinsic { .. } |
-        KeylessDeployError::InvalidSignature |
-        KeylessDeployError::InsufficientBalance |
-        KeylessDeployError::ContractAlreadyExists |
-        KeylessDeployError::ExecutionReverted |
-        KeylessDeployError::ExecutionHalted |
-        KeylessDeployError::NoContractCreated |
-        KeylessDeployError::AddressMismatch |
-        KeylessDeployError::DatabaseError => Bytes::copy_from_slice(&DEPLOYMENT_FAILED_SELECTOR),
+        KeylessDeployError::InvalidSignature => {
+            IKeylessDeploy::InvalidSignature {}.abi_encode().into()
+        }
+        KeylessDeployError::InsufficientBalance => {
+            IKeylessDeploy::InsufficientBalance {}.abi_encode().into()
+        }
+        KeylessDeployError::ContractAlreadyExists => {
+            IKeylessDeploy::ContractAlreadyExists {}.abi_encode().into()
+        }
+        KeylessDeployError::ExecutionReverted { gas_used, output } => {
+            IKeylessDeploy::ExecutionReverted { gasUsed: gas_used, output }.abi_encode().into()
+        }
+        KeylessDeployError::ExecutionHalted { gas_used, .. } => {
+            IKeylessDeploy::ExecutionHalted { gasUsed: gas_used }.abi_encode().into()
+        }
+        KeylessDeployError::NoContractCreated => {
+            IKeylessDeploy::NoContractCreated {}.abi_encode().into()
+        }
+        KeylessDeployError::AddressMismatch => {
+            IKeylessDeploy::AddressMismatch {}.abi_encode().into()
+        }
+        KeylessDeployError::InternalError(message) => {
+            IKeylessDeploy::InternalError { message }.abi_encode().into()
+        }
     }
 }

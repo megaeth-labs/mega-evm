@@ -28,8 +28,8 @@ use crate::MegaHardforks;
 
 // Re-export error types and transaction functions from sandbox
 pub use crate::sandbox::{
-    calculate_keyless_deploy_address, decode_keyless_tx, encode_error_result,
-    encode_success_result, recover_signer, KeylessDeployError,
+    calculate_keyless_deploy_address, decode_keyless_tx, encode_error_result, recover_signer,
+    KeylessDeployError,
 };
 
 /// The address of the keyless deploy system contract.
@@ -41,7 +41,7 @@ pub use mega_system_contracts::keyless_deploy::V1_0_0_CODE as KEYLESS_DEPLOY_COD
 /// The code hash of the keyless deploy contract (version 1.0.0).
 pub use mega_system_contracts::keyless_deploy::V1_0_0_CODE_HASH as KEYLESS_DEPLOY_CODE_HASH;
 
-pub use mega_system_contracts::keyless_deploy::{IKeylessDeploy, InvalidReason};
+pub use mega_system_contracts::keyless_deploy::IKeylessDeploy;
 
 /// Ensures the keyless deploy contract is deployed in the designated address and returns the
 /// state changes. Note that the database `db` is not modified in this function. The caller is

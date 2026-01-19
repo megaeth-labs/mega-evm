@@ -3,25 +3,28 @@
 //! This module executes keyless deployment in an isolated sandbox environment
 //! to implement Nick's Method for deterministic contract deployment.
 
-use std::collections::hash_map::Entry;
-
+use alloy_consensus::Transaction;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_sol_types::SolCall;
+use mega_system_contracts::keyless_deploy::IKeylessDeploy;
 use revm::{
-    context::{ContextTr, JournalTr, TxEnv},
-    database::states::account_status,
+    context::{ContextTr, TxEnv},
     handler::FrameResult,
     interpreter::{CallOutcome, Gas, InstructionResult, InterpreterResult},
     primitives::KECCAK_EMPTY,
-    state::{AccountStatus, EvmState},
+    state::EvmState,
     Database,
 };
 
-use crate::{constants, ExternalEnvTypes, MegaContext, MegaEvm, MegaTransaction};
+use crate::{
+    constants, merge_evm_state_optional_status, ExternalEnvTypes, MegaContext, MegaEvm,
+    MegaTransaction,
+};
 
 use super::tx::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer};
 
 use super::{
-    error::{encode_error_result, encode_success_result, KeylessDeployError},
+    error::{encode_error_result, KeylessDeployError},
     state::SandboxDb,
 };
 
@@ -58,7 +61,7 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
             FrameResult::Call(CallOutcome::new(
                 InterpreterResult::new(
                     InstructionResult::Return,
-                    encode_success_result(deployed_address),
+                    IKeylessDeploy::keylessDeployCall::abi_encode_returns(&deployed_address).into(),
                     gas,
                 ),
                 return_memory_offset.clone(),
@@ -101,9 +104,9 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
         ctx,
         deploy_signer,
         deploy_address,
-        keyless_tx.tx().input.clone(),
-        keyless_tx.tx().value,
-        keyless_tx.tx().gas_price,
+        keyless_tx.input().clone(),
+        keyless_tx.value(),
+        keyless_tx.effective_gas_price(None),
         remaining_gas,
     ) {
         Ok(sandbox_result) => {
@@ -152,7 +155,7 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
     // Check signer balance
     let signer_account = sandbox_db
         .basic(deploy_signer)
-        .map_err(|_| KeylessDeployError::DatabaseError)?
+        .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?
         .unwrap_or_default();
 
     // Ensure signer has enough balance to cover gas cost and value
@@ -165,7 +168,7 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
     // Check deploy address doesn't have code
     let deploy_account = sandbox_db
         .basic(deploy_address)
-        .map_err(|_| KeylessDeployError::DatabaseError)?
+        .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?
         .unwrap_or_default();
     if deploy_account.code_hash != KECCAK_EMPTY {
         return Err(KeylessDeployError::ContractAlreadyExists);
@@ -213,10 +216,14 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
                         Err(KeylessDeployError::NoContractCreated)
                     }
                 }
-                ExecutionResult::Revert { .. } => Err(KeylessDeployError::ExecutionReverted),
-                ExecutionResult::Halt { .. } => Err(KeylessDeployError::ExecutionHalted),
+                ExecutionResult::Revert { gas_used, output } => {
+                    Err(KeylessDeployError::ExecutionReverted { gas_used, output })
+                }
+                ExecutionResult::Halt { gas_used, reason } => {
+                    Err(KeylessDeployError::ExecutionHalted { gas_used, reason })
+                }
             },
-            Err(_) => Err(KeylessDeployError::DatabaseError),
+            Err(e) => Err(KeylessDeployError::InternalError(e.to_string())),
         }
     };
 
@@ -232,69 +239,15 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
 /// Note that we need to merge all accounts into the parent journal, even if they are not
 /// touched or created. This is because we need to know which accounts are read but
 /// not written to obtain `ReadSet` to facilitate stateless witness generation.
+///
+/// We do not merge any account status into the parent journal and the coldness of accounts and
+/// storage slots are preserved. This is because the changes in the sandbox are treated as a silent
+/// change in the database and should not affect the behavior of the current transaction (e.g., gas
+/// cost due to coldness) execept that the state itself are different.
 fn apply_sandbox_state<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     sandbox_state: EvmState,
 ) -> Result<(), KeylessDeployError> {
-    for (address, account) in sandbox_state {
-        let parent_account = ctx
-            .journal_mut()
-            .load_account(address)
-            .map_err(|_| KeylessDeployError::DatabaseError)?;
-
-        // Update account in the parent journal with the sandbox account
-        // We discard the sandbox account status since we are consolidating the status into the
-        // parent journal. The only two possible status is `Touched` and `Created`, or no change at
-        // all.
-        let mut account_status = AccountStatus::empty();
-
-        // TODO:
-        if account.is_selfdestructed() || account.is_selfdestructed_locally() {
-            account_status |= AccountStatus::SelfDestructed;
-        }
-
-        // For `AccountInfo`, we only update `balance`, `code_hash`, and `code`. `nonce` is not
-        // updated.
-        let parent_info = &mut parent_account.data.info;
-        // Any change to the balance?
-        if parent_info.balance != account.info.balance {
-            parent_info.balance = account.info.balance;
-            account_status |= AccountStatus::Touched;
-        }
-        // Any change to the code?
-        if parent_info.code_hash != account.info.code_hash {
-            account_status |= AccountStatus::Touched;
-            if parent_info.code_hash == KECCAK_EMPTY &&
-                !account.info.code.as_ref().is_some_and(|code| code.is_eip7702())
-            {
-                // If the code was empty and is now non-empty, it means the account was created.
-                // The only exception is if the code is EIP-7702, in which case the account was only
-                // marked as touched.
-                account_status |= AccountStatus::Created;
-            }
-            parent_info.code_hash = account.info.code_hash;
-            parent_info.code = account.info.code;
-        }
-        // We merge the storage.
-        let parent_storage = &mut parent_account.data.storage;
-        for (slot, value) in account.storage {
-            match parent_storage.entry(slot) {
-                Entry::Vacant(v) => {
-                    if value.is_changed() {
-                        account_status |= AccountStatus::Touched;
-                    }
-                    v.insert(value);
-                }
-                Entry::Occupied(mut v) => {
-                    v.get_mut().present_value = value.present_value;
-                    if v.get().is_changed() {
-                        account_status |= AccountStatus::Touched;
-                    }
-                }
-            }
-        }
-        // We merge the account status.
-        parent_account.data.status |= account_status;
-    }
+    merge_evm_state_optional_status(&mut ctx.journal_mut().state, &sandbox_state, false);
     Ok(())
 }

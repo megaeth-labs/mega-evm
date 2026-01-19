@@ -21,11 +21,22 @@ impl<DB: Database> BlockHashes for State<DB> {
     }
 }
 
-/// Merges the other [`EvmState`] into the current one.
+/// Merges the other [`EvmState`] into the current one with account status also merged.
+/// See more details in the [`merge_evm_state_optional_status`] function.
+pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
+    merge_evm_state_optional_status(this, other, true)
+}
+
+/// Merges the other [`EvmState`] into the current one. The account status may or may not be merged
+/// according to the `merge_status` parameter.
 ///
 /// # Assumption
-/// This function assumes that Cancun hardfork is activated.
-/// This function only works correctly post Cancun.
+///
+/// - The `other` `EvmState` is the result of the execution of a single transaction, or the merged
+/// result of another [`merge_evm_state`] call. It must not be a partial `EvmState` in the middle of
+/// a transaction execution.
+/// - This function assumes that Cancun hardfork (EIP-6780) is activated.
+/// - This function only works correctly post Cancun.
 ///
 /// # Algorithm
 ///
@@ -37,9 +48,26 @@ impl<DB: Database> BlockHashes for State<DB> {
 ///   `EvmState`, override the account with an empty, touched account.
 /// - Otherwise, we override the corresponding account and storage slots in the base `EvmState`.
 ///
+/// # Coldness
+///
+/// When merging the state, if an account or storage slot exists in `this`, its coldness is
+/// preserved; if an account or storage slot does not exist in `this`, it is marked as cold.
+///
+/// # Account Status
+///
+/// Optionally:
+/// - `CreatedLocal` and `SelfDestructedLocal` on the `other` `EvmState` is cleared since they only
+///   matter in the execution of the same transaction, while this merging between transactions.
+/// - The `Cold` flag in the `this` `EvmState` is preserved.
+/// - For other flags, they are merged from `other` into `this`.
+///
 /// We merge the state even if the account is not marked as `Touched`. This is because we may need
 /// to know which account is read but not written to obtain `ReadSet` for witness generation.
-pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
+pub fn merge_evm_state_optional_status(
+    this: &mut EvmState,
+    other: &EvmState,
+    merge_status: bool,
+) -> usize {
     let mut touched_slot: usize = 0;
     for (address, account) in other {
         if account.is_selfdestructed() {
@@ -61,18 +89,41 @@ pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
             //    created and destructed, there must be no storage data in the database.
             // 3. The account needs to be marked as `Touched` in case it pre-exists in the database
             //    and needs to be deleted.
-            this.insert(*address, Account::default().with_touched_mark());
+            let mut empty_account = Account::default().with_touched_mark();
+            match this.entry(*address) {
+                Entry::Occupied(mut occupied_entry) => {
+                    if occupied_entry.get().status.contains(AccountStatus::Cold) {
+                        // if the account was cold, we need to preserve the coldness
+                        empty_account.mark_cold();
+                    }
+                    occupied_entry.insert(empty_account);
+                }
+                Entry::Vacant(vacant_entry) => {
+                    // if the account didn't exist, we mark it as cold
+                    vacant_entry.insert(empty_account.with_cold_mark());
+                }
+            }
             continue;
         }
 
         // merge regardless of whether the account is touched or not
         match this.entry(*address) {
             Entry::Vacant(v) => {
-                v.insert(account.clone());
+                // if the account didn't exist, we mark it as cold
+                let mut merged_account = account.clone().with_cold_mark();
+                // all storage slots should be marked as cold
+                for slot in merged_account.storage.values_mut() {
+                    slot.mark_cold();
+                }
+                // `CreatedLocal` and `SelfDestructedLocal` are cleared since they only matter in
+                // the execution of the same transaction, while this merging between transactions.
+                merged_account.unmark_created_locally();
+                merged_account.unmark_selfdestructed_locally();
+                v.insert(merged_account);
             }
             Entry::Occupied(mut v) => {
                 let this_account = v.get_mut();
-                merge_account_state(this_account, account);
+                merge_account_state(this_account, account, merge_status);
             }
         }
         if account.is_touched() {
@@ -88,33 +139,56 @@ pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
 ///
 /// The other account to merge is not flagged as `SelfDestructed`. See more details in
 /// the [`merge_evm_state`] function.
-fn merge_account_state(this: &mut Account, other: &Account) {
-    assert!(
-        !other.status.contains(AccountStatus::SelfDestructed),
-        "Account is selfdestructed and should not be merged."
-    );
+fn merge_account_state(this: &mut Account, other: &Account, merge_status: bool) {
     this.info = other.info.clone();
     merge_evm_storage(&mut this.storage, &other.storage);
-    // Account status is merged.
-    this.status |= other.status;
+    if merge_status {
+        merge_account_status(&mut this.status, other.status);
+    }
+}
+
+/// Merges the other [`AccountStatus`] into the current one.
+///
+/// # Assumption
+///
+/// The other [`AccountStatus`] to merge is not flagged as `SelfDestructed`. See more details in
+/// the [`merge_evm_state`] function.
+fn merge_account_status(this: &mut AccountStatus, mut other: AccountStatus) {
+    assert!(
+        !other.contains(AccountStatus::SelfDestructed),
+        "Account is selfdestructed and should not be merged."
+    );
+    // The coldness of `this` account should be preserved.
+    // Remove the flags that only matter in the execution of the same transaction, while this
+    // merging between transactions.
+    other -= AccountStatus::Cold | AccountStatus::CreatedLocal | AccountStatus::SelfDestructedLocal;
+
+    if this.contains(AccountStatus::SelfDestructed) && other.contains(AccountStatus::Created) {
+        // if `this` account is selfdestructed, and `other` account is created,
+        // we should no longer mark `this` as selfdestructed.
+        *this -= AccountStatus::SelfDestructed;
+    }
+
+    // Other status flags are simply merged into `this`.
+    *this |= other;
 }
 
 /// Merges the other [`EvmStorage`] into the current one.
 ///
-/// # Warn
-///
-/// The [`EvmStorageSlot::is_cold`](revm::state::EvmStorageSlot::is_cold) is simply overwritten.
-/// It may not reflect the actual status of the slot.
+/// See more details in the [`merge_evm_state`] function.
 fn merge_evm_storage(this: &mut EvmStorage, other: &EvmStorage) {
     for (slot, slot_value) in other {
         match this.entry(*slot) {
             Entry::Vacant(v) => {
-                v.insert(slot_value.clone());
+                let mut slot = slot_value.clone();
+                // If this slot is not loaded, we mark it as cold.
+                slot.mark_cold();
+                v.insert(slot);
             }
             Entry::Occupied(mut v) => {
                 let this_slot = v.get_mut();
                 this_slot.present_value = slot_value.present_value;
-                this_slot.is_cold = slot_value.is_cold;
+                // The coldness of the slot is preserved.
             }
         }
     }
