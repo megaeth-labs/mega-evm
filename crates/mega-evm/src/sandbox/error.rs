@@ -11,13 +11,6 @@ use crate::MegaHaltReason;
 /// These map directly to the Solidity errors defined in IKeylessDeploy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeylessDeployError {
-    /// The gas limit for sandbox execution is too low
-    GasLimitLessThanIntrinsic {
-        /// The intrinsic gas required for the operation
-        intrinsic_gas: u64,
-        /// The gas limit provided by the caller
-        provided_gas: u64,
-    },
     /// The transaction data is malformed (invalid RLP encoding)
     MalformedEncoding,
     /// The transaction is not a contract creation (to address is not empty)
@@ -50,6 +43,13 @@ pub enum KeylessDeployError {
     NoContractCreated,
     /// The created contract address doesn't match the expected address (internal bug)
     AddressMismatch,
+    /// The gas limit override is less than the gas limit in the keyless transaction
+    GasLimitTooLow {
+        /// The gas limit from the keyless transaction
+        tx_gas_limit: u64,
+        /// The gas limit override provided by the caller
+        provided_gas_limit: u64,
+    },
     /// Internal error during sandbox execution
     InternalError(String),
 }
@@ -59,14 +59,6 @@ pub enum KeylessDeployError {
 /// Uses the generated Solidity error bindings from IKeylessDeploy.sol.
 pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
     match error {
-        KeylessDeployError::GasLimitLessThanIntrinsic { intrinsic_gas, provided_gas } => {
-            IKeylessDeploy::GasLimitLessThanIntrinsic {
-                intrinsicGas: intrinsic_gas,
-                providedGas: provided_gas,
-            }
-            .abi_encode()
-            .into()
-        }
         KeylessDeployError::MalformedEncoding => {
             IKeylessDeploy::MalformedEncoding {}.abi_encode().into()
         }
@@ -97,6 +89,14 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         }
         KeylessDeployError::AddressMismatch => {
             IKeylessDeploy::AddressMismatch {}.abi_encode().into()
+        }
+        KeylessDeployError::GasLimitTooLow { tx_gas_limit, provided_gas_limit } => {
+            IKeylessDeploy::GasLimitTooLow {
+                txGasLimit: tx_gas_limit,
+                providedGasLimit: provided_gas_limit,
+            }
+            .abi_encode()
+            .into()
         }
         KeylessDeployError::InternalError(message) => {
             IKeylessDeploy::InternalError { message }.abi_encode().into()

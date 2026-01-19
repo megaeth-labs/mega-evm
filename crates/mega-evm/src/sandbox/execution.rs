@@ -33,73 +33,98 @@ use super::{
 /// Implements Nick's Method contract deployment:
 /// 1. Validates the call (no ether transfer)
 /// 2. Decodes the pre-EIP-155 transaction from calldata
-/// 3. Recovers the signer and calculates the deploy address
-/// 4. Executes contract creation in a sandbox environment
-/// 5. Applies only allowed state changes (deployAddress + deploySigner balance)
+/// 3. Validates gas limit override against transaction gas limit
+/// 4. Recovers the signer and calculates the deploy address
+/// 5. Executes contract creation in a sandbox environment
+/// 6. Applies only allowed state changes (deployAddress + deploySigner balance)
 pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     call_inputs: &revm::interpreter::CallInputs,
     tx_bytes: &Bytes,
+    gas_limit_override: U256,
 ) -> FrameResult {
-    let sandbox_gas_limit = call_inputs.gas_limit;
+    // Gas tracking for this call
+    let mut gas = Gas::new(call_inputs.gas_limit);
     let return_memory_offset = call_inputs.return_memory_offset.clone();
 
-    let make_error = |error: KeylessDeployError, gas_remaining: u64| -> FrameResult {
-        let mut gas = Gas::new(sandbox_gas_limit);
-        let _ = gas.record_cost(sandbox_gas_limit.saturating_sub(gas_remaining));
-        FrameResult::Call(CallOutcome::new(
-            InterpreterResult::new(InstructionResult::Revert, encode_error_result(error), gas),
-            return_memory_offset.clone(),
-        ))
-    };
+    // Macros to construct frame results, avoiding closure borrow issues
+    macro_rules! make_error {
+        ($error:expr) => {
+            FrameResult::Call(CallOutcome::new(
+                InterpreterResult::new(InstructionResult::Revert, encode_error_result($error), gas),
+                return_memory_offset,
+            ))
+        };
+    }
 
-    let make_success =
-        |deployed_address: Address, gas_remaining: u64, gas_refunded: i64| -> FrameResult {
-            let mut gas = Gas::new(sandbox_gas_limit);
-            let _ = gas.record_cost(sandbox_gas_limit.saturating_sub(gas_remaining));
-            gas.record_refund(gas_refunded);
+    macro_rules! make_halt {
+        () => {
+            FrameResult::Call(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::OutOfGas,
+                    Bytes::new(),
+                    Gas::new_spent(gas.limit()),
+                ),
+                return_memory_offset,
+            ))
+        };
+    }
+
+    macro_rules! make_success {
+        ($gas_used:expr, $deployed_address:expr) => {
             FrameResult::Call(CallOutcome::new(
                 InterpreterResult::new(
                     InstructionResult::Return,
-                    IKeylessDeploy::keylessDeployCall::abi_encode_returns(&deployed_address).into(),
+                    IKeylessDeploy::keylessDeployCall::abi_encode_returns(
+                        &IKeylessDeploy::keylessDeployReturn {
+                            gasUsed: $gas_used,
+                            deployedAddress: $deployed_address,
+                        },
+                    )
+                    .into(),
                     gas,
                 ),
-                return_memory_offset.clone(),
+                return_memory_offset,
             ))
         };
+    }
 
-    // Step 1: Check no ether transfer
+    // Step 1: Charge overhead gas
+    let cost = constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS;
+    let has_sufficient_gas = gas.record_cost(cost);
+    if !has_sufficient_gas {
+        return make_halt!();
+    }
+
+    // Step 2: Check no ether transfer
     if !call_inputs.value.get().is_zero() {
-        return make_error(KeylessDeployError::NoEtherTransfer, sandbox_gas_limit);
+        return make_error!(KeylessDeployError::NoEtherTransfer);
     }
-
-    // Step 2: Charge overhead gas
-    let overhead_gas = constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS;
-    if sandbox_gas_limit < overhead_gas {
-        return make_error(
-            KeylessDeployError::GasLimitLessThanIntrinsic {
-                intrinsic_gas: overhead_gas,
-                provided_gas: sandbox_gas_limit,
-            },
-            0,
-        );
-    }
-    let remaining_gas = sandbox_gas_limit - overhead_gas;
 
     // Step 3: Decode the keyless transaction
     let keyless_tx = match decode_keyless_tx(tx_bytes) {
         Ok(tx) => tx,
-        Err(e) => return make_error(e, remaining_gas),
+        Err(e) => return make_error!(e),
     };
 
-    // Step 4: Recover signer and calculate deploy address
+    // Step 4: Validate gas limit override
+    let tx_gas_limit = keyless_tx.gas_limit();
+    let gas_limit_override_u64: u64 = gas_limit_override.try_into().unwrap_or(u64::MAX);
+    if gas_limit_override_u64 < tx_gas_limit {
+        return make_error!(KeylessDeployError::GasLimitTooLow {
+            tx_gas_limit,
+            provided_gas_limit: gas_limit_override_u64,
+        });
+    }
+
+    // Step 5: Recover signer and calculate deploy address
     let deploy_signer = match recover_signer(&keyless_tx) {
         Ok(addr) => addr,
-        Err(e) => return make_error(e, remaining_gas),
+        Err(e) => return make_error!(e),
     };
     let deploy_address = calculate_keyless_deploy_address(deploy_signer);
 
-    // Step 5: Execute sandbox and apply state changes
+    // Step 6: Execute sandbox and apply state changes
     match execute_keyless_deploy_sandbox(
         ctx,
         deploy_signer,
@@ -107,24 +132,20 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
         keyless_tx.input().clone(),
         keyless_tx.value(),
         keyless_tx.effective_gas_price(None),
-        remaining_gas,
+        gas_limit_override_u64,
     ) {
         Ok(sandbox_result) => {
             assert_eq!(sandbox_result.deploy_address, deploy_address, "Deployed address mismatch");
-            make_success(
-                deploy_address,
-                sandbox_result.gas.remaining(),
-                sandbox_result.gas.refunded(),
-            )
+            make_success!(sandbox_result.gas_used, sandbox_result.deploy_address)
         }
-        Err(e) => make_error(e, remaining_gas),
+        Err(e) => make_error!(e),
     }
 }
 
 /// Result of sandbox execution.
 struct SandboxResult {
+    gas_used: u64,
     deploy_address: Address,
-    gas: Gas,
 }
 
 /// Executes the contract creation in a sandbox environment.
@@ -175,7 +196,7 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
     }
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation
-    let sandbox_result: Result<(EvmState, Gas), KeylessDeployError> = {
+    let sandbox_result: Result<(EvmState, u64), KeylessDeployError> = {
         // Create sandbox context with the type-erased database.
         // SandboxDb is a concrete type, so MegaContext<SandboxDb, ...> doesn't recurse.
         // Disable sandbox interception to prevent recursive sandbox creation.
@@ -199,16 +220,13 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
         // Process result and extract what we need
         match result {
             Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
-                ExecutionResult::Success { gas_used, gas_refunded, output, .. } => {
+                ExecutionResult::Success { gas_used, output, .. } => {
                     if let revm::context::result::Output::Create(_, Some(created_addr)) = output {
                         if created_addr != deploy_address {
                             // This should never happen - address mismatch indicates a bug
                             Err(KeylessDeployError::AddressMismatch)
                         } else {
-                            let mut gas = Gas::new(gas_limit);
-                            let _ = gas.record_cost(gas_used);
-                            gas.record_refund(gas_refunded as i64);
-                            Ok((sandbox_state, gas))
+                            Ok((sandbox_state, gas_used))
                         }
                     } else {
                         // Contract creation didn't return an address - should never happen
@@ -228,10 +246,10 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
     };
 
     // Apply all state changes from sandbox to parent context
-    let (sandbox_state, gas) = sandbox_result?;
+    let (sandbox_state, gas_used) = sandbox_result?;
     apply_sandbox_state(ctx, sandbox_state)?;
 
-    Ok(SandboxResult { deploy_address, gas })
+    Ok(SandboxResult { deploy_address, gas_used })
 }
 
 /// Applies all state changes from sandbox execution to the parent journal.

@@ -650,6 +650,7 @@ where
                                 self.ctx(),
                                 call_inputs,
                                 &call.keylessDeploymentTransaction,
+                                call.gasLimitOverride,
                             );
                             return Ok(FrameInitResult::Result(result));
                         }
