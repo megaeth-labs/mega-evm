@@ -3,12 +3,17 @@
 //! This module executes keyless deployment in an isolated sandbox environment
 //! to implement Nick's Method for deterministic contract deployment.
 
-use alloy_consensus::Transaction;
+use alloy_consensus::Transaction as AlloyTransaction;
+use alloy_evm::Evm;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_system_contracts::keyless_deploy::IKeylessDeploy;
 use revm::{
-    context::{ContextTr, TxEnv},
+    context::{
+        result::{ExecutionResult, ResultAndState},
+        ContextTr, TxEnv,
+    },
+    context_interface::Transaction,
     handler::FrameResult,
     interpreter::{CallOutcome, Gas, InstructionResult, InterpreterResult},
     primitives::KECCAK_EMPTY,
@@ -124,18 +129,49 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
     };
     let deploy_address = calculate_keyless_deploy_address(deploy_signer);
 
-    // Step 6: Execute sandbox and apply state changes
-    match execute_keyless_deploy_sandbox(
-        ctx,
-        deploy_signer,
-        deploy_address,
-        keyless_tx.input().clone(),
-        keyless_tx.value(),
-        keyless_tx.effective_gas_price(None),
-        gas_limit_override_u64,
-    ) {
+    // Step 6: Build the sandbox transaction.
+    // The gas limit is set to the gas limit override.
+    // The nonce is set to 0.
+    // The enveloped_tx is set to the original raw keyless deploy transaction bytes
+    let sandbox_tx = {
+        let tx = TxEnv {
+            caller: deploy_signer,
+            kind: TxKind::Create,
+            data: keyless_tx.input().clone(),
+            value: keyless_tx.value(),
+            gas_limit: gas_limit_override_u64,
+            gas_price: keyless_tx.effective_gas_price(None),
+            nonce: 0,
+            ..Default::default()
+        };
+        let mut mega_tx = MegaTransaction::new(tx);
+        mega_tx.enveloped_tx = Some(tx_bytes.clone());
+        mega_tx
+    };
+
+    // Step 7: Check deploy address doesn't already have code
+    {
+        let deploy_account = ctx
+            .journal_mut()
+            .database
+            .basic(deploy_address)
+            .map_err(|e| KeylessDeployError::InternalError(e.to_string()));
+        match deploy_account {
+            Ok(Some(info)) if info.code_hash != KECCAK_EMPTY => {
+                return make_error!(KeylessDeployError::ContractAlreadyExists);
+            }
+            Err(e) => return make_error!(e),
+            _ => {}
+        }
+    }
+
+    // Step 8: Execute sandbox and apply state changes
+    match execute_keyless_deploy_sandbox(ctx, sandbox_tx) {
         Ok(sandbox_result) => {
-            assert_eq!(sandbox_result.deploy_address, deploy_address, "Deployed address mismatch");
+            // Verify the deployed address matches the expected address
+            if sandbox_result.deploy_address != deploy_address {
+                return make_error!(KeylessDeployError::AddressMismatch);
+            }
             make_success!(sandbox_result.gas_used, sandbox_result.deploy_address)
         }
         Err(e) => make_error!(e),
@@ -151,21 +187,25 @@ struct SandboxResult {
 /// Executes the contract creation in a sandbox environment.
 ///
 /// Uses a type-erased `SandboxDb` to prevent infinite type instantiation.
+///
+/// # Arguments
+///
+/// * `ctx` - The parent context to execute in
+/// * `sandbox_tx` - The transaction to execute, with `enveloped_tx` set to the original raw keyless
+///   deploy transaction bytes
 fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    deploy_signer: Address,
-    deploy_address: Address,
-    init_code: Bytes,
-    value: U256,
-    gas_price: u128,
-    gas_limit: u64,
+    sandbox_tx: MegaTransaction,
 ) -> Result<SandboxResult, KeylessDeployError> {
-    use alloy_evm::Evm;
-    use revm::context::result::{ExecutionResult, ResultAndState};
+    let deploy_signer = sandbox_tx.caller();
+    let gas_limit = sandbox_tx.gas_limit();
+    let gas_price = sandbox_tx.gas_price();
+    let value = sandbox_tx.value();
 
     // Extract values we need BEFORE borrowing the journal
     let mega_spec = ctx.mega_spec();
     let block = ctx.block().clone();
+    let chain = ctx.chain().clone();
     let journal = ctx.journal_mut();
 
     // Create type-erased sandbox database with split borrows:
@@ -186,48 +226,26 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
         return Err(KeylessDeployError::InsufficientBalance);
     }
 
-    // Check deploy address doesn't have code
-    let deploy_account = sandbox_db
-        .basic(deploy_address)
-        .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?
-        .unwrap_or_default();
-    if deploy_account.code_hash != KECCAK_EMPTY {
-        return Err(KeylessDeployError::ContractAlreadyExists);
-    }
-
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation
-    let sandbox_result: Result<(EvmState, u64), KeylessDeployError> = {
+    let sandbox_result: Result<(EvmState, u64, Address), KeylessDeployError> = {
         // Create sandbox context with the type-erased database.
         // SandboxDb is a concrete type, so MegaContext<SandboxDb, ...> doesn't recurse.
         // Disable sandbox interception to prevent recursive sandbox creation.
-        let sandbox_ctx =
-            MegaContext::new(sandbox_db, mega_spec).with_block(block).with_sandbox_disabled(true);
+        let sandbox_ctx = MegaContext::new(sandbox_db, mega_spec)
+            .with_block(block)
+            .with_chain(chain)
+            .with_sandbox_disabled(true);
         let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
 
-        // Build and execute CREATE transaction
-        let tx = TxEnv {
-            caller: deploy_signer,
-            kind: TxKind::Create,
-            data: init_code,
-            value,
-            gas_limit,
-            gas_price,
-            nonce: 0,
-            ..Default::default()
-        };
-        let result = sandbox_evm.transact_raw(MegaTransaction::new(tx));
+        // Execute the transaction
+        let result = sandbox_evm.transact_raw(sandbox_tx);
 
         // Process result and extract what we need
         match result {
             Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
                 ExecutionResult::Success { gas_used, output, .. } => {
                     if let revm::context::result::Output::Create(_, Some(created_addr)) = output {
-                        if created_addr != deploy_address {
-                            // This should never happen - address mismatch indicates a bug
-                            Err(KeylessDeployError::AddressMismatch)
-                        } else {
-                            Ok((sandbox_state, gas_used))
-                        }
+                        Ok((sandbox_state, gas_used, created_addr))
                     } else {
                         // Contract creation didn't return an address - should never happen
                         // but we return an error instead of panicking to avoid crashing the node
@@ -246,7 +264,7 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
     };
 
     // Apply all state changes from sandbox to parent context
-    let (sandbox_state, gas_used) = sandbox_result?;
+    let (sandbox_state, gas_used, deploy_address) = sandbox_result?;
     apply_sandbox_state(ctx, sandbox_state)?;
 
     Ok(SandboxResult { deploy_address, gas_used })
