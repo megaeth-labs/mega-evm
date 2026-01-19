@@ -52,6 +52,8 @@ pub enum KeylessDeployError {
     },
     /// Internal error during sandbox execution
     InternalError(String),
+    /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner calls)
+    NotIntercepted,
 }
 
 /// Encodes a keyless deploy error as ABI-encoded revert data.
@@ -101,5 +103,69 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         KeylessDeployError::InternalError(message) => {
             IKeylessDeploy::InternalError { message }.abi_encode().into()
         }
+        KeylessDeployError::NotIntercepted => IKeylessDeploy::NotIntercepted {}.abi_encode().into(),
     }
+}
+
+/// Decodes ABI-encoded revert data into a KeylessDeployError.
+///
+/// Returns `None` if the data doesn't match any known error format.
+///
+/// Note: For `ExecutionHalted`, the halt reason cannot be recovered from ABI encoding,
+/// so a default `OutOfGas` reason is used.
+pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
+    if IKeylessDeploy::NoEtherTransfer::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::NoEtherTransfer);
+    }
+    if IKeylessDeploy::MalformedEncoding::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::MalformedEncoding);
+    }
+    if IKeylessDeploy::NotContractCreation::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::NotContractCreation);
+    }
+    if IKeylessDeploy::NotPreEIP155::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::NotPreEIP155);
+    }
+    if IKeylessDeploy::InvalidSignature::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::InvalidSignature);
+    }
+    if IKeylessDeploy::InsufficientBalance::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::InsufficientBalance);
+    }
+    if IKeylessDeploy::ContractAlreadyExists::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::ContractAlreadyExists);
+    }
+    if let Ok(e) = IKeylessDeploy::ExecutionReverted::abi_decode(output) {
+        return Some(KeylessDeployError::ExecutionReverted { gas_used: e.gasUsed, output: e.output });
+    }
+    if let Ok(e) = IKeylessDeploy::ExecutionHalted::abi_decode(output) {
+        // Note: The actual halt reason is lost in ABI encoding, use OutOfGas as placeholder
+        return Some(KeylessDeployError::ExecutionHalted {
+            gas_used: e.gasUsed,
+            reason: MegaHaltReason::Base(op_revm::OpHaltReason::Base(
+                revm::context::result::HaltReason::OutOfGas(
+                    revm::context::result::OutOfGasError::Basic,
+                ),
+            )),
+        });
+    }
+    if IKeylessDeploy::NoContractCreated::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::NoContractCreated);
+    }
+    if IKeylessDeploy::AddressMismatch::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::AddressMismatch);
+    }
+    if let Ok(e) = IKeylessDeploy::GasLimitTooLow::abi_decode(output) {
+        return Some(KeylessDeployError::GasLimitTooLow {
+            tx_gas_limit: e.txGasLimit,
+            provided_gas_limit: e.providedGasLimit,
+        });
+    }
+    if let Ok(e) = IKeylessDeploy::InternalError::abi_decode(output) {
+        return Some(KeylessDeployError::InternalError(e.message));
+    }
+    if IKeylessDeploy::NotIntercepted::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::NotIntercepted);
+    }
+    None
 }

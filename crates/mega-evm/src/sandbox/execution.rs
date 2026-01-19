@@ -42,7 +42,7 @@ use super::{
 /// 4. Recovers the signer and calculates the deploy address
 /// 5. Executes contract creation in a sandbox environment
 /// 6. Applies only allowed state changes (deployAddress + deploySigner balance)
-pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
+pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     call_inputs: &revm::interpreter::CallInputs,
     tx_bytes: &Bytes,
@@ -179,7 +179,8 @@ pub(crate) fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: Exte
 }
 
 /// Result of sandbox execution.
-struct SandboxResult {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SandboxResult {
     gas_used: u64,
     deploy_address: Address,
 }
@@ -193,7 +194,7 @@ struct SandboxResult {
 /// * `ctx` - The parent context to execute in
 /// * `sandbox_tx` - The transaction to execute, with `enveloped_tx` set to the original raw keyless
 ///   deploy transaction bytes
-fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
+pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     sandbox_tx: MegaTransaction,
 ) -> Result<SandboxResult, KeylessDeployError> {
@@ -211,7 +212,9 @@ fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvT
     // Create type-erased sandbox database with split borrows:
     // - Immutable reference to journal state (for cached accounts)
     // - Mutable reference to underlying database (for cache misses)
-    let mut sandbox_db = SandboxDb::new(&journal.inner.state, &mut journal.database);
+    // Override the signer's nonce to 0 for keyless deploy (Nick's Method requires nonce=0)
+    let mut sandbox_db = SandboxDb::new(&journal.inner.state, &mut journal.database)
+        .with_nonce_override(deploy_signer);
 
     // Check signer balance
     let signer_account = sandbox_db

@@ -110,6 +110,8 @@ pub struct SandboxDb<'a> {
     db: Box<dyn ErasedDatabase + 'a>,
     /// Index from code_hash to address for O(1) bytecode lookup.
     code_index: HashMap<B256, Address>,
+    /// Address whose nonce should be overridden to 0 (for keyless deploy).
+    nonce_override_address: Option<Address>,
 }
 
 impl<'a> core::fmt::Debug for SandboxDb<'a> {
@@ -156,7 +158,17 @@ impl<'a> SandboxDb<'a> {
             journal_state: state,
             db: Box::new(DatabaseWrapper { db: RefCell::new(db) }),
             code_index,
+            nonce_override_address: None,
         }
+    }
+
+    /// Sets an address whose nonce should be overridden to 0.
+    ///
+    /// This is used for keyless deploy where the transaction must have nonce=0
+    /// regardless of the signer's actual nonce in the database.
+    pub fn with_nonce_override(mut self, address: Address) -> Self {
+        self.nonce_override_address = Some(address);
+        self
     }
 }
 
@@ -166,10 +178,23 @@ impl Database for SandboxDb<'_> {
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         // Check journal state first - clone only when accessed
         if let Some(account) = self.journal_state.get(&address) {
-            return Ok(Some(account.info.clone()));
+            let mut info = account.info.clone();
+            // Override nonce to 0 for the keyless deploy signer
+            if self.nonce_override_address == Some(address) {
+                info.nonce = 0;
+            }
+            return Ok(Some(info));
         }
         // Not found in journal state - query underlying database
-        self.db.basic(address)
+        let result = self.db.basic(address)?;
+        // Override nonce to 0 for the keyless deploy signer
+        if let Some(mut info) = result {
+            if self.nonce_override_address == Some(address) {
+                info.nonce = 0;
+            }
+            return Ok(Some(info));
+        }
+        Ok(None)
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
