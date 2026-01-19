@@ -23,6 +23,6 @@ contract KeylessDeploy is ISemver, IKeylessDeploy {
     {
         // This function body is never executed - the call is intercepted by the EVM.
         // The assembly block prevents the compiler from optimizing away the function.
-        revert("KeylessDeploy: not intercepted");
+        revert NotIntercepted();
     }
 }

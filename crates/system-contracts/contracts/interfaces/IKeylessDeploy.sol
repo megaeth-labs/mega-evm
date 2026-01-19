@@ -52,6 +52,9 @@ interface IKeylessDeploy {
     /// @param message The error message.
     error InternalError(string message);
 
+    /// @notice The call was not intercepted by the EVM (called on unsupported network).
+    error NotIntercepted();
+
     /// @notice Deploys a contract using a pre-EIP-155 signed transaction with a custom gas limit.
     /// @dev The keyless deployment transaction must be a valid RLP-encoded legacy transaction:
     ///      - nonce: any value
