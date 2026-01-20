@@ -417,7 +417,8 @@ fn test_keyless_deploy_execution_reverted() {
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
 
     // Fund the recovered signer
-    db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
+    let initial_balance = U256::from(1_000_000_000_000_000_000_000u128);
+    db.set_account_balance(signer, initial_balance);
 
     let result = call_keyless_deploy(
         MegaSpecId::REX2,
@@ -435,6 +436,10 @@ fn test_keyless_deploy_execution_reverted() {
             match error {
                 KeylessDeployError::ExecutionReverted { gas_used, .. } => {
                     assert!(gas_used > 0, "Expected non-zero gas usage");
+                    let signer_account =
+                        result.state.get(&signer).expect("signer should exist in state");
+                    let expected_charge = U256::from(gas_used) * U256::from(100_000_000_000u64);
+                    assert_eq!(signer_account.info.balance, initial_balance - expected_charge);
                 }
                 other => panic!("Expected ExecutionReverted, got {:?}", other),
             }
@@ -454,7 +459,8 @@ fn test_keyless_deploy_execution_halted_invalid_opcode() {
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
 
     // Fund the recovered signer
-    db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
+    let initial_balance = U256::from(1_000_000_000_000_000_000_000u128);
+    db.set_account_balance(signer, initial_balance);
 
     let result = call_keyless_deploy(
         MegaSpecId::REX2,
@@ -472,6 +478,10 @@ fn test_keyless_deploy_execution_halted_invalid_opcode() {
             match error {
                 KeylessDeployError::ExecutionHalted { gas_used, .. } => {
                     assert!(gas_used > 0, "Expected non-zero gas usage");
+                    let signer_account =
+                        result.state.get(&signer).expect("signer should exist in state");
+                    let expected_charge = U256::from(gas_used) * U256::from(100_000_000_000u64);
+                    assert_eq!(signer_account.info.balance, initial_balance - expected_charge);
                 }
                 other => panic!("Expected ExecutionHalted, got {:?}", other),
             }

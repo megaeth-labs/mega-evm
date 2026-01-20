@@ -167,18 +167,28 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
 
     // Step 8: Execute sandbox and apply state changes
     match execute_keyless_deploy_sandbox(ctx, sandbox_tx) {
-        Ok(sandbox_result) => {
+        Ok(SandboxOutcome::Success { state, result }) => {
+            if let Err(e) = apply_sandbox_state(ctx, state, deploy_signer) {
+                return make_error!(e);
+            }
+
             // Verify the deployed address matches the expected address
-            if sandbox_result.deploy_address != deploy_address {
+            if result.deploy_address != deploy_address {
                 return make_error!(KeylessDeployError::AddressMismatch);
             }
 
             // Emit logs from sandbox in parent context
-            for log in sandbox_result.logs {
+            for log in result.logs {
                 ctx.log(log);
             }
 
-            make_success!(sandbox_result.gas_used, sandbox_result.deploy_address)
+            make_success!(result.gas_used, result.deploy_address)
+        }
+        Ok(SandboxOutcome::Failure { state, error }) => {
+            if let Err(e) = apply_sandbox_state(ctx, state, deploy_signer) {
+                return make_error!(e);
+            }
+            make_error!(error)
         }
         Err(e) => make_error!(e),
     }
@@ -204,7 +214,7 @@ pub struct SandboxResult {
 pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     sandbox_tx: MegaTransaction,
-) -> Result<SandboxResult, KeylessDeployError> {
+) -> Result<SandboxOutcome, KeylessDeployError> {
     let deploy_signer = sandbox_tx.caller();
     let gas_limit = sandbox_tx.gas_limit();
     let gas_price = sandbox_tx.gas_price();
@@ -237,7 +247,7 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
     }
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation
-    let sandbox_result: Result<(EvmState, u64, Address, Vec<Log>), KeylessDeployError> = {
+    let sandbox_result: Result<SandboxOutcome, KeylessDeployError> = {
         // Create sandbox context with the type-erased database.
         // SandboxDb is a concrete type, so MegaContext<SandboxDb, ...> doesn't recurse.
         // Disable sandbox interception to prevent recursive sandbox creation.
@@ -255,29 +265,49 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
             Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
                 ExecutionResult::Success { gas_used, output, logs, .. } => {
                     if let revm::context::result::Output::Create(_, Some(created_addr)) = output {
-                        Ok((sandbox_state, gas_used, created_addr, logs))
+                        Ok(SandboxOutcome::Success {
+                            state: sandbox_state,
+                            result: SandboxResult { deploy_address: created_addr, gas_used, logs },
+                        })
                     } else {
                         // Contract creation didn't return an address - should never happen
                         // but we return an error instead of panicking to avoid crashing the node
                         Err(KeylessDeployError::NoContractCreated)
                     }
                 }
-                ExecutionResult::Revert { gas_used, output } => {
-                    Err(KeylessDeployError::ExecutionReverted { gas_used, output })
-                }
-                ExecutionResult::Halt { gas_used, reason } => {
-                    Err(KeylessDeployError::ExecutionHalted { gas_used, reason })
-                }
+                ExecutionResult::Revert { gas_used, output } => Ok(SandboxOutcome::Failure {
+                    state: sandbox_state,
+                    error: KeylessDeployError::ExecutionReverted { gas_used, output },
+                }),
+                ExecutionResult::Halt { gas_used, reason } => Ok(SandboxOutcome::Failure {
+                    state: sandbox_state,
+                    error: KeylessDeployError::ExecutionHalted { gas_used, reason },
+                }),
             },
             Err(e) => Err(KeylessDeployError::InternalError(e.to_string())),
         }
     };
 
-    // Apply all state changes from sandbox to parent context
-    let (sandbox_state, gas_used, deploy_address, logs) = sandbox_result?;
-    apply_sandbox_state(ctx, sandbox_state, deploy_signer)?;
+    sandbox_result
+}
 
-    Ok(SandboxResult { deploy_address, gas_used, logs })
+/// Outcome of sandbox execution, including state for merging on failure.
+#[derive(Debug)]
+pub enum SandboxOutcome {
+    /// Successful execution with the resulting state and return data.
+    Success {
+        /// Sandbox state to merge into the parent context.
+        state: EvmState,
+        /// Execution result details.
+        result: SandboxResult,
+    },
+    /// Failed execution with the resulting state and error.
+    Failure {
+        /// Sandbox state to merge into the parent context.
+        state: EvmState,
+        /// Error returned by sandbox execution.
+        error: KeylessDeployError,
+    },
 }
 
 /// Applies all state changes from sandbox execution to the parent journal.

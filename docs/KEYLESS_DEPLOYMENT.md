@@ -12,7 +12,7 @@ In a normal deployment, the contract address depends on the deployer's address a
 contract_address = keccak256(rlp([deployer, nonce]))[12:]
 ```
 
-Nick's Method uses a clever trick: create a pre-signed transaction where the "deployer" address is derived from the signature itself. Since the signature is fixed, the deployer address is deterministic, and so is the contract address.
+Nick's Method uses a clever trick: create a pre-signed transaction where the "deployer" address is recovered from the signature over the transaction hash (`ecrecover(keccak256(rlp(tx_fields)), v, r, s)`). Because the signature is bound to all signed fields, the recovered deployer address is deterministic for that exact payload, and so is the contract address.
 
 ```
 signature + tx_content  →  deployer_address  →  contract_address
@@ -25,7 +25,7 @@ This allows anyone to broadcast the same pre-signed transaction on any chain to 
 
 MegaETH's gas model prices many operations differently than Ethereum. Contracts that deploy successfully on Ethereum may run out of gas on MegaETH.
 
-Normally, you'd just increase the gas limit. But with Nick's Method, **any change to the transaction changes the derived deployer address**, which changes the contract address:
+Normally, you'd just increase the gas limit. But with Nick's Method, **any change to the signed transaction fields invalidates the signature**, so the signer can no longer be recovered for that payload. Even if you re-sign, the recovered signer (and therefore contract address) would change:
 
 ```
 modified_tx  →  different_deployer  →  different_contract_address  ✗
@@ -37,8 +37,8 @@ This breaks cross-chain address consistency—the whole point of Nick's Method.
 
 MegaETH provides a **KeylessDeploy system contract** that:
 
-1. Takes the original, unmodified keyless transaction
-2. Accepts a separate `gasLimitOverride` parameter
+1. Takes the original, unmodified keyless transaction (used for signature recovery)
+2. Accepts a separate `gasLimitOverride` parameter (used only at execution time)
 3. Executes the deployment using the override gas limit
 4. Deploys to the **same address** as other chains
 
@@ -60,7 +60,7 @@ interface IKeylessDeploy {
 ```
 
 **Parameters**:
-- `keylessDeploymentTransaction`: The original RLP-encoded pre-EIP-155 signed transaction (unmodified)
+- `keylessDeploymentTransaction`: The original RLP-encoded pre-EIP-155 signed transaction (unmodified). The signature is verified against these exact fields.
 - `gasLimitOverride`: Gas limit to use for execution (must be ≥ the transaction's original gas limit)
 
 **Returns**:
@@ -74,18 +74,22 @@ interface IKeylessDeploy {
 
 ## How It Works
 
-The system contract acts as a **transaction execution sandbox**. It decodes `keylessDeploymentTransaction` and executes it as if it were a standalone transaction, but with these modifications:
+The system contract acts as a **transaction execution sandbox**. It verifies the signature against the original signed fields from `keylessDeploymentTransaction`, then executes as if it were a standalone transaction, but with these modifications:
 
 - The signer's nonce is forced to `0` (required for deterministic address), even if the signer's nonce is already non-zero in the state.
-- The gas limit is replaced with `gasLimitOverride`.
+- The gas limit is replaced with `gasLimitOverride` (an execution-time parameter, not part of the signed payload).
 - All other transaction parameters remain unchanged.
+
+Nonce semantics are intentionally custom: the sandbox always uses nonce `0` for the signer for CREATE address derivation and execution, regardless of the signer's current state nonce.
+The parent-state's signer nonce is preserved (not incremented) on both success and failure; only the sandbox state uses the overridden nonce.
+Nonce changes for other accounts produced during sandbox execution are merged back into the parent context on success.
 
 ### Gas Costs
 
 | Cost | Paid By | Description |
 |------|---------|-------------|
 | Overhead (100,000 gas) | Caller | Fixed cost for system contract processing |
-| Deployment execution | Signer | Gas for running the init code, same as normal transactions |
+| Deployment execution | Signer | Sandbox execution gas, charged per the rules below |
 
 The signer (derived from `keylessDeploymentTransaction`) must be pre-funded with enough ETH to cover:
 ```
@@ -93,6 +97,22 @@ gasLimitOverride × gasPrice + value
 ```
 
 If you use a higher `gasLimitOverride`, ensure the signer has proportionally more ETH.
+
+### Charging Rules
+
+The caller pays the fixed overhead gas as part of the outer transaction's normal gas accounting.
+The outer caller's gas price is the outer transaction's gas price, and it is unrelated to the signed legacy transaction's `gasPrice`.
+The signer must have balance ≥ `gasLimitOverride × gasPrice + value` before sandbox execution, or the call fails with `InsufficientBalance()`.
+The sandbox uses `gasLimitOverride` and the legacy transaction's `gasPrice` for execution.
+On success, the sandbox state is merged, so the signer's balance is debited for actual gas used (including standard EVM refunds) and any value transfer.
+On revert or halt, the sandbox state is still merged to apply gas charges, but all execution side effects remain reverted and no value is transferred.
+Any refunds from sandbox execution accrue to the signer, not the outer caller.
+
+### Security Considerations
+
+The keyless deploy call is permissionless, so anyone can submit `keylessDeploy(originalTx, gasLimitOverride)`.
+Because the signer is charged for gas used even on inner failure, a malicious caller can repeatedly submit failing calls to burn the signer's funds before the first successful deployment.
+Operational guidance: keep the signer balance minimal until you are ready to deploy, fund and deploy promptly (ideally in the same block), and monitor for repeated failing keyless deploy attempts against the same deployment address.
 
 ### Transaction Format
 
@@ -108,6 +128,9 @@ The `keylessDeploymentTransaction` must be a pre-EIP-155 legacy transaction:
 | data | Contract initialization bytecode |
 | v | 27 or 28 (pre-EIP-155, no chain ID) |
 | r, s | Signature components |
+
+The signer's on-chain nonce is **not** required to be `0` for keyless deploy. 
+It is ignored in the sandbox and does not affect the deployment address or execution.
 
 ### Execution Flow
 
@@ -127,21 +150,25 @@ The `keylessDeploymentTransaction` must be a pre-EIP-155 legacy transaction:
 │ 4. CHECK preconditions                                          │
 │    • Signer has sufficient balance                              │
 │    • Deployment address has no existing code                    │
+│    • Signer state nonce is not checked (sandbox uses nonce=0)    │
 ├─────────────────────────────────────────────────────────────────┤
 │ 5. EXECUTE in sandbox                                           │
 │    • msg.sender = recovered signer                              │
 │    • nonce = 0 (forced)                                         │
 │    • gas limit = gasLimitOverride                               │
 ├─────────────────────────────────────────────────────────────────┤
-│ 6. APPLY state changes and logs on success                      │
+│ 6. APPLY sandbox state                                          │
+│    • On success: deploy effects + logs                          │
+│    • On failure: only gas charges (side effects reverted)       │
+│    • Signer nonce is preserved (no increment)                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Sandbox Guarantees
 
-- **Atomic**: State changes only apply if deployment succeeds completely
-- **Isolated**: Failures don't affect the outer transaction state
-- **Transparent**: Logs from deployment are propagated to the outer context
+- **Atomic**: Deployment side effects apply only on success
+- **Isolated**: Failures do not apply deployment side effects, but gas charges still apply
+- **Transparent**: Logs from deployment are propagated to the outer context on success
 
 ## Error Reference
 
