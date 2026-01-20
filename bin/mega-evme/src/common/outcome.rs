@@ -1,6 +1,8 @@
 //! Execution outcome for mega-evme commands
 
-use std::{io, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
+
+use super::EvmeError;
 
 use alloy_consensus::{Eip658Value, Receipt};
 use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash, B256};
@@ -209,7 +211,10 @@ pub fn print_receipt<T: serde::Serialize>(receipt: &T) {
 ///
 /// If `output_file` is provided, writes the trace to the file and prints the path.
 /// Otherwise, prints the trace to the console.
-pub fn print_execution_trace(trace: Option<&str>, output_file: Option<&Path>) -> io::Result<()> {
+pub fn print_execution_trace(
+    trace: Option<&str>,
+    output_file: Option<&Path>,
+) -> Result<(), EvmeError> {
     let Some(trace) = trace else {
         return Ok(());
     };
@@ -218,7 +223,8 @@ pub fn print_execution_trace(trace: Option<&str>, output_file: Option<&Path>) ->
     println!("=== Execution Trace ===");
 
     if let Some(path) = output_file {
-        std::fs::write(path, trace)?;
+        std::fs::write(path, trace)
+            .map_err(|e| EvmeError::Other(format!("Failed to write trace to file: {}", e)))?;
         println!("Trace written to: {}", path.display());
     } else {
         println!("{}", trace);

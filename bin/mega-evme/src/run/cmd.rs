@@ -143,10 +143,7 @@ impl Cmd {
         print_execution_trace(
             outcome.trace_data.as_deref(),
             self.trace_args.trace_output_file.as_deref(),
-        )
-        .map_err(|e| {
-            super::RunError::ExecutionError(format!("Failed to write trace to file: {}", e))
-        })?;
+        )?;
 
         // Dump state if requested
         if self.dump_args.dump {
