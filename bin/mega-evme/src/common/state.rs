@@ -404,7 +404,7 @@ impl AccountState {
     /// Creates a new [`AccountState`] from [`Account`].
     pub fn from_account(account: Account) -> Self {
         let AccountInfo { balance, nonce, code_hash, code } = account.info;
-        let code = code.map(|c| c.bytecode().to_vec()).unwrap_or_default().into();
+        let code = code.map(|c| c.original_byte_slice().to_vec()).unwrap_or_default().into();
         let storage =
             account.storage.into_iter().map(|(slot, value)| (slot, value.present_value)).collect();
         Self {
