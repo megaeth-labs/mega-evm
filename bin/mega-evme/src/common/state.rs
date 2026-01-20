@@ -399,6 +399,38 @@ where
             .storage
             .extend(storage.into_iter().map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0))));
     }
+
+    /// Deploys system contracts based on the given spec.
+    pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
+        use mega_evm::{
+            MegaSpecId, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+            ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_REX2,
+        };
+
+        // MiniRex+: Oracle Contract (v1.0.0 or v1.1.0 based on Rex2)
+        if spec >= MegaSpecId::MINI_REX {
+            let code = if spec >= MegaSpecId::REX2 {
+                ORACLE_CONTRACT_CODE_REX2
+            } else {
+                ORACLE_CONTRACT_CODE
+            };
+            self.set_account_code(ORACLE_CONTRACT_ADDRESS, Bytecode::new_raw(code));
+        }
+
+        // MiniRex+: High Precision Timestamp Oracle
+        if spec >= MegaSpecId::MINI_REX {
+            self.set_account_code(
+                HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+                Bytecode::new_raw(HIGH_PRECISION_TIMESTAMP_ORACLE_CODE),
+            );
+        }
+
+        // Rex2+: Keyless Deploy Contract
+        if spec >= MegaSpecId::REX2 {
+            self.set_account_code(KEYLESS_DEPLOY_ADDRESS, Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
+        }
+    }
 }
 
 // Impl block for methods that accept a generic provider
