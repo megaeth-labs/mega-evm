@@ -1235,13 +1235,7 @@ fn test_keyless_deploy_with_value_transfer() {
 
 #[test]
 fn test_keyless_deploy_emits_logs() {
-    // PLACEHOLDER TEST
-    //
-    // NOTE: Logs emitted during sandbox execution are NOT currently propagated
-    // to the outer execution context. This is a known limitation.
-    //
-    // This test documents the current behavior and serves as a placeholder
-    // for when/if log propagation is implemented.
+    // Test that logs emitted during sandbox execution are propagated to the parent context
     let mut db = MemoryDatabase::default();
 
     // Init code that:
@@ -1251,18 +1245,17 @@ fn test_keyless_deploy_emits_logs() {
     let log_data = 0xdeadbeef_u32;
 
     let init_code = BytecodeBuilder::default()
-        // Store log data to memory
-        .append_many([PUSH1, 0xde, PUSH1, 0xad, PUSH1, 0xbe, PUSH1, 0xef])
+        // Store log data to memory (right-justified in 32 bytes)
         .push_bytes(log_data.to_be_bytes())
         .append_many([PUSH1, 0x00])
         .append(MSTORE)
-        // LOG0(offset=0, size=4)
+        // LOG0(offset=28, size=4) - read the last 4 bytes of the 32-byte word
         .append_many([PUSH1, 0x04]) // size = 4
-        .append_many([PUSH1, 0x00]) // offset = 0
+        .append_many([PUSH1, 0x1c]) // offset = 28 (32 - 4)
         .append(LOG0)
         // Return minimal runtime code
         .append_many([PUSH1, 0x01]) // size = 1
-        .append_many([PUSH1, 0x18]) // offset of runtime code (approximate)
+        .append_many([PUSH1, 0x14]) // offset of runtime code
         .append_many([PUSH1, 0x00]) // dest = 0
         .append(CODECOPY)
         .append_many([PUSH1, 0x01]) // return size
@@ -1292,9 +1285,14 @@ fn test_keyless_deploy_emits_logs() {
         result
     );
 
-    // KNOWN LIMITATION: Logs from sandbox are not propagated
-    // The result.logs() would be empty even though the init code emitted logs
-    // This is documented behavior - revisit when log propagation is implemented
+    // Verify logs are propagated from sandbox
+    let logs = result.logs();
+    assert_eq!(logs.len(), 1, "Expected exactly one log from sandbox");
+
+    // Verify log data matches what init code emitted
+    let log = &logs[0];
+    assert_eq!(log.data.data.as_ref(), &log_data.to_be_bytes(), "Log data should match");
+    assert!(log.data.topics().is_empty(), "LOG0 should have no topics");
 }
 
 #[test]

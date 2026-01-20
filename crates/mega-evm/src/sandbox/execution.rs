@@ -5,7 +5,7 @@
 
 use alloy_consensus::Transaction as AlloyTransaction;
 use alloy_evm::Evm;
-use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, Log, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_system_contracts::keyless_deploy::IKeylessDeploy;
 use revm::{
@@ -15,7 +15,7 @@ use revm::{
     },
     context_interface::Transaction,
     handler::FrameResult,
-    interpreter::{CallOutcome, Gas, InstructionResult, InterpreterResult},
+    interpreter::{CallOutcome, Gas, Host, InstructionResult, InterpreterResult},
     primitives::KECCAK_EMPTY,
     state::EvmState,
     Database,
@@ -172,6 +172,12 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
             if sandbox_result.deploy_address != deploy_address {
                 return make_error!(KeylessDeployError::AddressMismatch);
             }
+
+            // Emit logs from sandbox in parent context
+            for log in sandbox_result.logs {
+                ctx.log(log);
+            }
+
             make_success!(sandbox_result.gas_used, sandbox_result.deploy_address)
         }
         Err(e) => make_error!(e),
@@ -179,10 +185,11 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
 }
 
 /// Result of sandbox execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxResult {
     gas_used: u64,
     deploy_address: Address,
+    logs: Vec<Log>,
 }
 
 /// Executes the contract creation in a sandbox environment.
@@ -230,7 +237,7 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
     }
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation
-    let sandbox_result: Result<(EvmState, u64, Address), KeylessDeployError> = {
+    let sandbox_result: Result<(EvmState, u64, Address, Vec<Log>), KeylessDeployError> = {
         // Create sandbox context with the type-erased database.
         // SandboxDb is a concrete type, so MegaContext<SandboxDb, ...> doesn't recurse.
         // Disable sandbox interception to prevent recursive sandbox creation.
@@ -246,9 +253,9 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
         // Process result and extract what we need
         match result {
             Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
-                ExecutionResult::Success { gas_used, output, .. } => {
+                ExecutionResult::Success { gas_used, output, logs, .. } => {
                     if let revm::context::result::Output::Create(_, Some(created_addr)) = output {
-                        Ok((sandbox_state, gas_used, created_addr))
+                        Ok((sandbox_state, gas_used, created_addr, logs))
                     } else {
                         // Contract creation didn't return an address - should never happen
                         // but we return an error instead of panicking to avoid crashing the node
@@ -267,10 +274,10 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
     };
 
     // Apply all state changes from sandbox to parent context
-    let (sandbox_state, gas_used, deploy_address) = sandbox_result?;
+    let (sandbox_state, gas_used, deploy_address, logs) = sandbox_result?;
     apply_sandbox_state(ctx, sandbox_state)?;
 
-    Ok(SandboxResult { deploy_address, gas_used })
+    Ok(SandboxResult { deploy_address, gas_used, logs })
 }
 
 /// Applies all state changes from sandbox execution to the parent journal.
