@@ -21,8 +21,9 @@ use mega_evm::{
     IKeylessDeploy, MegaSpecId, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
 };
 use revm::bytecode::opcode::{
-    CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, MSTORE,
-    PUSH0, PUSH1, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
+    CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, MLOAD,
+    MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT, SSTORE,
+    STATICCALL, STOP,
 };
 
 // =============================================================================
@@ -652,12 +653,14 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
     // 4. If call fails: reverts with the revert data
     let proxy_code = BytecodeBuilder::default()
         // Copy calldata to memory at offset 0
-        .append_many([CALLDATASIZE, PUSH1, 0, PUSH1, 0, CALLDATACOPY]) // CALLDATASIZE PUSH1 0 PUSH1 0 CALLDATACOPY
-        // CALL args: retSize=0, retOffset=0, argsSize=CALLDATASIZE, argsOffset=0, value=0, addr,
-        // gas
+        .append(CALLDATASIZE)
+        .append(PUSH0) // srcOffset
+        .append(PUSH0) // destOffset
+        .append(CALLDATACOPY)
+        // CALL args: retSize=0, retOffset=0, argsSize=CALLDATASIZE, argsOffset=0, value=0, addr, gas
         .append(PUSH0) // retSize
         .append(PUSH0) // retOffset
-        .append(CALLDATASIZE) // CALLDATASIZE for argsSize
+        .append(CALLDATASIZE) // argsSize
         .append(PUSH0) // argsOffset
         .append(PUSH0) // value
         .push_address(KEYLESS_DEPLOY_ADDRESS)
@@ -665,7 +668,9 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
         .append(CALL)
         // Stack now has: [success (0 or 1)]
         // If success == 0 (call failed), propagate the revert
-        .append_many([ISZERO, PUSH1, 0x2d, JUMPI]) // ISZERO PUSH1 0x2d JUMPI (jump to revert if failed)
+        .append(ISZERO)
+        .push_number(0x2b_u8) // jump to revert if failed (JUMPDEST is at offset 43 = 0x2b)
+        .append(JUMPI)
         // Success path: copy return data and return (7 bytes: 0x26-0x2c)
         .append(RETURNDATASIZE)
         .append(PUSH0)
@@ -892,14 +897,14 @@ fn test_keyless_deploy_init_code_selfdestructs() {
         .push_address(beneficiary)
         .append(SELFDESTRUCT)
         // Runtime code comes after SELFDESTRUCT + return sequence = 22 bytes (0x16)
-        .append_many([PUSH1, 0x01]) // size = 1
-        .append_many([PUSH1, 0x1a]) // offset of runtime code
-        .append_many([PUSH1, 0x00]) // dest offset
+        .push_number(1_u8) // size = 1
+        .push_number(0x1a_u8) // offset of runtime code
+        .push_number(0_u8) // dest offset
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01]) // return size
-        .append_many([PUSH1, 0x00]) // return offset
+        .push_number(1_u8) // return size
+        .push_number(0_u8) // return offset
         .append(RETURN)
-        .append(0x00) // runtime code: STOP
+        .append(STOP) // runtime code: STOP
         .build();
 
     // Create tx with value so the contract has ETH to send via SELFDESTRUCT
@@ -964,12 +969,15 @@ fn test_keyless_deploy_modifies_other_contract_state() {
     // PUSH1 0x00 SSTORE                              ; store to slot 0
     // STOP
     let storage_contract_code = BytecodeBuilder::default()
-        .append_many([PUSH1, 0x20, PUSH1, 0x00, PUSH1, 0x00, CALLDATACOPY]) // copy calldata
-        .append_many([PUSH1, 0x00]) // offset
-        .append(0x51) // MLOAD
-        .append_many([PUSH1, 0x00]) // slot
+        .push_number(0x20_u8) // size
+        .push_number(0_u8) // srcOffset
+        .push_number(0_u8) // destOffset
+        .append(CALLDATACOPY)
+        .push_number(0_u8) // offset
+        .append(MLOAD)
+        .push_number(0_u8) // slot
         .append(SSTORE)
-        .append(0x00) // STOP
+        .stop()
         .build();
 
     let storage_contract = address!("0000000000000000000000000000000000500000");
@@ -982,41 +990,26 @@ fn test_keyless_deploy_modifies_other_contract_state() {
     // 1. Stores test_value to memory at offset 0
     // 2. CALLs storage_contract with the value as calldata
     // 3. Returns minimal runtime code
-    //
-    // PUSH32 <value>       ; push value
-    // PUSH1 0x00 MSTORE    ; store at memory[0]
-    // PUSH1 0x00           ; retSize = 0
-    // PUSH1 0x00           ; retOffset = 0
-    // PUSH1 0x20           ; argsSize = 32
-    // PUSH1 0x00           ; argsOffset = 0
-    // PUSH1 0x00           ; value = 0
-    // PUSH20 <addr>        ; address
-    // GAS                  ; gas
-    // CALL                 ; call
-    // POP                  ; pop return value
-    // (then return runtime code)
     let init_code = BytecodeBuilder::default()
-        .push_u256(test_value)
-        .append_many([PUSH1, 0x00])
-        .append(MSTORE)
-        .append_many([PUSH1, 0x00]) // retSize
-        .append_many([PUSH1, 0x00]) // retOffset
-        .append_many([PUSH1, 0x20]) // argsSize = 32
-        .append_many([PUSH1, 0x00]) // argsOffset
-        .append_many([PUSH1, 0x00]) // value
+        .mstore(0, test_value.to_be_bytes_vec())
+        .push_number(0_u8) // retSize
+        .push_number(0_u8) // retOffset
+        .push_number(0x20_u8) // argsSize = 32
+        .push_number(0_u8) // argsOffset
+        .push_number(0_u8) // value
         .push_address(storage_contract)
         .append(GAS)
         .append(CALL)
-        .append(0x50) // POP
+        .append(POP)
         // Return minimal runtime code: just return a constant 0x42
-        .append_many([PUSH1, 0x01]) // size = 1
-        .append_many([PUSH1, 0x49]) // offset of runtime code (0x49 = 73)
-        .append_many([PUSH1, 0x00]) // dest offset
+        .push_number(1_u8) // size = 1
+        .push_number(0x49_u8) // offset of runtime code (0x49 = 73)
+        .push_number(0_u8) // dest offset
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01]) // return size
-        .append_many([PUSH1, 0x00]) // return offset
+        .push_number(1_u8) // return size
+        .push_number(0_u8) // return offset
         .append(RETURN)
-        .append(0x00) // runtime code: STOP
+        .append(STOP) // runtime code: STOP
         .build();
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO);
@@ -1064,16 +1057,13 @@ fn test_keyless_deploy_creates_child_contract() {
     let child_runtime_code: &[u8] = &[0x00]; // STOP
 
     // Child init code that returns the runtime code
-    // PUSH1 0x01 PUSH1 <offset> PUSH1 0x00 CODECOPY
-    // PUSH1 0x01 PUSH1 0x00 RETURN
-    // <runtime: 0x00>
     let child_init_code = BytecodeBuilder::default()
-        .append_many([PUSH1, 0x01]) // size = 1 (runtime code size)
-        .append_many([PUSH1, 0x0c]) // offset of runtime code
-        .append_many([PUSH1, 0x00]) // dest = 0
+        .push_number(1_u8) // size = 1 (runtime code size)
+        .push_number(0x0c_u8) // offset of runtime code
+        .push_number(0_u8) // dest = 0
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01]) // return size
-        .append_many([PUSH1, 0x00]) // return offset
+        .push_number(1_u8) // return size
+        .push_number(0_u8) // return offset
         .append(RETURN)
         .append_many(child_runtime_code.iter().copied())
         .build();
@@ -1087,24 +1077,17 @@ fn test_keyless_deploy_creates_child_contract() {
     // 4. Return parent runtime code
     let mut parent_init = BytecodeBuilder::default();
 
-    // Store child init code to memory at offset 0
-    // We need to store it 32 bytes at a time using MSTORE
-    for (i, chunk) in child_init_code.chunks(32).enumerate() {
-        let mut padded = [0u8; 32];
-        padded[..chunk.len()].copy_from_slice(chunk);
-        parent_init = parent_init.push_bytes(padded);
-        parent_init = parent_init.append_many([PUSH1, (i * 32) as u8]);
-        parent_init = parent_init.append(MSTORE);
-    }
+    // Store child init code to memory at offset 0 using mstore utility
+    parent_init = parent_init.mstore(0, &child_init_code);
 
     // CREATE: value=0, offset=0, size=child_init_len
-    parent_init = parent_init.append_many([PUSH1, child_init_len as u8]); // size
-    parent_init = parent_init.append_many([PUSH1, 0x00]); // offset
-    parent_init = parent_init.append_many([PUSH1, 0x00]); // value
+    parent_init = parent_init.push_number(child_init_len as u8); // size
+    parent_init = parent_init.push_number(0_u8); // offset
+    parent_init = parent_init.push_number(0_u8); // value
     parent_init = parent_init.append(CREATE);
 
     // Stack now has child address, store to slot 0
-    parent_init = parent_init.append_many([PUSH1, 0x00]); // slot
+    parent_init = parent_init.push_number(0_u8); // slot
     parent_init = parent_init.append(SSTORE);
 
     // Now calculate offset for runtime code
@@ -1114,14 +1097,14 @@ fn test_keyless_deploy_creates_child_contract() {
     let runtime_offset = current_len + 12;
 
     parent_init = parent_init
-        .append_many([PUSH1, 0x01]) // size = 1
-        .append_many([PUSH1, runtime_offset as u8])
-        .append_many([PUSH1, 0x00])
+        .push_number(1_u8) // size = 1
+        .push_number(runtime_offset as u8)
+        .push_number(0_u8)
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01])
-        .append_many([PUSH1, 0x00])
+        .push_number(1_u8)
+        .push_number(0_u8)
         .append(RETURN)
-        .append(0x00); // runtime code: STOP
+        .append(STOP); // runtime code: STOP
 
     let init_code = parent_init.build();
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO);
@@ -1182,14 +1165,14 @@ fn test_keyless_deploy_with_value_transfer() {
 
     // Simple init code that just returns minimal runtime code
     let init_code = BytecodeBuilder::default()
-        .append_many([PUSH1, 0x01]) // size = 1
-        .append_many([PUSH1, 0x0c]) // offset of runtime code
-        .append_many([PUSH1, 0x00]) // dest = 0
+        .push_number(1_u8) // size = 1
+        .push_number(0x0c_u8) // offset of runtime code
+        .push_number(0_u8) // dest = 0
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01]) // return size
-        .append_many([PUSH1, 0x00]) // return offset
+        .push_number(1_u8) // return size
+        .push_number(0_u8) // return offset
         .append(RETURN)
-        .append(0x00) // runtime code: STOP
+        .append(STOP) // runtime code: STOP
         .build();
 
     // Create tx with 0.5 ETH value
@@ -1245,23 +1228,23 @@ fn test_keyless_deploy_emits_logs() {
     let log_data = 0xdeadbeef_u32;
 
     let init_code = BytecodeBuilder::default()
-        // Store log data to memory (right-justified in 32 bytes)
+        // Store log data to memory (left-padded in 32 bytes via push_bytes + MSTORE)
         .push_bytes(log_data.to_be_bytes())
-        .append_many([PUSH1, 0x00])
+        .push_number(0_u8)
         .append(MSTORE)
         // LOG0(offset=28, size=4) - read the last 4 bytes of the 32-byte word
-        .append_many([PUSH1, 0x04]) // size = 4
-        .append_many([PUSH1, 0x1c]) // offset = 28 (32 - 4)
+        .push_number(4_u8) // size = 4
+        .push_number(0x1c_u8) // offset = 28 (32 - 4)
         .append(LOG0)
         // Return minimal runtime code
-        .append_many([PUSH1, 0x01]) // size = 1
-        .append_many([PUSH1, 0x14]) // offset of runtime code
-        .append_many([PUSH1, 0x00]) // dest = 0
+        .push_number(1_u8) // size = 1
+        .push_number(0x14_u8) // offset of runtime code
+        .push_number(0_u8) // dest = 0
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01]) // return size
-        .append_many([PUSH1, 0x00]) // return offset
+        .push_number(1_u8) // return size
+        .push_number(0_u8) // return offset
         .append(RETURN)
-        .append(0x00) // runtime code: STOP
+        .append(STOP) // runtime code: STOP
         .build();
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO);
@@ -1301,14 +1284,14 @@ fn test_keyless_deploy_reads_existing_contract() {
     let mut db = MemoryDatabase::default();
 
     // Deploy a "getter" contract that returns a constant value when called
-    // Bytecode: PUSH4 <value> PUSH1 0x00 MSTORE PUSH1 0x20 PUSH1 0x00 RETURN
+    // The value is left-padded to 32 bytes (standard EVM word format)
     let return_value = 0x12345678_u32;
     let getter_code = BytecodeBuilder::default()
         .push_bytes(return_value.to_be_bytes())
-        .append_many([PUSH1, 0x00])
+        .push_number(0_u8)
         .append(MSTORE)
-        .append_many([PUSH1, 0x20]) // return 32 bytes
-        .append_many([PUSH1, 0x00])
+        .push_number(0x20_u8) // return 32 bytes
+        .push_number(0_u8)
         .append(RETURN)
         .build();
 
@@ -1321,28 +1304,28 @@ fn test_keyless_deploy_reads_existing_contract() {
     // 3. Returns minimal runtime code
     let init_code = BytecodeBuilder::default()
         // STATICCALL: gas, addr, argsOffset, argsSize, retOffset, retSize
-        .append_many([PUSH1, 0x20]) // retSize = 32
-        .append_many([PUSH1, 0x00]) // retOffset = 0
-        .append_many([PUSH1, 0x00]) // argsSize = 0
-        .append_many([PUSH1, 0x00]) // argsOffset = 0
+        .push_number(0x20_u8) // retSize = 32
+        .push_number(0_u8) // retOffset = 0
+        .push_number(0_u8) // argsSize = 0
+        .push_number(0_u8) // argsOffset = 0
         .push_address(getter_contract)
         .append(GAS)
         .append(STATICCALL)
-        .append(0x50) // POP success flag
+        .append(POP) // POP success flag
         // Load return value from memory and store to slot 0
-        .append_many([PUSH1, 0x00])
-        .append(0x51) // MLOAD
-        .append_many([PUSH1, 0x00]) // slot
+        .push_number(0_u8)
+        .append(MLOAD)
+        .push_number(0_u8) // slot
         .append(SSTORE)
         // Return minimal runtime code
-        .append_many([PUSH1, 0x01]) // size = 1
-        .append_many([PUSH1, 0x2a]) // offset of runtime code
-        .append_many([PUSH1, 0x00]) // dest = 0
+        .push_number(1_u8) // size = 1
+        .push_number(0x2a_u8) // offset of runtime code
+        .push_number(0_u8) // dest = 0
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01]) // return size
-        .append_many([PUSH1, 0x00]) // return offset
+        .push_number(1_u8) // return size
+        .push_number(0_u8) // return offset
         .append(RETURN)
-        .append(0x00) // runtime code: STOP
+        .append(STOP) // runtime code: STOP
         .build();
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO);
