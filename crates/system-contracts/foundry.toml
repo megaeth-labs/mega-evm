@@ -7,6 +7,9 @@ optimizer = true
 optimizer_runs = 999999
 fs_permissions = [{ access = "read-write", path = "./artifacts" }]
 bytecode_hash = "none"
+# Suppress warnings from KeylessDeploy.sol - the keylessDeploy() function only reverts
+# but is intercepted by the EVM and actually modifies state when executed
+ignored_warnings_from = ["contracts/KeylessDeploy.sol"]
 
 [fuzz]
 runs = 64

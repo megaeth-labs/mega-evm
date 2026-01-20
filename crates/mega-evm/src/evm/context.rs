@@ -61,6 +61,10 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /* Internal state variables */
     /// Tracker for sensitive data access (block environment, beneficiary, etc.)
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
+
+    /// Whether sandbox interception is disabled for this context.
+    /// Set to `true` to prevent recursive sandbox creation (e.g., keyless deploy).
+    pub(crate) disable_sandbox: Rc<RefCell<bool>>,
 }
 
 impl Default for MegaContext<EmptyDB, EmptyExternalEnv> {
@@ -108,6 +112,7 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
             ))),
             oracle_env: Rc::new(RefCell::new(EmptyExternalEnv)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
+            disable_sandbox: Rc::new(RefCell::new(false)),
             inner,
         }
     }
@@ -164,6 +169,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
+            disable_sandbox: Rc::new(RefCell::new(false)),
             inner,
         }
     }
@@ -189,6 +195,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             dynamic_storage_gas_cost: self.dynamic_storage_gas_cost,
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
+            disable_sandbox: self.disable_sandbox,
         }
     }
 
@@ -289,6 +296,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
+            disable_sandbox: self.disable_sandbox,
         }
     }
 
@@ -327,6 +335,30 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Returns the [`SpecId`] representing the current `MegaETH` specification.
     pub fn mega_spec(&self) -> MegaSpecId {
         self.spec
+    }
+
+    /// Returns whether sandbox interception is disabled for this context.
+    ///
+    /// When `true`, sandbox interception (e.g., keyless deploy) is disabled to prevent
+    /// infinite recursion during sandbox execution.
+    #[inline]
+    pub fn is_sandbox_disabled(&self) -> bool {
+        *self.disable_sandbox.borrow()
+    }
+
+    /// Sets whether sandbox interception is disabled for this context.
+    #[inline]
+    pub(crate) fn set_sandbox_disabled(&self, value: bool) {
+        *self.disable_sandbox.borrow_mut() = value;
+    }
+
+    /// Builder method to disable sandbox interception.
+    ///
+    /// Used when creating sandbox contexts to prevent recursive interception.
+    #[inline]
+    pub fn with_sandbox_disabled(self, value: bool) -> Self {
+        self.set_sandbox_disabled(value);
+        self
     }
 
     /// Gets the current total data size generated from transaction execution.

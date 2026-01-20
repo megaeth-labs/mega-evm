@@ -36,9 +36,10 @@ use revm::{
 use crate::{
     constants, create_exceeding_interpreter_result, create_exceeding_limit_frame_result,
     is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
-    mark_interpreter_result_as_exceeding_limit, sent_from_mega_system_address, ExternalEnvTypes,
-    HostExt, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
-    MegaTransactionError, OracleEnv, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    mark_interpreter_result_as_exceeding_limit, sandbox::execute_keyless_deploy_call,
+    sent_from_mega_system_address, ExternalEnvTypes, HostExt, IKeylessDeploy, IOracle, MegaContext,
+    MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError, OracleEnv,
+    KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
     ORACLE_CONTRACT_ADDRESS,
 };
 
@@ -625,6 +626,34 @@ where
                             call.topic,
                             call.data,
                         );
+                    }
+                }
+            }
+        }
+
+        // Keyless Deploy Interception (Rex2+):
+        // Intercept keylessDeploy(bytes) calls to the keyless deploy contract.
+        // This executes the deployment in a sandbox and applies state changes.
+        // Only intercept TOP-LEVEL calls; internal calls from contracts are NOT intercepted.
+        if self.ctx().spec.is_enabled(MegaSpecId::REX2) {
+            // Only intercept if:
+            // 1. Sandbox is not disabled (prevents infinite recursion)
+            // 2. This is a top-level call (depth == 0)
+            if !self.ctx().is_sandbox_disabled() && frame_init.depth == 0 {
+                if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                    if call_inputs.target_address == KEYLESS_DEPLOY_ADDRESS {
+                        let input_bytes = call_inputs.input.bytes(self.ctx());
+                        if let Ok(call) =
+                            IKeylessDeploy::keylessDeployCall::abi_decode(&input_bytes)
+                        {
+                            let result = execute_keyless_deploy_call(
+                                self.ctx(),
+                                call_inputs,
+                                &call.keylessDeploymentTransaction,
+                                call.gasLimitOverride,
+                            );
+                            return Ok(FrameInitResult::Result(result));
+                        }
                     }
                 }
             }
