@@ -64,6 +64,11 @@ impl Cmd {
             .await?;
         debug!(sender = %self.tx_args.sender, "State initialized");
 
+        // Deploy system contracts based on spec
+        let spec = self.env_args.spec_id()?;
+        state.deploy_system_contracts(spec);
+        debug!(spec = ?spec, "System contracts deployed");
+
         let pre_execution_nonce =
             state.basic_ref(self.tx_args.sender)?.map(|acc| acc.nonce).unwrap_or(0);
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
