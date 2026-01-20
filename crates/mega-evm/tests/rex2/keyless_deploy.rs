@@ -732,6 +732,43 @@ fn test_keyless_deploy_balance_exactly_sufficient() {
 }
 
 #[test]
+fn test_keyless_deploy_increments_nonce_from_zero() {
+    // Verify that when the signer's initial nonce is 0, it becomes 1 after successful deployment.
+    // This is critical for replay protection - the nonce change marks the signer as "used".
+    let mut db = MemoryDatabase::default();
+
+    // Fund deployer with enough ETH (nonce defaults to 0)
+    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
+
+    // Note: initial nonce is 0 by default (not explicitly set)
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        Bytes::from_static(CREATE2_FACTORY_TX),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    // Verify success
+    let ResultAndState { result, state } = result;
+    assert!(
+        matches!(result, ExecutionResult::Success { .. }),
+        "Expected success, got: {:?}",
+        result
+    );
+
+    // Verify signer's nonce is now 1
+    let deployer = state.get(&CREATE2_FACTORY_DEPLOYER).expect("deployer should exist in state");
+    assert_eq!(deployer.info.nonce, 1, "deployer nonce should be incremented from 0 to 1");
+
+    // Verify the contract was deployed at the correct address
+    let output = result.output().unwrap();
+    let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output).unwrap();
+    assert_eq!(ret.deployedAddress, CREATE2_FACTORY_CONTRACT);
+}
+
+#[test]
 fn test_keyless_deploy_nonce_override_to_zero() {
     // Even if the signer has a non-zero nonce (up to 1), keyless deploy should override it to 0
     // so the contract deploys at the expected address (CREATE address depends on nonce).

@@ -34,6 +34,7 @@ alloy-provider = { workspace = true, features = ["reqwest"] }
 alloy-rpc-types-eth.workspace = true
 alloy-rpc-types-trace.workspace = true
 alloy-serde = { workspace = true, features = ["default"] }
+alloy-sol-types.workspace = true
 alloy-transport-http = { workspace = true, features = ["reqwest"] }
 
 # op
