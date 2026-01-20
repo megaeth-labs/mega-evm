@@ -150,6 +150,20 @@ For detailed documentation, see [mega-evme README](bin/mega-evme/README.md).
 
 ## Development
 
+### Cloning the Repository
+
+This repository uses git submodules. Clone with submodules:
+
+```bash
+git clone --recursive https://github.com/megaeth-labs/mega-evm.git
+```
+
+Or if you've already cloned, initialize submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
 ### Building
 
 ```bash
