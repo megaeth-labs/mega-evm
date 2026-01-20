@@ -49,6 +49,45 @@ pub struct PreStateArgs {
     /// otherwise 0)
     #[arg(long = "sender.balance", visible_aliases = ["from.balance"])]
     pub sender_balance: Option<U256>,
+
+    /// Add ether to specified addresses. Each entry format: `ADDRESS+=VALUE`
+    /// VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei).
+    /// Examples: `--faucet 0x1234+=100ether`, `--faucet 0x5678+=1000000gwei`
+    /// Can be repeated for multiple addresses.
+    #[arg(long = "faucet")]
+    pub faucet: Vec<String>,
+
+    /// Override balance for specified addresses. Each entry format: `ADDRESS=VALUE`
+    /// VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei).
+    /// Examples: `--balance 0x1234=100ether`
+    #[arg(long = "balance")]
+    pub balance: Vec<String>,
+
+    /// Override storage slots. Each entry format: `ADDRESS:SLOT=VALUE`
+    /// SLOT and VALUE are U256 (hex or decimal).
+    /// Examples: `--storage 0x1234:0x0=0x1`
+    #[arg(long = "storage")]
+    pub storage: Vec<String>,
+}
+
+/// Parse ether value string into wei (U256).
+/// Supports: plain number (wei), or number with suffix (ether, gwei, wei, etc).
+/// Examples: "1000000000000000000", "1ether", "100gwei", "1000wei"
+fn parse_ether_value(s: &str) -> Result<U256> {
+    use alloy_primitives::utils::parse_units;
+
+    let s = s.trim();
+
+    // Find where digits/decimal end and unit begins
+    let split_pos = s.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(s.len());
+
+    let (num_str, unit) = s.split_at(split_pos);
+    let unit = if unit.is_empty() { "wei" } else { unit };
+
+    let parsed = parse_units(num_str, unit)
+        .map_err(|e| EvmeError::InvalidInput(format!("Invalid ether value '{}': {}", s, e)))?;
+
+    Ok(parsed.into())
 }
 
 impl PreStateArgs {
@@ -83,6 +122,98 @@ impl PreStateArgs {
         Ok(map)
     }
 
+    /// Parse faucet entries from CLI arguments.
+    ///
+    /// Each entry should be in the format `ADDRESS+=VALUE`.
+    /// VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei).
+    pub fn parse_faucet(&self) -> Result<Vec<(Address, U256)>> {
+        let mut entries = Vec::new();
+        for entry in &self.faucet {
+            let (addr_str, value_str) = entry.split_once("+=").ok_or_else(|| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid faucet entry '{}': expected format 'ADDRESS+=VALUE'",
+                    entry
+                ))
+            })?;
+            let address = Address::from_str(addr_str.trim()).map_err(|e| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid address '{}' in faucet entry '{}': {}",
+                    addr_str, entry, e
+                ))
+            })?;
+            let wei = parse_ether_value(value_str)?;
+            entries.push((address, wei));
+        }
+        Ok(entries)
+    }
+
+    /// Parse balance override entries from CLI arguments.
+    ///
+    /// Each entry should be in the format `ADDRESS=VALUE`.
+    /// VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei).
+    pub fn parse_balance(&self) -> Result<Vec<(Address, U256)>> {
+        let mut entries = Vec::new();
+        for entry in &self.balance {
+            let (addr_str, value_str) = entry.split_once('=').ok_or_else(|| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid balance entry '{}': expected format 'ADDRESS=VALUE'",
+                    entry
+                ))
+            })?;
+            let address = Address::from_str(addr_str.trim()).map_err(|e| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid address '{}' in balance entry '{}': {}",
+                    addr_str, entry, e
+                ))
+            })?;
+            let wei = parse_ether_value(value_str)?;
+            entries.push((address, wei));
+        }
+        Ok(entries)
+    }
+
+    /// Parse storage override entries from CLI arguments.
+    ///
+    /// Each entry should be in the format `ADDRESS:SLOT=VALUE`.
+    /// SLOT and VALUE are U256 (hex or decimal).
+    pub fn parse_storage(&self) -> Result<Vec<(Address, U256, U256)>> {
+        let mut entries = Vec::new();
+        for entry in &self.storage {
+            let (addr_str, rest) = entry.split_once(':').ok_or_else(|| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid storage entry '{}': expected format 'ADDRESS:SLOT=VALUE'",
+                    entry
+                ))
+            })?;
+            let (slot_str, value_str) = rest.split_once('=').ok_or_else(|| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid storage entry '{}': expected format 'ADDRESS:SLOT=VALUE'",
+                    entry
+                ))
+            })?;
+            let address = Address::from_str(addr_str.trim()).map_err(|e| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid address '{}' in storage entry '{}': {}",
+                    addr_str, entry, e
+                ))
+            })?;
+            let slot = U256::from_str(slot_str.trim()).map_err(|e| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid slot '{}' in storage entry '{}': {}",
+                    slot_str, entry, e
+                ))
+            })?;
+            let value = U256::from_str(value_str.trim()).map_err(|e| {
+                EvmeError::InvalidInput(format!(
+                    "Invalid value '{}' in storage entry '{}': {}",
+                    value_str, entry, e
+                ))
+            })?;
+            entries.push((address, slot, value));
+        }
+        Ok(entries)
+    }
+
     /// Load prestate as [`EvmState`] from file if provided
     pub fn load_prestate(&self, sender: &Address) -> Result<EvmState> {
         let mut prestate = if let Some(pre_state_path) = &self.prestate {
@@ -108,10 +239,32 @@ impl PreStateArgs {
             HashMap::default()
         };
 
+        // Apply balance overrides
+        for (address, balance) in self.parse_balance()? {
+            info!(address = %address, balance = %balance, "Overriding balance");
+            prestate.entry(address).or_default().info.balance = balance;
+        }
+
+        // Apply storage overrides
+        for (address, slot, value) in self.parse_storage()? {
+            info!(address = %address, slot = %slot, value = %value, "Overriding storage");
+            prestate
+                .entry(address)
+                .or_default()
+                .storage
+                .insert(slot, EvmStorageSlot::new(value, 0));
+        }
+
         // Set balance for the sender if specified (overrides prestate)
         if let Some(sender_balance) = &self.sender_balance {
             info!(sender = %sender, sender_balance = %sender_balance, "Overriding sender balance");
             prestate.entry(*sender).or_default().info.set_balance(*sender_balance);
+        }
+
+        // Apply faucet balances
+        for (address, balance) in self.parse_faucet()? {
+            info!(address = %address, balance = %balance, "Faucet: adding balance");
+            prestate.entry(address).or_default().info.balance += balance;
         }
 
         Ok(prestate)
