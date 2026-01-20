@@ -251,8 +251,8 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
             }
             // Extract gas_used from the execution error
             let gas_used = match &error {
-                KeylessDeployError::ExecutionReverted { gas_used, .. } => *gas_used,
-                KeylessDeployError::ExecutionHalted { gas_used, .. } => *gas_used,
+                KeylessDeployError::ExecutionReverted { gas_used, .. } |
+                KeylessDeployError::ExecutionHalted { gas_used, .. } |
                 KeylessDeployError::EmptyCodeDeployed { gas_used } => *gas_used,
                 _ => 0, // Shouldn't happen for execution errors
             };
