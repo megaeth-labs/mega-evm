@@ -3,8 +3,6 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, bytes, Address, Bytes, B256};
-use alloy_sol_types::sol;
-pub use alloy_sol_types::SolCall;
 use revm::{
     database::State,
     state::{Account, Bytecode, EvmState},
@@ -28,19 +26,7 @@ pub use mega_system_contracts::oracle::V1_1_0_CODE as ORACLE_CONTRACT_CODE_REX2;
 /// The code hash of the oracle contract (version 1.1.0, Rex2+).
 pub use mega_system_contracts::oracle::V1_1_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH_REX2;
 
-sol! {
-    /// The Solidity interface for the oracle contract.
-    interface Oracle {
-        function multiCall(bytes[] calldata data) external returns (bytes[] memory results);
-        function getSlot(uint256 slot) external view returns (bytes32 value);
-        function setSlot(uint256 slot, bytes32 value) external;
-        function getSlots(uint256[] calldata slots) external view returns (bytes32[] memory values);
-        function setSlots(uint256[] calldata slots, bytes32[] calldata values) external;
-        function sendHint(bytes32 topic, bytes calldata data) external view;
-        function emitLog(bytes32 topic, bytes calldata data) external;
-        function emitLogs(bytes32 topic, bytes[] calldata dataVector) external;
-    }
-}
+pub use mega_system_contracts::oracle::IOracle;
 
 /// Ensures the oracle contract is deployed in the designated address and returns the state changes.
 /// Note that the database `db` is not modified in this function. The caller is responsible to

@@ -34,8 +34,7 @@ impl<DB: Database> BlockHashes for State<DB> {
 /// selfdestructed" in the same transaction and `Created` flag is also set. When merging `EvmState`s
 /// (base `EvmState` <- new `EvmState`), we are doing this for each account:
 /// - If the `SelfDestructed` (and `Created`) flag is set in the account status of the new
-///   `EvmState`, do nothing, because the account must be created in the same transaction, and
-///   creating and selfdestructing in the same transaction is a no-op.
+///   `EvmState`, override the account with an empty, touched account.
 /// - Otherwise, we override the corresponding account and storage slots in the base `EvmState`.
 ///
 /// We merge the state even if the account is not marked as `Touched`. This is because we may need
@@ -43,13 +42,26 @@ impl<DB: Database> BlockHashes for State<DB> {
 pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
     let mut touched_slot: usize = 0;
     for (address, account) in other {
-        if account.status.contains(AccountStatus::SelfDestructed) {
+        if account.is_selfdestructed() {
             // if the account is selfdestructed, we assert that the account is also created and do
             // nothing.
             assert!(
-                account.status.contains(AccountStatus::Created),
+                account.is_created(),
                 "Account is selfdestructed but not created. EIP-6780 must be applied."
             );
+            // we will put an empty (equivalent to non-existent) account in the base state.
+            // NOTE: we want to avoid marking an account as `SelfDestructed` since this may result
+            // in a `BundleAccount` with `wipe_storage = true`. The underlying database in fact
+            // cannot process such wiping storage action. Here, we do an early interpretation of
+            // `SelfDestruct` by overriding the account with a default (empty) one and marking it as
+            // `Touched`. The rationale is:
+            // 1. The account is effectively selfdestructed, so its result state is equivalent to an
+            //    empty account.
+            // 2. There is no need to wipe storage in the database since this account is just
+            //    created and destructed, there must be no storage data in the database.
+            // 3. The account needs to be marked as `Touched` in case it pre-exists in the database
+            //    and needs to be deleted.
+            this.insert(*address, Account::default().with_touched_mark());
             continue;
         }
 

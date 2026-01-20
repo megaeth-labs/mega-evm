@@ -2,7 +2,7 @@
 //!
 //! This script:
 //! 1. Compiles the Solidity contracts using Foundry
-//! 2. Validates that the compiled bytecode matches Oracle-latest.json
+//! 2. Validates that the compiled bytecode matches *-latest.json
 //! 3. Generates Rust constants from all versioned artifact files
 
 use std::{
@@ -12,31 +12,196 @@ use std::{
     process::{Command, Stdio},
 };
 
-use alloy_primitives::{hex, keccak256};
+use alloy_primitives::{hex, keccak256, Bytes, B256};
+use semver::Version;
 use serde::Deserialize;
 
-/// Artifact format for Oracle JSON files
+/// Artifact format for system contract JSON files
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OracleArtifact {
-    #[serde(default)]
-    version: String,
-    #[serde(rename = "codeHash")]
-    code_hash: String,
-    deployed_bytecode: String,
+struct ContractArtifact {
+    version: Version,
+    code_hash: B256,
+    deployed_bytecode: Bytes,
+}
+
+/// Configuration for a system contract to be validated and processed
+struct ContractConfig<'a> {
+    /// Contract name (e.g., "Oracle")
+    name: &'a str,
+    /// Forge script path (e.g., "scripts/OracleBytecode.s.sol:SaveOracleBytecode")
+    script_path: &'a str,
+    /// Output Rust file name (e.g., `oracle_artifacts.rs`)
+    output_file: &'a str,
+}
+
+/// Runs a forge script, validates bytecode against expected artifact, and returns the expected
+/// artifact.
+fn validate_contract_bytecode(crate_dir: &Path, config: &ContractConfig<'_>) -> ContractArtifact {
+    // Run the deploy script to generate bytecode with constructor args embedded
+    let script_status = Command::new("forge")
+        .args(["script", config.script_path, "--sig", "run()"])
+        .current_dir(crate_dir)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .unwrap_or_else(|_| panic!("Failed to execute {} forge script", config.name));
+
+    assert!(script_status.success(), "{} forge script failed", config.name);
+
+    // Read the generated artifact
+    let generated_path = crate_dir.join(format!("artifacts/{}.json", config.name));
+    let generated_content = fs::read_to_string(&generated_path)
+        .unwrap_or_else(|_| panic!("Failed to read {} generated artifact", config.name));
+    let generated: ContractArtifact = serde_json::from_str(&generated_content)
+        .unwrap_or_else(|_| panic!("Failed to parse {} generated artifact", config.name));
+
+    // Read the expected artifact
+    let expected_path = crate_dir.join(format!("artifacts/{}-latest.json", config.name));
+    let expected_content = fs::read_to_string(&expected_path)
+        .unwrap_or_else(|_| panic!("Failed to read {}-latest.json", config.name));
+    let expected: ContractArtifact = serde_json::from_str(&expected_content)
+        .unwrap_or_else(|_| panic!("Failed to parse {}-latest.json", config.name));
+
+    // Compare code hash
+    assert!(
+        generated.code_hash == expected.code_hash,
+        r#"
+ERROR: {name} contract bytecode mismatch!
+
+The compiled {name}.sol bytecode does not match artifacts/{name}-latest.json.
+
+If this change is intentional (new spec version):
+  1. Create a new artifacts/{name}-X.Y.Z.json file
+  2. Update {name}-latest.json symlink
+  3. Commit all changes together
+
+If this change is accidental:
+  Revert your changes to contracts/{name}.sol
+
+Expected:  {expected:x}
+Generated: {generated:x}
+"#,
+        expected = expected.code_hash,
+        generated = generated.code_hash,
+        name = config.name,
+    );
+
+    // Clean up generated artifact
+    let _ = fs::remove_file(&generated_path);
+
+    expected
+}
+
+/// Collects all versioned artifacts for a contract, validates code hashes, and returns sorted list.
+fn collect_versioned_artifacts(artifacts_dir: &Path, prefix: &str) -> Vec<ContractArtifact> {
+    let mut versions = Vec::new();
+
+    for entry in fs::read_dir(artifacts_dir).expect("Failed to read artifacts directory") {
+        let entry = entry.expect("Failed to read directory entry");
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+
+        // Skip symlinks and non-versioned files
+        if path.is_symlink() || !filename.starts_with(prefix) || !filename.ends_with(".json") {
+            continue;
+        }
+
+        let content = fs::read_to_string(&path).expect("Failed to read artifact");
+        let artifact: ContractArtifact =
+            serde_json::from_str(&content).expect("Failed to parse artifact");
+
+        // Sanity check, the code hash must match the expected code hash.
+        let computed_hash = keccak256(&artifact.deployed_bytecode);
+        assert!(
+            computed_hash == artifact.code_hash,
+            "Code hash mismatch for artifact {}: expected {:x}, got {:x}",
+            filename,
+            artifact.code_hash,
+            computed_hash
+        );
+
+        versions.push(artifact);
+    }
+
+    // Sort by semantic version
+    versions.sort_by_key(|a| a.version.clone());
+
+    versions
+}
+
+/// Generates Rust source file with bytecode constants for a contract.
+fn generate_rust_constants(
+    out_dir: &Path,
+    config: &ContractConfig<'_>,
+    versions: &[ContractArtifact],
+    latest: &ContractArtifact,
+) {
+    let generated_path = out_dir.join(config.output_file);
+    let mut file = fs::File::create(&generated_path).expect("Failed to create generated file");
+
+    writeln!(file, "// Auto-generated {} contract bytecode constants.", config.name).unwrap();
+    writeln!(file, "// DO NOT EDIT - generated by build.rs from artifacts/").unwrap();
+    writeln!(file).unwrap();
+    writeln!(file, "use alloy_primitives::{{bytes, b256, Bytes, B256}};").unwrap();
+    writeln!(file).unwrap();
+
+    for artifact in versions {
+        let version_underscore = artifact.version.to_string().replace('.', "_");
+        let const_name = format!("V{}", version_underscore);
+
+        writeln!(file, "/// {} contract bytecode v{}", config.name, artifact.version).unwrap();
+        writeln!(
+            file,
+            "pub const {}_CODE: Bytes = bytes!(\"{}\");",
+            const_name,
+            hex::encode(&artifact.deployed_bytecode)
+        )
+        .unwrap();
+        writeln!(file, "/// {} contract code hash v{}", config.name, artifact.version).unwrap();
+        writeln!(
+            file,
+            "pub const {}_CODE_HASH: B256 = b256!(\"{}\");",
+            const_name,
+            hex::encode(artifact.code_hash)
+        )
+        .unwrap();
+        writeln!(file).unwrap();
+    }
+
+    // Add latest alias
+    let latest_version_underscore = latest.version.to_string().replace('.', "_");
+    writeln!(file, "/// Latest {} contract bytecode", config.name).unwrap();
+    writeln!(file, "pub const LATEST_CODE: Bytes = V{}_CODE;", latest_version_underscore).unwrap();
+    writeln!(file, "/// Latest {} contract code hash", config.name).unwrap();
+    writeln!(file, "pub const LATEST_CODE_HASH: B256 = V{}_CODE_HASH;", latest_version_underscore)
+        .unwrap();
 }
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
     let crate_dir = Path::new(&manifest_dir);
+    let out_path = Path::new(&out_dir);
+
+    // Define contract configurations
+    let contracts = [ContractConfig {
+        name: "Oracle",
+        script_path: "scripts/OracleBytecode.s.sol:SaveOracleBytecode",
+        output_file: "oracle_artifacts.rs",
+    }];
 
     // Set up rerun-if-changed triggers
-    println!("cargo::rerun-if-changed={}", crate_dir.join("contracts/Oracle.sol").display());
-    println!(
-        "cargo::rerun-if-changed={}",
-        crate_dir.join("artifacts/Oracle-latest.json").display()
-    );
+    for config in &contracts {
+        println!(
+            "cargo::rerun-if-changed={}",
+            crate_dir.join(format!("contracts/{}.sol", config.name)).display()
+        );
+        println!(
+            "cargo::rerun-if-changed={}",
+            crate_dir.join(format!("artifacts/{}-latest.json", config.name)).display()
+        );
+    }
     println!("cargo::rerun-if-changed={}", crate_dir.join("foundry.toml").display());
 
     // Check if forge is available
@@ -47,156 +212,32 @@ fn main() {
         Ok(status) if status.success() => {}
         _ => {
             panic!(
-                "\n\
-                 ╔══════════════════════════════════════════════════════════════╗\n\
-                 ║  ERROR: `forge` command not found                            ║\n\
-                 ║                                                              ║\n\
-                 ║  Foundry is required to build system-contracts.              ║\n\
-                 ║  Install it from: https://getfoundry.sh                      ║\n\
-                 ║                                                              ║\n\
-                 ║  Quick install:                                              ║\n\
-                 ║    curl -L https://foundry.paradigm.xyz | bash               ║\n\
-                 ║    foundryup                                                 ║\n\
-                 ╚══════════════════════════════════════════════════════════════╝\n"
+                r#"
+ERROR: `forge` command not found
+
+Foundry is required to build system-contracts.
+Install it from: https://getfoundry.sh
+
+Quick install:
+  curl -L https://foundry.paradigm.xyz | bash
+  foundryup
+"#
             );
         }
     }
 
-    // Run the deploy script to generate bytecode with constructor args embedded
-    let script_status = Command::new("forge")
-        .args(["script", "scripts/OracleBytecode.s.sol:SaveOracleBytecode", "--sig", "run()"])
-        .current_dir(crate_dir)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .expect("Failed to execute forge script");
-
-    assert!(script_status.success(), "forge script failed");
-
-    // Read the generated artifact (script writes to artifacts/Oracle.json)
-    let generated_path = crate_dir.join("artifacts/Oracle.json");
-    let generated_content =
-        fs::read_to_string(&generated_path).expect("Failed to read generated artifact");
-    let generated: OracleArtifact =
-        serde_json::from_str(&generated_content).expect("Failed to parse generated artifact");
-
-    // Read the expected artifact (Oracle-latest.json)
-    let expected_path = crate_dir.join("artifacts/Oracle-latest.json");
-    let expected_content =
-        fs::read_to_string(&expected_path).expect("Failed to read Oracle-latest.json");
-    let expected: OracleArtifact =
-        serde_json::from_str(&expected_content).expect("Failed to parse Oracle-latest.json");
-
-    // Compare bytecode directly (bytecode_hash = "none" ensures deterministic output)
-    assert!(
-        generated.deployed_bytecode == expected.deployed_bytecode,
-        "\n\
-         ╔══════════════════════════════════════════════════════════════╗\n\
-         ║  ERROR: Oracle contract bytecode mismatch!                   ║\n\
-         ║                                                              ║\n\
-         ║  The compiled Oracle.sol bytecode does not match             ║\n\
-         ║  artifacts/Oracle-latest.json.                               ║\n\
-         ║                                                              ║\n\
-         ║  If this change is intentional (new spec version):           ║\n\
-         ║    1. Create a new artifacts/Oracle-X.Y.Z.json file          ║\n\
-         ║    2. Update Oracle-latest.json symlink                      ║\n\
-         ║    3. Commit all changes together                            ║\n\
-         ║                                                              ║\n\
-         ║  If this change is accidental:                               ║\n\
-         ║    Revert your changes to contracts/Oracle.sol               ║\n\
-         ╚══════════════════════════════════════════════════════════════╝\n\
-         \n\
-         Expected: {}...\n\
-         Generated: {}...\n",
-        &expected.deployed_bytecode[..expected.deployed_bytecode.len().min(80)],
-        &generated.deployed_bytecode[..generated.deployed_bytecode.len().min(80)]
-    );
-
-    // Clean up generated artifact
-    let _ = fs::remove_file(&generated_path);
-
-    // Read all versioned artifacts and generate Rust constants
     let artifacts_dir = crate_dir.join("artifacts");
-    let mut oracle_versions = Vec::new();
 
-    for entry in fs::read_dir(&artifacts_dir).expect("Failed to read artifacts directory") {
-        let entry = entry.expect("Failed to read directory entry");
-        let path = entry.path();
-        let filename = path.file_name().unwrap().to_str().unwrap();
+    // Process each contract
+    for config in &contracts {
+        // Validate bytecode and get expected artifact (contains latest version info)
+        let latest = validate_contract_bytecode(crate_dir, config);
 
-        // Skip symlinks and non-versioned files
-        if path.is_symlink() || !filename.starts_with("Oracle-") || !filename.ends_with(".json") {
-            continue;
-        }
+        // Collect all versioned artifacts
+        let prefix = format!("{}-", config.name);
+        let versions = collect_versioned_artifacts(&artifacts_dir, &prefix);
 
-        let content = fs::read_to_string(&path).expect("Failed to read artifact");
-        let artifact: OracleArtifact =
-            serde_json::from_str(&content).expect("Failed to parse artifact");
-
-        // Sanity check, the code hash must match the expected code hash.
-        let bytecode = hex::decode(&artifact.deployed_bytecode).expect("Invalid bytecode hex");
-        let computed_hash = keccak256(&bytecode);
-        let expected_hash = hex::decode(&artifact.code_hash).expect("Invalid code hash hex");
-        assert!(
-            computed_hash.as_slice() == expected_hash.as_slice(),
-            "Code hash mismatch for artifact {}: expected {}, got {:x}",
-            filename,
-            artifact.code_hash,
-            computed_hash
-        );
-
-        oracle_versions.push(artifact);
+        // Generate Rust constants
+        generate_rust_constants(out_path, config, &versions, &latest);
     }
-
-    // Sort by semantic version (major.minor.patch)
-    oracle_versions.sort_by(|a, b| {
-        let parse_version = |v: &str| -> (u32, u32, u32) {
-            let parts: Vec<u32> = v.split('.').filter_map(|s| s.parse().ok()).collect();
-            (
-                parts.first().copied().unwrap_or(0),
-                parts.get(1).copied().unwrap_or(0),
-                parts.get(2).copied().unwrap_or(0),
-            )
-        };
-        parse_version(&a.version).cmp(&parse_version(&b.version))
-    });
-
-    // Generate Rust code
-    let generated_path = Path::new(&out_dir).join("oracle_artifacts.rs");
-    let mut file = fs::File::create(&generated_path).expect("Failed to create generated file");
-
-    writeln!(file, "// Auto-generated Oracle contract bytecode constants.").unwrap();
-    writeln!(file, "// DO NOT EDIT - generated by build.rs from artifacts/").unwrap();
-    writeln!(file).unwrap();
-    writeln!(file, "use alloy_primitives::{{bytes, b256, Bytes, B256}};").unwrap();
-    writeln!(file).unwrap();
-
-    for artifact in &oracle_versions {
-        let version_underscore = artifact.version.replace('.', "_");
-        let const_name = format!("V{}", version_underscore);
-
-        writeln!(file, "/// Oracle contract bytecode v{}", artifact.version).unwrap();
-        writeln!(
-            file,
-            "pub const {}_CODE: Bytes = bytes!(\"{}\");",
-            const_name, artifact.deployed_bytecode
-        )
-        .unwrap();
-        writeln!(file, "/// Oracle contract code hash v{}", artifact.version).unwrap();
-        writeln!(
-            file,
-            "pub const {}_CODE_HASH: B256 = b256!(\"{}\");",
-            const_name, artifact.code_hash
-        )
-        .unwrap();
-        writeln!(file).unwrap();
-    }
-
-    // Add latest alias (based on Oracle-latest.json symlink, not max version)
-    let latest_version_underscore = expected.version.replace('.', "_");
-    writeln!(file, "/// Latest Oracle contract bytecode").unwrap();
-    writeln!(file, "pub const LATEST_CODE: Bytes = V{}_CODE;", latest_version_underscore).unwrap();
-    writeln!(file, "/// Latest Oracle contract code hash").unwrap();
-    writeln!(file, "pub const LATEST_CODE_HASH: B256 = V{}_CODE_HASH;", latest_version_underscore)
-        .unwrap();
 }
