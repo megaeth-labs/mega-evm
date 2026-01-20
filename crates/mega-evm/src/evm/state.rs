@@ -39,6 +39,11 @@ impl<DB: Database> BlockHashes for State<DB> {
 ///
 /// We merge the state even if the account is not marked as `Touched`. This is because we may need
 /// to know which account is read but not written to obtain `ReadSet` for witness generation.
+///
+/// # Return
+///
+/// Returns the _estimated_ number of touched KVs in the `other` [`EvmState`]. Each touched account
+/// is counted as 1, and each changed storage slot is counted as 1.
 pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
     let mut touched_slot: usize = 0;
     for (address, account) in other {
@@ -72,50 +77,63 @@ pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
             }
             Entry::Occupied(mut v) => {
                 let this_account = v.get_mut();
-                merge_account_state(this_account, account);
+                let changed_slots = merge_account_state(this_account, account);
+                touched_slot += changed_slots;
             }
         }
         if account.is_touched() {
-            touched_slot += if account.storage.is_empty() { 1 } else { account.storage.len() };
+            touched_slot += 1;
         }
     }
     touched_slot
 }
 
-/// Merges the other [`Account`] into the current one.
+/// Merges the other [`Account`] into the current one, and returns the number of changed slots in
+/// `other`.
 ///
 /// # Assumption
 ///
 /// The other account to merge is not flagged as `SelfDestructed`. See more details in
 /// the [`merge_evm_state`] function.
-fn merge_account_state(this: &mut Account, other: &Account) {
+fn merge_account_state(this: &mut Account, other: &Account) -> usize {
     assert!(
         !other.status.contains(AccountStatus::SelfDestructed),
         "Account is selfdestructed and should not be merged."
     );
     this.info = other.info.clone();
-    merge_evm_storage(&mut this.storage, &other.storage);
+    let changed_slots = merge_evm_storage(&mut this.storage, &other.storage);
     // Account status is merged.
     this.status |= other.status;
+
+    changed_slots
 }
 
-/// Merges the other [`EvmStorage`] into the current one.
+/// Merges the other [`EvmStorage`] into the current one, and returns the number of changed slots in
+/// `other`.
 ///
 /// # Warn
 ///
 /// The [`EvmStorageSlot::is_cold`](revm::state::EvmStorageSlot::is_cold) is simply overwritten.
 /// It may not reflect the actual status of the slot.
-fn merge_evm_storage(this: &mut EvmStorage, other: &EvmStorage) {
+fn merge_evm_storage(this: &mut EvmStorage, other: &EvmStorage) -> usize {
+    let mut changed_slots = 0;
     for (slot, slot_value) in other {
         match this.entry(*slot) {
             Entry::Vacant(v) => {
                 v.insert(slot_value.clone());
+                if slot_value.is_changed() {
+                    changed_slots += 1;
+                }
             }
             Entry::Occupied(mut v) => {
                 let this_slot = v.get_mut();
                 this_slot.present_value = slot_value.present_value;
                 this_slot.is_cold = slot_value.is_cold;
+                if this_slot.is_changed() {
+                    changed_slots += 1;
+                }
             }
         }
     }
+    changed_slots
 }
