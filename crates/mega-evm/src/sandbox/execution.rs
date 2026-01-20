@@ -275,7 +275,7 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
 
     // Apply all state changes from sandbox to parent context
     let (sandbox_state, gas_used, deploy_address, logs) = sandbox_result?;
-    apply_sandbox_state(ctx, sandbox_state)?;
+    apply_sandbox_state(ctx, sandbox_state, deploy_signer)?;
 
     Ok(SandboxResult { deploy_address, gas_used, logs })
 }
@@ -290,10 +290,40 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
 /// storage slots are preserved. This is because the changes in the sandbox are treated as a silent
 /// change in the database and should not affect the behavior of the current transaction (e.g., gas
 /// cost due to coldness) execept that the state itself are different.
+///
+/// The `deploy_signer` address's nonce is preserved from the parent state because the sandbox
+/// execution overrides the signer's nonce to 0 (for Nick's Method), and we don't want that
+/// artificial nonce change to affect the parent context.
 fn apply_sandbox_state<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    sandbox_state: EvmState,
+    mut sandbox_state: EvmState,
+    deploy_signer: Address,
 ) -> Result<(), KeylessDeployError> {
-    merge_evm_state_optional_status(&mut ctx.journal_mut().state, &sandbox_state, false);
+    let journal = ctx.journal_mut();
+
+    // Get the deployer's original nonce before merging.
+    // First check the journal state, then the database.
+    // If the account doesn't exist anywhere, the nonce is 0 by default.
+    let original_nonce = if let Some(acc) = journal.state.get(&deploy_signer) {
+        acc.info.nonce
+    } else {
+        // Not in journal state - check the database
+        journal
+            .database
+            .basic(deploy_signer)
+            .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?
+            .map(|info| info.nonce)
+            .unwrap_or(0)
+    };
+
+    // Override the deployer's nonce in sandbox_state before merging.
+    // The sandbox used nonce=0 (Nick's Method), but we need to preserve the original nonce.
+    if let Some(account) = sandbox_state.get_mut(&deploy_signer) {
+        account.info.nonce = original_nonce;
+    }
+
+    // Merge the sandbox state into the parent journal
+    merge_evm_state_optional_status(&mut journal.state, &sandbox_state, false);
+
     Ok(())
 }

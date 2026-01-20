@@ -589,6 +589,9 @@ fn test_keyless_deploy_nonce_override_to_zero() {
         "contract should have non-empty code"
     );
     assert_eq!(contract.info.code_hash, CREATE2_FACTORY_CODE_HASH);
+
+    let deployer = state.get(&CREATE2_FACTORY_DEPLOYER).expect("deployer should exist in state");
+    assert_eq!(deployer.info.nonce, 100, "deployer nonce should be left unchanged");
 }
 
 // =============================================================================

@@ -76,9 +76,9 @@ interface IKeylessDeploy {
 
 The system contract acts as a **transaction execution sandbox**. It decodes `keylessDeploymentTransaction` and executes it as if it were a standalone transaction, but with these modifications:
 
-- The signer's nonce is forced to `0` (required for deterministic address)
-- The gas limit is replaced with `gasLimitOverride`
-- All other transaction parameters remain unchanged
+- The signer's nonce is forced to `0` (required for deterministic address), even if the signer's nonce is already non-zero in the state.
+- The gas limit is replaced with `gasLimitOverride`.
+- All other transaction parameters remain unchanged.
 
 ### Gas Costs
 
