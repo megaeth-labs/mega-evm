@@ -28,6 +28,10 @@ interface IKeylessDeploy {
     /// @notice The deploy address already has code (contract already exists).
     error ContractAlreadyExists();
 
+    /// @notice The signer nonce is higher than allowed for keyless deploy.
+    /// @param signerNonce The on-chain nonce of the recovered signer.
+    error SignerNonceTooHigh(uint64 signerNonce);
+
     /// @notice The sandbox execution reverted.
     /// @param gasUsed The amount of gas used before reverting.
     /// @param output The revert output data.
@@ -36,6 +40,10 @@ interface IKeylessDeploy {
     /// @notice The sandbox execution halted (out of gas, stack overflow, etc.).
     /// @param gasUsed The amount of gas used before halting.
     error ExecutionHalted(uint64 gasUsed);
+
+    /// @notice Contract creation succeeded but returned empty bytecode.
+    /// @param gasUsed The amount of gas used.
+    error EmptyCodeDeployed(uint64 gasUsed);
 
     /// @notice Contract creation succeeded but no address was returned (internal bug).
     error NoContractCreated();

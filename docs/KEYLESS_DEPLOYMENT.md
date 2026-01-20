@@ -81,7 +81,8 @@ The system contract acts as a **transaction execution sandbox**. It verifies the
 - All other transaction parameters remain unchanged.
 
 Nonce semantics are intentionally custom: the sandbox always uses nonce `0` for the signer for CREATE address derivation and execution, regardless of the signer's current state nonce.
-The parent-state's signer nonce is preserved (not incremented) on both success and failure; only the sandbox state uses the overridden nonce.
+After a successful or failed keyless deploy, the signer's nonce becomes `1` in the parent state. This reflects that the signer has been used for a keyless deploy.
+The signer's on-chain nonce must be ≤ 1 to use keyless deploy. This restriction ensures that only fresh or nearly-fresh signers can be used: nonce 0 for fresh signers, or nonce 1 for signers where someone previously attempted to broadcast the raw transaction directly on-chain (which would fail but increment the nonce to 1). This prevents using actively-used EOAs as keyless deploy signers. Note that replay prevention is handled separately by the `ContractAlreadyExists` check (for successful deploys) and treating empty code as failure.
 Nonce changes for other accounts produced during sandbox execution are merged back into the parent context on success.
 
 ### Gas Costs
@@ -129,8 +130,8 @@ The `keylessDeploymentTransaction` must be a pre-EIP-155 legacy transaction:
 | v | 27 or 28 (pre-EIP-155, no chain ID) |
 | r, s | Signature components |
 
-The signer's on-chain nonce is **not** required to be `0` for keyless deploy. 
-It is ignored in the sandbox and does not affect the deployment address or execution.
+The signer's on-chain nonce must be ≤ 1 for keyless deploy (see nonce semantics above).
+The sandbox always uses nonce `0` regardless of the signer's actual nonce, so the deployment address is deterministic.
 
 ### Execution Flow
 
@@ -148,9 +149,9 @@ It is ignored in the sandbox and does not affect the deployment address or execu
 │ 3. CALCULATE deployment address = keccak256(rlp([signer, 0]))   │
 ├─────────────────────────────────────────────────────────────────┤
 │ 4. CHECK preconditions                                          │
+│    • Signer nonce ≤ 1                                           │
 │    • Signer has sufficient balance                              │
 │    • Deployment address has no existing code                    │
-│    • Signer state nonce is not checked (sandbox uses nonce=0)    │
 ├─────────────────────────────────────────────────────────────────┤
 │ 5. EXECUTE in sandbox                                           │
 │    • msg.sender = recovered signer                              │
@@ -160,7 +161,7 @@ It is ignored in the sandbox and does not affect the deployment address or execu
 │ 6. APPLY sandbox state                                          │
 │    • On success: deploy effects + logs                          │
 │    • On failure: only gas charges (side effects reverted)       │
-│    • Signer nonce is preserved (no increment)                   │
+│    • Signer nonce becomes 1                                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -169,6 +170,7 @@ It is ignored in the sandbox and does not affect the deployment address or execu
 - **Atomic**: Deployment side effects apply only on success
 - **Isolated**: Failures do not apply deployment side effects, but gas charges still apply
 - **Transparent**: Logs from deployment are propagated to the outer context on success
+- **No empty code**: If init code returns empty bytecode, it is treated as failure (`EmptyCodeDeployed`). This prevents replay attacks where the same keyless deploy transaction could be submitted repeatedly (since the `ContractAlreadyExists` check only looks for non-empty code).
 
 ## Error Reference
 
@@ -179,7 +181,9 @@ It is ignored in the sandbox and does not affect the deployment address or execu
 | `NotPreEIP155()` | v is not 27 or 28 (has chain ID) |
 | `NoEtherTransfer()` | Ether was sent to system contract |
 | `InvalidSignature()` | Cannot recover signer |
+| `SignerNonceTooHigh(signerNonce)` | Signer nonce > 1 |
 | `InsufficientBalance()` | Signer lacks funds |
+| `EmptyCodeDeployed(gasUsed)` | Init code returned empty bytecode |
 | `ContractAlreadyExists()` | Address already has code |
 | `GasLimitTooLow(txGasLimit, providedGasLimit)` | Override < transaction's limit |
 | `ExecutionReverted(gasUsed, output)` | Init code reverted |

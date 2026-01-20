@@ -129,6 +129,15 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
     };
     let deploy_address = calculate_keyless_deploy_address(deploy_signer);
 
+    // Restrict keyless deploys to signers with nonce <= 1 in parent state.
+    let signer_nonce = match get_account_nonce(ctx, deploy_signer) {
+        Ok(nonce) => nonce,
+        Err(e) => return make_error!(e),
+    };
+    if signer_nonce > 1 {
+        return make_error!(KeylessDeployError::SignerNonceTooHigh { signer_nonce });
+    }
+
     // Step 6: Build the sandbox transaction.
     // The gas limit is set to the gas limit override.
     // The nonce is set to 0.
@@ -264,7 +273,18 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
         match result {
             Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
                 ExecutionResult::Success { gas_used, output, logs, .. } => {
-                    if let revm::context::result::Output::Create(_, Some(created_addr)) = output {
+                    if let revm::context::result::Output::Create(bytecode, Some(created_addr)) =
+                        output
+                    {
+                        // Empty bytecode is treated as failure to prevent replay attacks.
+                        // Without this check, a keyless deploy tx that returns empty code could
+                        // be submitted multiple times, draining the signer's funds.
+                        if bytecode.is_empty() {
+                            return Ok(SandboxOutcome::Failure {
+                                state: sandbox_state,
+                                error: KeylessDeployError::EmptyCodeDeployed { gas_used },
+                            });
+                        }
                         Ok(SandboxOutcome::Success {
                             state: sandbox_state,
                             result: SandboxResult { deploy_address: created_addr, gas_used, logs },
@@ -321,39 +341,34 @@ pub enum SandboxOutcome {
 /// change in the database and should not affect the behavior of the current transaction (e.g., gas
 /// cost due to coldness) execept that the state itself are different.
 ///
-/// The `deploy_signer` address's nonce is preserved from the parent state because the sandbox
-/// execution overrides the signer's nonce to 0 (for Nick's Method), and we don't want that
-/// artificial nonce change to affect the parent context.
+/// The sandbox execution uses nonce 0 for the signer (Nick's Method), and after the CREATE
+/// transaction the nonce becomes 1. This nonce change is intentionally preserved in the parent
+/// state to reflect that the signer has been used for a keyless deploy.
 fn apply_sandbox_state<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    mut sandbox_state: EvmState,
-    deploy_signer: Address,
+    sandbox_state: EvmState,
+    _deploy_signer: Address,
 ) -> Result<(), KeylessDeployError> {
     let journal = ctx.journal_mut();
-
-    // Get the deployer's original nonce before merging.
-    // First check the journal state, then the database.
-    // If the account doesn't exist anywhere, the nonce is 0 by default.
-    let original_nonce = if let Some(acc) = journal.state.get(&deploy_signer) {
-        acc.info.nonce
-    } else {
-        // Not in journal state - check the database
-        journal
-            .database
-            .basic(deploy_signer)
-            .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?
-            .map(|info| info.nonce)
-            .unwrap_or(0)
-    };
-
-    // Override the deployer's nonce in sandbox_state before merging.
-    // The sandbox used nonce=0 (Nick's Method), but we need to preserve the original nonce.
-    if let Some(account) = sandbox_state.get_mut(&deploy_signer) {
-        account.info.nonce = original_nonce;
-    }
 
     // Merge the sandbox state into the parent journal
     merge_evm_state_optional_status(&mut journal.state, &sandbox_state, false);
 
     Ok(())
+}
+
+fn get_account_nonce<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    address: Address,
+) -> Result<u64, KeylessDeployError> {
+    let journal = ctx.journal_mut();
+    if let Some(acc) = journal.state.get(&address) {
+        return Ok(acc.info.nonce);
+    }
+    Ok(journal
+        .database
+        .basic(address)
+        .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?
+        .map(|info| info.nonce)
+        .unwrap_or(0))
 }

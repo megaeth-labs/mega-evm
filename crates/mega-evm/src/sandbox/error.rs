@@ -25,6 +25,11 @@ pub enum KeylessDeployError {
     InsufficientBalance,
     /// The deploy address already has code (contract already exists)
     ContractAlreadyExists,
+    /// The signer nonce is higher than allowed for keyless deploy
+    SignerNonceTooHigh {
+        /// The on-chain nonce of the recovered signer
+        signer_nonce: u64,
+    },
     /// The sandbox execution reverted
     ExecutionReverted {
         /// The gas used
@@ -38,6 +43,11 @@ pub enum KeylessDeployError {
         gas_used: u64,
         /// The reason
         reason: MegaHaltReason,
+    },
+    /// Contract creation succeeded but returned empty bytecode
+    EmptyCodeDeployed {
+        /// The gas used
+        gas_used: u64,
     },
     /// Contract creation succeeded but no address was returned (unexpected EVM behavior)
     NoContractCreated,
@@ -81,11 +91,17 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         KeylessDeployError::ContractAlreadyExists => {
             IKeylessDeploy::ContractAlreadyExists {}.abi_encode().into()
         }
+        KeylessDeployError::SignerNonceTooHigh { signer_nonce } => {
+            IKeylessDeploy::SignerNonceTooHigh { signerNonce: signer_nonce }.abi_encode().into()
+        }
         KeylessDeployError::ExecutionReverted { gas_used, output } => {
             IKeylessDeploy::ExecutionReverted { gasUsed: gas_used, output }.abi_encode().into()
         }
         KeylessDeployError::ExecutionHalted { gas_used, .. } => {
             IKeylessDeploy::ExecutionHalted { gasUsed: gas_used }.abi_encode().into()
+        }
+        KeylessDeployError::EmptyCodeDeployed { gas_used } => {
+            IKeylessDeploy::EmptyCodeDeployed { gasUsed: gas_used }.abi_encode().into()
         }
         KeylessDeployError::NoContractCreated => {
             IKeylessDeploy::NoContractCreated {}.abi_encode().into()
@@ -136,6 +152,9 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
     if IKeylessDeploy::ContractAlreadyExists::abi_decode(output).is_ok() {
         return Some(KeylessDeployError::ContractAlreadyExists);
     }
+    if let Ok(e) = IKeylessDeploy::SignerNonceTooHigh::abi_decode(output) {
+        return Some(KeylessDeployError::SignerNonceTooHigh { signer_nonce: e.signerNonce });
+    }
     if let Ok(e) = IKeylessDeploy::ExecutionReverted::abi_decode(output) {
         return Some(KeylessDeployError::ExecutionReverted {
             gas_used: e.gasUsed,
@@ -152,6 +171,9 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
                 ),
             )),
         });
+    }
+    if let Ok(e) = IKeylessDeploy::EmptyCodeDeployed::abi_decode(output) {
+        return Some(KeylessDeployError::EmptyCodeDeployed { gas_used: e.gasUsed });
     }
     if IKeylessDeploy::NoContractCreated::abi_decode(output).is_ok() {
         return Some(KeylessDeployError::NoContractCreated);
