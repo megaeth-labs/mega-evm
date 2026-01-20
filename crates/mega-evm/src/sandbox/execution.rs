@@ -10,10 +10,10 @@
 //!
 //! - **Top-level restriction**: Only intercepted at `depth == 0` (see `evm/execution.rs`)
 //! - **Execution errors return success**: `ExecutionReverted`, `ExecutionHalted`, and
-//!   `EmptyCodeDeployed` return `InstructionResult::Return` with error data encoded in
-//!   the return value, not `InstructionResult::Revert`
-//! - **Atomic state application**: `apply_sandbox_state` always succeeds after sandbox
-//!   execution completes
+//!   `EmptyCodeDeployed` return `InstructionResult::Return` with error data encoded in the return
+//!   value, not `InstructionResult::Revert`
+//! - **Atomic state application**: `apply_sandbox_state` always succeeds after sandbox execution
+//!   completes
 //!
 //! This design ensures there is no way for an attacker to trigger sandbox execution
 //! and then have the gas charges reverted.

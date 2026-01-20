@@ -24,10 +24,10 @@
 //!
 //! # Security Notes
 //!
-//! - **Signature modification changes identity**: Altering r or s values produces a
-//!   different recovered signer address, not an invalid signature.
-//! - **Empty initcode is allowed**: Transactions with empty `data` pass decoding but
-//!   result in `EmptyCodeDeployed` during execution.
+//! - **Signature modification changes identity**: Altering r or s values produces a different
+//!   recovered signer address, not an invalid signature.
+//! - **Empty initcode is allowed**: Transactions with empty `data` pass decoding but result in
+//!   `EmptyCodeDeployed` during execution.
 
 use alloy_consensus::{transaction::RlpEcdsaDecodableTx, Signed, TxLegacy};
 use alloy_primitives::Address;

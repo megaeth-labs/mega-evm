@@ -477,11 +477,7 @@ fn test_keyless_deploy_rejects_eip2718_typed_envelope() {
     };
 
     // Sign with a dummy signature
-    let sig = Signature::new(
-        U256::from(0x1234u64),
-        U256::from(0x5678u64),
-        false,
-    );
+    let sig = Signature::new(U256::from(0x1234u64), U256::from(0x5678u64), false);
     let signed = Signed::new_unchecked(eip1559_tx, sig, B256::ZERO);
 
     // Encode as EIP-2718 typed envelope (0x02 || RLP(...))
@@ -591,11 +587,7 @@ fn test_keyless_deploy_execution_reverted() {
         .expect("should decode return value");
 
     // Failed deploy should return zero address
-    assert_eq!(
-        ret.deployedAddress,
-        Address::ZERO,
-        "Failed deploy should return zero address"
-    );
+    assert_eq!(ret.deployedAddress, Address::ZERO, "Failed deploy should return zero address");
 
     // Error data should be populated
     assert!(!ret.errorData.is_empty(), "Failed deploy should have error data");
@@ -609,8 +601,7 @@ fn test_keyless_deploy_execution_reverted() {
             assert_eq!(ret.gasUsed, gas_used, "gasUsed in return should match error");
 
             // Verify signer was charged for gas (state changes persisted)
-            let signer_account =
-                result.state.get(&signer).expect("signer should exist in state");
+            let signer_account = result.state.get(&signer).expect("signer should exist in state");
             let expected_charge = U256::from(gas_used) * U256::from(100_000_000_000u64);
             assert_eq!(signer_account.info.balance, initial_balance - expected_charge);
         }
@@ -654,11 +645,7 @@ fn test_keyless_deploy_execution_halted_invalid_opcode() {
         .expect("should decode return value");
 
     // Failed deploy should return zero address
-    assert_eq!(
-        ret.deployedAddress,
-        Address::ZERO,
-        "Failed deploy should return zero address"
-    );
+    assert_eq!(ret.deployedAddress, Address::ZERO, "Failed deploy should return zero address");
 
     // Error data should be populated
     assert!(!ret.errorData.is_empty(), "Failed deploy should have error data");
@@ -672,8 +659,7 @@ fn test_keyless_deploy_execution_halted_invalid_opcode() {
             assert_eq!(ret.gasUsed, gas_used, "gasUsed in return should match error");
 
             // Verify signer was charged for gas (state changes persisted)
-            let signer_account =
-                result.state.get(&signer).expect("signer should exist in state");
+            let signer_account = result.state.get(&signer).expect("signer should exist in state");
             let expected_charge = U256::from(gas_used) * U256::from(100_000_000_000u64);
             assert_eq!(signer_account.info.balance, initial_balance - expected_charge);
         }
@@ -1162,11 +1148,7 @@ fn test_keyless_deploy_init_code_selfdestructs() {
     let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output).unwrap();
 
     // EmptyCodeDeployed returns zero address
-    assert_eq!(
-        ret.deployedAddress,
-        Address::ZERO,
-        "EmptyCodeDeployed should return zero address"
-    );
+    assert_eq!(ret.deployedAddress, Address::ZERO, "EmptyCodeDeployed should return zero address");
 
     // Error data should contain EmptyCodeDeployed
     assert!(!ret.errorData.is_empty(), "Should have error data");

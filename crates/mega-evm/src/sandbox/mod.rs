@@ -28,9 +28,9 @@
 //!    and `EmptyCodeDeployed` return normally with error data, ensuring state changes (including
 //!    gas charges) are committed.
 //!
-//! 3. **Atomic state application**: Once sandbox execution completes, `apply_sandbox_state`
-//!    always succeeds—there is no path for the outer transaction to revert after the signer
-//!    has been charged.
+//! 3. **Atomic state application**: Once sandbox execution completes, `apply_sandbox_state` always
+//!    succeeds—there is no path for the outer transaction to revert after the signer has been
+//!    charged.
 //!
 //! **Invariant**: If sandbox execution starts and produces an outcome (Success or Failure),
 //! the signer WILL be charged for gas consumed. The outer transaction cannot revert this.
