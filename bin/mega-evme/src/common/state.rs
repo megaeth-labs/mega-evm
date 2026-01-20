@@ -578,7 +578,6 @@ where
                 Bytecode::new_raw(HIGH_PRECISION_TIMESTAMP_ORACLE_CODE),
             );
         }
-
     }
 }
 
