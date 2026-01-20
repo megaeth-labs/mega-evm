@@ -557,8 +557,8 @@ where
     pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
         use mega_evm::{
             MegaSpecId, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
-            ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_REX2,
+            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
+            ORACLE_CONTRACT_CODE_REX2,
         };
 
         // MiniRex+: Oracle Contract (v1.0.0 or v1.1.0 based on Rex2)
@@ -579,10 +579,6 @@ where
             );
         }
 
-        // Rex2+: Keyless Deploy Contract
-        if spec >= MegaSpecId::REX2 {
-            self.set_account_code(KEYLESS_DEPLOY_ADDRESS, Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
-        }
     }
 }
 
