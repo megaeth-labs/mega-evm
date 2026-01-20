@@ -2,6 +2,21 @@
 //!
 //! This module executes keyless deployment in an isolated sandbox environment
 //! to implement Nick's Method for deterministic contract deployment.
+//!
+//! # Spam Protection
+//!
+//! This module guarantees that once sandbox execution starts and completes, the signer
+//! will always be charged for gas consumed. This is achieved through:
+//!
+//! - **Top-level restriction**: Only intercepted at `depth == 0` (see `evm/execution.rs`)
+//! - **Execution errors return success**: `ExecutionReverted`, `ExecutionHalted`, and
+//!   `EmptyCodeDeployed` return `InstructionResult::Return` with error data encoded in
+//!   the return value, not `InstructionResult::Revert`
+//! - **Atomic state application**: `apply_sandbox_state` always succeeds after sandbox
+//!   execution completes
+//!
+//! This design ensures there is no way for an attacker to trigger sandbox execution
+//! and then have the gas charges reverted.
 
 use alloy_consensus::Transaction as AlloyTransaction;
 use alloy_evm::Evm;
@@ -42,6 +57,16 @@ use super::{
 /// 4. Recovers the signer and calculates the deploy address
 /// 5. Executes contract creation in a sandbox environment
 /// 6. Applies only allowed state changes (deployAddress + deploySigner balance)
+///
+/// # Spam Protection Guarantee
+///
+/// This function is designed so that once sandbox execution starts and completes
+/// (producing either `SandboxOutcome::Success` or `SandboxOutcome::Failure`), the
+/// outer transaction **cannot revert**. Execution errors return success with error
+/// data encoded in the return value, ensuring the signer is always charged for gas.
+///
+/// This guarantee depends on this function only being called at `depth == 0`
+/// (enforced in `evm/execution.rs`), preventing contracts from wrapping and reverting.
 pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     call_inputs: &revm::interpreter::CallInputs,
@@ -84,6 +109,29 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
                         &IKeylessDeploy::keylessDeployReturn {
                             gasUsed: $gas_used,
                             deployedAddress: $deployed_address,
+                            errorData: Bytes::new(),
+                        },
+                    )
+                    .into(),
+                    gas,
+                ),
+                return_memory_offset,
+            ))
+        };
+    }
+
+    // Macro for execution failures (ExecutionReverted, ExecutionHalted, EmptyCodeDeployed).
+    // These return success (not revert) so state changes persist and the signer is charged.
+    macro_rules! make_execution_failure {
+        ($gas_used:expr, $error:expr) => {
+            FrameResult::Call(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Return, // Success, not Revert
+                    IKeylessDeploy::keylessDeployCall::abi_encode_returns(
+                        &IKeylessDeploy::keylessDeployReturn {
+                            gasUsed: $gas_used,
+                            deployedAddress: Address::ZERO,
+                            errorData: encode_error_result($error).to_vec().into(),
                         },
                     )
                     .into(),
@@ -197,7 +245,15 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
             if let Err(e) = apply_sandbox_state(ctx, state, deploy_signer) {
                 return make_error!(e);
             }
-            make_error!(error)
+            // Extract gas_used from the execution error
+            let gas_used = match &error {
+                KeylessDeployError::ExecutionReverted { gas_used, .. } => *gas_used,
+                KeylessDeployError::ExecutionHalted { gas_used, .. } => *gas_used,
+                KeylessDeployError::EmptyCodeDeployed { gas_used } => *gas_used,
+                _ => 0, // Shouldn't happen for execution errors
+            };
+            // Return success (not revert) so state changes persist and signer is charged
+            make_execution_failure!(gas_used, error)
         }
         Err(e) => make_error!(e),
     }

@@ -20,7 +20,7 @@ contract KeylessDeploy is ISemver, IKeylessDeploy {
     function keylessDeploy(
         bytes calldata, /* keylessDeploymentTransaction */
         uint256 /* gasLimitOverride */
-    ) external returns (uint64, /* gasUsed */ address /* deployedAddress */ ) {
+    ) external returns (uint64, /* gasUsed */ address, /* deployedAddress */ bytes memory /* errorData */) {
         // This function body is never executed - the call is intercepted by the EVM.
         revert NotIntercepted();
     }

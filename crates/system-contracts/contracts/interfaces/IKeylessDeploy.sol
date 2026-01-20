@@ -45,10 +45,14 @@ interface IKeylessDeploy {
     /// @param gasUsed The amount of gas used.
     error EmptyCodeDeployed(uint64 gasUsed);
 
-    /// @notice Contract creation succeeded but no address was returned (internal bug).
+    /// @notice Contract creation succeeded but no address was returned.
+    /// @dev This is a defensive check that should never occur. It indicates an EVM implementation
+    /// bug where CREATE returned success without an address. If encountered, report to MegaETH team.
     error NoContractCreated();
 
-    /// @notice The created contract address doesn't match the expected address (internal bug).
+    /// @notice The created contract address doesn't match the expected address.
+    /// @dev This is a defensive check that should never occur. It would indicate the EVM computed
+    /// a different CREATE address than keccak256(rlp([signer, 0])). If encountered, report to MegaETH team.
     error AddressMismatch();
 
     /// @notice The gas limit override is less than the gas limit in the keyless transaction.
@@ -78,7 +82,11 @@ interface IKeylessDeploy {
     /// @param gasLimitOverride The gas limit for the inner deployment transaction.
     ///        Must be >= the gas limit in the keyless transaction.
     /// @return gasUsed The amount of gas used by the deployment transaction execution.
-    /// @return deployedAddress The address of the deployed contract.
+    ///         Uses uint64 to match the EVM's native gas accounting type (max ~18 exagas).
+    /// @return deployedAddress The address of the deployed contract (zero if execution failed).
+    /// @return errorData ABI-encoded error if execution failed, empty bytes on success.
+    ///         Execution errors (ExecutionReverted, ExecutionHalted, EmptyCodeDeployed) return
+    ///         success with errorData populated. Validation errors revert the entire call.
     function keylessDeploy(bytes calldata keylessDeploymentTransaction, uint256 gasLimitOverride)
-        external returns (uint64 gasUsed, address deployedAddress);
+        external returns (uint64 gasUsed, address deployedAddress, bytes memory errorData);
 }

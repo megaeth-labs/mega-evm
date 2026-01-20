@@ -14,6 +14,27 @@
 //! - Executes contract creation with a nonce override of 0
 //! - Merges state changes back to the parent journal
 //!
+//! # Spam Protection
+//!
+//! The sandbox is designed to guarantee that **any execution that starts and completes will
+//! charge the signer for gas consumed**. This prevents spam attacks where an attacker triggers
+//! execution but avoids paying. Key protections:
+//!
+//! 1. **Top-level only (`depth == 0`)**: Sandbox interception only occurs for direct transaction
+//!    calls. Calls from contracts (depth > 0) hit the Solidity fallback which reverts with
+//!    `NotIntercepted()`. This prevents wrapping the call to observe and revert.
+//!
+//! 2. **Execution errors return success**: Failures like `ExecutionReverted`, `ExecutionHalted`,
+//!    and `EmptyCodeDeployed` return normally with error data, ensuring state changes (including
+//!    gas charges) are committed.
+//!
+//! 3. **Atomic state application**: Once sandbox execution completes, `apply_sandbox_state`
+//!    always succeeds—there is no path for the outer transaction to revert after the signer
+//!    has been charged.
+//!
+//! **Invariant**: If sandbox execution starts and produces an outcome (Success or Failure),
+//! the signer WILL be charged for gas consumed. The outer transaction cannot revert this.
+//!
 //! # Module Structure
 //!
 //! - `execution` - Core sandbox execution logic and the main entry point

@@ -6,7 +6,7 @@
 use alloy_primitives::{address, hex, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    alloy_consensus::{Signed, TxLegacy},
+    alloy_consensus::{Signed, TxEip1559, TxLegacy},
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{
         decode_error_result,
@@ -407,8 +407,158 @@ fn test_keyless_deploy_not_pre_eip155() {
 }
 
 #[test]
+fn test_keyless_deploy_rejects_corrupted_signature() {
+    // Corrupted signatures (invalid curve points) should be rejected.
+    // This tests that signature recovery properly validates the signature.
+    let mut db = MemoryDatabase::default();
+
+    // Take the CREATE2 factory tx and corrupt the r value to make recovery fail.
+    // Setting r to all 0xFF values creates an invalid curve point.
+    let mut corrupted_tx = CREATE2_FACTORY_TX.to_vec();
+
+    // In CREATE2_FACTORY_TX, r is at offset 102-134 (32 bytes after 0xa0 prefix at 101)
+    corrupted_tx[102..134].fill(0xff);
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        Bytes::from(corrupted_tx),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    // Invalid signature components fail during recovery
+    assert_revert_with_error(&result, KeylessDeployError::InvalidSignature);
+}
+
+#[test]
+fn test_keyless_deploy_modified_s_changes_signer() {
+    // Modifying the s value changes the recovered signer address.
+    // This demonstrates that signature manipulation produces a different identity.
+    // Note: Alloy does NOT reject high-s signatures; it recovers a different signer.
+    let mut db = MemoryDatabase::default();
+
+    // Take the CREATE2 factory tx and modify s.
+    // The recovered signer will be different and have no funds.
+    let mut modified_tx = CREATE2_FACTORY_TX.to_vec();
+
+    // Modify s (at offset 135-167) to a different value
+    modified_tx[135..167].fill(0x33);
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        Bytes::from(modified_tx),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    // The modified signature recovers a different signer who has no funds
+    assert_revert_with_error(&result, KeylessDeployError::InsufficientBalance);
+}
+
+#[test]
+fn test_keyless_deploy_rejects_eip2718_typed_envelope() {
+    // EIP-2718 typed transaction envelopes (0x01, 0x02, etc.) should be rejected.
+    // These are not valid pre-EIP-155 legacy transactions.
+    let mut db = MemoryDatabase::default();
+
+    // Create an EIP-1559 (type 0x02) transaction using alloy types
+    let eip1559_tx = TxEip1559 {
+        chain_id: 1,
+        nonce: 0,
+        gas_limit: 100_000,
+        max_fee_per_gas: 100_000_000_000,
+        max_priority_fee_per_gas: 1_000_000_000,
+        to: TxKind::Create,
+        value: U256::ZERO,
+        input: Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52]), // Simple init code
+        access_list: Default::default(),
+    };
+
+    // Sign with a dummy signature
+    let sig = Signature::new(
+        U256::from(0x1234u64),
+        U256::from(0x5678u64),
+        false,
+    );
+    let signed = Signed::new_unchecked(eip1559_tx, sig, B256::ZERO);
+
+    // Encode as EIP-2718 typed envelope (0x02 || RLP(...))
+    // RLP encode the signed transaction
+    let mut rlp_encoded = Vec::new();
+    signed.rlp_encode(&mut rlp_encoded);
+
+    // Prepend the EIP-1559 type byte (0x02) to create the typed envelope
+    let mut encoded = vec![0x02];
+    encoded.extend_from_slice(&rlp_encoded);
+
+    // Verify it starts with 0x02 (EIP-1559 type)
+    assert_eq!(encoded[0], 0x02, "EIP-1559 tx should start with type byte 0x02");
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        Bytes::from(encoded),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    // EIP-2718 envelopes don't start with RLP list header, so decoding as legacy fails
+    assert_revert_with_error(&result, KeylessDeployError::MalformedEncoding);
+}
+
+#[test]
+fn test_keyless_deploy_empty_initcode() {
+    // Empty initcode creates a contract with empty runtime code.
+    // This triggers EmptyCodeDeployed error (returns success with error data).
+    let mut db = MemoryDatabase::default();
+
+    // Create a pre-EIP-155 tx with empty data (empty initcode)
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(Bytes::new());
+
+    // Fund the signer
+    let initial_balance = U256::from(1_000_000_000_000_000_000_000u128);
+    db.set_account_balance(signer, initial_balance);
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        tx_bytes,
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    // Empty initcode triggers EmptyCodeDeployed (returns success with error data)
+    assert!(
+        matches!(result.result, ExecutionResult::Success { .. }),
+        "Expected Success with EmptyCodeDeployed error, got {:?}",
+        result.result
+    );
+
+    let output = result.result.output().unwrap();
+    let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output)
+        .expect("should decode return value");
+
+    assert_eq!(ret.deployedAddress, Address::ZERO, "Should return zero address");
+    assert!(!ret.errorData.is_empty(), "Should have error data");
+
+    let error = decode_error_result(&ret.errorData).expect("Should decode error");
+    assert!(
+        matches!(error, KeylessDeployError::EmptyCodeDeployed { .. }),
+        "Expected EmptyCodeDeployed, got {:?}",
+        error
+    );
+
+    // Signer should be charged for gas (state changes persist)
+    let signer_account = result.state.get(&signer).expect("signer should exist");
+    assert!(signer_account.info.balance < initial_balance, "Signer should be charged");
+}
+
+#[test]
 fn test_keyless_deploy_execution_reverted() {
-    // Init code that calls REVERT - should revert with ExecutionReverted
+    // Init code that calls REVERT - returns success with ExecutionReverted error data
+    // This allows state changes to persist and the signer to be charged for gas
     let mut db = MemoryDatabase::default();
 
     // Init code: PUSH1 0x00 PUSH1 0x00 REVERT
@@ -428,29 +578,50 @@ fn test_keyless_deploy_execution_reverted() {
         U256::ZERO,
     );
 
-    // Verify it's an ExecutionReverted error
-    match &result.result {
-        ExecutionResult::Revert { output, .. } => {
-            let error = decode_error_result(output)
-                .unwrap_or_else(|| panic!("Failed to decode error from output: {:?}", output));
-            match error {
-                KeylessDeployError::ExecutionReverted { gas_used, .. } => {
-                    assert!(gas_used > 0, "Expected non-zero gas usage");
-                    let signer_account =
-                        result.state.get(&signer).expect("signer should exist in state");
-                    let expected_charge = U256::from(gas_used) * U256::from(100_000_000_000u64);
-                    assert_eq!(signer_account.info.balance, initial_balance - expected_charge);
-                }
-                other => panic!("Expected ExecutionReverted, got {:?}", other),
-            }
+    // Verify it returns success with error data (not revert)
+    assert!(
+        matches!(result.result, ExecutionResult::Success { .. }),
+        "Expected Success with error data, got {:?}",
+        result.result
+    );
+
+    // Decode the 3-value return type
+    let output = result.result.output().unwrap();
+    let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output)
+        .expect("should decode return value");
+
+    // Failed deploy should return zero address
+    assert_eq!(
+        ret.deployedAddress,
+        Address::ZERO,
+        "Failed deploy should return zero address"
+    );
+
+    // Error data should be populated
+    assert!(!ret.errorData.is_empty(), "Failed deploy should have error data");
+
+    // Decode and verify the error
+    let error = decode_error_result(&ret.errorData)
+        .unwrap_or_else(|| panic!("Failed to decode error from errorData"));
+    match error {
+        KeylessDeployError::ExecutionReverted { gas_used, .. } => {
+            assert!(gas_used > 0, "Expected non-zero gas usage");
+            assert_eq!(ret.gasUsed, gas_used, "gasUsed in return should match error");
+
+            // Verify signer was charged for gas (state changes persisted)
+            let signer_account =
+                result.state.get(&signer).expect("signer should exist in state");
+            let expected_charge = U256::from(gas_used) * U256::from(100_000_000_000u64);
+            assert_eq!(signer_account.info.balance, initial_balance - expected_charge);
         }
-        other => panic!("Expected Revert, got {:?}", other),
+        other => panic!("Expected ExecutionReverted, got {:?}", other),
     }
 }
 
 #[test]
 fn test_keyless_deploy_execution_halted_invalid_opcode() {
-    // Init code with INVALID (0xfe) opcode - should revert with ExecutionHalted
+    // Init code with INVALID (0xfe) opcode - returns success with ExecutionHalted error data
+    // This allows state changes to persist and the signer to be charged for gas
     let mut db = MemoryDatabase::default();
 
     // Init code: INVALID
@@ -470,23 +641,43 @@ fn test_keyless_deploy_execution_halted_invalid_opcode() {
         U256::ZERO,
     );
 
-    // Verify it's an ExecutionHalted error
-    match &result.result {
-        ExecutionResult::Revert { output, .. } => {
-            let error = decode_error_result(output)
-                .unwrap_or_else(|| panic!("Failed to decode error from output: {:?}", output));
-            match error {
-                KeylessDeployError::ExecutionHalted { gas_used, .. } => {
-                    assert!(gas_used > 0, "Expected non-zero gas usage");
-                    let signer_account =
-                        result.state.get(&signer).expect("signer should exist in state");
-                    let expected_charge = U256::from(gas_used) * U256::from(100_000_000_000u64);
-                    assert_eq!(signer_account.info.balance, initial_balance - expected_charge);
-                }
-                other => panic!("Expected ExecutionHalted, got {:?}", other),
-            }
+    // Verify it returns success with error data (not revert)
+    assert!(
+        matches!(result.result, ExecutionResult::Success { .. }),
+        "Expected Success with error data, got {:?}",
+        result.result
+    );
+
+    // Decode the 3-value return type
+    let output = result.result.output().unwrap();
+    let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output)
+        .expect("should decode return value");
+
+    // Failed deploy should return zero address
+    assert_eq!(
+        ret.deployedAddress,
+        Address::ZERO,
+        "Failed deploy should return zero address"
+    );
+
+    // Error data should be populated
+    assert!(!ret.errorData.is_empty(), "Failed deploy should have error data");
+
+    // Decode and verify the error
+    let error = decode_error_result(&ret.errorData)
+        .unwrap_or_else(|| panic!("Failed to decode error from errorData"));
+    match error {
+        KeylessDeployError::ExecutionHalted { gas_used, .. } => {
+            assert!(gas_used > 0, "Expected non-zero gas usage");
+            assert_eq!(ret.gasUsed, gas_used, "gasUsed in return should match error");
+
+            // Verify signer was charged for gas (state changes persisted)
+            let signer_account =
+                result.state.get(&signer).expect("signer should exist in state");
+            let expected_charge = U256::from(gas_used) * U256::from(100_000_000_000u64);
+            assert_eq!(signer_account.info.balance, initial_balance - expected_charge);
         }
-        other => panic!("Expected Revert, got {:?}", other),
+        other => panic!("Expected ExecutionHalted, got {:?}", other),
     }
 }
 
@@ -556,16 +747,17 @@ fn test_keyless_deploy_balance_exactly_sufficient() {
 
 #[test]
 fn test_keyless_deploy_nonce_override_to_zero() {
-    // Even if the signer has a non-zero nonce, keyless deploy should override it to 0
-    // so the contract deploys at the expected address (CREATE address depends on nonce)
+    // Even if the signer has a non-zero nonce (up to 1), keyless deploy should override it to 0
+    // so the contract deploys at the expected address (CREATE address depends on nonce).
+    // Note: Signers with nonce > 1 are rejected to prevent replay attacks.
     let mut db = MemoryDatabase::default();
 
     // Fund deployer with enough ETH
     db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
 
-    // Set a non-zero nonce for the deployer - if nonce isn't overridden,
-    // the contract would deploy at a different address
-    db.set_account_nonce(CREATE2_FACTORY_DEPLOYER, 100);
+    // Set nonce to 1 for the deployer - this is the maximum allowed for keyless deploy.
+    // If nonce isn't overridden, the contract would deploy at a different address.
+    db.set_account_nonce(CREATE2_FACTORY_DEPLOYER, 1);
 
     let result = call_keyless_deploy(
         MegaSpecId::REX2,
@@ -601,7 +793,31 @@ fn test_keyless_deploy_nonce_override_to_zero() {
     assert_eq!(contract.info.code_hash, CREATE2_FACTORY_CODE_HASH);
 
     let deployer = state.get(&CREATE2_FACTORY_DEPLOYER).expect("deployer should exist in state");
-    assert_eq!(deployer.info.nonce, 100, "deployer nonce should be left unchanged");
+    assert_eq!(deployer.info.nonce, 1, "deployer nonce should be left unchanged");
+}
+
+#[test]
+fn test_keyless_deploy_signer_nonce_too_high() {
+    // Signers with nonce > 1 should be rejected to prevent replay attacks.
+    // This ensures keyless deploy can only be used for fresh or nearly-fresh signers.
+    let mut db = MemoryDatabase::default();
+
+    // Fund deployer with enough ETH
+    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
+
+    // Set nonce to 2 (one above the allowed maximum of 1)
+    db.set_account_nonce(CREATE2_FACTORY_DEPLOYER, 2);
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        Bytes::from_static(CREATE2_FACTORY_TX),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    // Should revert with SignerNonceTooHigh (validation error, not execution error)
+    assert_revert_with_error(&result, KeylessDeployError::SignerNonceTooHigh { signer_nonce: 2 });
 }
 
 // =============================================================================
@@ -888,9 +1104,10 @@ fn test_keyless_deploy_init_code_selfdestructs() {
     // the account will be destroyed at the end of the transaction.
     //
     // Key behavior:
-    // - CREATE still returns the allocated address (not zero)
-    // - The contract's ETH is sent to the beneficiary
-    // - The contract code is deleted (account destroyed)
+    // - SELFDESTRUCT results in empty bytecode after creation
+    // - Empty bytecode triggers EmptyCodeDeployed error (prevents replay attacks)
+    // - EmptyCodeDeployed returns success with zero address (not revert)
+    // - State changes persist: beneficiary receives ETH, signer is charged gas
     let mut db = MemoryDatabase::default();
 
     let beneficiary = address!("0000000000000000000000000000000000beeef1");
@@ -902,7 +1119,7 @@ fn test_keyless_deploy_init_code_selfdestructs() {
     // 3. Returns minimal runtime code
     //
     // Note: Even though init code returns runtime code, SELFDESTRUCT in same-tx
-    // causes the account to be destroyed, so the code won't persist.
+    // causes the account to be destroyed, so the code becomes empty.
     let init_code = BytecodeBuilder::default()
         .push_address(beneficiary)
         .append(SELFDESTRUCT)
@@ -921,7 +1138,8 @@ fn test_keyless_deploy_init_code_selfdestructs() {
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, contract_value);
 
     // Fund signer with enough for gas + value
-    db.set_account_balance(signer, U256::from(1_001_000_000_000_000_000_000u128));
+    let initial_balance = U256::from(1_001_000_000_000_000_000_000u128);
+    db.set_account_balance(signer, initial_balance);
 
     let result = call_keyless_deploy(
         MegaSpecId::REX2,
@@ -931,40 +1149,51 @@ fn test_keyless_deploy_init_code_selfdestructs() {
         U256::ZERO,
     );
 
-    // Verify success (keylessDeploy succeeds even if contract self-destructs)
+    // Verify it returns success with EmptyCodeDeployed error (not revert)
     let ResultAndState { result, state } = result;
     assert!(
         matches!(result, ExecutionResult::Success { .. }),
-        "Expected success, got: {:?}",
+        "Expected success with EmptyCodeDeployed error, got: {:?}",
         result
     );
 
-    // Get deployed address from return value
+    // Decode return value
     let output = result.output().unwrap();
     let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output).unwrap();
 
-    // CREATE returns the allocated address even when SELFDESTRUCT is called
-    assert_ne!(
+    // EmptyCodeDeployed returns zero address
+    assert_eq!(
         ret.deployedAddress,
         Address::ZERO,
-        "CREATE should return allocated address even with SELFDESTRUCT"
+        "EmptyCodeDeployed should return zero address"
+    );
+
+    // Error data should contain EmptyCodeDeployed
+    assert!(!ret.errorData.is_empty(), "Should have error data");
+    let error = decode_error_result(&ret.errorData)
+        .unwrap_or_else(|| panic!("Failed to decode error from errorData"));
+    assert!(
+        matches!(error, KeylessDeployError::EmptyCodeDeployed { .. }),
+        "Expected EmptyCodeDeployed, got {:?}",
+        error
     );
 
     // EIP-6780: Beneficiary receives the contract's ETH via SELFDESTRUCT
+    // State changes persist even though deploy "failed" with EmptyCodeDeployed
     let beneficiary_acc = state.get(&beneficiary).expect("beneficiary should be in state");
     assert_eq!(
         beneficiary_acc.info.balance, contract_value,
         "beneficiary should receive the contract's ETH via SELFDESTRUCT"
     );
 
-    // EIP-6780: Contract is destroyed because SELFDESTRUCT was called in same tx as creation
-    // The account may exist in state but should have no code
-    let has_code = state
-        .get(&ret.deployedAddress)
-        .and_then(|acc| acc.info.code.as_ref())
-        .map(|c| !c.is_empty())
-        .unwrap_or(false);
-    assert!(!has_code, "contract should have no code after SELFDESTRUCT in same-tx (EIP-6780)");
+    // Signer should be charged for gas (state changes persist)
+    let signer_account = state.get(&signer).expect("signer should exist in state");
+    let gas_cost = U256::from(ret.gasUsed) * U256::from(100_000_000_000u64);
+    let expected_balance = initial_balance - gas_cost - contract_value;
+    assert_eq!(
+        signer_account.info.balance, expected_balance,
+        "signer should be charged gas + value"
+    );
 }
 
 #[test]

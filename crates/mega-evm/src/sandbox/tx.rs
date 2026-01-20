@@ -2,6 +2,32 @@
 //!
 //! This module provides functions for decoding and validating pre-EIP-155 legacy transactions
 //! used in Nick's Method for deterministic contract deployment.
+//!
+//! # Two-Phase Validation
+//!
+//! Transaction validation occurs in two distinct phases:
+//!
+//! ## Phase 1: RLP Decoding ([`decode_keyless_tx`])
+//!
+//! Structural validation of the transaction format:
+//! - Valid RLP encoding of a legacy transaction
+//! - EIP-2718 typed envelopes (0x01, 0x02, etc.) rejected as `MalformedEncoding`
+//! - `to` field must be empty (contract creation)
+//! - `v` must be 27 or 28 (pre-EIP-155, no chain ID)
+//!
+//! ## Phase 2: Signature Recovery ([`recover_signer`])
+//!
+//! Cryptographic validation of the signature:
+//! - Signature components (r, s) must be valid secp256k1 curve points
+//! - Invalid/corrupted signatures fail with `InvalidSignature`
+//! - Recovery uses alloy's ECDSA implementation
+//!
+//! # Security Notes
+//!
+//! - **Signature modification changes identity**: Altering r or s values produces a
+//!   different recovered signer address, not an invalid signature.
+//! - **Empty initcode is allowed**: Transactions with empty `data` pass decoding but
+//!   result in `EmptyCodeDeployed` during execution.
 
 use alloy_consensus::{transaction::RlpEcdsaDecodableTx, Signed, TxLegacy};
 use alloy_primitives::Address;
