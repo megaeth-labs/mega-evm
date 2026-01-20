@@ -5,7 +5,10 @@ use mega_evm::revm::{context::result::ExecutionResult, state::EvmState, Database
 use tracing::{debug, info, trace, warn};
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeOutcome},
+    common::{
+        op_receipt_to_tx_receipt, print_execution_summary, print_execution_trace, print_receipt,
+        EvmeOutcome,
+    },
     run::EvmeState,
 };
 
@@ -46,6 +49,11 @@ impl Cmd {
             .create_initial_state::<op_alloy_network::Optimism>(&self.tx_args.sender)
             .await?;
         debug!(sender = %self.tx_args.sender, "State initialized");
+
+        // Deploy system contracts based on spec
+        let spec = self.env_args.spec_id()?;
+        state.deploy_system_contracts(spec);
+        debug!(spec = ?spec, "System contracts deployed");
 
         let pre_execution_nonce =
             state.basic_ref(self.tx_args.sender)?.map(|acc| acc.nonce).unwrap_or(0);
@@ -120,6 +128,9 @@ impl Cmd {
         let contract_address = (self.tx_args.create && op_receipt.is_success())
             .then(|| self.tx_args.sender.create(outcome.pre_execution_nonce));
 
+        // Print human-readable summary
+        print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
+
         let receipt = op_receipt_to_tx_receipt(
             &op_receipt,
             self.env_args.block.block_number,
@@ -134,33 +145,12 @@ impl Cmd {
             0,
         );
 
-        // Print execution time to stderr
-        println!();
-        println!("execution time:  {:?}", outcome.exec_time);
+        print_receipt(&receipt);
 
-        // Serialize and print receipt as JSON
-        println!();
-        println!("=== Receipt ===");
-        let receipt_json = serde_json::to_string_pretty(&receipt).map_err(|e| {
-            super::TxError::ExecutionError(format!("Failed to serialize receipt: {}", e))
-        })?;
-        println!("{}", receipt_json);
-
-        // Output trace data if available
-        if let Some(ref trace) = outcome.trace_data {
-            println!();
-            println!("=== Execution Trace ===");
-            if let Some(ref output_file) = self.trace_args.trace_output_file {
-                // Write trace to file
-                std::fs::write(output_file, trace).map_err(|e| {
-                    super::TxError::ExecutionError(format!("Failed to write trace to file: {}", e))
-                })?;
-                println!("Trace written to: {}", output_file.display());
-            } else {
-                // Print trace to console
-                println!("{}", trace);
-            }
-        }
+        print_execution_trace(
+            outcome.trace_data.as_deref(),
+            self.trace_args.trace_output_file.as_deref(),
+        )?;
 
         // Dump state if requested
         if self.dump_args.dump {

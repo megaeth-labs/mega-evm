@@ -22,7 +22,10 @@ use tracing::{debug, info, trace, warn};
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
-    common::{op_receipt_to_tx_receipt, EvmeOutcome, OpTxReceipt, TxOverrideArgs},
+    common::{
+        op_receipt_to_tx_receipt, print_execution_summary, print_execution_trace, print_receipt,
+        EvmeOutcome, OpTxReceipt, TxOverrideArgs,
+    },
     replay::get_hardfork_config,
     run, ChainArgs, EvmeState,
 };
@@ -409,32 +412,19 @@ impl Cmd {
 
     /// Output execution results
     fn output_results(&self, result: &ReplayOutcome) -> Result<()> {
-        // Print execution time to stderr
-        println!();
-        println!("execution time:  {:?}", result.outcome.exec_time);
+        // Print human-readable summary
+        print_execution_summary(
+            &result.outcome.exec_result,
+            result.receipt.contract_address,
+            result.outcome.exec_time,
+        );
 
-        // Serialize and print receipt as JSON
-        println!();
-        println!("=== Receipt ===");
-        let receipt_json = serde_json::to_string_pretty(&result.receipt)
-            .map_err(|e| ReplayError::Other(format!("Failed to serialize receipt: {}", e)))?;
-        println!("{}", receipt_json);
+        print_receipt(&result.receipt);
 
-        // Output trace data if available
-        if let Some(ref trace) = result.outcome.trace_data {
-            println!();
-            println!("=== Execution Trace ===");
-            if let Some(ref output_file) = self.trace_args.trace_output_file {
-                // Write trace to file
-                std::fs::write(output_file, trace).map_err(|e| {
-                    ReplayError::Other(format!("Failed to write trace to file: {}", e))
-                })?;
-                println!("Trace written to: {}", output_file.display());
-            } else {
-                // Print trace to console
-                println!("{}", trace);
-            }
-        }
+        print_execution_trace(
+            result.outcome.trace_data.as_deref(),
+            self.trace_args.trace_output_file.as_deref(),
+        )?;
 
         // Dump state if requested
         if self.dump_args.dump {

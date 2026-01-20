@@ -1,12 +1,11 @@
 use std::time::Instant;
 
-use alloy_primitives::hex;
 use clap::Parser;
 use mega_evm::revm::{context::result::ExecutionResult, state::Bytecode, DatabaseRef};
 use tracing::{debug, info, trace, warn};
 
 use super::{load_hex, Result, RunError};
-use crate::common::EvmeOutcome;
+use crate::common::{print_execution_summary, print_execution_trace, EvmeOutcome};
 
 // Re-export TracerType from common module
 pub use crate::common::TracerType;
@@ -63,6 +62,11 @@ impl Cmd {
             .create_initial_state::<op_alloy_network::Optimism>(&self.tx_args.sender)
             .await?;
         debug!(sender = %self.tx_args.sender, "State initialized");
+
+        // Deploy system contracts based on spec
+        let spec = self.env_args.spec_id()?;
+        state.deploy_system_contracts(spec);
+        debug!(spec = ?spec, "System contracts deployed");
 
         let pre_execution_nonce =
             state.basic_ref(self.tx_args.sender)?.map(|acc| acc.nonce).unwrap_or(0);
@@ -129,40 +133,17 @@ impl Cmd {
 
     /// Output execution results
     fn output_results(&self, outcome: &EvmeOutcome) -> Result<()> {
-        println!();
-        println!("execution time:  {:?}", outcome.exec_time);
-        println!();
-        println!("=== Execution Output ===");
-        println!("EVM gas used:    {}", outcome.exec_result.gas_used());
-        match &outcome.exec_result {
-            ExecutionResult::Success { output, .. } => {
-                println!("0x{}", hex::encode(output.data()));
-            }
-            ExecutionResult::Revert { output, .. } => {
-                println!("Revert: 0x{}", hex::encode(output.as_ref()));
-            }
-            ExecutionResult::Halt { reason, .. } => {
-                println!("Halt: {:?}", reason);
-            }
-        };
+        // Determine contract address for CREATE transactions
+        let contract_address = (self.tx_args.create && outcome.exec_result.is_success())
+            .then(|| self.tx_args.sender.create(outcome.pre_execution_nonce));
 
-        // Print statistics
+        // Print human-readable summary
+        print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
 
-        // Output trace data if available
-        if let Some(ref trace) = outcome.trace_data {
-            println!();
-            println!("=== Execution Trace ===");
-            if let Some(ref output_file) = self.trace_args.trace_output_file {
-                // Write trace to file
-                std::fs::write(output_file, trace).map_err(|e| {
-                    super::RunError::ExecutionError(format!("Failed to write trace to file: {}", e))
-                })?;
-                println!("Trace written to: {}", output_file.display());
-            } else {
-                // Print trace to console
-                println!("{}", trace);
-            }
-        }
+        print_execution_trace(
+            outcome.trace_data.as_deref(),
+            self.trace_args.trace_output_file.as_deref(),
+        )?;
 
         // Dump state if requested
         if self.dump_args.dump {

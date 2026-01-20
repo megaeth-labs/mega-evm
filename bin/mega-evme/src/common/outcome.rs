@@ -1,13 +1,17 @@
 //! Execution outcome for mega-evme commands
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
+
+use super::EvmeError;
 
 use alloy_consensus::{Eip658Value, Receipt};
-use alloy_primitives::{Address, BlockHash, TxHash, B256};
+use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash, B256};
 use alloy_rpc_types_eth::TransactionReceipt;
+use alloy_sol_types::{Panic, Revert, SolError};
 use mega_evm::{
+    op_revm::OpHaltReason,
     revm::{context::result::ExecutionResult, state::EvmState},
-    MegaTxType,
+    MegaHaltReason, MegaTxType,
 };
 use op_alloy_consensus::{OpDepositReceipt, OpReceiptEnvelope};
 
@@ -106,4 +110,125 @@ pub fn op_receipt_to_tx_receipt(
         to,
         contract_address,
     }
+}
+
+/// Print a human-readable execution summary.
+pub fn print_execution_summary(
+    exec_result: &ExecutionResult<MegaHaltReason>,
+    contract_address: Option<Address>,
+    exec_time: Duration,
+) {
+    println!();
+    println!("=== Transaction Summary ===");
+
+    match exec_result {
+        ExecutionResult::Success { gas_used, logs, output, .. } => {
+            println!("Status:           Success");
+            println!("Gas Used:         {}", gas_used);
+            println!("Execution Time:   {:?}", exec_time);
+            if let Some(addr) = contract_address {
+                println!("Contract Address: {}", addr);
+            }
+            if !logs.is_empty() {
+                println!("Events:           {} log(s) emitted", logs.len());
+            }
+            let output_data = output.data();
+            if !output_data.is_empty() {
+                println!("Output:           0x{}", hex::encode(output_data));
+            }
+        }
+        ExecutionResult::Revert { gas_used, output } => {
+            println!("Status:           Reverted");
+            println!("Gas Used:         {}", gas_used);
+            println!("Execution Time:   {:?}", exec_time);
+            println!("Revert Reason:    {}", decode_revert_reason(output));
+        }
+        ExecutionResult::Halt { gas_used, reason } => {
+            println!("Status:           Halted");
+            println!("Gas Used:         {}", gas_used);
+            println!("Execution Time:   {:?}", exec_time);
+            println!("Halt Reason:      {}", format_halt_reason(reason));
+        }
+    }
+}
+
+/// Decode revert reason from output bytes using alloy's built-in decoders.
+///
+/// Supports:
+/// - `Error(string)` via `alloy_sol_types::Revert`
+/// - `Panic(uint256)` via `alloy_sol_types::Panic`
+/// - Raw hex fallback
+fn decode_revert_reason(output: &Bytes) -> String {
+    if output.is_empty() {
+        return "(empty)".to_string();
+    }
+
+    // Try to decode as Revert (Error(string))
+    if let Ok(revert) = Revert::abi_decode(output) {
+        return format!("Error(\"{}\")", revert.reason());
+    }
+
+    // Try to decode as Panic (Panic(uint256))
+    if let Ok(panic) = Panic::abi_decode(output) {
+        return if let Some(kind) = panic.kind() {
+            format!("Panic: {}", kind)
+        } else {
+            format!("Panic(0x{:x})", panic.code)
+        };
+    }
+
+    // Fallback: raw hex
+    format!("0x{}", hex::encode(output))
+}
+
+/// Format halt reason for display.
+fn format_halt_reason(reason: &MegaHaltReason) -> String {
+    match reason {
+        MegaHaltReason::Base(op_reason) => format_op_halt_reason(op_reason),
+        _ => format!("{:?}", reason),
+    }
+}
+
+/// Format OP halt reason for display.
+fn format_op_halt_reason(reason: &OpHaltReason) -> String {
+    match reason {
+        OpHaltReason::Base(eth_reason) => format!("{:?}", eth_reason),
+        _ => format!("{:?}", reason),
+    }
+}
+
+/// Print a receipt as pretty-printed JSON.
+pub fn print_receipt<T: serde::Serialize>(receipt: &T) {
+    println!();
+    println!("=== Receipt ===");
+    match serde_json::to_string_pretty(receipt) {
+        Ok(json) => println!("{}", json),
+        Err(e) => println!("Failed to serialize receipt: {}", e),
+    }
+}
+
+/// Print execution trace to console or write to file.
+///
+/// If `output_file` is provided, writes the trace to the file and prints the path.
+/// Otherwise, prints the trace to the console.
+pub fn print_execution_trace(
+    trace: Option<&str>,
+    output_file: Option<&Path>,
+) -> Result<(), EvmeError> {
+    let Some(trace) = trace else {
+        return Ok(());
+    };
+
+    println!();
+    println!("=== Execution Trace ===");
+
+    if let Some(path) = output_file {
+        std::fs::write(path, trace)
+            .map_err(|e| EvmeError::Other(format!("Failed to write trace to file: {}", e)))?;
+        println!("Trace written to: {}", path.display());
+    } else {
+        println!("{}", trace);
+    }
+
+    Ok(())
 }
