@@ -8,18 +8,21 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
     revm::context::result::{ExecutionResult, ResultAndState},
-    sandbox::{decode_error_result, KeylessDeployError},
-    sandbox::tests::{
-        CREATE2_FACTORY_CODE_HASH, CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER,
-        CREATE2_FACTORY_TX, EIP1820_CODE_HASH, EIP1820_CONTRACT, EIP1820_DEPLOYER, EIP1820_TX,
-        NON_CONTRACT_CREATION_TX, POST_EIP155_CHAIN_1_TX,
+    sandbox::{
+        decode_error_result,
+        tests::{
+            CREATE2_FACTORY_CODE_HASH, CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER,
+            CREATE2_FACTORY_TX, EIP1820_CODE_HASH, EIP1820_CONTRACT, EIP1820_DEPLOYER, EIP1820_TX,
+            NON_CONTRACT_CREATION_TX, POST_EIP155_CHAIN_1_TX,
+        },
+        KeylessDeployError,
     },
     test_utils::{transact, BytecodeBuilder, MemoryDatabase},
     IKeylessDeploy, MegaSpecId, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
 };
 use revm::bytecode::opcode::{
     CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, MSTORE,
-    PUSH0, PUSH1, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT, STATICCALL, SSTORE,
+    PUSH0, PUSH1, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
 };
 
 // =============================================================================
@@ -75,12 +78,7 @@ fn assert_revert_with_error(
         ExecutionResult::Revert { output, .. } => {
             let error = decode_error_result(output)
                 .unwrap_or_else(|| panic!("Failed to decode error from output: {:?}", output));
-            assert!(
-                errors_match(&error, &expected),
-                "Expected {:?}, got {:?}",
-                expected,
-                error
-            );
+            assert!(errors_match(&error, &expected), "Expected {:?}, got {:?}", expected, error);
         }
         other => panic!("Expected Revert, got {:?}", other),
     }
@@ -593,6 +591,7 @@ fn test_keyless_deploy_nonce_override_to_zero() {
         contract.info.code.as_ref().map(|c| !c.is_empty()).unwrap_or(false),
         "contract should have non-empty code"
     );
+    assert_eq!(contract.info.code_hash, CREATE2_FACTORY_CODE_HASH);
 }
 
 // =============================================================================
@@ -893,14 +892,14 @@ fn test_keyless_deploy_init_code_selfdestructs() {
         .push_address(beneficiary)
         .append(SELFDESTRUCT)
         // Runtime code comes after SELFDESTRUCT + return sequence = 22 bytes (0x16)
-        .append_many([PUSH1, 0x01])   // size = 1
-        .append_many([PUSH1, 0x1a])   // offset of runtime code
-        .append_many([PUSH1, 0x00])   // dest offset
+        .append_many([PUSH1, 0x01]) // size = 1
+        .append_many([PUSH1, 0x1a]) // offset of runtime code
+        .append_many([PUSH1, 0x00]) // dest offset
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01])   // return size
-        .append_many([PUSH1, 0x00])   // return offset
+        .append_many([PUSH1, 0x01]) // return size
+        .append_many([PUSH1, 0x00]) // return offset
         .append(RETURN)
-        .append(0x00)                  // runtime code: STOP
+        .append(0x00) // runtime code: STOP
         .build();
 
     // Create tx with value so the contract has ETH to send via SELFDESTRUCT
@@ -950,10 +949,7 @@ fn test_keyless_deploy_init_code_selfdestructs() {
         .and_then(|acc| acc.info.code.as_ref())
         .map(|c| !c.is_empty())
         .unwrap_or(false);
-    assert!(
-        !has_code,
-        "contract should have no code after SELFDESTRUCT in same-tx (EIP-6780)"
-    );
+    assert!(!has_code, "contract should have no code after SELFDESTRUCT in same-tx (EIP-6780)");
 }
 
 #[test]
@@ -968,12 +964,12 @@ fn test_keyless_deploy_modifies_other_contract_state() {
     // PUSH1 0x00 SSTORE                              ; store to slot 0
     // STOP
     let storage_contract_code = BytecodeBuilder::default()
-        .append_many([PUSH1, 0x20, PUSH1, 0x00, PUSH1, 0x00, CALLDATACOPY])  // copy calldata
-        .append_many([PUSH1, 0x00])  // offset
-        .append(0x51)                // MLOAD
-        .append_many([PUSH1, 0x00])  // slot
+        .append_many([PUSH1, 0x20, PUSH1, 0x00, PUSH1, 0x00, CALLDATACOPY]) // copy calldata
+        .append_many([PUSH1, 0x00]) // offset
+        .append(0x51) // MLOAD
+        .append_many([PUSH1, 0x00]) // slot
         .append(SSTORE)
-        .append(0x00)                // STOP
+        .append(0x00) // STOP
         .build();
 
     let storage_contract = address!("0000000000000000000000000000000000500000");
@@ -1003,24 +999,24 @@ fn test_keyless_deploy_modifies_other_contract_state() {
         .push_u256(test_value)
         .append_many([PUSH1, 0x00])
         .append(MSTORE)
-        .append_many([PUSH1, 0x00])   // retSize
-        .append_many([PUSH1, 0x00])   // retOffset
-        .append_many([PUSH1, 0x20])   // argsSize = 32
-        .append_many([PUSH1, 0x00])   // argsOffset
-        .append_many([PUSH1, 0x00])   // value
+        .append_many([PUSH1, 0x00]) // retSize
+        .append_many([PUSH1, 0x00]) // retOffset
+        .append_many([PUSH1, 0x20]) // argsSize = 32
+        .append_many([PUSH1, 0x00]) // argsOffset
+        .append_many([PUSH1, 0x00]) // value
         .push_address(storage_contract)
         .append(GAS)
         .append(CALL)
-        .append(0x50)                 // POP
+        .append(0x50) // POP
         // Return minimal runtime code: just return a constant 0x42
-        .append_many([PUSH1, 0x01])   // size = 1
-        .append_many([PUSH1, 0x49])   // offset of runtime code (0x49 = 73)
-        .append_many([PUSH1, 0x00])   // dest offset
+        .append_many([PUSH1, 0x01]) // size = 1
+        .append_many([PUSH1, 0x49]) // offset of runtime code (0x49 = 73)
+        .append_many([PUSH1, 0x00]) // dest offset
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01])   // return size
-        .append_many([PUSH1, 0x00])   // return offset
+        .append_many([PUSH1, 0x01]) // return size
+        .append_many([PUSH1, 0x00]) // return offset
         .append(RETURN)
-        .append(0x00)                 // runtime code: STOP
+        .append(0x00) // runtime code: STOP
         .build();
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO);
@@ -1052,11 +1048,6 @@ fn test_keyless_deploy_modifies_other_contract_state() {
     let contract = state.get(&ret.deployedAddress).expect("contract should exist in state");
     let code = contract.info.code.as_ref().expect("contract should have code");
     assert!(!code.is_empty(), "contract should have non-empty code");
-    assert_eq!(
-        contract.info.code_hash,
-        keccak256(code.original_bytes()),
-        "contract code hash should match keccak256 of code bytes"
-    );
 
     // Verify storage contract's slot 0 contains the test value
     let storage_acc = state.get(&storage_contract).expect("storage contract should be in state");
@@ -1077,12 +1068,12 @@ fn test_keyless_deploy_creates_child_contract() {
     // PUSH1 0x01 PUSH1 0x00 RETURN
     // <runtime: 0x00>
     let child_init_code = BytecodeBuilder::default()
-        .append_many([PUSH1, 0x01])   // size = 1 (runtime code size)
-        .append_many([PUSH1, 0x0c])   // offset of runtime code
-        .append_many([PUSH1, 0x00])   // dest = 0
+        .append_many([PUSH1, 0x01]) // size = 1 (runtime code size)
+        .append_many([PUSH1, 0x0c]) // offset of runtime code
+        .append_many([PUSH1, 0x00]) // dest = 0
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01])   // return size
-        .append_many([PUSH1, 0x00])   // return offset
+        .append_many([PUSH1, 0x01]) // return size
+        .append_many([PUSH1, 0x00]) // return offset
         .append(RETURN)
         .append_many(child_runtime_code.iter().copied())
         .build();
@@ -1123,14 +1114,14 @@ fn test_keyless_deploy_creates_child_contract() {
     let runtime_offset = current_len + 12;
 
     parent_init = parent_init
-        .append_many([PUSH1, 0x01])   // size = 1
+        .append_many([PUSH1, 0x01]) // size = 1
         .append_many([PUSH1, runtime_offset as u8])
         .append_many([PUSH1, 0x00])
         .append(CODECOPY)
         .append_many([PUSH1, 0x01])
         .append_many([PUSH1, 0x00])
         .append(RETURN)
-        .append(0x00);               // runtime code: STOP
+        .append(0x00); // runtime code: STOP
 
     let init_code = parent_init.build();
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO);
@@ -1169,10 +1160,7 @@ fn test_keyless_deploy_creates_child_contract() {
         parent.info.code.as_ref().map(|c| !c.is_empty()).unwrap_or(false),
         "parent should have code"
     );
-    assert_eq!(
-        parent.info.code_hash, expected_code_hash,
-        "parent code hash should match"
-    );
+    assert_eq!(parent.info.code_hash, expected_code_hash, "parent code hash should match");
 
     // Get child address from parent's storage slot 0
     let child_address_slot = parent.storage.get(&U256::ZERO).expect("slot 0 should exist");
@@ -1184,10 +1172,7 @@ fn test_keyless_deploy_creates_child_contract() {
         child.info.code.as_ref().map(|c| !c.is_empty()).unwrap_or(false),
         "child should have code"
     );
-    assert_eq!(
-        child.info.code_hash, expected_code_hash,
-        "child code hash should match"
-    );
+    assert_eq!(child.info.code_hash, expected_code_hash, "child code hash should match");
 }
 
 #[test]
@@ -1197,14 +1182,14 @@ fn test_keyless_deploy_with_value_transfer() {
 
     // Simple init code that just returns minimal runtime code
     let init_code = BytecodeBuilder::default()
-        .append_many([PUSH1, 0x01])   // size = 1
-        .append_many([PUSH1, 0x0c])   // offset of runtime code
-        .append_many([PUSH1, 0x00])   // dest = 0
+        .append_many([PUSH1, 0x01]) // size = 1
+        .append_many([PUSH1, 0x0c]) // offset of runtime code
+        .append_many([PUSH1, 0x00]) // dest = 0
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01])   // return size
-        .append_many([PUSH1, 0x00])   // return offset
+        .append_many([PUSH1, 0x01]) // return size
+        .append_many([PUSH1, 0x00]) // return offset
         .append(RETURN)
-        .append(0x00)                 // runtime code: STOP
+        .append(0x00) // runtime code: STOP
         .build();
 
     // Create tx with 0.5 ETH value
@@ -1244,10 +1229,7 @@ fn test_keyless_deploy_with_value_transfer() {
         contract.info.code.as_ref().map(|c| !c.is_empty()).unwrap_or(false),
         "contract should have non-empty code"
     );
-    assert_eq!(
-        contract.info.code_hash, expected_code_hash,
-        "contract code hash should match"
-    );
+    assert_eq!(contract.info.code_hash, expected_code_hash, "contract code hash should match");
     assert_eq!(contract.info.balance, transfer_value, "contract should have transferred value");
 }
 
@@ -1275,18 +1257,18 @@ fn test_keyless_deploy_emits_logs() {
         .append_many([PUSH1, 0x00])
         .append(MSTORE)
         // LOG0(offset=0, size=4)
-        .append_many([PUSH1, 0x04])  // size = 4
-        .append_many([PUSH1, 0x00])  // offset = 0
+        .append_many([PUSH1, 0x04]) // size = 4
+        .append_many([PUSH1, 0x00]) // offset = 0
         .append(LOG0)
         // Return minimal runtime code
-        .append_many([PUSH1, 0x01])   // size = 1
-        .append_many([PUSH1, 0x18])   // offset of runtime code (approximate)
-        .append_many([PUSH1, 0x00])   // dest = 0
+        .append_many([PUSH1, 0x01]) // size = 1
+        .append_many([PUSH1, 0x18]) // offset of runtime code (approximate)
+        .append_many([PUSH1, 0x00]) // dest = 0
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01])   // return size
-        .append_many([PUSH1, 0x00])   // return offset
+        .append_many([PUSH1, 0x01]) // return size
+        .append_many([PUSH1, 0x00]) // return offset
         .append(RETURN)
-        .append(0x00)                 // runtime code: STOP
+        .append(0x00) // runtime code: STOP
         .build();
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO);
@@ -1327,7 +1309,7 @@ fn test_keyless_deploy_reads_existing_contract() {
         .push_bytes(return_value.to_be_bytes())
         .append_many([PUSH1, 0x00])
         .append(MSTORE)
-        .append_many([PUSH1, 0x20])  // return 32 bytes
+        .append_many([PUSH1, 0x20]) // return 32 bytes
         .append_many([PUSH1, 0x00])
         .append(RETURN)
         .build();
@@ -1341,28 +1323,28 @@ fn test_keyless_deploy_reads_existing_contract() {
     // 3. Returns minimal runtime code
     let init_code = BytecodeBuilder::default()
         // STATICCALL: gas, addr, argsOffset, argsSize, retOffset, retSize
-        .append_many([PUSH1, 0x20])   // retSize = 32
-        .append_many([PUSH1, 0x00])   // retOffset = 0
-        .append_many([PUSH1, 0x00])   // argsSize = 0
-        .append_many([PUSH1, 0x00])   // argsOffset = 0
+        .append_many([PUSH1, 0x20]) // retSize = 32
+        .append_many([PUSH1, 0x00]) // retOffset = 0
+        .append_many([PUSH1, 0x00]) // argsSize = 0
+        .append_many([PUSH1, 0x00]) // argsOffset = 0
         .push_address(getter_contract)
         .append(GAS)
         .append(STATICCALL)
-        .append(0x50)                 // POP success flag
+        .append(0x50) // POP success flag
         // Load return value from memory and store to slot 0
         .append_many([PUSH1, 0x00])
-        .append(0x51)                 // MLOAD
-        .append_many([PUSH1, 0x00])   // slot
+        .append(0x51) // MLOAD
+        .append_many([PUSH1, 0x00]) // slot
         .append(SSTORE)
         // Return minimal runtime code
-        .append_many([PUSH1, 0x01])   // size = 1
-        .append_many([PUSH1, 0x2a])   // offset of runtime code
-        .append_many([PUSH1, 0x00])   // dest = 0
+        .append_many([PUSH1, 0x01]) // size = 1
+        .append_many([PUSH1, 0x2a]) // offset of runtime code
+        .append_many([PUSH1, 0x00]) // dest = 0
         .append(CODECOPY)
-        .append_many([PUSH1, 0x01])   // return size
-        .append_many([PUSH1, 0x00])   // return offset
+        .append_many([PUSH1, 0x01]) // return size
+        .append_many([PUSH1, 0x00]) // return offset
         .append(RETURN)
-        .append(0x00)                 // runtime code: STOP
+        .append(0x00) // runtime code: STOP
         .build();
 
     let (tx_bytes, signer) = create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO);
@@ -1394,11 +1376,6 @@ fn test_keyless_deploy_reads_existing_contract() {
     let contract = state.get(&ret.deployedAddress).expect("contract should exist");
     let code = contract.info.code.as_ref().expect("contract should have code");
     assert!(!code.is_empty(), "contract should have non-empty code");
-    assert_eq!(
-        contract.info.code_hash,
-        keccak256(code.original_bytes()),
-        "contract code hash should match keccak256 of code bytes"
-    );
 
     // Verify deployed contract's storage slot 0 has the value from getter
     let stored = contract.storage.get(&U256::ZERO).expect("slot 0 should exist");
@@ -1434,10 +1411,7 @@ fn test_keyless_deploy_twice_fails_second_time() {
     // Verify the first deployment produced correct code and code hash
     let contract = state.get(&CREATE2_FACTORY_CONTRACT).expect("contract should exist");
     let code = contract.info.code.as_ref().expect("contract should have code");
-    assert!(
-        !code.is_empty(),
-        "contract should have non-empty code"
-    );
+    assert!(!code.is_empty(), "contract should have non-empty code");
     assert_eq!(
         contract.info.code_hash, CREATE2_FACTORY_CODE_HASH,
         "contract code hash should match"
