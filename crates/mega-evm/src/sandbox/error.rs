@@ -8,7 +8,7 @@ use crate::MegaHaltReason;
 
 /// Error types for keyless deployment operations.
 ///
-/// These map directly to the Solidity errors defined in IKeylessDeploy.
+/// These map directly to the Solidity errors defined in `IKeylessDeploy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeylessDeployError {
     /// The transaction data is malformed (invalid RLP encoding)
@@ -17,7 +17,7 @@ pub enum KeylessDeployError {
     NotContractCreation,
     /// The transaction is not pre-EIP-155 (v must be 27 or 28)
     NotPreEIP155,
-    /// The call tried to transfer ether (maps to NoEtherTransfer)
+    /// The call tried to transfer ether (maps to `NoEtherTransfer`)
     NoEtherTransfer,
     /// Failed to recover signer from signature (invalid signature)
     InvalidSignature,
@@ -52,7 +52,8 @@ pub enum KeylessDeployError {
     },
     /// Internal error during sandbox execution
     InternalError(String),
-    /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner calls)
+    /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner
+    /// calls)
     NotIntercepted,
 }
 
@@ -107,7 +108,7 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
     }
 }
 
-/// Decodes ABI-encoded revert data into a KeylessDeployError.
+/// Decodes ABI-encoded revert data into a `KeylessDeployError`.
 ///
 /// Returns `None` if the data doesn't match any known error format.
 ///
@@ -136,7 +137,10 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
         return Some(KeylessDeployError::ContractAlreadyExists);
     }
     if let Ok(e) = IKeylessDeploy::ExecutionReverted::abi_decode(output) {
-        return Some(KeylessDeployError::ExecutionReverted { gas_used: e.gasUsed, output: e.output });
+        return Some(KeylessDeployError::ExecutionReverted {
+            gas_used: e.gasUsed,
+            output: e.output,
+        });
     }
     if let Ok(e) = IKeylessDeploy::ExecutionHalted::abi_decode(output) {
         // Note: The actual halt reason is lost in ABI encoding, use OutOfGas as placeholder

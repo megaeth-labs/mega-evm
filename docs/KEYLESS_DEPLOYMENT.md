@@ -42,17 +42,13 @@ MegaETH provides a **KeylessDeploy system contract** that:
 3. Executes the deployment using the override gas limit
 4. Deploys to the **same address** as other chains
 
-```
-original_tx + gasLimitOverride  →  same_deployer  →  same_contract_address  ✓
-```
-
 ## System Contract
 
 **Address**: `0x6342000000000000000000000000000000000003`
 
 **Available**: REX2 hardfork onwards
 
-### Interface
+### [Interface](../crates/system-contracts/contracts/interfaces/IKeylessDeploy.sol)
 
 ```solidity
 interface IKeylessDeploy {
@@ -166,7 +162,7 @@ The `keylessDeploymentTransaction` must be a pre-EIP-155 legacy transaction:
 | `AddressMismatch()` | Internal error: address mismatch |
 | `InternalError(message)` | Unexpected error |
 
-## Examples
+## Examples (Foundry Scripts)
 
 ### Deploying the CREATE2 Factory
 

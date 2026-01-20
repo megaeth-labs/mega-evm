@@ -1,7 +1,7 @@
 //! The keyless deploy system contract for the `MegaETH` EVM.
 //!
 //! This contract enables deploying contracts using pre-EIP-155 transactions (Nick's Method)
-//! with custom gas limits, solving the problem of contracts failing to deploy on MegaETH
+//! with custom gas limits, solving the problem of contracts failing to deploy on `MegaETH`
 //! due to the different gas model.
 //!
 //! ## Nick's Method Overview

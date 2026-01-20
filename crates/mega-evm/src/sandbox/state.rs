@@ -108,7 +108,7 @@ pub struct SandboxDb<'a> {
     journal_state: &'a EvmState,
     /// Type-erased reference to the underlying database for cache misses.
     db: Box<dyn ErasedDatabase + 'a>,
-    /// Index from code_hash to address for O(1) bytecode lookup.
+    /// Index from `code_hash` to address for O(1) bytecode lookup.
     code_index: HashMap<B256, Address>,
     /// Address whose nonce should be overridden to 0 (for keyless deploy).
     nonce_override_address: Option<Address>,
@@ -124,7 +124,7 @@ impl<'a> SandboxDb<'a> {
     /// Creates a new sandbox database with references to the journal's state and database.
     ///
     /// This does NOT clone the state or database - it holds references and clones values
-    /// lazily when accessed. The code_index is built upfront for O(1) bytecode lookup.
+    /// lazily when accessed. The `code_index` is built upfront for O(1) bytecode lookup.
     ///
     /// # Arguments
     ///
@@ -277,12 +277,7 @@ mod tests {
 
         // Add contract account with bytecode
         let contract_account = revm::state::Account {
-            info: AccountInfo {
-                balance: U256::ZERO,
-                nonce: 1,
-                code_hash,
-                code: Some(bytecode),
-            },
+            info: AccountInfo { balance: U256::ZERO, nonce: 1, code_hash, code: Some(bytecode) },
             transaction_id: 0,
             storage: Default::default(),
             status: AccountStatus::empty(),
@@ -296,14 +291,9 @@ mod tests {
 
         // Add account with storage
         let mut storage = HashMap::default();
-        storage.insert(
-            U256::from(1),
-            EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0),
-        );
-        storage.insert(
-            U256::from(100),
-            EvmStorageSlot::new_changed(U256::ZERO, U256::from(999), 0),
-        );
+        storage.insert(U256::from(1), EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0));
+        storage
+            .insert(U256::from(100), EvmStorageSlot::new_changed(U256::ZERO, U256::from(999), 0));
 
         let account = revm::state::Account {
             info: AccountInfo {

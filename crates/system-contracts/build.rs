@@ -150,7 +150,7 @@ fn generate_rust_constants(
         let version_underscore = artifact.version.to_string().replace('.', "_");
         let const_name = format!("V{}", version_underscore);
 
-        writeln!(file, "/// {} contract bytecode v{}", config.name, artifact.version).unwrap();
+        writeln!(file, "/// `{}` contract bytecode v{}", config.name, artifact.version).unwrap();
         writeln!(
             file,
             "pub const {}_CODE: Bytes = bytes!(\"{}\");",
@@ -158,7 +158,7 @@ fn generate_rust_constants(
             hex::encode(&artifact.deployed_bytecode)
         )
         .unwrap();
-        writeln!(file, "/// {} contract code hash v{}", config.name, artifact.version).unwrap();
+        writeln!(file, "/// `{}` contract code hash v{}", config.name, artifact.version).unwrap();
         writeln!(
             file,
             "pub const {}_CODE_HASH: B256 = b256!(\"{}\");",
@@ -171,9 +171,9 @@ fn generate_rust_constants(
 
     // Add latest alias
     let latest_version_underscore = latest.version.to_string().replace('.', "_");
-    writeln!(file, "/// Latest {} contract bytecode", config.name).unwrap();
+    writeln!(file, "/// Latest `{}` contract bytecode", config.name).unwrap();
     writeln!(file, "pub const LATEST_CODE: Bytes = V{}_CODE;", latest_version_underscore).unwrap();
-    writeln!(file, "/// Latest {} contract code hash", config.name).unwrap();
+    writeln!(file, "/// Latest `{}` contract code hash", config.name).unwrap();
     writeln!(file, "pub const LATEST_CODE_HASH: B256 = V{}_CODE_HASH;", latest_version_underscore)
         .unwrap();
 }

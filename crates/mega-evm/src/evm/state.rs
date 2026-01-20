@@ -33,8 +33,8 @@ pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
 /// # Assumption
 ///
 /// - The `other` `EvmState` is the result of the execution of a single transaction, or the merged
-/// result of another [`merge_evm_state`] call. It must not be a partial `EvmState` in the middle of
-/// a transaction execution.
+///   result of another [`merge_evm_state`] call. It must not be a partial `EvmState` in the middle
+///   of a transaction execution.
 /// - This function assumes that Cancun hardfork (EIP-6780) is activated.
 /// - This function only works correctly post Cancun.
 ///

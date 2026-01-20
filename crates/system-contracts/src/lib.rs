@@ -21,7 +21,7 @@ pub mod oracle {
     alloy_sol_types::sol!("contracts/interfaces/IOracle.sol");
 }
 
-/// KeylessDeploy contract bytecode and interface.
+/// `KeylessDeploy` contract bytecode and interface.
 ///
 /// Bytecode constants are generated at build time from the versioned artifacts
 /// in the `artifacts/` directory. Interface bindings are generated from the

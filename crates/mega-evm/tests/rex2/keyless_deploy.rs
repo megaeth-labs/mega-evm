@@ -57,7 +57,7 @@ fn call_keyless_deploy(
     transact(spec, db, TEST_CALLER, Some(KEYLESS_DEPLOY_ADDRESS), call_data.into(), value).unwrap()
 }
 
-/// Checks if two KeylessDeployErrors match, ignoring the halt reason for ExecutionHalted.
+/// Checks if two `KeylessDeployErrors` match, ignoring the halt reason for `ExecutionHalted`.
 fn errors_match(a: &KeylessDeployError, b: &KeylessDeployError) -> bool {
     match (a, b) {
         // For ExecutionHalted, only compare gas_used (reason can't be recovered from ABI)
@@ -345,9 +345,7 @@ fn test_keyless_deploy_invalid_signature() {
     // Set r to all 0xFF to make signature recovery fail while keeping valid RLP
     let mut corrupted_tx = CREATE2_FACTORY_TX.to_vec();
     // r value is at offset 102, 32 bytes
-    for i in 102..134 {
-        corrupted_tx[i] = 0xff;
-    }
+    corrupted_tx[102..134].fill(0xff);
 
     let result = call_keyless_deploy(
         MegaSpecId::REX2,
@@ -505,17 +503,15 @@ fn test_keyless_deploy_gas_limit_exactly_equal() {
     );
 
     // Should NOT be GasLimitTooLow error - may be ExecutionHalted if gas runs out
-    match &result.result {
-        ExecutionResult::Revert { output, .. } => {
-            let error = decode_error_result(output)
-                .unwrap_or_else(|| panic!("Failed to decode error from output: {:?}", output));
-            assert!(
-                !matches!(error, KeylessDeployError::GasLimitTooLow { .. }),
-                "Should not get GasLimitTooLow with exact gas limit, got: {:?}",
-                error
-            );
-        }
-        _ => {} // Success is also acceptable
+    // Success is also acceptable
+    if let ExecutionResult::Revert { output, .. } = &result.result {
+        let error = decode_error_result(output)
+            .unwrap_or_else(|| panic!("Failed to decode error from output: {:?}", output));
+        assert!(
+            !matches!(error, KeylessDeployError::GasLimitTooLow { .. }),
+            "Should not get GasLimitTooLow with exact gas limit, got: {:?}",
+            error
+        );
     }
 }
 
@@ -625,7 +621,7 @@ fn test_keyless_deploy_not_available_before_rex2() {
 
     // Verify that the contract was NOT deployed (no code at target address)
     assert!(
-        state.get(&CREATE2_FACTORY_CONTRACT).is_none(),
+        !state.contains_key(&CREATE2_FACTORY_CONTRACT),
         "Contract should NOT be deployed in REX1"
     );
 }
@@ -641,7 +637,7 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
     // This is normally done by the system during block processing, but test_utils::transact
     // doesn't do this. For inner calls, the actual Solidity contract needs to exist.
     assert!(!KEYLESS_DEPLOY_CODE.is_empty(), "KEYLESS_DEPLOY_CODE should not be empty");
-    db.set_account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE.clone());
+    db.set_account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
 
     // Create a proxy contract that calls KEYLESS_DEPLOY_ADDRESS and propagates the revert
     // using BytecodeBuilder for cleaner code generation.
@@ -657,7 +653,8 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
         .append(PUSH0) // srcOffset
         .append(PUSH0) // destOffset
         .append(CALLDATACOPY)
-        // CALL args: retSize=0, retOffset=0, argsSize=CALLDATASIZE, argsOffset=0, value=0, addr, gas
+        // CALL args: retSize=0, retOffset=0, argsSize=CALLDATASIZE, argsOffset=0, value=0, addr,
+        // gas
         .append(PUSH0) // retSize
         .append(PUSH0) // retOffset
         .append(CALLDATASIZE) // argsSize
@@ -723,7 +720,7 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
 }
 
 /// Test that the keyless deploy contract is deployed when Rex2 activates via block executor.
-/// This exercises the deployment logic in block/executor.rs pre_execution_changes.
+/// This exercises the deployment logic in block/executor.rs `pre_execution_changes`.
 #[test]
 fn test_keyless_deploy_contract_deployed_on_rex2_activation() {
     use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
@@ -1401,7 +1398,7 @@ fn test_keyless_deploy_twice_fails_second_time() {
     // Apply only the contract code from first deployment to the database.
     // We specifically apply the code at CREATE2_FACTORY_CONTRACT to simulate
     // the contract existing, without modifying nonce which would cause NonceTooLow.
-    db.set_account_code(CREATE2_FACTORY_CONTRACT, code.original_bytes().clone());
+    db.set_account_code(CREATE2_FACTORY_CONTRACT, code.original_bytes());
 
     // Second deployment should fail with ContractAlreadyExists
     let result2 = call_keyless_deploy(
