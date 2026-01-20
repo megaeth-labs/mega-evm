@@ -18,6 +18,10 @@
 //! This design ensures there is no way for an attacker to trigger sandbox execution
 //! and then have the gas charges reverted.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::{string::ToString, vec::Vec};
+
 use alloy_consensus::Transaction as AlloyTransaction;
 use alloy_evm::Evm;
 use alloy_primitives::{Address, Bytes, Log, TxKind, U256};

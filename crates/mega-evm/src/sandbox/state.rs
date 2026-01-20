@@ -7,7 +7,10 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::string::String;
+use std::{
+    boxed::Box,
+    string::{String, ToString},
+};
 
 use alloy_primitives::{map::HashMap, Address, B256};
 use core::cell::RefCell;

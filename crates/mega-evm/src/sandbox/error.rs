@@ -1,5 +1,9 @@
 //! Error types for sandbox execution.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::string::String;
+
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
 use mega_system_contracts::keyless_deploy::IKeylessDeploy;
