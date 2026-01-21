@@ -36,7 +36,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./Mi
 
 #### Dynamic Gas Cost System
 
-**Files**: `crates/mega-evm/src/gas.rs`, `crates/mega-evm/src/instructions.rs`
+**Files**: `crates/mega-evm/src/external/gas.rs`, `crates/mega-evm/src/evm/instructions.rs`
 
 **Purpose**: Prevents state bloat by scaling gas costs based on SALT bucket capacity.
 
@@ -141,7 +141,7 @@ self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
 
 ## General Features
 
-Features that are avaialble regardless of EVM versions.
+Features that are available regardless of EVM versions.
 
 ## Block Environment Access Tracking
 
