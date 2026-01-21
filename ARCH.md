@@ -36,7 +36,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./Mi
 
 #### Dynamic Gas Cost System
 
-**Files**: `crates/mega-evm/src/gas.rs`, `crates/mega-evm/src/instructions.rs`
+**Files**: `crates/mega-evm/src/external/gas.rs`, `crates/mega-evm/src/evm/instructions.rs`
 
 **Purpose**: Prevents state bloat by scaling gas costs based on SALT bucket capacity.
 
@@ -49,7 +49,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./Mi
 
 #### Compute Gas Tracking and Limiting
 
-**Files**: `crates/mega-evm/src/limit/compute_gas.rs`, `crates/mega-evm/src/limit/mod.rs`, `crates/mega-evm/src/evm.rs`
+**Files**: `crates/mega-evm/src/limit/compute_gas.rs`, `crates/mega-evm/src/limit/mod.rs`, `crates/mega-evm/src/test_utils/evm.rs`
 
 **Purpose**: Separate tracking for computational work to enable independent resource pricing and gas detention for volatile data access.
 
@@ -68,7 +68,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./Mi
 
 #### LOG Opcodes with Dual Gas Model
 
-**Files**: `crates/mega-evm/src/instructions.rs`
+**Files**: `crates/mega-evm/src/evm/instructions.rs`
 
 **Purpose**: Split LOG costs into compute gas (for EVM execution) and storage gas (for persistence) to enable independent resource pricing.
 
@@ -85,7 +85,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./Mi
 
 #### SELFDESTRUCT Opcode Disabled
 
-**Files**: `crates/mega-evm/src/instructions.rs`
+**Files**: `crates/mega-evm/src/evm/instructions.rs`
 
 **Purpose**: Prevents permanent contract destruction in MINI_REX spec.
 
@@ -111,7 +111,7 @@ self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
 
 #### Contract Size Limits
 
-**Files**: `crates/mega-evm/src/constants.rs`, `crates/mega-evm/src/spec.rs`
+**Files**: `crates/mega-evm/src/constants.rs`, `crates/mega-evm/src/evm/spec.rs`
 
 **Change**: Dramatically increased contract size limits for MINI_REX spec.
 
@@ -141,7 +141,7 @@ self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
 
 ## General Features
 
-Features that are avaialble regardless of EVM versions.
+Features that are available regardless of EVM versions.
 
 ## Block Environment Access Tracking
 
