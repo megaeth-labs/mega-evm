@@ -21,6 +21,11 @@ pub enum KeylessDeployError {
     NotContractCreation,
     /// The transaction is not pre-EIP-155 (v must be 27 or 28)
     NotPreEIP155,
+    /// The nonce in the signed transaction is not zero
+    NonZeroTxNonce {
+        /// The nonce value in the signed transaction
+        tx_nonce: u64,
+    },
     /// The call tried to transfer ether (maps to `NoEtherTransfer`)
     NoEtherTransfer,
     /// Failed to recover signer from signature (invalid signature)
@@ -83,6 +88,9 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
             IKeylessDeploy::NotContractCreation {}.abi_encode().into()
         }
         KeylessDeployError::NotPreEIP155 => IKeylessDeploy::NotPreEIP155 {}.abi_encode().into(),
+        KeylessDeployError::NonZeroTxNonce { tx_nonce } => {
+            IKeylessDeploy::NonZeroTxNonce { txNonce: tx_nonce }.abi_encode().into()
+        }
         KeylessDeployError::NoEtherTransfer => {
             IKeylessDeploy::NoEtherTransfer {}.abi_encode().into()
         }
@@ -146,6 +154,9 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
     }
     if IKeylessDeploy::NotPreEIP155::abi_decode(output).is_ok() {
         return Some(KeylessDeployError::NotPreEIP155);
+    }
+    if let Ok(e) = IKeylessDeploy::NonZeroTxNonce::abi_decode(output) {
+        return Some(KeylessDeployError::NonZeroTxNonce { tx_nonce: e.txNonce });
     }
     if IKeylessDeploy::InvalidSignature::abi_decode(output).is_ok() {
         return Some(KeylessDeployError::InvalidSignature);

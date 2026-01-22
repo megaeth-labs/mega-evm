@@ -85,13 +85,17 @@ fn assert_revert_with_error(
     }
 }
 
-/// Creates a pre-EIP-155 signed transaction with custom init code and value.
+/// Creates a pre-EIP-155 signed transaction with custom nonce, init code and value.
 ///
 /// Uses a deterministic signature (r=s=0x2222...2222, v=27) similar to Nick's Method.
 /// The recovered signer address will be deterministic based on the transaction content.
-fn create_pre_eip155_deploy_tx_with_value(init_code: Bytes, value: U256) -> (Bytes, Address) {
+fn create_pre_eip155_deploy_tx_with_nonce_and_value(
+    nonce: u64,
+    init_code: Bytes,
+    value: U256,
+) -> (Bytes, Address) {
     let tx = TxLegacy {
-        nonce: 0,
+        nonce,
         gas_price: 100_000_000_000, // 100 gwei
         gas_limit: 1_000_000,       // 1M gas for more complex init codes
         to: TxKind::Create,
@@ -123,12 +127,14 @@ fn create_pre_eip155_deploy_tx_with_value(init_code: Bytes, value: U256) -> (Byt
     (tx_bytes, signer)
 }
 
-/// Creates a pre-EIP-155 signed transaction with custom init code and zero value.
-///
-/// Uses a deterministic signature (r=s=0x2222...2222, v=27) similar to Nick's Method.
-/// The recovered signer address will be deterministic based on the transaction content.
+/// Creates a pre-EIP-155 signed transaction with custom init code and value (nonce=0).
+fn create_pre_eip155_deploy_tx_with_value(init_code: Bytes, value: U256) -> (Bytes, Address) {
+    create_pre_eip155_deploy_tx_with_nonce_and_value(0, init_code, value)
+}
+
+/// Creates a pre-EIP-155 signed transaction with custom init code (nonce=0, value=0).
 fn create_pre_eip155_deploy_tx(init_code: Bytes) -> (Bytes, Address) {
-    create_pre_eip155_deploy_tx_with_value(init_code, U256::ZERO)
+    create_pre_eip155_deploy_tx_with_nonce_and_value(0, init_code, U256::ZERO)
 }
 
 /// Calculate the deployed contract address for a keyless deploy transaction.
@@ -404,6 +410,32 @@ fn test_keyless_deploy_not_pre_eip155() {
     );
 
     assert_revert_with_error(&result, KeylessDeployError::NotPreEIP155);
+}
+
+#[test]
+fn test_keyless_deploy_non_zero_tx_nonce() {
+    // Transaction with non-zero nonce should revert with NonZeroTxNonce.
+    // Nick's Method requires nonce=0 to ensure the deployed address is deterministic:
+    // contract_address = keccak256(rlp([signer, 0]))[12:]
+    let mut db = MemoryDatabase::default();
+
+    // Create a valid pre-EIP-155 transaction but with nonce=1 instead of 0
+    let init_code = Bytes::from_static(&hex!("6000")); // PUSH1 0x00 (minimal init code)
+    let (tx_bytes, signer) =
+        create_pre_eip155_deploy_tx_with_nonce_and_value(1, init_code, U256::ZERO);
+
+    // Fund the signer
+    db.set_account_balance(signer, U256::from(1_000_000_000_000_000_000_000u128));
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        tx_bytes,
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    assert_revert_with_error(&result, KeylessDeployError::NonZeroTxNonce { tx_nonce: 1 });
 }
 
 #[test]

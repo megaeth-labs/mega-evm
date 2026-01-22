@@ -16,6 +16,10 @@ interface IKeylessDeploy {
     /// @notice The transaction is not pre-EIP-155 (v must be 27 or 28).
     error NotPreEIP155();
 
+    /// @notice The nonce in the signed transaction is not zero.
+    /// @param txNonce The nonce value in the signed transaction.
+    error NonZeroTxNonce(uint64 txNonce);
+
     /// @notice The caller tried to transfer ether to this contract.
     error NoEtherTransfer();
 

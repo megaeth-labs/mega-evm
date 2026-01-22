@@ -111,6 +111,7 @@ This distinction ensures the signer can be charged for gas even when deployment 
 | `MalformedEncoding()` | Invalid RLP encoding |
 | `NotContractCreation()` | Transaction has a `to` address |
 | `NotPreEIP155()` | v is not 27 or 28 (has chain ID) |
+| `NonZeroTxNonce(txNonce)` | Transaction nonce is not 0 |
 | `NoEtherTransfer()` | Ether was sent to system contract |
 | `InvalidSignature()` | Cannot recover signer |
 | `SignerNonceTooHigh(signerNonce)` | Signer nonce > 1 |
@@ -406,6 +407,7 @@ Nonce changes for other accounts produced during sandbox execution are merged ba
 > **Warning**: This is intentionally non-standard EVM behavior. The sandbox uses custom nonce semantics to guarantee deterministic deployment addresses. Tooling that assumes standard EVM nonce rules may need adjustment.
 
 **Precondition**: The signer's on-chain nonce must be ≤ 1, enforced before execution. If nonce > 1, the call reverts with `SignerNonceTooHigh(signerNonce)`.
+In addition, the nonce field in the `keylessDeploymentTransaction` must be 0, othersiwe the call reverts with `NonZeroTxNonce(txNonce)` error.
 
 **Why ≤ 1 (not just 0)?** This accommodates a common scenario: someone attempts to broadcast the original keyless transaction directly on MegaETH before using this system contract. That transaction fails (due to gas differences), but the attempt still increments the signer's nonce from 0 to 1. Allowing nonce ≤ 1 means keyless deploy still works after such a failed direct broadcast.
 
