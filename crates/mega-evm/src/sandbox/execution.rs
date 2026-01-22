@@ -164,6 +164,11 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
         Err(e) => return make_error!(e),
     };
 
+    // Step 3b: Validate transaction nonce is zero (required for Nick's Method)
+    if keyless_tx.nonce() != 0 {
+        return make_error!(KeylessDeployError::NonZeroTxNonce { tx_nonce: keyless_tx.nonce() });
+    }
+
     // Step 4: Validate gas limit override
     let tx_gas_limit = keyless_tx.gas_limit();
     let gas_limit_override_u64: u64 = gas_limit_override.try_into().unwrap_or(u64::MAX);
