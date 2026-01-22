@@ -62,6 +62,7 @@ For complete Rex1 specification, see **[Rex1.md](./specs/Rex1.md)**.
 ### REX2 Spec
 
 - **SELFDESTRUCT Restored**: Re-enabled with EIP-6780 semantics
+- **KeylessDeploy System Contract**: Enables keyless deployment (Nick's Method) with custom gas limits
 - **Rex1 Baseline**: Inherits Rex1 behavior for all other features
 
 For complete Rex2 specification, see **[Rex2.md](./specs/Rex2.md)**.
