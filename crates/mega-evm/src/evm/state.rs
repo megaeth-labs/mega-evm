@@ -23,8 +23,8 @@ impl<DB: Database> BlockHashes for State<DB> {
 
 /// Merges the other [`EvmState`] into the current one with account status also merged.
 /// See more details in the [`merge_evm_state_optional_status`] function.
-pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
-    merge_evm_state_optional_status(this, other, true)
+pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) {
+    merge_evm_state_optional_status(this, other, true);
 }
 
 /// Merges the other [`EvmState`] into the current one. The account status may or may not be merged
@@ -63,12 +63,7 @@ pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) -> usize {
 ///
 /// We merge the state even if the account is not marked as `Touched`. This is because we may need
 /// to know which account is read but not written to obtain `ReadSet` for witness generation.
-pub fn merge_evm_state_optional_status(
-    this: &mut EvmState,
-    other: &EvmState,
-    merge_status: bool,
-) -> usize {
-    let mut touched_slot: usize = 0;
+pub fn merge_evm_state_optional_status(this: &mut EvmState, other: &EvmState, merge_status: bool) {
     for (address, account) in other {
         if account.is_selfdestructed() {
             // if the account is selfdestructed, we assert that the account is also created and do
@@ -126,11 +121,7 @@ pub fn merge_evm_state_optional_status(
                 merge_account_state(this_account, account, merge_status);
             }
         }
-        if account.is_touched() {
-            touched_slot += if account.storage.is_empty() { 1 } else { account.storage.len() };
-        }
     }
-    touched_slot
 }
 
 /// Merges the other [`Account`] into the current one.
