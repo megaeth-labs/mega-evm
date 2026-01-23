@@ -63,11 +63,7 @@ pub fn merge_evm_state(this: &mut EvmState, other: &EvmState) {
 ///
 /// We merge the state even if the account is not marked as `Touched`. This is because we may need
 /// to know which account is read but not written to obtain `ReadSet` for witness generation.
-pub fn merge_evm_state_optional_status(
-    this: &mut EvmState,
-    other: &EvmState,
-    merge_status: bool,
-) {
+pub fn merge_evm_state_optional_status(this: &mut EvmState, other: &EvmState, merge_status: bool) {
     for (address, account) in other {
         if account.is_selfdestructed() {
             // if the account is selfdestructed, we assert that the account is also created and do
