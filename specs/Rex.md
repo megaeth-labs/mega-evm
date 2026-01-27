@@ -175,7 +175,20 @@ The semantics of Rex spec are inherited and customized from:
 
 - **Rex** → **MiniRex** → **Optimism Isthmus** → **Ethereum Prague**
 
-## 4. References
+## 4. Implementation References
+
+- Gas rules and limits: `crates/mega-evm/src/constants.rs` (module `rex`),
+  `crates/mega-evm/src/external/gas.rs` (dynamic storage/account/contract gas),
+  `crates/mega-evm/src/evm/execution.rs` (intrinsic storage gas, account/contract creation storage gas),
+  `crates/mega-evm/src/evm/limit.rs` (tx runtime limits and trackers).
+- Call-like opcode gas forwarding: `crates/mega-evm/src/evm/instructions.rs`
+  (`forward_gas_ext`, `rex::instruction_table`).
+- SELFDESTRUCT disabled (inherited from MiniRex): `crates/mega-evm/src/evm/instructions.rs`
+  (`mini_rex::instruction_table`).
+- State merge and touched accounts: `crates/mega-evm/src/evm/state.rs` (`merge_evm_state`,
+  `merge_evm_state_optional_status`).
+
+## 5. References
 
 - [MiniRex Specification](MiniRex.md)
 - [Dual Gas Model](../docs/DUAL_GAS_MODEL.md)

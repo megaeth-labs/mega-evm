@@ -244,8 +244,8 @@ These options are available across all commands.
 
 | Option                 | Default | Description                               |
 | ---------------------- | ------- | ----------------------------------------- |
-| `--state.fork <FORK>`  | MiniRex | Hardfork: `MiniRex`, `Equivalence`, `Rex`, `Rex1`, `Rex2` |
-| `--state.chainid <ID>` | 6342    | Chain ID                                  |
+| `--spec <SPEC>`        | Rex2    | Spec: `Equivalence`, `MiniRex`, `Rex`, `Rex1`, `Rex2`     |
+| `--chain-id <ID>`      | 6342    | Chain ID                                  |
 
 ### Block Environment
 
@@ -363,7 +363,7 @@ mega-evme tx \
   --input 0x... \
   --block.number 1000 \
   --block.timestamp 1234567890 \
-  --state.fork MiniRex
+  --spec MiniRex
 ```
 
 ## State File Format
