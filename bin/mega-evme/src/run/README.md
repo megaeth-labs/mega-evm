@@ -98,13 +98,13 @@ mega-evme run 0x60016000526001601ff3 --gas 5000000
 
 ### Chain Configuration
 
-- `--state.fork <FORK>`: EVM fork/spec (default: mini-rex)
-  - `mini-rex`: MegaETH MiniRex hardfork
-  - `rex`: MegaETH Rex hardfork
-  - `rex1`: MegaETH Rex1 hardfork
-  - `rex2`: MegaETH Rex2 hardfork
-  - `equivalence`: Optimism Isthmus compatibility mode
-- `--state.chainid <ID>`: Chain ID (default: 6342)
+- `--spec <SPEC>`: EVM spec (default: `Rex2`)
+  - `MiniRex`: MegaETH MiniRex hardfork
+  - `Rex`: MegaETH Rex hardfork
+  - `Rex1`: MegaETH Rex1 hardfork
+  - `Rex2`: MegaETH Rex2 hardfork
+  - `Equivalence`: Optimism Isthmus compatibility mode
+- `--chain-id <ID>`: Chain ID (default: 6342)
 
 ### Block Environment
 
@@ -261,21 +261,21 @@ This is useful for:
 - Simulating specific block conditions
 - Testing EIP-1559 base fee mechanics
 
-### Fork Selection
+### Spec Selection
 
 Choose between different EVM specifications:
 
 ```bash
-# Use MiniRex hardfork (default)
-mega-evme run contract.hex --state.fork mini-rex
+# Use MiniRex spec
+mega-evme run contract.hex --spec MiniRex
 
 # Use Optimism Isthmus compatibility
-mega-evme run contract.hex --state.fork equivalence
+mega-evme run contract.hex --spec Equivalence
 ```
 
 Differences:
-- **mini-rex**: Includes SALT dynamic gas costs, LOG cost increases, large contract support
-- **equivalence**: Optimism Isthmus compatibility, parallel execution support
+- **MiniRex**: Includes SALT dynamic gas costs, LOG cost increases, large contract support
+- **Equivalence**: Optimism Isthmus compatibility, parallel execution support
 
 ## State File Format
 

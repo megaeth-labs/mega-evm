@@ -285,3 +285,16 @@ The semantics of MiniRex spec are inherited and customized from:
 
 - Subcalls now receive at most **98/100** of remaining gas (not 63/64)
 - May affect contracts that depend on precise gas forwarding behavior
+
+## 5. Implementation References
+
+- Gas rules and limits: `crates/mega-evm/src/constants.rs` (module `mini_rex`),
+  `crates/mega-evm/src/external/gas.rs` (dynamic storage/account gas),
+  `crates/mega-evm/src/evm/execution.rs` (intrinsic calldata storage gas),
+  `crates/mega-evm/src/evm/instructions.rs` (modules `additional_limit_ext`, `compute_gas_ext`),
+  `crates/mega-evm/src/evm/limit.rs` (AdditionalLimit trackers).
+- SELFDESTRUCT disabled: `crates/mega-evm/src/evm/instructions.rs` (`mini_rex::instruction_table`).
+- Call-like opcode gas forwarding (98/100): `crates/mega-evm/src/evm/instructions.rs`
+  (`forward_gas_ext`, `mini_rex::instruction_table` for CALL/CREATE/CREATE2).
+- State merge and touched accounts: `crates/mega-evm/src/evm/state.rs` (`merge_evm_state`,
+  `merge_evm_state_optional_status`).

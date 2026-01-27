@@ -135,6 +135,16 @@ mega-evme tx --fork --fork.rpc https://rpc.example.com \
 mega-evme replay 0xTxHash --rpc https://rpc.example.com
 ```
 
+### Spec Selection
+
+Spec names are case-sensitive and match `MegaSpecId` strings: `Equivalence`, `MiniRex`, `Rex`,
+`Rex1`, `Rex2`. Use `--spec` for `run`/`tx`, and `--override.spec` for `replay`.
+
+```bash
+# Run with a specific spec
+mega-evme run 0x60016000526001601ff3 --spec Rex2
+```
+
 ### Transaction Types
 
 The `tx` command supports multiple transaction types with type-specific options:
