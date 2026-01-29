@@ -344,6 +344,18 @@ pub struct BlockLimits {
     /// rejected with [`MegaBlockLimitExceededError::StateGrowthLimit`], and their state changes
     /// are **not committed**.
     pub block_state_growth_limit: u64,
+
+    /// Compute gas limit when accessing block environment data.
+    ///
+    /// When a transaction accesses volatile block environment data (e.g., TIMESTAMP, COINBASE),
+    /// the compute gas is capped to this limit to prevent `DoS` attacks.
+    pub block_env_access_compute_gas_limit: u64,
+
+    /// Compute gas limit when accessing oracle data.
+    ///
+    /// When a transaction accesses the oracle contract, the compute gas is capped to this
+    /// limit to prevent `DoS` attacks.
+    pub oracle_access_compute_gas_limit: u64,
 }
 
 impl BlockLimits {
@@ -364,6 +376,8 @@ impl BlockLimits {
             block_compute_gas_limit: u64::MAX,
             tx_state_growth_limit: u64::MAX,
             block_state_growth_limit: u64::MAX,
+            block_env_access_compute_gas_limit: u64::MAX,
+            oracle_access_compute_gas_limit: u64::MAX,
         }
     }
 
@@ -398,6 +412,8 @@ impl BlockLimits {
         self.tx_kv_update_limit = limits.tx_kv_updates_limit;
         self.tx_compute_gas_limit = limits.tx_compute_gas_limit;
         self.tx_state_growth_limit = limits.tx_state_growth_limit;
+        self.block_env_access_compute_gas_limit = limits.block_env_access_compute_gas_limit;
+        self.oracle_access_compute_gas_limit = limits.oracle_access_compute_gas_limit;
         self
     }
 
@@ -544,6 +560,24 @@ impl BlockLimits {
         self
     }
 
+    /// Set a custom compute gas limit when accessing block environment data.
+    ///
+    /// This is a builder method that consumes self and returns a new instance
+    /// with the specified block environment access compute gas limit.
+    pub fn with_block_env_access_compute_gas_limit(mut self, limit: u64) -> Self {
+        self.block_env_access_compute_gas_limit = limit;
+        self
+    }
+
+    /// Set a custom compute gas limit when accessing oracle data.
+    ///
+    /// This is a builder method that consumes self and returns a new instance
+    /// with the specified oracle access compute gas limit.
+    pub fn with_oracle_access_compute_gas_limit(mut self, limit: u64) -> Self {
+        self.oracle_access_compute_gas_limit = limit;
+        self
+    }
+
     /// Create a new block limiter from these limits.
     ///
     /// This converts the limit configuration into a stateful [`BlockLimiter`] that tracks
@@ -579,6 +613,8 @@ impl BlockLimits {
             tx_kv_updates_limit: self.tx_kv_update_limit,
             tx_compute_gas_limit: self.tx_compute_gas_limit,
             tx_state_growth_limit: self.tx_state_growth_limit,
+            block_env_access_compute_gas_limit: self.block_env_access_compute_gas_limit,
+            oracle_access_compute_gas_limit: self.oracle_access_compute_gas_limit,
         }
     }
 }

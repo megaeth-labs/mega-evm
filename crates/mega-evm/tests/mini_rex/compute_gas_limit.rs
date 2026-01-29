@@ -594,7 +594,9 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
     // Create a SINGLE EVM instance that will be used for both transactions
     // Use REX1 spec where limits are reset between transactions
     let mut context = MegaContext::new(db, MegaSpecId::REX1).with_tx_runtime_limits(
-        EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(compute_gas_limit),
+        EvmTxRuntimeLimits::no_limits()
+            .with_tx_compute_gas_limit(compute_gas_limit)
+            .with_oracle_access_compute_gas_limit(ORACLE_ACCESS_REMAINING_COMPUTE_GAS),
     );
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -701,7 +703,9 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
 
     // Use REX spec (pre-Rex1) where limits are NOT reset between transactions
     let mut context = MegaContext::new(db, MegaSpecId::REX).with_tx_runtime_limits(
-        EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(compute_gas_limit),
+        EvmTxRuntimeLimits::no_limits()
+            .with_tx_compute_gas_limit(compute_gas_limit)
+            .with_oracle_access_compute_gas_limit(ORACLE_ACCESS_REMAINING_COMPUTE_GAS),
     );
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
