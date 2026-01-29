@@ -12,6 +12,10 @@ pub struct EvmTxRuntimeLimits {
     pub tx_compute_gas_limit: u64,
     /// Maximum state growth limit for a single transaction.
     pub tx_state_growth_limit: u64,
+    /// Compute gas limit when accessing block environment data.
+    pub block_env_access_compute_gas_limit: u64,
+    /// Compute gas limit when accessing oracle data.
+    pub oracle_access_compute_gas_limit: u64,
 }
 
 impl EvmTxRuntimeLimits {
@@ -31,6 +35,8 @@ impl EvmTxRuntimeLimits {
             tx_kv_updates_limit: u64::MAX,
             tx_compute_gas_limit: u64::MAX,
             tx_state_growth_limit: u64::MAX,
+            block_env_access_compute_gas_limit: u64::MAX,
+            oracle_access_compute_gas_limit: u64::MAX,
         }
     }
 
@@ -45,6 +51,10 @@ impl EvmTxRuntimeLimits {
             tx_data_size_limit: crate::constants::mini_rex::TX_DATA_LIMIT,
             tx_kv_updates_limit: crate::constants::mini_rex::TX_KV_UPDATE_LIMIT,
             tx_compute_gas_limit: crate::constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
+            block_env_access_compute_gas_limit:
+                crate::constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS,
+            oracle_access_compute_gas_limit:
+                crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
             ..Self::equivalence()
         }
     }
@@ -56,6 +66,10 @@ impl EvmTxRuntimeLimits {
             tx_kv_updates_limit: crate::constants::rex::TX_KV_UPDATE_LIMIT,
             tx_compute_gas_limit: crate::constants::rex::TX_COMPUTE_GAS_LIMIT,
             tx_state_growth_limit: crate::constants::rex::TX_STATE_GROWTH_LIMIT,
+            block_env_access_compute_gas_limit:
+                crate::constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS,
+            oracle_access_compute_gas_limit:
+                crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
         }
     }
 }
@@ -82,6 +96,24 @@ impl EvmTxRuntimeLimits {
     /// Sets the maximum state growth limit for a single transaction.
     pub fn with_tx_state_growth_limit(mut self, tx_state_growth_limit: u64) -> Self {
         self.tx_state_growth_limit = tx_state_growth_limit;
+        self
+    }
+
+    /// Sets the compute gas limit when accessing block environment data.
+    pub fn with_block_env_access_compute_gas_limit(
+        mut self,
+        block_env_access_compute_gas_limit: u64,
+    ) -> Self {
+        self.block_env_access_compute_gas_limit = block_env_access_compute_gas_limit;
+        self
+    }
+
+    /// Sets the compute gas limit when accessing oracle data.
+    pub fn with_oracle_access_compute_gas_limit(
+        mut self,
+        oracle_access_compute_gas_limit: u64,
+    ) -> Self {
+        self.oracle_access_compute_gas_limit = oracle_access_compute_gas_limit;
         self
     }
 }

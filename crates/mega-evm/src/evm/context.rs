@@ -111,7 +111,10 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
             oracle_env: Rc::new(RefCell::new(EmptyExternalEnv)),
-            volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
+            volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new(
+                tx_limits.block_env_access_compute_gas_limit,
+                tx_limits.oracle_access_compute_gas_limit,
+            ))),
             disable_sandbox: Rc::new(RefCell::new(false)),
             inner,
         }
@@ -168,7 +171,10 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                 inner.block.number.to::<u64>() - 1,
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
-            volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new())),
+            volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new(
+                tx_limits.block_env_access_compute_gas_limit,
+                tx_limits.oracle_access_compute_gas_limit,
+            ))),
             disable_sandbox: Rc::new(RefCell::new(false)),
             inner,
         }
@@ -320,6 +326,10 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// Sets the transaction limits for the EVM.
     pub fn with_tx_runtime_limits(mut self, tx_limits: EvmTxRuntimeLimits) -> Self {
         self.additional_limit = Rc::new(RefCell::new(AdditionalLimit::new(tx_limits)));
+        self.volatile_data_tracker = Rc::new(RefCell::new(VolatileDataAccessTracker::new(
+            tx_limits.block_env_access_compute_gas_limit,
+            tx_limits.oracle_access_compute_gas_limit,
+        )));
         self
     }
 }

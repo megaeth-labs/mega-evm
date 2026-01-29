@@ -1,4 +1,4 @@
-use crate::{constants, VolatileDataAccess, ORACLE_CONTRACT_ADDRESS};
+use crate::{VolatileDataAccess, ORACLE_CONTRACT_ADDRESS};
 use alloy_primitives::Address;
 
 /// A tracker for volatile data access with compute gas limit enforcement.
@@ -53,19 +53,28 @@ use alloy_primitives::Address;
 ///
 /// // Caller applies 1M compute gas limit to AdditionalLimit
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VolatileDataAccessTracker {
     /// Unified bitmap tracking all types of volatile data access.
     /// Includes block environment fields, beneficiary balance, and oracle access.
     volatile_data_accessed: VolatileDataAccess,
     /// The compute gas limit to enforce when volatile data is accessed.
     compute_gas_limit: Option<u64>,
+    /// Compute gas limit when accessing block environment data.
+    block_env_access_limit: u64,
+    /// Compute gas limit when accessing oracle data.
+    oracle_access_limit: u64,
 }
 
 impl VolatileDataAccessTracker {
-    /// Creates a new tracker with no accesses recorded.
-    pub fn new() -> Self {
-        Self::default()
+    /// Creates a new tracker with no accesses recorded and configurable limits.
+    pub fn new(block_env_access_limit: u64, oracle_access_limit: u64) -> Self {
+        Self {
+            volatile_data_accessed: VolatileDataAccess::empty(),
+            compute_gas_limit: None,
+            block_env_access_limit,
+            oracle_access_limit,
+        }
     }
 
     /// Checks if any volatile data has been accessed.
@@ -106,7 +115,7 @@ impl VolatileDataAccessTracker {
     /// Marks that a specific type of block environment has been accessed.
     pub fn mark_block_env_accessed(&mut self, access_type: VolatileDataAccess) {
         self.volatile_data_accessed.insert(access_type);
-        self.apply_or_create_limit(constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS);
+        self.apply_or_create_limit(self.block_env_access_limit);
     }
 
     /// Checks if beneficiary balance has been accessed.
@@ -117,7 +126,7 @@ impl VolatileDataAccessTracker {
     /// Marks that beneficiary balance has been accessed.
     pub fn mark_beneficiary_balance_accessed(&mut self) {
         self.volatile_data_accessed.insert(VolatileDataAccess::BENEFICIARY_BALANCE);
-        self.apply_or_create_limit(constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS);
+        self.apply_or_create_limit(self.block_env_access_limit);
     }
 
     /// Checks if the oracle contract has been accessed.
@@ -131,7 +140,7 @@ impl VolatileDataAccessTracker {
     pub fn check_and_mark_oracle_access(&mut self, address: &Address) -> bool {
         if address == &ORACLE_CONTRACT_ADDRESS {
             self.volatile_data_accessed.insert(VolatileDataAccess::ORACLE);
-            self.apply_or_create_limit(constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS);
+            self.apply_or_create_limit(self.oracle_access_limit);
             true
         } else {
             false
@@ -151,8 +160,10 @@ impl VolatileDataAccessTracker {
     }
 
     /// Resets all access tracking for a new transaction.
+    /// Preserves the configured limits (only resets access state).
     pub fn reset(&mut self) {
         self.volatile_data_accessed = VolatileDataAccess::empty();
         self.compute_gas_limit = None;
     }
+
 }
