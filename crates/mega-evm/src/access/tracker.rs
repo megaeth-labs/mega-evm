@@ -165,5 +165,4 @@ impl VolatileDataAccessTracker {
         self.volatile_data_accessed = VolatileDataAccess::empty();
         self.compute_gas_limit = None;
     }
-
 }
