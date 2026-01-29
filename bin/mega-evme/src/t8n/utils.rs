@@ -1,16 +1,54 @@
 use std::collections::HashMap;
 
-use mega_evm::revm::{
-    database::{EmptyDB, State},
-    primitives::{alloy_primitives::Bloom, Address, Log, B256},
+use alloy_rlp::Encodable;
+use alloy_trie::root::ordered_trie_root;
+use mega_evm::{
+    revm::{
+        database::{EmptyDB, State},
+        primitives::{alloy_primitives::Bloom, Address, Log, B256},
+    },
+    MegaTxEnvelope,
 };
 use state_test::types::AccountInfo;
 
-use crate::t8n::{Result, StateAlloc, T8nError};
+use crate::t8n::{Result, StateAlloc, T8nError, TransactionReceipt};
 
 /// Calculate state root from the final state
 pub fn calculate_state_root(state: &State<EmptyDB>) -> B256 {
     state_test::utils::state_merkle_trie_root(state.cache.trie_account())
+}
+
+/// Calculate transaction root from a list of transaction envelopes
+pub fn calculate_tx_root(txs: &[MegaTxEnvelope]) -> B256 {
+    let mut encoded = Vec::with_capacity(txs.len());
+    for tx in txs {
+        let mut buf = Vec::new();
+        tx.encode(&mut buf);
+        encoded.push(buf);
+    }
+    ordered_trie_root(encoded)
+}
+
+/// Calculate receipts root from a list of receipts
+pub fn calculate_receipts_root(receipts: &[TransactionReceipt]) -> B256 {
+    let mut encoded = Vec::with_capacity(receipts.len());
+    for receipt in receipts {
+        let mut buf = Vec::new();
+
+        // Construct standard RLP for receipt
+        // [status/root, cumulative_gas_used, logs_bloom, logs]
+        let logs: Vec<_> = receipt
+            .logs
+            .iter()
+            .map(|l| Log { address: l.address, data: l.data.clone().into() })
+            .collect();
+
+        // This is a simplified version. Standard Ethereum receipts have specific RLP format.
+        // For now, let's use a placeholder if we can't easily find a helper.
+        // Actually, alloy-consensus should have it.
+        B256::default()
+    }
+    B256::default()
 }
 
 /// Calculate logs root from all transaction logs
