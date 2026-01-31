@@ -395,7 +395,7 @@ impl Cmd {
     }
 
     async fn retrieve_block_env(&self, block: &Block<Transaction>) -> Result<BlockEnv> {
-        Ok(BlockEnv {
+        let block_env = BlockEnv {
             number: U256::from(block.number()),
             beneficiary: block.header.beneficiary(),
             timestamp: U256::from(block.header.timestamp()),
@@ -407,7 +407,9 @@ impl Cmd {
                 excess_blob_gas: 0,
                 blob_gasprice: 1,
             }),
-        })
+        };
+        trace!(block_env = ?block_env, "Block environment retrieved");
+        Ok(block_env)
     }
 
     /// Output execution results
