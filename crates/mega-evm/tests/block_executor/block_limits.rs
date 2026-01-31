@@ -792,6 +792,150 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
     assert_eq!(receipts.receipts.len(), 3, "Should have 3 receipts (4th tx failed)");
 }
 
+const CALLER2: alloy_primitives::Address = address!("3000000000000000000000000000000000000003");
+const CALLER3: alloy_primitives::Address = address!("4000000000000000000000000000000000000004");
+
+/// Helper function to create a recovered transaction with a specific caller.
+fn create_transaction_with_caller(
+    caller: alloy_primitives::Address,
+    nonce: u64,
+    gas_limit: u64,
+) -> alloy_consensus::transaction::Recovered<MegaTxEnvelope> {
+    let tx_legacy = TxLegacy {
+        chain_id: Some(8453), // Base mainnet
+        nonce,
+        gas_price: 1_000_000,
+        gas_limit,
+        to: TxKind::Call(CONTRACT),
+        value: U256::ZERO,
+        input: Bytes::new(),
+    };
+    let signed = Signed::new_unchecked(tx_legacy, Signature::test_signature(), Default::default());
+    let tx = MegaTxEnvelope::Legacy(signed);
+    alloy_consensus::transaction::Recovered::new_unchecked(tx, caller)
+}
+
+/// Tests that the commit-time `pre_execution_check` catches parallel execution race conditions.
+///
+/// This test simulates the following scenario:
+/// 1. TX A: `run_transaction()` → passes (block has capacity for one more tx)
+/// 2. TX B: `run_transaction()` → passes (block still has capacity - checked before A committed)
+/// 3. TX B: `commit_transaction_outcome()` → succeeds, updates block counters (now at limit)
+/// 4. TX A: `commit_transaction_outcome()` → should FAIL due to commit-time `pre_execution_check`
+#[test]
+fn test_commit_time_pre_execution_check_parallel_simulation() {
+    // Create database and deploy a simple contract
+    let mut db = MemoryDatabase::default();
+    let bytecode = create_log_generating_contract(100);
+    db.set_account_code(CONTRACT, bytecode);
+    // Fund multiple caller accounts (simulating parallel execution from different senders)
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+    db.set_account_balance(CALLER2, U256::from(1_000_000_000_000_000u64));
+    db.set_account_balance(CALLER3, U256::from(1_000_000_000_000_000u64));
+
+    // Create state
+    let mut state = State::builder().with_database(&mut db).build();
+
+    // Create EVM factory
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+
+    // Determine gas needed per transaction
+    // We'll use gas_limit of 100_000 per transaction
+    let tx_gas_limit = 100_000u64;
+
+    // Create EVM environment with block gas limit that allows exactly 2 transactions
+    // The pre_execution_check uses: block_gas_used + gas_limit > block_gas_limit
+    // Actual gas used per tx is ~30_000 (simple contract call)
+    // After 2 txs commit: block_gas_used ≈ 60_000
+    // For 3rd tx to fail: 60_000 + 100_000 = 160_000 > block_gas_limit
+    // So we set block_gas_limit = 150_000 (allows 2 txs, rejects 3rd)
+    let block_gas_limit = 150_000u64;
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: block_gas_limit,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+
+    // Create EVM
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    // Create block context with block_gas_limit set (this is what pre_execution_check uses)
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        None,
+        Bytes::new(),
+        BlockLimits::no_limits().with_block_gas_limit(block_gas_limit),
+    );
+
+    // Create block executor with MiniRex hardfork activated
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    // Create 3 transactions from different callers (nonce 0 for each)
+    // This simulates parallel execution where each transaction is independent
+    let tx1 = create_transaction_with_caller(CALLER, 0, tx_gas_limit);
+    let tx2 = create_transaction_with_caller(CALLER2, 0, tx_gas_limit);
+    let tx3 = create_transaction_with_caller(CALLER3, 0, tx_gas_limit);
+
+    // Step 1: Run tx1 (should pass - block has capacity)
+    let outcome1 = executor.run_transaction(&tx1);
+    assert!(outcome1.is_ok(), "run_transaction(tx1) should succeed");
+    let outcome1 = outcome1.unwrap();
+
+    // Step 2: Run tx2 (should pass - block still has capacity, tx1 not committed yet)
+    let outcome2 = executor.run_transaction(&tx2);
+    assert!(outcome2.is_ok(), "run_transaction(tx2) should succeed (tx1 not committed yet)");
+    let outcome2 = outcome2.unwrap();
+
+    // Step 3: Run tx3 (should pass - block still has capacity, neither tx1 nor tx2 committed)
+    let outcome3 = executor.run_transaction(&tx3);
+    assert!(outcome3.is_ok(), "run_transaction(tx3) should succeed (no tx committed yet)");
+    let outcome3 = outcome3.unwrap();
+
+    // Step 4: Commit tx2 first (out of order - simulating parallel execution)
+    let commit2 = executor.commit_transaction_outcome(outcome2);
+    assert!(commit2.is_ok(), "commit_transaction_outcome(tx2) should succeed");
+
+    // Step 5: Commit tx3 (should succeed, filling up the block)
+    let commit3 = executor.commit_transaction_outcome(outcome3);
+    assert!(commit3.is_ok(), "commit_transaction_outcome(tx3) should succeed");
+
+    // Step 6: Commit tx1 (should FAIL - block is now at capacity)
+    // This tests the commit-time pre_execution_check that catches the race condition.
+    // Even though tx1 passed run_transaction() initially (before tx2/tx3 committed),
+    // the commit-time check re-validates and catches that block_gas_used + gas_limit
+    // now exceeds block_gas_limit.
+    let commit1 = executor.commit_transaction_outcome(outcome1);
+    assert!(commit1.is_err(), "commit_transaction_outcome(tx1) should fail - block at capacity");
+
+    let err_msg = format!("{:?}", commit1.unwrap_err());
+    assert!(
+        err_msg.contains("TransactionGasLimitMoreThanAvailableBlockGas"),
+        "Error should mention TransactionGasLimitMoreThanAvailableBlockGas, got: {}",
+        err_msg
+    );
+
+    // Finish the block - should have 2 receipts (tx2 and tx3, tx1 was rejected at commit time)
+    let block_result = executor.finish();
+    assert!(block_result.is_ok(), "Block should finish successfully");
+
+    let (_, receipts) = block_result.unwrap();
+    assert_eq!(
+        receipts.receipts.len(),
+        2,
+        "Should have 2 receipts (tx1 failed at commit time due to race condition)"
+    );
+}
+
 #[test]
 fn test_block_tx_size_limit_with_varying_sizes() {
     // Create database and deploy contract
