@@ -55,6 +55,19 @@ The semantics of Rex2 are inherited from:
 
 - **Rex2** -> **Rex1** -> **Rex** -> **MiniRex** -> **Optimism Isthmus** -> **Ethereum Prague**
 
+## Implementation References
+
+- SELFDESTRUCT (EIP-6780) enablement: `crates/mega-evm/src/evm/instructions.rs`
+  (`rex2::instruction_table`) and `crates/mega-evm/src/evm/state.rs`
+  (`merge_evm_state_optional_status`).
+- KeylessDeploy system contract: `crates/mega-evm/src/system/keyless_deploy.rs`
+  (pre-execution deployment), `crates/mega-evm/src/evm/execution.rs` (frame_init interception),
+  `crates/mega-evm/src/sandbox/execution.rs` (`execute_keyless_deploy_call`, `apply_sandbox_state`).
+- Gas rules and limits (inherited from Rex/Rex1): `crates/mega-evm/src/constants.rs`,
+  `crates/mega-evm/src/evm/execution.rs`, `crates/mega-evm/src/evm/limit.rs`.
+- State merge and touched accounts: `crates/mega-evm/src/evm/state.rs` (`merge_evm_state`,
+  `merge_evm_state_optional_status`).
+
 ## References
 
 - [Rex1 Specification](Rex1.md)
