@@ -387,6 +387,17 @@ where
     where
         Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
     {
+        // Re-validate limits at commit time to handle parallel execution race conditions.
+        // Between run_transaction() and commit_transaction_outcome(), other transactions
+        // may have been committed, potentially exceeding block limits.
+        self.block_limiter.pre_execution_check(
+            outcome.tx.tx().tx_hash(),
+            outcome.tx.tx().gas_limit(),
+            outcome.tx_size,
+            outcome.da_size,
+            outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE,
+        )?;
+
         // Check block-level limits after transaction execution but before committing
         self.block_limiter.post_execution_check(&outcome)?;
 
