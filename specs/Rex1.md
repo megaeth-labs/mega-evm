@@ -63,7 +63,18 @@ The semantics of Rex1 spec are inherited from:
 
 - **Rex1** → **Rex** → **MiniRex** → **Optimism Isthmus** → **Ethereum Prague**
 
-## 5. References
+## 5. Implementation References
+
+- Compute gas limit reset: `crates/mega-evm/src/evm/limit.rs` (`AdditionalLimit::reset`) and
+  `crates/mega-evm/src/evm/context.rs` (`MegaContext::on_new_tx`).
+- Inherited gas rules and opcode behavior: `crates/mega-evm/src/evm/execution.rs` and
+  `crates/mega-evm/src/evm/instructions.rs` (see Rex for full behavior).
+- SELFDESTRUCT disabled (inherited from MiniRex): `crates/mega-evm/src/evm/instructions.rs`
+  (`mini_rex::instruction_table`).
+- State merge and touched accounts: `crates/mega-evm/src/evm/state.rs` (`merge_evm_state`,
+  `merge_evm_state_optional_status`).
+
+## 6. References
 
 - [Rex Specification](Rex.md)
 - [MiniRex Specification](MiniRex.md)

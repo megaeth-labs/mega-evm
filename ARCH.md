@@ -13,9 +13,13 @@ This document provides detailed technical specifications and implementation deta
 - [Advanced Usage](#advanced-usage)
 - [Dependencies](#dependencies)
 
-## EVM Versions 
+## EVM Versions
 
-The implementation introduces two EVM versions (`SpecId`):
+The implementation exposes multiple EVM versions (`MegaSpecId`). String names and hardfork-to-spec
+mapping live in `crates/mega-evm/src/evm/spec.rs` and `crates/mega-evm/src/block/hardfork.rs`.
+
+Available specs: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`.
+See `specs/MiniRex.md`, `specs/Rex.md`, `specs/Rex1.md`, `specs/Rex2.md` for full behavior.
 
 ### EQUIVALENCE
 
@@ -23,7 +27,7 @@ Default spec that maintains equivalence with Optimism Isthmus EVM.
 
 ### MINI_REX
 
-The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./MiniRex.md) for complete specification.**
+The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./specs/MiniRex.md) for complete specification.**
 
 **Major Features**:
 - **Multidimensional Gas Model**: Independent limits for compute gas (1B), data size (3.125 MB), and KV updates (125K)
@@ -49,7 +53,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./Mi
 
 #### Compute Gas Tracking and Limiting
 
-**Files**: `crates/mega-evm/src/limit/compute_gas.rs`, `crates/mega-evm/src/limit/mod.rs`, `crates/mega-evm/src/test_utils/evm.rs`
+**Files**: `crates/mega-evm/src/evm/limit.rs`, `crates/mega-evm/src/test_utils/evm.rs`
 
 **Purpose**: Separate tracking for computational work to enable independent resource pricing and gas detention for volatile data access.
 
@@ -95,23 +99,24 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./Mi
 - Prevents malicious contract destruction
 
 **Implementation**:
-```rust
-self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
-```
+- `crates/mega-evm/src/evm/instructions.rs` (`mini_rex::instruction_table` maps `SELFDESTRUCT` to
+  `control::invalid`; `rex2::instruction_table` re-enables it later)
 
 #### Enhanced Transaction Processing
 
-**Files**: `crates/mega-evm/src/handler.rs`, `crates/mega-evm/src/limit/`
+**Files**: `crates/mega-evm/src/evm/execution.rs`, `crates/mega-evm/src/evm/instructions.rs`, `crates/mega-evm/src/evm/limit.rs`
 
 **Features**:
-- **Calldata Gas**: 400 gas per token (vs 4) - 100x increase
+- **Calldata Storage Gas**: 10× multiplier on standard token and floor costs (see
+  `constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS` and
+  `constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS`)
 - **Data Size Tracking**: Comprehensive tracking of transaction data generation
 - **KV Update Tracking**: Sophisticated counting of state changes with refund logic
 - **Limit Enforcement**: Halts with OutOfGas when limits exceeded
 
 #### Contract Size Limits
 
-**Files**: `crates/mega-evm/src/constants.rs`, `crates/mega-evm/src/evm/spec.rs`
+**Files**: `crates/mega-evm/src/constants.rs`, `crates/mega-evm/src/evm/context.rs`
 
 **Change**: Dramatically increased contract size limits for MINI_REX spec.
 
@@ -122,7 +127,7 @@ self.inner.insert_instruction(SELFDESTRUCT, control::invalid);
 
 #### Multidimensional Resource Limits
 
-**Files**: `crates/mega-evm/src/limit/`
+**Files**: `crates/mega-evm/src/evm/limit.rs`
 
 **Transaction Limits**:
 - **Compute Gas**: 1,000,000,000 gas maximum (separate from standard gas limit)
@@ -145,7 +150,7 @@ Features that are available regardless of EVM versions.
 
 ## Block Environment Access Tracking
 
-**Files**: `crates/mega-evm/src/block.rs`, `crates/mega-evm/src/evm.rs`
+**Files**: `crates/mega-evm/src/access/`, `crates/mega-evm/src/evm/context.rs`, `crates/mega-evm/src/evm/host.rs`
 
 **Purpose**: Tracks which block environment fields are accessed during execution to enable runtime conflict detection in parallel execution.
 
@@ -155,17 +160,20 @@ Features that are available regardless of EVM versions.
 - Base fee (`BASEFEE` opcode)
 - Difficulty (`DIFFICULTY` opcode)
 - Gas limit (`GASLIMIT` opcode)
-- Chain ID (`CHAINID` opcode)
 - Coinbase (`COINBASE` opcode)
+- Prevrandao (`PREVRANDAO` opcode)
+- Block hash (`BLOCKHASH` opcode)
+- Blob base fee (`BLOBBASEFEE` opcode)
+- Blob hash (`BLOBHASH` opcode)
 
 **Usage Example**:
 ```rust
 // Check which block environment fields were accessed
-let accesses = evm.get_block_env_accesses();
+let accesses = context.get_block_env_accesses();
 println!("Accessed fields: {:?}", accesses);
 
 // Reset tracking for next transaction
-evm.reset_block_env_access();
+context.reset_volatile_data_access();
 ```
 
 **Benefits**:
@@ -175,9 +183,10 @@ evm.reset_block_env_access();
 
 ## Beneficiary Access Tracking
 
-**Files**: `crates/mega-evm/src/context.rs`, `crates/mega-evm/src/host.rs`
+**Files**: `crates/mega-evm/src/evm/context.rs`, `crates/mega-evm/src/evm/host.rs`, `crates/mega-evm/src/access/tracker.rs`
 
-**Purpose**: Tracks when a transaction accesses the block beneficiary's balance or account state. Any action that causes `ResultAndState` to contain the beneficiary will be marked as beneficiary access.
+**Purpose**: Tracks when a transaction accesses the block beneficiary's balance or account state
+(balance/code reads, or when caller/recipient is the beneficiary).
 
 **Tracked Operations**:
 - Balance queries (`BALANCE` opcode)
@@ -187,12 +196,12 @@ evm.reset_block_env_access();
 **Usage Example**:
 ```rust
 // Check if beneficiary was accessed
-if evm.ctx_ref().has_accessed_beneficiary_balance() {
+if context.volatile_data_tracker.borrow().has_accessed_beneficiary_balance() {
     println!("Transaction accessed block beneficiary");
 }
 
 // Reset for next transaction
-evm.ctx_mut().reset_block_env_access();
+context.reset_volatile_data_access();
 ```
 
 **Benefits**:
