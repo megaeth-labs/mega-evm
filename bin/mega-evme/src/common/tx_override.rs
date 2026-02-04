@@ -12,7 +12,7 @@ use mega_evm::{
     MegaTransaction,
 };
 
-use super::{load_hex, Result};
+use super::{load_hex, parse_ether_value, Result};
 
 // Thread-local storage for input override (Bytes is not Copy, so we can't store it in TxOverrides)
 thread_local! {
@@ -27,9 +27,11 @@ pub struct TxOverrideArgs {
     #[arg(long = "override.gas-limit", visible_aliases = ["override.gaslimit"], value_name = "GAS")]
     pub gas_limit: Option<u64>,
 
-    /// Override transaction value (in wei)
-    #[arg(long = "override.value", value_name = "WEI")]
-    pub value: Option<U256>,
+    /// Override transaction value.
+    /// VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei).
+    /// Examples: `--override.value 1ether`, `--override.value 100gwei`
+    #[arg(long = "override.value", value_name = "VALUE")]
+    pub value: Option<String>,
 
     /// Override transaction input data (hex string)
     #[arg(long = "override.input", visible_aliases = ["override.data"], value_name = "HEX")]
@@ -65,7 +67,7 @@ impl TxOverrideArgs {
             inner: tx,
             overrides: TxOverrides {
                 gas_limit: self.gas_limit,
-                value: self.value,
+                value: self.value.as_deref().map(parse_ether_value).transpose()?,
                 has_input_override,
             },
         })

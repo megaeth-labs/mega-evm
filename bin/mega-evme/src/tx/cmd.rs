@@ -1,15 +1,18 @@
 use std::time::Instant;
 
 use clap::Parser;
-use mega_evm::revm::{context::result::ExecutionResult, state::EvmState, DatabaseRef};
+use mega_evm::{
+    revm::{
+        context::result::ExecutionResult, context_interface::transaction::Transaction as _,
+        primitives::TxKind, DatabaseRef,
+    },
+    MegaTransaction, MegaTxType,
+};
 use tracing::{debug, info, trace, warn};
 
-use crate::{
-    common::{
-        op_receipt_to_tx_receipt, print_execution_summary, print_execution_trace, print_receipt,
-        EvmeOutcome,
-    },
-    run::EvmeState,
+use crate::common::{
+    load_hex, op_receipt_to_tx_receipt, print_execution_summary, print_execution_trace,
+    print_receipt, DecodedRawTx, EvmeError, EvmeOutcome,
 };
 
 use super::Result;
@@ -17,6 +20,11 @@ use super::Result;
 /// Run arbitrary transaction
 #[derive(Parser, Debug)]
 pub struct Cmd {
+    /// Raw EIP-2718 encoded transaction (hex). When provided, used as the base
+    /// transaction with CLI flags serving as overrides.
+    #[arg(value_name = "RAW_TX")]
+    pub raw: Option<String>,
+
     // Shared argument groups
     /// Transaction configuration
     #[command(flatten)]
@@ -42,27 +50,52 @@ pub struct Cmd {
 impl Cmd {
     /// Execute the tx command
     pub async fn run(&self) -> Result<()> {
-        // Step 1: Setup initial state and environment
-        info!("Setting up initial state");
-        let mut state = self
-            .prestate_args
-            .create_initial_state::<op_alloy_network::Optimism>(&self.tx_args.sender)
-            .await?;
-        debug!(sender = %self.tx_args.sender, "State initialized");
-
-        // Deploy system contracts based on spec
+        let chain_id = self.env_args.chain.chain_id;
         let spec = self.env_args.spec_id()?;
+
+        // Step 1: Create transaction
+        info!("Creating transaction");
+        let tx = if let Some(ref raw) = self.raw {
+            let raw_bytes = load_hex(Some(raw.clone()), None)?.unwrap_or_default();
+            let decoded = DecodedRawTx::from_raw(raw_bytes)?.override_tx_env(&self.tx_args)?;
+            if decoded.tx_env.chain_id != Some(chain_id) {
+                warn!(
+                    chain_id,
+                    decoded_chain_id = decoded.tx_env.chain_id,
+                    "Raw transaction chain_id does not match the configured chain_id"
+                );
+            }
+            decoded.into_tx()
+        } else {
+            self.tx_args.create_tx(chain_id)?
+        };
+
+        debug!(
+            tx_type = tx.base.tx_type,
+            gas_limit = tx.base.gas_limit,
+            value = %tx.base.value,
+            "Transaction created"
+        );
+
+        // Step 2: Setup initial state and environment
+        let sender = tx.base.caller;
+        info!("Setting up initial state");
+        let mut state =
+            self.prestate_args.create_initial_state::<op_alloy_network::Optimism>(&sender).await?;
+        debug!(sender = %sender, "State initialized");
+
         state.deploy_system_contracts(spec);
         debug!(spec = ?spec, "System contracts deployed");
 
-        let pre_execution_nonce =
-            state.basic_ref(self.tx_args.sender)?.map(|acc| acc.nonce).unwrap_or(0);
+        let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
-        // Step 2: Execute transaction
+        // Step 3: Execute transaction
         info!("Executing transaction");
+        let evm_context = self.env_args.create_evm_context(&mut state)?;
         let start = Instant::now();
-        let (exec_result, evm_state, trace_data) = self.execute(&mut state)?;
+        let (exec_result, evm_state, trace_data) =
+            self.trace_args.execute_transaction(evm_context, tx.clone())?;
         let exec_time = start.elapsed();
 
         // Log execution result
@@ -86,47 +119,31 @@ impl Cmd {
             trace_data,
         };
 
-        // Step 3: Output results (including state dump if requested)
+        // Step 4: Output results (including state dump if requested)
         trace!("Writing output results");
-        self.output_results(&outcome)?;
+        self.output_results(&outcome, &tx)?;
 
         Ok(())
     }
 
-    /// Execute EVM with the given state. State changes will not be committed to
-    /// the state database.
-    fn execute<N, P>(
-        &self,
-        state: &mut EvmeState<N, P>,
-    ) -> Result<(ExecutionResult<mega_evm::MegaHaltReason>, EvmState, Option<String>)>
-    where
-        N: alloy_network::Network,
-        P: alloy_provider::Provider<N> + std::fmt::Debug,
-    {
-        // Create transaction and EVM context
-        let tx = self.tx_args.create_tx(self.env_args.chain.chain_id)?;
-        debug!(
-            tx_type = tx.base.tx_type,
-            gas_limit = tx.base.gas_limit,
-            value = %tx.base.value,
-            "Transaction created"
-        );
-
-        let evm_context = self.env_args.create_evm_context(state)?;
-
-        // Execute transaction
-        self.trace_args.execute_transaction(evm_context, tx)
-    }
-
     /// Output execution results
-    fn output_results(&self, outcome: &EvmeOutcome) -> Result<()> {
+    fn output_results(&self, outcome: &EvmeOutcome, tx: &MegaTransaction) -> Result<()> {
+        let tx_type = MegaTxType::try_from(tx.base.tx_type)
+            .map_err(|_| EvmeError::UnsupportedTxType(tx.base.tx_type))?;
+        let sender = tx.base.caller;
+        let is_create = tx.base.kind == TxKind::Create;
+        let receiver = match tx.base.kind {
+            TxKind::Call(addr) => Some(addr),
+            TxKind::Create => None,
+        };
+        let effective_gas_price = tx.effective_gas_price(self.env_args.block.block_basefee as u128);
+
         // Create transaction receipt
-        let op_receipt =
-            outcome.to_op_receipt(self.tx_args.tx_type()?, outcome.pre_execution_nonce);
+        let op_receipt = outcome.to_op_receipt(tx_type, outcome.pre_execution_nonce);
 
         // Determine contract address for CREATE transactions
-        let contract_address = (self.tx_args.create && op_receipt.is_success())
-            .then(|| self.tx_args.sender.create(outcome.pre_execution_nonce));
+        let contract_address = (is_create && op_receipt.is_success())
+            .then(|| sender.create(outcome.pre_execution_nonce));
 
         // Print human-readable summary
         print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
@@ -135,10 +152,10 @@ impl Cmd {
             &op_receipt,
             self.env_args.block.block_number,
             self.env_args.block.block_timestamp,
-            self.tx_args.sender,
-            if self.tx_args.create { None } else { Some(self.tx_args.receiver()) },
+            sender,
+            receiver,
             contract_address,
-            self.tx_args.effective_gas_price()?,
+            effective_gas_price,
             outcome.exec_result.gas_used(),
             None,
             None,

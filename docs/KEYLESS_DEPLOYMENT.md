@@ -48,19 +48,18 @@ MegaETH provides a **KeylessDeploy system contract** that:
 
 **Available**: REX2 hardfork onwards
 
-### Basic Usage (Foundry Script)
+### Basic Usage (CLI Script)
 
-```solidity
-import {IKeylessDeploy} from "mega-evm/interfaces/IKeylessDeploy.sol";
+The [`scripts/keyless_deploy.sh`](../scripts/keyless_deploy.sh) script automates the full deployment flow — decoding the transaction, checking preconditions, simulating gas usage, funding the signer, deploying, and verifying:
 
-IKeylessDeploy deployer = IKeylessDeploy(0x6342000000000000000000000000000000000003);
+```bash
+PRIVATE_KEY=<funded-account-key> ./scripts/keyless_deploy.sh <keyless-tx-hex>
 
-// Original keyless deployment transaction (do not modify!)
-bytes memory originalTx = hex"f8a58085174876e800830186a08080b853...";
-
-// Deploy with higher gas limit for MegaETH
-(uint64 gasUsed, address deployed) = deployer.keylessDeploy(originalTx, 500_000);
+# Example: deploy the CREATE2 factory
+PRIVATE_KEY=0x... ./scripts/keyless_deploy.sh 0xf8a58085174876e800830186a08080b853604580600e600039806000f350fe7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf31ba02222222222222222222222222222222222222222222222222222222222222222a02222222222222222222222222222222222222222222222222222222222222222
 ```
+
+Set `RPC_URL` (default `http://localhost:8545`) and `MEGA_EVME` (default: from `PATH`) environment variables as needed.
 
 ### Key Points
 
