@@ -308,18 +308,6 @@ impl TxArgs {
         }
     }
 
-    /// Calculates the effective gas price for the transaction.
-    pub fn effective_gas_price(&self) -> Result<u128> {
-        let basefee = self.basefee() as u128;
-        Ok(match self.mega_tx_type()? {
-            MegaTxType::Legacy | MegaTxType::Eip2930 => basefee,
-            MegaTxType::Eip1559 | MegaTxType::Eip7702 => {
-                basefee + self.priority_fee.unwrap_or(0) as u128
-            }
-            MegaTxType::Deposit => 0,
-        })
-    }
-
     /// Creates a [`TxEnv`] from the transaction arguments.
     ///
     /// Loads input data from `--input` or `--inputfile` arguments.

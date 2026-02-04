@@ -2,7 +2,10 @@ use std::time::Instant;
 
 use clap::Parser;
 use mega_evm::{
-    revm::{context::result::ExecutionResult, primitives::TxKind, DatabaseRef},
+    revm::{
+        context::result::ExecutionResult, context_interface::transaction::Transaction as _,
+        primitives::TxKind, DatabaseRef,
+    },
     MegaTransaction, MegaTxType,
 };
 use tracing::{debug, info, trace, warn};
@@ -133,7 +136,8 @@ impl Cmd {
             TxKind::Call(addr) => Some(addr),
             TxKind::Create => None,
         };
-        let effective_gas_price = tx.base.gas_price + tx.base.gas_priority_fee.unwrap_or(0);
+        let effective_gas_price =
+            tx.effective_gas_price(self.env_args.block.block_basefee as u128);
 
         // Create transaction receipt
         let op_receipt = outcome.to_op_receipt(tx_type, outcome.pre_execution_nonce);
