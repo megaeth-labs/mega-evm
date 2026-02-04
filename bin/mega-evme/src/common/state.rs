@@ -44,11 +44,13 @@ pub struct PreStateArgs {
     #[arg(long = "block-hash", visible_aliases = ["blockhash", "block-hashes", "blockhashes"])]
     pub block_hashes: Vec<String>,
 
-    /// Balance to allocate to the sender account
+    /// Balance to allocate to the sender account.
+    /// VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei).
+    /// Examples: `--sender.balance 1ether`, `--sender.balance 1000000000000000000`
     /// If not specified, sender balance is not set (fallback to `prestate` if specified,
     /// otherwise 0)
     #[arg(long = "sender.balance", visible_aliases = ["from.balance"])]
-    pub sender_balance: Option<U256>,
+    pub sender_balance: Option<String>,
 
     /// Add ether to specified addresses. Each entry format: `ADDRESS+=VALUE`
     /// VALUE can be: plain number (wei), or number with suffix (ether, gwei, wei).
@@ -73,7 +75,7 @@ pub struct PreStateArgs {
 /// Parse ether value string into wei (U256).
 /// Supports: plain number (wei), or number with suffix (ether, gwei, wei, etc).
 /// Examples: "1000000000000000000", "1ether", "100gwei", "1000wei"
-fn parse_ether_value(s: &str) -> Result<U256> {
+pub fn parse_ether_value(s: &str) -> Result<U256> {
     use alloy_primitives::utils::parse_units;
 
     let s = s.trim();
@@ -256,9 +258,10 @@ impl PreStateArgs {
         }
 
         // Set balance for the sender if specified (overrides prestate)
-        if let Some(sender_balance) = &self.sender_balance {
+        if let Some(sender_balance_str) = &self.sender_balance {
+            let sender_balance = parse_ether_value(sender_balance_str)?;
             info!(sender = %sender, sender_balance = %sender_balance, "Overriding sender balance");
-            prestate.entry(*sender).or_default().info.set_balance(*sender_balance);
+            prestate.entry(*sender).or_default().info.set_balance(sender_balance);
         }
 
         // Apply faucet balances

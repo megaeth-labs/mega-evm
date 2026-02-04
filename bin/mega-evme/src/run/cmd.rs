@@ -57,11 +57,12 @@ impl Cmd {
 
         // Step 2: Setup initial state and environment
         info!("Setting up initial state");
+        let sender = self.tx_args.sender();
         let mut state = self
             .prestate_args
-            .create_initial_state::<op_alloy_network::Optimism>(&self.tx_args.sender)
+            .create_initial_state::<op_alloy_network::Optimism>(&sender)
             .await?;
-        debug!(sender = %self.tx_args.sender, "State initialized");
+        debug!(sender = %sender, "State initialized");
 
         // Deploy system contracts based on spec
         let spec = self.env_args.spec_id()?;
@@ -69,11 +70,11 @@ impl Cmd {
         debug!(spec = ?spec, "System contracts deployed");
 
         let pre_execution_nonce =
-            state.basic_ref(self.tx_args.sender)?.map(|acc| acc.nonce).unwrap_or(0);
+            state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Run-specific: If not in create mode, set the code at the receiver address
-        if !self.tx_args.create && !code.is_empty() {
+        if !self.tx_args.create() && !code.is_empty() {
             let bytecode = Bytecode::new_raw_checked(code.clone())
                 .unwrap_or_else(|_| Bytecode::new_legacy(code.clone()));
             debug!(receiver = %self.tx_args.receiver(), "Setting code at receiver address");
@@ -91,7 +92,7 @@ impl Cmd {
         );
 
         // In create mode, prepend code to input data
-        if self.tx_args.create {
+        if self.tx_args.create() {
             debug!("Create mode: prepending code to input data");
             tx.base.data = [code.as_ref(), tx.base.data.as_ref()].concat().into();
         }
@@ -134,8 +135,8 @@ impl Cmd {
     /// Output execution results
     fn output_results(&self, outcome: &EvmeOutcome) -> Result<()> {
         // Determine contract address for CREATE transactions
-        let contract_address = (self.tx_args.create && outcome.exec_result.is_success())
-            .then(|| self.tx_args.sender.create(outcome.pre_execution_nonce));
+        let contract_address = (self.tx_args.create() && outcome.exec_result.is_success())
+            .then(|| self.tx_args.sender().create(outcome.pre_execution_nonce));
 
         // Print human-readable summary
         print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
