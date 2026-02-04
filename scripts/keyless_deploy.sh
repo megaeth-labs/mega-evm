@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Keyless deployment script for MegaETH
@@ -18,6 +18,7 @@ RPC_URL="${RPC_URL:-http://localhost:8545}"
 
 SYSTEM_CONTRACT="0x6342000000000000000000000000000000000003"
 MEGA_EVME="${MEGA_EVME:-mega-evme}"
+FUND_MARGIN="${FUND_MARGIN:-1000000000000000}"  # default 0.001 ether
 export FOUNDRY_DISABLE_NIGHTLY_WARNING=1 # Suppress foundry nightly warning
 
 # Strip 0x prefix if present
@@ -90,7 +91,7 @@ SIMULATION_OUTPUT=$("$MEGA_EVME" tx \
 echo "$SIMULATION_OUTPUT" | head -20
 
 # Check execution status
-STATUS=$(echo "$SIMULATION_OUTPUT" | grep -oP 'Status:\s+\K\S+')
+STATUS=$(echo "$SIMULATION_OUTPUT" | sed -n 's/.*Status:[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
 if [ "$STATUS" != "Success" ]; then
     echo "ERROR: Simulation failed with status: $STATUS"
     echo "Full output:"
@@ -126,7 +127,6 @@ echo ""
 echo "--- Step 4: Computing funding requirements ---"
 
 GAS_OVERRIDE=$(cast to-dec "$GAS_USED")
-FUND_MARGIN="${FUND_MARGIN:-1000000000000000}"  # default 0.001 ether
 FUND_AMOUNT=$(python3 -c "print($BALANCE_SPENT + $FUND_MARGIN)")
 
 echo "Gas override:  $GAS_OVERRIDE"
