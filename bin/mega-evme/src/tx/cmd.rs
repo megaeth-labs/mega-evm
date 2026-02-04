@@ -136,8 +136,7 @@ impl Cmd {
             TxKind::Call(addr) => Some(addr),
             TxKind::Create => None,
         };
-        let effective_gas_price =
-            tx.effective_gas_price(self.env_args.block.block_basefee as u128);
+        let effective_gas_price = tx.effective_gas_price(self.env_args.block.block_basefee as u128);
 
         // Create transaction receipt
         let op_receipt = outcome.to_op_receipt(tx_type, outcome.pre_execution_nonce);
