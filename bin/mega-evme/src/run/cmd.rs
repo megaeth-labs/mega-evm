@@ -58,10 +58,8 @@ impl Cmd {
         // Step 2: Setup initial state and environment
         info!("Setting up initial state");
         let sender = self.tx_args.sender();
-        let mut state = self
-            .prestate_args
-            .create_initial_state::<op_alloy_network::Optimism>(&sender)
-            .await?;
+        let mut state =
+            self.prestate_args.create_initial_state::<op_alloy_network::Optimism>(&sender).await?;
         debug!(sender = %sender, "State initialized");
 
         // Deploy system contracts based on spec
@@ -69,8 +67,7 @@ impl Cmd {
         state.deploy_system_contracts(spec);
         debug!(spec = ?spec, "System contracts deployed");
 
-        let pre_execution_nonce =
-            state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
+        let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Run-specific: If not in create mode, set the code at the receiver address
