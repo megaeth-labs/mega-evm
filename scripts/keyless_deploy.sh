@@ -147,13 +147,27 @@ else
     read -r confirm
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
         echo "Aborted."
+        echo ""
+        echo "=== Funding Transaction ==="
+        echo "To:    $SIGNER"
+        echo "Value: ${DEFICIT} wei"
         exit 1
     fi
-    FUND_TX=$(cast send "$SIGNER" \
+    set +e
+    FUND_RESULT=$(cast send "$SIGNER" \
         --value "${DEFICIT}wei" \
         --rpc-url "$RPC_URL" \
         --private-key "$PRIVATE_KEY" \
-        --json | jq -r '.transactionHash')
+        --json 2>&1)
+    FUND_STATUS=$?
+    set -e
+
+    if [ $FUND_STATUS -ne 0 ]; then
+        echo "ERROR: Failed to fund signer"
+        echo "$FUND_RESULT"
+        exit 1
+    fi
+    FUND_TX=$(echo "$FUND_RESULT" | jq -r '.transactionHash')
     echo "Funded successfully (tx: $FUND_TX)"
 fi
 echo ""
@@ -165,15 +179,33 @@ printf "Proceed with deployment? [y/N] "
 read -r confirm
 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
     echo "Aborted."
+    echo ""
+    echo "=== Deployment Transaction ==="
+    echo "To:       $SYSTEM_CONTRACT"
+    echo "Function: keylessDeploy(bytes,uint256)"
+    echo "Args:     0x${KEYLESS_TX} $GAS_OVERRIDE"
+    echo ""
+    echo "Calldata:"
+    cast calldata "keylessDeploy(bytes,uint256)" "0x${KEYLESS_TX}" "$GAS_OVERRIDE"
     exit 1
 fi
 
-DEPLOY_TX=$(cast send "$SYSTEM_CONTRACT" \
+set +e
+DEPLOY_RESULT=$(cast send "$SYSTEM_CONTRACT" \
     "keylessDeploy(bytes,uint256)" \
     "0x${KEYLESS_TX}" "$GAS_OVERRIDE" \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY" \
-    --json | jq -r '.transactionHash')
+    --json 2>&1)
+DEPLOY_STATUS=$?
+set -e
+
+if [ $DEPLOY_STATUS -ne 0 ]; then
+    echo "ERROR: Failed to send deployment transaction"
+    echo "$DEPLOY_RESULT"
+    exit 1
+fi
+DEPLOY_TX=$(echo "$DEPLOY_RESULT" | jq -r '.transactionHash')
 echo "Deploy tx: $DEPLOY_TX"
 echo ""
 

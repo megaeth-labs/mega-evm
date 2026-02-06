@@ -1704,3 +1704,82 @@ fn test_keyless_deploy_twice_fails_second_time() {
 
     assert_revert_with_error(&result2, KeylessDeployError::ContractAlreadyExists);
 }
+
+// =============================================================================
+// Beneficiary Fee Collection Tests
+// =============================================================================
+
+/// Default beneficiary address (block.coinbase) - receives transaction fees
+const DEFAULT_BENEFICIARY: Address = Address::ZERO;
+
+#[test]
+fn test_beneficiary_receives_fees_on_success() {
+    let mut db = MemoryDatabase::default();
+
+    // Fund signer with enough ETH for gas
+    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        Bytes::from_static(CREATE2_FACTORY_TX),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    // Verify success
+    let ResultAndState { result, state } = result;
+    assert!(matches!(result, ExecutionResult::Success { .. }));
+
+    // Decode return value to get gasUsed
+    let output = result.output().unwrap();
+    let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output).unwrap();
+
+    // Verify beneficiary (Address::ZERO) received fees: gas_used × gas_price (100 gwei)
+    let expected_fee = U256::from(ret.gasUsed) * U256::from(100_000_000_000u64);
+    let beneficiary_account =
+        state.get(&DEFAULT_BENEFICIARY).expect("beneficiary should exist in state");
+    assert_eq!(
+        beneficiary_account.info.balance, expected_fee,
+        "beneficiary should receive tx fees from keyless deploy sandbox"
+    );
+}
+
+#[test]
+fn test_beneficiary_receives_fees_on_execution_failure() {
+    let mut db = MemoryDatabase::default();
+
+    // Create tx with reverting init code: PUSH1 0x00 PUSH1 0x00 REVERT
+    let init_code = Bytes::from_static(&hex!("60006000fd"));
+    let (tx_bytes, signer) = create_pre_eip155_deploy_tx(init_code);
+
+    // Fund signer
+    let initial_balance = U256::from(1_000_000_000_000_000_000_000u128);
+    db.set_account_balance(signer, initial_balance);
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        tx_bytes,
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    // Verify it returns success with error data (ExecutionReverted is wrapped as success)
+    let ResultAndState { result, state } = result;
+    assert!(matches!(result, ExecutionResult::Success { .. }));
+
+    // Decode return value to get gasUsed
+    let output = result.output().unwrap();
+    let ret = IKeylessDeploy::keylessDeployCall::abi_decode_returns(output).unwrap();
+    assert!(!ret.errorData.is_empty(), "Should have ExecutionReverted error");
+
+    // Even though execution reverted, beneficiary should receive fees
+    let expected_fee = U256::from(ret.gasUsed) * U256::from(100_000_000_000u64);
+    let beneficiary_account =
+        state.get(&DEFAULT_BENEFICIARY).expect("beneficiary should exist in state");
+    assert_eq!(
+        beneficiary_account.info.balance, expected_fee,
+        "beneficiary should receive fees even when sandbox execution fails"
+    );
+}
