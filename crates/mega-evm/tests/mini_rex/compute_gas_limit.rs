@@ -1279,3 +1279,47 @@ fn test_compute_gas_high_usage() {
     // 1000 iterations × 11 gas = 11,000 gas
     assert!(compute_gas_used >= 21_000, "Expected at least 10,000 gas, got {}", compute_gas_used);
 }
+
+#[test]
+fn test_volatile_data_access_with_non_restrictive_detention_reports_compute_gas_limit() {
+    // When volatile data is accessed but the detention limit is NOT more restrictive than the
+    // per-tx compute gas limit, exceeding the per-tx compute gas limit should report
+    // ComputeGasLimitExceeded, NOT VolatileDataAccessOutOfGas.
+    //
+    // The `transact` helper uses `EvmTxRuntimeLimits::no_limits()` which sets volatile access
+    // limits to u64::MAX, so detention is never restrictive.
+
+    // Contract that accesses TIMESTAMP (volatile data) then does expensive work
+    let mut builder = BytecodeBuilder::default()
+        .append(TIMESTAMP) // Access volatile data
+        .append(POP);
+    // Do enough SSTOREs to exceed the compute gas limit
+    // Each SSTORE (zero -> non-zero) costs ~22,100 compute gas
+    // 1000 SSTOREs x 22,100 = 22.1M compute gas
+    for i in 1..=1000u32 {
+        builder = builder.push_number(i).push_number(i).append(SSTORE);
+    }
+    let bytecode = builder.append(STOP).build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+        .account_code(CONTRACT, bytecode);
+
+    let tx =
+        TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(1_000_000_000_000).build_fill();
+
+    // Set compute gas limit to 20M (will be exceeded by 22.1M of SSTOREs)
+    let compute_gas_limit = 19_000_000;
+    let (result, _) = transact(MegaSpecId::MINI_REX, &mut db, compute_gas_limit, tx).unwrap();
+
+    // Should halt with ComputeGasLimitExceeded, NOT VolatileDataAccessOutOfGas
+    assert!(
+        is_compute_gas_limit_exceeded(&result),
+        "Expected ComputeGasLimitExceeded when detention is not restrictive, got {:?}",
+        result.result
+    );
+
+    let (limit, actual) = get_compute_gas_limit_info(&result).unwrap();
+    assert_eq!(limit, compute_gas_limit);
+    assert!(actual > limit);
+}

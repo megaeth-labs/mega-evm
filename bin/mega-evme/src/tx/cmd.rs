@@ -6,7 +6,7 @@ use mega_evm::{
         context::result::ExecutionResult, context_interface::transaction::Transaction as _,
         primitives::TxKind, DatabaseRef,
     },
-    MegaTransaction, MegaTxType,
+    EvmTxRuntimeLimits, MegaTransaction, MegaTxType,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -92,7 +92,11 @@ impl Cmd {
 
         // Step 3: Execute transaction
         info!("Executing transaction");
-        let evm_context = self.env_args.create_evm_context(&mut state)?;
+        let tx_limits = EvmTxRuntimeLimits::from_spec(spec)
+            .with_block_env_access_compute_gas_limit(u64::MAX)
+            .with_oracle_access_compute_gas_limit(u64::MAX);
+        let evm_context =
+            self.env_args.create_evm_context(&mut state)?.with_tx_runtime_limits(tx_limits);
         let start = Instant::now();
         let (exec_result, evm_state, trace_data) =
             self.trace_args.execute_transaction(evm_context, tx.clone())?;
