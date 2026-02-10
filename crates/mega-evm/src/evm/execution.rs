@@ -461,20 +461,22 @@ where
         Ok(result.map_haltreason(|reason| {
             let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             if additional_limit.is_exceeding_limit_halt(&reason) {
-                if let Some((access_type, compute_gas_limit)) = volatile_info {
-                    // it's due to volatile data access
-                    MegaHaltReason::VolatileDataAccessOutOfGas {
-                        access_type,
-                        limit: compute_gas_limit,
-                        actual: additional_limit.compute_gas_tracker.current_gas_used(),
+                if let Some((access_type, volatile_compute_gas_limit)) = volatile_info {
+                    let actual = additional_limit.compute_gas_tracker.current_gas_used();
+                    if actual > volatile_compute_gas_limit {
+                        return MegaHaltReason::VolatileDataAccessOutOfGas {
+                            access_type,
+                            limit: volatile_compute_gas_limit,
+                            actual,
+                        };
                     }
-                } else {
-                    // normal additional limit exceeded without volatile data access
-                    additional_limit
-                        .check_limit()
-                        .maybe_halt_reason()
-                        .expect("should have a halt reason")
                 }
+                // normal additional limit exceeded (no volatile data access, or detention
+                // was not more restrictive than the per-tx compute gas limit)
+                additional_limit
+                    .check_limit()
+                    .maybe_halt_reason()
+                    .expect("should have a halt reason")
             } else {
                 // not due to additional limit exceeded
                 MegaHaltReason::Base(reason)
