@@ -58,7 +58,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX1` → `MINI_REX2` → `R
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _At present, both `REX3` and `REX4` are unstable specs._
+  - _At present, `REX4` is the unstable spec._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
   - Specifications of each spec can be found in `./specs`, which should always be maintained to be consistent with the implementation.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).

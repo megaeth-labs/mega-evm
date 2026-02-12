@@ -10,10 +10,10 @@ It introduces several behavioral changes while inheriting all Rex2 behavior.
 Rex3 increases the compute gas cap applied after oracle contract access:
 
 - **Previous limit (MINI_REX through REX2):** 1,000,000 (1M) compute gas
-- **New limit (REX3):** 10,000,000 (10M) compute gas
+- **New limit (REX3):** 20,000,000 (20M) compute gas
 
 The block environment access compute gas limit remains unchanged at 20M.
-When both block environment and oracle are accessed, the most restrictive cap still wins (10M from oracle, since 10M < 20M).
+When both block environment and oracle are accessed, both caps are now equal (20M), so neither is more restrictive than the other.
 
 This change allows transactions that read oracle data to perform more computation after the oracle access, reducing the frequency of `VolatileDataAccessOutOfGas` halts for legitimate use cases.
 
