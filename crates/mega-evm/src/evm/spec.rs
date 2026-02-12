@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 /// - [`SpecId::REX1`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX2`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX3`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::REX4`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 #[repr(u8)]
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
@@ -39,8 +40,10 @@ pub enum MegaSpecId {
     /// The EVM version for the *Rex2* hardfork of `MegaETH`.
     REX2,
     /// The EVM version for the *Rex3* hardfork of `MegaETH`.
-    #[default]
     REX3,
+    /// The EVM version for the *Rex4* hardfork of `MegaETH`.
+    #[default]
+    REX4,
 }
 
 /// String identifiers for `MegaETH` EVM versions.
@@ -58,6 +61,8 @@ pub mod name {
     pub const REX2: &str = "Rex2";
     /// The string identifier for the *Rex3* version of the `MegaETH` EVM.
     pub const REX3: &str = "Rex3";
+    /// The string identifier for the *Rex4* version of the `MegaETH` EVM.
+    pub const REX4: &str = "Rex4";
 }
 
 impl MegaSpecId {
@@ -74,7 +79,8 @@ impl MegaSpecId {
             Self::REX |
             Self::REX1 |
             Self::REX2 |
-            Self::REX3 => OpSpecId::ISTHMUS,
+            Self::REX3 |
+            Self::REX4 => OpSpecId::ISTHMUS,
         }
     }
 
@@ -97,6 +103,7 @@ impl From<MegaSpecId> for &'static str {
             MegaSpecId::REX1 => name::REX1,
             MegaSpecId::REX2 => name::REX2,
             MegaSpecId::REX3 => name::REX3,
+            MegaSpecId::REX4 => name::REX4,
         }
     }
 }
@@ -113,6 +120,7 @@ impl FromStr for MegaSpecId {
             name::REX1 => Ok(Self::REX1),
             name::REX2 => Ok(Self::REX2),
             name::REX3 => Ok(Self::REX3),
+            name::REX4 => Ok(Self::REX4),
             _ => Err(UnknownHardfork),
         }
     }

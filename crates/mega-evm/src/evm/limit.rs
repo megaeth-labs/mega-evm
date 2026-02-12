@@ -25,7 +25,7 @@ impl EvmTxRuntimeLimits {
             MegaSpecId::EQUIVALENCE => Self::equivalence(),
             MegaSpecId::MINI_REX => Self::mini_rex(),
             MegaSpecId::REX | MegaSpecId::REX1 | MegaSpecId::REX2 => Self::rex(),
-            MegaSpecId::REX3 => Self::rex3(),
+            MegaSpecId::REX3 | MegaSpecId::REX4 => Self::rex3(),
         }
     }
 
