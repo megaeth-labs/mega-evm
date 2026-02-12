@@ -183,8 +183,5 @@ fn test_rex3_oracle_access_still_enforces_10m_limit() {
         !result.is_success(),
         "REX3 transaction should fail: ~11M compute gas exceeds the 10M oracle access limit"
     );
-    assert!(
-        is_volatile_data_access_oog(&result),
-        "Should fail with VolatileDataAccessOutOfGas"
-    );
+    assert!(is_volatile_data_access_oog(&result), "Should fail with VolatileDataAccessOutOfGas");
 }
