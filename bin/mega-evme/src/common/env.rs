@@ -21,8 +21,8 @@ use super::{EvmeError, Result};
 #[command(next_help_heading = "Chain Options")]
 pub struct ChainArgs {
     /// Name of spec to use, possible values: `MiniRex`, `Equivalence`, `Rex`, `Rex1`, `Rex2`,
-    /// `Rex3`
-    #[arg(long = "spec", default_value = "Rex3")]
+    /// `Rex3`, `Rex4`
+    #[arg(long = "spec", default_value = "Rex4")]
     pub spec: String,
 
     /// `ChainID` to use

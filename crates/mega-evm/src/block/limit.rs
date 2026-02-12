@@ -389,14 +389,16 @@ impl BlockLimits {
             .with_tx_runtime_limits(tx_runtime_limits)
             .with_block_gas_limit(block_gas_limit);
         match hardfork {
-            MegaHardfork::Rex | MegaHardfork::Rex1 | MegaHardfork::Rex2 | MegaHardfork::Rex3 => {
-                Self {
-                    block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
-                    block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
-                    block_state_growth_limit: crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT,
-                    ..limits
-                }
-            }
+            MegaHardfork::Rex |
+            MegaHardfork::Rex1 |
+            MegaHardfork::Rex2 |
+            MegaHardfork::Rex3 |
+            MegaHardfork::Rex4 => Self {
+                block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
+                block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
+                block_state_growth_limit: crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT,
+                ..limits
+            },
             MegaHardfork::MiniRex | MegaHardfork::MiniRex2 => Self {
                 block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
                 block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,

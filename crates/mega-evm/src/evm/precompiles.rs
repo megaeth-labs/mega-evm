@@ -41,7 +41,11 @@ impl MegaPrecompiles {
         let inner = match spec {
             MegaSpecId::EQUIVALENCE => op_revm::precompiles::isthmus(),
             MegaSpecId::MINI_REX => mini_rex(),
-            MegaSpecId::REX | MegaSpecId::REX1 | MegaSpecId::REX2 | MegaSpecId::REX3 => rex(),
+            MegaSpecId::REX |
+            MegaSpecId::REX1 |
+            MegaSpecId::REX2 |
+            MegaSpecId::REX3 |
+            MegaSpecId::REX4 => rex(),
         };
 
         Self { inner: EthPrecompiles { precompiles: inner, spec: spec.into_eth_spec() }, spec }
