@@ -91,7 +91,10 @@ pub mod rex2 {
 
 /// Constants for the `REX3` spec.
 pub mod rex3 {
-    // TODO: Add constants for the `REX3` spec.
+    /// Gas limit after oracle contract access for the `REX3` spec.
+    /// Increased from 1M (used in `MINI_REX` through `REX2`) to 10M, giving oracle-accessing
+    /// transactions more room for post-oracle computation.
+    pub const ORACLE_ACCESS_REMAINING_COMPUTE_GAS: u64 = 10_000_000;
 }
 
 /// Constants for the `REX4` spec.

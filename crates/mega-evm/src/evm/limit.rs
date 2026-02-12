@@ -24,11 +24,8 @@ impl EvmTxRuntimeLimits {
         match spec {
             MegaSpecId::EQUIVALENCE => Self::equivalence(),
             MegaSpecId::MINI_REX => Self::mini_rex(),
-            MegaSpecId::REX |
-            MegaSpecId::REX1 |
-            MegaSpecId::REX2 |
-            MegaSpecId::REX3 |
-            MegaSpecId::REX4 => Self::rex(),
+            MegaSpecId::REX | MegaSpecId::REX1 | MegaSpecId::REX2 => Self::rex(),
+            MegaSpecId::REX3 | MegaSpecId::REX4 => Self::rex3(),
         }
     }
 
@@ -74,6 +71,15 @@ impl EvmTxRuntimeLimits {
                 crate::constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS,
             oracle_access_compute_gas_limit:
                 crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        }
+    }
+
+    /// Limits for the `REX3` spec.
+    fn rex3() -> Self {
+        Self {
+            oracle_access_compute_gas_limit:
+                crate::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+            ..Self::rex()
         }
     }
 }
