@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # Keyless deployment script for MegaETH
 #
@@ -20,6 +19,20 @@ SYSTEM_CONTRACT="0x6342000000000000000000000000000000000003"
 MEGA_EVME="${MEGA_EVME:-mega-evme}"
 FUND_MARGIN="${FUND_MARGIN:-1000000000000000}"  # default 0.001 ether
 export FOUNDRY_DISABLE_NIGHTLY_WARNING=1 # Suppress foundry nightly warning
+
+# Check required commands
+MISSING=()
+for cmd in cast jq python3 "$MEGA_EVME"; do
+    if ! command -v "$cmd" &>/dev/null; then
+        MISSING+=("$cmd")
+    fi
+done
+if [ ${#MISSING[@]} -ne 0 ]; then
+    echo "ERROR: Required command(s) not found: ${MISSING[*]}"
+    echo "Please install them before running this script."
+    echo "Aborting."
+    exit 1
+fi
 
 # Strip 0x prefix if present
 KEYLESS_TX="${KEYLESS_TX#0x}"
@@ -146,7 +159,7 @@ else
     printf "Proceed with funding? [y/N] "
     read -r confirm
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-        echo "Aborted."
+        echo "Funding aborted by user."
         echo ""
         echo "=== Funding Transaction ==="
         echo "To:    $SIGNER"
@@ -178,7 +191,7 @@ echo "--- Step 6: Deploying ---"
 printf "Proceed with deployment? [y/N] "
 read -r confirm
 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-    echo "Aborted."
+    echo "Deployment aborted by user."
     echo ""
     echo "=== Deployment Transaction ==="
     echo "To:       $SYSTEM_CONTRACT"
