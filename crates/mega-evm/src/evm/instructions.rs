@@ -80,7 +80,7 @@ use revm::{
 /// implements a global gas detention mechanism:
 /// 1. Remaining gas is immediately limited based on the type of volatile data:
 ///    - Block environment or beneficiary: `BLOCK_ENV_ACCESS_REMAINING_GAS` (20M gas)
-///    - Oracle contract: `ORACLE_ACCESS_REMAINING_GAS` (1M gas)
+///    - Oracle contract: `ORACLE_ACCESS_REMAINING_GAS` (1M gas pre-Rex3, 20M gas Rex3+)
 /// 2. Most restrictive limit wins: If multiple volatile data types are accessed, the minimum (most
 ///    restrictive) limit applies, regardless of access order
 /// 3. Detained gas is tracked and refunded at transaction end

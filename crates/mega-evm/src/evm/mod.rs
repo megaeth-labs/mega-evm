@@ -20,8 +20,9 @@
 //! - **`REX`**: Fixes `MiniRex` call opcode inconsistencies and refines storage gas
 //! - **`REX1`**: Resets compute gas limits between transactions
 //! - **`REX2`**: Re-enables SELFDESTRUCT with EIP-6780 semantics
-//! - **`REX3`**: Introduces per-frame additional limits (unstable)
-//! - **`REX4`**: Same as REX3 (unstable)
+//! - **`REX3`**: Increases oracle gas limit to 20M, moves oracle detention to SLOAD-based, tracks
+//!   keyless deploy compute gas
+//! - **`REX4`**: Unstable spec under active development
 
 mod context;
 mod execution;
