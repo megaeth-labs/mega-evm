@@ -41,8 +41,8 @@ use revm::{
 };
 
 use crate::{
-    constants, merge_evm_state_optional_status, ExternalEnvTypes, MegaContext, MegaEvm,
-    MegaTransaction,
+    constants, mark_frame_result_as_exceeding_limit, merge_evm_state_optional_status,
+    ExternalEnvTypes, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 
 use super::tx::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer};
@@ -151,6 +151,18 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
     let has_sufficient_gas = gas.record_cost(cost);
     if !has_sufficient_gas {
         return make_halt!();
+    }
+
+    // Rex3+: Record keyless deploy overhead gas as compute gas.
+    // The fixed overhead (100K) covers RLP decoding, signature recovery, and state filtering.
+    // Sandbox execution gas is tracked separately within the sandbox.
+    if ctx.spec.is_enabled(MegaSpecId::REX3) {
+        let mut limit = ctx.additional_limit.borrow_mut();
+        if limit.record_compute_gas(cost).exceeded_limit() {
+            let mut result = make_halt!();
+            mark_frame_result_as_exceeding_limit(&mut result);
+            return result;
+        }
     }
 
     // Step 2: Check no ether transfer

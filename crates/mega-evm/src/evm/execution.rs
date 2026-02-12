@@ -596,11 +596,14 @@ where
         frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
+        let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
         let additional_limit = self.ctx().additional_limit.clone();
 
         // Check if this is a call to the oracle contract and mark it as accessed.
         // This handles both direct transaction calls and internal CALL operations.
-        if is_mini_rex_enabled {
+        // Rex3+: Oracle access gas detention is triggered by SLOAD (not CALL), so skip this
+        // CALL-based check for Rex3 and later specs.
+        if is_mini_rex_enabled && !is_rex3_enabled {
             if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
                 // Mega system address is exempted from volatile data access enforcement.
                 if call_inputs.caller != MEGA_SYSTEM_ADDRESS {

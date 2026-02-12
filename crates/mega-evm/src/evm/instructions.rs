@@ -116,12 +116,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
-            MegaSpecId::REX2 | MegaSpecId::REX3 | MegaSpecId::REX4 => {
-                EthInstructions::new(rex2::instruction_table::<
-                    EthInterpreter,
-                    MegaContext<DB, ExtEnvs>,
-                >())
-            }
+            MegaSpecId::REX2 => EthInstructions::new(rex2::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
+            MegaSpecId::REX3 | MegaSpecId::REX4 => EthInstructions::new(rex3::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
         };
         Self { spec, inner: instruction_table }
     }
@@ -176,6 +178,33 @@ mod rex2 {
         let mut table = rex::instruction_table::<WIRE, H>();
 
         table[SELFDESTRUCT as usize] = compute_gas_ext::selfdestruct;
+
+        table
+    }
+}
+
+mod rex3 {
+    use super::*;
+
+    /// Returns the instruction table for the `REX3` spec.
+    ///
+    /// Changes from Rex2:
+    /// - SLOAD triggers gas detention when reading oracle contract storage. This replaces the
+    ///   CALL-based oracle access detection used in earlier specs.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        use revm::bytecode::opcode::*;
+        let mut table = rex2::instruction_table::<WIRE, H>();
+
+        // Rex3: SLOAD triggers gas detention for oracle contract access.
+        // The host's sload() method marks oracle access in the volatile data tracker,
+        // then the detain_gas_ext wrapper applies the compute gas limit.
+        table[SLOAD as usize] = volatile_data_ext::sload;
 
         table
     }
@@ -625,6 +654,9 @@ pub mod volatile_data_ext {
     wrap_op_detain_gas!(extcodesize, "EXTCODESIZE", compute_gas_ext::extcodesize);
     wrap_op_detain_gas!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
     wrap_op_detain_gas!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
+
+    // Added for Rex3
+    wrap_op_detain_gas!(sload, "SLOAD", compute_gas_ext::sload);
 }
 
 /// Extends opcodes with additional limit (kv update limit, data limit, etc.) enforcement.

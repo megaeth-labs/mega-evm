@@ -90,6 +90,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
 
     fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
         if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
+            // Rex3+: Mark oracle access for gas detention on SLOAD rather than CALL.
+            // The actual gas limit enforcement happens in the SLOAD instruction wrapper
+            // (detain_gas_ext::sload in instructions.rs).
+            if self.spec.is_enabled(MegaSpecId::REX3) {
+                self.volatile_data_tracker.borrow_mut().check_and_mark_oracle_access(&address);
+            }
+
             // if the oracle env provides a value, return it. Otherwise, fallback to the inner
             // context.
             if let Some(value) = self.oracle_env.borrow().get_oracle_storage(key) {
