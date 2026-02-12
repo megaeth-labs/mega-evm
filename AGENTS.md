@@ -247,5 +247,8 @@ When the agent is requested to implement a new feature or bug fix, it should con
   This is the standard convention — features are opted-in explicitly.
 - **Use `cargo check` (not `cargo clippy`) for compiler error checking.**
   Use `cargo clippy` only when specifically checking lint warnings.
+- **Keep documentation up to date.**
+  When making changes, always check whether related documentation needs updating.
+  This includes spec files in `specs/`, docs in `docs/`, and the `CLAUDE.md` itself (e.g., unstable spec marker, spec progression list, system contract table).
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.

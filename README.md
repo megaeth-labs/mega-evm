@@ -16,8 +16,8 @@ This repository contains a customized version of the revm EVM implementation spe
 
 This codebase distinguishes between two related concepts:
 
-- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`
-- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`
+- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`, `REX3`
+- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`
 
 Multiple hardforks can map to the same spec. For example, both `MiniRex` and `MiniRex2` hardforks use the `MINI_REX` spec.
 
@@ -66,6 +66,13 @@ For complete Rex1 specification, see **[Rex1.md](./specs/Rex1.md)**.
 - **Rex1 Baseline**: Inherits Rex1 behavior for all other features
 
 For complete Rex2 specification, see **[Rex2.md](./specs/Rex2.md)**.
+
+### REX3 Spec
+
+- **Increased Oracle Access Gas Limit**: Oracle access compute gas limit raised from 1M to 10M, allowing more post-oracle computation
+- **Rex2 Baseline**: Inherits all Rex2 behavior
+
+For complete Rex3 specification, see **[Rex3.md](./specs/Rex3.md)**.
 
 ## Quick Start
 
@@ -138,7 +145,7 @@ mega-evme replay 0xTxHash --rpc https://rpc.example.com
 ### Spec Selection
 
 Spec names are case-sensitive and match `MegaSpecId` strings: `Equivalence`, `MiniRex`, `Rex`,
-`Rex1`, `Rex2`. Use `--spec` for `run`/`tx`, and `--override.spec` for `replay`.
+`Rex1`, `Rex2`, `Rex3`. Use `--spec` for `run`/`tx`, and `--override.spec` for `replay`.
 
 ```bash
 # Run with a specific spec
