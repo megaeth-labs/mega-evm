@@ -59,7 +59,18 @@ PRIVATE_KEY=<funded-account-key> ./scripts/keyless_deploy.sh <keyless-tx-hex>
 PRIVATE_KEY=0x... ./scripts/keyless_deploy.sh 0xf8a58085174876e800830186a08080b853604580600e600039806000f350fe7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf31ba02222222222222222222222222222222222222222222222222222222222222222a02222222222222222222222222222222222222222222222222222222222222222
 ```
 
-Set `RPC_URL` (default `http://localhost:8545`) and `MEGA_EVME` (default: from `PATH`) environment variables as needed.
+Environment variables:
+
+| Variable      | Default                 | Description                                                         |
+| ------------- | ----------------------- | ------------------------------------------------------------------- |
+| `RPC_URL`     | `http://localhost:8545` | RPC endpoint                                                        |
+| `MEGA_EVME`   | `mega-evme` from PATH   | Path to mega-evme binary                                            |
+| `FUND_MARGIN` | `0`                     | Extra wei to fund above simulated cost (see note below)             |
+
+> **Note on `FUND_MARGIN`**: The script simulates the deployment locally to estimate the exact cost.
+> However, the L1 data fee component can fluctuate between simulation and on-chain execution.
+> `FUND_MARGIN` lets you add a safety buffer (in wei) on top of the simulated cost.
+> The default is `0` because the simulation is generally precise enough, but you can increase it if L1 fees are volatile.
 
 ### Key Points
 
@@ -83,10 +94,12 @@ interface IKeylessDeploy {
 ```
 
 **Parameters**:
+
 - `keylessDeploymentTransaction`: The original RLP-encoded pre-EIP-155 signed transaction (unmodified). The signature is verified against these exact fields.
 - `gasLimitOverride`: Gas limit to use for execution (must be ≥ the transaction's original gas limit)
 
 **Returns**:
+
 - `gasUsed`: Gas consumed by the deployment
 - `deployedAddress`: Address where the contract was deployed (zero if execution failed)
 - `errorData`: ABI-encoded error if execution failed, empty bytes on success
@@ -105,45 +118,45 @@ This distinction ensures the signer can be charged for gas even when deployment 
 
 **Validation errors (call reverts):**
 
-| Error | Cause |
-|-------|-------|
-| `MalformedEncoding()` | Invalid RLP encoding |
-| `NotContractCreation()` | Transaction has a `to` address |
-| `NotPreEIP155()` | v is not 27 or 28 (has chain ID) |
-| `NonZeroTxNonce(txNonce)` | Transaction nonce is not 0 |
-| `NoEtherTransfer()` | Ether was sent to system contract |
-| `InvalidSignature()` | Cannot recover signer |
-| `SignerNonceTooHigh(signerNonce)` | Signer nonce > 1 |
-| `InsufficientBalance()` | Signer lacks funds |
-| `ContractAlreadyExists()` | Address already has code |
-| `GasLimitTooLow(txGasLimit, providedGasLimit)` | Override < transaction's limit |
-| `NotIntercepted()` | Called from contract (not top-level) |
-| `NoContractCreated()` | Defensive: EVM bug (see [Implementation Notes](#implementation-notes)) |
-| `AddressMismatch()` | Defensive: EVM bug (see [Implementation Notes](#implementation-notes)) |
-| `InternalError(message)` | Defensive: database/storage failure |
+| Error                                          | Cause                                                                  |
+| ---------------------------------------------- | ---------------------------------------------------------------------- |
+| `MalformedEncoding()`                          | Invalid RLP encoding                                                   |
+| `NotContractCreation()`                        | Transaction has a `to` address                                         |
+| `NotPreEIP155()`                               | v is not 27 or 28 (has chain ID)                                       |
+| `NonZeroTxNonce(txNonce)`                      | Transaction nonce is not 0                                             |
+| `NoEtherTransfer()`                            | Ether was sent to system contract                                      |
+| `InvalidSignature()`                           | Cannot recover signer                                                  |
+| `SignerNonceTooHigh(signerNonce)`              | Signer nonce > 1                                                       |
+| `InsufficientBalance()`                        | Signer lacks funds                                                     |
+| `ContractAlreadyExists()`                      | Address already has code                                               |
+| `GasLimitTooLow(txGasLimit, providedGasLimit)` | Override < transaction's limit                                         |
+| `NotIntercepted()`                             | Called from contract (not top-level)                                   |
+| `NoContractCreated()`                          | Defensive: EVM bug (see [Implementation Notes](#implementation-notes)) |
+| `AddressMismatch()`                            | Defensive: EVM bug (see [Implementation Notes](#implementation-notes)) |
+| `InternalError(message)`                       | Defensive: database/storage failure                                    |
 
 **Execution errors (returned in `errorData`):**
 
-| Error | Cause |
-|-------|-------|
-| `ExecutionReverted(gasUsed, output)` | Init code reverted |
-| `ExecutionHalted(gasUsed)` | Out of gas, stack overflow, etc. |
-| `EmptyCodeDeployed(gasUsed)` | Init code returned empty bytecode |
+| Error                                | Cause                             |
+| ------------------------------------ | --------------------------------- |
+| `ExecutionReverted(gasUsed, output)` | Init code reverted                |
+| `ExecutionHalted(gasUsed)`           | Out of gas, stack overflow, etc.  |
+| `EmptyCodeDeployed(gasUsed)`         | Init code returned empty bytecode |
 
 ### Transaction Format
 
 The `keylessDeploymentTransaction` must be a pre-EIP-155 legacy transaction:
 
-| Field | Requirement |
-|-------|-------------|
-| nonce | 0 (required in signed payload) |
-| gasPrice | Any value (commonly 100 gwei) |
-| gasLimit | Any value (must be ≤ `gasLimitOverride`) |
-| to | Empty (must be contract creation) |
-| value | ETH to transfer to created contract (see [Value Transfer](#value-transfer)) |
-| data | Contract initialization bytecode |
-| v | 27 or 28 (pre-EIP-155, no chain ID) |
-| r, s | Signature components |
+| Field    | Requirement                                                                 |
+| -------- | --------------------------------------------------------------------------- |
+| nonce    | 0 (required in signed payload)                                              |
+| gasPrice | Any value (commonly 100 gwei)                                               |
+| gasLimit | Any value (must be ≤ `gasLimitOverride`)                                    |
+| to       | Empty (must be contract creation)                                           |
+| value    | ETH to transfer to created contract (see [Value Transfer](#value-transfer)) |
+| data     | Contract initialization bytecode                                            |
+| v        | 27 or 28 (pre-EIP-155, no chain ID)                                         |
+| r, s     | Signature components                                                        |
 
 ## Usage Guide
 
@@ -157,14 +170,15 @@ Before calling `keylessDeploy`, you need the original pre-signed transaction byt
 
 Common sources for well-known keyless deployment transactions:
 
-| Contract | Source |
-|----------|--------|
-| CREATE2 Factory | [Arachnid/deterministic-deployment-proxy](https://github.com/Arachnid/deterministic-deployment-proxy) |
-| EIP-1820 Registry | [EIP-1820 specification](https://eips.ethereum.org/EIPS/eip-1820) |
-| Safe Singleton Factory | [safe-global/safe-singleton-factory](https://github.com/safe-global/safe-singleton-factory) |
-| Multicall3 | [mds1/multicall](https://github.com/mds1/multicall) |
+| Contract               | Source                                                                                                |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| CREATE2 Factory        | [Arachnid/deterministic-deployment-proxy](https://github.com/Arachnid/deterministic-deployment-proxy) |
+| EIP-1820 Registry      | [EIP-1820 specification](https://eips.ethereum.org/EIPS/eip-1820)                                     |
+| Safe Singleton Factory | [safe-global/safe-singleton-factory](https://github.com/safe-global/safe-singleton-factory)           |
+| Multicall3             | [mds1/multicall](https://github.com/mds1/multicall)                                                   |
 
 You can also retrieve deployed transactions from Etherscan:
+
 1. Find the contract's creation transaction
 2. Click "More Details" → "View Input As" → "Original"
 3. Copy the full transaction input (this is the RLP-encoded signed transaction)
@@ -190,13 +204,13 @@ cast decode-tx 0xf8a58085174876e800830186a08080b853...
 
 **Verify the transaction is valid for keyless deploy:**
 
-| Field | Required | Check |
-|-------|----------|-------|
-| `to` | null/empty | Must be contract creation |
-| `v` | 27 or 28 | Must be pre-EIP-155 (no chain ID) |
-| `nonce` | 0 | Required for deterministic address |
-| `signer` | recovered | Confirms valid signature |
-| signer's on-chain nonce | ≤ 1 | Check with `cast nonce <signer>` |
+| Field                   | Required   | Check                              |
+| ----------------------- | ---------- | ---------------------------------- |
+| `to`                    | null/empty | Must be contract creation          |
+| `v`                     | 27 or 28   | Must be pre-EIP-155 (no chain ID)  |
+| `nonce`                 | 0          | Required for deterministic address |
+| `signer`                | recovered  | Confirms valid signature           |
+| signer's on-chain nonce | ≤ 1        | Check with `cast nonce <signer>`   |
 
 **Compute the expected deployment address:**
 
@@ -275,11 +289,13 @@ cast code $EXPECTED_ADDR --rpc-url $RPC
 #### Deployment Procedure
 
 1. **Fund minimally**: Transfer exactly the calculated amount to the signer
+
    ```bash
    cast send $SIGNER --value 0.05ether --rpc-url $RPC --private-key $YOUR_KEY
    ```
 
 2. **Deploy immediately**: Call `keylessDeploy` as soon as possible (ideally same block)
+
    ```bash
    # Via Foundry script or direct call
    cast send 0x6342000000000000000000000000000000000003 \
@@ -300,11 +316,13 @@ cast code $EXPECTED_ADDR --rpc-url $RPC
 > **Warning**: Do not leave excess funds in the signer address.
 
 Since `keylessDeploy` is permissionless, anyone can call it with your signer's transaction. If the signer has excess balance, an attacker can:
+
 1. Call `keylessDeploy` with intentionally low `gasLimitOverride`
 2. Deployment fails, but signer is still charged for gas consumed
 3. Repeat until signer balance is drained
 
 By funding only the exact amount needed, you ensure:
+
 - Successful deployment uses all funds productively
 - An attacker draining minimal funds wastes their own gas on the outer transaction
 - Even if griefed, the loss is bounded to your intended spend
@@ -317,9 +335,9 @@ See [Griefing Attack: Pre-Deployment Fund Burning](#griefing-attack-pre-deployme
 
 The [deterministic deployment proxy](https://github.com/Arachnid/deterministic-deployment-proxy) (CREATE2 factory) uses Nick's Method:
 
-| | Address |
-|-|---------|
-| Signer | `0x3fab184622dc19b6109349b94811493bf2a45362` |
+|          | Address                                      |
+| -------- | -------------------------------------------- |
+| Signer   | `0x3fab184622dc19b6109349b94811493bf2a45362` |
 | Contract | `0x4e59b44847b379578588920ca78fbf26c0b4956c` |
 
 ```solidity
@@ -338,9 +356,9 @@ assert(deployed == 0x4e59b44847b379578588920ca78fbf26c0b4956c);
 
 The [EIP-1820](https://eips.ethereum.org/EIPS/eip-1820) universal registry also uses Nick's Method:
 
-| | Address |
-|-|---------|
-| Signer | `0xa990077c3205cbDf861e17Fa532eeB069cE9fF96` |
+|          | Address                                      |
+| -------- | -------------------------------------------- |
+| Signer   | `0xa990077c3205cbDf861e17Fa532eeB069cE9fF96` |
 | Contract | `0x1820a4B7618BdE71Dce8cdc73aAB6C95905faD24` |
 
 ```solidity
@@ -415,6 +433,7 @@ In addition, the nonce field in the `keylessDeploymentTransaction` must be 0, ot
 **After execution**: The signer's nonce becomes 1 in the parent state (on both success and failure). This marks the signer as "used" and consumes the keyless deploy opportunity.
 
 **Replay prevention**: A second keyless deploy attempt for the same signer would either:
+
 - Find existing code at the deployment address → `ContractAlreadyExists` error
 - Find the signer nonce is now 1, but since ≤ 1 is allowed, it proceeds to the code check above
 - If the first deploy returned empty code (failure), the signer nonce is still 1, but no code exists. This is why empty code is treated as failure (`EmptyCodeDeployed`) rather than success—it prevents infinite replay of broken deployments.
@@ -423,14 +442,15 @@ In addition, the nonce field in the `keylessDeploymentTransaction` must be 0, ot
 
 The keyless deploy system uses **two separate gas contexts** with different payers:
 
-| Context | Gas Limit | Gas Price | Paid By |
-|---------|-----------|-----------|---------|
-| Outer transaction | Caller's tx gas limit | Caller's tx gas price | Caller (transaction sender) |
-| Sandbox execution | `gasLimitOverride` | Legacy tx's `gasPrice` | Signer (balance deducted directly) |
+| Context           | Gas Limit             | Gas Price              | Paid By                            |
+| ----------------- | --------------------- | ---------------------- | ---------------------------------- |
+| Outer transaction | Caller's tx gas limit | Caller's tx gas price  | Caller (transaction sender)        |
+| Sandbox execution | `gasLimitOverride`    | Legacy tx's `gasPrice` | Signer (balance deducted directly) |
 
 #### Outer Transaction (Caller Pays)
 
 The caller submits a normal transaction calling `keylessDeploy(...)`. This transaction pays for:
+
 - Standard transaction intrinsic costs
 - System contract overhead (~100,000 gas fixed cost)
 - Any calldata costs
@@ -442,15 +462,19 @@ The outer gas price is whatever the caller's transaction specifies—completely 
 The signer is not actually sending a transaction. Instead, the system contract **explicitly debits the signer's ETH balance** to simulate gas payment:
 
 **Before execution (balance check)**:
+
 ```
 require(signer.balance >= gasLimitOverride × legacyTx.gasPrice + legacyTx.value)
 ```
+
 If insufficient, reverts with `InsufficientBalance()`.
 
 **After execution (actual charge)**:
+
 ```
 signer.balance -= gasUsed × legacyTx.gasPrice + valueTransferred
 ```
+
 Where `gasUsed` is the actual gas consumed (not the full `gasLimitOverride`), after applying standard EVM gas refunds.
 
 **Refund handling**: Standard EVM refund mechanics apply within the sandbox. Refunds reduce `gasUsed` and thus reduce the amount debited from the signer. Refunds accrue to the signer, not the outer caller.
@@ -460,6 +484,7 @@ Where `gasUsed` is the actual gas consumed (not the full `gasLimitOverride`), af
 #### Gas Price Semantics
 
 The `gasPrice` field in the signed legacy transaction is interpreted as a simple multiplier for gas costs within the sandbox. It is:
+
 - **Not** validated against any base fee or minimum
 - **Not** subject to EIP-1559 mechanics
 - **Not** split between L1/L2 fees
@@ -470,14 +495,15 @@ This is intentional: the signed transaction was created for other chains and can
 
 The keyless deployment system handles ETH value in two distinct contexts:
 
-| Context | Requirement | Purpose |
-|---------|-------------|---------|
-| Outer call to `keylessDeploy()` | Must be `msg.value == 0` | Prevents accidental ETH loss |
+| Context                           | Requirement                       | Purpose                      |
+| --------------------------------- | --------------------------------- | ---------------------------- |
+| Outer call to `keylessDeploy()`   | Must be `msg.value == 0`          | Prevents accidental ETH loss |
 | Inner keyless transaction `value` | Any amount (deducted from signer) | ETH sent to created contract |
 
 **How it works:**
 
 1. **Balance check**: Before execution, the signer must have sufficient balance:
+
    ```
    signer.balance >= (gasLimitOverride × gasPrice) + innerTx.value
    ```
@@ -493,26 +519,31 @@ The keyless deployment system handles ETH value in two distinct contexts:
 Validation occurs in four phases:
 
 **Phase 1: Call Validation**
+
 - `msg.value == 0` — no ether sent to system contract (`NoEtherTransfer`)
 - `gasLimitOverride >= tx.gasLimit` — override must be sufficient (`GasLimitTooLow`)
 
 **Phase 2: RLP Decoding (Structural Validation)**
+
 - The input must be valid RLP encoding of a legacy transaction (`MalformedEncoding`)
 - EIP-2718 typed envelopes (starting with 0x01, 0x02, etc.) are rejected as `MalformedEncoding`
 - The `to` field must be empty (contract creation) (`NotContractCreation`)
 - The `v` value must be 27 or 28 (pre-EIP-155, no chain ID) (`NotPreEIP155`)
 
 **Phase 3: Signature Recovery (Cryptographic Validation)**
+
 - Signature components (r, s) must be valid secp256k1 curve points
 - Invalid signatures (corrupted r/s, zero values) fail with `InvalidSignature`
 - Alloy's signature recovery is used, which handles standard ECDSA recovery
 
 **Phase 4: On-Chain Preconditions**
+
 - Signer nonce ≤ 1 (`SignerNonceTooHigh`)
 - Signer balance ≥ `gasLimitOverride × gasPrice + value` (`InsufficientBalance`)
 - No existing code at deployment address (`ContractAlreadyExists`)
 
 **Note on Signature Malleability**: Modifying the signature (r or s values) changes the recovered signer address. This means:
+
 - A different signature produces a different signer identity
 - The new signer will likely have insufficient balance
 - This is not a security concern—each signature uniquely identifies its signer
@@ -528,11 +559,13 @@ The "sandbox" is an internal execution context that allows applying partial stat
 The system contract has two categories of errors with different behaviors:
 
 **Validation errors (revert)**: These revert the entire `keylessDeploy` call. The outer transaction fails (unless caught via try/catch). No state changes occur.
+
 - `MalformedEncoding`, `NotContractCreation`, `NotPreEIP155`, `NoEtherTransfer`
 - `InvalidSignature`, `SignerNonceTooHigh`, `InsufficientBalance`
 - `ContractAlreadyExists`, `GasLimitTooLow`, `NotIntercepted`
 
 **Execution errors (return with error data)**: These return normally (do not revert), encoding the error in the return data. State changes for gas charges are applied.
+
 - `ExecutionReverted(gasUsed, output)` — init code called `revert`
 - `ExecutionHalted(gasUsed)` — out of gas, stack overflow, etc.
 - `EmptyCodeDeployed(gasUsed)` — init code returned empty bytecode
@@ -541,15 +574,16 @@ This distinction is why the signer can be charged for gas even on deployment fai
 
 #### State Application
 
-| Outcome | Contract deployed | Signer charged | Logs emitted | Signer nonce |
-|---------|-------------------|----------------|--------------|--------------|
-| Success | ✓ | ✓ (gasUsed × gasPrice) | ✓ | → 1 |
-| Execution error | ✗ | ✓ (gasUsed × gasPrice) | ✗ | → 1 |
-| Validation error | ✗ | ✗ (call reverts) | ✗ | unchanged |
+| Outcome          | Contract deployed | Signer charged         | Logs emitted | Signer nonce |
+| ---------------- | ----------------- | ---------------------- | ------------ | ------------ |
+| Success          | ✓                 | ✓ (gasUsed × gasPrice) | ✓            | → 1          |
+| Execution error  | ✗                 | ✓ (gasUsed × gasPrice) | ✗            | → 1          |
+| Validation error | ✗                 | ✗ (call reverts)       | ✗            | unchanged    |
 
 #### Log Propagation
 
 On successful deployment, logs emitted during contract initialization are propagated to the outer transaction context:
+
 - Log addresses reflect the actual emitting contract (the newly deployed contract or contracts it called)
 - Topics and data are unchanged
 - Log ordering is preserved; logs appear after any logs emitted before the `keylessDeploy` call
@@ -584,7 +618,7 @@ The keyless deploy system is designed to ensure that **any sandbox execution tha
    - Too low to complete deployment (causes `ExecutionHalted` / out-of-gas)
 3. Repeating until the signer's balance is drained
 
-**Why this matters**: This attack window exists *before* the first successful deployment—exactly when users are trying to bootstrap canonical contracts. After successful deployment, the `ContractAlreadyExists` check prevents further calls, but by then the attack window has closed naturally.
+**Why this matters**: This attack window exists _before_ the first successful deployment—exactly when users are trying to bootstrap canonical contracts. After successful deployment, the `ContractAlreadyExists` check prevents further calls, but by then the attack window has closed naturally.
 
 **Why we don't prevent this at the protocol level**: Any mitigation that restricts who can call `keylessDeploy` would break the permissionless nature that makes keyless deployment useful (anyone should be able to deploy these canonical contracts). The signer address is derived from a public transaction, so there's no secret to protect.
 
@@ -606,12 +640,12 @@ Operators deploying via keyless deploy should:
 
   **Why this restriction?** It prevents wrap-and-revert attacks. If a contract could call `keylessDeploy`, observe the result, and then revert, the signer's gas charge would be rolled back—enabling free spam. By requiring `depth == 0`, the sandbox result IS the transaction result; there's no outer context that can revert.
 
-  | Scenario | Intercepted? | Result |
-  |----------|--------------|--------|
-  | EOA sends tx to system contract | ✅ Yes | Sandbox executes |
-  | Contract calls system contract | ❌ No | Reverts with `NotIntercepted()` |
-  | EIP-7702 EOA sends direct tx | ✅ Yes | Sandbox executes (EIP-7702 delegation doesn't affect outgoing txs) |
-  | EIP-7702 delegated code calls system contract | ❌ No | Reverts with `NotIntercepted()` |
+  | Scenario                                      | Intercepted? | Result                                                             |
+  | --------------------------------------------- | ------------ | ------------------------------------------------------------------ |
+  | EOA sends tx to system contract               | ✅ Yes       | Sandbox executes                                                   |
+  | Contract calls system contract                | ❌ No        | Reverts with `NotIntercepted()`                                    |
+  | EIP-7702 EOA sends direct tx                  | ✅ Yes       | Sandbox executes (EIP-7702 delegation doesn't affect outgoing txs) |
+  | EIP-7702 delegated code calls system contract | ❌ No        | Reverts with `NotIntercepted()`                                    |
 
 - **No ether to system contract**: The outer call must have `msg.value == 0`. This is separate from the inner keyless transaction's `value` field—see [Value Transfer](#value-transfer).
 
@@ -623,17 +657,18 @@ Operators deploying via keyless deploy should:
 
 The implementation includes defensive checks that should never trigger under normal operation. These exist to catch EVM bugs rather than user errors:
 
-| Internal Error | Invariant Being Checked | If Triggered |
-|----------------|------------------------|--------------|
-| `NoContractCreated()` | CREATE returns an address on success | EVM returned success without an address—indicates EVM bug |
-| `AddressMismatch()` | CREATE address = `keccak256(rlp([signer, 0]))[12:]` | EVM computed wrong address—indicates EVM bug |
-| `InternalError(msg)` | Database operations succeed | Storage/database failure during execution |
+| Internal Error        | Invariant Being Checked                             | If Triggered                                              |
+| --------------------- | --------------------------------------------------- | --------------------------------------------------------- |
+| `NoContractCreated()` | CREATE returns an address on success                | EVM returned success without an address—indicates EVM bug |
+| `AddressMismatch()`   | CREATE address = `keccak256(rlp([signer, 0]))[12:]` | EVM computed wrong address—indicates EVM bug              |
+| `InternalError(msg)`  | Database operations succeed                         | Storage/database failure during execution                 |
 
 **If you encounter any of these errors, please report to the MegaETH team**—they indicate a bug in the EVM implementation, not a problem with your transaction.
 
 ### Why uint64 for gasUsed?
 
 The return type uses `uint64` for `gasUsed` because:
+
 1. It matches the EVM's native gas accounting type
 2. Maximum value (~18 exagas) far exceeds any realistic gas limit
 3. More efficient ABI encoding than uint256

@@ -9,7 +9,7 @@
 #   PRIVATE_KEY  - Private key of a funded account (required)
 #   RPC_URL      - RPC endpoint (default: http://localhost:8545)
 #   MEGA_EVME    - Path to mega-evme binary (default: mega-evme from PATH)
-#   FUND_MARGIN  - Extra wei to fund above simulated cost (default: 0.001 ether)
+#   FUND_MARGIN  - Extra wei to fund above simulated cost (default: 0)
 
 KEYLESS_TX="${1:?Usage: PRIVATE_KEY=<key> $0 <keyless-tx-hex>}"
 : "${PRIVATE_KEY:?PRIVATE_KEY environment variable is required}"
@@ -17,7 +17,7 @@ RPC_URL="${RPC_URL:-http://localhost:8545}"
 
 SYSTEM_CONTRACT="0x6342000000000000000000000000000000000003"
 MEGA_EVME="${MEGA_EVME:-mega-evme}"
-FUND_MARGIN="${FUND_MARGIN:-1000000000000000}"  # default 0.001 ether
+FUND_MARGIN="${FUND_MARGIN:-0}"  # default 0 ether funding margin
 export FOUNDRY_DISABLE_NIGHTLY_WARNING=1 # Suppress foundry nightly warning
 
 # Check required commands
