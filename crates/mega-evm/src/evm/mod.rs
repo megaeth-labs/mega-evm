@@ -20,6 +20,7 @@
 //! - **`REX`**: Fixes `MiniRex` call opcode inconsistencies and refines storage gas
 //! - **`REX1`**: Resets compute gas limits between transactions
 //! - **`REX2`**: Re-enables SELFDESTRUCT with EIP-6780 semantics
+//! - **`REX3`**: Introduces per-frame additional limits (unstable)
 
 mod context;
 mod execution;
