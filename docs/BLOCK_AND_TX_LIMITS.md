@@ -255,6 +255,9 @@ The REX3 specification inherits all REX limits but increases the oracle access c
 **Changes from REX/REX1/REX2:**
 
 - `oracle_access_compute_gas_limit` - 20,000,000 gas (20M, up from 1M)
+- Oracle gas detention now triggers on SLOAD from oracle storage instead of CALL to oracle contract.
+  This means simply calling the oracle without reading storage no longer activates gas detention.
+- Keyless deploy overhead gas (100K) is now recorded as compute gas, counting toward the 200M per-transaction compute gas limit.
 
 All other limits remain the same as REX.
 

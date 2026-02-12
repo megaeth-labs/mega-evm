@@ -18,15 +18,15 @@ use alloy_primitives::Address;
 ///
 /// # Key Properties
 ///
-/// - **Type-Specific Limits**: Block env/beneficiary access → 20M compute gas, Oracle access → 1M
-///   compute gas
+/// - **Type-Specific Limits**: Block env/beneficiary access → 20M compute gas, Oracle access →
+///   configurable (1M pre-Rex3, 20M Rex3+)
 /// - **Most Restrictive Wins**: Multiple accesses with different limits → minimum limit applied
 /// - **Order Independent**: Oracle→BlockEnv or BlockEnv→Oracle both result in same final limit
 /// - **Compute Gas Only**: Only limits compute gas costs, not storage gas cost
 ///
 /// # Example Flows
 ///
-/// ## Example 1: Block env then oracle (currently 20M > 1M)
+/// ## Example 1: Block env then oracle (pre-Rex3, oracle limit = 1M)
 /// ```ignore
 /// // Transaction starts with compute gas limit of 30M
 /// TIMESTAMP opcode:
@@ -40,7 +40,7 @@ use alloy_primitives::Address;
 /// // Caller applies 1M compute gas limit to AdditionalLimit
 /// ```
 ///
-/// ## Example 2: Oracle then block env (order independent)
+/// ## Example 2: Oracle then block env (pre-Rex3, order independent)
 /// ```ignore
 /// // Transaction starts with compute gas limit of 30M
 /// CALL(oracle) opcode:
@@ -53,6 +53,8 @@ use alloy_primitives::Address;
 ///
 /// // Caller applies 1M compute gas limit to AdditionalLimit
 /// ```
+///
+/// In Rex3+, the oracle access limit is also 20M, so both limits are equal.
 #[derive(Debug, Clone)]
 pub struct VolatileDataAccessTracker {
     /// Unified bitmap tracking all types of volatile data access.

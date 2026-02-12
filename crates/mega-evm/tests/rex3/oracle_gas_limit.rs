@@ -8,7 +8,7 @@ use mega_evm::{
     ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
-    bytecode::opcode::{CALL, GAS, POP, PUSH0, SLOAD, SSTORE, STOP},
+    bytecode::opcode::{CALL, GAS, POP, PUSH0, SLOAD, SSTORE, STOP, TIMESTAMP},
     context::{result::ExecutionResult, TxEnv},
     handler::EvmTr,
     inspector::NoOpInspector,
@@ -16,6 +16,9 @@ use revm::{
 
 const CALLER: alloy_primitives::Address = address!("2000000000000000000000000000000000000002");
 const CALLEE: alloy_primitives::Address = address!("1000000000000000000000000000000000000001");
+const CONTRACT_B: alloy_primitives::Address = address!("3000000000000000000000000000000000000003");
+const REGULAR_CONTRACT: alloy_primitives::Address =
+    address!("4000000000000000000000000000000000000004");
 
 /// Helper function to execute a transaction with the given spec and database.
 fn execute_transaction(
@@ -259,5 +262,173 @@ fn test_rex3_direct_oracle_sload_triggers_detention() {
         compute_gas_limit,
         mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
         "REX3: SLOAD from oracle contract should trigger 20M gas detention"
+    );
+}
+
+// =============================================================================
+// Rex3: Additional oracle SLOAD detention tests
+// =============================================================================
+
+/// Test that SLOAD from a regular (non-oracle) contract does NOT trigger gas detention.
+/// Only SLOAD from oracle contract storage should trigger detention.
+#[test]
+fn test_rex3_sload_from_non_oracle_contract_no_detention() {
+    // Regular contract does SLOAD(0) - this should NOT trigger oracle detention
+    let regular_code = BytecodeBuilder::default()
+        .append(PUSH0) // key = 0
+        .append(SLOAD) // SLOAD from regular contract's own storage
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    // Callee calls the regular contract
+    let callee_bytecode = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(0u8) // value: 0 wei
+        .push_address(REGULAR_CONTRACT)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(REGULAR_CONTRACT, regular_code);
+    db.set_account_code(CALLEE, callee_bytecode);
+
+    let (result, compute_gas_limit) = execute_transaction(MegaSpecId::REX3, &mut db, CALLEE);
+
+    assert!(result.is_success(), "Transaction should succeed, got: {:?}", result);
+    // Compute gas limit should remain at the default (200M) - no detention triggered
+    assert_eq!(
+        compute_gas_limit,
+        mega_evm::constants::rex::TX_COMPUTE_GAS_LIMIT,
+        "SLOAD from non-oracle contract should NOT trigger gas detention"
+    );
+}
+
+/// Test that nested calls through an intermediate contract still trigger detention when
+/// the oracle's SLOAD is reached.
+/// Call chain: CALLEE -> `CONTRACT_B` -> ORACLE (SLOAD) -> detention at 20M
+#[test]
+fn test_rex3_nested_call_oracle_sload_triggers_detention() {
+    // Oracle contract code: SLOAD(0) + POP + STOP
+    let oracle_code = build_oracle_sload_code();
+
+    // Contract B: calls oracle contract
+    let contract_b_code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(0u8) // value: 0 wei
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    // Callee: calls Contract B
+    let callee_bytecode = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(0u8) // value: 0 wei
+        .push_address(CONTRACT_B)
+        .append(GAS)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
+    db.set_account_code(CONTRACT_B, contract_b_code);
+    db.set_account_code(CALLEE, callee_bytecode);
+
+    let (result, compute_gas_limit) = execute_transaction(MegaSpecId::REX3, &mut db, CALLEE);
+
+    assert!(result.is_success(), "Transaction should succeed, got: {:?}", result);
+    assert_eq!(
+        compute_gas_limit,
+        mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        "Nested call through intermediate contract should still trigger 20M oracle detention"
+    );
+}
+
+/// Test that accessing both block env (TIMESTAMP) and oracle SLOAD results in the combined
+/// (minimum) compute gas limit. In Rex3, both limits are 20M, so the combined limit is 20M.
+#[test]
+fn test_rex3_block_env_and_oracle_sload_combined_limit() {
+    // Oracle contract code: SLOAD(0) + POP + STOP
+    let oracle_code = build_oracle_sload_code();
+
+    // Callee: TIMESTAMP (block env access) + CALL oracle (SLOAD access)
+    let callee_bytecode = BytecodeBuilder::default()
+        .append(TIMESTAMP) // Block env access -> 20M limit
+        .append(POP)
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(0u8) // value: 0 wei
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS)
+        .append(CALL) // Oracle SLOAD access -> 20M limit
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
+    db.set_account_code(CALLEE, callee_bytecode);
+
+    let (result, compute_gas_limit) = execute_transaction(MegaSpecId::REX3, &mut db, CALLEE);
+
+    assert!(result.is_success(), "Transaction should succeed, got: {:?}", result);
+    // Both block env (20M) and oracle (20M) limits are equal, so combined = min(20M, 20M) = 20M
+    assert_eq!(
+        compute_gas_limit,
+        mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        "Combined block env + oracle access should result in 20M limit in Rex3"
+    );
+}
+
+/// Test that calling oracle with sendHint (intercepted in `frame_init`) does NOT trigger
+/// SLOAD-based detention in Rex3, since sendHint is intercepted before the oracle code
+/// executes any SLOAD.
+#[test]
+fn test_rex3_send_hint_call_no_detention() {
+    // Oracle contract code that has sendHint ABI entry but no SLOAD.
+    // In practice, sendHint calls are intercepted in frame_init before the oracle code runs,
+    // so the oracle bytecode doesn't matter. We deploy an oracle with just STOP to confirm.
+    let oracle_code = BytecodeBuilder::default().append(STOP).build();
+
+    // Build sendHint(bytes32,bytes) calldata
+    use alloy_sol_types::SolCall;
+    let hint_call =
+        mega_evm::IOracle::sendHintCall { topic: alloy_primitives::B256::ZERO, data: Bytes::new() };
+    let hint_calldata: Vec<u8> = hint_call.abi_encode();
+
+    // Callee: store sendHint calldata in memory, then CALL oracle with it
+    let callee_bytecode = BytecodeBuilder::default()
+        .mstore(0, &hint_calldata)
+        .push_number(0u8) // retSize
+        .push_number(0u8) // retOffset
+        .push_number(hint_calldata.len() as u64) // argsLength
+        .push_number(0u8) // argsOffset
+        .push_number(0u8) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS) // gas
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
+    db.set_account_code(CALLEE, callee_bytecode);
+
+    let (result, compute_gas_limit) = execute_transaction(MegaSpecId::REX3, &mut db, CALLEE);
+
+    assert!(result.is_success(), "Transaction should succeed, got: {:?}", result);
+    // sendHint is intercepted before oracle code runs, so no SLOAD -> no detention
+    assert_eq!(
+        compute_gas_limit,
+        mega_evm::constants::rex::TX_COMPUTE_GAS_LIMIT,
+        "sendHint call should NOT trigger SLOAD-based gas detention in Rex3"
     );
 }

@@ -70,6 +70,8 @@ For complete Rex2 specification, see **[Rex2.md](./specs/Rex2.md)**.
 ### REX3 Spec
 
 - **Increased Oracle Access Gas Limit**: Oracle access compute gas limit raised from 1M to 20M, allowing more post-oracle computation
+- **SLOAD-based Oracle Detention**: Oracle gas detention triggers on SLOAD from oracle storage instead of CALL to oracle contract
+- **Keyless Deploy Compute Gas Tracking**: Records the 100K keyless deploy overhead as compute gas
 - **Rex2 Baseline**: Inherits all Rex2 behavior
 
 For complete Rex3 specification, see **[Rex3.md](./specs/Rex3.md)**.

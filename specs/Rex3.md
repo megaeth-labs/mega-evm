@@ -28,9 +28,19 @@ This more accurately captures actual oracle data access: only transactions that 
 - **Previous behavior (MINI_REX through REX2):** CALL to oracle contract → triggers gas detention
 - **New behavior (REX3):** SLOAD from oracle contract storage → triggers gas detention
 
+The SLOAD-based detention is caller-agnostic: any SLOAD that reads from the oracle contract's storage triggers detention, regardless of which contract initiated the call chain.
+For example, if Contract A calls Contract B, which then calls the oracle contract, the oracle's SLOAD triggers detention for the entire transaction.
+
+DELEGATECALL to the oracle contract does **not** trigger detention.
+This is because DELEGATECALL executes the oracle's code in the caller's context, so SLOAD reads the caller's storage, not the oracle contract's storage.
+
+The `MEGA_SYSTEM_ADDRESS` exemption applies to the SLOAD-based path, but with a semantic difference from pre-Rex3.
+In the pre-Rex3 CALL-based path, the exemption checked the frame-level caller (`call_inputs.caller`).
+In Rex3, the exemption checks the transaction sender (`TxEnv.caller` via `Host::caller()`), which means the entire transaction from `MEGA_SYSTEM_ADDRESS` is exempted regardless of call depth.
+
 ### 3. Keyless Deploy Compute Gas Tracking
 
-The 100K overhead gas for sandbox execution are deducted from frame gas but never recorded as the compute gas.
+The 100K overhead gas for sandbox execution is deducted from frame gas but never recorded as compute gas.
 This means keyless deploy transactions don't count toward the 200M per-transaction compute gas limit.
 
 Rex3 fixes this by recording the keyless deploy overhead gas (100K) as compute gas.

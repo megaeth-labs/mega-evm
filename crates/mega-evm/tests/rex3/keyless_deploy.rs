@@ -10,8 +10,8 @@ use mega_evm::{
     revm::context::result::ExecutionResult,
     sandbox::tests::{CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
     test_utils::MemoryDatabase,
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
+    EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{context::TxEnv, handler::EvmTr, inspector::NoOpInspector};
 
@@ -107,6 +107,57 @@ fn test_rex2_keyless_deploy_does_not_record_compute_gas() {
         compute_gas_used < constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
         "Rex2 compute gas ({}) should NOT include keyless deploy overhead ({})",
         compute_gas_used,
+        constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
+    );
+}
+
+/// Test that keyless deploy halts when compute gas limit is set below the 100K overhead.
+/// In Rex3, the 100K overhead is recorded as compute gas, so if the compute gas limit
+/// is lower than 100K, the transaction should fail.
+#[test]
+fn test_rex3_keyless_deploy_exceeds_compute_gas_limit() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
+
+    let call_data = IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: Bytes::from_static(CREATE2_FACTORY_TX),
+        gasLimitOverride: U256::from(LARGE_GAS_LIMIT_OVERRIDE),
+    }
+    .abi_encode();
+
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+    let mut context =
+        MegaContext::new(&mut db, MegaSpecId::REX3).with_external_envs((&external_envs).into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+
+    let tx = TxEnv {
+        caller: TEST_CALLER,
+        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+        data: call_data.into(),
+        value: U256::ZERO,
+        gas_limit: 1_000_000_000_000,
+        gas_price: 0,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    // Set compute gas limit to 50K, which is below the 100K keyless deploy overhead
+    let runtime_limits =
+        EvmTxRuntimeLimits::from_spec(MegaSpecId::REX3).with_tx_compute_gas_limit(50_000);
+    let mut evm =
+        MegaEvm::new(context).with_tx_runtime_limits(runtime_limits).with_inspector(NoOpInspector);
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = result_envelope.result;
+
+    // The transaction should fail because 100K overhead exceeds the 50K compute gas limit
+    assert!(
+        !result.is_success(),
+        "Keyless deploy should fail when compute gas limit ({}) is below overhead ({})",
+        50_000,
         constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS,
     );
 }
