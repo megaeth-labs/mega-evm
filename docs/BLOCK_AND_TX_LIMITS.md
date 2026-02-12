@@ -250,11 +250,11 @@ The REX specification is the production-ready hardfork with higher transaction-l
 
 ### REX3 Specification (Increased Oracle Access Compute Gas Limit)
 
-The REX3 specification inherits all REX limits but increases the oracle access compute gas limit from 1M to 10M.
+The REX3 specification inherits all REX limits but increases the oracle access compute gas limit from 1M to 20M.
 
 **Changes from REX/REX1/REX2:**
 
-- `oracle_access_compute_gas_limit` - 10,000,000 gas (10M, up from 1M)
+- `oracle_access_compute_gas_limit` - 20,000,000 gas (20M, up from 1M)
 
 All other limits remain the same as REX.
 

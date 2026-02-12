@@ -1,4 +1,4 @@
-//! Tests for the Rex3 oracle access compute gas limit (1M -> 10M) and
+//! Tests for the Rex3 oracle access compute gas limit (1M -> 20M) and
 //! the Rex3 change to trigger oracle gas detention on SLOAD instead of CALL.
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
@@ -86,9 +86,9 @@ fn build_oracle_sload_code() -> Bytes {
 // Rex3: Oracle access via SLOAD tests
 // =============================================================================
 
-/// Test that the compute gas limit is set to 10M after oracle SLOAD under REX3.
+/// Test that the compute gas limit is set to 20M after oracle SLOAD under REX3.
 #[test]
-fn test_rex3_oracle_sload_sets_10m_compute_gas_limit() {
+fn test_rex3_oracle_sload_sets_20m_compute_gas_limit() {
     // Deploy oracle contract code that does SLOAD
     let oracle_code = build_oracle_sload_code();
     let callee_bytecode = build_call_oracle_bytecode();
@@ -103,7 +103,7 @@ fn test_rex3_oracle_sload_sets_10m_compute_gas_limit() {
     assert_eq!(
         compute_gas_limit,
         mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
-        "REX3 compute gas limit should be 10M after oracle SLOAD"
+        "REX3 compute gas limit should be 20M after oracle SLOAD"
     );
 }
 
@@ -157,10 +157,10 @@ fn test_rex2_oracle_access_still_uses_1m_compute_gas_limit() {
     );
 }
 
-/// Test that a transaction consuming >1M but <10M compute gas after oracle access succeeds
+/// Test that a transaction consuming >1M but <20M compute gas after oracle access succeeds
 /// under REX3 but fails under REX2.
 ///
-/// Rex3 path: CALL oracle (with SLOAD code) triggers 10M detention, then ~4.4M SSTOREs succeed.
+/// Rex3 path: CALL oracle (with SLOAD code) triggers 20M detention, then ~4.4M SSTOREs succeed.
 /// Rex2 path: CALL oracle triggers 1M detention, then ~4.4M SSTOREs exceed the limit.
 #[test]
 fn test_oracle_access_succeeds_rex3_fails_rex2() {
@@ -182,14 +182,14 @@ fn test_oracle_access_succeeds_rex3_fails_rex2() {
     }
     let bytecode = builder.append(STOP).build();
 
-    // REX3: should succeed (4.4M < 10M limit)
+    // REX3: should succeed (4.4M < 20M limit)
     let mut db_rex3 = MemoryDatabase::default();
     db_rex3.set_account_code(ORACLE_CONTRACT_ADDRESS, oracle_code);
     db_rex3.set_account_code(CALLEE, bytecode.clone());
     let (result_rex3, _) = execute_transaction(MegaSpecId::REX3, &mut db_rex3, CALLEE);
     assert!(
         result_rex3.is_success(),
-        "REX3 transaction should succeed: ~4.4M compute gas is within the 10M oracle access limit"
+        "REX3 transaction should succeed: ~4.4M compute gas is within the 20M oracle access limit"
     );
 
     // REX2: should fail (4.4M > 1M limit). No oracle code needed - CALL triggers detention.
@@ -206,14 +206,14 @@ fn test_oracle_access_succeeds_rex3_fails_rex2() {
     );
 }
 
-/// Test that REX3 still enforces the 10M limit (not unlimited).
-/// A transaction consuming >10M compute gas after oracle SLOAD should still fail.
+/// Test that REX3 still enforces the 20M limit (not unlimited).
+/// A transaction consuming >20M compute gas after oracle SLOAD should still fail.
 #[test]
-fn test_rex3_oracle_access_still_enforces_10m_limit() {
+fn test_rex3_oracle_access_still_enforces_20m_limit() {
     // Oracle contract code for Rex3 - performs SLOAD to trigger detention
     let oracle_code = build_oracle_sload_code();
 
-    // Build bytecode: call oracle (with SLOAD), then do ~500 SSTOREs (~11M compute gas)
+    // Build bytecode: call oracle (with SLOAD), then do ~1000 SSTOREs (~22M compute gas)
     let mut builder = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
         .push_number(0u8)
@@ -222,8 +222,8 @@ fn test_rex3_oracle_access_still_enforces_10m_limit() {
         .append(CALL)
         .append(POP);
 
-    // 500 SSTOREs to unique slots: ~500 * 22,100 = ~11M compute gas
-    for i in 1..=500u32 {
+    // 1000 SSTOREs to unique slots: ~1000 * 22,100 = ~22M compute gas
+    for i in 1..=1000u32 {
         builder = builder.push_number(i).push_number(i).append(SSTORE);
     }
     let bytecode = builder.append(STOP).build();
@@ -235,7 +235,7 @@ fn test_rex3_oracle_access_still_enforces_10m_limit() {
 
     assert!(
         !result.is_success(),
-        "REX3 transaction should fail: ~11M compute gas exceeds the 10M oracle access limit"
+        "REX3 transaction should fail: ~22M compute gas exceeds the 20M oracle access limit"
     );
     assert!(is_volatile_data_access_oog(&result), "Should fail with VolatileDataAccessOutOfGas");
 }
@@ -258,6 +258,6 @@ fn test_rex3_direct_oracle_sload_triggers_detention() {
     assert_eq!(
         compute_gas_limit,
         mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
-        "REX3: SLOAD from oracle contract should trigger 10M gas detention"
+        "REX3: SLOAD from oracle contract should trigger 20M gas detention"
     );
 }

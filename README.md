@@ -69,7 +69,7 @@ For complete Rex2 specification, see **[Rex2.md](./specs/Rex2.md)**.
 
 ### REX3 Spec
 
-- **Increased Oracle Access Gas Limit**: Oracle access compute gas limit raised from 1M to 10M, allowing more post-oracle computation
+- **Increased Oracle Access Gas Limit**: Oracle access compute gas limit raised from 1M to 20M, allowing more post-oracle computation
 - **Rex2 Baseline**: Inherits all Rex2 behavior
 
 For complete Rex3 specification, see **[Rex3.md](./specs/Rex3.md)**.
