@@ -94,6 +94,11 @@ pub mod rex3 {
     // TODO: Add constants for the `REX3` spec.
 }
 
+/// Constants for the `REX4` spec.
+pub mod rex4 {
+    // TODO: Add constants for the `REX4` spec.
+}
+
 /// Constants for the `REX` spec.
 pub mod rex {
     /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.

@@ -21,6 +21,7 @@
 //! - **`REX1`**: Resets compute gas limits between transactions
 //! - **`REX2`**: Re-enables SELFDESTRUCT with EIP-6780 semantics
 //! - **`REX3`**: Introduces per-frame additional limits (unstable)
+//! - **`REX4`**: Same as REX3 (unstable)
 
 mod context;
 mod execution;
