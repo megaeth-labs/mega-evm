@@ -89,6 +89,11 @@ pub mod rex2 {
     pub const KEYLESS_DEPLOY_OVERHEAD_GAS: u64 = 100_000;
 }
 
+/// Constants for the `REX3` spec.
+pub mod rex3 {
+    // TODO: Add constants for the `REX3` spec.
+}
+
 /// Constants for the `REX` spec.
 pub mod rex {
     /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.

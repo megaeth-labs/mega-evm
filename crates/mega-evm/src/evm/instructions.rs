@@ -116,7 +116,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
-            MegaSpecId::REX2 => EthInstructions::new(rex2::instruction_table::<
+            MegaSpecId::REX2 | MegaSpecId::REX3 => EthInstructions::new(rex2::instruction_table::<
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
