@@ -173,6 +173,7 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
                 mark_frame_result_as_exceeding_limit(
                     &mut result,
                     crate::AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+                    Default::default(),
                 );
                 result
             };

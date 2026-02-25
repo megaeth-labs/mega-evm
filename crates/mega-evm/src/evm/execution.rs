@@ -211,6 +211,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
                 mark_frame_result_as_exceeding_limit(
                     frame_result,
                     additional_limit.exceeding_instruction_result(),
+                    Default::default(),
                 );
             }
         }

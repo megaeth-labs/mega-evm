@@ -1,3 +1,6 @@
+use alloy_primitives::Bytes;
+use alloy_sol_types::SolError;
+
 mod compute_gas;
 mod data_size;
 mod frame_limit;
@@ -11,6 +14,12 @@ pub(crate) use frame_limit::{FrameLimitTracker, TxRuntimeLimit};
 
 use crate::MegaHaltReason;
 
+alloy_sol_types::sol! {
+    /// ABI-encoded error emitted as revert data when a frame-local resource limit is exceeded.
+    #[derive(Debug, PartialEq, Eq)]
+    error MegaLimitExceeded(uint8 kind, uint64 limit);
+}
+
 /// Identifies which resource limit was exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LimitKind {
@@ -22,6 +31,18 @@ pub enum LimitKind {
     ComputeGas,
     /// State growth limit (net new accounts and storage slots).
     StateGrowth,
+}
+
+impl LimitKind {
+    /// Returns the discriminant value used in ABI-encoded revert data.
+    pub const fn as_u8(&self) -> u8 {
+        match self {
+            Self::DataSize => 0,
+            Self::KVUpdate => 1,
+            Self::ComputeGas => 2,
+            Self::StateGrowth => 3,
+        }
+    }
 }
 
 /// Result of a limit check, indicating whether any resource limit has been exceeded.
@@ -61,6 +82,21 @@ impl LimitCheck {
     #[inline]
     pub const fn is_frame_local(&self) -> bool {
         matches!(self, Self::ExceedsLimit { frame_local: true, .. })
+    }
+
+    /// Returns ABI-encoded revert data for a frame-local limit exceed.
+    ///
+    /// Encodes as `MegaLimitExceeded(uint8 kind, uint64 limit)`.
+    /// Returns empty bytes if within limit.
+    pub fn revert_data(&self) -> Bytes {
+        match self {
+            Self::ExceedsLimit { kind, limit, .. } => {
+                MegaLimitExceeded { kind: kind.as_u8(), limit: *limit }
+                    .abi_encode()
+                    .into()
+            }
+            Self::WithinLimit => Bytes::new(),
+        }
     }
 
     /// Returns the [`MegaHaltReason`] if the limit has been exceeded, otherwise returns `None`.

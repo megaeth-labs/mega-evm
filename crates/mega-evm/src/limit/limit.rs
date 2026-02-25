@@ -304,10 +304,12 @@ impl AdditionalLimit {
                 }
                 FrameInput::Empty => unreachable!(),
             };
+            let output = self.has_exceeded_limit.revert_data();
             return Some(create_exceeding_limit_frame_result(
                 self.exceeding_instruction_result(),
                 Gas::new(gas_limit),
                 return_memory_offset,
+                output,
             ));
         }
 
@@ -340,9 +342,11 @@ impl AdditionalLimit {
         self.compute_gas.before_frame_run(frame);
 
         if self.check_limit().exceeded_limit() {
+            let output = self.has_exceeded_limit.revert_data();
             return Some(create_exceeding_interpreter_result(
                 self.exceeding_instruction_result(),
                 frame.interpreter.gas,
+                output,
             ));
         }
         None
@@ -364,19 +368,23 @@ impl AdditionalLimit {
             if frame.data.is_create() {
                 // if the limit has already been exceeded, return early
                 if self.has_exceeded_limit.exceeded_limit() {
+                    let output = self.has_exceeded_limit.revert_data();
                     mark_interpreter_result_as_exceeding_limit(
                         interpreter_result,
                         self.exceeding_instruction_result(),
+                        output,
                     );
                     return;
                 }
 
-                // if the limit has already been exceeded, we mark the interpreter result as
+                // if the limit has been exceeded, we mark the interpreter result as
                 // exceeding the limit
                 if self.check_limit().exceeded_limit() {
+                    let output = self.has_exceeded_limit.revert_data();
                     mark_interpreter_result_as_exceeding_limit(
                         interpreter_result,
                         self.exceeding_instruction_result(),
+                        output,
                     );
                 }
             }
@@ -410,10 +418,17 @@ impl AdditionalLimit {
         let limit_check = self.check_limit();
         if limit_check.exceeded_limit() && !duplicate_return_frame_result {
             if limit_check.is_frame_local() {
+                let output = limit_check.revert_data();
                 self.has_exceeded_limit = LimitCheck::WithinLimit;
                 match result {
-                    FrameResult::Call(o) => o.result.result = InstructionResult::Revert,
-                    FrameResult::Create(o) => o.result.result = InstructionResult::Revert,
+                    FrameResult::Call(o) => {
+                        o.result.result = InstructionResult::Revert;
+                        o.result.output = output;
+                    }
+                    FrameResult::Create(o) => {
+                        o.result.result = InstructionResult::Revert;
+                        o.result.output = output;
+                    }
                 }
             } else {
                 // We rescue the remaining gas of the frame after the limit exceeds.
@@ -422,6 +437,7 @@ impl AdditionalLimit {
                 mark_frame_result_as_exceeding_limit(
                     result,
                     Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+                    Default::default(),
                 );
             }
         }
@@ -469,77 +485,58 @@ fn create_exceeding_limit_frame_result(
     instruction_result: InstructionResult,
     gas: Gas,
     return_memory_offset: Option<Range<usize>>,
+    output: Bytes,
 ) -> FrameResult {
     match return_memory_offset {
         None => FrameResult::Create(CreateOutcome::new(
-            create_exceeding_interpreter_result(instruction_result, gas),
+            create_exceeding_interpreter_result(instruction_result, gas, output),
             None,
         )),
         Some(return_memory_offset) => FrameResult::Call(CallOutcome::new(
-            create_exceeding_interpreter_result(instruction_result, gas),
+            create_exceeding_interpreter_result(instruction_result, gas, output),
             return_memory_offset,
         )),
     }
 }
 
 /// Creates an interpreter result indicating that the limit is exceeded.
-///
-/// This utility function creates an interpreter result that signals limit exceeded.
-///
-/// # Arguments
-///
-/// * `gas` - The gas of the interpreter result
-///
-/// # Returns
-///
-/// An interpreter result indicating that the limit is exceeded with
-/// [`AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT`] instruction result.
 fn create_exceeding_interpreter_result(
     instruction_result: InstructionResult,
     gas: Gas,
+    output: Bytes,
 ) -> InterpreterResult {
-    InterpreterResult::new(instruction_result, Bytes::new(), gas)
+    InterpreterResult::new(instruction_result, output, gas)
 }
 
 /// Marks an existing interpreter result as exceeding the limit.
-///
-/// This utility function modifies an existing interpreter result to indicate that
-/// limits have been exceeded. Remaining gas is preserved.
-///
-/// # Arguments
-///
-/// * `result` - The interpreter result to modify
 fn mark_interpreter_result_as_exceeding_limit(
     result: &mut InterpreterResult,
     instruction_result: InstructionResult,
+    output: Bytes,
 ) {
-    // mark the instruction result as exceeding the limit and discard the output
     result.result = instruction_result;
+    result.output = output;
 }
 
 /// Marks a frame result as exceeding the limit.
-///
-/// This utility function modifies a frame result to indicate that limits have been exceeded.
-/// Remaining gas is preserved.
-///
-/// # Arguments
-///
-/// * `result` - The frame result to modify
 pub(crate) fn mark_frame_result_as_exceeding_limit(
     result: &mut FrameResult,
     instruction_result: InstructionResult,
+    output: Bytes,
 ) {
     match result {
         FrameResult::Call(call_outcome) => {
             mark_interpreter_result_as_exceeding_limit(
                 &mut call_outcome.result,
                 instruction_result,
+                output,
             );
         }
         FrameResult::Create(create_outcome) => {
             mark_interpreter_result_as_exceeding_limit(
                 &mut create_outcome.result,
                 instruction_result,
+                output,
             );
         }
     }
