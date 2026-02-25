@@ -42,7 +42,7 @@ use revm::{
 
 use crate::{
     constants, mark_frame_result_as_exceeding_limit, merge_evm_state_optional_status,
-    ExternalEnvTypes, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    ExternalEnvTypes, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TxRuntimeLimit,
 };
 
 use super::tx::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer};
@@ -158,10 +158,24 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
     // Sandbox execution gas is tracked separately within the sandbox.
     if ctx.spec.is_enabled(MegaSpecId::REX3) {
         let mut limit = ctx.additional_limit.borrow_mut();
-        if limit.record_compute_gas(cost).exceeded_limit() {
-            let mut result = make_halt!();
-            mark_frame_result_as_exceeding_limit(&mut result);
-            return result;
+        if !limit.record_compute_gas(cost) {
+            let crate::LimitCheck::ExceedsLimit { limit, used, frame_local, .. } =
+                limit.compute_gas.check_limit()
+            else {
+                unreachable!()
+            };
+            return if frame_local {
+                // revert if the limit exceeding is local to the frame
+                make_error!(KeylessDeployError::InsufficientComputeGas { limit, used })
+            } else {
+                // halt if the limit exceeding is global to the transaction
+                let mut result = make_halt!();
+                mark_frame_result_as_exceeding_limit(
+                    &mut result,
+                    crate::AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+                );
+                result
+            };
         }
     }
 

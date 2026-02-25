@@ -100,7 +100,7 @@ fn test_timestamp_limits_gas() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -135,7 +135,7 @@ fn test_number_limits_gas() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -166,7 +166,7 @@ fn test_coinbase_limits_gas() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -196,7 +196,7 @@ fn test_difficulty_limits_gas() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -226,7 +226,7 @@ fn test_gaslimit_limits_gas() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -256,7 +256,7 @@ fn test_basefee_limits_gas() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -287,7 +287,7 @@ fn test_blockhash_limits_gas() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
     assert!(result.is_success(), "Transaction should succeed");
@@ -322,7 +322,7 @@ fn test_multiple_block_env_accesses() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -363,7 +363,7 @@ fn test_block_env_access_with_nested_calls() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -395,7 +395,7 @@ fn test_no_gas_limit_without_block_env_access() {
     let (result, evm) = execute_bytecode(&mut db, gas_limit);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         TX_COMPUTE_GAS_LIMIT,
         "Compute gas limit should be the same as the transaction compute gas limit"
     );
@@ -487,7 +487,7 @@ fn test_nested_call_block_env_access_child_oog() {
     let (result, evm) = execute_bytecode(&mut db, total_gas);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -546,7 +546,7 @@ fn test_deeply_nested_call_block_env_access() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -610,7 +610,7 @@ fn test_parent_block_env_access_oog_after_nested_call() {
     let (result, evm) = execute_bytecode(&mut db, total_gas);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -665,7 +665,7 @@ fn test_nested_call_already_limited_no_further_restriction() {
     let (result, evm) = execute_bytecode(&mut db, 30_000_000);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 
@@ -698,7 +698,7 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
     let (result, evm) = execute_bytecode(&mut db, total_gas);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
     );
 

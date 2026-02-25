@@ -34,13 +34,11 @@ use revm::{
 };
 
 use crate::{
-    constants, create_exceeding_interpreter_result, create_exceeding_limit_frame_result,
-    is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
-    mark_interpreter_result_as_exceeding_limit, sandbox::execute_keyless_deploy_call,
-    sent_from_mega_system_address, ExternalEnvTypes, HostExt, IKeylessDeploy, IOracle, MegaContext,
-    MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError, OracleEnv,
-    KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
-    ORACLE_CONTRACT_ADDRESS,
+    constants, is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
+    sandbox::execute_keyless_deploy_call, sent_from_mega_system_address, ExternalEnvTypes, HostExt,
+    IKeylessDeploy, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
+    MegaTransactionError, OracleEnv, TxRuntimeLimit, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -140,18 +138,13 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         // Check if the additional limit is already exceeded, if so, we should immediately stop
         // and synthesize an interpreter action.
         if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            let mut additional_limit = ctx.additional_limit.borrow_mut();
-            if additional_limit.check_limit().exceeded_limit() {
-                Ok(Some(InterpreterAction::Return(create_exceeding_interpreter_result(
-                    frame.interpreter.gas,
-                ))))
-            } else {
-                drop(additional_limit);
-                Ok(None)
+            if let Some(interpreter_result) =
+                ctx.additional_limit.borrow_mut().before_frame_run(frame)
+            {
+                return Ok(Some(InterpreterAction::Return(interpreter_result)));
             }
-        } else {
-            Ok(None)
         }
+        Ok(None)
     }
 
     /// This is the hook to be called in the `frame_run` and `inspect_frame_run`
@@ -184,15 +177,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
                     interpreter_result.result = InstructionResult::OutOfGas;
                 }
             }
-
-            // Update additional limits
-            let mut additional_limit = ctx.additional_limit.borrow_mut();
-            if frame.data.is_create() &&
-                additional_limit.after_create_frame_run(interpreter_result).exceeded_limit()
-            {
-                mark_interpreter_result_as_exceeding_limit(interpreter_result);
-            }
         }
+
+        // Update additional limits. MiniRex is guaranteed to be enabled here.
+        ctx.additional_limit.borrow_mut().after_frame_run(frame, action);
 
         Ok(())
     }
@@ -218,8 +206,12 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             let compute_gas_cost =
                 gas_remaining_before.saturating_sub(frame_result.gas().remaining());
             let mut additional_limit = ctx.additional_limit.borrow_mut();
-            if additional_limit.record_compute_gas(compute_gas_cost).exceeded_limit() {
-                mark_frame_result_as_exceeding_limit(frame_result);
+            if !additional_limit.record_compute_gas(compute_gas_cost) {
+                // if the limit is exceeded, mark the frame result as exceeding the limit
+                mark_frame_result_as_exceeding_limit(
+                    frame_result,
+                    additional_limit.exceeding_instruction_result(),
+                );
             }
         }
 
@@ -304,11 +296,11 @@ where
         let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         let is_rex_enabled = ctx.spec.is_enabled(MegaSpecId::REX);
         if is_mini_rex_enabled {
-            let mut additional_limit = ctx.additional_limit().borrow_mut();
             // record the initial gas cost as compute gas cost, limit exceeding will be captured in
             // `frame_init` function.
-            additional_limit.record_compute_gas(initial_and_floor_gas.initial_gas);
-            drop(additional_limit);
+            ctx.additional_limit()
+                .borrow_mut()
+                .record_compute_gas(initial_and_floor_gas.initial_gas);
 
             // MegaETH MiniRex modification: calldata storage gas costs
             // - Standard tokens: 400 gas per token (vs 4)
@@ -416,11 +408,8 @@ where
     ) -> Result<(), Self::Error> {
         let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         if is_mini_rex {
-            let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             // Update the additional limit before returning the frame result
-            if additional_limit.before_frame_return_result::<true>(frame_result).exceeded_limit() {
-                mark_frame_result_as_exceeding_limit(frame_result);
-            }
+            evm.ctx().additional_limit.borrow_mut().before_frame_return_result::<true>(frame_result)
         }
 
         // Call the inner last_frame_result function first
@@ -462,7 +451,7 @@ where
             let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             if additional_limit.is_exceeding_limit_halt(&reason) {
                 if let Some((access_type, volatile_compute_gas_limit)) = volatile_info {
-                    let actual = additional_limit.compute_gas_tracker.current_gas_used();
+                    let actual = additional_limit.compute_gas.tx_usage();
                     if actual > volatile_compute_gas_limit {
                         return MegaHaltReason::VolatileDataAccessOutOfGas {
                             access_type,
@@ -664,24 +653,13 @@ where
             }
         }
 
-        if is_mini_rex_enabled &&
-            additional_limit
+        if is_mini_rex_enabled {
+            if let Some(frame_result) = additional_limit
                 .borrow_mut()
                 .before_frame_init(&frame_init, self.ctx().journal_mut())
-                .exceeded_limit()
-        {
-            // if the limit is exceeded, create an error frame result and return it directly
-            let (gas_limit, return_memory_offset) = match &frame_init.frame_input {
-                FrameInput::Create(inputs) => (inputs.gas_limit, None),
-                FrameInput::Call(inputs) => {
-                    (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
-                }
-                FrameInput::Empty => unreachable!(),
-            };
-            return Ok(FrameInitResult::Result(create_exceeding_limit_frame_result(
-                Gas::new(gas_limit),
-                return_memory_offset,
-            )));
+            {
+                return Ok(FrameInitResult::Result(frame_result));
+            }
         }
 
         // call the inner frame_init function to initialize the frame
@@ -689,9 +667,7 @@ where
 
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if is_mini_rex_enabled {
-            if let ItemOrResult::Item(frame) = &init_result {
-                additional_limit.borrow_mut().after_frame_init_on_frame(frame);
-            }
+            additional_limit.borrow_mut().after_frame_init(&init_result);
         }
 
         Ok(init_result)
@@ -752,20 +728,9 @@ where
         let is_mini_rex = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if is_mini_rex {
-            let mut additional_limit = ctx.additional_limit.borrow_mut();
-
             // call the `on_frame_return` function to update the `AdditionalLimit` if the limit is
             // exceeded, return the error frame result
-            if additional_limit.before_frame_return_result::<false>(&result).exceeded_limit() {
-                match &mut result {
-                    FrameResult::Call(call_outcome) => {
-                        mark_interpreter_result_as_exceeding_limit(&mut call_outcome.result)
-                    }
-                    FrameResult::Create(create_outcome) => {
-                        mark_interpreter_result_as_exceeding_limit(&mut create_outcome.result)
-                    }
-                }
-            }
+            ctx.additional_limit.borrow_mut().before_frame_return_result::<false>(&mut result);
         }
 
         // Call the inner frame_return_result function to return the frame result.
@@ -825,7 +790,7 @@ where
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
             // Inspector intercepted this call/create - notify additional limit trackers
             if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-                ctx.additional_limit.borrow_mut().on_inspector_intercept();
+                ctx.additional_limit.borrow_mut().after_inspector_intercept_frame_init();
             }
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));

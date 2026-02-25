@@ -1,12 +1,14 @@
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::vec::Vec;
-
 use alloy_primitives::{Address, U256};
 use revm::{
     context::{transaction::AuthorizationTr, Transaction},
-    interpreter::{InstructionResult, SStoreResult},
+    handler::{EthFrame, FrameResult},
+    interpreter::{
+        interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, InterpreterAction,
+        SStoreResult,
+    },
 };
+
+use crate::{FrameLimitTracker, MegaSpecId, TxRuntimeLimit};
 
 /// The number of bytes for the base transaction data.
 pub const BASE_TX_SIZE: u64 = 110;
@@ -28,11 +30,20 @@ pub const ACCOUNT_INFO_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_ACCOUN
 /// The originated data size for writing a storage slot.
 pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAGE_SLOT_SIZE;
 
+/// Per-frame metadata for the data size tracker.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DataSizeFrameInfo {
+    /// The target address of the frame. `None` during CREATE until the address is known.
+    pub(crate) target_address: Option<Address>,
+    /// Whether this frame's target address has been marked as updated.
+    pub(crate) target_updated: bool,
+}
+
 /// A tracker for the total data size (in bytes) generated from transaction execution.
 ///
-/// This struct provides comprehensive tracking of all data generated during transaction
-/// execution, including transaction data, logs, storage operations, and account updates.
-/// It maintains frame-aware tracking to properly handle nested calls and reverts.
+/// Uses `FrameLimitTracker` for frame-aware tracking with per-frame budgets (Rex4+).
+///
+/// Data size is enforced at the TX level only (no per-frame budgets).
 ///
 /// ## Tracked Data Types
 ///
@@ -49,303 +60,240 @@ pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAG
 /// - Storage writes: 40 bytes (only when original ≠ new value, refunded when reset to original)
 /// - Account updates from calls/creates: 40 bytes each
 /// - Contract code: actual deployed bytecode size
-///
-/// ## Frame Management
-///
-/// The tracker maintains a stack of frame to properly handle
-/// nested calls and reverts. When a frame is reverted, its data is discarded;
-/// when a frame completes successfully, its data is merged into the parent frame.
-#[derive(Debug, Default)]
-pub struct DataSizeTracker {
-    /// The current total data size generated from the transaction execution.
-    total_size: i64,
-
-    /// The stack of frames
-    frame_stack: Vec<FrameInfo>,
+#[derive(Debug, Clone)]
+pub(crate) struct DataSizeLimit2 {
+    frame_tracker: FrameLimitTracker<DataSizeFrameInfo>,
 }
 
-#[derive(Debug)]
-pub(crate) struct FrameInfo {
-    /// The data size that should be discarded when the frame is reverted.
-    pub(crate) discardable: i64,
-    // The target address of the frame. The target address may be temporarily `None` when it is
-    // create frame and the target address is not yet created.
-    pub(crate) target_address: Option<Address>,
-    // Whether the target address's account info marked as updated.
-    pub(crate) target_updated: bool,
-}
+impl DataSizeLimit2 {
+    pub(crate) fn new(_spec: MegaSpecId, tx_limit: u64) -> Self {
+        Self { frame_tracker: FrameLimitTracker::new(tx_limit) }
+    }
 
-impl FrameInfo {
-    pub(crate) fn target_address(&self) -> Address {
-        self.target_address.expect("target address is none for frame")
+    /// Pushes a new frame onto the tracker with `u64::MAX` limit.
+    /// Data size uses TX-level enforcement only (no per-frame budgets).
+    fn push_frame(&mut self, info: DataSizeFrameInfo) {
+        self.frame_tracker.push_frame_with_limit(u64::MAX, info);
+    }
+
+    /// Returns whether there is at least one active frame on the stack.
+    pub(crate) fn has_active_frame(&self) -> bool {
+        self.frame_tracker.has_active_frame()
+    }
+
+    /// Records discardable data in the current frame.
+    fn record_discardable(&mut self, size: u64) {
+        if let Some(entry) = self.frame_tracker.frame_mut() {
+            entry.discardable_usage += size;
+        }
+    }
+
+    /// Records a refund (negative data) in the current frame.
+    fn record_refund(&mut self, size: u64) {
+        if let Some(entry) = self.frame_tracker.frame_mut() {
+            entry.refund += size;
+        }
     }
 }
 
-impl DataSizeTracker {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn reset(&mut self) {
-        self.total_size = 0;
-        self.frame_stack.clear();
-    }
-
+impl TxRuntimeLimit for DataSizeLimit2 {
+    /// Returns the current effective data size limit for the entire transaction.
     #[inline]
-    pub(crate) const fn current_size(&self) -> u64 {
-        if self.total_size < 0 {
-            0
+    fn tx_limit(&self) -> u64 {
+        self.frame_tracker.tx_limit()
+    }
+
+    /// Returns the current total data size across all frames, clamped to zero.
+    #[inline]
+    fn tx_usage(&self) -> u64 {
+        self.frame_tracker.net_usage()
+    }
+
+    fn reset(&mut self) {
+        self.frame_tracker.reset();
+    }
+
+    /// Returns whether the data size limit has been exceeded.
+    ///
+    /// Checks total data size across all frames against the TX limit.
+    fn check_limit(&self) -> super::LimitCheck {
+        let used = self.tx_usage();
+        let limit = self.frame_tracker.tx_limit();
+        if used > limit {
+            super::LimitCheck::ExceedsLimit {
+                kind: super::LimitKind::DataSize,
+                limit,
+                used,
+                frame_local: false,
+            }
         } else {
-            self.total_size as u64
+            super::LimitCheck::WithinLimit
         }
     }
 
-    #[inline]
-    pub(crate) const fn exceeds_limit(&self, limit: u64) -> bool {
-        self.current_size() > limit
-    }
-
-    /// Called when inspector intercepts and skips a call/create.
-    ///
-    /// Pushes an empty frame so `end_frame` can pop it to keep the stack aligned.
-    #[inline]
-    pub(crate) fn on_inspector_intercept(&mut self) {
-        self.frame_stack.push(FrameInfo {
-            discardable: 0,
-            target_address: None,
-            target_updated: false,
-        });
-    }
-}
-
-impl DataSizeTracker {
-    /// Returns the current frame as a mutable reference.
-    pub(crate) fn current_frame(&mut self) -> Option<&mut FrameInfo> {
-        self.frame_stack.last_mut()
-    }
-
-    /// Returns the parent frame as a mutable reference.
-    pub(crate) fn parent_frame(&mut self) -> Option<&mut FrameInfo> {
-        let len = self.frame_stack.len();
-        if len < 2 {
-            return None;
-        }
-        self.frame_stack.get_mut(len - 2)
-    }
-
-    /// Hook called when an execution frame returns.
-    ///
-    /// This method handles the completion of an execution frame, properly managing the data size
-    /// stack based on whether the frame was reverted or completed successfully.
-    ///
-    /// # Arguments
-    ///
-    /// * `result` - The frame execution result
-    pub(crate) fn end_frame(&mut self, result: InstructionResult, last_frame: bool) {
-        if last_frame && self.frame_stack.is_empty() {
-            // the last frame may be ended twice. In such case, we just return.
-            return;
-        }
-        let frame = self.frame_stack.pop().expect("frame stack is empty");
-        if result.is_ok() {
-            // merge the current frame's discardable data into the previous frame or do nothing if
-            // the current frame is the last frame.
-            self.update_current_frame_discardable_size(frame.discardable);
-        } else {
-            // discard the current frame's discardable data
-            self.total_size -= frame.discardable;
-        }
-    }
-}
-
-impl DataSizeTracker {
     /// Records the data size of a transaction at the start of execution.
-    pub(crate) fn record_tx_data(&mut self, tx: &crate::MegaTransaction) {
-        // 110 bytes for the intrinsic data of a transaction, including the gas limit, value,
-        // signature, gas price, etc.
+    ///
+    /// This includes:
+    /// - 110 bytes base transaction data
+    /// - Calldata byte length
+    /// - Access list sizes
+    /// - EIP-7702 authorizations (101 bytes each) + authority account updates (40 bytes each)
+    /// - Caller account update (40 bytes)
+    ///
+    /// All recorded as pre-frame (non-discardable) since no frame exists yet.
+    fn before_tx_start(&mut self, tx: &crate::MegaTransaction) {
+        // TX intrinsic data (non-discardable, recorded before any frame is pushed)
         let mut size = BASE_TX_SIZE;
-        // bytes for the calldata of a transaction
         size += tx.input().len() as u64;
-        // bytes for the access list of a transaction
         size += tx
             .access_list()
             .map(|item| item.map(|access| access.size() as u64).sum::<u64>())
             .unwrap_or_default();
-        // bytes for the EIP-7702 authorization list of a transaction (101 bytes per authorization)
         size += tx.authorization_list_len() as u64 * AUTHORIZATION_SIZE;
-        self.total_size += size as i64;
-        // tx data are non-discardable when the frame (or the transaction) is reverted
-    }
+        self.frame_tracker.tx_mut().persistent_usage += size;
 
-    /// Records the data size generated by the EIP-7702 authority account info update.
-    pub(crate) fn record_eip7702_account_info_update(&mut self, tx: &crate::MegaTransaction) {
-        // the 7702 authorization of each account needs one update on its account info
+        // EIP-7702 authority account updates (non-discardable)
         for authorization in tx.authorization_list() {
-            let authority = authorization.authority();
-            if let Some(authority) = authority {
-                self.record_account_info_update(authority);
+            if authorization.authority().is_some() {
+                self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
             }
         }
+
+        // Caller account update (non-discardable)
+        self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
     }
 
-    /// Pushes a new frame to the stack.
-    pub(crate) fn record_call(&mut self, target_address: Address, transfer: bool) {
-        // push a new frame to the stack. The new frame needs to be pushed first so that all data
-        // induced by the call can be captured by the new frame.
-        self.frame_stack.push(FrameInfo {
-            discardable: 0,
-            target_address: Some(target_address),
-            target_updated: transfer,
-        });
+    /// Called when inspector intercepts and skips a call/create.
+    ///
+    /// Pushes an empty frame so `before_frame_return_result` can pop it to keep
+    /// the frame stack aligned with the EVM's call stack.
+    #[inline]
+    fn after_inspector_intercept_frame_init(&mut self) {
+        self.push_frame(DataSizeFrameInfo { target_address: None, target_updated: false });
+    }
 
-        if transfer {
-            // update the caller if the current frame's target address (i.e., the caller) is not
-            // updated
-            if let Some(previous_frame) = self.parent_frame() {
-                if !previous_frame.target_updated {
-                    let target = previous_frame.target_address();
-                    self.record_account_info_update(target);
+    /// Hook called before a new execution frame is initialized.
+    ///
+    /// Pushes a new frame and records account info updates:
+    /// - **Call with value transfer**: Updates parent's account info if not yet marked, then
+    ///   records target account info update (40 bytes each).
+    /// - **Create**: Updates parent's account info if not yet marked (caller nonce increment).
+    ///   Created address is set later in `after_frame_init_on_frame`.
+    /// - **Call without transfer**: No account info updates.
+    fn before_frame_init<JOURNAL: crate::JournalInspectTr<DBError: core::fmt::Debug>>(
+        &mut self,
+        frame_init: &FrameInit,
+        _journal: &mut JOURNAL,
+    ) {
+        match &frame_init.frame_input {
+            FrameInput::Call(call_inputs) => {
+                let has_transfer = call_inputs.transfers_value();
+                // Check if parent's account info needs updating BEFORE pushing the child frame.
+                // Note: we do NOT set parent's target_updated to true — matching the old tracker,
+                // which never mutates it after frame creation.
+                let parent_needs_update = has_transfer &&
+                    self.frame_tracker
+                        .frame_mut()
+                        .is_some_and(|entry| !entry.info.target_updated);
+                // Push new frame
+                self.push_frame(DataSizeFrameInfo {
+                    target_address: Some(call_inputs.target_address),
+                    target_updated: has_transfer,
+                });
+                if has_transfer {
+                    if parent_needs_update {
+                        // Parent's account info update goes to child's discardable,
+                        self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    }
+                    // Record target account info update in child's discardable
+                    self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
                 }
             }
-            // record the account info update of the target address
-            self.record_account_info_update(target_address);
+            FrameInput::Create(_) => {
+                // Check if parent's account info needs updating BEFORE pushing the child frame.
+                let parent_needs_update =
+                    self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
+                // Push new frame (address unknown until after init)
+                self.push_frame(DataSizeFrameInfo { target_address: None, target_updated: true });
+                if parent_needs_update {
+                    // Parent's account info update goes to child's discardable,
+                    // matching the old tracker's behavior.
+                    self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                }
+            }
+            FrameInput::Empty => unreachable!(),
         }
     }
 
-    pub(crate) fn record_create(&mut self) {
-        // push a new frame to the stack. The new frame needs to be pushed first so that all data
-        // induced by the create can be captured by the new frame.
-        self.frame_stack.push(FrameInfo {
-            discardable: 0,
-            target_address: None,
-            target_updated: true,
-        });
-
-        // the caller of the create frame is always updated (nonce increment)
-        if let Some(previous_frame) = self.parent_frame() {
-            if !previous_frame.target_updated {
-                let target = previous_frame.target_address();
-                self.record_account_info_update(target);
+    /// Hook called when a new execution frame is successfully initialized.
+    ///
+    /// For CREATE frames, records the created address and its account info update (40 bytes).
+    fn after_frame_init_on_frame(&mut self, frame: &EthFrame<EthInterpreter>) {
+        if frame.data.is_create() {
+            let created_address =
+                frame.data.created_address().expect("created address is none for create frame");
+            if let Some(entry) = self.frame_tracker.frame_mut() {
+                assert!(entry.info.target_address.is_none(), "created account already recorded");
+                entry.info.target_address = Some(created_address);
+                // Record account info update for created address
+                entry.discardable_usage += ACCOUNT_INFO_WRITE_SIZE;
             }
         }
-        // the created account also needs to be updated, but we don't know the created address yet.
-        // It will be updated in `record_created_account`.
     }
 
-    /// Records the created account address.
-    pub(crate) fn record_created_account(&mut self, created_address: Address) {
-        if let Some(frame) = self.current_frame() {
-            assert!(frame.target_address.is_none(), "created account already recorded");
-            frame.target_address = Some(created_address);
-            self.record_account_info_update(created_address);
-        }
-    }
-
-    /// Records the data size of created contract code.
+    /// Hook called after a frame finishes running.
     ///
-    /// This internal method records the size of contract code created during
-    /// CREATE/CREATE2 operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The size of the created contract code in bytes
-    pub(crate) fn record_created_contract_code(&mut self, size: u64) {
-        self.total_size += size as i64;
-        // if the last frame creates a contract, we don't need to record the data size for future
-        // discard. This is because at this point the transaction execution ends and we know the
-        // transaction didn't revert.
-        if !self.frame_stack.is_empty() {
-            // the created contract code should be discarded when the frame is reverted
-            self.update_current_frame_discardable_size(size as i64);
-        }
-    }
-
-    /// Records the data size generated by LOG operations.
-    ///
-    /// This method calculates and records the data size for log operations,
-    /// including both topics and data.
-    ///
-    /// # Arguments
-    ///
-    /// * `num_topics` - Number of log topics
-    /// * `data_size` - Size of log data in bytes
-    pub(crate) fn record_log(&mut self, num_topics: u64, data_size: u64) {
-        let size = num_topics * LOG_TOPIC_SIZE + data_size;
-        self.total_size += size as i64;
-        self.update_current_frame_discardable_size(size as i64);
-    }
-
-    /// Records the data size generated by cold SSTORE operations.
-    ///
-    /// This method calculates and records the estimated data size for storage
-    /// write operations, including address, key, value, salt data, and witness data.
-    ///
-    /// # Arguments
-    ///
-    /// * `_address` - The contract address (unused but kept for interface consistency)
-    /// * `_key` - The storage slot key (unused but kept for interface consistency)
-    /// * `store_reuslt` - The result of the SSTORE operation
-    pub(crate) fn record_sstore(
+    /// For CREATE frames, records the deployed contract bytecode size as discardable data.
+    fn after_frame_run<'a>(
         &mut self,
-        _address: Address,
-        _key: U256,
-        store_result: &SStoreResult,
+        frame: &'a EthFrame<EthInterpreter>,
+        action: &'a mut InterpreterAction,
     ) {
+        if let InterpreterAction::Return(interpreter_result) = action {
+            if frame.data.is_create() {
+                let code_size = interpreter_result.output.len() as u64;
+                self.record_discardable(code_size);
+            }
+        }
+    }
+
+    /// Hook called when a frame returns its result to the parent frame.
+    ///
+    /// Pops the current frame from the tracker:
+    /// - **On success**: merges the frame's data into the parent frame.
+    /// - **On revert/failure**: discards the frame's discardable data.
+    fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
+        assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
+        self.frame_tracker.pop_frame(result.instruction_result().is_ok());
+    }
+
+    /// Hook called when a storage slot is written via `SSTORE`.
+    ///
+    /// Records SSTORE data based on the storage slot's state transition:
+    ///
+    /// | Original == Present | Original == New | Effect                | Reason                  |
+    /// |---------------------|-----------------|------------------------|-------------------------|
+    /// | yes                 | yes             | —                      | No change               |
+    /// | yes                 | no              | +40 bytes (discardable)| First write to slot     |
+    /// | no                  | yes             | -40 bytes (refund)     | Reset to original value |
+    /// | no                  | no              | —                      | Rewrite, no new data    |
+    fn after_sstore(&mut self, _target_address: Address, _slot: U256, store_result: &SStoreResult) {
         if store_result.is_original_eq_present() {
-            // the slot was not written before
-            if store_result.is_original_eq_new() {
-                // write the same value to the slot, no data is induced
-            } else {
-                // the slot is written to a new value, we record the data size
-                // store a non-zero value to a originally zero slot for the first time
-                let size = STORAGE_SLOT_WRITE_SIZE;
-                self.total_size += size as i64;
-                // the SSTORE data should be discarded when the frame is reverted
-                self.update_current_frame_discardable_size(size as i64);
+            if !store_result.is_original_eq_new() {
+                // First write to slot: original == present, but new differs
+                self.record_discardable(STORAGE_SLOT_WRITE_SIZE);
             }
-        } else {
-            // the slot has already been written before
-            if store_result.is_original_eq_new() {
-                // the slot is reset to original value, we refund the data size
-                let size = STORAGE_SLOT_WRITE_SIZE as i64;
-                self.total_size -= size;
-                // the SSTORE data should be restored when the frame is reverted
-                self.update_current_frame_discardable_size(-size);
-            } else {
-                // rewrite the slot to a new value, no data is induced
-            }
+        } else if store_result.is_original_eq_new() {
+            // Reset to original: refund
+            self.record_refund(STORAGE_SLOT_WRITE_SIZE);
         }
     }
 
-    /// Records the data size generated by account information updates.
+    /// Hook called when a log is emitted.
     ///
-    /// This internal method calculates and records the estimated data size for
-    /// account updates, including address, nonce, balance, code hash, and witness data.
-    ///
-    /// # Arguments
-    ///
-    /// * `_address` - The account address (unused but kept for interface consistency)
-    pub(crate) fn record_account_info_update(&mut self, _address: Address) {
-        let size = ACCOUNT_INFO_WRITE_SIZE;
-        self.total_size += size as i64;
-        // the account info should be discarded when the frame is reverted
-        self.update_current_frame_discardable_size(size as i64);
-    }
-
-    /// Updates the current frame's discardable data size.
-    ///
-    /// This internal method adds the specified size to the current frame's
-    /// discardable data size in the stack. If there is no current frame, meaning that we are at the
-    /// beginning of the transaction or the end of the transaction, the changes will not be
-    /// reverted (e.g., the caller's nonce will still be updated, even if the transaction is
-    /// reverted).
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The data size to add to the current frame
-    fn update_current_frame_discardable_size(&mut self, size: i64) {
-        if let Some(frame) = self.frame_stack.last_mut() {
-            frame.discardable += size;
-        }
+    /// Records: (num_topics * 32 bytes) + data_size as discardable.
+    fn after_log(&mut self, num_topics: u64, data_size: u64) {
+        let size = num_topics * LOG_TOPIC_SIZE + data_size;
+        self.record_discardable(size);
     }
 }

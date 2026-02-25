@@ -1,6 +1,7 @@
 # Resource Accounting
 
-This document specifies how MegaETH tracks resource usage across four independent dimensions: compute gas, data size, key-value updates, and state growth. Each resource is tracked separately during transaction execution to enforce the multi-dimensional limits defined in [BLOCK_AND_TX_LIMITS.md](./BLOCK_AND_TX_LIMITS.md).
+This document specifies how MegaETH tracks resource usage across four independent dimensions: compute gas, data size, key-value updates, and state growth.
+Each resource is tracked separately during transaction execution to enforce the multi-dimensional limits defined in [BLOCK_AND_TX_LIMITS.md](./BLOCK_AND_TX_LIMITS.md).
 
 ## Overview
 
@@ -12,6 +13,18 @@ MegaETH implements a **multi-dimensional resource tracking system** that monitor
 4. **State Growth**: Tracks new accounts and storage slots created (net growth)
 
 Each resource is tracked independently, and when any limit is exceeded, the transaction halts with `OutOfGas` (remaining gas is preserved and refunded to sender).
+
+### Revert Behavior
+
+For data size, KV updates, and state growth, resource usage is **frame-aware**: usage tracked within a subcall is discarded if the subcall reverts, and merged into the parent on success.
+
+Compute gas is the exception: it accumulates globally and is **never** reverted, even when a subcall reverts, because CPU cycles cannot be undone.
+
+### Account Update Deduplication
+
+Both data size and KV update tracking deduplicate account updates within a call frame.
+When a CALL with value transfer or CREATE occurs, the caller's account update is counted only if it was not already marked as updated in the current frame.
+This prevents double-counting the same account's state change within a single frame.
 
 ## Compute Gas Tracking
 
@@ -32,11 +45,18 @@ All gas consumed during transaction execution is tracked, including:
 
 ### Accumulation
 
-Compute gas accumulates globally across all nested call frames within a transaction. It is never reverted, even when a subcall reverts.
+Compute gas accumulates globally across all nested call frames within a transaction.
+It is never reverted, even when a subcall reverts.
+
+### Gas Detention
+
+The effective compute gas limit may be dynamically lowered when a transaction accesses **volatile data** (block environment fields, oracle storage, beneficiary account).
+This mechanism, called gas detention, caps the remaining compute gas budget to reduce conflicts in parallel execution.
+See the Rex spec files for the specific detention limits per volatile data category.
 
 ### Limit Enforcement
 
-When `compute_gas_used > TX_COMPUTE_GAS_LIMIT`:
+When `compute_gas_used > effective_compute_gas_limit`:
 
 - Transaction execution halts with `OutOfGas` error
 - Remaining gas is preserved (not consumed)
@@ -55,15 +75,12 @@ The following constants define data sizes for various operations:
 | `BASE_TX_SIZE`                       | 110 bytes | Fixed overhead for each transaction (gas limit, value, signature, etc.) |
 | `AUTHORIZATION_SIZE`                 | 101 bytes | Size per EIP-7702 authorization in transaction                          |
 | `LOG_TOPIC_SIZE`                     | 32 bytes  | Size per log topic                                                      |
-| `SALT_KEY_SIZE`                      | 8 bytes   | Salt key size for SALT data structure                                   |
-| `SALT_VALUE_DELTA_ACCOUNT_INFO_SIZE` | 32 bytes  | Estimated XOR delta size for account info (over-estimate for balance)   |
-| `SALT_VALUE_DELTA_STORAGE_SLOT_SIZE` | 32 bytes  | Estimated XOR delta size for storage slot value                         |
-| `ACCOUNT_INFO_WRITE_SIZE`            | 40 bytes  | Total size for account info update (8 + 32)                             |
-| `STORAGE_SLOT_WRITE_SIZE`            | 40 bytes  | Total size for storage slot write (8 + 32)                              |
+| `ACCOUNT_INFO_WRITE_SIZE`            | 40 bytes  | Total size for account info update (8-byte key + 32-byte value delta)   |
+| `STORAGE_SLOT_WRITE_SIZE`            | 40 bytes  | Total size for storage slot write (8-byte key + 32-byte value delta)    |
 
 ### Tracked Data Types
 
-Data size tracking distinguishes between **non-discardable** (permanent) and **discardable** (reverted on frame revert) data:
+Data size tracking distinguishes between **non-discardable** (permanent) and **discardable** (reverted on subcall revert) data:
 
 #### Non-discardable Data (Permanent)
 
@@ -80,7 +97,7 @@ These data sizes are counted at transaction start and never reverted:
 
 #### Discardable Data (Frame-Aware)
 
-These data sizes are tracked within execution frames and reverted if the frame reverts:
+These data sizes are tracked within execution frames and discarded if the frame reverts:
 
 | Data Type                      | Size (Bytes)          | Conditions                              | Notes                                    |
 | ------------------------------ | --------------------- | --------------------------------------- | ---------------------------------------- |
@@ -93,22 +110,6 @@ These data sizes are tracked within execution frames and reverted if the frame r
 | **Account update from CALL**   | 40                    | Per account with balance change         | Caller and/or callee account             |
 | **Account update from CREATE** | 40                    | Per account                             | Created account (caller may also update) |
 | **Deployed bytecode**          | `contract_code.len()` | On successful CREATE/CREATE2            | Actual deployed contract size            |
-
-### Frame Management
-
-Data size tracking maintains a frame stack to properly handle nested calls and reverts:
-
-1. **Frame Push**: When a CALL or CREATE starts, a new frame is created
-2. **Frame Pop (Success)**: Discardable data from child frame merges into parent frame
-3. **Frame Pop (Revert)**: Discardable data from child frame is discarded (subtracted from total)
-
-### Smart Accounting for Calls
-
-To avoid double-counting account updates, the tracker uses a `target_updated` flag per frame:
-
-- When a frame transfers value, both caller and callee accounts are marked as updated
-- If a subcall transfers value and the caller wasn't already updated in the parent frame, the parent caller gets counted
-- This ensures each account is counted at most once per unique state change
 
 ### Limit Enforcement
 
@@ -135,7 +136,7 @@ These operations are counted at transaction start and never reverted:
 
 #### Discardable Operations (Frame-Aware)
 
-These operations are tracked within execution frames and reverted if the frame reverts:
+These operations are tracked within execution frames and discarded if the frame reverts:
 
 | Operation                      | KV Count | Conditions                              | Notes                                                                |
 | ------------------------------ | -------- | --------------------------------------- | -------------------------------------------------------------------- |
@@ -147,23 +148,6 @@ These operations are tracked within execution frames and reverted if the frame r
 | **CALL with transfer**         | 1 or 2   | -                                       | Callee account (1) + caller account if not already updated (0 or 1)  |
 | **CALL without transfer**      | 0        | -                                       | No state changes                                                     |
 
-### Frame Management
-
-KV update counting uses the same frame stack mechanism as data size tracking:
-
-1. **Frame Push**: When a CALL or CREATE starts, a new frame is created with `target_updated` flag
-2. **Frame Pop (Success)**: KV updates from child frame merge into parent frame
-3. **Frame Pop (Revert)**: KV updates from child frame are discarded (subtracted from total)
-
-### Smart Accounting for Calls
-
-The same `target_updated` optimization applies:
-
-- CREATE always marks the caller as updated (nonce increment)
-- CALL with transfer marks both caller and callee as updated
-- Subcalls only count parent caller update if not already marked as updated
-- This prevents double-counting the same account within a transaction
-
 ### Limit Enforcement
 
 When `kv_updates > TX_KV_UPDATES_LIMIT`:
@@ -174,12 +158,11 @@ When `kv_updates > TX_KV_UPDATES_LIMIT`:
 
 ## State Growth Tracking
 
-State growth tracks the net increase in blockchain state by counting new accounts created and new storage slots written. It uses a **net growth model** where clearing storage slots back to zero reduces the count.
-Note that the net growth model only applies on transaction level, which means clearing a storage slot created in previous transactions does not decrease the state growth tracked count.
+State growth tracks the net increase in blockchain state by counting new accounts created and new storage slots written.
+It uses a **net growth model** where clearing storage slots back to zero reduces the count.
+Note that the net growth model only applies on transaction level, which means clearing a storage slot created in previous transactions does not decrease the state growth count.
 
 ### Tracked Operations
-
-State growth distinguishes between **permanent growth** and **frame-aware growth** (can be reverted):
 
 #### Account Creation (Frame-Aware)
 
@@ -190,7 +173,7 @@ State growth distinguishes between **permanent growth** and **frame-aware growth
 | **CALL without value to empty account**     | 0            | EIP-161: no value transfer, no account created |
 | **Transaction to empty account with value** | +1           | Transaction-level account creation             |
 | **Transaction to existing account**         | 0            | Account already exists                         |
-| **Account creation reverted**               | 0            | Frame revert discards the growth               |
+| **Account creation reverted**               | 0            | Subcall revert discards the growth             |
 
 #### Storage Slot Creation (Frame-Aware)
 
@@ -209,11 +192,11 @@ State growth tracks transitions based on the **original value** (at transaction 
 - Slot starts at 0, write 5, write 10: **+1** (only counted once)
 - Slot starts at 0, write 5, write 0: **0** (created then cleared in same tx)
 - Slot starts at 5, write 10: **0** (slot already existed at tx start)
-- Slot starts at 0, write 5 in subcall, subcall reverts: **0** (frame revert discards)
+- Slot starts at 0, write 5 in subcall, subcall reverts: **0** (revert discards)
 
 ### Net Growth Model
 
-The tracker maintains an internal counter that can become negative during execution:
+The internal counter can become negative during execution:
 
 - **Creating state**: Increments the counter (+1 per account/slot)
 - **Clearing state**: Decrements the counter (-1 per slot cleared to zero)
@@ -227,32 +210,29 @@ Transaction clears 1 slot back to zero:     total_growth = +2
 Transaction clears 2 more slots:            total_growth = 0
 ```
 
-### Frame Management
+### Revert Behavior
 
-State growth uses a frame stack to properly handle reverts:
+State growth within a subcall is fully discardable:
 
-1. **Frame Creation**: When a CALL or CREATE is made, a new frame is pushed
-2. **Growth Accumulation**: Growth within a frame is tracked as "discardable"
-3. **On Success**: Frame's growth is merged into parent frame
-4. **On Revert**: Frame's growth is discarded (subtracted from total)
+- **On success**: The subcall's growth merges into the parent.
+- **On revert**: The subcall's growth is discarded.
 
 **Example:**
 
 ```
-Main transaction starts:                    Frame 0: discardable = 0
-Main creates 2 storage slots:               Frame 0: discardable = 2, total = 2
-Main calls contract A:                      Frame 1: discardable = 0
-Contract A creates 3 storage slots:         Frame 1: discardable = 3, total = 5
-Contract A calls contract B:                Frame 2: discardable = 0
-Contract B creates 1 storage slot:          Frame 2: discardable = 1, total = 6
-Contract B reverts:                         Frame 2 discarded, total = 5
-Contract A completes successfully:          Frame 1 merged to Frame 0, total = 5
+Main creates 2 storage slots:               total = 2
+Main calls contract A:
+  Contract A creates 3 storage slots:       total = 5
+  Contract A calls contract B:
+    Contract B creates 1 storage slot:      total = 6
+    Contract B reverts:                     total = 5 (B's growth discarded)
+  Contract A completes successfully:        total = 5 (A's growth merged)
 Transaction completes:                      Final growth = 5
 ```
 
 ### EIP-161 Compliance
 
-The tracker implements EIP-161 account clearing rules for CALL operations:
+EIP-161 account clearing rules apply for CALL operations:
 
 - **CALL with value to empty account**: Creates account → counts as +1 growth
 - **CALL without value to empty account**: Does NOT create account → no growth
@@ -265,3 +245,45 @@ When `state_growth > TX_STATE_GROWTH_LIMIT`:
 - Transaction execution halts with `OutOfGas` error
 - Remaining gas is preserved (not consumed)
 - Gas is refunded to transaction sender
+
+### Per-Frame State Growth Limits (Rex4+)
+
+Starting from Rex4, state growth is also enforced at the **per-frame** level to prevent a single inner call from consuming the entire transaction's state growth budget.
+
+#### Budget Allocation
+
+- **Top-level frame**: Gets the full TX state growth limit (no reduction).
+- **Inner frames**: Each receives `remaining * 98 / 100` of the parent's remaining budget, where `remaining` is the parent's limit minus the net growth accumulated since the parent's entry.
+
+#### Limit Exceeding Semantics
+
+When an inner frame exceeds its per-frame budget:
+
+- The frame's result is changed to **Revert** (not Halt).
+- Gas is returned to the parent frame.
+- The child's state growth is discarded (standard revert behavior).
+- The parent can continue executing after the reverted child call.
+
+This is different from TX-level limit enforcement, which halts the entire transaction.
+
+#### Example
+
+```
+TX state growth limit: 1000
+Top-level frame limit: 1000
+
+Top-level calls Child A:
+  Child A budget = 1000 * 98/100 = 980
+  Child A creates 500 slots
+
+  Child A calls Grandchild B:
+    Remaining = 980 - 500 = 480
+    Grandchild B budget = 480 * 98/100 = 470
+    Grandchild B creates 471 slots → exceeds 470 → reverted
+    Child A continues with its remaining budget
+
+Top-level calls Child C (after Child A):
+  Growth so far = 500 (Grandchild B's growth was discarded)
+  Remaining = 1000 - 500 = 500
+  Child C budget = 500 * 98/100 = 490
+```

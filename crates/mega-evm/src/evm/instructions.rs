@@ -2,7 +2,7 @@ use core::cmp::min;
 
 use crate::{
     constants::{self},
-    AdditionalLimit, ExternalEnvTypes, HostExt, MegaContext, MegaSpecId,
+    ExternalEnvTypes, HostExt, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Address, Bytes, U256};
@@ -214,8 +214,8 @@ mod rex3 {
 /// the interpreter halts and returns.
 macro_rules! compute_gas {
     ($interpreter:expr, $additional_limit:expr, $gas_used:expr $(,$ret:expr)?) => {
-        if $additional_limit.record_compute_gas($gas_used).exceeded_limit() {
-            $interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
+        if !$additional_limit.record_compute_gas($gas_used) {
+            $interpreter.halt($additional_limit.exceeding_instruction_result());
             return $($ret)?;
         }
     };
@@ -711,8 +711,8 @@ pub mod additional_limit_ext {
         // limit, if so, halt.
         let additional_limit = context.host.additional_limit();
         let mut additional_limit = additional_limit.borrow_mut();
-        if additional_limit.on_sstore(target_address, index, &loaded_data).exceeded_limit() {
-            context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
+        if !additional_limit.on_sstore(target_address, index, &loaded_data) {
+            context.interpreter.halt(additional_limit.exceeding_instruction_result());
         }
     }
 
@@ -746,8 +746,8 @@ pub mod additional_limit_ext {
         // halt.
         let additional_limit = context.host.additional_limit();
         let mut additional_limit = additional_limit.borrow_mut();
-        if additional_limit.on_log(N as u64, len as u64).exceeded_limit() {
-            context.interpreter.halt(AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT);
+        if !additional_limit.on_log(N as u64, len as u64) {
+            context.interpreter.halt(additional_limit.exceeding_instruction_result());
         }
     }
 }
@@ -1016,16 +1016,6 @@ pub mod storage_gas_ext {
 
         // Execute the original SSTORE instruction
         run_inner_instruction_or_abort!(compute_gas_ext::sstore, context);
-
-        // record the state growth
-        let mut additional_limit = context.host.additional_limit().borrow_mut();
-        additional_limit.state_growth_tracker.on_sstore(
-            target_address,
-            index,
-            original_value,
-            present_value,
-            new_value,
-        );
     }
 }
 

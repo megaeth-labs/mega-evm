@@ -25,7 +25,8 @@ impl EvmTxRuntimeLimits {
             MegaSpecId::EQUIVALENCE => Self::equivalence(),
             MegaSpecId::MINI_REX => Self::mini_rex(),
             MegaSpecId::REX | MegaSpecId::REX1 | MegaSpecId::REX2 => Self::rex(),
-            MegaSpecId::REX3 | MegaSpecId::REX4 => Self::rex3(),
+            MegaSpecId::REX3 => Self::rex3(),
+            MegaSpecId::REX4 => Self::rex4(),
         }
     }
 
@@ -81,6 +82,14 @@ impl EvmTxRuntimeLimits {
                 crate::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
             ..Self::rex()
         }
+    }
+
+    /// Limits for the `REX4` spec.
+    ///
+    /// Currently identical to Rex3 limits.
+    /// Per-frame state growth budgets are handled by `FrameLimitTracker`.
+    fn rex4() -> Self {
+        Self::rex3()
     }
 }
 

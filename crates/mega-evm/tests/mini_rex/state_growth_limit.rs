@@ -757,3 +757,51 @@ fn test_state_growth_not_tracked_in_equivalence() {
     assert!(result.result.is_success());
     assert_eq!(state_growth, 0, "EQUIVALENCE spec should not track state growth");
 }
+
+// ============================================================================
+// TRACKER MIGRATION COVERAGE TESTS
+// ============================================================================
+
+/// Tests that when a child frame both writes a storage slot (+1 growth) and resets it back
+/// to zero (-1 refund), then reverts, BOTH the growth and the refund are discarded.
+///
+/// This exercises the new tracker's separate `discardable_usage` and `refund` fields
+/// (vs the old tracker's single `i64 discardable`), ensuring they are both dropped on revert.
+#[test]
+fn test_child_write_and_refund_both_discarded_on_revert() {
+    // Child: write slot 0 from 0→1 (+1 growth), then reset slot 0 from 1→0 (-1 refund), then REVERT
+    let child_code = BytecodeBuilder::default()
+        .sstore(U256::from(0), U256::from(1)) // growth: +1
+        .sstore(U256::from(0), U256::from(0)) // refund: -1
+        .revert()
+        .build();
+
+    // Parent: write slot 5 from 0→1 (+1 growth), CALL child, STOP
+    let parent_code = BytecodeBuilder::default()
+        .sstore(U256::from(5), U256::from(1)) // growth: +1
+        .push_number(0_u64)                    // retSize
+        .push_number(0_u64)                    // retOffset
+        .push_number(0_u64)                    // argsSize
+        .push_number(0_u64)                    // argsOffset
+        .push_number(0_u64)                    // value
+        .push_address(CONTRACT)                // child address
+        .push_number(10_000_000_u64)           // gas
+        .append(CALL)
+        .append(STOP)
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, parent_code)
+        .account_code(CONTRACT, child_code);
+
+    let tx = default_tx_builder(CALLEE).build_fill();
+    let (result, state_growth) = transact(MegaSpecId::MINI_REX, &mut db, 100, tx).unwrap();
+
+    assert!(result.result.is_success());
+    // Only parent's slot 5 write should count; child's write (+1) and refund (-1) both discarded.
+    assert_eq!(
+        state_growth, 1,
+        "Child's growth and refund should both be discarded on revert, leaving only parent's +1"
+    );
+}

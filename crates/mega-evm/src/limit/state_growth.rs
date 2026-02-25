@@ -72,243 +72,198 @@
 //! - `(zero, non-zero, zero)`: Clear a slot that was empty at transaction start → **-1**
 //! - Other transitions: No change (slot was already non-zero at transaction start)
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::vec::Vec;
-
 use alloy_primitives::{Address, U256};
-use revm::{interpreter::InstructionResult, primitives::hardfork::SpecId};
+use revm::{
+    handler::FrameResult,
+    interpreter::{interpreter_action::FrameInit, FrameInput, SStoreResult},
+    primitives::hardfork::SpecId,
+};
 
-use crate::JournalInspectTr;
+use crate::{FrameLimitTracker, JournalInspectTr, MegaSpecId, TxRuntimeLimit};
 
-/// A tracker for tracking the net state growth during transaction execution.
+/// A tracker for net state growth during transaction execution.
 ///
-/// This tracker maintains a running count of state expansion by monitoring:
-/// - New accounts created
-/// - Storage slots written from zero to non-zero
-/// - Storage slots cleared from non-zero back to zero
+/// Uses `FrameLimitTracker` for frame-aware tracking with per-frame budgets (Rex4+).
 ///
-/// The tracker uses a frame stack to properly handle reverts in nested calls.
-/// See module-level documentation for details on the net growth model.
-#[derive(Debug, Default, Clone)]
-pub struct StateGrowthTracker {
-    /// The total net state growth. Can be negative internally if more state is
-    /// cleared than created, but reported as zero minimum via `current_growth()`.
-    total_growth: i64,
-
-    /// Stack of frames tracking revertable state growth. Each frame corresponds
-    /// to a call frame in the EVM execution.
-    frame_stack: Vec<FrameInfo>,
-}
-
-/// Information about state growth within a single call frame.
+/// State growth measures the expansion of blockchain state by counting new accounts and
+/// storage slots created, offset by any that are cleared:
+///
+/// - **+1** for creating a new account (via `CREATE`, `CREATE2`, or `CALL` with value to empty
+///   account per EIP-161)
+/// - **+1** for writing a storage slot from zero to non-zero for the first time
+/// - **-1** for clearing a storage slot back to zero (only when the slot was empty at transaction
+///   start)
+///
+/// See module-level documentation for details on the net growth model and frame-based tracking.
 #[derive(Debug, Clone)]
-struct FrameInfo {
-    /// The amount of state growth in this frame that can be reverted if the frame fails.
-    /// This value can be negative if more state is cleared than created within the frame.
-    discardable: i64,
+pub(crate) struct StateGrowthLimit2 {
+    rex4_enabled: bool,
+    frame_tracker: FrameLimitTracker<()>,
 }
 
-impl StateGrowthTracker {
-    /// Creates a new state growth tracker with zero growth.
-    pub(crate) fn new() -> Self {
-        Self::default()
+impl StateGrowthLimit2 {
+    pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
+        Self {
+            frame_tracker: FrameLimitTracker::new(tx_limit),
+            rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
+        }
+    }
+
+    /// Pushes a new frame onto the tracker.
+    /// For Rex4+, uses the 98/100 budget-based limit derived from parent's remaining budget.
+    /// For pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced
+    /// (the TX-level check in `check_limit()` uses `net_usage()` instead).
+    fn push_frame(&mut self) {
+        if self.rex4_enabled {
+            self.frame_tracker.push_frame(());
+        } else {
+            self.frame_tracker.push_frame_with_limit(u64::MAX, ());
+        }
+    }
+
+    /// Records positive state growth in the current frame.
+    fn record_growth(&mut self, n: u64) {
+        if let Some(entry) = self.frame_tracker.frame_mut() {
+            // For state growth, all growth in the current transaction is discardable on revert.
+            entry.discardable_usage += n;
+        }
+    }
+
+    /// Records a refund (negative growth) in the current frame.
+    fn record_refund(&mut self, n: u64) {
+        if let Some(entry) = self.frame_tracker.frame_mut() {
+            entry.refund += n;
+        }
+    }
+}
+
+impl TxRuntimeLimit for StateGrowthLimit2 {
+    /// Returns the current effective state growth limit for the entire transaction.
+    #[inline]
+    fn tx_limit(&self) -> u64 {
+        self.frame_tracker.tx_limit()
+    }
+
+    /// Returns the current net state growth across all frames, clamped to zero.
+    #[inline]
+    fn tx_usage(&self) -> u64 {
+        self.frame_tracker.net_usage()
     }
 
     /// Resets the tracker to its initial state.
     ///
-    /// This clears all accumulated growth and frame stack, preparing the tracker
-    /// for a new transaction.
-    pub(crate) fn reset(&mut self) {
-        self.total_growth = 0;
-        self.frame_stack.clear();
+    /// This clears the frame stack, preparing the tracker for a new transaction.
+    #[inline]
+    fn reset(&mut self) {
+        self.frame_tracker.reset();
     }
 
-    /// Returns the current net state growth, clamped to a minimum of zero.
+    /// Returns whether the state growth limit has been exceeded.
     ///
-    /// # Returns
-    ///
-    /// The net state growth as a non-negative integer. If the internal `total_growth`
-    /// is negative (more state cleared than created), this returns 0.
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// internal total_growth = 5  → returns 5
-    /// internal total_growth = 0  → returns 0
-    /// internal total_growth = -3 → returns 0 (clamped)
-    /// ```
-    #[inline]
-    pub(crate) const fn current_growth(&self) -> u64 {
-        if self.total_growth < 0 {
-            0
+    /// For Rex4+, the check is frame-local: each inner call has its own budget derived
+    /// from the parent's remaining budget (98/100 ratio).
+    /// For pre-Rex4, the check is TX-level: total net growth across all frames is compared
+    /// against the TX limit.
+    fn check_limit(&self) -> super::LimitCheck {
+        if self.rex4_enabled {
+            self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::StateGrowth)
         } else {
-            self.total_growth as u64
+            // Pre-Rex4: check total growth across all frames against the TX-level limit.
+            let used = self.tx_usage();
+            let limit = self.frame_tracker.tx_limit();
+            if used > limit {
+                super::LimitCheck::ExceedsLimit {
+                    kind: super::LimitKind::StateGrowth,
+                    limit,
+                    used,
+                    frame_local: false,
+                }
+            } else {
+                super::LimitCheck::WithinLimit
+            }
         }
-    }
-
-    /// Checks if the current growth exceeds the specified limit.
-    ///
-    /// # Arguments
-    ///
-    /// * `limit` - The maximum allowed state growth
-    ///
-    /// # Returns
-    ///
-    /// `true` if current growth strictly exceeds the limit, `false` otherwise.
-    #[inline]
-    pub(crate) const fn exceeds_limit(&self, limit: u64) -> bool {
-        self.current_growth() > limit
     }
 
     /// Called when inspector intercepts and skips a call/create.
     ///
-    /// Pushes an empty frame so `end_frame` can pop it to keep the stack aligned.
+    /// Pushes an empty frame so `before_frame_return_result` can pop it to keep
+    /// the frame stack aligned with the EVM's call stack.
     #[inline]
-    pub(crate) fn on_inspector_intercept(&mut self) {
-        self.frame_stack.push(FrameInfo { discardable: 0 });
-    }
-}
-
-impl StateGrowthTracker {
-    /// Pushes a new frame onto the stack for a new call context.
-    ///
-    /// This is called at the start of each `CALL`/`CREATE` operation to track
-    /// state growth within that call frame separately.
-    fn new_frame(&mut self) {
-        self.frame_stack.push(FrameInfo { discardable: 0 });
+    fn after_inspector_intercept_frame_init(&mut self) {
+        self.push_frame();
     }
 
-    /// Ends the current frame and handles its state growth based on execution result.
+    /// Hook called before a new execution frame is initialized.
     ///
-    /// This method is called when a call frame completes (either successfully or with revert).
-    /// It processes the frame's accumulated state growth:
-    /// - On success: merges the frame's growth into the parent frame
-    /// - On revert: discards the frame's growth from the total
+    /// Pushes a new frame onto the tracker and records any state growth caused by
+    /// the frame initialization itself:
     ///
-    /// # Arguments
-    ///
-    /// * `result` - The execution result of the frame (success or error)
-    /// * `last_frame` - Whether this is the last frame of the transaction
-    ///
-    /// # Frame Stack Handling
-    ///
-    /// The last frame may be ended twice in some execution paths. This method
-    /// handles that case gracefully by returning early if the stack is already empty.
-    pub(crate) fn end_frame(&mut self, result: InstructionResult, last_frame: bool) {
-        if last_frame && self.frame_stack.is_empty() {
-            // the last frame may be ended twice. In such case, we just return.
-            return;
-        }
-        let frame = self.frame_stack.pop().expect("frame stack is empty");
-        if result.is_ok() {
-            // merge the current frame's discardable into the previous frame
-            self.update_current_frame_discardable_size(frame.discardable);
-        } else {
-            // discard the current frame's discardable
-            self.total_growth -= frame.discardable;
-        }
-    }
-}
-
-impl StateGrowthTracker {
-    /// Records the new account creation.
-    ///
-    /// This is invoked when:
-    /// - An empty account is called with value transfer (either in a transaction or in a inner
-    ///   message call)
-    /// - A contract is crated via `CREATE` or `CREATE2` or contract creation transaction
-    ///
-    /// # Arguments
-    ///
-    /// * `_address` - The address being created (unused, reserved for future use)
-    ///
-    /// This implements EIP-161's account clearing rules. Calls without value transfer
-    /// to empty accounts do not create an account and thus don't count toward state growth.
-    pub(crate) fn record_call<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
+    /// - **Call with value transfer to empty account**: +1 growth (EIP-161 compliant). Only
+    ///   `CALL`-like opcodes with value transfer to empty accounts count as creating an account.
+    ///   `CALL` without value transfer does not count (empty account remains empty).
+    /// - **Create** (`CREATE` / `CREATE2`): +1 growth for the new account.
+    /// - **Call without value transfer** or **call to non-empty account**: no growth.
+    fn before_frame_init<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
         &mut self,
+        frame_init: &FrameInit,
         journal: &mut JOURNAL,
-        address: Address,
-        has_transfer: bool,
     ) {
-        self.new_frame();
+        self.push_frame();
 
-        let to_account =
-            journal.inspect_account_delegated(address).expect("failed to inspect account");
-        let is_empty = to_account.state_clear_aware_is_empty(SpecId::PRAGUE);
-
-        if is_empty && has_transfer {
-            self.total_growth += 1;
-            self.update_current_frame_discardable_size(1);
+        match &frame_init.frame_input {
+            FrameInput::Call(call_inputs) => {
+                // EIP-161: only value transfers to empty accounts count as creating an account.
+                if call_inputs.transfers_value() {
+                    let to_account = journal
+                        .inspect_account_delegated(call_inputs.target_address)
+                        .expect("failed to inspect account");
+                    let is_empty = to_account.state_clear_aware_is_empty(SpecId::PRAGUE);
+                    if is_empty {
+                        self.record_growth(1);
+                    }
+                }
+            }
+            FrameInput::Create(_) => {
+                self.record_growth(1);
+            }
+            FrameInput::Empty => unreachable!(),
         }
-    }
-
-    /// Records the new account creation.
-    ///
-    /// This is invoked when a contract is created via `CREATE` or `CREATE2` or contract creation
-    /// transaction.
-    ///
-    /// # Arguments
-    ///
-    /// * `_address` - The address being created (unused, reserved for future use)
-    pub(crate) fn record_create(&mut self) {
-        self.new_frame();
-
-        self.total_growth += 1;
-        self.update_current_frame_discardable_size(1);
     }
 
     /// Hook called when a storage slot is written via `SSTORE`.
     ///
-    /// This method updates the total growth and discardable size based on the storage
-    /// slot's state transition. Only transitions that affect transaction-level state
-    /// growth are counted.
+    /// Updates the frame's growth and refund counters based on the storage slot's state
+    /// transition.
+    /// Only transitions that affect **transaction-level** state growth are counted:
     ///
-    /// # Arguments
-    ///
-    /// * `_address` - The address of the storage slot (unused, reserved for future use)
-    /// * `_slot` - The storage slot key (unused, reserved for future use)
-    /// * `original_value` - The value at the start of the transaction
-    /// * `present_value` - The current value before this `SSTORE`
-    /// * `new_value` - The value being written
-    ///
-    /// # State Growth Rules
-    ///
-    /// The growth change depends on the transition:
-    ///
-    /// | Original | Present | New   | Growth Change | Reason                                      |
-    /// |----------|---------|-------|---------------|---------------------------------------------|
-    /// | zero     | zero    | non-0 | **+1**        | First write to empty slot                   |
-    /// | zero     | non-0   | zero  | **-1**        | Clear slot that was empty at tx start       |
-    /// | zero     | non-0   | non-0 | 0             | Already counted when first written          |
-    /// | non-0    | *       | *     | 0             | Slot existed at tx start, no growth change  |
+    /// | Original | Present | New   | Effect     | Reason                                      |
+    /// |----------|---------|-------|------------|---------------------------------------------|
+    /// | zero     | zero    | non-0 | +1 growth  | First write to empty slot                   |
+    /// | zero     | non-0   | zero  | +1 refund  | Clear slot that was empty at tx start       |
+    /// | zero     | non-0   | non-0 | —          | Already counted when first written          |
+    /// | non-0    | *       | *     | —          | Slot existed at tx start, no growth change  |
     ///
     /// # Examples
     ///
     /// ```text
     /// Slot starts at 0, write 5:           +1 (new storage)
     /// Slot starts at 0, write 5, write 10: +1 (only counted once)
-    /// Slot starts at 0, write 5, write 0:  0  (created then cleared)
+    /// Slot starts at 0, write 5, write 0:  0  (created then cleared via refund)
     /// Slot starts at 5, write 10:          0  (already existed)
     /// ```
-    pub(crate) fn on_sstore(
-        &mut self,
-        _address: Address,
-        _slot: U256,
-        original_value: U256,
-        present_value: U256,
-        new_value: U256,
-    ) {
-        match (original_value.is_zero(), present_value.is_zero(), new_value.is_zero()) {
+    fn after_sstore(&mut self, _target_address: Address, _slot: U256, store_result: &SStoreResult) {
+        match (
+            store_result.original_value.is_zero(),
+            store_result.present_value.is_zero(),
+            store_result.new_value.is_zero(),
+        ) {
             (true, true, false) => {
-                // First write to empty slot: slot goes from zero to non-zero
-                self.total_growth += 1;
-                self.update_current_frame_discardable_size(1);
+                // First write to empty slot: slot goes from zero to non-zero → +1
+                self.record_growth(1);
             }
             (true, false, true) => {
-                // Clear slot: slot was zero at tx start, became non-zero, now back to zero
-                self.total_growth -= 1;
-                self.update_current_frame_discardable_size(-1);
+                // Clear slot: was zero at tx start, became non-zero, now back to zero → -1
+                self.record_refund(1);
             }
             _ => {
                 // No state growth change:
@@ -318,20 +273,15 @@ impl StateGrowthTracker {
         }
     }
 
-    /// Updates the current frame's discardable size.
+    /// Hook called when a frame returns its result to the parent frame.
     ///
-    /// This internal method adds the specified size to the current frame's
-    /// discardable size in the stack. If there is no current frame, meaning that we are at the
-    /// beginning of the transaction or the end of the transaction, the changes will not be
-    /// reverted (e.g., the caller's nonce will still be updated, even if the transaction is
-    /// reverted).
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - The size to add to the current frame's discardable size
-    fn update_current_frame_discardable_size(&mut self, size: i64) {
-        if let Some(frame) = self.frame_stack.last_mut() {
-            frame.discardable += size;
-        }
+    /// Pops the current frame from the tracker and handles its accumulated state growth:
+    /// - **On success**: merges the frame's growth and refunds into the parent frame via
+    ///   `pop_frame::<true>()`.
+    /// - **On revert/failure**: discards the frame's discardable growth (refunds and persistent
+    ///   usage are still propagated) via `pop_frame::<false>()`.
+    fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
+        assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
+        self.frame_tracker.pop_frame(result.instruction_result().is_ok());
     }
 }

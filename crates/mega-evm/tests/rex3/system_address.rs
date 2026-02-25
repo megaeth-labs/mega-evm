@@ -155,7 +155,7 @@ fn test_non_system_address_subject_to_rex3_sload_detention() {
     );
 
     // Compute gas limit should be set to 20M
-    let compute_gas_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit;
+    let compute_gas_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit();
     assert_eq!(
         compute_gas_limit,
         mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,

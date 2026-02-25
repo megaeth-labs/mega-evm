@@ -615,7 +615,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
 
     // Verify TX1 lowered the compute_gas_limit to oracle limit
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
         "TX1 should have lowered compute_gas_limit to oracle access limit"
     );
@@ -651,7 +651,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
     );
 
     // Verify the limit is at the original value (not stuck at oracle limit)
-    let actual_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit;
+    let actual_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit();
     assert_eq!(
         actual_limit, compute_gas_limit,
         "compute_gas_limit should be reset to original value ({}), not stuck at oracle limit ({})",
@@ -724,7 +724,7 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
 
     // Verify TX1 lowered the compute_gas_limit to oracle limit
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
         "TX1 should have lowered compute_gas_limit to oracle access limit"
     );
@@ -747,7 +747,7 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
     );
 
     // Verify the limit is still at the lowered oracle limit (not reset)
-    let actual_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit;
+    let actual_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit();
     assert_eq!(
         actual_limit, ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
         "compute_gas_limit should still be at oracle limit ({}) in pre-Rex1, not reset to {}",
@@ -1322,4 +1322,97 @@ fn test_volatile_data_access_with_non_restrictive_detention_reports_compute_gas_
     let (limit, actual) = get_compute_gas_limit_info(&result).unwrap();
     assert_eq!(limit, compute_gas_limit);
     assert!(actual > limit);
+}
+
+// ============================================================================
+// TRACKER MIGRATION COVERAGE TESTS
+// ============================================================================
+
+/// Tests that compute gas is persistent across frame reverts — i.e., a child frame's
+/// compute gas consumption is NOT discarded when the child reverts.
+///
+/// This is a key property of `ComputeGasLimit2`: all gas goes to `persistent_usage`,
+/// never to `discardable_usage`. CPU cycles cannot be undone.
+///
+/// We compare parent+reverting-child vs parent-only (no child call). The child uses SHA3
+/// on a 256-byte memory region to consume ~1000+ compute gas. If the child's gas were
+/// discarded on revert, the two cases would show similar gas. Instead, the revert case
+/// should show significantly MORE gas.
+#[test]
+fn test_compute_gas_survives_child_revert() {
+    // Child: SHA3 on 256 bytes of memory (costs 30 base + 6*8 words = 78 gas for SHA3,
+    // plus MSTORE8 * 256 for filling memory, plus overhead). Then REVERT.
+    let mut child_builder = BytecodeBuilder::default();
+    // Fill 256 bytes of memory to force memory expansion and give SHA3 data to hash
+    for i in 0..8u64 {
+        child_builder = child_builder
+            .push_number(0xDEADBEEFCAFEBABEu64) // value
+            .push_number(i * 32)                  // offset
+            .append(MSTORE);
+    }
+    // SHA3 over 256 bytes: costs 30 + 6*8 = 78 gas, plus the MSTOREs above
+    let child_code = child_builder
+        .push_number(256_u64) // size
+        .push_number(0_u64)   // offset
+        .append(KECCAK256)
+        .append(POP)
+        // Do it again to double the cost
+        .push_number(256_u64)
+        .push_number(0_u64)
+        .append(KECCAK256)
+        .append(POP)
+        .revert()
+        .build();
+
+    // Parent with child call: CALL child, POP, STOP
+    let parent_with_call = BytecodeBuilder::default()
+        .push_number(0_u64)            // retSize
+        .push_number(0_u64)            // retOffset
+        .push_number(0_u64)            // argsSize
+        .push_number(0_u64)            // argsOffset
+        .push_number(0_u64)            // value
+        .push_address(CONTRACT2)       // child address
+        .push_number(10_000_000_u64)   // gas
+        .append(CALL)
+        .append(POP)
+        .stop()
+        .build();
+
+    // Parent without child call: just STOP
+    let parent_no_call = BytecodeBuilder::default().stop().build();
+
+    // Run: parent calls reverting child
+    let mut db_with_child = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, parent_with_call)
+        .account_code(CONTRACT2, child_code);
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
+    let (result_with_child, gas_with_child) =
+        transact(MegaSpecId::MINI_REX, &mut db_with_child, u64::MAX, tx).unwrap();
+    assert!(result_with_child.result.is_success());
+
+    // Run: parent only (no child call)
+    let mut db_no_child = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, parent_no_call);
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
+    let (result_no_child, gas_no_child) =
+        transact(MegaSpecId::MINI_REX, &mut db_no_child, u64::MAX, tx).unwrap();
+    assert!(result_no_child.result.is_success());
+
+    // The child's compute gas should persist despite the revert.
+    // If it were discarded, gas_with_child ≈ gas_no_child.
+    // The child consumes >500 gas (8 MSTOREs + 2 SHA3s + PUSHes + POPs).
+    let child_gas = gas_with_child.saturating_sub(gas_no_child);
+    assert!(
+        child_gas > 500,
+        "Child's compute gas should persist through revert. \
+         gas_with_child={}, gas_no_child={}, child_contribution={}. \
+         If child gas were discarded, child_contribution would be near zero.",
+        gas_with_child,
+        gas_no_child,
+        child_gas
+    );
 }

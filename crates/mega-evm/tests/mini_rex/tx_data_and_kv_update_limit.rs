@@ -1168,3 +1168,165 @@ fn test_multiple_operations_with_limit_exceeded_preserves_gas() {
         gas_remaining
     );
 }
+
+// ============================================================================
+// TRACKER MIGRATION COVERAGE TESTS
+// ============================================================================
+
+/// Tests that when a child frame both writes a storage slot (+1) and resets it back to original
+/// (-1 refund), then reverts, BOTH the write and the refund are discarded.
+///
+/// This exercises the new tracker's separate `discardable_usage` and `refund` fields
+/// (vs the old tracker's single `i64 discardable`), ensuring they are both dropped on revert.
+#[test]
+fn test_child_write_and_refund_both_discarded_on_revert() {
+    // Child: write slot 0 from 0→1 (+1 write), then reset slot 0 from 1→0 (-1 refund), then REVERT
+    let child_code = BytecodeBuilder::default()
+        .sstore(U256::from(0), U256::from(1)) // write: +1
+        .sstore(U256::from(0), U256::from(0)) // refund: -1
+        .revert()
+        .build();
+
+    // Parent: write slot 5 from 0→1 (+1 write), CALL child, STOP
+    let parent_code = BytecodeBuilder::default()
+        .sstore(U256::from(5), U256::from(1)) // write: +1
+        .push_number(0_u64)                    // retSize
+        .push_number(0_u64)                    // retOffset
+        .push_number(0_u64)                    // argsSize
+        .push_number(0_u64)                    // argsOffset
+        .push_number(0_u64)                    // value
+        .push_address(LIBRARY)                 // child address
+        .push_number(10_000_000_u64)           // gas
+        .append(CALL)
+        .append(STOP)
+        .build();
+
+    let mut db = CacheDB::new(EmptyDB::new());
+    db.insert_account_info(
+        CALLER,
+        revm::state::AccountInfo { balance: U256::from(1_000_000), ..Default::default() },
+    );
+    db.insert_account_info(
+        CALLEE,
+        revm::state::AccountInfo {
+            code: Some(revm::bytecode::Bytecode::new_raw(parent_code)),
+            ..Default::default()
+        },
+    );
+    db.insert_account_info(
+        LIBRARY,
+        revm::state::AccountInfo {
+            code: Some(revm::bytecode::Bytecode::new_raw(child_code)),
+            ..Default::default()
+        },
+    );
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(100_000_000).build_fill();
+
+    // Expected data_size:
+    //   base tx (110) + caller account update (40) = 150 (non-discardable)
+    //   + parent's SSTORE slot 5 write (40) = 190
+    //   Child's write (+40) and refund (-40) should both be discarded on revert.
+    let expected_data_size = BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE + STORAGE_SLOT_WRITE_SIZE;
+
+    // Expected kv_updates:
+    //   caller account update (1) + parent's SSTORE slot 5 write (1) = 2
+    //   Child's write (+1) and refund (-1) should both be discarded on revert.
+    let expected_kv_updates = 2;
+
+    let (result, data_size, kv_updates) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+
+    assert!(result.result.is_success());
+    assert_eq!(
+        data_size, expected_data_size,
+        "Child's write and refund should both be discarded on revert"
+    );
+    assert_eq!(
+        kv_updates, expected_kv_updates,
+        "Child's KV write and refund should both be discarded on revert"
+    );
+}
+
+/// Tests that TX intrinsic data (base tx size + caller account update) persists even when
+/// the top-level frame reverts. This exercises the new tracker's `persistent_usage` field
+/// at the TX entry level.
+#[test]
+fn test_tx_intrinsic_data_survives_top_level_revert() {
+    // CALLEE code: immediately REVERT
+    let code = BytecodeBuilder::default().revert().build();
+
+    let mut db = CacheDB::new(EmptyDB::new());
+    db.insert_account_info(
+        CALLER,
+        revm::state::AccountInfo { balance: U256::from(1_000_000), ..Default::default() },
+    );
+    db.insert_account_info(
+        CALLEE,
+        revm::state::AccountInfo {
+            code: Some(revm::bytecode::Bytecode::new_raw(code)),
+            ..Default::default()
+        },
+    );
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(100_000_000).build_fill();
+
+    let (result, data_size, kv_updates) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, u64::MAX, tx).unwrap();
+
+    // Transaction should be reverted (not success, not halt)
+    assert!(
+        matches!(result.result, ExecutionResult::Revert { .. }),
+        "Expected top-level revert, got {:?}",
+        result.result
+    );
+
+    // TX intrinsic data should persist despite the revert:
+    // base tx size (110) + caller account update (40) = 150
+    let expected_data_size = BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE;
+    assert_eq!(
+        data_size, expected_data_size,
+        "TX intrinsic data (base + caller) should survive top-level revert"
+    );
+
+    // Caller account update should persist
+    assert_eq!(kv_updates, 1, "Caller account KV update should survive top-level revert");
+}
+
+/// Tests the check_limit priority order: data_size is checked before kv_update.
+/// When both limits are exceeded simultaneously, the data_size error should be reported.
+#[test]
+fn test_check_limit_priority_data_size_before_kv_update() {
+    // Simple code that STOPs immediately — the intrinsic TX data already exceeds limits
+    let code = BytecodeBuilder::default().append(STOP).build();
+
+    let mut db = CacheDB::new(EmptyDB::new());
+    db.insert_account_info(
+        CALLER,
+        revm::state::AccountInfo { balance: U256::from(1_000_000), ..Default::default() },
+    );
+    db.insert_account_info(
+        CALLEE,
+        revm::state::AccountInfo {
+            code: Some(revm::bytecode::Bytecode::new_raw(code)),
+            ..Default::default()
+        },
+    );
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(100_000_000).build_fill();
+
+    // Set both limits very low so both are exceeded by TX intrinsics:
+    // data_size will be 150 (110 base + 40 caller), exceeds limit=1
+    // kv_updates will be 1 (caller), exceeds limit=0
+    let (result, _, _) = transact(MegaSpecId::MINI_REX, &mut db, 1, 0, tx).unwrap();
+
+    assert!(result.result.is_halt(), "Expected halt, got {:?}", result.result);
+
+    // data_size is checked before kv_update in the check_limit() order,
+    // so DataLimitExceeded should be reported
+    assert!(
+        is_data_limit_exceeded(&result),
+        "Expected DataLimitExceeded (checked first), got {:?}",
+        result.result
+    );
+}

@@ -69,6 +69,13 @@ pub enum KeylessDeployError {
         /// The gas limit override provided by the caller
         provided_gas_limit: u64,
     },
+    /// The remaining compute gas is insufficient to pay for the keyless deploy overhead.
+    InsufficientComputeGas {
+        /// The configured compute gas limit
+        limit: u64,
+        /// The actual compute gas usage
+        used: u64,
+    },
     /// Internal error during sandbox execution
     InternalError(String),
     /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner
@@ -128,6 +135,9 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
             }
             .abi_encode()
             .into()
+        }
+        KeylessDeployError::InsufficientComputeGas { limit, used } => {
+            IKeylessDeploy::InsufficientComputeGas { limit, used }.abi_encode().into()
         }
         KeylessDeployError::InternalError(message) => {
             IKeylessDeploy::InternalError { message }.abi_encode().into()

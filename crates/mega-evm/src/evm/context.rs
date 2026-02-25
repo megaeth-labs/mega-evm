@@ -30,7 +30,8 @@ use revm::{
 
 use crate::{
     constants, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
-    ExternalEnvTypes, ExternalEnvs, MegaSpecId, VolatileDataAccess, VolatileDataAccessTracker,
+    ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit, VolatileDataAccess,
+    VolatileDataAccessTracker,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -104,7 +105,7 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
         Self {
             spec,
             disable_beneficiary: false,
-            additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(tx_limits))),
+            additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(spec, tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
                 EmptyExternalEnv,
@@ -164,7 +165,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
         Self {
             spec,
             disable_beneficiary: false,
-            additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(tx_limits))),
+            additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(spec, tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
                 external_envs.salt_env,
@@ -325,7 +326,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
 
     /// Sets the transaction limits for the EVM.
     pub fn with_tx_runtime_limits(mut self, tx_limits: EvmTxRuntimeLimits) -> Self {
-        self.additional_limit = Rc::new(RefCell::new(AdditionalLimit::new(tx_limits)));
+        self.additional_limit = Rc::new(RefCell::new(AdditionalLimit::new(self.spec, tx_limits)));
         self.volatile_data_tracker = Rc::new(RefCell::new(VolatileDataAccessTracker::new(
             tx_limits.block_env_access_compute_gas_limit,
             tx_limits.oracle_access_compute_gas_limit,
@@ -378,7 +379,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Returns the current total data size in bytes generated so far. The data size is reset at the
     /// beginning of each transaction.
     pub fn generated_data_size(&self) -> u64 {
-        self.additional_limit.borrow().data_size_tracker.current_size()
+        self.additional_limit.borrow().data_size.tx_usage()
     }
 
     /// Gets the current total number of key-value updates performed during transaction execution.
@@ -388,7 +389,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Returns the current total number of KV operations performed so far. The count is reset at
     /// the beginning of each transaction.
     pub fn kv_update_count(&self) -> u64 {
-        self.additional_limit.borrow().kv_update_counter.current_count()
+        self.additional_limit.borrow().kv_update.tx_usage()
     }
 
     /// Gets the bucket IDs used during transaction execution.
@@ -509,7 +510,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
-            self.additional_limit.borrow_mut().reset(self.spec);
+            self.additional_limit.borrow_mut().reset();
             self.additional_limit.borrow_mut().before_tx_start(&self.inner.tx);
         }
     }

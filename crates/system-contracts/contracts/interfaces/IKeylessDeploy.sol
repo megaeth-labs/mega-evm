@@ -64,6 +64,11 @@ interface IKeylessDeploy {
     /// @param providedGasLimit The gas limit override provided by the caller.
     error GasLimitTooLow(uint64 txGasLimit, uint64 providedGasLimit);
 
+    /// @notice The remaining compute gas is insufficient to pay for the keyless deploy overhead.
+    /// @param limit The configured compute gas limit.
+    /// @param used The compute gas usage.
+    error InsufficientComputeGas(uint64 limit, uint64 used);
+
     /// @notice Internal error during sandbox execution.
     /// @param message The error message.
     error InternalError(string message);

@@ -1,20 +1,23 @@
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::vec::Vec;
-
 use alloy_primitives::{Address, U256};
 use revm::{
     context::{transaction::AuthorizationTr, Transaction},
-    interpreter::{InstructionResult, SStoreResult},
+    handler::{EthFrame, FrameResult},
+    interpreter::{
+        interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, SStoreResult,
+    },
 };
 
-use crate::MegaTransaction;
+use super::{
+    data_size::DataSizeFrameInfo,
+    frame_limit::{FrameLimitTracker, TxRuntimeLimit},
+};
+use crate::{MegaSpecId, MegaTransaction};
 
 /// A counter for tracking key-value storage operations during transaction execution.
 ///
-/// This struct provides frame-aware counting of storage operations, properly handling
-/// nested calls and reverts. Uses sophisticated logic to track net state changes rather
-/// than all operations.
+/// Uses `FrameLimitTracker` for frame-aware counting.
+/// KV updates are enforced at the TX level only (no per-frame budgets).
+/// Units are 1 per KV operation (not bytes).
 ///
 /// ## Tracked Operations
 ///
@@ -26,204 +29,187 @@ use crate::MegaTransaction;
 /// - Storage writes: 1 KV update (only when original ≠ new value, refunded when reset to original)
 /// - Account updates from CREATE: 1 KV update for created account
 /// - Account updates from CALL with transfer: 2 KV updates (caller + callee)
-#[derive(Debug, Default)]
-pub struct KVUpdateCounter {
-    /// The total number of key-value updates performed during execution.
-    total_count: i64,
-
-    /// The stack of KV update counts per execution frame for proper revert handling.
-    ///
-    /// This stack allows the counter to properly handle nested calls and reverts
-    /// by maintaining separate counts for each execution frame.
-    frame_stack: Vec<super::data_size::FrameInfo>,
+#[derive(Debug, Clone)]
+pub(crate) struct KVUpdateLimit2 {
+    frame_tracker: FrameLimitTracker<DataSizeFrameInfo>,
 }
 
-impl KVUpdateCounter {
-    pub(crate) fn new() -> Self {
-        Self::default()
+impl KVUpdateLimit2 {
+    pub(crate) fn new(_spec: MegaSpecId, tx_limit: u64) -> Self {
+        Self { frame_tracker: FrameLimitTracker::new(tx_limit) }
     }
 
-    pub(crate) fn reset(&mut self) {
-        self.total_count = 0;
-        self.frame_stack.clear();
+    /// Pushes a new frame onto the tracker with `u64::MAX` limit.
+    /// KV updates use TX-level enforcement only (no per-frame budgets).
+    fn push_frame(&mut self, info: DataSizeFrameInfo) {
+        self.frame_tracker.push_frame_with_limit(u64::MAX, info);
+    }
+
+    /// Records a discardable KV update in the current frame.
+    fn record_discardable(&mut self, n: u64) {
+        if let Some(entry) = self.frame_tracker.frame_mut() {
+            entry.discardable_usage += n;
+        }
+    }
+
+    /// Records a KV update refund in the current frame.
+    fn record_refund(&mut self, n: u64) {
+        if let Some(entry) = self.frame_tracker.frame_mut() {
+            entry.refund += n;
+        }
+    }
+}
+
+impl TxRuntimeLimit for KVUpdateLimit2 {
+    /// Returns the current effective KV update limit for the entire transaction.
+    #[inline]
+    fn tx_limit(&self) -> u64 {
+        self.frame_tracker.tx_limit()
+    }
+
+    /// Returns the current total KV update count across all frames, clamped to zero.
+    #[inline]
+    fn tx_usage(&self) -> u64 {
+        self.frame_tracker.net_usage()
     }
 
     #[inline]
-    pub(crate) const fn current_count(&self) -> u64 {
-        if self.total_count < 0 {
-            0
+    fn reset(&mut self) {
+        self.frame_tracker.reset();
+    }
+
+    /// Returns whether the KV update limit has been exceeded.
+    ///
+    /// Checks total KV updates across all frames against the TX limit.
+    fn check_limit(&self) -> super::LimitCheck {
+        let used = self.tx_usage();
+        let limit = self.frame_tracker.tx_limit();
+        if used > limit {
+            super::LimitCheck::ExceedsLimit {
+                kind: super::LimitKind::KVUpdate,
+                limit,
+                used,
+                frame_local: false,
+            }
         } else {
-            self.total_count as u64
+            super::LimitCheck::WithinLimit
         }
+    }
+
+    /// Records the KV updates at the start of a transaction.
+    ///
+    /// This includes:
+    /// - EIP-7702 authority account updates (1 each)
+    /// - Caller account update (1)
+    ///
+    /// All recorded as pre-frame (non-discardable) since no frame exists yet.
+    fn before_tx_start(&mut self, tx: &MegaTransaction) {
+        // EIP-7702 authority account updates (non-discardable)
+        for authorization in tx.authorization_list() {
+            if authorization.authority().is_some() {
+                self.frame_tracker.tx_mut().persistent_usage += 1;
+            }
+        }
+
+        // Caller account update (non-discardable)
+        self.frame_tracker.tx_mut().persistent_usage += 1;
     }
 
     #[inline]
-    pub(crate) const fn exceeds_limit(&self, limit: u64) -> bool {
-        self.current_count() > limit
+    fn after_inspector_intercept_frame_init(&mut self) {
+        self.push_frame(DataSizeFrameInfo { target_address: None, target_updated: false });
     }
 
-    /// Called when inspector intercepts and skips a call/create.
+    /// Hook called before a new execution frame is initialized.
     ///
-    /// Pushes an empty frame so `end_frame` can pop it to keep the stack aligned.
-    #[inline]
-    pub(crate) fn on_inspector_intercept(&mut self) {
-        self.frame_stack.push(super::data_size::FrameInfo {
-            discardable: 0,
-            target_address: None,
-            target_updated: false,
-        });
-    }
-}
-
-impl KVUpdateCounter {
-    /// Pushes a new frame to the stack.
-    pub(crate) fn new_frame(&mut self, target_address: Option<Address>, target_updated: bool) {
-        self.frame_stack.push(super::data_size::FrameInfo {
-            discardable: 0,
-            target_address,
-            target_updated,
-        });
-    }
-
-    pub(crate) fn parent_frame(&mut self) -> Option<&mut super::data_size::FrameInfo> {
-        let len = self.frame_stack.len();
-        if len < 2 {
-            return None;
-        }
-        self.frame_stack.get_mut(len - 2)
-    }
-
-    /// Hook called when an execution frame returns.
-    ///
-    /// This method handles the completion of an execution frame, properly managing the KV update
-    /// stack and adjusting the total count based on whether the frame was reverted or completed
-    /// successfully.
-    pub(crate) fn end_frame(&mut self, result: InstructionResult, last_frame: bool) {
-        if last_frame && self.frame_stack.is_empty() {
-            // the last frame may be ended twice. In such case, we just return.
-            return;
-        }
-        let frame = self.frame_stack.pop().expect("frame stack is empty");
-        if result.is_ok() {
-            // merge the current frame's kv update into the previous frame
-            self.update_current_frame_count(frame.discardable);
-        } else {
-            // discard the current frame's kv update
-            self.total_count -= frame.discardable;
-        }
-    }
-}
-
-impl KVUpdateCounter {
-    /// Records a call frame.
-    pub(crate) fn record_call(&mut self, target_address: Address, transfer: bool) {
-        // new frame in kv update counter. The new frame needs to be pushed first so that all kv
-        // updates induced by the call can be captured by the new frame.
-        self.new_frame(Some(target_address), transfer);
-
-        if transfer {
-            // update the caller if the current frame's target address (i.e., the caller) is not
-            // updated
-            if let Some(previous_frame) = self.parent_frame() {
-                if !previous_frame.target_updated {
-                    let target = previous_frame.target_address();
-                    self.record_account_info_update(target);
+    /// Records KV updates for account info changes:
+    /// - **Call with value transfer**: Parent account update (1, if not yet marked) + target
+    ///   account update (1).
+    /// - **Create**: Parent account update (1, if not yet marked). Created address is set later in
+    ///   `after_frame_init_on_frame`.
+    /// - **Call without transfer**: No KV updates.
+    fn before_frame_init<JOURNAL: crate::JournalInspectTr<DBError: core::fmt::Debug>>(
+        &mut self,
+        frame_init: &FrameInit,
+        _journal: &mut JOURNAL,
+    ) {
+        match &frame_init.frame_input {
+            FrameInput::Call(call_inputs) => {
+                let has_transfer = call_inputs.transfers_value();
+                // Check if parent's account info needs updating BEFORE pushing the child frame.
+                // Note: we do NOT set parent's target_updated to true — matching the old tracker,
+                // which never mutates it after frame creation.
+                let parent_needs_update = has_transfer &&
+                    self.frame_tracker
+                        .frame_mut()
+                        .is_some_and(|entry| !entry.info.target_updated);
+                // Push new frame
+                self.push_frame(DataSizeFrameInfo {
+                    target_address: Some(call_inputs.target_address),
+                    target_updated: has_transfer,
+                });
+                if has_transfer {
+                    if parent_needs_update {
+                        // Parent's account info update goes to child's discardable,
+                        // matching the old tracker's behavior.
+                        self.record_discardable(1);
+                    }
+                    // Record target account info update in child's discardable
+                    self.record_discardable(1);
                 }
             }
-            // record the account info update of the target address
-            self.record_account_info_update(target_address);
+            FrameInput::Create(_) => {
+                // Check if parent's account info needs updating BEFORE pushing the child frame.
+                let parent_needs_update =
+                    self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
+                // Push new frame (address unknown until after init)
+                self.push_frame(DataSizeFrameInfo { target_address: None, target_updated: true });
+                if parent_needs_update {
+                    // Parent's account info update goes to child's discardable,
+                    self.record_discardable(1);
+                }
+            }
+            FrameInput::Empty => unreachable!(),
         }
     }
 
-    /// Records a create frame.
-    pub(crate) fn record_create(&mut self) {
-        // new frame in kv update counter. The new frame needs to be pushed first so that all kv
-        // updates induced by the create can be captured by the new frame.
-        self.new_frame(None, true);
-
-        // the caller of the create frame is always updated (nonce increment)
-        if let Some(previous_frame) = self.parent_frame() {
-            if !previous_frame.target_updated {
-                let target = previous_frame.target_address();
-                self.record_account_info_update(target);
+    /// Hook called when a new execution frame is successfully initialized.
+    ///
+    /// For CREATE frames, records the created address and its account info update (1 KV).
+    fn after_frame_init_on_frame(&mut self, frame: &EthFrame<EthInterpreter>) {
+        if frame.data.is_create() {
+            let created_address =
+                frame.data.created_address().expect("created address is none for create frame");
+            if let Some(entry) = self.frame_tracker.frame_mut() {
+                assert!(entry.info.target_address.is_none(), "created account already recorded");
+                entry.info.target_address = Some(created_address);
+                // Record account info update for created address
+                entry.discardable_usage += 1;
             }
         }
-        // the created account also needs to be updated, but we don't know the created address yet.
-        // It will be updated in `record_created_account`.
     }
 
-    /// Records the created account address.
-    pub(crate) fn record_created_account(&mut self, created_address: Address) {
-        if let Some(frame) = self.frame_stack.last_mut() {
-            assert!(frame.target_address.is_none(), "created account already recorded");
-            frame.target_address = Some(created_address);
-            self.record_account_info_update(created_address);
-        }
+    /// Hook called when a frame returns its result to the parent frame.
+    fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
+        assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
+        self.frame_tracker.pop_frame(result.instruction_result().is_ok());
     }
 
-    /// Records a cold update to a storage slot, using the account's address and the slot as the
-    /// key. We do an estimation here by counting every sstore regardless of the uniqueness of
-    /// whether the storage slot is warm or cold.
-    pub(crate) fn record_sstore(
-        &mut self,
-        _address: Address,
-        _slot: U256,
-        store_result: &SStoreResult,
-    ) {
+    /// Hook called when a storage slot is written via `SSTORE`.
+    ///
+    /// | Original == Present | Original == New | Effect     | Reason                  |
+    /// |---------------------|-----------------|------------|-------------------------|
+    /// | yes                 | yes             | —          | No change               |
+    /// | yes                 | no              | +1 (disc.) | First write to slot     |
+    /// | no                  | yes             | +1 (refund)| Reset to original value |
+    /// | no                  | no              | —          | Rewrite, no new KV      |
+    fn after_sstore(&mut self, _target_address: Address, _slot: U256, store_result: &SStoreResult) {
         if store_result.is_original_eq_present() {
-            // the slot was not written before
-            if store_result.is_original_eq_new() {
-                // write the same value to the slot, no data is induced
-            } else {
-                // the slot is written to a new value, we record the data size
-                self.total_count += 1;
-                self.update_current_frame_count(1);
+            if !store_result.is_original_eq_new() {
+                self.record_discardable(1);
             }
-        } else {
-            // the slot has already been written before
-            if store_result.is_original_eq_new() {
-                // the slot is reset to original value, we refund the data size
-                self.total_count -= 1;
-                self.update_current_frame_count(-1);
-            } else {
-                // rewrite the slot to a new value, no data is induced
-            }
-        }
-    }
-
-    /// Records an update to an account info, using the account's address as the key.
-    /// We do an estimation here by counting every account info update regardless of whether the
-    /// account is warm or cold.
-    pub(crate) fn record_account_info_update(&mut self, _address: Address) {
-        self.total_count += 1;
-        self.update_current_frame_count(1);
-    }
-
-    /// Records an update to an EIP-7702 account info, using the account's address as the key.
-    /// We do an estimation here by counting every account info update regardless of whether the
-    /// account is warm or cold.
-    pub(crate) fn record_eip7702_account_info_update(&mut self, tx: &MegaTransaction) {
-        for authorization in tx.authorization_list() {
-            if let Some(authority) = authorization.authority() {
-                self.record_account_info_update(authority);
-            }
-        }
-    }
-
-    /// Updates the current frame's KV update count.
-    ///
-    /// This internal method adds the specified number of KV updates to the current frame's
-    /// KV update count in the stack. If there is no current frame, meaning that we are at the
-    /// beginning of the transaction or the end of the transaction, the changes will not be
-    /// reverted (e.g., the caller's nonce will still be updated, even if the transaction is
-    /// reverted).
-    ///
-    /// # Arguments
-    ///
-    /// * `n` - The number of KV updates to add
-    fn update_current_frame_count(&mut self, n: i64) {
-        if let Some(frame) = self.frame_stack.last_mut() {
-            frame.discardable += n;
+        } else if store_result.is_original_eq_new() {
+            self.record_refund(1);
         }
     }
 }

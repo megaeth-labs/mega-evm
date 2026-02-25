@@ -99,7 +99,7 @@ fn test_oracle_access_detected_on_call() {
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
         "Compute gas limit should be set to oracle access limit"
     );
@@ -330,7 +330,7 @@ fn test_no_gas_limiting_without_oracle_access() {
     assert!(result.is_success(), "Transaction should succeed");
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         TX_COMPUTE_GAS_LIMIT,
         "Compute gas limit should be the same as the transaction compute gas limit"
     );
@@ -764,7 +764,7 @@ fn test_progressive_restriction_block_env_then_oracle() {
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
         "Compute gas limit should be set to oracle access limit"
     );
@@ -817,7 +817,7 @@ fn test_order_independent_oracle_then_block_env() {
         execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
 
     assert_eq!(
-        evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
+        evm.ctx_ref().additional_limit.borrow().compute_gas_limit(),
         ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
         "Compute gas limit should be set to oracle access limit"
     );

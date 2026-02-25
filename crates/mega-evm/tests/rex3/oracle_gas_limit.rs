@@ -48,7 +48,7 @@ fn execute_transaction(
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let result = result_envelope.result;
-    let compute_gas_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit;
+    let compute_gas_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit();
 
     (result, compute_gas_limit)
 }
