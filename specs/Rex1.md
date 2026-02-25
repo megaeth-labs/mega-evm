@@ -40,6 +40,11 @@ Rex1 ensures that the compute gas limit is reset to its original configured valu
 | **Pre-Rex1** | Compute gas limit persists across transactions within the same block          |
 | **Rex1**     | Compute gas limit resets to configured value at the start of each transaction |
 
+In other words, the further restricted compute gas limit after volatile data access is enforced _only_ on the current transaction execution. 
+The further restricted compute gas limit is enforced gloablly for the transaction, i.e., if the current transaction has already consumed more than the further restricted compute gas before the access, the transaction execution will halt immediately.
+Later transactions in the same block are not affected. 
+
+
 ### 3.2 What Gets Reset
 
 At the start of each transaction (in the `reset()` method of `AdditionalLimit`), the following are reset when Rex1 is enabled:

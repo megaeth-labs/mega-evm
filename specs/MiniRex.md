@@ -190,7 +190,8 @@ Any operation that accesses the beneficiary account triggers gas limiting:
 
 **Behavior:**
 
-- The whole transaction's remaining compute gas is limited to at most `20_000_000` immediately after any beneficiary account access, if the current remaining compute gas is larger.
+- The _whole_ transaction's remaining compute gas is limited to at most `20_000_000` immediately after any beneficiary account access, if the current remaining compute gas is larger.
+If the transaction has already consumed more than 20M compute gas before the access, the transaction execution will halt immediately.
 
 #### 2.8.3 Oracle Contract Access
 
@@ -211,7 +212,7 @@ Transactions sent from the mega system address (`0xA887dCB9D5f39Ef79272801d05Abd
 **Behavior:**
 
 - The _whole_ transaction's remaining compute gas is limited to at most `1_000_000` immediately after oracle contract access is detected, if the current remaining compute gas is larger.
-If the transaction has already consumed more than 20M compute gas before the access, the transaction execution will halt immediately.
+If the transaction has already consumed more than 1M compute gas before the access, the transaction execution will halt immediately.
 
 **Storage Access Behavior:**
 
