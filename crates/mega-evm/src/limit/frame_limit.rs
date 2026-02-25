@@ -9,7 +9,9 @@ use revm::{
 };
 use std::vec::Vec;
 
-use crate::{constants, AdditionalLimitResult, JournalInspectTr, MegaTransaction};
+use crate::{constants, JournalInspectTr, MegaTransaction};
+
+use super::{LimitCheck, LimitKind};
 
 #[derive(Debug, Clone)]
 pub(crate) struct FrameLimitTracker<I> {
@@ -163,45 +165,6 @@ impl<I> FrameLimitTracker<I> {
             total_refund += entry.refund;
         }
         total_used.saturating_sub(total_refund)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum LimitKind {
-    DataSize,
-    KVUpdate,
-    ComputeGas,
-    StateGrowth,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum LimitCheck {
-    WithinLimit,
-    ExceedsLimit {
-        kind: LimitKind,
-        limit: u64,
-        used: u64,
-        /// Whether this exceed is from a frame-local budget (absorbable at frame boundary)
-        /// vs a TX-level limit (must propagate to halt the transaction).
-        frame_local: bool,
-    },
-}
-
-impl From<LimitCheck> for AdditionalLimitResult {
-    fn from(check: LimitCheck) -> Self {
-        match check {
-            LimitCheck::WithinLimit => AdditionalLimitResult::WithinLimit,
-            LimitCheck::ExceedsLimit { kind, limit, used, .. } => match kind {
-                LimitKind::DataSize => AdditionalLimitResult::ExceedsDataLimit { limit, used },
-                LimitKind::KVUpdate => AdditionalLimitResult::ExceedsKVUpdateLimit { limit, used },
-                LimitKind::ComputeGas => {
-                    AdditionalLimitResult::ExceedsComputeGasLimit { limit, used }
-                }
-                LimitKind::StateGrowth => {
-                    AdditionalLimitResult::ExceedsStateGrowthLimit { limit, used }
-                }
-            },
-        }
     }
 }
 

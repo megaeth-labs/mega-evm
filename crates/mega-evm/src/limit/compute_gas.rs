@@ -1,6 +1,9 @@
 use revm::{handler::FrameResult, interpreter::interpreter_action::FrameInit};
 
-use super::frame_limit::{FrameLimitTracker, LimitCheck, LimitKind, TxRuntimeLimit};
+use super::{
+    frame_limit::{FrameLimitTracker, TxRuntimeLimit},
+    LimitCheck, LimitKind,
+};
 use crate::{JournalInspectTr, MegaSpecId};
 
 /// A frame-limit-based compute gas tracker using `FrameLimitTracker`.
