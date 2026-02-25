@@ -550,8 +550,7 @@ fn test_compute_gas_resets_across_transactions() {
 #[test]
 fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
     use mega_evm::{
-        constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS, MegaTransaction,
-        ORACLE_CONTRACT_ADDRESS,
+        constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
     };
     use revm::ExecuteEvm;
 
@@ -596,7 +595,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
     let mut context = MegaContext::new(db, MegaSpecId::REX1).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits()
             .with_tx_compute_gas_limit(compute_gas_limit)
-            .with_oracle_access_compute_gas_limit(ORACLE_ACCESS_REMAINING_COMPUTE_GAS),
+            .with_oracle_access_compute_gas_limit(ORACLE_ACCESS_COMPUTE_GAS),
     );
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -616,7 +615,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
     // Verify TX1 lowered the compute_gas_limit to oracle limit
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        ORACLE_ACCESS_COMPUTE_GAS,
         "TX1 should have lowered compute_gas_limit to oracle access limit"
     );
 
@@ -634,10 +633,10 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
 
     // Verify TX2 used more than the oracle limit (1M)
     assert!(
-        compute_gas_used > ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        compute_gas_used > ORACLE_ACCESS_COMPUTE_GAS,
         "TX2 should use more compute gas than oracle limit: {} > {}",
         compute_gas_used,
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS
+        ORACLE_ACCESS_COMPUTE_GAS
     );
 
     // TX2 should succeed because the limit was reset to 10M (Rex1 behavior)
@@ -647,7 +646,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
          Without Rex1, it would fail because the limit would be stuck at {}",
         compute_gas_limit,
         compute_gas_used,
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS
+        ORACLE_ACCESS_COMPUTE_GAS
     );
 
     // Verify the limit is at the original value (not stuck at oracle limit)
@@ -655,7 +654,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
     assert_eq!(
         actual_limit, compute_gas_limit,
         "compute_gas_limit should be reset to original value ({}), not stuck at oracle limit ({})",
-        compute_gas_limit, ORACLE_ACCESS_REMAINING_COMPUTE_GAS
+        compute_gas_limit, ORACLE_ACCESS_COMPUTE_GAS
     );
 }
 
@@ -667,8 +666,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
 #[test]
 fn test_compute_gas_limit_not_reset_pre_rex1() {
     use mega_evm::{
-        constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS, MegaTransaction,
-        ORACLE_CONTRACT_ADDRESS,
+        constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
     };
     use revm::ExecuteEvm;
 
@@ -705,7 +703,7 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
     let mut context = MegaContext::new(db, MegaSpecId::REX).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits()
             .with_tx_compute_gas_limit(compute_gas_limit)
-            .with_oracle_access_compute_gas_limit(ORACLE_ACCESS_REMAINING_COMPUTE_GAS),
+            .with_oracle_access_compute_gas_limit(ORACLE_ACCESS_COMPUTE_GAS),
     );
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -725,7 +723,7 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
     // Verify TX1 lowered the compute_gas_limit to oracle limit
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        ORACLE_ACCESS_COMPUTE_GAS,
         "TX1 should have lowered compute_gas_limit to oracle access limit"
     );
 
@@ -743,15 +741,15 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
         !result2.is_success(),
         "TX2 should fail in pre-Rex1 because compute_gas_limit was NOT reset. \
          The limit should be stuck at {} from oracle access in TX1",
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS
+        ORACLE_ACCESS_COMPUTE_GAS
     );
 
     // Verify the limit is still at the lowered oracle limit (not reset)
     let actual_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit;
     assert_eq!(
-        actual_limit, ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        actual_limit, ORACLE_ACCESS_COMPUTE_GAS,
         "compute_gas_limit should still be at oracle limit ({}) in pre-Rex1, not reset to {}",
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS, compute_gas_limit
+        ORACLE_ACCESS_COMPUTE_GAS, compute_gas_limit
     );
 }
 

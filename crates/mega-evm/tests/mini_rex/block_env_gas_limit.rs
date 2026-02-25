@@ -12,7 +12,7 @@
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::mini_rex::{BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
+    constants::mini_rex::{BLOCK_ENV_ACCESS_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
@@ -101,7 +101,7 @@ fn test_timestamp_limits_gas() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     assert!(result.is_success(), "Transaction should succeed");
@@ -136,7 +136,7 @@ fn test_number_limits_gas() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     assert!(result.is_success(), "Transaction should succeed");
@@ -167,7 +167,7 @@ fn test_coinbase_limits_gas() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     let gas_used = result.gas_used();
@@ -197,7 +197,7 @@ fn test_difficulty_limits_gas() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     let gas_used = result.gas_used();
@@ -227,7 +227,7 @@ fn test_gaslimit_limits_gas() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     let gas_used = result.gas_used();
@@ -257,7 +257,7 @@ fn test_basefee_limits_gas() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     let gas_used = result.gas_used();
@@ -288,7 +288,7 @@ fn test_blockhash_limits_gas() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
     assert!(result.is_success(), "Transaction should succeed");
 
@@ -323,7 +323,7 @@ fn test_multiple_block_env_accesses() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     assert!(result.is_success());
@@ -364,7 +364,7 @@ fn test_block_env_access_with_nested_calls() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     let gas_used = result.gas_used();
@@ -488,7 +488,7 @@ fn test_nested_call_block_env_access_child_oog() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     assert!(!result.is_success(), "Parent should succeed even if child runs out of gas");
@@ -547,7 +547,7 @@ fn test_deeply_nested_call_block_env_access() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     let success = result.is_success();
@@ -611,7 +611,7 @@ fn test_parent_block_env_access_oog_after_nested_call() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     assert!(!result.is_success(), "Parent should run out of gas when attempting 1000 SSTOREs (22.1M compute gas) after accessing block env itself (20M compute limit).");
@@ -666,7 +666,7 @@ fn test_nested_call_already_limited_no_further_restriction() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     assert!(result.is_success(), "Transaction should succeed");
@@ -699,7 +699,7 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
     assert!(!result.is_success(), "Transaction should fail due to exceeding compute gas limit.");

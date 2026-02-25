@@ -3,7 +3,7 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
-    constants::mini_rex::{ORACLE_ACCESS_REMAINING_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
+    constants::mini_rex::{ORACLE_ACCESS_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaContext, MegaEvm, MegaHaltReason, MegaHardforkConfig, MegaSpecId,
     MegaTransaction, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
@@ -100,7 +100,7 @@ fn test_oracle_access_detected_on_call() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        ORACLE_ACCESS_COMPUTE_GAS,
         "Compute gas limit should be set to oracle access limit"
     );
 
@@ -765,7 +765,7 @@ fn test_progressive_restriction_block_env_then_oracle() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        ORACLE_ACCESS_COMPUTE_GAS,
         "Compute gas limit should be set to oracle access limit"
     );
 
@@ -818,7 +818,7 @@ fn test_order_independent_oracle_then_block_env() {
 
     assert_eq!(
         evm.ctx_ref().additional_limit.borrow().compute_gas_limit,
-        ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        ORACLE_ACCESS_COMPUTE_GAS,
         "Compute gas limit should be set to oracle access limit"
     );
 

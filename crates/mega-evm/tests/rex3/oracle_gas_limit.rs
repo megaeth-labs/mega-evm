@@ -105,7 +105,7 @@ fn test_rex3_oracle_sload_sets_20m_compute_gas_limit() {
     assert!(result.is_success(), "Transaction should succeed, got: {:?}", result);
     assert_eq!(
         compute_gas_limit,
-        mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        mega_evm::constants::rex3::ORACLE_ACCESS_COMPUTE_GAS,
         "REX3 compute gas limit should be 20M after oracle SLOAD"
     );
 }
@@ -155,7 +155,7 @@ fn test_rex2_oracle_access_still_uses_1m_compute_gas_limit() {
     assert!(result.is_success(), "Transaction should succeed");
     assert_eq!(
         compute_gas_limit,
-        mega_evm::constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        mega_evm::constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS,
         "REX2 compute gas limit should be 1M after oracle access"
     );
 }
@@ -260,7 +260,7 @@ fn test_rex3_direct_oracle_sload_triggers_detention() {
     assert!(result.is_success(), "Transaction should succeed, got: {:?}", result);
     assert_eq!(
         compute_gas_limit,
-        mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        mega_evm::constants::rex3::ORACLE_ACCESS_COMPUTE_GAS,
         "REX3: SLOAD from oracle contract should trigger 20M gas detention"
     );
 }
@@ -347,7 +347,7 @@ fn test_rex3_nested_call_oracle_sload_triggers_detention() {
     assert!(result.is_success(), "Transaction should succeed, got: {:?}", result);
     assert_eq!(
         compute_gas_limit,
-        mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        mega_evm::constants::rex3::ORACLE_ACCESS_COMPUTE_GAS,
         "Nested call through intermediate contract should still trigger 20M oracle detention"
     );
 }
@@ -382,7 +382,7 @@ fn test_rex3_block_env_and_oracle_sload_combined_limit() {
     // Both block env (20M) and oracle (20M) limits are equal, so combined = min(20M, 20M) = 20M
     assert_eq!(
         compute_gas_limit,
-        mega_evm::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+        mega_evm::constants::rex3::ORACLE_ACCESS_COMPUTE_GAS,
         "Combined block env + oracle access should result in 20M limit in Rex3"
     );
 }
