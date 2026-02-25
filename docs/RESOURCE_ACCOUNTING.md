@@ -263,6 +263,8 @@ When an inner frame exceeds its per-frame budget:
 - Gas is returned to the parent frame.
 - The child's state growth is discarded (standard revert behavior).
 - The parent can continue executing after the reverted child call.
+- The revert data is ABI-encoded as `MegaLimitExceeded(uint8 kind, uint64 limit)`, where `kind` identifies the exceeded resource (`0` = data size, `1` = KV updates, `2` = compute gas, `3` = state growth) and `limit` is the frame's configured budget.
+  Parent contracts can decode this via try/catch or low-level call return data.
 
 This is different from TX-level limit enforcement, which halts the entire transaction.
 

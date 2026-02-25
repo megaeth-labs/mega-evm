@@ -71,8 +71,36 @@ When an inner frame exceeds its frame-local state growth limit:
 2. Gas is returned to the parent frame (not consumed).
 3. The parent can continue executing after the reverted child call.
 4. The child's state growth is discarded (standard revert behavior).
+5. The revert data is ABI-encoded as `MegaLimitExceeded(uint8 kind, uint64 limit)` (see below).
 
 This is different from TX-level limit enforcement, which halts the entire transaction with `OutOfGas`.
+
+#### Revert Data Encoding
+
+When a frame-local limit exceed triggers a revert, the revert output carries ABI-encoded data so that parent contracts can identify the cause:
+
+```solidity
+error MegaLimitExceeded(uint8 kind, uint64 limit);
+```
+
+| Field   | Type     | Description                           |
+| ------- | -------- | ------------------------------------- |
+| `kind`  | `uint8`  | Which resource limit was exceeded     |
+| `limit` | `uint64` | The configured limit for this frame   |
+
+The `kind` discriminant values are:
+
+| Value | Resource     |
+| ----- | ------------ |
+| 0     | Data size    |
+| 1     | KV updates   |
+| 2     | Compute gas  |
+| 3     | State growth |
+
+Currently only state growth has per-frame enforcement, so in practice `kind = 3` is the only value emitted.
+The encoding is general to support future per-frame limits for other resource dimensions.
+
+Parent contracts can detect a frame-local limit exceed via low-level call return data or try/catch, and decode it to determine which limit was hit and what the frame's budget was.
 
 ## Inheritance
 
@@ -87,7 +115,8 @@ The semantics of Rex4 are inherited from:
 - Frame state growth limit constants: `crates/mega-evm/src/constants.rs` (`rex4::FRAME_LIMIT_NUMERATOR`, `rex4::FRAME_LIMIT_DENOMINATOR`).
 - Frame limit tracker: `crates/mega-evm/src/limit/frame_limit.rs` (`FrameLimitTracker`, `max_forward_limit()`).
 - State growth tracker (Rex4 per-frame logic): `crates/mega-evm/src/limit/state_growth.rs` (`StateGrowthLimit2`).
-- Absorb logic: `crates/mega-evm/src/limit/mod.rs` (`AdditionalLimit::before_frame_return_result`).
+- Absorb logic: `crates/mega-evm/src/limit/limit.rs` (`AdditionalLimit::before_frame_return_result`).
+- Revert data encoding: `crates/mega-evm/src/limit/mod.rs` (`MegaLimitExceeded`, `LimitCheck::revert_data()`).
 - TX runtime limits: `crates/mega-evm/src/evm/limit.rs` (`rex4()`).
 
 ## References
