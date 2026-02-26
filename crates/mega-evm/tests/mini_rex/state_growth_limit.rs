@@ -779,13 +779,13 @@ fn test_child_write_and_refund_both_discarded_on_revert() {
     // Parent: write slot 5 from 0→1 (+1 growth), CALL child, STOP
     let parent_code = BytecodeBuilder::default()
         .sstore(U256::from(5), U256::from(1)) // growth: +1
-        .push_number(0_u64)                    // retSize
-        .push_number(0_u64)                    // retOffset
-        .push_number(0_u64)                    // argsSize
-        .push_number(0_u64)                    // argsOffset
-        .push_number(0_u64)                    // value
-        .push_address(CONTRACT)                // child address
-        .push_number(10_000_000_u64)           // gas
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(CONTRACT) // child address
+        .push_number(10_000_000_u64) // gas
         .append(CALL)
         .append(STOP)
         .build();

@@ -942,8 +942,7 @@ fn test_child_refund_reflected_in_sibling_budget() {
     // Child B creates 93 slots → succeeds.
     // This proves Child A's refunds flow back to the parent, giving Child B a larger budget
     // than if the gross usage (10) were used (which would yield 90 * 98/100 = 88).
-    let child_a_code =
-        write_n_clear_m_slots(BytecodeBuilder::default(), 10, 5).stop().build();
+    let child_a_code = write_n_clear_m_slots(BytecodeBuilder::default(), 10, 5).stop().build();
     let child_b_code = write_n_slots(BytecodeBuilder::default(), 93).stop().build();
 
     let parent_code = append_call(BytecodeBuilder::default(), CONTRACT, 50_000_000).append(POP);

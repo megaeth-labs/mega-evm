@@ -1347,13 +1347,13 @@ fn test_compute_gas_survives_child_revert() {
     for i in 0..8u64 {
         child_builder = child_builder
             .push_number(0xDEADBEEFCAFEBABEu64) // value
-            .push_number(i * 32)                  // offset
+            .push_number(i * 32) // offset
             .append(MSTORE);
     }
     // SHA3 over 256 bytes: costs 30 + 6*8 = 78 gas, plus the MSTOREs above
     let child_code = child_builder
         .push_number(256_u64) // size
-        .push_number(0_u64)   // offset
+        .push_number(0_u64) // offset
         .append(KECCAK256)
         .append(POP)
         // Do it again to double the cost
@@ -1366,13 +1366,13 @@ fn test_compute_gas_survives_child_revert() {
 
     // Parent with child call: CALL child, POP, STOP
     let parent_with_call = BytecodeBuilder::default()
-        .push_number(0_u64)            // retSize
-        .push_number(0_u64)            // retOffset
-        .push_number(0_u64)            // argsSize
-        .push_number(0_u64)            // argsOffset
-        .push_number(0_u64)            // value
-        .push_address(CONTRACT2)       // child address
-        .push_number(10_000_000_u64)   // gas
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(CONTRACT2) // child address
+        .push_number(10_000_000_u64) // gas
         .append(CALL)
         .append(POP)
         .stop()

@@ -9,8 +9,8 @@ mod limit;
 mod state_growth;
 
 pub use data_size::*;
-pub use limit::*;
 pub(crate) use frame_limit::{FrameLimitTracker, TxRuntimeLimit};
+pub use limit::*;
 
 use crate::MegaHaltReason;
 
@@ -91,9 +91,7 @@ impl LimitCheck {
     pub fn revert_data(&self) -> Bytes {
         match self {
             Self::ExceedsLimit { kind, limit, .. } => {
-                MegaLimitExceeded { kind: kind.as_u8(), limit: *limit }
-                    .abi_encode()
-                    .into()
+                MegaLimitExceeded { kind: kind.as_u8(), limit: *limit }.abi_encode().into()
             }
             Self::WithinLimit => Bytes::new(),
         }
