@@ -171,11 +171,13 @@ impl revm::Database for ErrorInjectingDatabase {
         self.inner.code_by_hash(code_hash).map_err(|e| match e {})
     }
 
-    fn storage(&mut self, address: Address, index: StorageKey) -> Result<StorageValue, Self::Error> {
+    fn storage(
+        &mut self,
+        address: Address,
+        index: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
         if self.fail_on_storage == Some((address, index)) {
-            return Err(InjectedDbError(format!(
-                "injected storage() error for {address}:{index}"
-            )));
+            return Err(InjectedDbError(format!("injected storage() error for {address}:{index}")));
         }
         self.inner.storage(address, index).map_err(|e| match e {})
     }

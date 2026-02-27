@@ -1232,4 +1232,3 @@ impl StackInspectTr for Stack {
         Some(unsafe { *self.data().get_unchecked(index) })
     }
 }
-

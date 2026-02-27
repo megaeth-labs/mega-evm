@@ -77,7 +77,10 @@ fn test_sstore_db_error_on_inspect_storage() {
 
     match result {
         Err(EVMError::Custom(msg)) => {
-            assert!(msg.contains("injected storage()"), "error message should contain injected error, got: {msg}");
+            assert!(
+                msg.contains("injected storage()"),
+                "error message should contain injected error, got: {msg}"
+            );
         }
         Err(other) => panic!("expected EVMError::Custom, got: {other:?}"),
         Ok(result) => panic!("expected error, got success: {:?}", result.result),
@@ -122,7 +125,10 @@ fn test_call_with_transfer_db_error_on_inspect_account() {
 
     match result {
         Err(EVMError::Custom(msg)) => {
-            assert!(msg.contains("injected basic()"), "error message should contain injected error, got: {msg}");
+            assert!(
+                msg.contains("injected basic()"),
+                "error message should contain injected error, got: {msg}"
+            );
         }
         Err(other) => panic!("expected EVMError::Custom, got: {other:?}"),
         Ok(result) => panic!("expected error, got success: {:?}", result.result),
@@ -141,11 +147,11 @@ fn test_call_with_transfer_db_error_on_inspect_account() {
 fn test_staticcall_db_error_on_inspect_account() {
     // STATICCALL stack layout: gas, addr, argsOffset, argsSize, retOffset, retSize
     let bytecode = BytecodeBuilder::default()
-        .push_number(0_u64)     // retSize
-        .push_number(0_u64)     // retOffset
-        .push_number(0_u64)     // argsSize
-        .push_number(0_u64)     // argsOffset
-        .push_address(TARGET)   // addr
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_address(TARGET) // addr
         .push_number(100_000_u64) // gas
         .append(revm::bytecode::opcode::STATICCALL)
         .stop()
@@ -159,19 +165,15 @@ fn test_staticcall_db_error_on_inspect_account() {
     // Fail when STATICCALL's `inspect_account_delegated` tries to load TARGET.
     db.fail_on_account = Some(TARGET);
 
-    let result = transact(
-        MegaSpecId::REX,
-        db,
-        CALLER,
-        Some(CALLEE),
-        Bytes::new(),
-        U256::ZERO,
-        1_000_000,
-    );
+    let result =
+        transact(MegaSpecId::REX, db, CALLER, Some(CALLEE), Bytes::new(), U256::ZERO, 1_000_000);
 
     match result {
         Err(EVMError::Custom(msg)) => {
-            assert!(msg.contains("injected basic()"), "error message should contain injected error, got: {msg}");
+            assert!(
+                msg.contains("injected basic()"),
+                "error message should contain injected error, got: {msg}"
+            );
         }
         Err(other) => panic!("expected EVMError::Custom, got: {other:?}"),
         Ok(result) => panic!("expected error, got success: {:?}", result.result),
