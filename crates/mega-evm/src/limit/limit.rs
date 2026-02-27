@@ -272,6 +272,19 @@ impl AdditionalLimit {
         self.rescued_gas += gas.remaining();
     }
 
+    /// Rescue remaining gas from a frame result if a TX-level additional limit has been
+    /// exceeded.
+    ///
+    /// This must be called before any inspector callback (`frame_end`) that might modify the
+    /// gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
+    /// The rescued gas is later refunded to the transaction sender in `last_frame_result`.
+    pub(crate) fn try_rescue_gas(&mut self, gas: &Gas) {
+        let limit_check = self.check_limit();
+        if limit_check.exceeded_limit() && !limit_check.is_frame_local() {
+            self.rescue_gas(gas);
+        }
+    }
+
     /// Hook called when a new transaction starts.
     /// Returns `false` if the limit has been exceeded.
     pub(crate) fn before_tx_start(&mut self, tx: &MegaTransaction) -> bool {
@@ -305,12 +318,14 @@ impl AdditionalLimit {
                 FrameInput::Empty => unreachable!(),
             };
             let output = self.has_exceeded_limit.revert_data();
-            return Some(create_exceeding_limit_frame_result(
+            let result = create_exceeding_limit_frame_result(
                 self.exceeding_instruction_result(),
                 Gas::new(gas_limit),
                 return_memory_offset,
                 output,
-            ));
+            );
+            self.try_rescue_gas(result.gas());
+            return Some(result);
         }
 
         None
@@ -327,6 +342,10 @@ impl AdditionalLimit {
             self.data_size.after_frame_init_on_frame(frame);
             self.kv_update.after_frame_init_on_frame(frame);
             self.compute_gas.after_frame_init_on_frame(frame);
+        } else if let ItemOrResult::Result(result) = init_result {
+            // Rescue gas if a TX-level limit was exceeded. This covers the
+            // before_frame_init early-return path and any other Result from frame_init.
+            self.try_rescue_gas(result.gas());
         }
     }
 
@@ -352,9 +371,34 @@ impl AdditionalLimit {
         None
     }
 
+    /// Hook called after frame action processing in `frame_run`.
+    ///
+    /// Records compute gas cost induced in frame action processing (e.g., code deposit cost),
+    /// marks the frame result as exceeding limit if needed, and rescues gas if a TX-level limit
+    /// was exceeded (before any inspector callback that might modify gas).
+    pub(crate) fn after_frame_run(
+        &mut self,
+        result: &mut FrameResult,
+        gas_remaining_before_process_action: Option<u64>,
+    ) {
+        if let Some(gas_remaining_before) = gas_remaining_before_process_action {
+            let compute_gas_cost =
+                gas_remaining_before.saturating_sub(result.gas().remaining());
+            if !self.record_compute_gas(compute_gas_cost) {
+                mark_frame_result_as_exceeding_limit(
+                    result,
+                    Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+                    Default::default(),
+                );
+            }
+        }
+
+        self.try_rescue_gas(result.gas());
+    }
+
     /// Hook called when a frame finishes running in `frame_run`. If the limit is exceeded, mark
     /// in place the interpreter result as exceeding the limit.
-    pub(crate) fn after_frame_run<'a>(
+    pub(crate) fn after_frame_run_instructions<'a>(
         &mut self,
         frame: &'a EthFrame<EthInterpreter>,
         action: &'a mut InterpreterAction,
@@ -431,9 +475,8 @@ impl AdditionalLimit {
                     }
                 }
             } else {
-                // We rescue the remaining gas of the frame after the limit exceeds.
-                // This gas will be refunded to the transaction sender in `last_frame_result`.
-                self.rescue_gas(result.gas());
+                // Gas has already been rescued in frame_run/inspect_frame_run before
+                // the inspector callback. Just mark the result as exceeding the limit.
                 mark_frame_result_as_exceeding_limit(
                     result,
                     Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT,

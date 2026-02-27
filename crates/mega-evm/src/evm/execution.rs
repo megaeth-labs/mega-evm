@@ -34,7 +34,7 @@ use revm::{
 };
 
 use crate::{
-    constants, is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
+    constants, is_mega_system_transaction,
     sandbox::execute_keyless_deploy_call, sent_from_mega_system_address, ExternalEnvTypes, HostExt,
     IKeylessDeploy, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
     MegaTransactionError, OracleEnv, TxRuntimeLimit, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
@@ -180,7 +180,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         }
 
         // Update additional limits. MiniRex is guaranteed to be enabled here.
-        ctx.additional_limit.borrow_mut().after_frame_run(frame, action);
+        ctx.additional_limit.borrow_mut().after_frame_run_instructions(frame, action);
 
         Ok(())
     }
@@ -199,21 +199,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             return Ok(());
         }
 
-        // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
-        if let (ItemOrResult::Result(frame_result), Some(gas_remaining_before)) =
-            (frame_output, gas_remaining_before_process_action)
-        {
-            let compute_gas_cost =
-                gas_remaining_before.saturating_sub(frame_result.gas().remaining());
-            let mut additional_limit = ctx.additional_limit.borrow_mut();
-            if !additional_limit.record_compute_gas(compute_gas_cost) {
-                // if the limit is exceeded, mark the frame result as exceeding the limit
-                mark_frame_result_as_exceeding_limit(
-                    frame_result,
-                    additional_limit.exceeding_instruction_result(),
-                    Default::default(),
-                );
-            }
+        if let ItemOrResult::Result(frame_result) = frame_output {
+            ctx.additional_limit
+                .borrow_mut()
+                .after_frame_run(frame_result, gas_remaining_before_process_action);
         }
 
         Ok(())
@@ -712,7 +701,7 @@ where
                 }
             })?;
 
-        // After frame_run Hook
+        // After frame_run Hook (also rescues gas if TX-level limit exceeded)
         Self::after_frame_run(context, &mut frame_output, gas_remaining_before)?;
 
         Ok(frame_output)
@@ -798,20 +787,12 @@ where
         }
 
         // Normal path - delegate to frame_init (which pushes a real frame)
+        // Note: frame_init already calls try_rescue_gas for the before_frame_init early-return
+        // path (limit exceeded), so we don't need to rescue again here.
         let frame_input = frame_init.frame_input.clone();
         if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
             let (ctx, inspector) = self.ctx_inspector();
-            // Save gas remaining before the inspector callback. The inspector's call_end /
-            // create_end hook (via GasInspector) may zero remaining gas for error results
-            // through spend_all(). MegaETH's rescue_gas mechanism reads gas.remaining()
-            // later in before_frame_return_result, so we must restore the original value.
-            let gas_remaining_saved = output.gas().remaining();
             frame_end(ctx, inspector, &frame_input, &mut output);
-            let gas_spent_by_inspector =
-                gas_remaining_saved.saturating_sub(output.gas().remaining());
-            if gas_spent_by_inspector > 0 {
-                output.gas_mut().erase_cost(gas_spent_by_inspector);
-            }
             return Ok(ItemOrResult::Result(output));
         }
 
@@ -862,23 +843,14 @@ where
                 }
             })?;
 
-        // After frame_run Hook
+        // After frame_run Hook (also rescues gas if TX-level limit exceeded, before
+        // the inspector callback which may modify gas via spend_all())
         Self::after_frame_run(ctx, &mut frame_output, gas_remaining_before)?;
 
         // Call frame_end for inspector callback
         if let ItemOrResult::Result(frame_result) = &mut frame_output {
-            // Save gas remaining before the inspector callback. The inspector's call_end /
-            // create_end hook (via GasInspector) may zero remaining gas for error results
-            // through spend_all(). MegaETH's rescue_gas mechanism reads gas.remaining()
-            // later in before_frame_return_result, so we must restore the original value.
-            let gas_remaining_saved = frame_result.gas().remaining();
             let (ctx, inspector, frame) = self.ctx_inspector_frame();
             frame_end(ctx, inspector, frame.frame_input(), frame_result);
-            let gas_spent_by_inspector =
-                gas_remaining_saved.saturating_sub(frame_result.gas().remaining());
-            if gas_spent_by_inspector > 0 {
-                frame_result.gas_mut().erase_cost(gas_spent_by_inspector);
-            }
         }
 
         Ok(frame_output)
