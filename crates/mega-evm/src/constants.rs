@@ -68,18 +68,18 @@ pub mod mini_rex {
     pub const TX_KV_UPDATE_LIMIT: u64 = BLOCK_KV_UPDATE_LIMIT * 25 / 100; // 25% of the block limit
 
     /// Gas limit after block environment or beneficiary data access.
-    /// When block environment data or beneficiary account data is accessed, remaining compute gas
+    /// When block environment data or beneficiary account data is accessed, the global compute gas
     /// is immediately limited to this value to force the transaction to complete quickly and
     /// prevent `DoS` attacks.
-    pub const BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS: u64 = 20_000_000;
+    pub const BLOCK_ENV_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
 
     /// Gas limit after oracle contract access.
-    /// When oracle contract is accessed, remaining compute gas is immediately limited to this value
-    /// to force the transaction to complete quickly and prevent `DoS` attacks.
+    /// When oracle contract is accessed, the global compute gas is immediately limited to this
+    /// value to force the transaction to complete quickly and prevent `DoS` attacks.
     /// Note: If block environment was accessed first (20M compute gas limit), then oracle is
     /// accessed, the compute gas will be further restricted to this lower limit (1M compute
     /// gas).
-    pub const ORACLE_ACCESS_REMAINING_COMPUTE_GAS: u64 = 1_000_000;
+    pub const ORACLE_ACCESS_COMPUTE_GAS: u64 = 1_000_000;
 }
 
 /// Constants for the `REX2` spec.
@@ -94,7 +94,7 @@ pub mod rex3 {
     /// Gas limit after oracle contract access for the `REX3` spec.
     /// Increased from 1M (used in `MINI_REX` through `REX2`) to 20M, giving oracle-accessing
     /// transactions more room for post-oracle computation.
-    pub const ORACLE_ACCESS_REMAINING_COMPUTE_GAS: u64 = 20_000_000;
+    pub const ORACLE_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
 }
 
 /// Constants for the `REX4` spec.

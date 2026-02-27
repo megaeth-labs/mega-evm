@@ -15,6 +15,9 @@ Rex3 increases the compute gas cap applied after oracle contract access:
 The block environment access compute gas limit remains unchanged at 20M.
 When both block environment and oracle are accessed, both caps are now equal (20M), so neither is more restrictive than the other.
 
+Note that the further restricted compute gas limit is enforced on the compute gas consumption across the entire transaction execution.
+That is, if the transaction has already consumed more than 20M compute gas before accessing volatile data (e.g., from an oracle contract or the block environment), the transaction execution will halt immediately.
+
 This change allows transactions that read oracle data to perform more computation after the oracle access, reducing the frequency of `VolatileDataAccessOutOfGas` halts for legitimate use cases.
 
 ### 2. Oracle Gas Detention Triggers on SLOAD (not CALL)
@@ -59,7 +62,7 @@ The semantics of Rex3 are inherited from:
 
 ## Implementation References
 
-- Oracle access compute gas limit constant: `crates/mega-evm/src/constants.rs` (`rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS`).
+- Oracle access compute gas limit constant: `crates/mega-evm/src/constants.rs` (`rex3::ORACLE_ACCESS_COMPUTE_GAS`).
 - Oracle SLOAD gas detention: `crates/mega-evm/src/evm/host.rs` (`sload` method), `crates/mega-evm/src/evm/instructions.rs` (`rex3::instruction_table`, `volatile_data_ext::sload`).
 - Keyless deploy compute gas: `crates/mega-evm/src/evm/execution.rs` (`frame_init`, keyless deploy section).
 - Gas detention mechanism: `crates/mega-evm/src/evm/instructions.rs` (`wrap_op_detain_gas!`), `crates/mega-evm/src/access/tracker.rs` (`VolatileDataAccessTracker`).

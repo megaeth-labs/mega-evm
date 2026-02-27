@@ -54,9 +54,8 @@ impl EvmTxRuntimeLimits {
             tx_kv_updates_limit: crate::constants::mini_rex::TX_KV_UPDATE_LIMIT,
             tx_compute_gas_limit: crate::constants::mini_rex::TX_COMPUTE_GAS_LIMIT,
             block_env_access_compute_gas_limit:
-                crate::constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS,
-            oracle_access_compute_gas_limit:
-                crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+                crate::constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
+            oracle_access_compute_gas_limit: crate::constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS,
             ..Self::equivalence()
         }
     }
@@ -69,17 +68,15 @@ impl EvmTxRuntimeLimits {
             tx_compute_gas_limit: crate::constants::rex::TX_COMPUTE_GAS_LIMIT,
             tx_state_growth_limit: crate::constants::rex::TX_STATE_GROWTH_LIMIT,
             block_env_access_compute_gas_limit:
-                crate::constants::mini_rex::BLOCK_ENV_ACCESS_REMAINING_COMPUTE_GAS,
-            oracle_access_compute_gas_limit:
-                crate::constants::mini_rex::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+                crate::constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
+            oracle_access_compute_gas_limit: crate::constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS,
         }
     }
 
     /// Limits for the `REX3` spec.
     fn rex3() -> Self {
         Self {
-            oracle_access_compute_gas_limit:
-                crate::constants::rex3::ORACLE_ACCESS_REMAINING_COMPUTE_GAS,
+            oracle_access_compute_gas_limit: crate::constants::rex3::ORACLE_ACCESS_COMPUTE_GAS,
             ..Self::rex()
         }
     }
