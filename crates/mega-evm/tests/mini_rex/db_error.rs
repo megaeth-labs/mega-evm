@@ -141,7 +141,7 @@ fn test_call_with_transfer_db_error_on_inspect_account() {
 /// but still calls `inspect_account_delegated` on the target to check `is_empty`.
 ///
 /// Uses REX spec because `wrap_call_with_storage_gas!` (which calls `inspect_account_delegated`)
-/// is only wired for STATICCALL starting from REX (MINI_REX uses `compute_gas_ext::static_call`
+/// is only wired for STATICCALL starting from REX (`MINI_REX` uses `compute_gas_ext::static_call`
 /// which delegates directly to revm's handler without inspecting first).
 #[test]
 fn test_staticcall_db_error_on_inspect_account() {
