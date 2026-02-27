@@ -8,8 +8,8 @@ use crate::{JournalInspectTr, MegaSpecId};
 
 /// A frame-limit-based compute gas tracker using `FrameLimitTracker`.
 ///
-/// Unlike the other trackers (`DataSizeTracker`, `KVUpdateTracker`, `StateGrowthTracker`), compute gas
-/// is **always persistent**: CPU cycles cannot be undone, so even if a child frame reverts,
+/// Unlike the other trackers (`DataSizeTracker`, `KVUpdateTracker`, `StateGrowthTracker`), compute
+/// gas is **always persistent**: CPU cycles cannot be undone, so even if a child frame reverts,
 /// its compute gas still counts toward the parent's total. All gas is recorded as
 /// `persistent_usage`, never as `discardable_usage` or `refund`.
 ///
