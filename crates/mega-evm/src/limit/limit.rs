@@ -318,9 +318,9 @@ impl AdditionalLimit {
 
     /// Hook called when a new execution frame is successfully initialized in `frame_init` and needs
     /// to be run (i.e., target address has code).
-    pub(crate) fn after_frame_init<'a>(
+    pub(crate) fn after_frame_init(
         &mut self,
-        init_result: &ItemOrResult<&'a mut EthFrame<EthInterpreter>, FrameResult>,
+        init_result: &ItemOrResult<&mut EthFrame<EthInterpreter>, FrameResult>,
     ) {
         if let ItemOrResult::Item(frame) = &init_result {
             self.state_growth.after_frame_init_on_frame(frame);
@@ -332,9 +332,9 @@ impl AdditionalLimit {
 
     /// Hook called before a frame run. If the limit is exceeded, return an interpreter result
     /// indicating that the limit is exceeded.
-    pub(crate) fn before_frame_run<'a>(
+    pub(crate) fn before_frame_run(
         &mut self,
-        frame: &'a EthFrame<EthInterpreter>,
+        frame: &EthFrame<EthInterpreter>,
     ) -> Option<InterpreterResult> {
         self.state_growth.before_frame_run(frame);
         self.data_size.before_frame_run(frame);

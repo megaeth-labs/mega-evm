@@ -1293,8 +1293,8 @@ fn test_tx_intrinsic_data_survives_top_level_revert() {
     assert_eq!(kv_updates, 1, "Caller account KV update should survive top-level revert");
 }
 
-/// Tests the check_limit priority order: data_size is checked before kv_update.
-/// When both limits are exceeded simultaneously, the data_size error should be reported.
+/// Tests the `check_limit` priority order: `data_size` is checked before `kv_update`.
+/// When both limits are exceeded simultaneously, the `data_size` error should be reported.
 #[test]
 fn test_check_limit_priority_data_size_before_kv_update() {
     // Simple code that STOPs immediately — the intrinsic TX data already exceeds limits

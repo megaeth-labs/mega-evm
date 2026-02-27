@@ -101,7 +101,7 @@ pub mod rex3 {
 pub mod rex4 {
     /// Numerator of the fraction of parent's remaining state growth budget forwarded to a child
     /// frame.
-    /// Child budget = parent_remaining * NUMERATOR / DENOMINATOR.
+    /// Child budget = `parent_remaining` * NUMERATOR / DENOMINATOR.
     pub const FRAME_LIMIT_NUMERATOR: u64 = 98;
     /// Denominator of the per-frame state growth budget forwarding fraction.
     pub const FRAME_LIMIT_DENOMINATOR: u64 = 100;

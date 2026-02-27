@@ -26,7 +26,7 @@ use crate::{JournalInspectTr, MegaSpecId};
 pub(crate) struct ComputeGasTracker {
     rex1_enabled: bool,
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
-    /// (volatile data access). Always <= frame_tracker.tx_limit().
+    /// (volatile data access). Always <= `frame_tracker.tx_limit()`.
     detained_limit: u64,
     frame_tracker: FrameLimitTracker<()>,
 }
@@ -53,8 +53,8 @@ impl ComputeGasTracker {
     }
 
     /// Records compute gas as persistent usage in the current frame.
-    /// If no frame exists (before frame_init or after last frame pop),
-    /// records to the tx_entry.
+    /// If no frame exists (before `frame_init` or after last frame pop),
+    /// records to the `tx_entry`.
     ///
     /// Compute gas is always persistent because CPU cycles cannot be undone.
     pub(crate) fn record_gas_used(&mut self, gas: u64) {
@@ -116,7 +116,7 @@ impl TxRuntimeLimit for ComputeGasTracker {
     }
 
     /// Push a new frame when a child call/create starts.
-    /// Compute gas does not need any data from the frame_init input.
+    /// Compute gas does not need any data from the `frame_init` input.
     #[inline]
     fn before_frame_init<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
         &mut self,

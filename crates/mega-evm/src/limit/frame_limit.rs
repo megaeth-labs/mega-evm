@@ -67,7 +67,7 @@ impl<I> FrameLimitEntry<I> {
     /// Returns usage for this frame.
     #[inline]
     pub(crate) fn used(&self) -> u64 {
-        self.persistent_usage.strict_add(self.discardable_usage)
+        self.persistent_usage.checked_add(self.discardable_usage).expect("overflow")
     }
 }
 
@@ -167,8 +167,8 @@ impl<I> FrameLimitTracker<I> {
         self.frame_stack.push(FrameLimitEntry::new(limit, info));
     }
 
-    /// Returns the total net usage across tx_entry and all frames on the stack.
-    /// Net usage = Σ(persistent_usage + discardable_usage) - Σ(refund), clamped to 0.
+    /// Returns the total net usage across `tx_entry` and all frames on the stack.
+    /// Net usage = Σ(`persistent_usage` + `discardable_usage`) - Σ(refund), clamped to 0.
     pub(crate) fn net_usage(&self) -> u64 {
         let mut total_used: u64 = self.tx_entry.used();
         let mut total_refund: u64 = self.tx_entry.refund;
@@ -200,7 +200,7 @@ pub(crate) trait TxRuntimeLimit {
     #[inline]
     fn after_frame_init_on_frame(&mut self, _frame: &EthFrame<EthInterpreter>) {}
     #[inline]
-    fn before_frame_run<'a>(&mut self, _frame: &'a EthFrame<EthInterpreter>) {}
+    fn before_frame_run(&mut self, _frame: &EthFrame<EthInterpreter>) {}
     #[inline]
     fn after_frame_run<'a>(
         &mut self,

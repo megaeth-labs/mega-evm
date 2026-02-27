@@ -283,7 +283,7 @@ impl TxRuntimeLimit for DataSizeTracker {
 
     /// Hook called when a log is emitted.
     ///
-    /// Records: (num_topics * 32 bytes) + data_size as discardable.
+    /// Records: (`num_topics` * 32 bytes) + `data_size` as discardable.
     fn after_log(&mut self, num_topics: u64, data_size: u64) {
         let size = num_topics * LOG_TOPIC_SIZE + data_size;
         self.record_discardable(size);

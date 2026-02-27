@@ -5,6 +5,7 @@ mod compute_gas;
 mod data_size;
 mod frame_limit;
 mod kv_update;
+#[allow(clippy::module_inception)]
 mod limit;
 mod state_growth;
 
