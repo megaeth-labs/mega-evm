@@ -4,8 +4,8 @@ use alloy_primitives::{Address, Bytes, B256, U256};
 use delegate::delegate;
 use revm::{
     database::{AccountState, CacheDB, DBErrorMarker, EmptyDB},
-    primitives::{StorageKey, StorageValue},
-    state::{AccountInfo, Bytecode},
+    primitives::{HashMap, StorageKey, StorageValue},
+    state::{Account, AccountInfo, Bytecode},
 };
 
 /// A memory database for testing purposes.
@@ -110,16 +110,10 @@ impl revm::DatabaseCommit for MemoryDatabase {
 }
 
 /// Error type for [`ErrorInjectingDatabase`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InjectedDbError(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
+#[display("{_0}")]
+pub struct InjectedDbError(#[error(not(source))] pub String);
 
-impl core::fmt::Display for InjectedDbError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl core::error::Error for InjectedDbError {}
 impl DBErrorMarker for InjectedDbError {}
 
 /// A database wrapper that injects errors on configurable account or storage lookups.
@@ -127,8 +121,10 @@ impl DBErrorMarker for InjectedDbError {}
 /// Used to test DB error handling paths (e.g., `FatalExternalError` when `inspect_*` fails).
 /// Wraps a [`MemoryDatabase`] and can be configured to fail on specific `basic()` or `storage()`
 /// calls.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::Deref, derive_more::DerefMut)]
 pub struct ErrorInjectingDatabase {
+    #[deref]
+    #[deref_mut]
     inner: MemoryDatabase,
     /// When set, `basic()` calls for this address return an error.
     pub fail_on_account: Option<Address>,
@@ -140,20 +136,6 @@ impl ErrorInjectingDatabase {
     /// Creates a new `ErrorInjectingDatabase` wrapping the given [`MemoryDatabase`].
     pub fn new(inner: MemoryDatabase) -> Self {
         Self { inner, fail_on_account: None, fail_on_storage: None }
-    }
-}
-
-impl core::ops::Deref for ErrorInjectingDatabase {
-    type Target = MemoryDatabase;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl core::ops::DerefMut for ErrorInjectingDatabase {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
     }
 }
 
@@ -188,7 +170,7 @@ impl revm::Database for ErrorInjectingDatabase {
 }
 
 impl revm::DatabaseCommit for ErrorInjectingDatabase {
-    fn commit(&mut self, changes: revm::primitives::HashMap<Address, revm::state::Account>) {
+    fn commit(&mut self, changes: HashMap<Address, Account>) {
         self.inner.commit(changes);
     }
 }
