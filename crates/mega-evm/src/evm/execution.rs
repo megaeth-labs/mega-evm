@@ -352,11 +352,11 @@ where
                     let new_account = !ctx.tx().value().is_zero() &&
                         ctx.db_mut().basic(address)?.is_none_or(|acc| acc.is_empty());
                     let storage_gas =
-                        if new_account { ctx.new_account_storage_gas(address) } else { Ok(0) };
+                        if new_account { ctx.new_account_storage_gas(address) } else { Some(0) };
                     (address, storage_gas)
                 }
             };
-            initial_and_floor_gas.initial_gas += storage_gas.map_err(|_| {
+            initial_and_floor_gas.initial_gas += storage_gas.ok_or_else(|| {
                 let err_str =
                     format!("Failed to get storage gas for callee address: {callee_address}",);
                 Self::Error::from_string(err_str)
@@ -657,7 +657,7 @@ where
         if is_mini_rex_enabled {
             if let Some(frame_result) = additional_limit
                 .borrow_mut()
-                .before_frame_init(&frame_init, self.ctx().journal_mut())
+                .before_frame_init(&frame_init, self.ctx().journal_mut())?
             {
                 return Ok(FrameInitResult::Result(frame_result));
             }

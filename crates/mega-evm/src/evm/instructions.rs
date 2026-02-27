@@ -2,12 +2,12 @@ use core::cmp::min;
 
 use crate::{
     constants::{self},
-    ExternalEnvTypes, HostExt, MegaContext, MegaSpecId,
+    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
-use alloy_primitives::{keccak256, Address, Bytes, U256};
+use alloy_primitives::{keccak256, Bytes, U256};
 use revm::{
-    context::{ContextTr, JournalTr},
+    context::ContextTr,
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
         as_usize_or_fail, gas, gas_or_fail,
@@ -17,9 +17,6 @@ use revm::{
         FrameInput, Instruction, InstructionContext, InstructionResult, InstructionTable,
         InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
-    primitives::{hash_map::Entry, StorageKey, KECCAK_EMPTY},
-    state::{Account, Bytecode, EvmStorageSlot},
-    Journal,
 };
 
 /// `MegaInstructions` is the instruction table for `MegaETH`.
@@ -146,7 +143,7 @@ mod rex {
     /// Returns the instruction table for the `REX` and `REX1` specs.
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >() -> [Instruction<WIRE, H>; 256]
     where
         WIRE::Stack: StackInspectTr,
@@ -169,7 +166,7 @@ mod rex2 {
     /// Returns the instruction table for the `REX2` spec.
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >() -> [Instruction<WIRE, H>; 256]
     where
         WIRE::Stack: StackInspectTr,
@@ -193,7 +190,7 @@ mod rex3 {
     ///   CALL-based oracle access detection used in earlier specs.
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >() -> [Instruction<WIRE, H>; 256]
     where
         WIRE::Stack: StackInspectTr,
@@ -246,7 +243,7 @@ mod mini_rex {
     /// Returns the instruction table for the `MINI_REX` spec.
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >() -> [Instruction<WIRE, H>; 256] {
         use revm::bytecode::opcode::*;
         let mut table = [control::unknown as Instruction<WIRE, H>; 256];
@@ -453,7 +450,7 @@ pub mod forward_gas_ext {
             #[inline]
             pub fn $fn_name<
                 WIRE: InterpreterTypes<Stack: StackInspectTr>,
-                H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+                H: HostExt + ContextTr + JournalInspectTr + ?Sized,
             >(
                 context: InstructionContext<'_, H, WIRE>,
             ) {
@@ -683,7 +680,7 @@ pub mod additional_limit_ext {
     /// Refunds data/KV when slot reset to original value.
     pub fn sstore<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) {
@@ -693,10 +690,11 @@ pub mod additional_limit_ext {
             context.interpreter.halt(InstructionResult::StackUnderflow);
             return;
         };
-        let storage_slot = context.host.journal_mut().inspect_storage(target_address, index);
-        let (original_value, present_value) = storage_slot
-            .map(|slot| (slot.original_value(), slot.present_value()))
-            .unwrap_or_default();
+        let Ok(slot) = context.host.inspect_storage(target_address, index) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let (original_value, present_value) = (slot.original_value(), slot.present_value());
         let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
             context.interpreter.halt(InstructionResult::StackUnderflow);
             return;
@@ -728,7 +726,7 @@ pub mod additional_limit_ext {
     pub fn log<
         const N: usize,
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) {
@@ -780,7 +778,7 @@ pub mod storage_gas_ext {
             #[doc = concat!("`", $opcode_name, "` opcode implementation modified from `revm` with compute gas tracking and dynamically-scaled storage gas costs.")]
             pub fn $fn_name<
                 WIRE: InterpreterTypes<Stack: StackInspectTr>,
-                H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+                H: HostExt + ContextTr + JournalInspectTr + ?Sized,
             >(
                 context: InstructionContext<'_, H, WIRE>,
             ) {
@@ -790,7 +788,7 @@ pub mod storage_gas_ext {
                     return;
                 };
                 let to = to.into_address();
-                let Ok(to_account) = context.host.journal_mut().inspect_account_delegated(to) else {
+                let Ok(to_account) = context.host.inspect_account_delegated(to) else {
                     context.interpreter.halt(InstructionResult::FatalExternalError);
                     return;
                 };
@@ -806,7 +804,7 @@ pub mod storage_gas_ext {
                 };
                 // Charge additional storage gas cost for creating a new account
                 if is_empty && has_transfer {
-                    let Ok(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
+                    let Some(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
                         context.interpreter.halt(InstructionResult::FatalExternalError);
                         return;
                     };
@@ -845,7 +843,7 @@ pub mod storage_gas_ext {
     pub fn create<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         const IS_CREATE2: bool,
-        H: HostExt + ContextTr + ?Sized,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) {
@@ -853,9 +851,9 @@ pub mod storage_gas_ext {
 
         // The current execution contract (the caller)
         let creator_address = context.interpreter.input.target_address();
-        // Load the creator account from the journal, this must not be cold loaded since the creator
-        // must have been warmed when the current frame begins.
-        let Ok(creator) = context.host.journal_mut().load_account(creator_address) else {
+        // Load the creator account without marking it warm (it is already warm since the creator
+        // must have been warmed when the current frame begins).
+        let Ok(creator) = context.host.inspect_account_delegated(creator_address) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
@@ -884,7 +882,7 @@ pub mod storage_gas_ext {
 
             creator_address.create2(salt.to_be_bytes(), initcode_hash)
         } else {
-            creator_address.create(creator.data.info.nonce)
+            creator_address.create(creator.info.nonce)
         };
 
         // Charge storage gas cost for creating a new contract
@@ -895,7 +893,7 @@ pub mod storage_gas_ext {
             // Mini-Rex spec does not distinguish between contract creation and account creation.
             context.host.new_account_storage_gas(created_address)
         };
-        let Ok(create_contract_storage_gas) = create_contract_storage_gas else {
+        let Some(create_contract_storage_gas) = create_contract_storage_gas else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
@@ -982,7 +980,7 @@ pub mod storage_gas_ext {
     /// enabled.
     pub fn sstore<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr<Journal: JournalInspectTr> + ?Sized,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) {
@@ -994,10 +992,11 @@ pub mod storage_gas_ext {
             return;
         };
         // The storage slot values
-        let storage_slot = context.host.journal_mut().inspect_storage(target_address, index);
-        let (original_value, present_value) = storage_slot
-            .map(|slot| (slot.original_value(), slot.present_value()))
-            .unwrap_or_default();
+        let Ok(slot) = context.host.inspect_storage(target_address, index) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let (original_value, present_value) = (slot.original_value(), slot.present_value());
         let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
             context.interpreter.halt(InstructionResult::StackUnderflow);
             return;
@@ -1005,7 +1004,7 @@ pub mod storage_gas_ext {
 
         // Charge storage gas cost before the instruction is executed
         if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
-            let Ok(sstore_set_storage_gas) =
+            let Some(sstore_set_storage_gas) =
                 context.host.sstore_set_storage_gas(target_address, index)
             else {
                 context.interpreter.halt(InstructionResult::FatalExternalError);
@@ -1234,93 +1233,3 @@ impl StackInspectTr for Stack {
     }
 }
 
-/// Trait to inspect the journal's internal state without marking any accounts or storage slots as
-/// warm. To improve performance, when journal does not have the account or storage slot, it will be
-/// loaded from the database and cached in the journal. However, since we explicitly mark the
-/// account or storage slot as cold, this pre-loading before executing the original instruction will
-/// make no difference on gas cost.
-pub trait JournalInspectTr {
-    /// The database error type.
-    type DBError;
-
-    /// Inspect the account at the given address without marking it as warm. If the account is
-    /// EIP-7702 type, it should inspect the delegated account.
-    fn inspect_account_delegated(
-        &mut self,
-        address: Address,
-    ) -> Result<&mut Account, Self::DBError>;
-
-    /// Inspect the storage at the given address and key without marking it as warm.
-    fn inspect_storage(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-    ) -> Result<&EvmStorageSlot, Self::DBError>;
-}
-
-impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
-    type DBError = <DB as revm::Database>::Error;
-
-    fn inspect_account_delegated(
-        &mut self,
-        address: Address,
-    ) -> Result<&mut Account, Self::DBError> {
-        let transaction_id = self.transaction_id;
-        let account = match self.inner.state.entry(address) {
-            Entry::Occupied(entry) => {
-                let account = entry.into_mut();
-                if account.info.code_hash != KECCAK_EMPTY && account.info.code.is_none() {
-                    // Load code if not loaded before
-                    account.info.code = Some(self.database.code_by_hash(account.info.code_hash)?);
-                }
-                account
-            }
-            Entry::Vacant(entry) => {
-                let mut account = self
-                    .database
-                    .basic(address)?
-                    .map(|info| info.into())
-                    .unwrap_or_else(|| Account::new_not_existing(transaction_id));
-                // delibrately mark the account as cold since we are only inpecting it, not warming
-                // it.
-                account.mark_cold();
-                entry.insert(account)
-            }
-        };
-
-        // If the account is a delegated account, inspect the delegated account.
-        if let Some(Bytecode::Eip7702(code)) = &account.info.code {
-            let address = code.address();
-            return self.inspect_account_delegated(address);
-        }
-
-        // Load account again to bypass the borrow checker.
-        let account = self.inner.state.get_mut(&address).unwrap();
-        Ok(account)
-    }
-
-    fn inspect_storage(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-    ) -> Result<&EvmStorageSlot, Self::DBError> {
-        let transaction_id = self.transaction_id;
-        let account = self.inspect_account_delegated(address)?;
-        if account.storage.contains_key(&key) {
-            // Slot already exists, return reference to it
-            // Need to reload account to satisfy borrow checker
-            let account = self.inspect_account_delegated(address)?;
-            return Ok(account.storage.get(&key).unwrap());
-        }
-        // Slot doesn't exist, load from DB and insert
-        let slot = self.database.storage(address, key)?;
-        let mut slot = EvmStorageSlot::new(slot, transaction_id);
-        // delibrately mark the slot as cold since we are only inpecting it, not warming it
-        slot.mark_cold();
-        // Load account again to bypass the borrow checker and insert the slot
-        let account = self.inspect_account_delegated(address)?;
-        account.storage.insert(key, slot);
-        // Return reference to the newly inserted slot
-        Ok(account.storage.get(&key).expect("slot should exist"))
-    }
-}

@@ -207,16 +207,15 @@ impl TxRuntimeLimit for StateGrowthTracker {
         &mut self,
         frame_init: &FrameInit,
         journal: &mut JOURNAL,
-    ) {
+    ) -> Result<(), JOURNAL::DBError> {
         self.push_frame();
 
         match &frame_init.frame_input {
             FrameInput::Call(call_inputs) => {
                 // EIP-161: only value transfers to empty accounts count as creating an account.
                 if call_inputs.transfers_value() {
-                    let to_account = journal
-                        .inspect_account_delegated(call_inputs.target_address)
-                        .expect("failed to inspect account");
+                    let to_account =
+                        journal.inspect_account_delegated(call_inputs.target_address)?;
                     let is_empty = to_account.state_clear_aware_is_empty(SpecId::PRAGUE);
                     if is_empty {
                         self.record_growth(1);
@@ -228,6 +227,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
             }
             FrameInput::Empty => unreachable!(),
         }
+        Ok(())
     }
 
     /// Hook called when a storage slot is written via `SSTORE`.

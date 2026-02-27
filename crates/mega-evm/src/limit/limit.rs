@@ -288,12 +288,12 @@ impl AdditionalLimit {
         &mut self,
         frame_init: &FrameInit,
         journal: &mut JOURNAL,
-    ) -> Option<FrameResult> {
+    ) -> Result<Option<FrameResult>, JOURNAL::DBError> {
         // new frame in frame limit trackers
-        self.state_growth.before_frame_init(frame_init, journal);
-        self.data_size.before_frame_init(frame_init, journal);
-        self.kv_update.before_frame_init(frame_init, journal);
-        self.compute_gas.before_frame_init(frame_init, journal);
+        self.state_growth.before_frame_init(frame_init, journal)?;
+        self.data_size.before_frame_init(frame_init, journal)?;
+        self.kv_update.before_frame_init(frame_init, journal)?;
+        self.compute_gas.before_frame_init(frame_init, journal)?;
 
         if self.check_limit().exceeded_limit() {
             // if the limit is exceeded, create an error frame result and return it directly
@@ -305,15 +305,15 @@ impl AdditionalLimit {
                 FrameInput::Empty => unreachable!(),
             };
             let output = self.has_exceeded_limit.revert_data();
-            return Some(create_exceeding_limit_frame_result(
+            return Ok(Some(create_exceeding_limit_frame_result(
                 self.exceeding_instruction_result(),
                 Gas::new(gas_limit),
                 return_memory_offset,
                 output,
-            ));
+            )));
         }
 
-        None
+        Ok(None)
     }
 
     /// Hook called when a new execution frame is successfully initialized in `frame_init` and needs

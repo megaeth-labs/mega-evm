@@ -2,7 +2,10 @@
 //! gas pricing. Storage slots and accounts are organized into buckets, and the gas cost scales
 //! with bucket capacity to incentivize efficient resource allocation.
 
-use core::{convert::Infallible, fmt::Debug};
+use core::{
+    convert::Infallible,
+    fmt::{Debug, Display},
+};
 
 use alloy_primitives::{Address, U256};
 use auto_impl::auto_impl;
@@ -42,7 +45,7 @@ pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 #[auto_impl(&, Box, Arc)]
 pub trait SaltEnv: Debug + Unpin {
     /// Error type returned when bucket capacity cannot be retrieved.
-    type Error;
+    type Error: Display;
 
     /// Returns the current capacity of the specified bucket.
     ///
