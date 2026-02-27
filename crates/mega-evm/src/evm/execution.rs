@@ -801,7 +801,17 @@ where
         let frame_input = frame_init.frame_input.clone();
         if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
             let (ctx, inspector) = self.ctx_inspector();
+            // Save gas remaining before the inspector callback. The inspector's call_end /
+            // create_end hook (via GasInspector) may zero remaining gas for error results
+            // through spend_all(). MegaETH's rescue_gas mechanism reads gas.remaining()
+            // later in before_frame_return_result, so we must restore the original value.
+            let gas_remaining_saved = output.gas().remaining();
             frame_end(ctx, inspector, &frame_input, &mut output);
+            let gas_spent_by_inspector =
+                gas_remaining_saved.saturating_sub(output.gas().remaining());
+            if gas_spent_by_inspector > 0 {
+                output.gas_mut().erase_cost(gas_spent_by_inspector);
+            }
             return Ok(ItemOrResult::Result(output));
         }
 
@@ -857,8 +867,18 @@ where
 
         // Call frame_end for inspector callback
         if let ItemOrResult::Result(frame_result) = &mut frame_output {
+            // Save gas remaining before the inspector callback. The inspector's call_end /
+            // create_end hook (via GasInspector) may zero remaining gas for error results
+            // through spend_all(). MegaETH's rescue_gas mechanism reads gas.remaining()
+            // later in before_frame_return_result, so we must restore the original value.
+            let gas_remaining_saved = frame_result.gas().remaining();
             let (ctx, inspector, frame) = self.ctx_inspector_frame();
             frame_end(ctx, inspector, frame.frame_input(), frame_result);
+            let gas_spent_by_inspector =
+                gas_remaining_saved.saturating_sub(frame_result.gas().remaining());
+            if gas_spent_by_inspector > 0 {
+                frame_result.gas_mut().erase_cost(gas_spent_by_inspector);
+            }
         }
 
         Ok(frame_output)
