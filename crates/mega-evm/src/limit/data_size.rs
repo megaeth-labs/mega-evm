@@ -8,6 +8,7 @@ use revm::{
     },
 };
 
+use super::frame_limit::CallFrameInfo;
 use crate::{FrameLimitTracker, MegaSpecId, TxRuntimeLimit};
 
 /// The number of bytes for the base transaction data.
@@ -29,15 +30,6 @@ pub const SALT_VALUE_DELTA_STORAGE_SLOT_SIZE: u64 = 32;
 pub const ACCOUNT_INFO_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_ACCOUNT_INFO_SIZE;
 /// The originated data size for writing a storage slot.
 pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAGE_SLOT_SIZE;
-
-/// Per-frame metadata for the data size tracker.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DataSizeFrameInfo {
-    /// The target address of the frame. `None` during CREATE until the address is known.
-    pub(crate) target_address: Option<Address>,
-    /// Whether this frame's target address has been marked as updated.
-    pub(crate) target_updated: bool,
-}
 
 /// A tracker for the total data size (in bytes) generated from transaction execution.
 ///
@@ -61,18 +53,18 @@ pub(crate) struct DataSizeFrameInfo {
 /// - Account updates from calls/creates: 40 bytes each
 /// - Contract code: actual deployed bytecode size
 #[derive(Debug, Clone)]
-pub(crate) struct DataSizeLimit2 {
-    frame_tracker: FrameLimitTracker<DataSizeFrameInfo>,
+pub(crate) struct DataSizeTracker {
+    frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
-impl DataSizeLimit2 {
+impl DataSizeTracker {
     pub(crate) fn new(_spec: MegaSpecId, tx_limit: u64) -> Self {
         Self { frame_tracker: FrameLimitTracker::new(tx_limit) }
     }
 
     /// Pushes a new frame onto the tracker with `u64::MAX` limit.
     /// Data size uses TX-level enforcement only (no per-frame budgets).
-    fn push_frame(&mut self, info: DataSizeFrameInfo) {
+    fn push_frame(&mut self, info: CallFrameInfo) {
         self.frame_tracker.push_frame_with_limit(u64::MAX, info);
     }
 
@@ -96,7 +88,7 @@ impl DataSizeLimit2 {
     }
 }
 
-impl TxRuntimeLimit for DataSizeLimit2 {
+impl TxRuntimeLimit for DataSizeTracker {
     /// Returns the current effective data size limit for the entire transaction.
     #[inline]
     fn tx_limit(&self) -> u64 {
@@ -169,7 +161,7 @@ impl TxRuntimeLimit for DataSizeLimit2 {
     /// the frame stack aligned with the EVM's call stack.
     #[inline]
     fn after_inspector_intercept_frame_init(&mut self) {
-        self.push_frame(DataSizeFrameInfo { target_address: None, target_updated: false });
+        self.push_frame(CallFrameInfo { target_address: None, target_updated: false });
     }
 
     /// Hook called before a new execution frame is initialized.
@@ -196,7 +188,7 @@ impl TxRuntimeLimit for DataSizeLimit2 {
                         .frame_mut()
                         .is_some_and(|entry| !entry.info.target_updated);
                 // Push new frame
-                self.push_frame(DataSizeFrameInfo {
+                self.push_frame(CallFrameInfo {
                     target_address: Some(call_inputs.target_address),
                     target_updated: has_transfer,
                 });
@@ -214,7 +206,7 @@ impl TxRuntimeLimit for DataSizeLimit2 {
                 let parent_needs_update =
                     self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
                 // Push new frame (address unknown until after init)
-                self.push_frame(DataSizeFrameInfo { target_address: None, target_updated: true });
+                self.push_frame(CallFrameInfo { target_address: None, target_updated: true });
                 if parent_needs_update {
                     // Parent's account info update goes to child's discardable,
                     // matching the old tracker's behavior.

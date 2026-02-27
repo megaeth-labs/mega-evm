@@ -96,12 +96,12 @@ use crate::{FrameLimitTracker, JournalInspectTr, MegaSpecId, TxRuntimeLimit};
 ///
 /// See module-level documentation for details on the net growth model and frame-based tracking.
 #[derive(Debug, Clone)]
-pub(crate) struct StateGrowthLimit2 {
+pub(crate) struct StateGrowthTracker {
     rex4_enabled: bool,
     frame_tracker: FrameLimitTracker<()>,
 }
 
-impl StateGrowthLimit2 {
+impl StateGrowthTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             frame_tracker: FrameLimitTracker::new(tx_limit),
@@ -137,7 +137,7 @@ impl StateGrowthLimit2 {
     }
 }
 
-impl TxRuntimeLimit for StateGrowthLimit2 {
+impl TxRuntimeLimit for StateGrowthTracker {
     /// Returns the current effective state growth limit for the entire transaction.
     #[inline]
     fn tx_limit(&self) -> u64 {

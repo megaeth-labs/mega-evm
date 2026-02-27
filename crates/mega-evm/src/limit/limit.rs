@@ -59,16 +59,16 @@ pub struct AdditionalLimit {
     pub limits: EvmTxRuntimeLimits,
 
     /// A tracker for the state growth during transaction execution.
-    pub(crate) state_growth: state_growth::StateGrowthLimit2,
+    pub(crate) state_growth: state_growth::StateGrowthTracker,
 
     /// A tracker for the total data size (in bytes) generated from a transaction execution.
-    pub(crate) data_size: data_size::DataSizeLimit2,
+    pub(crate) data_size: data_size::DataSizeTracker,
 
     /// A tracker for the total KV updates during transaction execution.
-    pub(crate) kv_update: kv_update::KVUpdateLimit2,
+    pub(crate) kv_update: kv_update::KVUpdateTracker,
 
     /// A tracker for the total compute gas consumed during transaction execution.
-    pub(crate) compute_gas: compute_gas::ComputeGasLimit2,
+    pub(crate) compute_gas: compute_gas::ComputeGasTracker,
 }
 
 /// The usage of the additional limits.
@@ -91,10 +91,10 @@ impl AdditionalLimit {
             has_exceeded_limit: LimitCheck::WithinLimit,
             rescued_gas: 0,
             limits,
-            state_growth: state_growth::StateGrowthLimit2::new(spec, limits.tx_state_growth_limit),
-            data_size: data_size::DataSizeLimit2::new(spec, limits.tx_data_size_limit),
-            kv_update: kv_update::KVUpdateLimit2::new(spec, limits.tx_kv_updates_limit),
-            compute_gas: compute_gas::ComputeGasLimit2::new(spec, limits.tx_compute_gas_limit),
+            state_growth: state_growth::StateGrowthTracker::new(spec, limits.tx_state_growth_limit),
+            data_size: data_size::DataSizeTracker::new(spec, limits.tx_data_size_limit),
+            kv_update: kv_update::KVUpdateTracker::new(spec, limits.tx_kv_updates_limit),
+            compute_gas: compute_gas::ComputeGasTracker::new(spec, limits.tx_compute_gas_limit),
         }
     }
 }
@@ -126,7 +126,7 @@ impl AdditionalLimit {
     /// This method clears both the data size tracker and KV update counter,
     /// preparing the limit system for a new execution context.
     ///
-    /// Each tracker internally handles spec-gated behavior (e.g., `ComputeGasLimit2`
+    /// Each tracker internally handles spec-gated behavior (e.g., `ComputeGasTracker`
     /// resets the detained limit only for Rex1+).
     pub fn reset(&mut self) {
         self.has_exceeded_limit = LimitCheck::WithinLimit;

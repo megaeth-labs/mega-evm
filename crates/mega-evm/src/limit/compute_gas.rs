@@ -8,7 +8,7 @@ use crate::{JournalInspectTr, MegaSpecId};
 
 /// A frame-limit-based compute gas tracker using `FrameLimitTracker`.
 ///
-/// Unlike other trackers (DataSizeLimit2, KVUpdateLimit2, StateGrowthLimit2), compute gas
+/// Unlike the other trackers (`DataSizeTracker`, `KVUpdateTracker`, `StateGrowthTracker`), compute gas
 /// is **always persistent**: CPU cycles cannot be undone, so even if a child frame reverts,
 /// its compute gas still counts toward the parent's total. All gas is recorded as
 /// `persistent_usage`, never as `discardable_usage` or `refund`.
@@ -23,7 +23,7 @@ use crate::{JournalInspectTr, MegaSpecId};
 /// - `precompiles.rs` (precompile gas)
 /// - `sandbox/execution.rs` (sandbox gas)
 #[derive(Debug, Clone)]
-pub(crate) struct ComputeGasLimit2 {
+pub(crate) struct ComputeGasTracker {
     rex1_enabled: bool,
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
     /// (volatile data access). Always <= frame_tracker.tx_limit().
@@ -31,7 +31,7 @@ pub(crate) struct ComputeGasLimit2 {
     frame_tracker: FrameLimitTracker<()>,
 }
 
-impl ComputeGasLimit2 {
+impl ComputeGasTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             detained_limit: tx_limit,
@@ -66,7 +66,7 @@ impl ComputeGasLimit2 {
     }
 }
 
-impl TxRuntimeLimit for ComputeGasLimit2 {
+impl TxRuntimeLimit for ComputeGasTracker {
     /// Returns the current effective compute gas limit for the entire transaction (may be
     /// detained/lowered by volatile data access).
     #[inline]

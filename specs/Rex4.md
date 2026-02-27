@@ -59,8 +59,9 @@ Top-level calls Child A:
     Grandchild B creates 862 slots → at frame limit → reverted (absorbed)
 
 Top-level calls Child C (after Child A succeeds):
-  Remaining = 1000 - 962 = 38
-  Child C budget = 38 * 98/100 = 37
+  Growth so far = 100 (Grandchild B's growth was discarded)
+  Remaining = 1000 - 100 = 900
+  Child C budget = 900 * 98/100 = 882
 ```
 
 #### Limit Exceeding Semantics

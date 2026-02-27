@@ -13,6 +13,16 @@ use crate::{constants, JournalInspectTr, MegaTransaction};
 
 use super::{LimitCheck, LimitKind};
 
+/// Per-frame metadata for trackers that need account update deduplication
+/// (data size and KV update trackers).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CallFrameInfo {
+    /// The target address of the frame. `None` during CREATE until the address is known.
+    pub(crate) target_address: Option<Address>,
+    /// Whether this frame's target address has been marked as updated.
+    pub(crate) target_updated: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FrameLimitTracker<I> {
     /// Top-level (TX-scope) entry. Holds the TX limit and accumulates usage
@@ -95,8 +105,10 @@ impl<I> FrameLimitTracker<I> {
         self.frame_stack.push(FrameLimitEntry::new(self.max_forward_limit(), info));
     }
 
-    /// Called in `before_frame_return_result` after trackers pop their frames.
-    /// The remaining budget and refunded
+    /// Pops the current frame from the stack and merges its usage into the parent.
+    ///
+    /// On success: `persistent_usage`, `discardable_usage`, and `refund` are all merged.
+    /// On failure: only `persistent_usage` is merged; `discardable_usage` and `refund` are dropped.
     pub(crate) fn pop_frame(&mut self, success: bool) -> Option<FrameLimitEntry<I>> {
         let child = self.frame_stack.pop();
         if let Some(child) = &child {

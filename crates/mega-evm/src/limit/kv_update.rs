@@ -7,10 +7,7 @@ use revm::{
     },
 };
 
-use super::{
-    data_size::DataSizeFrameInfo,
-    frame_limit::{FrameLimitTracker, TxRuntimeLimit},
-};
+use super::frame_limit::{CallFrameInfo, FrameLimitTracker, TxRuntimeLimit};
 use crate::{MegaSpecId, MegaTransaction};
 
 /// A counter for tracking key-value storage operations during transaction execution.
@@ -30,18 +27,18 @@ use crate::{MegaSpecId, MegaTransaction};
 /// - Account updates from CREATE: 1 KV update for created account
 /// - Account updates from CALL with transfer: 2 KV updates (caller + callee)
 #[derive(Debug, Clone)]
-pub(crate) struct KVUpdateLimit2 {
-    frame_tracker: FrameLimitTracker<DataSizeFrameInfo>,
+pub(crate) struct KVUpdateTracker {
+    frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
-impl KVUpdateLimit2 {
+impl KVUpdateTracker {
     pub(crate) fn new(_spec: MegaSpecId, tx_limit: u64) -> Self {
         Self { frame_tracker: FrameLimitTracker::new(tx_limit) }
     }
 
     /// Pushes a new frame onto the tracker with `u64::MAX` limit.
     /// KV updates use TX-level enforcement only (no per-frame budgets).
-    fn push_frame(&mut self, info: DataSizeFrameInfo) {
+    fn push_frame(&mut self, info: CallFrameInfo) {
         self.frame_tracker.push_frame_with_limit(u64::MAX, info);
     }
 
@@ -60,7 +57,7 @@ impl KVUpdateLimit2 {
     }
 }
 
-impl TxRuntimeLimit for KVUpdateLimit2 {
+impl TxRuntimeLimit for KVUpdateTracker {
     /// Returns the current effective KV update limit for the entire transaction.
     #[inline]
     fn tx_limit(&self) -> u64 {
@@ -117,7 +114,7 @@ impl TxRuntimeLimit for KVUpdateLimit2 {
 
     #[inline]
     fn after_inspector_intercept_frame_init(&mut self) {
-        self.push_frame(DataSizeFrameInfo { target_address: None, target_updated: false });
+        self.push_frame(CallFrameInfo { target_address: None, target_updated: false });
     }
 
     /// Hook called before a new execution frame is initialized.
@@ -144,7 +141,7 @@ impl TxRuntimeLimit for KVUpdateLimit2 {
                         .frame_mut()
                         .is_some_and(|entry| !entry.info.target_updated);
                 // Push new frame
-                self.push_frame(DataSizeFrameInfo {
+                self.push_frame(CallFrameInfo {
                     target_address: Some(call_inputs.target_address),
                     target_updated: has_transfer,
                 });
@@ -163,7 +160,7 @@ impl TxRuntimeLimit for KVUpdateLimit2 {
                 let parent_needs_update =
                     self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
                 // Push new frame (address unknown until after init)
-                self.push_frame(DataSizeFrameInfo { target_address: None, target_updated: true });
+                self.push_frame(CallFrameInfo { target_address: None, target_updated: true });
                 if parent_needs_update {
                     // Parent's account info update goes to child's discardable,
                     self.record_discardable(1);
