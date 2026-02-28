@@ -191,7 +191,12 @@ fn assert_log_call_status(
     expected_success: bool,
 ) {
     let logs = result.result.logs();
-    assert!(logs.len() > log_index, "Expected at least {} log(s), got {}", log_index + 1, logs.len());
+    assert!(
+        logs.len() > log_index,
+        "Expected at least {} log(s), got {}",
+        log_index + 1,
+        logs.len()
+    );
     let value = U256::from_be_slice(logs[log_index].data.data.as_ref());
     let expected = if expected_success { U256::from(1) } else { U256::ZERO };
     assert_eq!(value, expected, "Log[{log_index}] call status: expected {expected}, got {value}");
@@ -241,7 +246,7 @@ fn test_inner_call_timestamp_reverts() {
     assert_log_call_status(&result, 0, false);
 }
 
-/// Caller's own frame IS restricted after calling disableVolatileDataAccess().
+/// Caller's own frame IS restricted after calling `disableVolatileDataAccess()`.
 #[test]
 fn test_caller_frame_is_restricted() {
     // Parent bytecode: call disableVolatileDataAccess(), then read TIMESTAMP itself
@@ -601,7 +606,7 @@ fn test_extcodesize_non_beneficiary_not_restricted() {
     assert_log_call_status(&result, 0, true);
 }
 
-/// When parent accesses volatile data (TIMESTAMP) before calling disableVolatileDataAccess(),
+/// When parent accesses volatile data (TIMESTAMP) before calling `disableVolatileDataAccess()`,
 /// the child should still be restricted when accessing the same volatile data type.
 /// The pre-execution check in the instruction handler detects the disabled state regardless of
 /// whether the bitmap bit is already set.
@@ -638,7 +643,7 @@ fn test_parent_accesses_volatile_then_child_restricted() {
 // 9. SIBLING CALL SCOPING
 // ============================================================================
 
-/// When C1 calls disableVolatileDataAccess() and returns, sibling C2's children should NOT be
+/// When C1 calls `disableVolatileDataAccess()` and returns, sibling C2's children should NOT be
 /// restricted. The disable flag should be deactivated when C1's frame returns.
 ///
 /// ```text
@@ -742,7 +747,7 @@ fn test_enable_after_disable_succeeds() {
     );
 }
 
-/// Parent disables, child tries to enable → reverts with DisabledByParent().
+/// Parent disables, child tries to enable → reverts with `DisabledByParent()`.
 #[test]
 fn test_enable_by_child_reverts_when_parent_disabled() {
     // Child: tries to call enableVolatileDataAccess(), captures return data
@@ -779,7 +784,7 @@ fn test_enable_by_child_reverts_when_parent_disabled() {
     );
 }
 
-/// Calling enableVolatileDataAccess() when not disabled is a no-op (succeeds).
+/// Calling `enableVolatileDataAccess()` when not disabled is a no-op (succeeds).
 #[test]
 fn test_enable_when_not_disabled_is_noop() {
     // Parent: just call enableVolatileDataAccess() without prior disable
@@ -879,7 +884,7 @@ fn direct_access_control_tx(selector: &[u8; 4]) -> TxEnv {
         .build_fill()
 }
 
-/// Direct TX calling disableVolatileDataAccess() should succeed without frame stack underflow.
+/// Direct TX calling `disableVolatileDataAccess()` should succeed without frame stack underflow.
 #[test]
 fn test_direct_tx_disable_volatile_data_access() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
@@ -894,7 +899,7 @@ fn test_direct_tx_disable_volatile_data_access() {
     );
 }
 
-/// Direct TX calling enableVolatileDataAccess() should succeed without frame stack underflow.
+/// Direct TX calling `enableVolatileDataAccess()` should succeed without frame stack underflow.
 #[test]
 fn test_direct_tx_enable_volatile_data_access() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
@@ -908,7 +913,7 @@ fn test_direct_tx_enable_volatile_data_access() {
     );
 }
 
-/// Direct TX calling isVolatileDataAccessDisabled() should succeed and return false.
+/// Direct TX calling `isVolatileDataAccessDisabled()` should succeed and return false.
 #[test]
 fn test_direct_tx_is_volatile_data_access_disabled() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
@@ -1025,7 +1030,7 @@ fn test_inspector_sees_system_contract_call() {
 // ============================================================================
 
 /// The system contract call intercepted in `frame_init` should only consume the CALL opcode
-/// overhead (warm account access = 100 gas), not the gas_limit forwarded to the child frame.
+/// overhead (warm account access = 100 gas), not the `gas_limit` forwarded to the child frame.
 /// The child frame's gas is fully refunded since the interception returns `Gas::new(gas_limit)`.
 #[test]
 fn test_system_contract_call_gas_cost() {
@@ -1399,8 +1404,8 @@ fn test_callcode_to_access_control_not_intercepted() {
 // 17. DISABLE IN REVERTED CHILD DOES NOT AFFECT SIBLING
 // ============================================================================
 
-/// When a child frame calls disableVolatileDataAccess() and then reverts, the disable
-/// should be cleared when the child's frame returns (via enable_access_if_returning).
+/// When a child frame calls `disableVolatileDataAccess()` and then reverts, the disable
+/// should be cleared when the child's frame returns (via `enable_access_if_returning`).
 /// A sibling call should NOT be restricted.
 ///
 /// ```text

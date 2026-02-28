@@ -108,7 +108,7 @@ use revm::{
 /// Each spec builds on the previous one. Only the opcodes that change are listed:
 ///
 /// - **EQUIVALENCE**: Standard revm mainnet instruction table (no custom wrappers).
-/// - **MINI_REX** (base custom table): All 256 opcodes initialized from scratch.
+/// - **`MINI_REX`** (base custom table): All 256 opcodes initialized from scratch.
 ///   - Most opcodes: `compute_gas_ext::*`
 ///   - Block env opcodes (TIMESTAMP, NUMBER, etc.): `volatile_data_ext::*`
 ///   - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*`
@@ -117,9 +117,9 @@ use revm::{
 ///   - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
 ///   - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
 ///   - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
-///   - CALLCODE, DELEGATECALL, STATICCALL: `compute_gas_ext::*` (bug: missing forward_gas_ext)
+///   - CALLCODE, DELEGATECALL, STATICCALL: `compute_gas_ext::*` (bug: missing `forward_gas_ext`)
 ///   - SELFDESTRUCT: disabled (`control::invalid`)
-/// - **REX / REX1** (extends MINI_REX):
+/// - **REX / REX1** (extends `MINI_REX)`:
 ///   - CALLCODE: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
 ///   - DELEGATECALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
 ///   - STATICCALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
@@ -350,7 +350,7 @@ mod mini_rex {
     /// - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
     /// - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
     /// - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
-    /// - CALLCODE, DELEGATECALL, STATICCALL: `compute_gas_ext::*` (bug: missing forward_gas_ext)
+    /// - CALLCODE, DELEGATECALL, STATICCALL: `compute_gas_ext::*` (bug: missing `forward_gas_ext`)
     /// - SELFDESTRUCT: disabled (`control::invalid`)
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,

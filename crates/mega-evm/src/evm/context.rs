@@ -61,7 +61,7 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
 
     /* Internal state variables */
     /// Tracker for volatile data access (block environment, beneficiary, oracle)
-    /// and volatile data access disable (MegaAccessControl system contract).
+    /// and volatile data access disable (`MegaAccessControl` system contract).
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
 
     /// Whether sandbox interception is disabled for this context.
