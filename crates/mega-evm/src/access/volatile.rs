@@ -79,9 +79,26 @@ impl VolatileDataAccess {
         self.bits()
     }
 
+    /// Converts a single-bit flag to its bit position as a `u8`.
+    /// This matches the `VolatileDataAccessType` Solidity enum discriminant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` is empty (no bits set).
+    pub fn as_u8(self) -> u8 {
+        debug_assert!(!self.is_empty(), "cannot convert empty VolatileDataAccess to u8");
+        self.bits().trailing_zeros() as u8
+    }
+
     /// Returns only the block environment access portion as a separate bitflag.
     /// This is useful for compatibility with code that expects only block env flags.
     pub fn block_env_only(self) -> Self {
         Self::from_bits_truncate(self.bits() & Self::BLOCK_ENV_MASK)
+    }
+}
+
+impl From<crate::VolatileDataAccessType> for VolatileDataAccess {
+    fn from(ty: crate::VolatileDataAccessType) -> Self {
+        Self::from_bits_truncate(1 << (ty as u8))
     }
 }

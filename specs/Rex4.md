@@ -103,6 +103,97 @@ The encoding is general to support future per-frame limits for other resource di
 
 Parent contracts can detect a frame-local limit exceed via low-level call return data or try/catch, and decode it to determine which limit was hit and what the frame's budget was.
 
+### 2. MegaAccessControl System Contract
+
+Rex4 introduces the **MegaAccessControl** system contract at address `0x6342000000000000000000000000000000000004`.
+This contract provides access restriction functions that are intercepted and enforced by the EVM.
+
+#### Volatile Data
+
+The following are considered **volatile data**:
+- Block environment fields: TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH
+- Beneficiary account access: BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH, CALL, STATICCALL, DELEGATECALL, CALLCODE when targeting the block beneficiary
+- Oracle contract access: SLOAD on the oracle contract
+
+#### `disableVolatileDataAccess()`
+
+When a contract calls `MegaAccessControl.disableVolatileDataAccess()`, the caller's frame and all inner calls that access volatile data will revert with `VolatileDataAccessDisabled(uint8 accessType)` error.
+
+**Semantics:**
+- The caller's own frame **is** restricted.
+  Accessing volatile data after calling `disableVolatileDataAccess()` in the same frame will revert.
+- The restriction applies to all inner call types: CALL, STATICCALL, DELEGATECALL, CALLCODE.
+- When a restricted frame accesses volatile data, it immediately reverts with ABI-encoded `VolatileDataAccessDisabled(uint8 accessType)` error.
+  The `accessType` parameter identifies which volatile data triggered the revert (see `VolatileDataAccessType` enum below).
+- The reverted call returns gas to the parent frame (standard revert behavior).
+- If called multiple times at different depths, the shallowest (more restrictive) activation depth is kept.
+- The restriction is **scoped to the caller's subtree**: when the frame that called `disableVolatileDataAccess()` returns, the restriction is deactivated.
+  Sibling calls made by the parent after the disabling frame returns are not affected.
+- Blocked volatile data accesses do **not** set the `volatile_data_accessed` bitmap or lower the compute gas limit (gas detention).
+  The access is rejected before it can affect the transaction-level tracking state.
+
+#### `enableVolatileDataAccess()`
+
+Re-enables volatile data access for the caller's frame and all inner calls.
+
+**Semantics:**
+- Succeeds if access is not currently disabled, or if the caller (or a frame at the same depth) was the one that disabled it.
+- Reverts with `DisabledByParent()` (selector `0xcc11219e`) if a parent frame (shallower depth) disabled access.
+  A child frame cannot override a parent's restriction.
+- After a successful call, both the caller and its inner calls can access volatile data again.
+
+#### `isVolatileDataAccessDisabled()`
+
+Queries whether volatile data access is disabled at the caller's current call depth.
+
+**Semantics:**
+- Returns `true` if volatile data access is disabled at the caller's depth, `false` otherwise.
+- This is a read-only query; it does not modify the disable state.
+
+#### `VolatileDataAccessType` Enum
+
+The `VolatileDataAccessType` enum identifies which type of volatile data triggered the revert.
+Discriminant values match the bit positions in the internal `VolatileDataAccess` bitmap.
+
+```solidity
+enum VolatileDataAccessType {
+    BlockNumber,    // 0  — NUMBER opcode
+    Timestamp,      // 1  — TIMESTAMP opcode
+    Coinbase,       // 2  — COINBASE opcode
+    Difficulty,     // 3  — DIFFICULTY opcode
+    GasLimit,       // 4  — GASLIMIT opcode
+    BaseFee,        // 5  — BASEFEE opcode
+    PrevRandao,     // 6  — PREVRANDAO opcode
+    BlockHash,      // 7  — BLOCKHASH opcode
+    BlobBaseFee,    // 8  — BLOBBASEFEE opcode
+    BlobHash,       // 9  — BLOBHASH opcode
+    Beneficiary,    // 10 — BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH/CALL/STATICCALL/DELEGATECALL/CALLCODE on beneficiary
+    Oracle          // 11 — SLOAD on oracle contract
+}
+```
+
+#### Contract Interface
+
+```solidity
+interface IMegaAccessControl {
+    error NotIntercepted();
+    error VolatileDataAccessDisabled(VolatileDataAccessType accessType);
+    error DisabledByParent();
+    function disableVolatileDataAccess() external view;
+    function enableVolatileDataAccess() external view;
+    function isVolatileDataAccessDisabled() external view returns (bool disabled);
+}
+```
+
+The contract body reverts with `NotIntercepted()` if called outside the MegaETH EVM (e.g., on a network that doesn't support this feature).
+
+#### DELEGATECALL / CALLCODE
+
+DELEGATECALL and CALLCODE to the MegaAccessControl system contract are **not intercepted**.
+The EVM interception only triggers on CALL and STATICCALL (where `target_address` equals the system contract address).
+For DELEGATECALL and CALLCODE, `target_address` is the caller's own address (not the code address), so the interception does not match.
+The call falls through to the underlying contract code, which reverts with `NotIntercepted()`.
+
 ## Inheritance
 
 Rex4 inherits all Rex3 behavior (including increased oracle access compute gas limit, SLOAD-based oracle gas detention, and keyless deploy compute gas tracking) and all features from Rex2, Rex1, Rex, and MiniRex.
@@ -119,6 +210,11 @@ The semantics of Rex4 are inherited from:
 - Absorb logic: `crates/mega-evm/src/limit/limit.rs` (`AdditionalLimit::before_frame_return_result`).
 - Revert data encoding: `crates/mega-evm/src/limit/mod.rs` (`MegaLimitExceeded`, `LimitCheck::revert_data()`).
 - TX runtime limits: `crates/mega-evm/src/evm/limit.rs` (`rex4()`).
+- MegaAccessControl system contract: `crates/mega-evm/src/system/control.rs`, `crates/system-contracts/contracts/MegaAccessControl.sol`.
+- Volatile access disable tracking: merged into `VolatileDataAccessTracker` in `crates/mega-evm/src/access/tracker.rs`.
+- Frame init interception: `crates/mega-evm/src/evm/execution.rs` (`frame_init` method).
+- Frame return deactivation: `crates/mega-evm/src/evm/execution.rs` (`frame_return_result` method).
+- Instruction enforcement: `crates/mega-evm/src/evm/instructions.rs` (`wrap_op_detain_gas_unconditional!`, `wrap_op_detain_gas_conditional!`, and `wrap_call_volatile_check!` macros).
 
 ## References
 

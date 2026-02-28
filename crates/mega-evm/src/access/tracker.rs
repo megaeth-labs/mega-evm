@@ -1,4 +1,4 @@
-use crate::{VolatileDataAccess, ORACLE_CONTRACT_ADDRESS};
+use crate::{VolatileDataAccess, VolatileDataAccessType, ORACLE_CONTRACT_ADDRESS};
 use alloy_primitives::Address;
 
 /// A tracker for volatile data access with compute gas limit enforcement.
@@ -66,6 +66,11 @@ pub struct VolatileDataAccessTracker {
     block_env_access_limit: u64,
     /// Compute gas limit when accessing oracle data.
     oracle_access_limit: u64,
+
+    /// The journal depth at which `disableVolatileDataAccess()` was activated (Rex4+).
+    /// `None` means inactive. `Some(depth)` means calls with
+    /// `journal.depth() >= depth` are restricted.
+    disable_depth: Option<usize>,
 }
 
 impl VolatileDataAccessTracker {
@@ -76,6 +81,7 @@ impl VolatileDataAccessTracker {
             compute_gas_limit: None,
             block_env_access_limit,
             oracle_access_limit,
+            disable_depth: None,
         }
     }
 
@@ -115,8 +121,8 @@ impl VolatileDataAccessTracker {
     }
 
     /// Marks that a specific type of block environment has been accessed.
-    pub fn mark_block_env_accessed(&mut self, access_type: VolatileDataAccess) {
-        self.volatile_data_accessed.insert(access_type);
+    pub fn mark_block_env_accessed(&mut self, access_type: VolatileDataAccessType) {
+        self.volatile_data_accessed.insert(access_type.into());
         self.apply_or_create_limit(self.block_env_access_limit);
     }
 
@@ -161,10 +167,60 @@ impl VolatileDataAccessTracker {
         }
     }
 
+    /// Activates the volatile data access disable at the given depth.
+    ///
+    /// When active, `volatile_access_disabled(depth)` returns `true` for any
+    /// `depth` greater than or equal to `disable_depth`, causing the caller and
+    /// inner calls that access volatile data to revert with
+    /// `VolatileDataAccessDisabled()`.
+    ///
+    /// If already active, keeps the shallower (more restrictive) depth.
+    pub fn disable_access(&mut self, depth: usize) {
+        match self.disable_depth {
+            Some(current) if depth >= current => {}
+            _ => self.disable_depth = Some(depth),
+        }
+    }
+
+    /// Checks if volatile data access is disabled at the given journal depth.
+    /// Returns `true` if `disable_depth` is set and `current_depth >= disable_depth`.
+    pub fn volatile_access_disabled(&self, current_depth: usize) -> bool {
+        self.disable_depth.is_some_and(|d| current_depth >= d)
+    }
+
+    /// Re-enables volatile data access.
+    ///
+    /// Succeeds (returns `true`) if access is not disabled, or the caller is at the same
+    /// depth or shallower than the disabling frame (`caller_depth <= disable_depth`).
+    /// Fails (returns `false`) if a parent frame disabled access (`caller_depth > disable_depth`).
+    pub fn enable_access(&mut self, caller_depth: usize) -> bool {
+        match self.disable_depth {
+            None => true,
+            Some(d) if caller_depth <= d => {
+                self.disable_depth = None;
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Deactivates the disable if the current depth has dropped below the disable depth.
+    ///
+    /// Called on frame return to ensure the disable only applies to the activating frame's
+    /// subtree and does not leak to sibling calls.
+    /// When the journal depth drops strictly below the disable depth, the frame that called
+    /// `disableVolatileDataAccess()` has returned and the restriction is no longer in scope.
+    pub fn enable_access_if_returning(&mut self, current_depth: usize) {
+        if self.disable_depth.is_some_and(|d| current_depth < d) {
+            self.disable_depth = None;
+        }
+    }
+
     /// Resets all access tracking for a new transaction.
     /// Preserves the configured limits (only resets access state).
     pub fn reset(&mut self) {
         self.volatile_data_accessed = VolatileDataAccess::empty();
         self.compute_gas_limit = None;
+        self.disable_depth = None;
     }
 }

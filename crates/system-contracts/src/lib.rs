@@ -31,3 +31,17 @@ pub mod keyless_deploy {
 
     alloy_sol_types::sol!("contracts/interfaces/IKeylessDeploy.sol");
 }
+
+/// `MegaAccessControl` contract bytecode and interface.
+///
+/// Bytecode constants are generated at build time from the versioned artifacts
+/// in the `artifacts/` directory. Interface bindings are generated from the
+/// Solidity source.
+pub mod access_control {
+    include!(concat!(env!("OUT_DIR"), "/access_control_artifacts.rs"));
+
+    alloy_sol_types::sol!(
+        #[sol(all_derives)]
+        "contracts/interfaces/IMegaAccessControl.sol"
+    );
+}

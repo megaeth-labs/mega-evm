@@ -189,7 +189,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
     /// Pushes an empty frame so `before_frame_return_result` can pop it to keep
     /// the frame stack aligned with the EVM's call stack.
     #[inline]
-    fn after_inspector_intercept_frame_init(&mut self) {
+    fn push_empty_frame(&mut self) {
         self.push_frame();
     }
 

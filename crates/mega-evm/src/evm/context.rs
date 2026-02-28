@@ -31,7 +31,7 @@ use revm::{
 use crate::{
     constants, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
     ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit, VolatileDataAccess,
-    VolatileDataAccessTracker,
+    VolatileDataAccessTracker, VolatileDataAccessType,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -60,7 +60,8 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     pub oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
 
     /* Internal state variables */
-    /// Tracker for sensitive data access (block environment, beneficiary, etc.)
+    /// Tracker for volatile data access (block environment, beneficiary, oracle)
+    /// and volatile data access disable (MegaAccessControl system contract).
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
 
     /// Whether sandbox interception is disabled for this context.
@@ -445,7 +446,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// # Arguments
     ///
     /// * `access_type` - The type of block environment access to record
-    pub(crate) fn mark_block_env_accessed(&self, access_type: VolatileDataAccess) {
+    pub(crate) fn mark_block_env_accessed(&self, access_type: VolatileDataAccessType) {
         self.volatile_data_tracker.borrow_mut().mark_block_env_accessed(access_type);
     }
 }
@@ -457,8 +458,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.disable_beneficiary = true;
     }
 
-    /// Check if address is beneficiary and mark access if so. Returns true if beneficiary was
-    /// accessed.
+    /// Check if address is beneficiary and mark access if so.
+    /// Returns true if beneficiary was accessed.
     pub(crate) fn check_and_mark_beneficiary_balance_access(&self, address: &Address) -> bool {
         if self.inner.block.beneficiary == *address {
             self.volatile_data_tracker.borrow_mut().mark_beneficiary_balance_accessed();

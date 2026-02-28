@@ -113,7 +113,7 @@ impl TxRuntimeLimit for KVUpdateTracker {
     }
 
     #[inline]
-    fn after_inspector_intercept_frame_init(&mut self) {
+    fn push_empty_frame(&mut self) {
         self.push_frame(CallFrameInfo { target_address: None, target_updated: false });
     }
 

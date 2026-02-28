@@ -13,7 +13,7 @@ use op_revm::{
 use revm::{
     context::{
         result::{ExecutionResult, FromStringError, InvalidTransaction},
-        ContextTr, FrameStack, Transaction,
+        ContextTr, FrameStack, JournalTr, Transaction,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
@@ -35,9 +35,10 @@ use revm::{
 
 use crate::{
     constants, is_mega_system_transaction, sandbox::execute_keyless_deploy_call,
-    sent_from_mega_system_address, ExternalEnvTypes, HostExt, IKeylessDeploy, IOracle, MegaContext,
-    MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError, OracleEnv,
-    TxRuntimeLimit, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
+    sent_from_mega_system_address, ExternalEnvTypes, HostExt, IKeylessDeploy, IMegaAccessControl,
+    IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
+    MegaTransactionError, OracleEnv, TxRuntimeLimit, ACCESS_CONTROL_ADDRESS,
+    DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
     MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
 };
 
@@ -643,6 +644,103 @@ where
             }
         }
 
+        // Access Control Interception (Rex4+):
+        // Intercept calls to the MegaAccessControl system contract.
+        if self.ctx().spec.is_enabled(MegaSpecId::REX4) {
+            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                if call_inputs.target_address == ACCESS_CONTROL_ADDRESS {
+                    let input_bytes = call_inputs.input.bytes(self.ctx());
+                    // At this point (before inner.frame_init runs), journal.depth() equals
+                    // frame_init.depth, which is the caller's journal depth.
+                    let caller_journal_depth = frame_init.depth;
+
+                    // disableVolatileDataAccess(): activates the volatile data access
+                    // disable at the caller's depth. The caller and all inner calls will
+                    // revert when accessing volatile data.
+                    if IMegaAccessControl::disableVolatileDataAccessCall::abi_decode(&input_bytes)
+                        .is_ok()
+                    {
+                        self.ctx()
+                            .volatile_data_tracker
+                            .borrow_mut()
+                            .disable_access(caller_journal_depth);
+
+                        additional_limit.borrow_mut().push_empty_frame();
+                        let result = FrameResult::Call(CallOutcome::new(
+                            InterpreterResult::new(
+                                InstructionResult::Return,
+                                Bytes::new(),
+                                Gas::new(call_inputs.gas_limit),
+                            ),
+                            call_inputs.return_memory_offset.clone(),
+                        ));
+                        return Ok(FrameInitResult::Result(result));
+                    }
+
+                    // enableVolatileDataAccess(): re-enables volatile data access.
+                    // Reverts with DisabledByParent() if a parent frame disabled it.
+                    if IMegaAccessControl::enableVolatileDataAccessCall::abi_decode(&input_bytes)
+                        .is_ok()
+                    {
+                        let success = self
+                            .ctx()
+                            .volatile_data_tracker
+                            .borrow_mut()
+                            .enable_access(caller_journal_depth);
+
+                        additional_limit.borrow_mut().push_empty_frame();
+                        let result = if success {
+                            FrameResult::Call(CallOutcome::new(
+                                InterpreterResult::new(
+                                    InstructionResult::Return,
+                                    Bytes::new(),
+                                    Gas::new(call_inputs.gas_limit),
+                                ),
+                                call_inputs.return_memory_offset.clone(),
+                            ))
+                        } else {
+                            FrameResult::Call(CallOutcome::new(
+                                InterpreterResult::new(
+                                    InstructionResult::Revert,
+                                    Bytes::copy_from_slice(&DISABLED_BY_PARENT_REVERT_DATA),
+                                    Gas::new(call_inputs.gas_limit),
+                                ),
+                                call_inputs.return_memory_offset.clone(),
+                            ))
+                        };
+                        return Ok(FrameInitResult::Result(result));
+                    }
+
+                    // isVolatileDataAccessDisabled(): queries whether volatile data access
+                    // is disabled at the caller's depth.
+                    if IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_decode(
+                        &input_bytes,
+                    )
+                    .is_ok()
+                    {
+                        let disabled = self
+                            .ctx()
+                            .volatile_data_tracker
+                            .borrow()
+                            .volatile_access_disabled(caller_journal_depth);
+
+                        let output = IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&disabled);
+
+                        additional_limit.borrow_mut().push_empty_frame();
+                        let result = FrameResult::Call(CallOutcome::new(
+                            InterpreterResult::new(
+                                InstructionResult::Return,
+                                Bytes::from(output),
+                                Gas::new(call_inputs.gas_limit),
+                            ),
+                            call_inputs.return_memory_offset.clone(),
+                        ));
+                        return Ok(FrameInitResult::Result(result));
+                    }
+                }
+            }
+        }
+
         if is_mini_rex_enabled {
             if let Some(frame_result) = additional_limit
                 .borrow_mut()
@@ -724,7 +822,19 @@ where
         }
 
         // Call the inner frame_return_result function to return the frame result.
-        self.inner.frame_return_result(result)
+        let ret = self.inner.frame_return_result(result)?;
+
+        // Rex4+: Re-enable volatile data access when the disabling frame has returned.
+        // The inner handler has already popped the frame and committed/reverted the journal,
+        // so journal depth is decremented at this point. If it dropped below disable_depth,
+        // the frame that invoked disableVolatileDataAccess() has returned and the disable
+        // should no longer restrict sibling calls.
+        if self.ctx_ref().spec.is_enabled(MegaSpecId::REX4) {
+            let depth = self.ctx_ref().journal_ref().depth();
+            self.ctx_ref().volatile_data_tracker.borrow_mut().enable_access_if_returning(depth);
+        }
+
+        Ok(ret)
     }
 }
 
@@ -778,9 +888,11 @@ where
 
         // Check if inspector wants to skip this call/create
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
-            // Inspector intercepted this call/create - notify additional limit trackers
+            // Inspector intercepted — `after_frame_init` (which normally pushes a tracking
+            // frame) was skipped, but `before_frame_return_result` (which pops) will still
+            // run. Push an empty frame to keep the limit tracker stack balanced.
             if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-                ctx.additional_limit.borrow_mut().after_inspector_intercept_frame_init();
+                ctx.additional_limit.borrow_mut().push_empty_frame();
             }
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));

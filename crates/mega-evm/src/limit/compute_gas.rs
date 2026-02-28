@@ -111,7 +111,7 @@ impl TxRuntimeLimit for ComputeGasTracker {
     }
 
     #[inline]
-    fn after_inspector_intercept_frame_init(&mut self) {
+    fn push_empty_frame(&mut self) {
         self.push_frame();
     }
 

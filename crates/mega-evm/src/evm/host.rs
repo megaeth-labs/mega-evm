@@ -2,17 +2,18 @@ use core::cell::RefCell;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
+use mega_system_contracts::access_control::IMegaAccessControl::VolatileDataAccessType;
 use std::{format, rc::Rc};
 
 use crate::{
-    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv, VolatileDataAccess,
+    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv,
     VolatileDataAccessTracker, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
 use revm::{
-    context::ContextTr,
+    context::{ContextTr, JournalTr},
     context_interface::{context::ContextError, journaled_state::AccountLoad},
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
     primitives::{hash_map::Entry, StorageKey, KECCAK_EMPTY},
@@ -23,53 +24,53 @@ use revm::{
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> {
     // Block environment related methods - with tracking
     fn basefee(&self) -> U256 {
-        self.mark_block_env_accessed(VolatileDataAccess::BASE_FEE);
+        self.mark_block_env_accessed(VolatileDataAccessType::BaseFee);
         self.inner.basefee()
     }
 
     fn gas_limit(&self) -> U256 {
-        self.mark_block_env_accessed(VolatileDataAccess::GAS_LIMIT);
+        self.mark_block_env_accessed(VolatileDataAccessType::GasLimit);
         self.inner.gas_limit()
     }
 
     fn difficulty(&self) -> U256 {
-        self.mark_block_env_accessed(VolatileDataAccess::DIFFICULTY);
+        self.mark_block_env_accessed(VolatileDataAccessType::Difficulty);
         self.inner.difficulty()
     }
 
     fn prevrandao(&self) -> Option<U256> {
-        self.mark_block_env_accessed(VolatileDataAccess::PREV_RANDAO);
+        self.mark_block_env_accessed(VolatileDataAccessType::PrevRandao);
         self.inner.prevrandao()
     }
 
     fn block_number(&self) -> U256 {
-        self.mark_block_env_accessed(VolatileDataAccess::BLOCK_NUMBER);
+        self.mark_block_env_accessed(VolatileDataAccessType::BlockNumber);
         self.inner.block_number()
     }
 
     fn timestamp(&self) -> U256 {
-        self.mark_block_env_accessed(VolatileDataAccess::TIMESTAMP);
+        self.mark_block_env_accessed(VolatileDataAccessType::Timestamp);
         self.inner.timestamp()
     }
 
     fn beneficiary(&self) -> Address {
-        self.mark_block_env_accessed(VolatileDataAccess::COINBASE);
+        self.mark_block_env_accessed(VolatileDataAccessType::Coinbase);
         self.inner.beneficiary()
     }
 
     fn block_hash(&mut self, number: u64) -> Option<B256> {
-        self.mark_block_env_accessed(VolatileDataAccess::BLOCK_HASH);
+        self.mark_block_env_accessed(VolatileDataAccessType::BlockHash);
         self.inner.block_hash(number)
     }
 
     // Blob-related block environment methods - with tracking
     fn blob_gasprice(&self) -> U256 {
-        self.mark_block_env_accessed(VolatileDataAccess::BLOB_BASE_FEE);
+        self.mark_block_env_accessed(VolatileDataAccessType::BlobBaseFee);
         self.inner.blob_gasprice()
     }
 
     fn blob_hash(&self, number: usize) -> Option<U256> {
-        self.mark_block_env_accessed(VolatileDataAccess::BLOB_HASH);
+        self.mark_block_env_accessed(VolatileDataAccessType::BlobHash);
         self.inner.blob_hash(number)
     }
 
@@ -182,6 +183,15 @@ pub trait HostExt: Host {
 
     /// Gets the volatile data tracker. Only used when the `MINI_REX` spec is enabled.
     fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>>;
+
+    /// Checks if volatile data access should cause a revert at the current call depth.
+    /// Returns `true` if `disableVolatileDataAccess()` was called and the current
+    /// journal depth is deeper than the activation depth.
+    fn volatile_access_disabled(&self) -> bool;
+
+    /// Returns the block beneficiary address without triggering volatile data tracking.
+    /// Used by instruction handlers to pre-check whether an opcode targets the beneficiary.
+    fn beneficiary_address(&self) -> Address;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
@@ -232,6 +242,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>> {
         &self.volatile_data_tracker
+    }
+
+    #[inline]
+    fn volatile_access_disabled(&self) -> bool {
+        let current_depth = self.journal_ref().depth();
+        self.volatile_data_tracker.borrow().volatile_access_disabled(current_depth)
+    }
+
+    #[inline]
+    fn beneficiary_address(&self) -> Address {
+        self.inner.block.beneficiary
     }
 }
 

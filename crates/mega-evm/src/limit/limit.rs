@@ -148,16 +148,17 @@ impl AdditionalLimit {
         }
     }
 
-    /// Called when inspector intercepts and skips a call/create.
+    /// Pushes an empty frame to all trackers so `before_frame_return_result` can pop
+    /// them to keep stacks aligned with the EVM's call stack.
     ///
-    /// Pushes an empty frame to all trackers so `frame_return_result` can pop them
-    /// to keep stacks aligned.
+    /// Used when `frame_init` returns an early `Result` (e.g., inspector interception,
+    /// access control interception) without going through `after_frame_init`.
     #[inline]
-    pub(crate) fn after_inspector_intercept_frame_init(&mut self) {
-        self.state_growth.after_inspector_intercept_frame_init();
-        self.data_size.after_inspector_intercept_frame_init();
-        self.kv_update.after_inspector_intercept_frame_init();
-        self.compute_gas.after_inspector_intercept_frame_init();
+    pub(crate) fn push_empty_frame(&mut self) {
+        self.state_growth.push_empty_frame();
+        self.data_size.push_empty_frame();
+        self.kv_update.push_empty_frame();
+        self.compute_gas.push_empty_frame();
     }
 
     /// Returns the current effective compute gas limit (may be detained/lowered by volatile

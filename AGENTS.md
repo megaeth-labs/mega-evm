@@ -152,6 +152,7 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 | Oracle                   | `...0001`      | External key-value storage with hint support        |
 | High-Precision Timestamp | `...0002`      | Sub-second block timestamp                          |
 | Keyless Deploy           | `...0003`      | Deterministic contract deployment via Nick's Method |
+| MegaAccessControl        | `...0004`      | Access control (disableVolatileDataAccess)          |
 
 Key design aspects:
 

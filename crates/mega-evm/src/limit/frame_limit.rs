@@ -189,7 +189,7 @@ pub(crate) trait TxRuntimeLimit {
     #[inline]
     fn before_tx_start(&mut self, _tx: &MegaTransaction) {}
     #[inline]
-    fn after_inspector_intercept_frame_init(&mut self) {}
+    fn push_empty_frame(&mut self) {}
     #[inline]
     fn before_frame_init<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
         &mut self,

@@ -84,6 +84,56 @@ use revm::{
 /// 4. Users only pay for actual work performed, not for enforcement gas
 /// 5. This prevents `DoS` attacks while maintaining fair gas accounting
 ///
+/// # Instruction Layering Architecture
+///
+/// ## Extension Modules (Inner → Outer)
+///
+/// Each opcode handler is composed of one or more extension module wrappers, applied from
+/// innermost (closest to revm) to outermost:
+///
+/// 1. **`compute_gas_ext`** — Tracks compute gas usage for every opcode. Wraps the raw revm
+///    instruction and records how much gas was consumed.
+/// 2. **`storage_gas_ext`** — Adds dynamic storage gas costs (SSTORE, CALL with value transfer,
+///    CREATE, LOG). Wraps `compute_gas_ext` handlers.
+/// 3. **`additional_limit_ext`** — Enforces multidimensional resource limits (data size, KV
+///    updates). Wraps `storage_gas_ext` handlers.
+/// 4. **`forward_gas_ext`** — Enforces the 98/100 gas forwarding rule for CALL-like and CREATE
+///    opcodes. Wraps `storage_gas_ext` handlers.
+/// 5. **`volatile_data_ext`** — Applies gas detention on volatile data access (block env,
+///    beneficiary, oracle) and pre-execution disable checks (Rex4+). Wraps `compute_gas_ext` or
+///    `forward_gas_ext` handlers depending on the opcode.
+///
+/// ## Spec Progression and Opcode Overrides
+///
+/// Each spec builds on the previous one. Only the opcodes that change are listed:
+///
+/// - **EQUIVALENCE**: Standard revm mainnet instruction table (no custom wrappers).
+/// - **MINI_REX** (base custom table): All 256 opcodes initialized from scratch.
+///   - Most opcodes: `compute_gas_ext::*`
+///   - Block env opcodes (TIMESTAMP, NUMBER, etc.): `volatile_data_ext::*`
+///   - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*`
+///   - SLOAD: `compute_gas_ext::sload`
+///   - SSTORE: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - CALLCODE, DELEGATECALL, STATICCALL: `compute_gas_ext::*` (bug: missing forward_gas_ext)
+///   - SELFDESTRUCT: disabled (`control::invalid`)
+/// - **REX / REX1** (extends MINI_REX):
+///   - CALLCODE: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
+///   - DELEGATECALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
+///   - STATICCALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
+/// - **REX2** (extends REX):
+///   - SELFDESTRUCT: `compute_gas_ext::selfdestruct` (re-enabled with EIP-6780)
+/// - **REX3** (extends REX2):
+///   - SLOAD: `volatile_data_ext::sload` → `compute_gas_ext::sload` (oracle gas detention)
+/// - **REX4** (extends REX3):
+///   - CALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - STATICCALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - DELEGATECALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext` →
+///     `compute_gas_ext`
+///   - CALLCODE: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+///
 /// # Assumptions
 ///
 /// This instruction table is only used when the `MINI_REX` spec (or later) is enabled, so we can
@@ -117,7 +167,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
-            MegaSpecId::REX3 | MegaSpecId::REX4 => EthInstructions::new(rex3::instruction_table::<
+            MegaSpecId::REX3 => EthInstructions::new(rex3::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
+            MegaSpecId::REX4 => EthInstructions::new(rex4::instruction_table::<
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
@@ -141,6 +195,11 @@ mod rex {
     use super::*;
 
     /// Returns the instruction table for the `REX` and `REX1` specs.
+    ///
+    /// Changes from Mini-Rex (bugfix — adds missing `forward_gas_ext` wrapping):
+    /// - CALLCODE: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - DELEGATECALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - STATICCALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -164,6 +223,9 @@ mod rex2 {
     use super::*;
 
     /// Returns the instruction table for the `REX2` spec.
+    ///
+    /// Changes from Rex:
+    /// - SELFDESTRUCT: `compute_gas_ext::selfdestruct` (re-enabled with EIP-6780 semantics)
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -186,8 +248,8 @@ mod rex3 {
     /// Returns the instruction table for the `REX3` spec.
     ///
     /// Changes from Rex2:
-    /// - SLOAD triggers gas detention when reading oracle contract storage. This replaces the
-    ///   CALL-based oracle access detection used in earlier specs.
+    /// - SLOAD: `volatile_data_ext::sload` → `compute_gas_ext::sload` (oracle gas detention). This
+    ///   replaces the CALL-based oracle access detection used in earlier specs.
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -202,6 +264,43 @@ mod rex3 {
         // The host's sload() method marks oracle access in the volatile data tracker,
         // then the detain_gas_ext wrapper applies the compute gas limit.
         table[SLOAD as usize] = volatile_data_ext::sload;
+
+        table
+    }
+}
+
+mod rex4 {
+    use super::*;
+
+    /// Returns the instruction table for the `REX4` spec.
+    ///
+    /// Changes from Rex3:
+    /// - CALL: `volatile_data_ext::call` → `forward_gas_ext` → `storage_gas_ext` →
+    ///   `compute_gas_ext`
+    /// - STATICCALL: `volatile_data_ext::static_call` → `forward_gas_ext` → `storage_gas_ext` →
+    ///   `compute_gas_ext`
+    /// - DELEGATECALL: `volatile_data_ext::delegate_call` → `forward_gas_ext` → `storage_gas_ext` →
+    ///   `compute_gas_ext`
+    /// - CALLCODE: `volatile_data_ext::call_code` → `forward_gas_ext` → `storage_gas_ext` →
+    ///   `compute_gas_ext`
+    ///
+    /// The `volatile_data_ext` wrapper checks if the target address is the beneficiary and
+    /// volatile data access is disabled — if so, reverts before executing.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        use revm::bytecode::opcode::*;
+        let mut table = rex3::instruction_table::<WIRE, H>();
+
+        // Rex4: CALL-like opcodes check for beneficiary volatile access disabled.
+        table[CALL as usize] = volatile_data_ext::call;
+        table[STATICCALL as usize] = volatile_data_ext::static_call;
+        table[DELEGATECALL as usize] = volatile_data_ext::delegate_call;
+        table[CALLCODE as usize] = volatile_data_ext::call_code;
 
         table
     }
@@ -241,6 +340,18 @@ mod mini_rex {
     use super::*;
 
     /// Returns the instruction table for the `MINI_REX` spec.
+    ///
+    /// This is the base custom table — all 256 opcodes are initialized from scratch with
+    /// compute gas tracking. Key opcode layering:
+    /// - Most opcodes: `compute_gas_ext::*` (compute gas tracking only)
+    /// - Block env opcodes: `volatile_data_ext::*` (gas detention)
+    /// - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*` (conditional)
+    /// - SSTORE: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - CALLCODE, DELEGATECALL, STATICCALL: `compute_gas_ext::*` (bug: missing forward_gas_ext)
+    /// - SELFDESTRUCT: disabled (`control::invalid`)
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -564,8 +675,8 @@ pub mod forward_gas_ext {
 /** Volatile data access opcode handlers with compute gas limit enforcement.
 
 These custom instruction handlers override opcodes that access volatile data (block environment,
-beneficiary account data) to lower the compute gas limit. This prevents `DoS` attacks while
-allowing storage operations to continue with full transaction gas.
+beneficiary account data, oracle contract) to lower the compute gas limit.
+This prevents `DoS` attacks while allowing storage operations to continue with full transaction gas.
 
 # Compute Gas Limit Enforcement
 
@@ -580,12 +691,12 @@ When volatile data is accessed:
 4. All subsequent compute operations are limited by this compute gas limit
 5. Storage operations (SSTORE, account creation) continue with full transaction gas
 
-This approach:
-- Prevents `DoS` attacks by limiting compute operations after volatile data access
-- Allows storage operations to continue normally (not limited by volatile data access)
-- Works across nested calls through the compute gas tracking mechanism
-- Order-independent: accessing oracle then block env OR block env then oracle both result in
-  the same final compute gas limit (the minimum of the two)
+# Volatile Data Access Disable (Rex4+)
+
+When `disableVolatileDataAccess()` is active, the handlers check **before** executing the
+opcode and revert immediately if the access would be volatile.
+This ensures that disabled volatile accesses do not pollute the tracker's `volatile_data_accessed`
+bitmap or lower the `compute_gas_limit`.
 
 # Two Categories of Opcodes
 
@@ -599,61 +710,254 @@ These opcodes only SOMETIMES access volatile data (20M compute gas limit when vo
 - `BALANCE(other_address)` → not volatile, no limit
 - EXTCODESIZE/EXTCODECOPY/EXTCODEHASH → same conditional behavior
 
-For conditional opcodes:
-- The Host methods detect when they access beneficiary/volatile accounts
-- Compute gas limit lowering only occurs if volatile data is actually accessed
-- Regular account accesses don't trigger limit changes
+For conditional opcodes, the instruction handler peeks the target address from the stack before
+executing the opcode to determine if the access would be volatile.
+
+## Oracle SLOAD (Rex3+)
+SLOAD targeting the oracle contract is volatile and applies the oracle compute gas limit.
+The target address comes from `interpreter.input.target_address()` (not from the stack).
 */
 pub mod volatile_data_ext {
     use super::*;
-    /// Macro to create opcode handlers that lower compute gas limit on volatile data access.
+
+    use alloy_primitives::Address;
+
+    use crate::{
+        volatile_data_access_disabled_revert_data, VolatileDataAccessType, ORACLE_CONTRACT_ADDRESS,
+    };
+
+    /// Applies the compute gas limit from the volatile data tracker to the additional limit.
     ///
-    /// This macro generates a wrapper function that:
-    /// 1. Calls the original instruction implementation from revm
-    /// 2. Lowers the compute gas limit if volatile data was accessed
+    /// This is safe to call unconditionally after any instruction: `get_compute_gas_limit()`
+    /// returns `None` if no volatile data has been accessed in this transaction, and if a
+    /// prior instruction already set the limit, re-applying the same value is idempotent.
+    macro_rules! apply_compute_gas_limit {
+        ($context:expr) => {
+            let compute_gas_limit =
+                $context.host.volatile_data_tracker().borrow().get_compute_gas_limit();
+            if let Some(limit) = compute_gas_limit {
+                $context.host.additional_limit().borrow_mut().set_compute_gas_limit(limit);
+            }
+        };
+    }
+
+    /// Macro to create opcode handlers for **unconditionally volatile** opcodes.
     ///
-    /// The limit enforcement is managed by `VolatileDataAccessTracker` which tracks accessed types
-    /// and `AdditionalLimit.set_compute_gas_limit()` which enforces the limit:
-    /// - On first volatile data access: lowers the compute gas limit
-    /// - On subsequent accesses: may further lower the limit if a more restrictive type is accessed
-    macro_rules! wrap_op_detain_gas {
-    ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
+    /// These opcodes (TIMESTAMP, NUMBER, etc.) always access volatile data.
+    /// The handler:
+    /// 1. Checks if volatile data access is disabled (Rex4+) — if so, reverts immediately
+    ///    **before** executing the opcode, avoiding any side effects on the tracker.
+    /// 2. Executes the original instruction.
+    /// 3. Applies the compute gas limit via `apply_compute_gas_limit!`.
+    macro_rules! wrap_op_detain_gas_unconditional {
+    ($fn_name:ident, $opcode_name:expr, $original_fn:path, $access_type:expr) => {
         #[doc = concat!("`", $opcode_name, "` opcode with compute gas limit enforcement on volatile data access.")]
         #[inline]
         pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
             context: InstructionContext<'_, H, WIRE>,
         ) {
-            let volatile_data_tracker = context.host.volatile_data_tracker().clone();
-
-            // The volatile data tracker will be marked as accessed in the `Host` hooks.
-            run_inner_instruction_or_abort!($original_fn, context);
-
-            // Lower compute gas limit if volatile data was accessed.
-            // This is a no-op if no volatile data was accessed or if limit is already lower.
-            let compute_gas_limit = volatile_data_tracker.borrow().get_compute_gas_limit();
-            if let Some(limit) = compute_gas_limit {
-                context.host.additional_limit().borrow_mut().set_compute_gas_limit(limit);
+            // Rex4+: revert before executing if volatile data access is disabled.
+            if context.host.volatile_access_disabled() {
+                context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                    InstructionResult::Revert,
+                    volatile_data_access_disabled_revert_data($access_type),
+                    context.interpreter.gas,
+                ));
+                return;
             }
+
+            run_inner_instruction_or_abort!($original_fn, context);
+            apply_compute_gas_limit!(context);
         }
     };
-}
+    }
 
-    wrap_op_detain_gas!(timestamp, "TIMESTAMP", compute_gas_ext::timestamp);
-    wrap_op_detain_gas!(block_number, "NUMBER", compute_gas_ext::number);
-    wrap_op_detain_gas!(difficulty, "DIFFICULTY", compute_gas_ext::difficulty);
-    wrap_op_detain_gas!(gas_limit_opcode, "GASLIMIT", compute_gas_ext::gaslimit);
-    wrap_op_detain_gas!(basefee, "BASEFEE", compute_gas_ext::basefee);
-    wrap_op_detain_gas!(coinbase, "COINBASE", compute_gas_ext::coinbase);
-    wrap_op_detain_gas!(blockhash, "BLOCKHASH", compute_gas_ext::blockhash);
-    wrap_op_detain_gas!(blobbasefee, "BLOBBASEFEE", compute_gas_ext::blobbasefee);
-    wrap_op_detain_gas!(blobhash, "BLOBHASH", compute_gas_ext::blobhash);
-    wrap_op_detain_gas!(balance, "BALANCE", compute_gas_ext::balance);
-    wrap_op_detain_gas!(extcodesize, "EXTCODESIZE", compute_gas_ext::extcodesize);
-    wrap_op_detain_gas!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
-    wrap_op_detain_gas!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
+    /// Macro to create opcode handlers for **conditionally volatile** opcodes.
+    ///
+    /// These opcodes (BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH) are volatile only when
+    /// targeting the block beneficiary address.
+    /// The handler:
+    /// 1. Peeks the target address from the stack (position 0) without consuming it.
+    /// 2. If the target is the beneficiary and volatile access is disabled, reverts immediately
+    ///    **before** executing the opcode.
+    /// 3. Otherwise executes the instruction normally and applies gas detention if volatile data
+    ///    was accessed.
+    macro_rules! wrap_op_detain_gas_conditional {
+    ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
+        #[doc = concat!("`", $opcode_name, "` opcode with compute gas limit enforcement on volatile data access.")]
+        #[inline]
+        pub fn $fn_name<
+            WIRE: InterpreterTypes<Stack: StackInspectTr>,
+            H: HostExt + ?Sized,
+        >(
+            context: InstructionContext<'_, H, WIRE>,
+        ) {
+            // Peek the target address from the stack to check if it's the beneficiary.
+            // Rex4+: If targeting the beneficiary while volatile access is disabled, revert
+            // before executing the opcode to avoid polluting the tracker.
+            if let Some(addr_word) = context.interpreter.stack.inspect::<0>() {
+                let target: Address = addr_word.into_address();
+                let beneficiary = context.host.beneficiary_address();
+                if target == beneficiary && context.host.volatile_access_disabled() {
+                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                        InstructionResult::Revert,
+                        volatile_data_access_disabled_revert_data(
+                            VolatileDataAccessType::Beneficiary,
+                        ),
+                        context.interpreter.gas,
+                    ));
+                    return;
+                }
+            }
 
-    // Added for Rex3
-    wrap_op_detain_gas!(sload, "SLOAD", compute_gas_ext::sload);
+            run_inner_instruction_or_abort!($original_fn, context);
+            apply_compute_gas_limit!(context);
+        }
+    };
+    }
+
+    // Unconditional volatile opcodes — always access volatile data, no stack inspection needed.
+    wrap_op_detain_gas_unconditional!(
+        timestamp,
+        "TIMESTAMP",
+        compute_gas_ext::timestamp,
+        VolatileDataAccessType::Timestamp
+    );
+    wrap_op_detain_gas_unconditional!(
+        block_number,
+        "NUMBER",
+        compute_gas_ext::number,
+        VolatileDataAccessType::BlockNumber
+    );
+    wrap_op_detain_gas_unconditional!(
+        difficulty,
+        "DIFFICULTY",
+        compute_gas_ext::difficulty,
+        VolatileDataAccessType::Difficulty
+    );
+    wrap_op_detain_gas_unconditional!(
+        gas_limit_opcode,
+        "GASLIMIT",
+        compute_gas_ext::gaslimit,
+        VolatileDataAccessType::GasLimit
+    );
+    wrap_op_detain_gas_unconditional!(
+        basefee,
+        "BASEFEE",
+        compute_gas_ext::basefee,
+        VolatileDataAccessType::BaseFee
+    );
+    wrap_op_detain_gas_unconditional!(
+        coinbase,
+        "COINBASE",
+        compute_gas_ext::coinbase,
+        VolatileDataAccessType::Coinbase
+    );
+    wrap_op_detain_gas_unconditional!(
+        blockhash,
+        "BLOCKHASH",
+        compute_gas_ext::blockhash,
+        VolatileDataAccessType::BlockHash
+    );
+    wrap_op_detain_gas_unconditional!(
+        blobbasefee,
+        "BLOBBASEFEE",
+        compute_gas_ext::blobbasefee,
+        VolatileDataAccessType::BlobBaseFee
+    );
+    wrap_op_detain_gas_unconditional!(
+        blobhash,
+        "BLOBHASH",
+        compute_gas_ext::blobhash,
+        VolatileDataAccessType::BlobHash
+    );
+
+    // Conditional volatile opcodes — volatile only when targeting the block beneficiary.
+    wrap_op_detain_gas_conditional!(balance, "BALANCE", compute_gas_ext::balance);
+    wrap_op_detain_gas_conditional!(extcodesize, "EXTCODESIZE", compute_gas_ext::extcodesize);
+    wrap_op_detain_gas_conditional!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
+    wrap_op_detain_gas_conditional!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
+
+    /// `SLOAD` opcode with compute gas limit enforcement on volatile data access.
+    ///
+    /// SLOAD is conditionally volatile when targeting the oracle contract.
+    /// Unlike the beneficiary-conditional opcodes, the target address comes from
+    /// `interpreter.input.target_address()` (the current contract), not from the stack.
+    ///
+    /// The handler checks if the SLOAD targets the oracle contract and volatile access is
+    /// disabled — if so, reverts before executing the instruction.
+    #[inline]
+    pub fn sload<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        // Rex4+: If SLOAD targets the oracle contract and volatile access is disabled,
+        // revert before executing to avoid polluting the tracker.
+        let target = context.interpreter.input.target_address();
+        if target == ORACLE_CONTRACT_ADDRESS && context.host.volatile_access_disabled() {
+            context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                InstructionResult::Revert,
+                volatile_data_access_disabled_revert_data(VolatileDataAccessType::Oracle),
+                context.interpreter.gas,
+            ));
+            return;
+        }
+
+        run_inner_instruction_or_abort!(compute_gas_ext::sload, context);
+        apply_compute_gas_limit!(context);
+    }
+
+    /// Macro to create opcode handlers for **conditionally volatile CALL-like** opcodes.
+    ///
+    /// These opcodes (CALL, STATICCALL, DELEGATECALL, CALLCODE) are volatile only when
+    /// targeting the block beneficiary address.
+    /// The handler:
+    /// 1. Peeks the target address from the stack (position 1) without consuming it.
+    /// 2. If the target is the beneficiary and volatile access is disabled, reverts immediately
+    ///    **before** executing the opcode to avoid polluting the tracker via
+    ///    `load_account_delegated`.
+    /// 3. Otherwise delegates to the existing `forward_gas_ext` handler.
+    macro_rules! wrap_call_volatile_check {
+    ($fn_name:ident, $opcode_name:expr, $inner_fn:path) => {
+        #[doc = concat!("`", $opcode_name, "` opcode with volatile data access disabled check for beneficiary.")]
+        #[inline]
+        pub fn $fn_name<
+            WIRE: InterpreterTypes<Stack: StackInspectTr>,
+            H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+        >(
+            context: InstructionContext<'_, H, WIRE>,
+        ) {
+            // Peek the target address from the stack (position 1 for CALL-like opcodes:
+            // stack layout is [gas_limit, to, ...]).
+            // Rex4+: If targeting the beneficiary while volatile access is disabled, revert
+            // before executing the opcode to avoid polluting the tracker.
+            if let Some(addr_word) = context.interpreter.stack.inspect::<1>() {
+                let target: Address = addr_word.into_address();
+                let beneficiary = context.host.beneficiary_address();
+                if target == beneficiary && context.host.volatile_access_disabled() {
+                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                        InstructionResult::Revert,
+                        volatile_data_access_disabled_revert_data(
+                            VolatileDataAccessType::Beneficiary,
+                        ),
+                        context.interpreter.gas,
+                    ));
+                    return;
+                }
+            }
+
+            // Delegate to the existing forward_gas_ext handler (includes storage gas,
+            // compute gas, and 98/100 gas forwarding rule).
+            $inner_fn(context);
+        }
+    };
+    }
+
+    // Conditionally volatile CALL-like opcodes — volatile only when targeting the block
+    // beneficiary. These wrap forward_gas_ext handlers with a pre-execution beneficiary check.
+    wrap_call_volatile_check!(call, "CALL", forward_gas_ext::call);
+    wrap_call_volatile_check!(static_call, "STATICCALL", forward_gas_ext::static_call);
+    wrap_call_volatile_check!(delegate_call, "DELEGATECALL", forward_gas_ext::delegate_call);
+    wrap_call_volatile_check!(call_code, "CALLCODE", forward_gas_ext::call_code);
 }
 
 /// Extends opcodes with additional limit (kv update limit, data limit, etc.) enforcement.

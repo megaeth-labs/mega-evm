@@ -26,10 +26,11 @@ use revm::{
 };
 
 use crate::{
-    block::eips, transact_deploy_high_precision_timestamp_oracle,
-    transact_deploy_keyless_deploy_contract, transact_deploy_oracle_contract, BlockLimiter,
-    BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
-    MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
+    block::eips, transact_deploy_access_control_contract,
+    transact_deploy_high_precision_timestamp_oracle, transact_deploy_keyless_deploy_contract,
+    transact_deploy_oracle_contract, BlockLimiter, BlockMegaTransactionOutcome, BucketId,
+    MegaBlockExecutionCtx, MegaHardforks, MegaSystemCallOutcome, MegaTransaction,
+    MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -236,6 +237,18 @@ where
 
         // Rex2 hardfork: keyless deploy contract
         let result_and_state = transact_deploy_keyless_deploy_contract(
+            &self.hardforks,
+            self.evm.block().timestamp.saturating_to(),
+            self.evm.db_mut(),
+        )
+        .map_err(BlockExecutionError::other)?;
+        if let Some(state) = result_and_state {
+            outcomes
+                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
+        }
+
+        // Rex4 hardfork: access control contract
+        let result_and_state = transact_deploy_access_control_contract(
             &self.hardforks,
             self.evm.block().timestamp.saturating_to(),
             self.evm.db_mut(),

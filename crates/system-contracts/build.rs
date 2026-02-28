@@ -196,6 +196,11 @@ fn main() {
             script_path: "scripts/KeylessDeployBytecode.s.sol:SaveKeylessDeployBytecode",
             output_file: "keyless_deploy_artifacts.rs",
         },
+        ContractConfig {
+            name: "MegaAccessControl",
+            script_path: "scripts/MegaAccessControlBytecode.s.sol:SaveMegaAccessControlBytecode",
+            output_file: "access_control_artifacts.rs",
+        },
     ];
 
     // Set up rerun-if-changed triggers
