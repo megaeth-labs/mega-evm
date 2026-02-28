@@ -600,11 +600,9 @@ where
         // Side-effect-only interceptors (oracle hint) return None; short-circuiting
         // interceptors return Some(FrameResult).
         if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-            if let Some(result) = dispatch_system_contract_interceptors(
-                self.ctx(),
-                call_inputs,
-                frame_init.depth,
-            ) {
+            if let Some(result) =
+                dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
+            {
                 // Push an empty frame to keep the limit tracker stack balanced:
                 // `frame_return_result` / `last_frame_result` will pop a frame, but
                 // `after_frame_init` (which normally pushes) was skipped.

@@ -22,11 +22,11 @@ use crate::{
 
 /// The result of a system contract call interception attempt.
 ///
-/// - `None`: The interceptor did not handle this call.
-///   The caller should try the next interceptor or proceed with normal frame initialization.
-/// - `Some(FrameResult)`: The interceptor handled the call and produced a synthetic result.
-///   The caller should return this as `FrameInitResult::Result` and push an empty frame to
-///   keep the limit tracker stack balanced.
+/// - `None`: The interceptor did not handle this call. The caller should try the next interceptor
+///   or proceed with normal frame initialization.
+/// - `Some(FrameResult)`: The interceptor handled the call and produced a synthetic result. The
+///   caller should return this as `FrameInitResult::Result` and push an empty frame to keep the
+///   limit tracker stack balanced.
 pub type InterceptResult = Option<FrameResult>;
 
 /// Trait for intercepting calls to system contracts during `frame_init`.
@@ -36,8 +36,8 @@ pub type InterceptResult = Option<FrameResult>;
 ///
 /// # Contract
 ///
-/// - The caller guarantees that `call_inputs` comes from a `FrameInput::Call`.
-///   Create frames are never dispatched to interceptors.
+/// - The caller guarantees that `call_inputs` comes from a `FrameInput::Call`. Create frames are
+///   never dispatched to interceptors.
 /// - When the method returns `Some(FrameResult)`, the caller is responsible for calling
 ///   `additional_limit.push_empty_frame()` to keep the frame tracker stack balanced.
 /// - When the method returns `None`, the caller proceeds as if no interception occurred.
@@ -171,12 +171,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 /// Interceptor for MegaAccessControl system contract calls.
 ///
 /// Handles three functions:
-/// - `disableVolatileDataAccess()`: activates volatile data access restriction at the
+/// - `disableVolatileDataAccess()`: activates volatile data access restriction at the caller's
+///   depth.
+/// - `enableVolatileDataAccess()`: re-enables volatile data access. Reverts with
+///   `DisabledByParent()` if a parent frame disabled it.
+/// - `isVolatileDataAccessDisabled()`: queries whether volatile data access is disabled at the
 ///   caller's depth.
-/// - `enableVolatileDataAccess()`: re-enables volatile data access.
-///   Reverts with `DisabledByParent()` if a parent frame disabled it.
-/// - `isVolatileDataAccessDisabled()`: queries whether volatile data access is disabled at
-///   the caller's depth.
 #[derive(Debug)]
 pub struct AccessControlInterceptor;
 
@@ -245,10 +245,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         // isVolatileDataAccessDisabled()
         if IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_decode(&input_bytes).is_ok() {
-            let disabled = ctx
-                .volatile_data_tracker
-                .borrow()
-                .volatile_access_disabled(caller_journal_depth);
+            let disabled =
+                ctx.volatile_data_tracker.borrow().volatile_access_disabled(caller_journal_depth);
 
             let output =
                 IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&disabled);
