@@ -81,7 +81,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             fn log(&mut self, log: Log);
             fn caller(&self) -> Address;
             fn max_initcode_size(&self) -> usize;
-            fn selfdestruct(&mut self, address: Address, target: Address) -> Option<StateLoad<SelfDestructResult>>;
             fn sstore(
                 &mut self,
                 address: Address,
@@ -91,6 +90,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             fn tstore(&mut self, address: Address, key: U256, value: U256);
             fn tload(&mut self, address: Address, key: U256) -> U256;
         }
+    }
+
+    fn selfdestruct(
+        &mut self,
+        address: Address,
+        target: Address,
+    ) -> Option<StateLoad<SelfDestructResult>> {
+        // Rex4+: Mark beneficiary balance access when SELFDESTRUCT targets the beneficiary.
+        // This enables gas detention and the disableVolatileDataAccess check in the instruction
+        // wrapper.
+        if self.spec.is_enabled(MegaSpecId::REX4) {
+            self.check_and_mark_beneficiary_balance_access(&target);
+        }
+        self.inner.selfdestruct(address, target)
     }
 
     fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {

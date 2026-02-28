@@ -283,6 +283,7 @@ mod rex4 {
     ///   `compute_gas_ext`
     /// - CALLCODE: `volatile_data_ext::call_code` → `forward_gas_ext` → `storage_gas_ext` →
     ///   `compute_gas_ext`
+    /// - SELFDESTRUCT: `volatile_data_ext::selfdestruct` → `compute_gas_ext::selfdestruct`
     ///
     /// The `volatile_data_ext` wrapper checks if the target address is the beneficiary and
     /// volatile data access is disabled — if so, reverts before executing.
@@ -301,6 +302,9 @@ mod rex4 {
         table[STATICCALL as usize] = volatile_data_ext::static_call;
         table[DELEGATECALL as usize] = volatile_data_ext::delegate_call;
         table[CALLCODE as usize] = volatile_data_ext::call_code;
+
+        // Rex4: SELFDESTRUCT checks for beneficiary volatile access.
+        table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct;
 
         table
     }
@@ -877,6 +881,7 @@ pub mod volatile_data_ext {
     wrap_op_detain_gas_conditional!(extcodesize, "EXTCODESIZE", compute_gas_ext::extcodesize);
     wrap_op_detain_gas_conditional!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
     wrap_op_detain_gas_conditional!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
+    wrap_op_detain_gas_conditional!(selfdestruct, "SELFDESTRUCT", compute_gas_ext::selfdestruct);
 
     /// `SLOAD` opcode with compute gas limit enforcement on volatile data access.
     ///

@@ -1764,3 +1764,142 @@ fn test_blocked_call_beneficiary_does_not_pollute_tracker() {
         "compute_gas_limit should not be set after blocked CALL to beneficiary"
     );
 }
+
+// ============================================================================
+// 21. SELFDESTRUCT TARGETING BENEFICIARY
+// ============================================================================
+
+/// SELFDESTRUCT targeting the beneficiary should revert when volatile access is disabled.
+#[test]
+fn test_selfdestruct_beneficiary_restricted() {
+    let beneficiary = Address::ZERO;
+
+    // Child: SELFDESTRUCT targeting the beneficiary address
+    let child_code = BytecodeBuilder::default()
+        .push_address(beneficiary)
+        .append(SELFDESTRUCT)
+        .build();
+
+    // Parent: disable volatile access, call child, capture revert data
+    let parent_code = call_disable_volatile_data_access(BytecodeBuilder::default());
+    let parent_code = append_call_and_return_data(parent_code, CHILD, 50_000_000).build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(PARENT, parent_code)
+        .account_code(CHILD, child_code);
+
+    let result = transact(&mut db, default_tx(PARENT)).unwrap();
+    let output = result.result.output().expect("should have output");
+    assert_eq!(&output[..4], &VOLATILE_DATA_ACCESS_DISABLED_SELECTOR);
+    let decoded = decode_volatile_data_access_disabled(output);
+    assert_eq!(
+        decoded.accessType,
+        VolatileDataAccessType::Beneficiary,
+        "SELFDESTRUCT to beneficiary should revert with Beneficiary access type"
+    );
+}
+
+/// SELFDESTRUCT targeting a non-beneficiary address should NOT revert when volatile access
+/// is disabled.
+#[test]
+fn test_selfdestruct_non_beneficiary_not_restricted() {
+    // Child: SELFDESTRUCT targeting a non-beneficiary address (GRANDCHILD)
+    let child_code = BytecodeBuilder::default()
+        .push_address(GRANDCHILD)
+        .append(SELFDESTRUCT)
+        .build();
+
+    // Parent: disable volatile access, call child, log call status
+    let parent_code = call_disable_volatile_data_access(BytecodeBuilder::default());
+    let parent_code = append_call(parent_code, CHILD, 50_000_000);
+    let parent_code = append_log_call_status(parent_code).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(PARENT, parent_code)
+        .account_code(CHILD, child_code);
+
+    let result = transact(&mut db, default_tx(PARENT)).unwrap();
+    assert!(
+        result.result.is_success(),
+        "SELFDESTRUCT to non-beneficiary should not be restricted"
+    );
+    assert_log_call_status(&result, 0, true);
+}
+
+/// SELFDESTRUCT targeting the beneficiary should work (with gas detention) when volatile
+/// access is NOT disabled.
+#[test]
+fn test_selfdestruct_beneficiary_not_restricted_without_disable() {
+    let beneficiary = Address::ZERO;
+
+    // Child: SELFDESTRUCT targeting the beneficiary
+    let child_code = BytecodeBuilder::default()
+        .push_address(beneficiary)
+        .append(SELFDESTRUCT)
+        .build();
+
+    // Parent: call child without disabling volatile access, log call status
+    let parent_code = append_call(BytecodeBuilder::default(), CHILD, 50_000_000);
+    let parent_code = append_log_call_status(parent_code).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(PARENT, parent_code)
+        .account_code(CHILD, child_code);
+
+    let result = transact(&mut db, default_tx(PARENT)).unwrap();
+    assert!(
+        result.result.is_success(),
+        "SELFDESTRUCT to beneficiary should succeed when volatile access is not disabled"
+    );
+    assert_log_call_status(&result, 0, true);
+}
+
+/// Blocked SELFDESTRUCT to beneficiary should NOT pollute the volatile data tracker.
+#[test]
+fn test_blocked_selfdestruct_beneficiary_does_not_pollute_tracker() {
+    let beneficiary = Address::ZERO;
+
+    // Child: SELFDESTRUCT targeting the beneficiary (will be blocked)
+    let child_code = BytecodeBuilder::default()
+        .push_address(beneficiary)
+        .append(SELFDESTRUCT)
+        .build();
+
+    // Parent: disable volatile access, call child, log call status
+    let parent_code = call_disable_volatile_data_access(BytecodeBuilder::default());
+    let parent_code = append_call(parent_code, CHILD, 50_000_000);
+    let parent_code = append_log_call_status(parent_code).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(PARENT, parent_code)
+        .account_code(CHILD, child_code);
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX4);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let volatile_data_tracker = context.volatile_data_tracker.clone();
+
+    let mut evm = MegaEvm::new(context);
+    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    assert!(result.result.is_success(), "Parent tx should succeed");
+    assert_log_call_status(&result, 0, false);
+
+    // The blocked SELFDESTRUCT to beneficiary should NOT have set the bitmap.
+    let tracker = volatile_data_tracker.borrow();
+    assert!(
+        !tracker.accessed(),
+        "volatile_data_accessed should be empty after blocked SELFDESTRUCT to beneficiary"
+    );
+    assert!(
+        tracker.get_compute_gas_limit().is_none(),
+        "compute_gas_limit should not be set after blocked SELFDESTRUCT to beneficiary"
+    );
+}

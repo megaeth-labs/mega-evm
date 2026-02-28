@@ -112,7 +112,7 @@ This contract provides access restriction functions that are intercepted and enf
 
 The following are considered **volatile data**:
 - Block environment fields: TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH
-- Beneficiary account access: BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH, CALL, STATICCALL, DELEGATECALL, CALLCODE when targeting the block beneficiary
+- Beneficiary account access: BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH, CALL, STATICCALL, DELEGATECALL, CALLCODE, SELFDESTRUCT when targeting the block beneficiary
 - Oracle contract access: SLOAD on the oracle contract
 
 #### `disableVolatileDataAccess()`
@@ -167,7 +167,7 @@ enum VolatileDataAccessType {
     BlockHash,      // 7  — BLOCKHASH opcode
     BlobBaseFee,    // 8  — BLOBBASEFEE opcode
     BlobHash,       // 9  — BLOBHASH opcode
-    Beneficiary,    // 10 — BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH/CALL/STATICCALL/DELEGATECALL/CALLCODE on beneficiary
+    Beneficiary,    // 10 — BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH/CALL/STATICCALL/DELEGATECALL/CALLCODE/SELFDESTRUCT on beneficiary
     Oracle          // 11 — SLOAD on oracle contract
 }
 ```
