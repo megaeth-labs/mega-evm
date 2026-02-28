@@ -34,10 +34,10 @@ use revm::{
 };
 
 use crate::{
-    constants, is_mega_system_transaction, mark_frame_result_as_exceeding_limit,
-    sandbox::execute_keyless_deploy_call, sent_from_mega_system_address, ExternalEnvTypes, HostExt,
-    IKeylessDeploy, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
-    MegaTransactionError, OracleEnv, TxRuntimeLimit, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
+    constants, is_mega_system_transaction, sandbox::execute_keyless_deploy_call,
+    sent_from_mega_system_address, ExternalEnvTypes, HostExt, IKeylessDeploy, IOracle, MegaContext,
+    MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError, OracleEnv,
+    TxRuntimeLimit, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
     MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
 };
 
@@ -180,7 +180,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         }
 
         // Update additional limits. MiniRex is guaranteed to be enabled here.
-        ctx.additional_limit.borrow_mut().after_frame_run(frame, action);
+        ctx.additional_limit.borrow_mut().after_frame_run_instructions(frame, action);
 
         Ok(())
     }
@@ -199,21 +199,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
             return Ok(());
         }
 
-        // Record compute gas cost induced in frame action processing (e.g., code deposit cost)
-        if let (ItemOrResult::Result(frame_result), Some(gas_remaining_before)) =
-            (frame_output, gas_remaining_before_process_action)
-        {
-            let compute_gas_cost =
-                gas_remaining_before.saturating_sub(frame_result.gas().remaining());
-            let mut additional_limit = ctx.additional_limit.borrow_mut();
-            if !additional_limit.record_compute_gas(compute_gas_cost) {
-                // if the limit is exceeded, mark the frame result as exceeding the limit
-                mark_frame_result_as_exceeding_limit(
-                    frame_result,
-                    additional_limit.exceeding_instruction_result(),
-                    Default::default(),
-                );
-            }
+        if let ItemOrResult::Result(frame_result) = frame_output {
+            ctx.additional_limit
+                .borrow_mut()
+                .after_frame_run(frame_result, gas_remaining_before_process_action);
         }
 
         Ok(())

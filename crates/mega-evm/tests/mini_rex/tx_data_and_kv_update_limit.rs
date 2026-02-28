@@ -26,7 +26,8 @@ use revm::{
     },
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
-    DatabaseCommit,
+    interpreter::{CallInputs, CallOutcome},
+    DatabaseCommit, Inspector,
 };
 
 /// Executes a transaction on the `MegaETH` EVM with configurable data limits.
@@ -1328,5 +1329,118 @@ fn test_check_limit_priority_data_size_before_kv_update() {
         is_data_limit_exceeded(&result),
         "Expected DataLimitExceeded (checked first), got {:?}",
         result.result
+    );
+}
+
+/// An inspector that mimics `TracerEip3155`'s `GasInspector` behavior:
+/// calls `Gas::spend_all()` on error results in `call_end`.
+///
+/// This reproduces the scenario where an inspector zeros `gas.remaining()`
+/// which could interfere with `rescue_gas` if called in the wrong order.
+struct GasSpendingInspector;
+
+impl<CTX: ContextTr> Inspector<CTX> for GasSpendingInspector {
+    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if !outcome.result.result.is_ok() {
+            outcome.result.gas.spend_all();
+        }
+    }
+}
+
+/// Test that `rescue_gas` correctly preserves remaining gas when an inspector calls
+/// `spend_all()` in `call_end`, for the `inspect_frame_init` early-return path.
+///
+/// The KV limit is exceeded in `before_frame_init` (value transfer creates 2 KV updates
+/// but limit is 1), so `frame_init` returns an error result immediately. `try_rescue_gas`
+/// captures the gas before `frame_end` → `call_end` fires on the inspector.
+/// Without the fix, the inspector's `spend_all()` would zero the gas before rescue.
+#[test]
+fn test_rescue_gas_with_gas_spending_inspector_frame_init() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(100));
+
+    let tx = TxEnvBuilder::new()
+        .caller(CALLER)
+        .call(CALLEE)
+        .value(U256::from(1))
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(u64::MAX)
+            .with_tx_kv_updates_limit(2 - 1),
+    );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+
+    let mut inspector = GasSpendingInspector;
+    let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+
+    assert!(is_kv_update_limit_exceeded(&result), "Expected KV update limit exceeded");
+
+    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    assert!(
+        gas_remaining > 997_000_000,
+        "Expected >997m gas remaining (rescue_gas should capture gas before inspector spend_all), got {}",
+        gas_remaining
+    );
+}
+
+/// Test that `rescue_gas` correctly preserves remaining gas when an inspector calls
+/// `spend_all()` in `call_end`, for the `inspect_frame_run` path.
+///
+/// The data limit is exceeded during SSTORE execution inside a nested call.
+/// `after_frame_run` rescues gas, then `frame_end` → `call_end` fires on the inspector.
+/// Without the fix, the inspector's `spend_all()` would zero the gas before rescue.
+#[test]
+fn test_rescue_gas_with_gas_spending_inspector_frame_run() {
+    let mut db = MemoryDatabase::default();
+
+    // Parent contract that calls a library
+    let contract_code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(LIBRARY)
+        .append(GAS)
+        .append(CALL)
+        .build();
+    db.set_account_code(CALLEE, contract_code);
+
+    // Library that does SSTORE, which will exceed the data limit
+    let library_code =
+        BytecodeBuilder::default().append_many([PUSH1, 0x1u8, PUSH0, SSTORE, STOP]).build();
+    db.set_account_code(LIBRARY, library_code);
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(1_000_000_000).build_fill();
+
+    // Set data limit tight enough that SSTORE exceeds it
+    let tight_limit = BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE + STORAGE_SLOT_WRITE_SIZE - 1;
+    let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(tight_limit)
+            .with_tx_kv_updates_limit(u64::MAX),
+    );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+
+    let mut inspector = GasSpendingInspector;
+    let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+
+    assert!(is_data_limit_exceeded(&result), "Expected data limit exceeded");
+
+    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    assert!(
+        gas_remaining > 990_000_000,
+        "Expected >990m gas remaining (rescue_gas should capture gas before inspector spend_all), got {}",
+        gas_remaining
     );
 }

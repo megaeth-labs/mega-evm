@@ -221,24 +221,6 @@ impl AdditionalLimit {
         self.has_exceeded_limit
     }
 
-    /// Determines if a frame result indicates that limits have been exceeded.
-    ///
-    /// This method checks both the instruction result and the current limit status
-    /// to determine if the frame failed due to limit enforcement.
-    ///
-    /// # Arguments
-    ///
-    /// * `result` - The frame result to check
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the result indicates limit exceeded, `false` otherwise.
-    #[inline]
-    pub fn is_exceeding_limit_result(&mut self, instruction_result: InstructionResult) -> bool {
-        instruction_result == Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT &&
-            self.check_limit().exceeded_limit()
-    }
-
     /// Checks if the halt reason indicates that the limit has been exceeded.
     ///
     /// # Arguments
@@ -270,6 +252,19 @@ impl AdditionalLimit {
     /// afterwards.
     pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
         self.rescued_gas += gas.remaining();
+    }
+
+    /// Rescue remaining gas from a frame result if a TX-level additional limit has been
+    /// exceeded.
+    ///
+    /// This must be called before any inspector callback (`frame_end`) that might modify the
+    /// gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
+    /// The rescued gas is later refunded to the transaction sender in `last_frame_result`.
+    pub(crate) fn try_rescue_gas(&mut self, gas: &Gas) {
+        let limit_check = self.check_limit();
+        if limit_check.exceeded_limit() && !limit_check.is_frame_local() {
+            self.rescue_gas(gas);
+        }
     }
 
     /// Hook called when a new transaction starts.
@@ -305,12 +300,14 @@ impl AdditionalLimit {
                 FrameInput::Empty => unreachable!(),
             };
             let output = self.has_exceeded_limit.revert_data();
-            return Ok(Some(create_exceeding_limit_frame_result(
+            let result = create_exceeding_limit_frame_result(
                 self.exceeding_instruction_result(),
                 Gas::new(gas_limit),
                 return_memory_offset,
                 output,
-            )));
+            );
+            self.try_rescue_gas(result.gas());
+            return Ok(Some(result));
         }
 
         Ok(None)
@@ -327,6 +324,10 @@ impl AdditionalLimit {
             self.data_size.after_frame_init_on_frame(frame);
             self.kv_update.after_frame_init_on_frame(frame);
             self.compute_gas.after_frame_init_on_frame(frame);
+        } else if let ItemOrResult::Result(result) = init_result {
+            // Rescue gas if a TX-level limit was exceeded. This covers the
+            // before_frame_init early-return path and any other Result from frame_init.
+            self.try_rescue_gas(result.gas());
         }
     }
 
@@ -352,9 +353,35 @@ impl AdditionalLimit {
         None
     }
 
+    /// Hook called after frame action processing in `frame_run`.
+    ///
+    /// Records compute gas cost induced in frame action processing (e.g., code deposit cost),
+    /// marks the frame result as exceeding limit if needed, and rescues gas if a TX-level limit
+    /// was exceeded (before any inspector callback that might modify gas).
+    pub(crate) fn after_frame_run(
+        &mut self,
+        result: &mut FrameResult,
+        gas_remaining_before_process_action: Option<u64>,
+    ) {
+        if let Some(gas_remaining_before) = gas_remaining_before_process_action {
+            let compute_gas_cost = gas_remaining_before.saturating_sub(result.gas().remaining());
+            if !self.record_compute_gas(compute_gas_cost) {
+                mark_frame_result_as_exceeding_limit(
+                    result,
+                    self.exceeding_instruction_result(),
+                    Default::default(),
+                );
+            }
+        }
+        // Rescue gas if a TX-level additional limit has been exceeded.
+        // This must happen before any inspector callback (`frame_end`) that might modify
+        // the gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
+        self.try_rescue_gas(result.gas());
+    }
+
     /// Hook called when a frame finishes running in `frame_run`. If the limit is exceeded, mark
     /// in place the interpreter result as exceeding the limit.
-    pub(crate) fn after_frame_run<'a>(
+    pub(crate) fn after_frame_run_instructions<'a>(
         &mut self,
         frame: &'a EthFrame<EthInterpreter>,
         action: &'a mut InterpreterAction,
@@ -431,9 +458,9 @@ impl AdditionalLimit {
                     }
                 }
             } else {
-                // We rescue the remaining gas of the frame after the limit exceeds.
-                // This gas will be refunded to the transaction sender in `last_frame_result`.
-                self.rescue_gas(result.gas());
+                // Gas has already been rescued at the point where the limit was
+                // exceeded (before_frame_init, after_frame_init, or after_frame_run).
+                // Just mark the result as exceeding the limit.
                 mark_frame_result_as_exceeding_limit(
                     result,
                     Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
@@ -479,8 +506,7 @@ impl AdditionalLimit {
 ///
 /// # Returns
 ///
-/// A `FrameResult` indicating that the limit is exceeded with
-/// [`AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT`] instruction result.
+/// A `FrameResult` indicating that the limit is exceeded with the given instruction result.
 fn create_exceeding_limit_frame_result(
     instruction_result: InstructionResult,
     gas: Gas,
