@@ -701,7 +701,7 @@ where
                 }
             })?;
 
-        // After frame_run Hook (also rescues gas if TX-level limit exceeded)
+        // After frame_run Hook
         Self::after_frame_run(context, &mut frame_output, gas_remaining_before)?;
 
         Ok(frame_output)
@@ -787,8 +787,6 @@ where
         }
 
         // Normal path - delegate to frame_init (which pushes a real frame)
-        // Note: frame_init already calls try_rescue_gas for the before_frame_init early-return
-        // path (limit exceeded), so we don't need to rescue again here.
         let frame_input = frame_init.frame_input.clone();
         if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
             let (ctx, inspector) = self.ctx_inspector();
@@ -843,8 +841,7 @@ where
                 }
             })?;
 
-        // After frame_run Hook (also rescues gas if TX-level limit exceeded, before
-        // the inspector callback which may modify gas via spend_all())
+        // After frame_run Hook
         Self::after_frame_run(ctx, &mut frame_output, gas_remaining_before)?;
 
         // Call frame_end for inspector callback
