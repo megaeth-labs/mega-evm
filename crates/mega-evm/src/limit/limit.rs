@@ -221,24 +221,6 @@ impl AdditionalLimit {
         self.has_exceeded_limit
     }
 
-    /// Determines if a frame result indicates that limits have been exceeded.
-    ///
-    /// This method checks both the instruction result and the current limit status
-    /// to determine if the frame failed due to limit enforcement.
-    ///
-    /// # Arguments
-    ///
-    /// * `result` - The frame result to check
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the result indicates limit exceeded, `false` otherwise.
-    #[inline]
-    pub fn is_exceeding_limit_result(&mut self, instruction_result: InstructionResult) -> bool {
-        instruction_result == Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT &&
-            self.check_limit().exceeded_limit()
-    }
-
     /// Checks if the halt reason indicates that the limit has been exceeded.
     ///
     /// # Arguments
@@ -382,17 +364,18 @@ impl AdditionalLimit {
         gas_remaining_before_process_action: Option<u64>,
     ) {
         if let Some(gas_remaining_before) = gas_remaining_before_process_action {
-            let compute_gas_cost =
-                gas_remaining_before.saturating_sub(result.gas().remaining());
+            let compute_gas_cost = gas_remaining_before.saturating_sub(result.gas().remaining());
             if !self.record_compute_gas(compute_gas_cost) {
                 mark_frame_result_as_exceeding_limit(
                     result,
-                    Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+                    self.exceeding_instruction_result(),
                     Default::default(),
                 );
             }
         }
-
+        // Rescue gas if a TX-level additional limit has been exceeded.
+        // This must happen before any inspector callback (`frame_end`) that might modify
+        // the gas via `spend_all()`, so the correct `gas.remaining()` value is captured.
         self.try_rescue_gas(result.gas());
     }
 
@@ -522,8 +505,7 @@ impl AdditionalLimit {
 ///
 /// # Returns
 ///
-/// A `FrameResult` indicating that the limit is exceeded with
-/// [`AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT`] instruction result.
+/// A `FrameResult` indicating that the limit is exceeded with the given instruction result.
 fn create_exceeding_limit_frame_result(
     instruction_result: InstructionResult,
     gas: Gas,
