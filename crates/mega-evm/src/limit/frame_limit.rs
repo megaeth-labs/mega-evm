@@ -195,7 +195,8 @@ pub(crate) trait TxRuntimeLimit {
         &mut self,
         _frame_init: &FrameInit,
         _journal: &mut JOURNAL,
-    ) {
+    ) -> Result<(), JOURNAL::DBError> {
+        Ok(())
     }
     #[inline]
     fn after_frame_init_on_frame(&mut self, _frame: &EthFrame<EthInterpreter>) {}

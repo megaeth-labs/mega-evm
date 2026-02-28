@@ -2,18 +2,22 @@ use core::cell::RefCell;
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::rc::Rc;
+use std::{format, rc::Rc};
 
 use crate::{
-    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv, SaltEnv,
-    VolatileDataAccess, VolatileDataAccessTracker, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv, VolatileDataAccess,
+    VolatileDataAccessTracker, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use delegate::delegate;
 use revm::{
-    context_interface::journaled_state::AccountLoad,
+    context::ContextTr,
+    context_interface::{context::ContextError, journaled_state::AccountLoad},
     interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
+    primitives::{hash_map::Entry, StorageKey, KECCAK_EMPTY},
+    state::{Account, Bytecode, EvmStorageSlot},
+    Journal,
 };
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> {
@@ -144,10 +148,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
 }
 
 /// Extension trait for the `Host` trait that provides additional functionality for `MegaETH`.
+///
+/// Gas cost methods (`sstore_set_storage_gas`, `new_account_storage_gas`,
+/// `create_contract_storage_gas`) follow the same error-handling pattern as revm's `Host` trait:
+/// on error, stash the error in `self.error()` and return `None`.
+/// This ensures that `FatalExternalError` always has a stashed error for revm to drain.
 pub trait HostExt: Host {
-    /// The error type for the oracle.
-    type Error;
-
     /// Gets the `MegaSpecId` of the current execution context.
     fn spec_id(&self) -> MegaSpecId;
 
@@ -156,22 +162,29 @@ pub trait HostExt: Host {
 
     /// Gets the gas cost for setting a storage slot to a non-zero value. Only used when the
     /// `MINI_REX` spec is enabled.
-    fn sstore_set_storage_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error>;
+    ///
+    /// Returns `None` if the underlying SALT environment returns an error (the error is stashed
+    /// in `self.error()`).
+    fn sstore_set_storage_gas(&mut self, address: Address, key: U256) -> Option<u64>;
 
     /// Gets the gas cost for creating a new account. Only used when the `MINI_REX` spec is enabled.
-    fn new_account_storage_gas(&self, address: Address) -> Result<u64, Self::Error>;
+    ///
+    /// Returns `None` if the underlying SALT environment returns an error (the error is stashed
+    /// in `self.error()`).
+    fn new_account_storage_gas(&mut self, address: Address) -> Option<u64>;
 
     /// Gets the gas cost for creating a new contract. Only used when the `REX` spec is
     /// enabled.
-    fn create_contract_storage_gas(&self, address: Address) -> Result<u64, Self::Error>;
+    ///
+    /// Returns `None` if the underlying SALT environment returns an error (the error is stashed
+    /// in `self.error()`).
+    fn create_contract_storage_gas(&mut self, address: Address) -> Option<u64>;
 
     /// Gets the volatile data tracker. Only used when the `MINI_REX` spec is enabled.
     fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>>;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
-    type Error = <ExtEnvs::SaltEnv as SaltEnv>::Error;
-
     #[inline]
     fn spec_id(&self) -> MegaSpecId {
         self.spec
@@ -184,25 +197,167 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     }
 
     #[inline]
-    fn sstore_set_storage_gas(&self, address: Address, key: U256) -> Result<u64, Self::Error> {
+    fn sstore_set_storage_gas(&mut self, address: Address, key: U256) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(address, key)
+        let result = self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(address, key);
+        result
+            .map_err(|e| {
+                *self.error() = Err(ContextError::Custom(format!("{e}")));
+            })
+            .ok()
     }
 
     #[inline]
-    fn new_account_storage_gas(&self, address: Address) -> Result<u64, Self::Error> {
+    fn new_account_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(address)
+        let result = self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(address);
+        result
+            .map_err(|e| {
+                *self.error() = Err(ContextError::Custom(format!("{e}")));
+            })
+            .ok()
     }
 
     #[inline]
-    fn create_contract_storage_gas(&self, address: Address) -> Result<u64, Self::Error> {
+    fn create_contract_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
-        self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(address)
+        let result = self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(address);
+        result
+            .map_err(|e| {
+                *self.error() = Err(ContextError::Custom(format!("{e}")));
+            })
+            .ok()
     }
 
     #[inline]
     fn volatile_data_tracker(&self) -> &Rc<RefCell<VolatileDataAccessTracker>> {
         &self.volatile_data_tracker
+    }
+}
+
+/// Trait to inspect the journal's internal state without marking any accounts or storage slots as
+/// warm.
+///
+/// To improve performance, when journal does not have the account or storage slot, it will be
+/// loaded from the database and cached in the journal.
+/// However, since we explicitly mark the account or storage slot as cold, this pre-loading before
+/// executing the original instruction will make no difference on gas cost.
+///
+/// Both `Journal<DB>` and `MegaContext` implement this trait:
+/// - `Journal<DB>`: `DBError = DB::Error` — returns DB errors for propagation.
+/// - `MegaContext`: `DBError = ()` — stashes errors in `self.error()` and returns `Err(())`.
+pub trait JournalInspectTr {
+    /// The error type returned on DB failures.
+    type DBError: core::fmt::Debug;
+
+    /// Inspect the account at the given address without marking it as warm.
+    /// If the account is EIP-7702 type, it should inspect the delegated account.
+    fn inspect_account_delegated(
+        &mut self,
+        address: Address,
+    ) -> Result<&mut Account, Self::DBError>;
+
+    /// Inspect the storage at the given address and key without marking it as warm.
+    fn inspect_storage(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+    ) -> Result<&EvmStorageSlot, Self::DBError>;
+}
+
+impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
+    type DBError = <DB as revm::Database>::Error;
+
+    fn inspect_account_delegated(
+        &mut self,
+        address: Address,
+    ) -> Result<&mut Account, Self::DBError> {
+        let transaction_id = self.transaction_id;
+        let account = match self.inner.state.entry(address) {
+            Entry::Occupied(entry) => {
+                let account = entry.into_mut();
+                if account.info.code_hash != KECCAK_EMPTY && account.info.code.is_none() {
+                    // Load code if not loaded before
+                    account.info.code = Some(self.database.code_by_hash(account.info.code_hash)?);
+                }
+                account
+            }
+            Entry::Vacant(entry) => {
+                let mut account = self
+                    .database
+                    .basic(address)?
+                    .map(|info| info.into())
+                    .unwrap_or_else(|| Account::new_not_existing(transaction_id));
+                // delibrately mark the account as cold since we are only inpecting it, not warming
+                // it.
+                account.mark_cold();
+                entry.insert(account)
+            }
+        };
+
+        // If the account is a delegated account, inspect the delegated account.
+        if let Some(Bytecode::Eip7702(code)) = &account.info.code {
+            let address = code.address();
+            return self.inspect_account_delegated(address);
+        }
+
+        // Load account again to bypass the borrow checker.
+        let account = self.inner.state.get_mut(&address).unwrap();
+        Ok(account)
+    }
+
+    fn inspect_storage(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+    ) -> Result<&EvmStorageSlot, Self::DBError> {
+        let transaction_id = self.transaction_id;
+        let account = self.inspect_account_delegated(address)?;
+        if account.storage.contains_key(&key) {
+            // Slot already exists, return reference to it
+            // Need to reload account to satisfy borrow checker
+            let account = self.inspect_account_delegated(address)?;
+            return Ok(account.storage.get(&key).unwrap());
+        }
+        // Slot doesn't exist, load from DB and insert
+        let slot = self.database.storage(address, key)?;
+        let mut slot = EvmStorageSlot::new(slot, transaction_id);
+        // delibrately mark the slot as cold since we are only inpecting it, not warming it
+        slot.mark_cold();
+        // Load account again to bypass the borrow checker and insert the slot
+        let account = self.inspect_account_delegated(address)?;
+        account.storage.insert(key, slot);
+        // Return reference to the newly inserted slot
+        Ok(account.storage.get(&key).expect("slot should exist"))
+    }
+}
+
+/// `MegaContext` delegates to `Journal<DB>` and stashes DB errors via `self.error()`.
+///
+/// On DB error, the real error is stashed as `ContextError::Custom` and `Err(())` is returned.
+/// Callers should halt with `FatalExternalError` when receiving `Err`.
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> JournalInspectTr for MegaContext<DB, ExtEnvs> {
+    type DBError = ();
+
+    fn inspect_account_delegated(&mut self, address: Address) -> Result<&mut Account, ()> {
+        // Split borrow: `journaled_state` and `error` are sibling fields on the inner context,
+        // so we can borrow them independently to avoid the double-call workaround.
+        let journal = &mut self.inner.journaled_state;
+        let error = &mut self.inner.error;
+        journal.inspect_account_delegated(address).map_err(|e| {
+            *error = Err(ContextError::Custom(format!("{e}")));
+        })
+    }
+
+    fn inspect_storage(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+    ) -> Result<&EvmStorageSlot, ()> {
+        let journal = &mut self.inner.journaled_state;
+        let error = &mut self.inner.error;
+        journal.inspect_storage(address, key).map_err(|e| {
+            *error = Err(ContextError::Custom(format!("{e}")));
+        })
     }
 }

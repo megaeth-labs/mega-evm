@@ -122,8 +122,9 @@ impl TxRuntimeLimit for ComputeGasTracker {
         &mut self,
         _frame_init: &FrameInit,
         _journal: &mut JOURNAL,
-    ) {
+    ) -> Result<(), JOURNAL::DBError> {
         self.push_frame();
+        Ok(())
     }
 
     /// Pop frame when returning. Since all gas is recorded as `persistent_usage`,

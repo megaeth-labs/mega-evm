@@ -6,7 +6,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::{cell::RefCell, convert::Infallible};
+use core::{cell::RefCell, convert::Infallible, fmt::Display};
 use std::{rc::Rc, vec::Vec};
 
 use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
@@ -68,7 +68,7 @@ impl<'a> From<&'a TestExternalEnvs> for ExternalEnvs<&'a TestExternalEnvs> {
     }
 }
 
-impl<Error: Unpin + Clone + 'static> TestExternalEnvs<Error> {
+impl<Error: Unpin + Clone + Display + 'static> TestExternalEnvs<Error> {
     /// Creates a new test environment with empty bucket capacity and oracle storage.
     pub fn new() -> Self {
         Self {
@@ -139,7 +139,7 @@ impl<Error: Unpin + Clone + 'static> TestExternalEnvs<Error> {
     }
 }
 
-impl<Error: Unpin + Clone> ExternalEnvFactory for TestExternalEnvs<Error> {
+impl<Error: Unpin + Clone + Display> ExternalEnvFactory for TestExternalEnvs<Error> {
     type EnvTypes = Self;
 
     fn external_envs(&self, _block: BlockNumber) -> ExternalEnvs<Self::EnvTypes> {
@@ -147,7 +147,7 @@ impl<Error: Unpin + Clone> ExternalEnvFactory for TestExternalEnvs<Error> {
     }
 }
 
-impl<Error: Unpin> ExternalEnvTypes for TestExternalEnvs<Error> {
+impl<Error: Unpin + Display> ExternalEnvTypes for TestExternalEnvs<Error> {
     type SaltEnv = Self;
 
     type OracleEnv = Self;
@@ -164,7 +164,7 @@ const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 ///
 /// Bucket IDs are calculated using the SALT hasher from the `salt` crate, which provides
 /// deterministic mapping of accounts and storage slots to buckets.
-impl<Error: Unpin> SaltEnv for TestExternalEnvs<Error> {
+impl<Error: Unpin + Display> SaltEnv for TestExternalEnvs<Error> {
     type Error = Error;
 
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
@@ -189,7 +189,7 @@ impl<Error: Unpin> SaltEnv for TestExternalEnvs<Error> {
     }
 }
 
-impl<Error: Unpin> OracleEnv for TestExternalEnvs<Error> {
+impl<Error: Unpin + Display> OracleEnv for TestExternalEnvs<Error> {
     fn get_oracle_storage(&self, slot: U256) -> Option<U256> {
         self.oracle_storage.borrow().get(&slot).copied()
     }

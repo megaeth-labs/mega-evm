@@ -176,7 +176,7 @@ impl TxRuntimeLimit for DataSizeTracker {
         &mut self,
         frame_init: &FrameInit,
         _journal: &mut JOURNAL,
-    ) {
+    ) -> Result<(), JOURNAL::DBError> {
         match &frame_init.frame_input {
             FrameInput::Call(call_inputs) => {
                 let has_transfer = call_inputs.transfers_value();
@@ -215,6 +215,7 @@ impl TxRuntimeLimit for DataSizeTracker {
             }
             FrameInput::Empty => unreachable!(),
         }
+        Ok(())
     }
 
     /// Hook called when a new execution frame is successfully initialized.

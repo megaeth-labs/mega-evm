@@ -3,9 +3,9 @@ use core::convert::Infallible;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use delegate::delegate;
 use revm::{
-    database::{AccountState, CacheDB, EmptyDB},
-    primitives::{StorageKey, StorageValue},
-    state::{AccountInfo, Bytecode},
+    database::{AccountState, CacheDB, DBErrorMarker, EmptyDB},
+    primitives::{HashMap, StorageKey, StorageValue},
+    state::{Account, AccountInfo, Bytecode},
 };
 
 /// A memory database for testing purposes.
@@ -106,5 +106,71 @@ impl revm::DatabaseCommit for MemoryDatabase {
         to self.db {
             fn commit(&mut self, changes: revm::primitives::HashMap<Address, revm::state::Account>);
         }
+    }
+}
+
+/// Error type for [`ErrorInjectingDatabase`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
+#[display("{_0}")]
+pub struct InjectedDbError(#[error(not(source))] pub String);
+
+impl DBErrorMarker for InjectedDbError {}
+
+/// A database wrapper that injects errors on configurable account or storage lookups.
+///
+/// Used to test DB error handling paths (e.g., `FatalExternalError` when `inspect_*` fails).
+/// Wraps a [`MemoryDatabase`] and can be configured to fail on specific `basic()` or `storage()`
+/// calls.
+#[derive(Debug, Clone, derive_more::Deref, derive_more::DerefMut)]
+pub struct ErrorInjectingDatabase {
+    #[deref]
+    #[deref_mut]
+    inner: MemoryDatabase,
+    /// When set, `basic()` calls for this address return an error.
+    pub fail_on_account: Option<Address>,
+    /// When set, `storage()` calls for this (address, key) return an error.
+    pub fail_on_storage: Option<(Address, StorageKey)>,
+}
+
+impl ErrorInjectingDatabase {
+    /// Creates a new `ErrorInjectingDatabase` wrapping the given [`MemoryDatabase`].
+    pub fn new(inner: MemoryDatabase) -> Self {
+        Self { inner, fail_on_account: None, fail_on_storage: None }
+    }
+}
+
+impl revm::Database for ErrorInjectingDatabase {
+    type Error = InjectedDbError;
+
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        if self.fail_on_account == Some(address) {
+            return Err(InjectedDbError(format!("injected basic() error for {address}")));
+        }
+        self.inner.basic(address).map_err(|e| match e {})
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        self.inner.code_by_hash(code_hash).map_err(|e| match e {})
+    }
+
+    fn storage(
+        &mut self,
+        address: Address,
+        index: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
+        if self.fail_on_storage == Some((address, index)) {
+            return Err(InjectedDbError(format!("injected storage() error for {address}:{index}")));
+        }
+        self.inner.storage(address, index).map_err(|e| match e {})
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        self.inner.block_hash(number).map_err(|e| match e {})
+    }
+}
+
+impl revm::DatabaseCommit for ErrorInjectingDatabase {
+    fn commit(&mut self, changes: HashMap<Address, Account>) {
+        self.inner.commit(changes);
     }
 }
