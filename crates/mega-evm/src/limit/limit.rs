@@ -458,8 +458,9 @@ impl AdditionalLimit {
                     }
                 }
             } else {
-                // Gas has already been rescued in frame_run/inspect_frame_run before
-                // the inspector callback. Just mark the result as exceeding the limit.
+                // Gas has already been rescued at the point where the limit was
+                // exceeded (before_frame_init, after_frame_init, or after_frame_run).
+                // Just mark the result as exceeding the limit.
                 mark_frame_result_as_exceeding_limit(
                     result,
                     Self::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
