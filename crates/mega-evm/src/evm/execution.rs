@@ -4,7 +4,6 @@ use std::string::ToString;
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use alloy_primitives::{Bytes, TxKind};
-use alloy_sol_types::SolCall;
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -34,12 +33,10 @@ use revm::{
 };
 
 use crate::{
-    constants, is_mega_system_transaction, sandbox::execute_keyless_deploy_call,
-    sent_from_mega_system_address, ExternalEnvTypes, HostExt, IKeylessDeploy, IMegaAccessControl,
-    IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
-    MegaTransactionError, OracleEnv, TxRuntimeLimit, ACCESS_CONTROL_ADDRESS,
-    DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
+    constants, dispatch_system_contract_interceptors, is_mega_system_transaction,
+    sent_from_mega_system_address, ExternalEnvTypes, HostExt, MegaContext, MegaEvm, MegaHaltReason,
+    MegaInstructions, MegaSpecId, MegaTransactionError, TxRuntimeLimit, MEGA_SYSTEM_ADDRESS,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -598,146 +595,23 @@ where
             }
         }
 
-        // Oracle Hint Mechanism (Rex2+):
-        // Intercept sendHint(bytes32,bytes) calls to the oracle contract and forward them
-        // to the oracle service backend via OracleEnv::on_hint.
-        if self.ctx().spec.is_enabled(MegaSpecId::REX2) {
-            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                if call_inputs.target_address == ORACLE_CONTRACT_ADDRESS {
-                    let input_bytes = call_inputs.input.bytes(self.ctx());
-                    if let Ok(call) = IOracle::sendHintCall::abi_decode(&input_bytes) {
-                        self.ctx().oracle_env.borrow().on_hint(
-                            call_inputs.caller,
-                            call.topic,
-                            call.data,
-                        );
-                    }
+        // System contract interception dispatch.
+        // Each interceptor checks target address and ABI-decodes function selectors.
+        // Side-effect-only interceptors (oracle hint) return None; short-circuiting
+        // interceptors return Some(FrameResult).
+        if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+            if let Some(result) = dispatch_system_contract_interceptors(
+                self.ctx(),
+                call_inputs,
+                frame_init.depth,
+            ) {
+                // Push an empty frame to keep the limit tracker stack balanced:
+                // `frame_return_result` / `last_frame_result` will pop a frame, but
+                // `after_frame_init` (which normally pushes) was skipped.
+                if is_mini_rex_enabled {
+                    additional_limit.borrow_mut().push_empty_frame();
                 }
-            }
-        }
-
-        // Keyless Deploy Interception (Rex2+):
-        // Intercept keylessDeploy(bytes) calls to the keyless deploy contract.
-        // This executes the deployment in a sandbox and applies state changes.
-        // Only intercept TOP-LEVEL calls; internal calls from contracts are NOT intercepted.
-        if self.ctx().spec.is_enabled(MegaSpecId::REX2) {
-            // Only intercept if:
-            // 1. Sandbox is not disabled (prevents infinite recursion)
-            // 2. This is a top-level call (depth == 0)
-            if !self.ctx().is_sandbox_disabled() && frame_init.depth == 0 {
-                if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                    if call_inputs.target_address == KEYLESS_DEPLOY_ADDRESS {
-                        let input_bytes = call_inputs.input.bytes(self.ctx());
-                        if let Ok(call) =
-                            IKeylessDeploy::keylessDeployCall::abi_decode(&input_bytes)
-                        {
-                            let result = execute_keyless_deploy_call(
-                                self.ctx(),
-                                call_inputs,
-                                &call.keylessDeploymentTransaction,
-                                call.gasLimitOverride,
-                            );
-                            return Ok(FrameInitResult::Result(result));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Access Control Interception (Rex4+):
-        // Intercept calls to the MegaAccessControl system contract.
-        if self.ctx().spec.is_enabled(MegaSpecId::REX4) {
-            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                if call_inputs.target_address == ACCESS_CONTROL_ADDRESS {
-                    let input_bytes = call_inputs.input.bytes(self.ctx());
-                    // At this point (before inner.frame_init runs), journal.depth() equals
-                    // frame_init.depth, which is the caller's journal depth.
-                    let caller_journal_depth = frame_init.depth;
-
-                    // disableVolatileDataAccess(): activates the volatile data access
-                    // disable at the caller's depth. The caller and all inner calls will
-                    // revert when accessing volatile data.
-                    if IMegaAccessControl::disableVolatileDataAccessCall::abi_decode(&input_bytes)
-                        .is_ok()
-                    {
-                        self.ctx()
-                            .volatile_data_tracker
-                            .borrow_mut()
-                            .disable_access(caller_journal_depth);
-
-                        additional_limit.borrow_mut().push_empty_frame();
-                        let result = FrameResult::Call(CallOutcome::new(
-                            InterpreterResult::new(
-                                InstructionResult::Return,
-                                Bytes::new(),
-                                Gas::new(call_inputs.gas_limit),
-                            ),
-                            call_inputs.return_memory_offset.clone(),
-                        ));
-                        return Ok(FrameInitResult::Result(result));
-                    }
-
-                    // enableVolatileDataAccess(): re-enables volatile data access.
-                    // Reverts with DisabledByParent() if a parent frame disabled it.
-                    if IMegaAccessControl::enableVolatileDataAccessCall::abi_decode(&input_bytes)
-                        .is_ok()
-                    {
-                        let success = self
-                            .ctx()
-                            .volatile_data_tracker
-                            .borrow_mut()
-                            .enable_access(caller_journal_depth);
-
-                        additional_limit.borrow_mut().push_empty_frame();
-                        let result = if success {
-                            FrameResult::Call(CallOutcome::new(
-                                InterpreterResult::new(
-                                    InstructionResult::Return,
-                                    Bytes::new(),
-                                    Gas::new(call_inputs.gas_limit),
-                                ),
-                                call_inputs.return_memory_offset.clone(),
-                            ))
-                        } else {
-                            FrameResult::Call(CallOutcome::new(
-                                InterpreterResult::new(
-                                    InstructionResult::Revert,
-                                    Bytes::copy_from_slice(&DISABLED_BY_PARENT_REVERT_DATA),
-                                    Gas::new(call_inputs.gas_limit),
-                                ),
-                                call_inputs.return_memory_offset.clone(),
-                            ))
-                        };
-                        return Ok(FrameInitResult::Result(result));
-                    }
-
-                    // isVolatileDataAccessDisabled(): queries whether volatile data access
-                    // is disabled at the caller's depth.
-                    if IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_decode(
-                        &input_bytes,
-                    )
-                    .is_ok()
-                    {
-                        let disabled = self
-                            .ctx()
-                            .volatile_data_tracker
-                            .borrow()
-                            .volatile_access_disabled(caller_journal_depth);
-
-                        let output = IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&disabled);
-
-                        additional_limit.borrow_mut().push_empty_frame();
-                        let result = FrameResult::Call(CallOutcome::new(
-                            InterpreterResult::new(
-                                InstructionResult::Return,
-                                Bytes::from(output),
-                                Gas::new(call_inputs.gas_limit),
-                            ),
-                            call_inputs.return_memory_offset.clone(),
-                        ));
-                        return Ok(FrameInitResult::Result(result));
-                    }
-                }
+                return Ok(FrameInitResult::Result(result));
             }
         }
 
