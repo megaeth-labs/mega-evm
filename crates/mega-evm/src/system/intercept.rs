@@ -46,7 +46,7 @@ pub trait SystemContractInterceptor<DB: Database, ExtEnvs: ExternalEnvTypes> {
     ///
     /// # Arguments
     ///
-    /// * `ctx` - The EVM context providing access to all MegaETH state.
+    /// * `ctx` - The EVM context providing access to all `MegaETH` state.
     /// * `call_inputs` - The call inputs (target address, input data, gas limit, caller, etc.).
     /// * `depth` - The frame depth from `FrameInit::depth`, which equals the caller's journal
     ///   depth.
@@ -168,7 +168,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
     }
 }
 
-/// Interceptor for MegaAccessControl system contract calls.
+/// Interceptor for `MegaAccessControl` system contract calls.
 ///
 /// Handles three functions:
 /// - `disableVolatileDataAccess()`: activates volatile data access restriction at the caller's
