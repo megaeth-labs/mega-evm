@@ -37,6 +37,7 @@ pub mod keyless_deploy {
 /// Bytecode constants are generated at build time from the versioned artifacts
 /// in the `artifacts/` directory. Interface bindings are generated from the
 /// Solidity source.
+#[allow(missing_docs)]
 pub mod access_control {
     include!(concat!(env!("OUT_DIR"), "/access_control_artifacts.rs"));
 
