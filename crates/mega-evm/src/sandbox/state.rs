@@ -237,6 +237,19 @@ impl Database for SandboxDb<'_> {
     }
 }
 
+/// `SaltEnv` implementation for `SandboxDb`.
+///
+/// Provides default SALT bucket capacity (minimum size) for sandbox databases.
+/// This is appropriate since sandboxes are typically used for temporary execution
+/// and don't need dynamic gas pricing.
+impl crate::SaltEnv for SandboxDb<'_> {
+    type Error = SandboxDbError;
+
+    fn get_bucket_capacity(&self, _bucket_id: crate::BucketId) -> Result<u64, Self::Error> {
+        Ok(crate::MIN_BUCKET_SIZE as u64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,26 +525,5 @@ mod tests {
         // Even if database had a different value, journal takes priority
         let value = sandbox.storage(TEST_ADDR_1, U256::from(1)).unwrap();
         assert_eq!(value, U256::from(42));
-    }
-}
-
-/// SaltEnv implementation for SandboxDb.
-///
-/// Provides default SALT bucket capacity (minimum size) for sandbox databases.
-/// This is appropriate since sandboxes are typically used for temporary execution
-/// and don't need dynamic gas pricing.
-impl crate::SaltEnv for SandboxDb<'_> {
-    type Error = SandboxDbError;
-
-    fn get_bucket_capacity(&self, _bucket_id: crate::BucketId) -> Result<u64, Self::Error> {
-        Ok(crate::MIN_BUCKET_SIZE as u64)
-    }
-
-    fn bucket_id_for_account(_account: Address) -> crate::BucketId {
-        0
-    }
-
-    fn bucket_id_for_slot(_address: Address, _key: alloy_primitives::U256) -> crate::BucketId {
-        0
     }
 }

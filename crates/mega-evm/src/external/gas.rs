@@ -43,7 +43,7 @@ impl DynamicGasCost {
     /// [`SSTORE_SET`](revm::interpreter::gas::SSTORE_SET) gas cost in the original EVM.
     pub fn sstore_set_gas<DB: SaltEnv>(
         &mut self,
-        db: &mut DB,
+        db: &DB,
         address: Address,
         key: U256,
     ) -> Result<u64, DB::Error> {
@@ -64,7 +64,7 @@ impl DynamicGasCost {
     /// [`NEWACCOUNT`](revm::interpreter::gas::NEWACCOUNT) gas cost in the original EVM.
     pub fn new_account_gas<DB: SaltEnv>(
         &mut self,
-        db: &mut DB,
+        db: &DB,
         address: Address,
     ) -> Result<u64, DB::Error> {
         // increase the gas cost according to the bucket capacity
@@ -84,7 +84,7 @@ impl DynamicGasCost {
     /// [`CREATE`](revm::interpreter::gas::CREATE) gas cost in the original EVM.
     pub fn create_contract_gas<DB: SaltEnv>(
         &mut self,
-        db: &mut DB,
+        db: &DB,
         address: Address,
     ) -> Result<u64, DB::Error> {
         // increase the gas cost according to the bucket capacity
@@ -103,7 +103,7 @@ impl DynamicGasCost {
     /// Loads the bucket cost multiplier for a given bucket Id.
     fn load_bucket_cost_multiplier<DB: SaltEnv>(
         &mut self,
-        db: &mut DB,
+        db: &DB,
         bucket_id: BucketId,
     ) -> Result<u64, DB::Error> {
         match self.bucket_cost_mulitipers.entry(bucket_id) {

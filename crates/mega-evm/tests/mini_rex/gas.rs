@@ -930,16 +930,15 @@ fn test_floor_gas_minimal_calldata() {
 #[test]
 fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
     use mega_evm::SaltEnv;
-    use std::convert::Infallible;
 
     let mut db = MemoryDatabase::default();
     db.set_account_balance(CALLER, U256::from(10_000_000));
 
     let new_account = address!("9000000000000000000000000000000000000009");
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(new_account);
+    let bucket_id = MemoryDatabase::bucket_id_for_account(new_account);
     let multiplier = 10u64;
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+    db.set_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+    let external_envs = TestExternalEnvs::new();
 
     // MiniRex account creation storage gas: 2,000,000 × 10 = 20,000,000
     // Intrinsic: 21,000
@@ -976,7 +975,6 @@ fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
 #[test]
 fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
     use mega_evm::SaltEnv;
-    use std::convert::Infallible;
 
     let mut db = MemoryDatabase::default();
     db.set_account_balance(CALLER, U256::from(10_000_000));
@@ -984,10 +982,10 @@ fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
     // Empty init code to minimize calldata gas
     let init_code = Bytes::new();
     let created_address = CALLER.create(0);
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(created_address);
+    let bucket_id = MemoryDatabase::bucket_id_for_account(created_address);
     let multiplier = 10u64;
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+    db.set_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+    let external_envs = TestExternalEnvs::new();
 
     // MiniRex contract creation storage gas: 2,000,000 × 10 = 20,000,000
     // Base intrinsic for CREATE: 21,000 + 32,000 (CREATE base) = 53,000

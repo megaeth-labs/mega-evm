@@ -2,7 +2,7 @@
 use alloc as std;
 use std::string::ToString;
 
-use alloy_evm::{precompiles::PrecompilesMap};
+use alloy_evm::precompiles::PrecompilesMap;
 use alloy_primitives::{Bytes, TxKind};
 use delegate::delegate;
 use op_revm::{

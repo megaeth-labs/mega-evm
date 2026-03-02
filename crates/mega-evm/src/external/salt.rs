@@ -7,8 +7,13 @@ use core::{
     fmt::{Debug, Display},
 };
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use auto_impl::auto_impl;
+use salt::state::hasher;
+
+const ADDRESS_KEY_LEN: usize = Address::len_bytes();
+const STORAGE_SLOT_LEN: usize = B256::len_bytes();
+const STORAGE_KEY_LEN: usize = ADDRESS_KEY_LEN + STORAGE_SLOT_LEN;
 
 /// SALT bucket identifier. Accounts and storage slots are mapped to buckets, which have
 /// dynamic capacities that affect gas costs.
@@ -73,7 +78,9 @@ pub trait SaltEnv: Debug + Unpin {
     /// # Arguments
     ///
     /// * `account` - The account address to map
-    fn bucket_id_for_account(account: Address) -> BucketId;
+    fn bucket_id_for_account(account: Address) -> BucketId {
+        hasher::bucket_id(account.as_slice())
+    }
 
     /// Maps a storage slot to its bucket ID.
     ///
@@ -84,7 +91,11 @@ pub trait SaltEnv: Debug + Unpin {
     ///
     /// * `address` - The contract address owning the storage
     /// * `key` - The storage slot key
-    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId;
+    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
+        hasher::bucket_id(
+            address.concat_const::<STORAGE_SLOT_LEN, STORAGE_KEY_LEN>(key.into()).as_slice(),
+        )
+    }
 }
 
 /// No-op implementation that returns minimum bucket size for all buckets.
@@ -97,14 +108,6 @@ impl SaltEnv for super::EmptyExternalEnv {
 
     fn get_bucket_capacity(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
         Ok(MIN_BUCKET_SIZE as u64)
-    }
-
-    fn bucket_id_for_account(_account: Address) -> BucketId {
-        0
-    }
-
-    fn bucket_id_for_slot(_address: Address, _key: U256) -> BucketId {
-        0
     }
 }
 
@@ -161,8 +164,7 @@ impl<T> MegaDatabase for T where
 {
 }
 
-
-/// SaltEnv implementation for `&mut State<DB>` where `DB` implements `SaltEnv`.
+/// `SaltEnv` implementation for `&mut State<DB>` where `DB` implements `SaltEnv`.
 ///
 /// This allows `State` wrappers to delegate SALT operations to the underlying database.
 /// Note: We implement for both `revm::database::State` and the internal `revm_database::State`
@@ -177,17 +179,9 @@ where
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
         self.database.get_bucket_capacity(bucket_id)
     }
-
-    fn bucket_id_for_account(account: Address) -> BucketId {
-        DB::bucket_id_for_account(account)
-    }
-
-    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
-        DB::bucket_id_for_slot(address, key)
-    }
 }
 
-/// Wrapper that provides default SaltEnv implementation for any Database.
+/// Wrapper that provides default `SaltEnv` implementation for any `Database`.
 ///
 /// This wrapper allows any `Database` to be used as a `MegaDatabase` by providing
 /// a default `SaltEnv` implementation that returns minimum bucket sizes for all queries.
@@ -198,10 +192,7 @@ pub struct DefaultSaltEnv<DB>(pub DB);
 impl<DB: revm::Database> revm::Database for DefaultSaltEnv<DB> {
     type Error = DB::Error;
 
-    fn basic(
-        &mut self,
-        address: Address,
-    ) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+    fn basic(&mut self, address: Address) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
         self.0.basic(address)
     }
 
@@ -235,38 +226,22 @@ where
     fn get_bucket_capacity(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
         Ok(MIN_BUCKET_SIZE as u64)
     }
-
-    fn bucket_id_for_account(_account: Address) -> BucketId {
-        0
-    }
-
-    fn bucket_id_for_slot(_address: Address, _key: alloy_primitives::U256) -> BucketId {
-        0
-    }
 }
 
-/// SaltEnv implementation for revm::database::EmptyDB.
+/// `SaltEnv` implementation for `revm::database::EmptyDB`.
 ///
-/// This allows EmptyDB to be used directly as a MegaDatabase without wrapping.
+/// This allows `EmptyDB` to be used directly as a `MegaDatabase` without wrapping.
 impl SaltEnv for revm::database::EmptyDB {
     type Error = core::convert::Infallible;
 
     fn get_bucket_capacity(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
         Ok(MIN_BUCKET_SIZE as u64)
     }
-
-    fn bucket_id_for_account(_account: Address) -> BucketId {
-        0
-    }
-
-    fn bucket_id_for_slot(_address: Address, _key: U256) -> BucketId {
-        0
-    }
 }
 
-/// SaltEnv implementation for revm::database::CacheDB.
+/// `SaltEnv` implementation for `revm::database::CacheDB`.
 ///
-/// This delegates to the underlying database's SaltEnv implementation.
+/// This delegates to the underlying database's `SaltEnv` implementation.
 impl<DB> SaltEnv for revm::database::CacheDB<DB>
 where
     DB: revm::DatabaseRef + SaltEnv<Error = <DB as revm::DatabaseRef>::Error>,
@@ -277,17 +252,9 @@ where
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
         self.db.get_bucket_capacity(bucket_id)
     }
-
-    fn bucket_id_for_account(account: Address) -> BucketId {
-        DB::bucket_id_for_account(account)
-    }
-
-    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
-        DB::bucket_id_for_slot(address, key)
-    }
 }
 
-/// SaltEnv implementation for &mut revm::database::CacheDB.
+/// `SaltEnv` implementation for `&mut revm::database::CacheDB`.
 impl<DB> SaltEnv for &mut revm::database::CacheDB<DB>
 where
     DB: revm::DatabaseRef + SaltEnv<Error = <DB as revm::DatabaseRef>::Error>,
@@ -297,13 +264,5 @@ where
 
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
         (**self).get_bucket_capacity(bucket_id)
-    }
-
-    fn bucket_id_for_account(account: Address) -> BucketId {
-        revm::database::CacheDB::<DB>::bucket_id_for_account(account)
-    }
-
-    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
-        revm::database::CacheDB::<DB>::bucket_id_for_slot(address, key)
     }
 }

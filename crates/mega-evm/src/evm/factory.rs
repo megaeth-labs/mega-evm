@@ -1,10 +1,10 @@
-use alloy_evm::{EvmEnv};
+use alloy_evm::EvmEnv;
 use op_revm::L1BlockInfo;
 use revm::Inspector;
 
 use crate::{
-    DynPrecompilesBuilder, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory,
-    MegaContext, MegaDatabase, MegaEvm, MegaSpecId, MegaTransaction,
+    DynPrecompilesBuilder, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory, MegaContext,
+    MegaDatabase, MegaEvm, MegaSpecId, MegaTransaction,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -21,7 +21,7 @@ use crate::{
 /// # Usage
 ///
 /// ```rust
-/// use alloy_evm::{EvmEnv};
+/// use alloy_evm::EvmEnv;
 /// use mega_evm::{MegaEvmFactory, MegaSpecId};
 /// use revm::database::{CacheDB, EmptyDB};
 ///
@@ -158,7 +158,10 @@ impl<ExtEnvFactory: ExternalEnvFactory + Clone> MegaEvmFactory<ExtEnvFactory> {
     /// # Returns
     ///
     /// A new [`Evm`] instance configured with the provided database, environment, and inspector.
-    pub fn create_evm_with_inspector<DB: MegaDatabase, I: Inspector<MegaContext<DB, ExtEnvFactory::EnvTypes>>>(
+    pub fn create_evm_with_inspector<
+        DB: MegaDatabase,
+        I: Inspector<MegaContext<DB, ExtEnvFactory::EnvTypes>>,
+    >(
         &self,
         db: DB,
         evm_env: EvmEnv<MegaSpecId>,

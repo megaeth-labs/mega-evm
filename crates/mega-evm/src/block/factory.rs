@@ -1,15 +1,11 @@
-use alloy_consensus::{Transaction};
+use alloy_consensus::Transaction;
 use alloy_eips::Encodable2718;
-use alloy_evm::{
-    EvmEnv, FromRecoveredTx,
-};
+use alloy_evm::{EvmEnv, FromRecoveredTx};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{Bytes, B256};
 use revm::{database::State, inspector::NoOpInspector, Inspector};
 
-use crate::{
-    BlockLimits, MegaBlockExecutor, MegaDatabase, MegaEvm, MegaHardforks, MegaSpecId,
-};
+use crate::{BlockLimits, MegaBlockExecutor, MegaDatabase, MegaEvm, MegaHardforks, MegaSpecId};
 
 /// `MegaETH` block executor factory.
 ///

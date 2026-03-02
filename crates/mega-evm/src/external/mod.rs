@@ -135,15 +135,4 @@ impl SaltEnv for EmptyMegaDB {
     fn get_bucket_capacity(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
         Ok(MIN_BUCKET_SIZE as u64)
     }
-
-    fn bucket_id_for_account(_account: alloy_primitives::Address) -> BucketId {
-        0
-    }
-
-    fn bucket_id_for_slot(
-        _address: alloy_primitives::Address,
-        _key: alloy_primitives::U256,
-    ) -> BucketId {
-        0
-    }
 }

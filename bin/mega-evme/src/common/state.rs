@@ -6,11 +6,14 @@ use alloy_network::Network;
 use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
 use alloy_provider::{DynProvider, Provider};
 use clap::Parser;
-use mega_evm::revm::{
-    database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
-    primitives::HashMap,
-    state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot},
-    Database, DatabaseRef,
+use mega_evm::{
+    revm::{
+        database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
+        primitives::HashMap,
+        state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot},
+        Database, DatabaseRef,
+    },
+    BucketId, MIN_BUCKET_SIZE,
 };
 use tracing::{debug, info, trace};
 
@@ -480,6 +483,8 @@ where
     code_map: HashMap<alloy_primitives::B256, Bytecode>,
     /// Block hash overrides (block number -> block hash)
     block_hashes: HashMap<u64, B256>,
+    /// Bucket capacity overrides used for dynamic storage gas testing.
+    bucket_capacities: HashMap<BucketId, u64>,
 }
 
 impl<N, P> EvmeState<N, P>
@@ -497,7 +502,13 @@ where
             })
             .collect();
 
-        Self { backend: EvmeBackend::Empty(EmptyDB::default()), prestate, code_map, block_hashes }
+        Self {
+            backend: EvmeBackend::Empty(EmptyDB::default()),
+            prestate,
+            code_map,
+            block_hashes,
+            bucket_capacities: HashMap::default(),
+        }
     }
 
     /// Inserts an account override
@@ -633,7 +644,39 @@ where
             })
             .collect();
 
-        Ok(Self { backend: EvmeBackend::Forked(Box::new(db)), prestate, code_map, block_hashes })
+        Ok(Self {
+            backend: EvmeBackend::Forked(Box::new(db)),
+            prestate,
+            code_map,
+            block_hashes,
+            bucket_capacities: HashMap::default(),
+        })
+    }
+}
+
+impl<N, P> EvmeState<N, P>
+where
+    N: Network,
+    P: Provider<N>,
+{
+    /// Overrides the capacity for a specific SALT bucket.
+    pub fn set_bucket_capacity(&mut self, bucket_id: BucketId, capacity: u64) {
+        self.bucket_capacities.insert(bucket_id, capacity);
+    }
+
+    /// Applies multiple SALT bucket overrides at once.
+    pub fn apply_bucket_capacities<I>(&mut self, capacities: I)
+    where
+        I: IntoIterator<Item = (BucketId, u64)>,
+    {
+        for (bucket_id, capacity) in capacities {
+            self.set_bucket_capacity(bucket_id, capacity);
+        }
+    }
+
+    /// Clears all SALT bucket overrides.
+    pub fn clear_bucket_capacities(&mut self) {
+        self.bucket_capacities.clear();
     }
 }
 
@@ -884,17 +927,8 @@ where
 {
     type Error = EvmeError;
 
-    fn get_bucket_capacity(&self, _bucket_id: mega_evm::BucketId) -> Result<u64> {
-        // Return minimum bucket size (no dynamic gas pricing for mega-evme)
-        Ok(mega_evm::MIN_BUCKET_SIZE as u64)
-    }
-
-    fn bucket_id_for_account(_account: Address) -> mega_evm::BucketId {
-        0
-    }
-
-    fn bucket_id_for_slot(_address: Address, _key: U256) -> mega_evm::BucketId {
-        0
+    fn get_bucket_capacity(&self, bucket_id: mega_evm::BucketId) -> Result<u64> {
+        Ok(self.bucket_capacities.get(&bucket_id).copied().unwrap_or(MIN_BUCKET_SIZE as u64))
     }
 }
 
@@ -907,13 +941,5 @@ where
 
     fn get_bucket_capacity(&self, bucket_id: mega_evm::BucketId) -> Result<u64> {
         (**self).get_bucket_capacity(bucket_id)
-    }
-
-    fn bucket_id_for_account(account: Address) -> mega_evm::BucketId {
-        EvmeState::<N, P>::bucket_id_for_account(account)
-    }
-
-    fn bucket_id_for_slot(address: Address, key: U256) -> mega_evm::BucketId {
-        EvmeState::<N, P>::bucket_id_for_slot(address, key)
     }
 }

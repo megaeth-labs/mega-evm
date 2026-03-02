@@ -81,6 +81,8 @@ mega-evme run 0x60016000526001601ff3 --gas 5000000
 - `--bucket-capacity <ID:CAPACITY>`: Configure bucket capacity (can be specified multiple times)
   - Format: `bucket_id:capacity`
   - Example: `--bucket-capacity 123:1000000`
+  - The override is applied directly to the underlying database, so MiniRex/REX storage-gas
+    multipliers reflect the configured capacity during execution.
 
 ### Tracing
 

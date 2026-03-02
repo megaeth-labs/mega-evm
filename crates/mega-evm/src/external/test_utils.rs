@@ -156,13 +156,6 @@ impl<Error: Unpin + Display> ExternalEnvTypes for TestExternalEnvs<Error> {
     type OracleEnv = Self;
 }
 
-/// Length of a storage slot key in bytes (32 bytes for U256).
-const SLOT_KEY_LEN: usize = B256::len_bytes();
-/// Length of an account address in bytes (20 bytes).
-const PLAIN_ACCOUNT_KEY_LEN: usize = Address::len_bytes();
-/// Length of a combined address+slot key (52 bytes = 20 + 32).
-const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
-
 /// SALT environment implementation using real bucket ID hashing.
 ///
 /// Bucket IDs are calculated using the SALT hasher from the `salt` crate, which provides
@@ -177,18 +170,6 @@ impl<Error: Unpin + Display + Send + Sync + 'static> SaltEnv for TestExternalEnv
             .get(&bucket_id)
             .copied()
             .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64))
-    }
-
-    /// Maps accounts to buckets by hashing the address.
-    fn bucket_id_for_account(account: Address) -> BucketId {
-        salt::state::hasher::bucket_id(account.as_slice())
-    }
-
-    /// Maps storage slots to buckets by hashing the concatenation of address and slot key.
-    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
-        salt::state::hasher::bucket_id(
-            address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
-        )
     }
 }
 

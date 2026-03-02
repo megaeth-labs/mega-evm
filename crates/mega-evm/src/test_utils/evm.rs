@@ -18,7 +18,10 @@ pub fn transact<DB>(
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<<DB as revm::Database>::Error, MegaTransactionError>>
+) -> Result<
+    ResultAndState<MegaHaltReason>,
+    EVMError<<DB as revm::Database>::Error, MegaTransactionError>,
+>
 where
     DB: MegaDatabase + Debug,
     <DB as revm::Database>::Error: Send + Sync + Debug + 'static,

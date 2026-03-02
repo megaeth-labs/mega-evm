@@ -148,6 +148,7 @@ impl Cmd {
             Default::default(), // block_hashes - not used in replay
         )
         .await?;
+        self.ext_args.apply_bucket_capacities(&mut database)?;
 
         // Step 5: Setup BlockEnv and CfgEnv
         let block_env = self.retrieve_block_env(&block).await?;

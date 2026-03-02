@@ -87,6 +87,8 @@ impl Cmd {
         state.deploy_system_contracts(spec);
         debug!(spec = ?spec, "System contracts deployed");
 
+        self.env_args.apply_bucket_capacities(&mut state)?;
+
         let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 

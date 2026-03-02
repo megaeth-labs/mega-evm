@@ -73,7 +73,6 @@ fn test_sstore_minimum_bucket_zero_gas() {
 
     db.set_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64);
 
-
     let external_envs = TestExternalEnvs::new();
 
     let result = transact(
@@ -425,7 +424,6 @@ fn test_contract_creation_with_multiplier() {
 
         db.set_bucket_capacity(bucket_id, bucket_capacity);
 
-
         let external_envs = TestExternalEnvs::new();
 
         let result = transact(
@@ -469,8 +467,8 @@ fn test_contract_creation_costs_more_than_account() {
     // Contract creation
     let created_address = CALLER.create(0);
     let contract_bucket_id = MemoryDatabase::bucket_id_for_account(created_address);
-    let contract_external_envs =
-        TestExternalEnvs::new().with_bucket_capacity(contract_bucket_id, bucket_capacity);
+    db_contract.set_bucket_capacity(contract_bucket_id, bucket_capacity);
+    let contract_external_envs = TestExternalEnvs::new();
 
     let deployed_bytecode = BytecodeBuilder::default().stop().build();
     let contract_result = transact(
@@ -487,8 +485,8 @@ fn test_contract_creation_costs_more_than_account() {
 
     // Account creation
     let account_bucket_id = MemoryDatabase::bucket_id_for_account(NEW_ACCOUNT);
-    let account_external_envs =
-        TestExternalEnvs::new().with_bucket_capacity(account_bucket_id, bucket_capacity);
+    db_account.set_bucket_capacity(account_bucket_id, bucket_capacity);
+    let account_external_envs = TestExternalEnvs::new();
 
     let account_result = transact(
         MegaSpecId::REX,
@@ -534,8 +532,7 @@ fn test_combined_contract_creation_and_sstore() {
     // Get both bucket IDs
     let created_address = CALLER.create(0);
     let contract_bucket_id = MemoryDatabase::bucket_id_for_account(created_address);
-    let storage_bucket_id =
-        MemoryDatabase::bucket_id_for_slot(created_address, storage_key);
+    let storage_bucket_id = MemoryDatabase::bucket_id_for_slot(created_address, storage_key);
 
     db.set_bucket_capacity(contract_bucket_id, bucket_capacity);
     db.set_bucket_capacity(storage_bucket_id, bucket_capacity);
