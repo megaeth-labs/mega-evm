@@ -131,7 +131,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::ops::DerefMut
     }
 }
 
-impl<DB: crate::MegaDatabase, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
+impl<DB: MegaDatabase, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     /// Creates a new `MegaETH` EVM instance.
     ///
     /// # Parameters

@@ -12,8 +12,8 @@ use revm::{
 };
 
 use crate::{
-    ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason, MegaHandler,
-    MegaSpecId, MegaTransaction, MegaTransactionError,
+    ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaDatabase, MegaEvm, MegaHaltReason,
+    MegaHandler, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Implementation of [`alloy_evm::Evm`] for `MegaETH` EVM.
@@ -23,7 +23,7 @@ use crate::{
 /// customizations and optimizations.
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> alloy_evm::Evm for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: crate::MegaDatabase,
+    DB: MegaDatabase,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     type DB = DB;
@@ -113,7 +113,7 @@ where
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::ExecuteEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: crate::MegaDatabase,
+    DB: MegaDatabase,
 {
     type Tx = MegaTransaction;
     type Block = BlockEnv;
@@ -148,7 +148,7 @@ where
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::ExecuteCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: crate::MegaDatabase + DatabaseCommit,
+    DB: MegaDatabase + DatabaseCommit,
 {
     fn commit(&mut self, state: Self::State) {
         self.ctx().db_mut().commit(state);
@@ -157,7 +157,7 @@ where
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::InspectEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: crate::MegaDatabase,
+    DB: MegaDatabase,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     type Inspector = INSP;
@@ -175,14 +175,14 @@ where
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::InspectCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: crate::MegaDatabase + DatabaseCommit,
+    DB: MegaDatabase + DatabaseCommit,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
 }
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: crate::MegaDatabase,
+    DB: MegaDatabase,
 {
     fn transact_system_call_with_caller(
         &mut self,

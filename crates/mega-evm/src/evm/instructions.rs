@@ -2,7 +2,7 @@ use core::cmp::min;
 
 use crate::{
     constants::{self},
-    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId,
+    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaDatabase, MegaSpecId,
 };
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Bytes, U256};
@@ -150,7 +150,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> core::fmt::Debug for MegaInstructi
     }
 }
 
-impl<DB: crate::MegaDatabase, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
+impl<DB: MegaDatabase, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
     /// Create a new `MegaethInstructions` with the given spec id.
     pub fn new(spec: MegaSpecId) -> Self {
         let instruction_table = match spec {

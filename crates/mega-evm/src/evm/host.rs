@@ -6,7 +6,7 @@ use mega_system_contracts::access_control::IMegaAccessControl::VolatileDataAcces
 use std::{format, rc::Rc};
 
 use crate::{
-    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv,
+    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaDatabase, MegaSpecId, OracleEnv,
     VolatileDataAccessTracker, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
@@ -207,7 +207,7 @@ pub trait HostExt: Host {
     fn beneficiary_address(&self) -> Address;
 }
 
-impl<DB: crate::MegaDatabase, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
+impl<DB: MegaDatabase, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
     #[inline]
     fn spec_id(&self) -> MegaSpecId {
         self.spec

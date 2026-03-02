@@ -29,7 +29,7 @@ use crate::{
     block::eips, transact_deploy_access_control_contract,
     transact_deploy_high_precision_timestamp_oracle, transact_deploy_keyless_deploy_contract,
     transact_deploy_oracle_contract, BlockLimiter, BlockMegaTransactionOutcome, BucketId,
-    MegaBlockExecutionCtx, MegaHardforks, MegaSystemCallOutcome, MegaTransaction,
+    MegaBlockExecutionCtx, MegaDatabase, MegaHardforks, MegaSystemCallOutcome, MegaTransaction,
     MegaTransactionExt, MegaTransactionOutcome,
 };
 
@@ -75,7 +75,7 @@ impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> 
 impl<'db, DB, H, R, INSP, ExtEnvs>
     MegaBlockExecutor<H, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
-    DB: crate::MegaDatabase + 'db,
+    DB: MegaDatabase + 'db,
     H: MegaHardforks + Clone,
     ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
@@ -156,7 +156,7 @@ where
 impl<'db, DB, C, R, INSP, ExtEnvs>
     MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
-    DB: crate::MegaDatabase + 'db,
+    DB: MegaDatabase + 'db,
     C: MegaHardforks,
     ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
@@ -485,7 +485,7 @@ where
 impl<'db, DB, C, R, INSP, ExtEnvs> alloy_evm::block::BlockExecutor
     for MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
-    DB: crate::MegaDatabase + 'db,
+    DB: MegaDatabase + 'db,
     C: MegaHardforks,
     ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
