@@ -7,12 +7,19 @@ use core::{
     fmt::{Debug, Display},
 };
 
-use alloy_primitives::{Address, B256, U256};
+#[cfg(feature = "std")]
+use alloy_primitives::B256;
+use alloy_primitives::{Address, U256};
 use auto_impl::auto_impl;
+
+#[cfg(feature = "std")]
 use salt::state::hasher;
 
+#[cfg(feature = "std")]
 const ADDRESS_KEY_LEN: usize = Address::len_bytes();
+#[cfg(feature = "std")]
 const STORAGE_SLOT_LEN: usize = B256::len_bytes();
+#[cfg(feature = "std")]
 const STORAGE_KEY_LEN: usize = ADDRESS_KEY_LEN + STORAGE_SLOT_LEN;
 
 /// SALT bucket identifier. Accounts and storage slots are mapped to buckets, which have
@@ -78,8 +85,23 @@ pub trait SaltEnv: Debug + Unpin {
     /// # Arguments
     ///
     /// * `account` - The account address to map
+    ///
+    /// # Panics
+    ///
+    /// Panics in `no_std` environments if not overridden, as the default implementation
+    /// requires the `salt` crate which is only available with the `std` feature.
     fn bucket_id_for_account(account: Address) -> BucketId {
-        hasher::bucket_id(account.as_slice())
+        #[cfg(feature = "std")]
+        {
+            hasher::bucket_id(account.as_slice())
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            unimplemented!(
+                "bucket_id_for_account({:?}) requires std feature or must be overridden in no_std environments",
+                account
+            )
+        }
     }
 
     /// Maps a storage slot to its bucket ID.
@@ -91,10 +113,26 @@ pub trait SaltEnv: Debug + Unpin {
     ///
     /// * `address` - The contract address owning the storage
     /// * `key` - The storage slot key
+    ///
+    /// # Panics
+    ///
+    /// Panics in `no_std` environments if not overridden, as the default implementation
+    /// requires the `salt` crate which is only available with the `std` feature.
     fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
-        hasher::bucket_id(
-            address.concat_const::<STORAGE_SLOT_LEN, STORAGE_KEY_LEN>(key.into()).as_slice(),
-        )
+        #[cfg(feature = "std")]
+        {
+            hasher::bucket_id(
+                address.concat_const::<STORAGE_SLOT_LEN, STORAGE_KEY_LEN>(key.into()).as_slice(),
+            )
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            unimplemented!(
+                "bucket_id_for_slot({:?}, {:?}) requires std feature or must be overridden in no_std environments",
+                address,
+                key
+            )
+        }
     }
 }
 
