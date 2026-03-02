@@ -8,18 +8,45 @@ use revm::{
     state::{Account, AccountInfo, Bytecode},
 };
 
+use crate::{BucketId, SaltEnv, MIN_BUCKET_SIZE};
+
 /// A memory database for testing purposes.
-#[derive(Debug, Default, Clone, derive_more::Deref, derive_more::DerefMut)]
+#[derive(Debug, Default, Clone)]
 pub struct MemoryDatabase {
-    #[deref]
-    #[deref_mut]
     db: CacheDB<EmptyDB>,
+    /// Bucket capacity overrides for testing dynamic gas pricing
+    bucket_capacities: HashMap<BucketId, u64>,
+}
+
+impl core::ops::Deref for MemoryDatabase {
+    type Target = CacheDB<EmptyDB>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.db
+    }
+}
+
+impl core::ops::DerefMut for MemoryDatabase {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.db
+    }
 }
 
 impl MemoryDatabase {
     /// Creates a new `MemoryDatabase` from a `CacheDB`.
     pub fn from_cache_db(db: CacheDB<EmptyDB>) -> Self {
-        Self { db }
+        Self { db, bucket_capacities: HashMap::default() }
+    }
+
+    /// Sets the bucket capacity for a given bucket ID.
+    pub fn set_bucket_capacity(&mut self, bucket_id: BucketId, capacity: u64) {
+        self.bucket_capacities.insert(bucket_id, capacity);
+    }
+
+    /// Sets the bucket capacity for a given bucket ID (builder pattern).
+    pub fn with_bucket_capacity(mut self, bucket_id: BucketId, capacity: u64) -> Self {
+        self.set_bucket_capacity(bucket_id, capacity);
+        self
     }
 
     /// Sets the code for an account in the database.
@@ -109,6 +136,49 @@ impl revm::DatabaseCommit for MemoryDatabase {
     }
 }
 
+/// SaltEnv implementation for MemoryDatabase.
+///
+/// This implementation uses the real SALT hashing logic from the `salt` crate to calculate
+/// bucket IDs. All buckets return minimum capacity by default.
+impl SaltEnv for MemoryDatabase {
+    type Error = Infallible;
+
+    fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        // Return custom capacity if set, otherwise default to minimum bucket size
+        Ok(self.bucket_capacities.get(&bucket_id).copied().unwrap_or(MIN_BUCKET_SIZE as u64))
+    }
+
+    fn bucket_id_for_account(account: Address) -> BucketId {
+        salt::state::hasher::bucket_id(account.as_slice())
+    }
+
+    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
+        const SLOT_KEY_LEN: usize = 32; // U256 is 32 bytes
+        const PLAIN_ACCOUNT_KEY_LEN: usize = 20; // Address is 20 bytes
+        const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
+
+        salt::state::hasher::bucket_id(
+            address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
+        )
+    }
+}
+
+impl SaltEnv for &mut MemoryDatabase {
+    type Error = Infallible;
+
+    fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        (**self).get_bucket_capacity(bucket_id)
+    }
+
+    fn bucket_id_for_account(account: Address) -> BucketId {
+        MemoryDatabase::bucket_id_for_account(account)
+    }
+
+    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
+        MemoryDatabase::bucket_id_for_slot(address, key)
+    }
+}
+
 /// Error type for [`ErrorInjectingDatabase`].
 #[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
 #[display("{_0}")]
@@ -172,5 +242,40 @@ impl revm::Database for ErrorInjectingDatabase {
 impl revm::DatabaseCommit for ErrorInjectingDatabase {
     fn commit(&mut self, changes: HashMap<Address, Account>) {
         self.inner.commit(changes);
+    }
+}
+
+/// SaltEnv implementation for ErrorInjectingDatabase.
+///
+/// Delegates to the inner MemoryDatabase implementation.
+impl SaltEnv for ErrorInjectingDatabase {
+    type Error = InjectedDbError;
+
+    fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        self.inner.get_bucket_capacity(bucket_id).map_err(|e| match e {})
+    }
+
+    fn bucket_id_for_account(account: Address) -> BucketId {
+        MemoryDatabase::bucket_id_for_account(account)
+    }
+
+    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
+        MemoryDatabase::bucket_id_for_slot(address, key)
+    }
+}
+
+impl SaltEnv for &mut ErrorInjectingDatabase {
+    type Error = InjectedDbError;
+
+    fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        (**self).get_bucket_capacity(bucket_id)
+    }
+
+    fn bucket_id_for_account(account: Address) -> BucketId {
+        ErrorInjectingDatabase::bucket_id_for_account(account)
+    }
+
+    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
+        ErrorInjectingDatabase::bucket_id_for_slot(address, key)
     }
 }

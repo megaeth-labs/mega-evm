@@ -2,7 +2,7 @@
 use alloc as std;
 use std::string::ToString;
 
-use alloy_evm::{precompiles::PrecompilesMap, Database};
+use alloy_evm::{precompiles::PrecompilesMap};
 use alloy_primitives::{Bytes, TxKind};
 use delegate::delegate;
 use op_revm::{
@@ -61,7 +61,7 @@ impl<EVM, ERROR, FRAME> Default for MegaHandler<EVM, ERROR, FRAME> {
 
 impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
 where
-    DB: Database,
+    DB: crate::MegaDatabase,
     ExtEnvs: ExternalEnvTypes,
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
     ERROR: FromStringError,
@@ -124,7 +124,7 @@ where
     }
 }
 
-impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
+impl<DB: crate::MegaDatabase, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// This is the hook to be called in the beginning of the `frame_run` and `inspect_frame_run`
     /// functions. This function checks if the additional limit is already exceeded, if so, we
     /// should immediately stop and synthesize an interpreter action and return it.
@@ -207,7 +207,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes> Handler
+impl<DB: crate::MegaDatabase, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes> Handler
     for MegaHandler<EVM, ERROR, FRAME>
 where
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
@@ -474,7 +474,7 @@ where
 impl<DB, EVM, ERROR, ExtEnvs: ExternalEnvTypes> InspectorHandler
     for MegaHandler<EVM, ERROR, EthFrame<EthInterpreter>>
 where
-    DB: Database,
+    DB: crate::MegaDatabase,
     MegaContext<DB, ExtEnvs>: ContextTr<Journal = Journal<DB>>,
     Journal<DB>: revm::inspector::JournalExt,
     EVM: InspectorEvmTr<
@@ -534,7 +534,7 @@ where
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::handler::EvmTr for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: Database,
+    DB: crate::MegaDatabase,
 {
     type Context = MegaContext<DB, ExtEnvs>;
 
@@ -713,7 +713,7 @@ where
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::inspector::InspectorEvmTr
     for MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: Database,
+    DB: crate::MegaDatabase,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     type Inspector = INSP;

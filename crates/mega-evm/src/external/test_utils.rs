@@ -9,7 +9,7 @@ use alloc as std;
 use core::{cell::RefCell, convert::Infallible, fmt::Display};
 use std::{rc::Rc, vec::Vec};
 
-use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use revm::primitives::HashMap;
 
 use crate::{BucketId, ExternalEnvFactory, ExternalEnvTypes, ExternalEnvs, OracleEnv, SaltEnv};
@@ -27,14 +27,16 @@ pub struct RecordedHint {
 
 /// Configurable external environment implementation for testing.
 ///
-/// This struct provides mutable state for bucket capacities, oracle storage, and recorded hints,
-/// allowing tests to set up specific scenarios and verify hint mechanism behavior. Bucket IDs are
-/// calculated using the real SALT hashing logic from the `salt` crate.
+/// This struct provides mutable state for oracle storage and recorded hints,
+/// allowing tests to set up specific scenarios and verify hint mechanism behavior.
+///
+/// Note: SALT functionality (bucket capacities) should now be implemented on the
+/// database type itself by implementing the `SaltEnv` trait. This struct only
+/// handles Oracle environment.
 ///
 /// # Example
 /// ```ignore
 /// let env = TestExternalEnvs::new()
-///     .with_bucket_capacity(123, 512)  // Set bucket 123 to 512 capacity
 ///     .with_oracle_storage(U256::ZERO, U256::from(42));  // Set oracle slot 0 to 42
 /// ```
 #[derive(derive_more::Debug, Clone)]
@@ -45,6 +47,9 @@ pub struct TestExternalEnvs<Error = Infallible> {
     oracle_storage: Rc<RefCell<HashMap<U256, U256>>>,
     /// Bucket capacities. Maps bucket IDs to their capacity values.
     /// Buckets not in this map default to [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
+    ///
+    /// Note: This is kept for backward compatibility with existing tests, but new code
+    /// should implement `SaltEnv` on the database type instead.
     bucket_capacity: Rc<RefCell<HashMap<BucketId, u64>>>,
     /// Recorded hints from `on_hint` calls. Used for testing the hint mechanism.
     recorded_hints: Rc<RefCell<Vec<RecordedHint>>>,
@@ -58,13 +63,13 @@ impl Default for TestExternalEnvs {
 
 impl From<TestExternalEnvs> for ExternalEnvs<TestExternalEnvs> {
     fn from(value: TestExternalEnvs) -> Self {
-        Self { salt_env: value.clone(), oracle_env: value }
+        Self { oracle_env: value }
     }
 }
 
 impl<'a> From<&'a TestExternalEnvs> for ExternalEnvs<&'a TestExternalEnvs> {
     fn from(value: &'a TestExternalEnvs) -> Self {
-        ExternalEnvs { salt_env: value.clone(), oracle_env: value.clone() }
+        ExternalEnvs { oracle_env: value.clone() }
     }
 }
 
@@ -142,14 +147,12 @@ impl<Error: Unpin + Clone + Display + 'static> TestExternalEnvs<Error> {
 impl<Error: Unpin + Clone + Display> ExternalEnvFactory for TestExternalEnvs<Error> {
     type EnvTypes = Self;
 
-    fn external_envs(&self, _block: BlockNumber) -> ExternalEnvs<Self::EnvTypes> {
-        ExternalEnvs { salt_env: self.clone(), oracle_env: self.clone() }
+    fn external_envs(&self) -> ExternalEnvs<Self::EnvTypes> {
+        ExternalEnvs { oracle_env: self.clone() }
     }
 }
 
 impl<Error: Unpin + Display> ExternalEnvTypes for TestExternalEnvs<Error> {
-    type SaltEnv = Self;
-
     type OracleEnv = Self;
 }
 
@@ -164,7 +167,7 @@ const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 ///
 /// Bucket IDs are calculated using the SALT hasher from the `salt` crate, which provides
 /// deterministic mapping of accounts and storage slots to buckets.
-impl<Error: Unpin + Display> SaltEnv for TestExternalEnvs<Error> {
+impl<Error: Unpin + Display + Send + Sync + 'static> SaltEnv for TestExternalEnvs<Error> {
     type Error = Error;
 
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {

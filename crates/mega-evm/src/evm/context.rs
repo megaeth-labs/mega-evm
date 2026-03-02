@@ -24,14 +24,13 @@ use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
 use revm::{
     context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
     context_interface::context::ContextError,
-    database::EmptyDB,
     Journal,
 };
 
 use crate::{
-    constants, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
-    ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit, VolatileDataAccess,
-    VolatileDataAccessTracker, VolatileDataAccessType,
+    constants, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EmptyMegaDB,
+    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit,
+    VolatileDataAccess, VolatileDataAccessTracker, VolatileDataAccessType,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -54,7 +53,7 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     pub additional_limit: Rc<RefCell<AdditionalLimit>>,
 
     /// Calculator for dynamic gas costs during transaction execution.
-    pub dynamic_storage_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
+    pub dynamic_storage_gas_cost: Rc<RefCell<DynamicGasCost>>,
 
     /// The oracle environment.
     pub oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
@@ -69,9 +68,9 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     pub(crate) disable_sandbox: Rc<RefCell<bool>>,
 }
 
-impl Default for MegaContext<EmptyDB, EmptyExternalEnv> {
+impl Default for MegaContext<EmptyMegaDB, EmptyExternalEnv> {
     fn default() -> Self {
-        Self::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE)
+        Self::new(EmptyMegaDB::default(), MegaSpecId::EQUIVALENCE)
     }
 }
 
@@ -87,7 +86,6 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
     ///
     /// * `db` - The database implementation to use for state storage
     /// * `spec` - The `MegaETH` specification version to use
-    /// * `external_envs` - The external environments for gas cost calculations
     ///
     /// # Returns
     ///
@@ -109,7 +107,6 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(spec, tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
-                EmptyExternalEnv,
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
             oracle_env: Rc::new(RefCell::new(EmptyExternalEnv)),
@@ -169,7 +166,6 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(spec, tx_limits))),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
-                external_envs.salt_env,
                 inner.block.number.to::<u64>() - 1,
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
@@ -274,10 +270,9 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
 
     /// Sets the external environments for the EVM.
     ///
-    /// This method updates the external environments used for gas cost calculations,
-    /// including the salt environment and oracle environment. When setting new
-    /// external environments, the dynamic gas cost calculator and oracle environment
-    /// are reinitialized with the new configurations.
+    /// This method updates the external environments used for oracle environment.
+    /// Note that SALT environment is now provided by the database itself through
+    /// the `MegaDatabase` trait, so only the oracle environment needs to be set here.
     ///
     /// # Arguments
     ///
@@ -290,18 +285,12 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
         self,
         external_envs: ExternalEnvs<NewExtEnvTypes>,
     ) -> MegaContext<DB, NewExtEnvTypes> {
-        let parent_block_number = self.inner.block.number.to::<u64>().saturating_sub(1);
-        let spec = self.spec;
         MegaContext {
             inner: self.inner,
-            spec,
+            spec: self.spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
-            dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
-                spec,
-                external_envs.salt_env,
-                parent_block_number,
-            ))),
+            dynamic_storage_gas_cost: self.dynamic_storage_gas_cost,
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
             disable_sandbox: self.disable_sandbox,

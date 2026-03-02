@@ -12,7 +12,7 @@ use alloy_evm::{
         StateChangeSource, SystemCaller,
     },
     eth::receipt_builder::ReceiptBuilderCtx,
-    Database, Evm as _, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv, RecoveredTx,
+    Evm as _, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv, RecoveredTx,
 };
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::B256;
@@ -75,7 +75,7 @@ impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> 
 impl<'db, DB, H, R, INSP, ExtEnvs>
     MegaBlockExecutor<H, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
-    DB: Database + 'db,
+    DB: crate::MegaDatabase + 'db,
     H: MegaHardforks + Clone,
     ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
@@ -156,7 +156,7 @@ where
 impl<'db, DB, C, R, INSP, ExtEnvs>
     MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
-    DB: Database + 'db,
+    DB: crate::MegaDatabase + 'db,
     C: MegaHardforks,
     ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
@@ -485,7 +485,7 @@ where
 impl<'db, DB, C, R, INSP, ExtEnvs> alloy_evm::block::BlockExecutor
     for MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
 where
-    DB: Database + 'db,
+    DB: crate::MegaDatabase + 'db,
     C: MegaHardforks,
     ExtEnvs: crate::ExternalEnvTypes,
     INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,

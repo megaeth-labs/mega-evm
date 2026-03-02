@@ -876,3 +876,44 @@ where
         }
     }
 }
+
+impl<N, P> mega_evm::SaltEnv for EvmeState<N, P>
+where
+    N: Network,
+    P: Provider<N> + std::fmt::Debug,
+{
+    type Error = EvmeError;
+
+    fn get_bucket_capacity(&self, _bucket_id: mega_evm::BucketId) -> Result<u64> {
+        // Return minimum bucket size (no dynamic gas pricing for mega-evme)
+        Ok(mega_evm::MIN_BUCKET_SIZE as u64)
+    }
+
+    fn bucket_id_for_account(_account: Address) -> mega_evm::BucketId {
+        0
+    }
+
+    fn bucket_id_for_slot(_address: Address, _key: U256) -> mega_evm::BucketId {
+        0
+    }
+}
+
+impl<N, P> mega_evm::SaltEnv for &mut EvmeState<N, P>
+where
+    N: Network,
+    P: Provider<N> + std::fmt::Debug,
+{
+    type Error = EvmeError;
+
+    fn get_bucket_capacity(&self, bucket_id: mega_evm::BucketId) -> Result<u64> {
+        (**self).get_bucket_capacity(bucket_id)
+    }
+
+    fn bucket_id_for_account(account: Address) -> mega_evm::BucketId {
+        EvmeState::<N, P>::bucket_id_for_account(account)
+    }
+
+    fn bucket_id_for_slot(address: Address, key: U256) -> mega_evm::BucketId {
+        EvmeState::<N, P>::bucket_id_for_slot(address, key)
+    }
+}

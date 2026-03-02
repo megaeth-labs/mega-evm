@@ -1,10 +1,10 @@
-use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
+use alloy_evm::{EvmEnv};
 use op_revm::L1BlockInfo;
-use revm::{context::result::EVMError, Inspector};
+use revm::Inspector;
 
 use crate::{
-    DynPrecompilesBuilder, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory, MegaContext,
-    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
+    DynPrecompilesBuilder, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory,
+    MegaContext, MegaDatabase, MegaEvm, MegaSpecId, MegaTransaction,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -21,7 +21,7 @@ use crate::{
 /// # Usage
 ///
 /// ```rust
-/// use alloy_evm::{EvmEnv, EvmFactory};
+/// use alloy_evm::{EvmEnv};
 /// use mega_evm::{MegaEvmFactory, MegaSpecId};
 /// use revm::database::{CacheDB, EmptyDB};
 ///
@@ -107,25 +107,16 @@ impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
     }
 }
 
-impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
-    for MegaEvmFactory<ExtEnvFactory>
-{
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> =
-        MegaEvm<DB, I, ExtEnvFactory::EnvTypes>;
-    type Context<DB: Database> = MegaContext<DB, ExtEnvFactory::EnvTypes>;
-    type Tx = MegaTransaction;
-    type Error<DBError: core::error::Error + Send + Sync + 'static> =
-        EVMError<DBError, MegaTransactionError>;
-    type HaltReason = MegaHaltReason;
-    type Spec = MegaSpecId;
-    type Precompiles = PrecompilesMap;
-
+// Note: We do NOT implement alloy_evm::EvmFactory because it requires DB: Database
+// in associated types, but our MegaEvm requires DB: MegaDatabase. Instead, we provide
+// our own factory methods that work with MegaDatabase.
+impl<ExtEnvFactory: ExternalEnvFactory + Clone> MegaEvmFactory<ExtEnvFactory> {
     /// Creates a new `Evm` instance with the provided database and EVM environment.
     ///
     /// This method constructs a new `Context` using the given database, the specification from the
-    /// EVM environment, and the factory's `external_envs`. It then sets up the transaction, block,
-    /// config, and chain environment for the context, and finally returns a new `Evm` instance
-    /// using the [`NoOpInspector`] as the default inspector.
+    /// EVM environment, and the factory's external environments. It then sets up the transaction,
+    /// block, config, and chain environment for the context, and finally returns a new `Evm`
+    /// instance using the [`NoOpInspector`] as the default inspector.
     ///
     /// # Parameters
     ///
@@ -135,16 +126,15 @@ impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
     /// # Returns
     ///
     /// A new [`Evm`] instance configured with the provided database and environment.
-    fn create_evm<DB: Database>(
+    pub fn create_evm<DB: MegaDatabase>(
         &self,
         db: DB,
-        evm_env: EvmEnv<Self::Spec>,
-    ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
+        evm_env: EvmEnv<MegaSpecId>,
+    ) -> MegaEvm<DB, revm::inspector::NoOpInspector, ExtEnvFactory::EnvTypes> {
         let spec_id = *evm_env.spec_id();
-        let block_number = evm_env.block_env.number.to();
         let runtime_limits = EvmTxRuntimeLimits::from_spec(spec_id);
         let ctx = MegaContext::new(db, spec_id)
-            .with_external_envs(self.external_env_factory.external_envs(block_number))
+            .with_external_envs(self.external_env_factory.external_envs())
             .with_tx(MegaTransaction::default())
             .with_block(evm_env.block_env)
             .with_cfg(evm_env.cfg_env)
@@ -157,12 +147,23 @@ impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
         )
     }
 
-    fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
+    /// Creates a new `Evm` instance with the provided database, EVM environment, and inspector.
+    ///
+    /// # Parameters
+    ///
+    /// - `db`: The database to use for EVM state.
+    /// - `evm_env`: The EVM environment, including block and config environments.
+    /// - `inspector`: The inspector to use for debugging and monitoring.
+    ///
+    /// # Returns
+    ///
+    /// A new [`Evm`] instance configured with the provided database, environment, and inspector.
+    pub fn create_evm_with_inspector<DB: MegaDatabase, I: Inspector<MegaContext<DB, ExtEnvFactory::EnvTypes>>>(
         &self,
         db: DB,
-        input: EvmEnv<Self::Spec>,
+        evm_env: EvmEnv<MegaSpecId>,
         inspector: I,
-    ) -> Self::Evm<DB, I> {
-        Self::create_evm(self, db, input).with_inspector(inspector)
+    ) -> MegaEvm<DB, I, ExtEnvFactory::EnvTypes> {
+        self.create_evm(db, evm_env).with_inspector(inspector)
     }
 }

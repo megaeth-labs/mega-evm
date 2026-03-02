@@ -554,7 +554,7 @@ fn test_oracle_storage_sload_direct_call() {
 /// This exercises the deployment logic in block.rs:284-292.
 #[test]
 fn test_oracle_contract_deployed_on_mini_rex_activation() {
-    use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
+    use alloy_evm::{block::BlockExecutor, Evm, EvmEnv};
     use alloy_primitives::B256;
     use mega_evm::{
         MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaSpecId,

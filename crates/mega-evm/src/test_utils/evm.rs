@@ -1,15 +1,13 @@
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use core::fmt::Debug;
-use revm::{
-    context::{
-        result::{EVMError, ResultAndState},
-        TxEnv,
-    },
-    Database,
+use revm::context::{
+    result::{EVMError, ResultAndState},
+    TxEnv,
 };
 
 use crate::{
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
+    MegaContext, MegaDatabase, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError,
 };
 
 /// Executes a transaction on the EVM.
@@ -20,10 +18,10 @@ pub fn transact<DB>(
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<DB::Error, MegaTransactionError>>
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<<DB as revm::Database>::Error, MegaTransactionError>>
 where
-    DB: Database + Debug,
-    DB::Error: Send + Sync + Debug + 'static,
+    DB: MegaDatabase + Debug,
+    <DB as revm::Database>::Error: Send + Sync + Debug + 'static,
 {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
