@@ -21,16 +21,60 @@ This skill handles the full release workflow:
 7. Verify the tag on remote matches expectations
 8. Create a GitHub release with auto-generated notes
 
-## Step 0: Check if main already has a version bump
+## Step 0: Detect existing version bump progress
 
-Check the latest commit on `main`:
+Before starting a new version bump, check if one is already in progress.
+Run these checks in order and take the first matching action.
+
+### 0a. Fetch latest remote state
 
 ```bash
 git fetch origin main
+```
+
+### 0b. Check if we're on a version bump branch
+
+Check the current branch name:
+
+```bash
+git branch --show-current
+```
+
+If the current branch matches a version bump pattern (e.g., `*/chore/bump-v*`), extract the version from the branch name.
+Then check whether a PR already exists for this branch:
+
+```bash
+gh pr list --head "$(git branch --show-current)" --state all --json number,state,url,title
+```
+
+- If **an open PR exists**: inform the user, then **skip to Step 3** (wait for CI / merge).
+- If **a merged PR exists**: extract the version and **skip to Step 5** (tag & release).
+- If **no PR exists but the branch has commits ahead of main**: **skip to Step 2e** (push and create PR).
+- If **no PR exists and no commits ahead**: the branch is empty — continue to Step 1 to determine the version, then proceed to Step 2b (skip branch creation since we're already on it).
+
+### 0c. Check for open version bump PRs on any branch
+
+```bash
+gh pr list --search "bump version in:title" --state open --json number,title,url,headRefName
+```
+
+If an open version bump PR exists:
+
+- Inform the user about the existing PR (show title and URL).
+- Ask the user whether to continue with that PR or start a new one.
+- If continuing: check out that branch and **skip to Step 3**.
+
+### 0d. Check if main already has a version bump as the latest commit
+
+```bash
 git log origin/main -1 --oneline
 ```
 
 If the latest commit message on `main` matches a version bump pattern (e.g., starts with `chore: bump version`), extract the version from that commit and **skip to Step 5**.
+
+### 0e. No existing progress found
+
+Proceed to Step 1.
 
 ## Step 1: Determine version bump type
 
