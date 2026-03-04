@@ -8,12 +8,12 @@
 //! `MegaLimitExceeded(uint8 kind, uint64 limit)` revert data.
 //!
 //! Behavior differences from StateGrowth:
-//! - **DataSize / KVUpdate**: The reverted child's discardable usage is dropped, protecting
-//!   the parent's budget (same semantics as StateGrowth).
-//! - **ComputeGas**: Gas is always persistent — even after a child frame reverts due to
-//!   exceeding its per-frame compute gas budget, the parent's total compute gas still
-//!   increases by the child's actual gas used. Per-frame limits act as "early termination
-//!   guardrails", not budget protection.
+//! - **DataSize / KVUpdate**: The reverted child's discardable usage is dropped, protecting the
+//!   parent's budget (same semantics as StateGrowth).
+//! - **ComputeGas**: Gas is always persistent — even after a child frame reverts due to exceeding
+//!   its per-frame compute gas budget, the parent's total compute gas still increases by the
+//!   child's actual gas used. Per-frame limits act as "early termination guardrails", not budget
+//!   protection.
 
 use std::convert::Infallible;
 
@@ -21,8 +21,8 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, EvmTxRuntimeLimits, MegaContext, MegaEvm,
-    MegaHaltReason, MegaLimitExceeded, MegaSpecId, MegaTransaction, MegaTransactionError,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
+    MegaTransaction, MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
     STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
@@ -204,11 +204,7 @@ fn test_data_size_child_exceeds_budget_frame_local_revert() {
         transact_data_kv(MegaSpecId::REX4, &mut db, limit, u64::MAX, tx).unwrap();
 
     assert!(result.result.is_success(), "Parent should succeed after child frame-local revert");
-    assert_eq!(
-        data_size,
-        tx_intrinsic_data_size(),
-        "Child's discardable data dropped on revert"
-    );
+    assert_eq!(data_size, tx_intrinsic_data_size(), "Child's discardable data dropped on revert");
 }
 
 #[test]
@@ -224,8 +220,7 @@ fn test_data_size_child_exceed_reverts_not_halts() {
         .account_code(CONTRACT, child_code);
 
     let tx = default_tx_builder(CALLEE).build_fill();
-    let (result, _, _) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, limit, u64::MAX, tx).unwrap();
+    let (result, _, _) = transact_data_kv(MegaSpecId::REX4, &mut db, limit, u64::MAX, tx).unwrap();
 
     assert!(result.result.is_success(), "TX should succeed, not halt");
     assert!(!result.result.is_halt());
@@ -280,8 +275,7 @@ fn test_data_size_revert_data_encodes_mega_limit_exceeded() {
         .account_code(CONTRACT, child_code);
 
     let tx = default_tx_builder(CALLEE).build_fill();
-    let (result, _, _) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, limit, u64::MAX, tx).unwrap();
+    let (result, _, _) = transact_data_kv(MegaSpecId::REX4, &mut db, limit, u64::MAX, tx).unwrap();
 
     assert!(result.result.is_success());
     let output = match &result.result {
@@ -491,8 +485,7 @@ fn test_data_size_rex3_tx_exceed_halts() {
         .account_code(CONTRACT, child_code);
 
     let tx = default_tx_builder(CALLEE).build_fill();
-    let (result, _, _) =
-        transact_data_kv(MegaSpecId::REX3, &mut db, limit, u64::MAX, tx).unwrap();
+    let (result, _, _) = transact_data_kv(MegaSpecId::REX3, &mut db, limit, u64::MAX, tx).unwrap();
 
     assert!(result.result.is_halt(), "REX3 should halt on TX-level data size exceed");
     assert!(matches!(
@@ -758,8 +751,7 @@ fn test_kv_update_rex3_tx_exceed_halts() {
 
     let tx = default_tx_builder(CALLEE).build_fill();
     // KV limit = 10: caller(1) + 10 sstores = 11 > 10
-    let (result, _, _) =
-        transact_data_kv(MegaSpecId::REX3, &mut db, u64::MAX, 10, tx).unwrap();
+    let (result, _, _) = transact_data_kv(MegaSpecId::REX3, &mut db, u64::MAX, 10, tx).unwrap();
 
     assert!(result.result.is_halt(), "REX3 should halt on TX-level KV exceed");
     assert!(matches!(
@@ -803,8 +795,7 @@ fn test_compute_gas_child_exceeds_budget_frame_local_revert() {
         .account_code(CONTRACT, child_code);
 
     let tx = default_tx_builder(CALLEE).build_fill();
-    let (result, _compute_gas) =
-        transact_compute(MegaSpecId::REX4, &mut db, tx_limit, tx).unwrap();
+    let (result, _compute_gas) = transact_compute(MegaSpecId::REX4, &mut db, tx_limit, tx).unwrap();
 
     assert!(result.result.is_success(), "Parent should succeed after child frame-local revert");
     assert!(!result.result.is_halt(), "Should NOT be halt");
@@ -829,8 +820,7 @@ fn test_compute_gas_child_gas_still_counts_despite_revert() {
     // Child budget = 2_000_000 * 98 / 100 = 1_960_000.
     // Child burns 1_970_000 > 1_960_000 → per-frame revert.
     let tx = default_tx_builder(CALLEE).build_fill();
-    let (result, compute_gas) =
-        transact_compute(MegaSpecId::REX4, &mut db, 2_000_000, tx).unwrap();
+    let (result, compute_gas) = transact_compute(MegaSpecId::REX4, &mut db, 2_000_000, tx).unwrap();
 
     assert!(result.result.is_success());
     // Child's gas persists — total should be significantly more than just the parent's minimal ops.

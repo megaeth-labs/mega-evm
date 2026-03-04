@@ -14,11 +14,10 @@ use crate::{JournalInspectTr, MegaSpecId};
 /// `persistent_usage`, never as `discardable_usage` or `refund`.
 ///
 /// In Rex4+, compute gas is enforced at **both** per-frame and TX level:
-/// - **Per-frame**: Each inner call frame receives `remaining * 98 / 100` of the parent's
-///   remaining compute gas budget. When a frame exceeds its budget, it reverts (not halts).
-///   However, since gas is always persistent, the parent's total gas still increases by the
-///   child's actual gas used — per-frame limits act as "early termination guardrails", not
-///   budget protection.
+/// - **Per-frame**: Each inner call frame receives `remaining * 98 / 100` of the parent's remaining
+///   compute gas budget. When a frame exceeds its budget, it reverts (not halts). However, since
+///   gas is always persistent, the parent's total gas still increases by the child's actual gas
+///   used — per-frame limits act as "early termination guardrails", not budget protection.
 /// - **TX-level (detained)**: The effective TX limit may be dynamically lowered by gas detention
 ///   (volatile data access). This remains a TX-level halt for all specs including Rex4+.
 ///
@@ -113,8 +112,7 @@ impl TxRuntimeLimit for ComputeGasTracker {
     #[inline]
     fn check_limit(&self) -> LimitCheck {
         if self.rex4_enabled {
-            let frame_check =
-                self.frame_tracker.exceeds_current_frame_limit(LimitKind::ComputeGas);
+            let frame_check = self.frame_tracker.exceeds_current_frame_limit(LimitKind::ComputeGas);
             if frame_check.exceeded_limit() {
                 return frame_check;
             }
@@ -123,7 +121,12 @@ impl TxRuntimeLimit for ComputeGasTracker {
         let limit = self.tx_limit();
         let used = self.tx_usage();
         if used > limit {
-            LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, frame_local: false, limit, used }
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::ComputeGas,
+                frame_local: false,
+                limit,
+                used,
+            }
         } else {
             LimitCheck::WithinLimit
         }

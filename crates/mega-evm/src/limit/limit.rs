@@ -39,8 +39,8 @@ use super::LimitCheck;
 /// - **Data size**: Reverted child's discardable data is dropped, protecting parent's budget.
 /// - **KV updates**: Reverted child's discardable KV ops are dropped, protecting parent's budget.
 /// - **Compute gas**: Reverted child's gas still counts toward parent (gas is always persistent).
-///   Per-frame limits act as "early termination guardrails" only, not budget protection.
-///   Compute gas still retains TX-level detained checking in all specs.
+///   Per-frame limits act as "early termination guardrails" only, not budget protection. Compute
+///   gas still retains TX-level detained checking in all specs.
 ///
 /// # Tracking Details
 ///
