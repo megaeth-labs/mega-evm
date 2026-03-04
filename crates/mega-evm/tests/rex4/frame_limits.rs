@@ -8,8 +8,8 @@
 //! `MegaLimitExceeded(uint8 kind, uint64 limit)` revert data.
 //!
 //! Behavior differences from `StateGrowth`:
-//! - **`DataSize` / `KVUpdate`**: The reverted child's discardable usage is dropped, protecting
-//!   the parent's budget (same semantics as `StateGrowth`).
+//! - **`DataSize` / `KVUpdate`**: The reverted child's discardable usage is dropped, protecting the
+//!   parent's budget (same semantics as `StateGrowth`).
 //! - **`ComputeGas`**: Gas is always persistent — even after a child frame reverts due to exceeding
 //!   its per-frame compute gas budget, the parent's total compute gas still increases by the
 //!   child's actual gas used. Per-frame limits act as "early termination guardrails", not budget
