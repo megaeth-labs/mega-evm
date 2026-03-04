@@ -109,6 +109,11 @@ impl TxRuntimeLimit for ComputeGasTracker {
     /// In Rex4+, checks the per-frame budget first (`frame_local`: true on exceed), then falls
     /// through to the TX-level detained check. Gas detention is always TX-level (`frame_local`:
     /// false) across all specs — accessing volatile data caps the whole transaction.
+    ///
+    /// Note: unlike state growth in Rex4+, we intentionally do NOT return early on
+    /// frame-within-limit. Compute gas has TX-scope components (e.g., pre-frame intrinsic compute
+    /// gas recorded in `tx_entry`) and TX-level detention (`detained_limit`) that can exceed even
+    /// when the current frame budget is still within limit.
     #[inline]
     fn check_limit(&self) -> LimitCheck {
         if self.rex4_enabled {

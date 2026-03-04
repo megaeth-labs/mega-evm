@@ -636,7 +636,7 @@ fn test_kv_update_child_exceeds_budget_after_parent_usage() {
 fn test_kv_update_grandchild_budget_progressive_reduction() {
     // TX limit = 100.
     // Child budget = 98.
-    // Grandchild budget = 96.
+    // Grandchild budget = floor(98 * 98 / 100) = 96.
     // Grandchild writes 96 -> succeeds.
     let grandchild_code = write_n_slots(BytecodeBuilder::default(), 96).stop().build();
     let child_code =
@@ -662,7 +662,7 @@ fn test_kv_update_grandchild_budget_progressive_reduction() {
 fn test_kv_update_grandchild_exceeds_progressive_budget() {
     // TX limit = 100.
     // Child budget = 98.
-    // Grandchild budget = 96.
+    // Grandchild budget = floor(98 * 98 / 100) = 96.
     // Grandchild writes 97 -> exceeds and reverts.
     let grandchild_code = write_n_slots(BytecodeBuilder::default(), 97).stop().build();
     let child_code =
@@ -763,6 +763,12 @@ fn test_kv_update_rex3_tx_exceed_halts() {
 // ============================================================================
 // COMPUTE GAS PER-FRAME LIMITS
 // ============================================================================
+//
+// Note:
+// We intentionally do not add a `test_compute_gas_top_level_exceed_is_frame_local_revert`.
+// For compute gas, usage is always persistent and top-level exceed is observed by the TX-level
+// check, so the expected result is `Halt` (covered by `test_compute_gas_rex4_tx_exceed_halts`),
+// not frame-local `Revert`.
 
 /// Burns approximately `target_gas` of compute gas via repeated PUSH1/POP sequences.
 /// Each PUSH1+POP pair costs 3+2=5 gas.
@@ -923,7 +929,8 @@ fn test_compute_gas_sibling_frames_independent() {
 
 #[test]
 fn test_compute_gas_rex4_tx_exceed_halts() {
-    // TX-level compute gas exceed should halt in Rex4.
+    // Symmetric top-level case for compute gas:
+    // top-level exceed is expected to halt (not frame-local revert).
     let code = BytecodeBuilder::default().stop().build();
 
     let mut db = MemoryDatabase::default()
