@@ -1,16 +1,16 @@
-//! Tests for Rex4 per-frame limits on DataSize, KVUpdate, and ComputeGas.
+//! Tests for Rex4 per-frame limits on `DataSize`, `KVUpdate`, and `ComputeGas`.
 //!
-//! Rex4 extends per-frame budgets to all four resource dimensions (DataSize, KVUpdate,
-//! ComputeGas, and StateGrowth — the last already tested in `frame_state_growth.rs`).
+//! Rex4 extends per-frame budgets to all four resource dimensions (`DataSize`, `KVUpdate`,
+//! `ComputeGas`, and `StateGrowth` — the last already tested in `frame_state_growth.rs`).
 //!
 //! Each inner call frame receives `remaining * 98 / 100` of the parent's remaining budget.
 //! When a frame exceeds its per-frame budget, it reverts (not halts) with ABI-encoded
 //! `MegaLimitExceeded(uint8 kind, uint64 limit)` revert data.
 //!
-//! Behavior differences from StateGrowth:
-//! - **DataSize / KVUpdate**: The reverted child's discardable usage is dropped, protecting the
-//!   parent's budget (same semantics as StateGrowth).
-//! - **ComputeGas**: Gas is always persistent — even after a child frame reverts due to exceeding
+//! Behavior differences from `StateGrowth`:
+//! - **`DataSize` / `KVUpdate`**: The reverted child's discardable usage is dropped, protecting
+//!   the parent's budget (same semantics as `StateGrowth`).
+//! - **`ComputeGas`**: Gas is always persistent — even after a child frame reverts due to exceeding
 //!   its per-frame compute gas budget, the parent's total compute gas still increases by the
 //!   child's actual gas used. Per-frame limits act as "early termination guardrails", not budget
 //!   protection.

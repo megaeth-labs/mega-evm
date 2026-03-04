@@ -35,7 +35,7 @@ use super::LimitCheck;
 /// Each inner call frame receives `remaining * 98 / 100` of the parent's remaining budget.
 /// When a frame exceeds its per-frame budget, it **reverts** (not halts) and gas returns to
 /// the parent frame, which can continue executing:
-/// - **State growth**: Reverted child's growth is discarded (discardable_usage dropped).
+/// - **State growth**: Reverted child's growth is discarded (`discardable_usage` dropped).
 /// - **Data size**: Reverted child's discardable data is dropped, protecting parent's budget.
 /// - **KV updates**: Reverted child's discardable KV ops are dropped, protecting parent's budget.
 /// - **Compute gas**: Reverted child's gas still counts toward parent (gas is always persistent).

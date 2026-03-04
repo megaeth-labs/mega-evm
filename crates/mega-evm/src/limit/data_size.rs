@@ -120,7 +120,7 @@ impl TxRuntimeLimit for DataSizeTracker {
 
     /// Returns whether the data size limit has been exceeded.
     ///
-    /// In Rex4+, checks the current frame's per-frame budget (frame_local: true on exceed).
+    /// In Rex4+, checks the current frame's per-frame budget (`frame_local`: true on exceed).
     /// In pre-Rex4, checks total data size across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
         if self.rex4_enabled {
