@@ -13,8 +13,16 @@ use crate::{JournalInspectTr, MegaSpecId};
 /// its compute gas still counts toward the parent's total. All gas is recorded as
 /// `persistent_usage`, never as `discardable_usage` or `refund`.
 ///
-/// Compute gas is enforced at the TX level only (no per-frame budgets).
-/// The effective limit may be dynamically lowered by gas detention (volatile data access).
+/// In Rex4+, compute gas is enforced at **both** per-frame and TX level:
+/// - **Per-frame**: Each inner call frame receives `remaining * 98 / 100` of the parent's
+///   remaining compute gas budget. When a frame exceeds its budget, it reverts (not halts).
+///   However, since gas is always persistent, the parent's total gas still increases by the
+///   child's actual gas used — per-frame limits act as "early termination guardrails", not
+///   budget protection.
+/// - **TX-level (detained)**: The effective TX limit may be dynamically lowered by gas detention
+///   (volatile data access). This remains a TX-level halt for all specs including Rex4+.
+///
+/// In pre-Rex4, compute gas is enforced at the TX level only.
 ///
 /// Compute gas is NOT recorded via `TxRuntimeLimit` lifecycle hooks. Instead it is
 /// recorded externally via `record_gas_used()` called from:
@@ -25,6 +33,7 @@ use crate::{JournalInspectTr, MegaSpecId};
 #[derive(Debug, Clone)]
 pub(crate) struct ComputeGasTracker {
     rex1_enabled: bool,
+    rex4_enabled: bool,
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
     /// (volatile data access). Always <= `frame_tracker.tx_limit()`.
     detained_limit: u64,
@@ -37,13 +46,19 @@ impl ComputeGasTracker {
             detained_limit: tx_limit,
             frame_tracker: FrameLimitTracker::new(tx_limit),
             rex1_enabled: spec.is_enabled(MegaSpecId::REX1),
+            rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
         }
     }
 
-    /// Pushes a new frame onto the tracker with `u64::MAX` limit.
-    /// Compute gas uses TX-level enforcement only (no per-frame budgets).
+    /// Pushes a new frame onto the tracker.
+    /// In Rex4+, uses the 98/100 budget-based limit derived from parent's remaining budget.
+    /// In pre-Rex4, pushes with `u64::MAX` since TX-level enforcement only.
     fn push_frame(&mut self) {
-        self.frame_tracker.push_frame_with_limit(u64::MAX, ());
+        if self.rex4_enabled {
+            self.frame_tracker.push_frame(());
+        } else {
+            self.frame_tracker.push_frame_with_limit(u64::MAX, ());
+        }
     }
 
     /// Sets the detained compute gas limit to a new value (takes the minimum).
@@ -92,19 +107,23 @@ impl TxRuntimeLimit for ComputeGasTracker {
 
     /// Returns whether the compute gas limit has been exceeded.
     ///
-    /// Checks total usage against the detained limit, which may be dynamically lowered
-    /// by volatile data access.
+    /// In Rex4+, checks the per-frame budget first (frame_local: true on exceed), then falls
+    /// through to the TX-level detained check. Gas detention is always TX-level (frame_local:
+    /// false) across all specs — accessing volatile data caps the whole transaction.
     #[inline]
     fn check_limit(&self) -> LimitCheck {
+        if self.rex4_enabled {
+            let frame_check =
+                self.frame_tracker.exceeds_current_frame_limit(LimitKind::ComputeGas);
+            if frame_check.exceeded_limit() {
+                return frame_check;
+            }
+        }
+        // TX-level detained check (all specs): total usage vs effective limit (min of tx/detained).
         let limit = self.tx_limit();
         let used = self.tx_usage();
         if used > limit {
-            LimitCheck::ExceedsLimit {
-                kind: LimitKind::ComputeGas,
-                frame_local: false,
-                limit,
-                used,
-            }
+            LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, frame_local: false, limit, used }
         } else {
             LimitCheck::WithinLimit
         }

@@ -35,7 +35,11 @@ pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAG
 ///
 /// Uses `FrameLimitTracker` for frame-aware tracking with per-frame budgets (Rex4+).
 ///
-/// Data size is enforced at the TX level only (no per-frame budgets).
+/// In Rex4+, data size is enforced at the per-frame level: each inner call frame receives
+/// `remaining * 98 / 100` of the parent's remaining data size budget.
+/// When a frame exceeds its budget, it reverts (not halts) and its discardable data is dropped,
+/// protecting the parent's budget.
+/// In pre-Rex4, data size is enforced at the TX level only.
 ///
 /// ## Tracked Data Types
 ///
@@ -54,18 +58,27 @@ pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAG
 /// - Contract code: actual deployed bytecode size
 #[derive(Debug, Clone)]
 pub(crate) struct DataSizeTracker {
+    rex4_enabled: bool,
     frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
 impl DataSizeTracker {
-    pub(crate) fn new(_spec: MegaSpecId, tx_limit: u64) -> Self {
-        Self { frame_tracker: FrameLimitTracker::new(tx_limit) }
+    pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
+        Self {
+            rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
+            frame_tracker: FrameLimitTracker::new(tx_limit),
+        }
     }
 
-    /// Pushes a new frame onto the tracker with `u64::MAX` limit.
-    /// Data size uses TX-level enforcement only (no per-frame budgets).
+    /// Pushes a new frame onto the tracker.
+    /// In Rex4+, uses the 98/100 budget-based limit derived from parent's remaining budget.
+    /// In pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced.
     fn push_frame(&mut self, info: CallFrameInfo) {
-        self.frame_tracker.push_frame_with_limit(u64::MAX, info);
+        if self.rex4_enabled {
+            self.frame_tracker.push_frame(info);
+        } else {
+            self.frame_tracker.push_frame_with_limit(u64::MAX, info);
+        }
     }
 
     /// Returns whether there is at least one active frame on the stack.
@@ -107,8 +120,12 @@ impl TxRuntimeLimit for DataSizeTracker {
 
     /// Returns whether the data size limit has been exceeded.
     ///
-    /// Checks total data size across all frames against the TX limit.
+    /// In Rex4+, checks the current frame's per-frame budget (frame_local: true on exceed).
+    /// In pre-Rex4, checks total data size across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
+        if self.rex4_enabled {
+            return self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::DataSize);
+        }
         let used = self.tx_usage();
         let limit = self.frame_tracker.tx_limit();
         if used > limit {

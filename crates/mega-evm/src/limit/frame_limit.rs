@@ -94,8 +94,10 @@ impl<I> FrameLimitTracker<I> {
     pub(crate) fn max_forward_limit(&self) -> u64 {
         match self.frame_stack.last() {
             Some(entry) => {
-                entry.remaining() * constants::rex4::FRAME_LIMIT_NUMERATOR /
-                    constants::rex4::FRAME_LIMIT_DENOMINATOR
+                let remaining = u128::from(entry.remaining());
+                let numerator = u128::from(constants::rex4::FRAME_LIMIT_NUMERATOR);
+                let denominator = u128::from(constants::rex4::FRAME_LIMIT_DENOMINATOR);
+                ((remaining * numerator) / denominator) as u64
             }
             None => self.tx_entry.limit,
         }
