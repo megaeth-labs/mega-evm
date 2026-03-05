@@ -121,6 +121,11 @@ impl TxRuntimeLimit for ComputeGasTracker {
             if frame_check.exceeded_limit() {
                 return frame_check;
             }
+            // Do not early-return on frame WithinLimit:
+            // 1) pre-frame intrinsic compute gas is recorded in `tx_entry`, outside current frame
+            //    budget;
+            // 2) `detained_limit` can be lowered at runtime by volatile-data access.
+            // So TX-level detained check must still run even when frame check is within limit.
         }
         // TX-level detained check (all specs): total usage vs effective limit (min of tx/detained).
         let limit = self.tx_limit();
