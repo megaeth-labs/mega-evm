@@ -141,10 +141,9 @@ impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
         evm_env: EvmEnv<Self::Spec>,
     ) -> Self::Evm<DB, revm::inspector::NoOpInspector> {
         let spec_id = *evm_env.spec_id();
-        let block_number = evm_env.block_env.number.to();
         let runtime_limits = EvmTxRuntimeLimits::from_spec(spec_id);
         let ctx = MegaContext::new(db, spec_id)
-            .with_external_envs(self.external_env_factory.external_envs(block_number))
+            .with_external_envs(self.external_env_factory.external_envs())
             .with_tx(MegaTransaction::default())
             .with_block(evm_env.block_env)
             .with_cfg(evm_env.cfg_env)

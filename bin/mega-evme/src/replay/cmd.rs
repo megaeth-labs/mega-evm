@@ -226,7 +226,7 @@ impl Cmd {
         let transaction_index = preceding_transactions.len() as u64;
         debug!(transaction_index, "Setting up block executor");
 
-        let external_env_factory = self.ext_args.create_external_envs()?;
+        let (external_env_factory, _bucket_capacities) = self.ext_args.create_external_envs()?;
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_env_factory);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             &hardforks,

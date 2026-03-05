@@ -2,6 +2,12 @@
 
 use revm::context::TxEnv;
 
+/// SALT bucket identifier.
+///
+/// Accounts and storage slots are mapped to buckets, which have dynamic capacities
+/// that affect gas costs.
+pub type BucketId = u32;
+
 /// `MegaETH` transaction type used in revm.
 pub type MegaTransaction = op_revm::OpTransaction<TxEnv>;
 /// `MegaETH` transaction builder type used in revm.
