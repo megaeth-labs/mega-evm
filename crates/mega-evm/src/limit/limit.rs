@@ -18,13 +18,29 @@ use super::LimitCheck;
 
 /// Additional limits for the `MegaETH` EVM beyond standard EVM limits.
 ///
-/// This struct coordinates three independent resource limits: compute gas, data size, and
-/// key-value updates. Each limit is tracked separately and enforced during transaction execution.
-/// When a limit is exceeded, the transaction halts with `OutOfGas` and remaining gas is preserved
-/// (not consumed):
-/// - **Compute gas limit**: Transaction halts with `OutOfGas`, remaining gas is preserved
-/// - **Data size limit**: Transaction halts with `OutOfGas`, remaining gas is preserved
-/// - **KV update limit**: Transaction halts with `OutOfGas`, remaining gas is preserved
+/// This struct coordinates four independent resource limits: compute gas, data size,
+/// key-value updates, and state growth. Each limit is tracked separately and enforced during
+/// transaction execution.
+///
+/// ## TX-Level Halt Enforcement
+///
+/// TX-level exceed is represented as `InstructionResult::OutOfGas`.
+/// Remaining gas is rescued and later refunded to the sender.
+/// - **Compute gas**: TX-level check is always active (`min(tx_limit, detained_limit)`).
+/// - **Data size / KV update / State growth**: TX-level check applies in pre-Rex4 specs.
+///
+/// ## Per-Frame Enforcement (Rex4+)
+///
+/// In Rex4+, all four limits use per-frame budgets.
+/// Each inner call frame receives `remaining * 98 / 100` of the parent's remaining budget.
+/// When a frame exceeds its per-frame budget, it **reverts** (not halts) and gas returns to
+/// the parent frame, which can continue executing:
+/// - **State growth**: Reverted child's growth is discarded (`discardable_usage` dropped).
+/// - **Data size**: Reverted child's discardable data is dropped, protecting parent's budget.
+/// - **KV updates**: Reverted child's discardable KV ops are dropped, protecting parent's budget.
+/// - **Compute gas**: Reverted child's gas still counts toward parent (gas is always persistent).
+///   Per-frame limits act as "early termination guardrails" only, not budget protection. Compute
+///   gas still retains TX-level detained checking in all specs.
 ///
 /// # Tracking Details
 ///
@@ -36,12 +52,7 @@ use super::LimitCheck;
 ///   code size
 /// - **KV Updates**: Tracks transaction caller + authority updates, storage writes (when original ≠
 ///   new), and account updates from value transfers and creates
-///
-/// # Default Limits (`MINI_REX`)
-///
-/// - Compute gas limit: 30,000,000 gas
-/// - Data size limit: 3.125 MB (25% of 12.5 MB block limit)
-/// - KV update limit: 1,000 operations
+/// - **State Growth**: Tracks net new accounts + net new storage slots
 #[derive(Debug)]
 pub struct AdditionalLimit {
     /// A flag to indicate if the limit has been exceeded, set when the limit is exceeded. The
@@ -102,9 +113,9 @@ impl AdditionalLimit {
 impl AdditionalLimit {
     /// The [`InstructionResult`] to indicate that the limit is exceeded (TX-level).
     ///
-    /// This constant is used to signal that either the data limit or KV update limit
-    /// has been exceeded during transaction execution. For TX-level exceeds, this is
-    /// `OutOfGas` (Halt, gas consumed). For frame-local exceeds (Rex4+), use
+    /// This constant is used for TX-level additional-limit exceeds.
+    /// For TX-level exceeds, this is `OutOfGas` (halt path, with rescued gas refund).
+    /// For frame-local exceeds (Rex4+), use
     /// `exceeding_instruction_result()` which returns `Revert` instead.
     pub const EXCEEDING_LIMIT_INSTRUCTION_RESULT: InstructionResult = InstructionResult::OutOfGas;
 
@@ -178,8 +189,8 @@ impl AdditionalLimit {
 
     /// Checks if any of the configured limits have been exceeded.
     ///
-    /// This method examines both the data size and KV update limits to determine
-    /// if the current usage exceeds the configured thresholds.
+    /// This method examines data size, KV update, compute gas, and state growth in fixed order
+    /// and returns the first exceeded limit.
     ///
     /// # Returns
     ///
@@ -204,15 +215,16 @@ impl AdditionalLimit {
             return self.has_exceeded_limit;
         }
 
-        // Rex4+ frame-local compute gas check (returns WithinLimit for pre-Rex4)
+        // Per-frame compute gas check (Rex4+) and TX-level detained check (all specs).
         let compute_gas_check = self.compute_gas.check_limit();
         if compute_gas_check.exceeded_limit() {
             self.has_exceeded_limit = compute_gas_check;
             return self.has_exceeded_limit;
         }
 
-        // Frame-local check (Rex4+): check if the current inner frame
-        // has exceeded its per-frame budget before checking the TX-level limits.
+        // State growth check:
+        // - Rex4+: frame-local budget check.
+        // - pre-Rex4: TX-level check inside `state_growth.check_limit()`.
         let state_growth_check = self.state_growth.check_limit();
         if state_growth_check.exceeded_limit() {
             self.has_exceeded_limit = state_growth_check;
