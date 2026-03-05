@@ -3,3 +3,4 @@
 mod access_control;
 mod frame_limits;
 mod frame_state_growth;
+mod remaining_compute_gas;

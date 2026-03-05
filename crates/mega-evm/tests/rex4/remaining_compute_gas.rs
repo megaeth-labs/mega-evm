@@ -1,0 +1,449 @@
+//! Tests for the `RemainingComputeGas` system contract.
+//!
+//! When a contract calls `REMAINING_COMPUTE_GAS_ADDRESS.remainingComputeGas()`,
+//! the interceptor returns the transaction-level remaining compute gas.
+
+use std::convert::Infallible;
+
+use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_sol_types::SolCall;
+use mega_evm::{
+    constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
+    IRemainingComputeGas, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError, REMAINING_COMPUTE_GAS_ADDRESS, REMAINING_COMPUTE_GAS_CODE,
+};
+use revm::{
+    bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, MSTORE, POP, RETURN, STATICCALL, TIMESTAMP},
+    context::{
+        result::{EVMError, ExecutionResult, ResultAndState},
+        tx::TxEnvBuilder,
+        ContextTr, TxEnv,
+    },
+    interpreter::{CallInputs, CallOutcome, InterpreterTypes},
+    Inspector,
+};
+
+// Test addresses
+const CALLER: Address = address!("0000000000000000000000000000000000300000");
+const CONTRACT: Address = address!("0000000000000000000000000000000000300001");
+const CONTRACT2: Address = address!("0000000000000000000000000000000000300002");
+const CONTRACT3: Address = address!("0000000000000000000000000000000000300003");
+
+/// The 4-byte selector for `remainingComputeGas()`.
+const REMAINING_COMPUTE_GAS_SELECTOR: [u8; 4] =
+    IRemainingComputeGas::remainingComputeGasCall::SELECTOR;
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Executes a transaction on the given spec.
+fn transact(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    tx: TxEnv,
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+    let mut context = MegaContext::new(db, spec);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    alloy_evm::Evm::transact_raw(&mut evm, tx)
+}
+
+/// Builds a default transaction calling a contract.
+fn default_tx(to: Address) -> TxEnv {
+    TxEnvBuilder::default().caller(CALLER).call(to).gas_limit(100_000_000).build_fill()
+}
+
+/// Builds a direct transaction calling `remainingComputeGas()` on the target.
+fn direct_query_tx(to: Address) -> TxEnv {
+    TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(to)
+        .gas_limit(100_000_000)
+        .data(Bytes::copy_from_slice(&REMAINING_COMPUTE_GAS_SELECTOR))
+        .build_fill()
+}
+
+/// Decodes return data as `remainingComputeGas()` output.
+fn decode_remaining_compute_gas(result: &ResultAndState<MegaHaltReason>) -> u64 {
+    let output = match &result.result {
+        ExecutionResult::Success { output, .. } => output.data().clone(),
+        _ => panic!("expected success output, got: {:?}", result.result),
+    };
+
+    IRemainingComputeGas::remainingComputeGasCall::abi_decode_returns(&output)
+        .expect("should decode remainingComputeGas output")
+}
+
+/// Builds bytecode that calls `remainingComputeGas()` and returns the ABI result.
+fn call_remaining_compute_gas_and_return(builder: BytecodeBuilder) -> BytecodeBuilder {
+    builder
+        .mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR)
+        .push_number(32_u64) // retSize
+        .push_number(0x20_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(REMAINING_COMPUTE_GAS_ADDRESS)
+        .push_number(100_000_u64) // gas
+        .append(CALL)
+        .append(POP)
+        .push_number(32_u64)
+        .push_number(0x20_u64)
+        .append(RETURN)
+}
+
+/// Builds bytecode that STATICCALLs `remainingComputeGas()` and returns the ABI result.
+fn staticcall_remaining_compute_gas_and_return(builder: BytecodeBuilder) -> BytecodeBuilder {
+    builder
+        .mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR)
+        .push_number(32_u64) // retSize
+        .push_number(0x20_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_address(REMAINING_COMPUTE_GAS_ADDRESS)
+        .push_number(100_000_u64) // gas
+        .append(STATICCALL)
+        .append(POP)
+        .push_number(32_u64)
+        .push_number(0x20_u64)
+        .append(RETURN)
+}
+
+/// Builds bytecode that CALLs a target address with the given gas.
+fn append_call(builder: BytecodeBuilder, target: Address, gas: u64) -> BytecodeBuilder {
+    builder
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(target)
+        .push_number(gas)
+        .append(CALL)
+}
+
+/// Builds bytecode that DELEGATECALLs a target address with the given gas.
+fn append_delegatecall(builder: BytecodeBuilder, target: Address, gas: u64) -> BytecodeBuilder {
+    builder
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_address(target)
+        .push_number(gas)
+        .append(DELEGATECALL)
+}
+
+/// Builds bytecode that CALLCODEs a target address with the given gas.
+fn append_callcode(builder: BytecodeBuilder, target: Address, gas: u64) -> BytecodeBuilder {
+    builder
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(target)
+        .push_number(gas)
+        .append(CALLCODE)
+}
+
+/// Appends a configurable amount of pure compute work (`PUSH1; POP`).
+fn burn_compute(mut builder: BytecodeBuilder, n: u64) -> BytecodeBuilder {
+    for _ in 0..n {
+        builder = builder.push_number(1_u64).append(POP);
+    }
+    builder
+}
+
+// ============================================================================
+// 1. BASIC remainingComputeGas() BEHAVIOR
+// ============================================================================
+
+/// Direct transaction call to system contract should return a positive remaining value.
+#[test]
+fn test_direct_tx_remaining_compute_gas() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
+
+    let result =
+        transact(MegaSpecId::REX4, &mut db, direct_query_tx(REMAINING_COMPUTE_GAS_ADDRESS))
+            .unwrap();
+    assert!(result.result.is_success());
+
+    let remaining = decode_remaining_compute_gas(&result);
+    assert!(remaining > 0, "remaining compute gas should be positive");
+}
+
+/// STATICCALL query should also return a positive remaining value.
+#[test]
+fn test_remaining_compute_gas_staticcall() {
+    let code = staticcall_remaining_compute_gas_and_return(BytecodeBuilder::default()).build();
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, code);
+
+    let result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
+    assert!(result.result.is_success());
+
+    let remaining = decode_remaining_compute_gas(&result);
+    assert!(remaining > 0, "remaining compute gas should be positive for STATICCALL query");
+}
+
+// ============================================================================
+// 2. COMPUTE ACCOUNTING
+// ============================================================================
+
+/// More compute work should reduce `remainingComputeGas()`.
+#[test]
+fn test_remaining_compute_gas_decreases_after_compute_work() {
+    let base_contract_code =
+        call_remaining_compute_gas_and_return(BytecodeBuilder::default()).build();
+
+    let heavy_contract_code =
+        call_remaining_compute_gas_and_return(burn_compute(BytecodeBuilder::default(), 20_000))
+            .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, base_contract_code)
+        .account_code(CONTRACT2, heavy_contract_code);
+
+    let base_result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
+    let heavy_result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT2)).unwrap();
+
+    assert!(base_result.result.is_success());
+    assert!(heavy_result.result.is_success());
+
+    let base_remaining = decode_remaining_compute_gas(&base_result);
+    let heavy_remaining = decode_remaining_compute_gas(&heavy_result);
+    assert!(
+        heavy_remaining < base_remaining,
+        "remaining compute gas should decrease after more compute work: heavy={}, base={}",
+        heavy_remaining,
+        base_remaining
+    );
+}
+
+/// Compute gas in reverted inner calls is still persistent and should reduce remaining value.
+#[test]
+fn test_remaining_compute_gas_persistent_after_inner_revert() {
+    // Base contract: just queries remainingComputeGas and returns it.
+    let base_contract_code =
+        call_remaining_compute_gas_and_return(BytecodeBuilder::default()).build();
+
+    // Reverting child: burns compute then reverts.
+    let reverting_child_code = burn_compute(BytecodeBuilder::default(), 20_000).revert().build();
+
+    // CONTRACT3: call reverting child, then query remainingComputeGas.
+    let caller_code = append_call(BytecodeBuilder::default(), CONTRACT2, 50_000_000).append(POP);
+    let caller_code = call_remaining_compute_gas_and_return(caller_code).build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, base_contract_code)
+        .account_code(CONTRACT2, reverting_child_code)
+        .account_code(CONTRACT3, caller_code);
+
+    let base_result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
+    let after_revert_result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT3)).unwrap();
+
+    assert!(base_result.result.is_success());
+    assert!(after_revert_result.result.is_success());
+
+    let base_remaining = decode_remaining_compute_gas(&base_result);
+    let after_revert_remaining = decode_remaining_compute_gas(&after_revert_result);
+
+    assert!(
+        after_revert_remaining < base_remaining,
+        "remaining should be lower after reverted inner call (compute gas is persistent): \
+         after_revert={}, base={}",
+        after_revert_remaining,
+        base_remaining
+    );
+}
+
+// ============================================================================
+// 3. DETENTION BEHAVIOR
+// ============================================================================
+
+/// Accessing volatile data should reduce effective remaining compute gas via detention.
+#[test]
+fn test_remaining_compute_gas_reflects_detention() {
+    let base_contract_code =
+        call_remaining_compute_gas_and_return(BytecodeBuilder::default()).build();
+
+    let detained_contract_code = call_remaining_compute_gas_and_return(
+        BytecodeBuilder::default().append(TIMESTAMP).append(POP),
+    )
+    .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, base_contract_code)
+        .account_code(CONTRACT2, detained_contract_code);
+
+    let base_result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
+    let detained_result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT2)).unwrap();
+
+    assert!(base_result.result.is_success());
+    assert!(detained_result.result.is_success());
+
+    let base_remaining = decode_remaining_compute_gas(&base_result);
+    let detained_remaining = decode_remaining_compute_gas(&detained_result);
+    assert!(
+        detained_remaining < base_remaining,
+        "detention should reduce effective remaining compute gas: detained={}, base={}",
+        detained_remaining,
+        base_remaining
+    );
+    assert!(
+        detained_remaining <= BLOCK_ENV_ACCESS_COMPUTE_GAS,
+        "detained remaining ({}) should not exceed the BLOCK_ENV_ACCESS_COMPUTE_GAS cap ({})",
+        detained_remaining,
+        BLOCK_ENV_ACCESS_COMPUTE_GAS
+    );
+}
+
+// ============================================================================
+// 4. INSPECTOR VISIBILITY
+// ============================================================================
+
+/// An inspector that records all `call` and `call_end` invocations.
+#[derive(Default)]
+struct CallTrackingInspector {
+    calls: Vec<Address>,
+    call_ends: Vec<Address>,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for CallTrackingInspector {
+    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        self.calls.push(inputs.target_address);
+        None
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, _outcome: &mut CallOutcome) {
+        self.call_ends.push(inputs.target_address);
+    }
+}
+
+/// System contract interception should still be visible to inspectors.
+#[test]
+fn test_inspector_sees_remaining_compute_gas_system_call() {
+    let contract_code = call_remaining_compute_gas_and_return(BytecodeBuilder::default()).build();
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, contract_code);
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX4);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut inspector = CallTrackingInspector::default();
+    let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
+    let mut tx = MegaTransaction::new(default_tx(CONTRACT));
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+
+    assert!(result.result.is_success(), "transaction should succeed");
+
+    assert_eq!(inspector.calls.len(), 2, "inspector should see two call hooks");
+    assert_eq!(inspector.calls[0], CONTRACT, "first call should be top-level contract");
+    assert_eq!(
+        inspector.calls[1], REMAINING_COMPUTE_GAS_ADDRESS,
+        "second call should target remaining compute gas system contract"
+    );
+
+    assert_eq!(inspector.call_ends.len(), 2, "inspector should see two call_end hooks");
+    assert_eq!(
+        inspector.call_ends[0], REMAINING_COMPUTE_GAS_ADDRESS,
+        "first call_end should be remaining compute gas system contract"
+    );
+    assert_eq!(inspector.call_ends[1], CONTRACT, "second call_end should be top-level contract");
+}
+
+// ============================================================================
+// 5. CALL VARIANTS
+// ============================================================================
+
+/// DELEGATECALL to the contract should NOT be intercepted.
+#[test]
+fn test_delegatecall_not_intercepted() {
+    // Parent: DELEGATECALL to REMAINING_COMPUTE_GAS_ADDRESS with selector,
+    // then return success flag as 32-byte word.
+    let parent_code = BytecodeBuilder::default().mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR);
+    let parent_code = append_delegatecall(parent_code, REMAINING_COMPUTE_GAS_ADDRESS, 100_000_u64)
+        .push_number(0_u64)
+        .append(MSTORE)
+        .push_number(32_u64)
+        .push_number(0_u64)
+        .append(RETURN)
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, parent_code)
+        .account_code(REMAINING_COMPUTE_GAS_ADDRESS, REMAINING_COMPUTE_GAS_CODE);
+
+    let result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
+    assert!(result.result.is_success(), "parent tx should succeed");
+
+    let output = result.result.output().expect("should have output");
+    let success_flag = U256::from_be_slice(output);
+    assert_eq!(
+        success_flag,
+        U256::from(0),
+        "DELEGATECALL should fail because it is not intercepted"
+    );
+}
+
+/// CALLCODE to the contract should NOT be intercepted.
+#[test]
+fn test_callcode_not_intercepted() {
+    // Parent: CALLCODE to REMAINING_COMPUTE_GAS_ADDRESS with selector,
+    // then return success flag as 32-byte word.
+    let parent_code = BytecodeBuilder::default().mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR);
+    let parent_code = append_callcode(parent_code, REMAINING_COMPUTE_GAS_ADDRESS, 100_000_u64)
+        .push_number(0_u64)
+        .append(MSTORE)
+        .push_number(32_u64)
+        .push_number(0_u64)
+        .append(RETURN)
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, parent_code)
+        .account_code(REMAINING_COMPUTE_GAS_ADDRESS, REMAINING_COMPUTE_GAS_CODE);
+
+    let result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
+    assert!(result.result.is_success(), "parent tx should succeed");
+
+    let output = result.result.output().expect("should have output");
+    let success_flag = U256::from_be_slice(output);
+    assert_eq!(success_flag, U256::from(0), "CALLCODE should fail because it is not intercepted");
+}
+
+// ============================================================================
+// 6. BACKWARD COMPATIBILITY
+// ============================================================================
+
+/// On Rex3, calling the address has no special interception behavior.
+#[test]
+fn test_pre_rex4_no_interception() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
+
+    let result =
+        transact(MegaSpecId::REX3, &mut db, direct_query_tx(REMAINING_COMPUTE_GAS_ADDRESS))
+            .unwrap();
+
+    assert!(result.result.is_success());
+    let output = result.result.output().expect("success must include output");
+    assert!(output.is_empty(), "REX3 should not intercept this system contract call");
+}

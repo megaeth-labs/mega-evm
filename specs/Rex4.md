@@ -194,6 +194,40 @@ The EVM interception only triggers on CALL and STATICCALL (where `target_address
 For DELEGATECALL and CALLCODE, `target_address` is the caller's own address (not the code address), so the interception does not match.
 The call falls through to the underlying contract code, which reverts with `NotIntercepted()`.
 
+### 3. RemainingComputeGas System Contract
+
+Rex4 introduces the **RemainingComputeGas** system contract at address `0x6342000000000000000000000000000000000005`.
+This contract provides a read-only query for transaction-level remaining compute gas.
+The runtime value is returned by EVM interception.
+
+#### `remainingComputeGas()`
+
+Returns the remaining transaction-level compute gas as `uint64`.
+The value is computed as `max(0, effective_tx_compute_limit - tx_compute_used)`.
+`effective_tx_compute_limit` includes gas detention (`min(tx_limit, detained_limit)`).
+`tx_compute_used` includes all compute usage accumulated so far in the transaction.
+
+This query is TX-scoped.
+It is not a per-frame remaining budget query.
+In Rex4 where per-frame compute budgets exist, the returned value may be larger than the remaining budget of the current call frame.
+The returned value is a snapshot at call time and can change after further execution.
+
+#### Contract Interface
+
+```solidity
+interface IRemainingComputeGas {
+    error NotIntercepted();
+    function remainingComputeGas() external view returns (uint64 remaining);
+}
+```
+
+The contract body reverts with `NotIntercepted()` if called outside the MegaETH EVM.
+
+#### Interception Scope
+
+Interception matches CALL and STATICCALL to `0x6342...0005`.
+DELEGATECALL and CALLCODE are not intercepted for the same reason as `MegaAccessControl`.
+
 ## Inheritance
 
 Rex4 inherits all Rex3 behavior (including increased oracle access compute gas limit, SLOAD-based oracle gas detention, and keyless deploy compute gas tracking) and all features from Rex2, Rex1, Rex, and MiniRex.
@@ -211,6 +245,7 @@ The semantics of Rex4 are inherited from:
 - Revert data encoding: `crates/mega-evm/src/limit/mod.rs` (`MegaLimitExceeded`, `LimitCheck::revert_data()`).
 - TX runtime limits: `crates/mega-evm/src/evm/limit.rs` (`rex4()`).
 - MegaAccessControl system contract: `crates/mega-evm/src/system/control.rs`, `crates/system-contracts/contracts/MegaAccessControl.sol`.
+- RemainingComputeGas system contract: `crates/mega-evm/src/system/remaining_compute_gas.rs`, `crates/system-contracts/contracts/RemainingComputeGas.sol`.
 - Volatile access disable tracking: merged into `VolatileDataAccessTracker` in `crates/mega-evm/src/access/tracker.rs`.
 - Frame init interception: `crates/mega-evm/src/evm/execution.rs` (`frame_init` method).
 - Frame return deactivation: `crates/mega-evm/src/evm/execution.rs` (`frame_return_result` method).

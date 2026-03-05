@@ -153,6 +153,7 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 | High-Precision Timestamp | `...0002`      | Sub-second block timestamp                          |
 | Keyless Deploy           | `...0003`      | Deterministic contract deployment via Nick's Method |
 | MegaAccessControl        | `...0004`      | Access control (disableVolatileDataAccess)          |
+| RemainingComputeGas      | `...0005`      | Query transaction-level remaining compute gas       |
 
 Key design aspects:
 
@@ -248,6 +249,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   This is the standard convention — features are opted-in explicitly.
 - **Use `cargo check` (not `cargo clippy`) for compiler error checking.**
   Use `cargo clippy` only when specifically checking lint warnings.
+- **Before finishing a change, always run full lint and format checks.**
+  Run `cargo clippy --workspace --lib --examples --tests --benches --all-features --locked` before completion.
+  Run `cargo fmt --all --check` before completion.
 - **Keep documentation up to date.**
   When making changes, always check whether related documentation needs updating.
   This includes spec files in `specs/`, docs in `docs/`, and the `CLAUDE.md` itself (e.g., unstable spec marker, spec progression list, system contract table).

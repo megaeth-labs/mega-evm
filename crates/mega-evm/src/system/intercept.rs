@@ -16,8 +16,9 @@ use revm::{
 
 use crate::{
     sandbox::execute_keyless_deploy_call, ExternalEnvTypes, IKeylessDeploy, IMegaAccessControl,
-    IOracle, MegaContext, MegaSpecId, OracleEnv, ACCESS_CONTROL_ADDRESS,
+    IOracle, IRemainingComputeGas, MegaContext, MegaSpecId, OracleEnv, ACCESS_CONTROL_ADDRESS,
     DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    REMAINING_COMPUTE_GAS_ADDRESS,
 };
 
 /// The result of a system contract call interception attempt.
@@ -83,6 +84,13 @@ pub fn dispatch_system_contract_interceptors<DB: Database, ExtEnvs: ExternalEnvT
     // Access Control (Rex4+)
     if spec.is_enabled(AccessControlInterceptor::ACTIVATION_SPEC) {
         if let Some(result) = AccessControlInterceptor::intercept(ctx, call_inputs, depth) {
+            return Some(result);
+        }
+    }
+
+    // Remaining compute gas (Rex4+)
+    if spec.is_enabled(RemainingComputeGasInterceptor::ACTIVATION_SPEC) {
+        if let Some(result) = RemainingComputeGasInterceptor::intercept(ctx, call_inputs, depth) {
             return Some(result);
         }
     }
@@ -250,6 +258,55 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
             let output =
                 IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&disabled);
+
+            return Some(FrameResult::Call(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    Bytes::from(output),
+                    Gas::new(call_inputs.gas_limit),
+                ),
+                call_inputs.return_memory_offset.clone(),
+            )));
+        }
+
+        // Unknown selector — not intercepted.
+        None
+    }
+}
+
+/// Interceptor for remaining compute gas query system contract calls.
+///
+/// Handles:
+/// - `remainingComputeGas()`: returns transaction-level remaining compute gas.
+#[derive(Debug)]
+pub struct RemainingComputeGasInterceptor;
+
+impl RemainingComputeGasInterceptor {
+    /// The minimum spec required for this interceptor to be active.
+    pub const ACTIVATION_SPEC: MegaSpecId = MegaSpecId::REX4;
+}
+
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtEnvs>
+    for RemainingComputeGasInterceptor
+{
+    fn intercept(
+        ctx: &mut MegaContext<DB, ExtEnvs>,
+        call_inputs: &CallInputs,
+        _depth: usize,
+    ) -> InterceptResult {
+        if call_inputs.target_address != REMAINING_COMPUTE_GAS_ADDRESS {
+            return None;
+        }
+
+        let input_bytes = call_inputs.input.bytes(ctx);
+        if IRemainingComputeGas::remainingComputeGasCall::abi_decode(&input_bytes).is_ok() {
+            let (effective_limit, used) = {
+                let additional_limit = ctx.additional_limit.borrow();
+                (additional_limit.compute_gas_limit(), additional_limit.get_usage().compute_gas)
+            };
+            let remaining = effective_limit.saturating_sub(used);
+            let output =
+                IRemainingComputeGas::remainingComputeGasCall::abi_encode_returns(&remaining);
 
             return Some(FrameResult::Call(CallOutcome::new(
                 InterpreterResult::new(
