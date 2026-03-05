@@ -11,7 +11,7 @@ use mega_evm::{
         state::{AccountInfo, Bytecode},
         ExecuteCommitEvm,
     },
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, MegaTxEnvelope,
 };
 use state_test::types::Env;
 
@@ -372,10 +372,41 @@ impl Cmd {
         let caller = if let Some(secret_key) = tx.secret_key {
             recover_address_from_secret_key(&secret_key)?
         } else {
-            // TODO: Implement signature recovery from v, r, s
-            return Err(T8nError::InvalidTransaction(
-                "Missing secret key for transaction".to_string(),
-            ));
+            // Recover address from signature
+            let envelope =
+                tx.to_envelope().map_err(|e| T8nError::InvalidTransaction(e.to_string()))?;
+
+            match envelope {
+                MegaTxEnvelope::Legacy(signed) => signed.recover_signer().map_err(|e| {
+                    T8nError::InvalidTransaction(format!(
+                        "Failed to recover signer from legacy signature: {}",
+                        e
+                    ))
+                })?,
+                MegaTxEnvelope::Eip2930(signed) => signed.recover_signer().map_err(|e| {
+                    T8nError::InvalidTransaction(format!(
+                        "Failed to recover signer from EIP-2930 signature: {}",
+                        e
+                    ))
+                })?,
+                MegaTxEnvelope::Eip1559(signed) => signed.recover_signer().map_err(|e| {
+                    T8nError::InvalidTransaction(format!(
+                        "Failed to recover signer from EIP-1559 signature: {}",
+                        e
+                    ))
+                })?,
+                MegaTxEnvelope::Eip7702(signed) => signed.recover_signer().map_err(|e| {
+                    T8nError::InvalidTransaction(format!(
+                        "Failed to recover signer from EIP-7702 signature: {}",
+                        e
+                    ))
+                })?,
+                _ => {
+                    return Err(T8nError::InvalidTransaction(
+                        "Unsupported transaction type for signature recovery".to_string(),
+                    ))
+                }
+            }
         };
 
         Ok(TxEnv {
