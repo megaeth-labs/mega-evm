@@ -43,6 +43,18 @@ fn execute_transaction_with_data(
     target: alloy_primitives::Address,
     data: Bytes,
 ) -> revm::context::result::ExecutionResult<mega_evm::MegaHaltReason> {
+    execute_transaction_with_data_and_value(spec, db, external_envs, target, data, U256::ZERO)
+}
+
+/// Helper function to execute a transaction with calldata and value.
+fn execute_transaction_with_data_and_value(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    external_envs: &TestExternalEnvs<std::convert::Infallible>,
+    target: alloy_primitives::Address,
+    data: Bytes,
+    value: U256,
+) -> revm::context::result::ExecutionResult<mega_evm::MegaHaltReason> {
     let mut context = MegaContext::new(db, spec).with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -53,7 +65,7 @@ fn execute_transaction_with_data(
         caller: CALLER,
         kind: TxKind::Call(target),
         data,
-        value: U256::ZERO,
+        value,
         gas_limit: 1_000_000_000_000,
         gas_price: 0,
         ..Default::default()
@@ -296,4 +308,62 @@ fn test_on_hint_direct_oracle_call() {
     assert_eq!(hints[0].from, CALLER, "Hint from should be the transaction caller");
     assert_eq!(hints[0].topic, user_topic, "Hint topic should match");
     assert_eq!(hints[0].data, hint_data, "Hint data should match");
+}
+
+/// In Rex2, value-bearing `sendHint` still triggers `on_hint`.
+/// The transaction later reverts because the Solidity function is non-payable.
+#[test]
+fn test_on_hint_with_non_zero_value_on_rex2_still_calls_hint() {
+    let user_topic = B256::from_slice(&[0x42u8; 32]);
+    let hint_data = bytes!("deadbeef");
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000));
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2);
+
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+
+    let calldata = encode_send_hint_calldata(user_topic, &hint_data);
+    let result = execute_transaction_with_data_and_value(
+        MegaSpecId::REX2,
+        &mut db,
+        &external_envs,
+        ORACLE_CONTRACT_ADDRESS,
+        Bytes::from(calldata),
+        U256::from(1_u64),
+    );
+
+    assert!(!result.is_success(), "sendHint with non-zero value should revert, got: {:?}", result);
+    let hints = external_envs.recorded_hints();
+    assert_eq!(hints.len(), 1, "Rex2 should still call on_hint for value-bearing sendHint");
+    assert_eq!(hints[0].from, CALLER, "Hint from should be the transaction caller");
+    assert_eq!(hints[0].topic, user_topic, "Hint topic should match");
+    assert_eq!(hints[0].data, hint_data, "Hint data should match");
+}
+
+/// In Rex4, value-bearing `sendHint` is rejected by interceptor before `on_hint`.
+#[test]
+fn test_on_hint_with_non_zero_value_on_rex4_reverts_and_not_called() {
+    let user_topic = B256::from_slice(&[0x42u8; 32]);
+    let hint_data = bytes!("deadbeef");
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000));
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2);
+
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+
+    let calldata = encode_send_hint_calldata(user_topic, &hint_data);
+    let result = execute_transaction_with_data_and_value(
+        MegaSpecId::REX4,
+        &mut db,
+        &external_envs,
+        ORACLE_CONTRACT_ADDRESS,
+        Bytes::from(calldata),
+        U256::from(1_u64),
+    );
+
+    assert!(!result.is_success(), "sendHint with non-zero value should revert, got: {:?}", result);
+    let hints = external_envs.recorded_hints();
+    assert!(hints.is_empty(), "Rex4 must reject value-bearing sendHint before calling on_hint");
 }

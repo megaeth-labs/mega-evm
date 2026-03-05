@@ -2,15 +2,15 @@
 pragma solidity ^0.8.0;
 
 import {Script} from "forge-std/Script.sol";
-import {RemainingComputeGas} from "../contracts/RemainingComputeGas.sol";
+import {MegaLimitControl} from "../contracts/MegaLimitControl.sol";
 
-/// @title SaveRemainingComputeGasBytecode
-/// @notice Script to deploy RemainingComputeGas contract and save deployed bytecode to a file
-contract SaveRemainingComputeGasBytecode is Script {
+/// @title SaveMegaLimitControlBytecode
+/// @notice Script to deploy MegaLimitControl contract and save deployed bytecode to a file
+contract SaveMegaLimitControlBytecode is Script {
     function run() public {
         vm.startBroadcast();
 
-        RemainingComputeGas contractImpl = new RemainingComputeGas();
+        MegaLimitControl contractImpl = new MegaLimitControl();
 
         vm.stopBroadcast();
 
@@ -35,6 +35,6 @@ contract SaveRemainingComputeGasBytecode is Script {
             '"\n',
             "}"
         );
-        vm.writeFile("artifacts/RemainingComputeGas.json", json);
+        vm.writeFile("artifacts/MegaLimitControl.json", json);
     }
 }

@@ -16,9 +16,9 @@ use revm::{
 
 use crate::{
     sandbox::execute_keyless_deploy_call, ExternalEnvTypes, IKeylessDeploy, IMegaAccessControl,
-    IOracle, IRemainingComputeGas, MegaContext, MegaSpecId, OracleEnv, ACCESS_CONTROL_ADDRESS,
-    DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, ORACLE_CONTRACT_ADDRESS,
-    REMAINING_COMPUTE_GAS_ADDRESS,
+    IMegaLimitControl, IOracle, MegaContext, MegaSpecId, OracleEnv, ACCESS_CONTROL_ADDRESS,
+    DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, LIMIT_CONTROL_ADDRESS,
+    ORACLE_CONTRACT_ADDRESS,
 };
 
 /// The result of a system contract call interception attempt.
@@ -88,9 +88,9 @@ pub fn dispatch_system_contract_interceptors<DB: Database, ExtEnvs: ExternalEnvT
         }
     }
 
-    // Remaining compute gas (Rex4+)
-    if spec.is_enabled(RemainingComputeGasInterceptor::ACTIVATION_SPEC) {
-        if let Some(result) = RemainingComputeGasInterceptor::intercept(ctx, call_inputs, depth) {
+    // MegaLimitControl (Rex4+)
+    if spec.is_enabled(LimitControlInterceptor::ACTIVATION_SPEC) {
+        if let Some(result) = LimitControlInterceptor::intercept(ctx, call_inputs, depth) {
             return Some(result);
         }
     }
@@ -98,10 +98,29 @@ pub fn dispatch_system_contract_interceptors<DB: Database, ExtEnvs: ExternalEnvT
     None
 }
 
+/// Returns a synthetic revert result when the call carries non-zero transferred value.
+///
+/// This is used by view-style system contract interceptors to prevent silently accepting
+/// value-bearing calls.
+fn reject_non_zero_transfer(call_inputs: &CallInputs) -> InterceptResult {
+    if call_inputs.transfer_value().is_some_and(|value| !value.is_zero()) {
+        return Some(FrameResult::Call(CallOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::Revert,
+                Bytes::new(),
+                Gas::new(call_inputs.gas_limit),
+            ),
+            call_inputs.return_memory_offset.clone(),
+        )));
+    }
+    None
+}
+
 /// Interceptor for oracle hint calls (`IOracle::sendHint`).
 ///
 /// When a call to the oracle contract matches the `sendHint(bytes32,bytes)` selector, the
 /// hint is forwarded to the oracle service backend via `OracleEnv::on_hint`.
+/// In Rex4+, value-bearing calls are rejected before `on_hint` side-effects.
 /// Execution continues normally (no early return).
 #[derive(Debug)]
 pub struct OracleHintInterceptor;
@@ -125,6 +144,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         let input_bytes = call_inputs.input.bytes(ctx);
         if let Ok(call) = IOracle::sendHintCall::abi_decode(&input_bytes) {
+            if ctx.spec.is_enabled(MegaSpecId::REX4) {
+                if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                    return Some(result);
+                }
+            }
             ctx.oracle_env.borrow().on_hint(call_inputs.caller, call.topic, call.data);
         }
 
@@ -212,6 +236,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         // disableVolatileDataAccess()
         if IMegaAccessControl::disableVolatileDataAccessCall::abi_decode(&input_bytes).is_ok() {
+            if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                return Some(result);
+            }
             ctx.volatile_data_tracker.borrow_mut().disable_access(caller_journal_depth);
 
             return Some(FrameResult::Call(CallOutcome::new(
@@ -226,6 +253,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         // enableVolatileDataAccess()
         if IMegaAccessControl::enableVolatileDataAccessCall::abi_decode(&input_bytes).is_ok() {
+            if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                return Some(result);
+            }
             let success =
                 ctx.volatile_data_tracker.borrow_mut().enable_access(caller_journal_depth);
 
@@ -253,6 +283,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         // isVolatileDataAccessDisabled()
         if IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_decode(&input_bytes).is_ok() {
+            if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                return Some(result);
+            }
             let disabled =
                 ctx.volatile_data_tracker.borrow().volatile_access_disabled(caller_journal_depth);
 
@@ -274,39 +307,41 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
     }
 }
 
-/// Interceptor for remaining compute gas query system contract calls.
+/// Interceptor for `MegaLimitControl` system contract calls.
 ///
 /// Handles:
 /// - `remainingComputeGas()`: returns transaction-level remaining compute gas.
 #[derive(Debug)]
-pub struct RemainingComputeGasInterceptor;
+pub struct LimitControlInterceptor;
 
-impl RemainingComputeGasInterceptor {
+impl LimitControlInterceptor {
     /// The minimum spec required for this interceptor to be active.
     pub const ACTIVATION_SPEC: MegaSpecId = MegaSpecId::REX4;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtEnvs>
-    for RemainingComputeGasInterceptor
+    for LimitControlInterceptor
 {
     fn intercept(
         ctx: &mut MegaContext<DB, ExtEnvs>,
         call_inputs: &CallInputs,
         _depth: usize,
     ) -> InterceptResult {
-        if call_inputs.target_address != REMAINING_COMPUTE_GAS_ADDRESS {
+        if call_inputs.target_address != LIMIT_CONTROL_ADDRESS {
             return None;
         }
 
         let input_bytes = call_inputs.input.bytes(ctx);
-        if IRemainingComputeGas::remainingComputeGasCall::abi_decode(&input_bytes).is_ok() {
+        if IMegaLimitControl::remainingComputeGasCall::abi_decode(&input_bytes).is_ok() {
+            if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                return Some(result);
+            }
             let (effective_limit, used) = {
                 let additional_limit = ctx.additional_limit.borrow();
                 (additional_limit.compute_gas_limit(), additional_limit.get_usage().compute_gas)
             };
             let remaining = effective_limit.saturating_sub(used);
-            let output =
-                IRemainingComputeGas::remainingComputeGasCall::abi_encode_returns(&remaining);
+            let output = IMegaLimitControl::remainingComputeGasCall::abi_encode_returns(&remaining);
 
             return Some(FrameResult::Call(CallOutcome::new(
                 InterpreterResult::new(

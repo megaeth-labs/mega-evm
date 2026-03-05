@@ -1,17 +1,17 @@
-//! Tests for the `RemainingComputeGas` system contract.
+//! Tests for the `MegaLimitControl` system contract.
 //!
-//! When a contract calls `REMAINING_COMPUTE_GAS_ADDRESS.remainingComputeGas()`,
+//! When a contract calls `LIMIT_CONTROL_ADDRESS.remainingComputeGas()`,
 //! the interceptor returns the transaction-level remaining compute gas.
 
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IRemainingComputeGas, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, REMAINING_COMPUTE_GAS_ADDRESS, REMAINING_COMPUTE_GAS_CODE,
+    EvmTxRuntimeLimits, IMegaLimitControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionError, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, MSTORE, POP, RETURN, STATICCALL, TIMESTAMP},
@@ -20,6 +20,7 @@ use revm::{
         tx::TxEnvBuilder,
         ContextTr, TxEnv,
     },
+    handler::EvmTr,
     interpreter::{CallInputs, CallOutcome, InterpreterTypes},
     Inspector,
 };
@@ -32,7 +33,8 @@ const CONTRACT3: Address = address!("0000000000000000000000000000000000300003");
 
 /// The 4-byte selector for `remainingComputeGas()`.
 const REMAINING_COMPUTE_GAS_SELECTOR: [u8; 4] =
-    IRemainingComputeGas::remainingComputeGasCall::SELECTOR;
+    IMegaLimitControl::remainingComputeGasCall::SELECTOR;
+const NOT_INTERCEPTED_SELECTOR: [u8; 4] = IMegaLimitControl::NotIntercepted::SELECTOR;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -62,12 +64,53 @@ fn default_tx(to: Address) -> TxEnv {
 
 /// Builds a direct transaction calling `remainingComputeGas()` on the target.
 fn direct_query_tx(to: Address) -> TxEnv {
+    direct_query_tx_with_value(to, U256::ZERO)
+}
+
+/// Builds a direct transaction calling `remainingComputeGas()` with a custom call value.
+fn direct_query_tx_with_value(to: Address, value: U256) -> TxEnv {
+    TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(to)
+        .value(value)
+        .gas_limit(100_000_000)
+        .data(Bytes::copy_from_slice(&REMAINING_COMPUTE_GAS_SELECTOR))
+        .build_fill()
+}
+
+/// Builds a direct transaction calling `to` with custom calldata.
+fn direct_tx_with_data(to: Address, data: &[u8]) -> TxEnv {
     TxEnvBuilder::default()
         .caller(CALLER)
         .call(to)
         .gas_limit(100_000_000)
-        .data(Bytes::copy_from_slice(&REMAINING_COMPUTE_GAS_SELECTOR))
+        .data(Bytes::copy_from_slice(data))
         .build_fill()
+}
+
+/// Executes a transaction on the given spec with custom tx compute gas limit.
+fn transact_with_compute_limit(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    tx_compute_gas_limit: u64,
+    tx: TxEnv,
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
+{
+    let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(tx_compute_gas_limit),
+    );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+    let additional_limit = evm.ctx_ref().additional_limit.borrow();
+    let usage = additional_limit.get_usage().compute_gas;
+    let effective_limit = additional_limit.compute_gas_limit();
+    Ok((result, usage, effective_limit))
 }
 
 /// Decodes return data as `remainingComputeGas()` output.
@@ -77,7 +120,7 @@ fn decode_remaining_compute_gas(result: &ResultAndState<MegaHaltReason>) -> u64 
         _ => panic!("expected success output, got: {:?}", result.result),
     };
 
-    IRemainingComputeGas::remainingComputeGasCall::abi_decode_returns(&output)
+    IMegaLimitControl::remainingComputeGasCall::abi_decode_returns(&output)
         .expect("should decode remainingComputeGas output")
 }
 
@@ -90,7 +133,7 @@ fn call_remaining_compute_gas_and_return(builder: BytecodeBuilder) -> BytecodeBu
         .push_number(4_u64) // argsSize
         .push_number(0_u64) // argsOffset
         .push_number(0_u64) // value
-        .push_address(REMAINING_COMPUTE_GAS_ADDRESS)
+        .push_address(LIMIT_CONTROL_ADDRESS)
         .push_number(100_000_u64) // gas
         .append(CALL)
         .append(POP)
@@ -107,7 +150,7 @@ fn staticcall_remaining_compute_gas_and_return(builder: BytecodeBuilder) -> Byte
         .push_number(0x20_u64) // retOffset
         .push_number(4_u64) // argsSize
         .push_number(0_u64) // argsOffset
-        .push_address(REMAINING_COMPUTE_GAS_ADDRESS)
+        .push_address(LIMIT_CONTROL_ADDRESS)
         .push_number(100_000_u64) // gas
         .append(STATICCALL)
         .append(POP)
@@ -172,12 +215,62 @@ fn test_direct_tx_remaining_compute_gas() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
 
     let result =
-        transact(MegaSpecId::REX4, &mut db, direct_query_tx(REMAINING_COMPUTE_GAS_ADDRESS))
-            .unwrap();
+        transact(MegaSpecId::REX4, &mut db, direct_query_tx(LIMIT_CONTROL_ADDRESS)).unwrap();
     assert!(result.result.is_success());
 
     let remaining = decode_remaining_compute_gas(&result);
     assert!(remaining > 0, "remaining compute gas should be positive");
+}
+
+/// Unknown selector should not be intercepted and should fall through to contract fallback revert.
+#[test]
+fn test_direct_tx_unknown_selector_falls_through_and_reverts_not_intercepted() {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
+
+    let result = transact(
+        MegaSpecId::REX4,
+        &mut db,
+        direct_tx_with_data(LIMIT_CONTROL_ADDRESS, &[0xde, 0xad, 0xbe, 0xef]),
+    )
+    .unwrap();
+    assert!(
+        !result.result.is_success(),
+        "unknown selector should fall through and revert, got: {:?}",
+        result.result
+    );
+
+    let output = result.result.output().expect("revert should include output");
+    assert_eq!(
+        output.len(),
+        4,
+        "fallback should return only NotIntercepted selector, got {} bytes",
+        output.len()
+    );
+    assert_eq!(
+        &output[..4],
+        &NOT_INTERCEPTED_SELECTOR,
+        "unknown selector should revert with NotIntercepted()"
+    );
+}
+
+/// Direct transaction query with non-zero value should revert.
+#[test]
+fn test_direct_tx_remaining_compute_gas_with_value_reverts() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
+
+    let result = transact(
+        MegaSpecId::REX4,
+        &mut db,
+        direct_query_tx_with_value(LIMIT_CONTROL_ADDRESS, U256::from(1_u64)),
+    )
+    .unwrap();
+    assert!(
+        !result.result.is_success(),
+        "Direct TX query with non-zero value should revert, got: {:?}",
+        result.result
+    );
 }
 
 /// STATICCALL query should also return a positive remaining value.
@@ -227,6 +320,30 @@ fn test_remaining_compute_gas_decreases_after_compute_work() {
         "remaining compute gas should decrease after more compute work: heavy={}, base={}",
         heavy_remaining,
         base_remaining
+    );
+}
+
+/// With a fixed tx compute limit, returned value should match `effective_limit - used` exactly.
+#[test]
+fn test_remaining_compute_gas_exact_value_matches_tracker() {
+    let tx_limit = 1_000_000_u64;
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
+
+    let (result, used_compute, effective_limit) = transact_with_compute_limit(
+        MegaSpecId::REX4,
+        &mut db,
+        tx_limit,
+        direct_query_tx(LIMIT_CONTROL_ADDRESS),
+    )
+    .unwrap();
+    assert!(result.result.is_success(), "direct query should succeed");
+
+    let remaining = decode_remaining_compute_gas(&result);
+    let expected_remaining = effective_limit.saturating_sub(used_compute);
+    assert_eq!(
+        remaining, expected_remaining,
+        "remainingComputeGas should equal effective_limit - used (limit={}, used={})",
+        effective_limit, used_compute
     );
 }
 
@@ -356,13 +473,13 @@ fn test_inspector_sees_remaining_compute_gas_system_call() {
     assert_eq!(inspector.calls.len(), 2, "inspector should see two call hooks");
     assert_eq!(inspector.calls[0], CONTRACT, "first call should be top-level contract");
     assert_eq!(
-        inspector.calls[1], REMAINING_COMPUTE_GAS_ADDRESS,
+        inspector.calls[1], LIMIT_CONTROL_ADDRESS,
         "second call should target remaining compute gas system contract"
     );
 
     assert_eq!(inspector.call_ends.len(), 2, "inspector should see two call_end hooks");
     assert_eq!(
-        inspector.call_ends[0], REMAINING_COMPUTE_GAS_ADDRESS,
+        inspector.call_ends[0], LIMIT_CONTROL_ADDRESS,
         "first call_end should be remaining compute gas system contract"
     );
     assert_eq!(inspector.call_ends[1], CONTRACT, "second call_end should be top-level contract");
@@ -375,10 +492,10 @@ fn test_inspector_sees_remaining_compute_gas_system_call() {
 /// DELEGATECALL to the contract should NOT be intercepted.
 #[test]
 fn test_delegatecall_not_intercepted() {
-    // Parent: DELEGATECALL to REMAINING_COMPUTE_GAS_ADDRESS with selector,
+    // Parent: DELEGATECALL to LIMIT_CONTROL_ADDRESS with selector,
     // then return success flag as 32-byte word.
     let parent_code = BytecodeBuilder::default().mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR);
-    let parent_code = append_delegatecall(parent_code, REMAINING_COMPUTE_GAS_ADDRESS, 100_000_u64)
+    let parent_code = append_delegatecall(parent_code, LIMIT_CONTROL_ADDRESS, 100_000_u64)
         .push_number(0_u64)
         .append(MSTORE)
         .push_number(32_u64)
@@ -389,7 +506,7 @@ fn test_delegatecall_not_intercepted() {
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000))
         .account_code(CONTRACT, parent_code)
-        .account_code(REMAINING_COMPUTE_GAS_ADDRESS, REMAINING_COMPUTE_GAS_CODE);
+        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
 
     let result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
     assert!(result.result.is_success(), "parent tx should succeed");
@@ -406,10 +523,10 @@ fn test_delegatecall_not_intercepted() {
 /// CALLCODE to the contract should NOT be intercepted.
 #[test]
 fn test_callcode_not_intercepted() {
-    // Parent: CALLCODE to REMAINING_COMPUTE_GAS_ADDRESS with selector,
+    // Parent: CALLCODE to LIMIT_CONTROL_ADDRESS with selector,
     // then return success flag as 32-byte word.
     let parent_code = BytecodeBuilder::default().mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR);
-    let parent_code = append_callcode(parent_code, REMAINING_COMPUTE_GAS_ADDRESS, 100_000_u64)
+    let parent_code = append_callcode(parent_code, LIMIT_CONTROL_ADDRESS, 100_000_u64)
         .push_number(0_u64)
         .append(MSTORE)
         .push_number(32_u64)
@@ -420,7 +537,7 @@ fn test_callcode_not_intercepted() {
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000))
         .account_code(CONTRACT, parent_code)
-        .account_code(REMAINING_COMPUTE_GAS_ADDRESS, REMAINING_COMPUTE_GAS_CODE);
+        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
 
     let result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
     assert!(result.result.is_success(), "parent tx should succeed");
@@ -440,8 +557,7 @@ fn test_pre_rex4_no_interception() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
 
     let result =
-        transact(MegaSpecId::REX3, &mut db, direct_query_tx(REMAINING_COMPUTE_GAS_ADDRESS))
-            .unwrap();
+        transact(MegaSpecId::REX3, &mut db, direct_query_tx(LIMIT_CONTROL_ADDRESS)).unwrap();
 
     assert!(result.result.is_success());
     let output = result.result.output().expect("success must include output");

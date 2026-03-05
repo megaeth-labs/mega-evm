@@ -153,7 +153,7 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 | High-Precision Timestamp | `...0002`      | Sub-second block timestamp                          |
 | Keyless Deploy           | `...0003`      | Deterministic contract deployment via Nick's Method |
 | MegaAccessControl        | `...0004`      | Access control (disableVolatileDataAccess)          |
-| RemainingComputeGas      | `...0005`      | Query transaction-level remaining compute gas       |
+| MegaLimitControl         | `...0005`      | Limit query/control (currently remainingComputeGas) |
 
 Key design aspects:
 
@@ -239,6 +239,13 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Never change what an existing spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
+- **Define value-transfer policy explicitly for system contract interceptors.**
+  For read-only or control methods, reject calls with non-zero `transfer_value` in the interceptor.
+  If a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
+- **Do not intercept unknown selectors for system contracts.**
+  Unknown selectors should fall through to on-chain bytecode and revert with a stable custom error such as `NotIntercepted()`.
+- **System contract interceptor tests must cover boundary behaviors.**
+  Include tests for normal intercepted path, non-zero value behavior, unknown selector fallback, and CALL vs DELEGATECALL/CALLCODE interception boundaries.
 - **Respect `no_std` in `mega-evm` crate.**
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.

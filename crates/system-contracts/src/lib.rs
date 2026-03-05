@@ -47,13 +47,13 @@ pub mod access_control {
     );
 }
 
-/// `RemainingComputeGas` contract bytecode and interface.
+/// `MegaLimitControl` contract bytecode and interface.
 ///
 /// Bytecode constants are generated at build time from the versioned artifacts
 /// in the `artifacts/` directory. Interface bindings are generated from the
 /// Solidity source.
-pub mod remaining_compute_gas {
-    include!(concat!(env!("OUT_DIR"), "/remaining_compute_gas_artifacts.rs"));
+pub mod limit_control {
+    include!(concat!(env!("OUT_DIR"), "/limit_control_artifacts.rs"));
 
-    alloy_sol_types::sol!("contracts/interfaces/IRemainingComputeGas.sol");
+    alloy_sol_types::sol!("contracts/interfaces/IMegaLimitControl.sol");
 }

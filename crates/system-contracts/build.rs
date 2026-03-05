@@ -202,10 +202,9 @@ fn main() {
             output_file: "access_control_artifacts.rs",
         },
         ContractConfig {
-            name: "RemainingComputeGas",
-            script_path:
-                "scripts/RemainingComputeGasBytecode.s.sol:SaveRemainingComputeGasBytecode",
-            output_file: "remaining_compute_gas_artifacts.rs",
+            name: "MegaLimitControl",
+            script_path: "scripts/MegaLimitControlBytecode.s.sol:SaveMegaLimitControlBytecode",
+            output_file: "limit_control_artifacts.rs",
         },
     ];
 

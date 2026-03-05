@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-/// @title IRemainingComputeGas
-/// @notice Interface for querying transaction-level remaining compute gas.
+/// @title IMegaLimitControl
+/// @notice Interface for limit-related control and query methods.
 /// @dev The call is intercepted by MegaETH EVM.
-interface IRemainingComputeGas {
+interface IMegaLimitControl {
     /// @notice The call was not intercepted by the EVM (called on unsupported network).
     error NotIntercepted();
 
