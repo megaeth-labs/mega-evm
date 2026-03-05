@@ -10,7 +10,7 @@ use mega_evm::{
         context::{block::BlockEnv, cfg::CfgEnv},
         primitives::eip4844,
     },
-    MegaContext, MegaSpecId, TestExternalEnvs,
+    BucketId, MegaContext, MegaSpecId, TestExternalEnvs,
 };
 use tracing::{debug, trace};
 
@@ -127,18 +127,19 @@ pub struct ExtEnvArgs {
 }
 
 impl ExtEnvArgs {
-    /// Creates [`TestExternalEnvs`].
-    pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
-        let mut external_envs = TestExternalEnvs::new();
+    /// Creates [`TestExternalEnvs`] and returns bucket capacity configuration.
+    pub fn create_external_envs(&self) -> Result<(TestExternalEnvs, Vec<(BucketId, u64)>)> {
+        let external_envs = TestExternalEnvs::new();
 
-        // Parse and configure bucket capacities
+        // Parse bucket capacities
+        let mut bucket_capacities = Vec::new();
         for bucket_capacity_str in &self.bucket_capacity {
             let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
-            external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
+            bucket_capacities.push((bucket_id, capacity));
         }
-        debug!(external_envs = ?external_envs, "Evm TestExternalEnvs created");
+        debug!(external_envs = ?external_envs, bucket_capacities = ?bucket_capacities, "Evm TestExternalEnvs created");
 
-        Ok(external_envs)
+        Ok((external_envs, bucket_capacities))
     }
 }
 
@@ -174,8 +175,8 @@ impl EnvArgs {
         self.block.create_block_env()
     }
 
-    /// Creates [`TestExternalEnvs`].
-    pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
+    /// Creates [`TestExternalEnvs`] and returns bucket capacity configuration.
+    pub fn create_external_envs(&self) -> Result<(TestExternalEnvs, Vec<(BucketId, u64)>)> {
         self.ext.create_external_envs()
     }
 
@@ -186,7 +187,7 @@ impl EnvArgs {
     ) -> Result<MegaContext<DB, TestExternalEnvs>> {
         let cfg = self.create_cfg_env()?;
         let block = self.create_block_env()?;
-        let external_envs = self.create_external_envs()?;
+        let (external_envs, _bucket_capacities) = self.create_external_envs()?;
 
         Ok(MegaContext::new(db, cfg.spec)
             .with_cfg(cfg)

@@ -8,6 +8,8 @@ use revm::{
     state::{Account, AccountInfo, Bytecode},
 };
 
+use crate::constants::MIN_BUCKET_SIZE;
+
 /// A memory database for testing purposes.
 #[derive(Debug, Default, Clone, derive_more::Deref, derive_more::DerefMut)]
 pub struct MemoryDatabase {
@@ -99,6 +101,15 @@ impl revm::Database for MemoryDatabase {
             fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error>;
         }
     }
+
+    fn salt_bucket_capacity(
+        &self,
+        _address: Address,
+        _index: Option<U256>,
+    ) -> Result<(usize, u64), Self::Error> {
+        // For testing, return minimum bucket size (multiplier = 1)
+        Ok((0, MIN_BUCKET_SIZE as u64))
+    }
 }
 
 impl revm::DatabaseCommit for MemoryDatabase {
@@ -166,6 +177,14 @@ impl revm::Database for ErrorInjectingDatabase {
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         self.inner.block_hash(number).map_err(|e| match e {})
+    }
+
+    fn salt_bucket_capacity(
+        &self,
+        address: Address,
+        index: Option<U256>,
+    ) -> Result<(usize, u64), Self::Error> {
+        self.inner.salt_bucket_capacity(address, index).map_err(|e| match e {})
     }
 }
 

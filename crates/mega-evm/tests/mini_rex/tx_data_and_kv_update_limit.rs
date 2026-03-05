@@ -33,9 +33,9 @@ use revm::{
 /// Executes a transaction on the `MegaETH` EVM with configurable data limits.
 ///
 /// Returns the execution result, generated data size, and number of key-value updates.
-fn transact(
+fn transact<DB: revm::Database<Error = Infallible> + core::fmt::Debug>(
     spec: MegaSpecId,
-    db: &mut CacheDB<EmptyDB>,
+    db: &mut DB,
     data_limit: u64,
     kv_update_limit: u64,
     tx: TxEnv,
@@ -1221,6 +1221,7 @@ fn test_child_write_and_refund_both_discarded_on_revert() {
             ..Default::default()
         },
     );
+    let mut db = db;
 
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(100_000_000).build_fill();
 
@@ -1269,6 +1270,7 @@ fn test_tx_intrinsic_data_survives_top_level_revert() {
             ..Default::default()
         },
     );
+    let mut db = db;
 
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(100_000_000).build_fill();
 
@@ -1313,6 +1315,7 @@ fn test_check_limit_priority_data_size_before_kv_update() {
             ..Default::default()
         },
     );
+    let mut db = db;
 
     let tx = TxEnvBuilder::new().caller(CALLER).call(CALLEE).gas_limit(100_000_000).build_fill();
 

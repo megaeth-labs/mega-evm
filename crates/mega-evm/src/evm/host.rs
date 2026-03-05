@@ -222,7 +222,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn sstore_set_storage_gas(&mut self, address: Address, key: U256) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        let result = self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(address, key);
+        let result =
+            self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(self.db(), address, key);
         result
             .map_err(|e| {
                 *self.error() = Err(ContextError::Custom(format!("{e}")));
@@ -233,7 +234,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn new_account_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        let result = self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(address);
+        let result = self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(self.db(), address);
         result
             .map_err(|e| {
                 *self.error() = Err(ContextError::Custom(format!("{e}")));
@@ -244,7 +245,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn create_contract_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
-        let result = self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(address);
+        let result =
+            self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(self.db(), address);
         result
             .map_err(|e| {
                 *self.error() = Err(ContextError::Custom(format!("{e}")));

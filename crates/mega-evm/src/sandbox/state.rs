@@ -12,7 +12,7 @@ use std::{
     string::{String, ToString},
 };
 
-use alloy_primitives::{map::HashMap, Address, B256};
+use alloy_primitives::{map::HashMap, Address, B256, U256};
 use core::cell::RefCell;
 use revm::{
     database::DBErrorMarker,
@@ -64,6 +64,11 @@ trait ErasedDatabase {
     fn storage(&self, address: Address, index: StorageKey) -> Result<StorageValue, SandboxDbError>;
     fn block_hash(&self, number: u64) -> Result<B256, SandboxDbError>;
     fn code_by_hash(&self, code_hash: B256) -> Result<Bytecode, SandboxDbError>;
+    fn salt_bucket_capacity(
+        &self,
+        address: Address,
+        index: Option<U256>,
+    ) -> Result<(usize, u64), SandboxDbError>;
 }
 
 /// Wrapper that implements [`ErasedDatabase`] for any [`Database`] type.
@@ -95,6 +100,18 @@ where
     #[inline]
     fn code_by_hash(&self, code_hash: B256) -> Result<Bytecode, SandboxDbError> {
         self.db.borrow_mut().code_by_hash(code_hash).map_err(|e| SandboxDbError(e.to_string()))
+    }
+
+    #[inline]
+    fn salt_bucket_capacity(
+        &self,
+        address: Address,
+        index: Option<U256>,
+    ) -> Result<(usize, u64), SandboxDbError> {
+        self.db
+            .borrow()
+            .salt_bucket_capacity(address, index)
+            .map_err(|e| SandboxDbError(e.to_string()))
     }
 }
 
@@ -234,6 +251,15 @@ impl Database for SandboxDb<'_> {
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         // Block hashes are not stored in journal state - query database
         self.db.block_hash(number)
+    }
+
+    fn salt_bucket_capacity(
+        &self,
+        address: Address,
+        index: Option<U256>,
+    ) -> Result<(usize, u64), Self::Error> {
+        // Delegate to underlying database
+        self.db.salt_bucket_capacity(address, index)
     }
 }
 

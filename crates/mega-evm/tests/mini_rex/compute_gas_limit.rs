@@ -18,7 +18,6 @@ use revm::{
         tx::TxEnvBuilder,
         TxEnv,
     },
-    database::{CacheDB, EmptyDB},
     handler::EvmTr,
     precompile::{
         bn128::pair,
@@ -40,9 +39,9 @@ const CONTRACT2: Address = address!("0000000000000000000000000000000000100002");
 // ============================================================================
 
 /// Executes a transaction with specified compute gas limit.
-fn transact(
+fn transact<DB: revm::Database<Error = Infallible> + core::fmt::Debug>(
     spec: MegaSpecId,
-    db: &mut CacheDB<EmptyDB>,
+    db: &mut DB,
     compute_gas_limit: u64,
     tx: TxEnv,
 ) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {

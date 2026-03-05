@@ -2,6 +2,18 @@
 //!
 //! It groups the constants for different EVM specs as sub-modules.
 
+// SALT bucket constants
+
+/// Number of bits to represent the minimum bucket size (8 bits = 256 slots).
+pub const MIN_BUCKET_SIZE_BITS: usize = 8;
+
+/// Minimum capacity of a SALT bucket in number of slots (256).
+///
+/// Buckets hold accounts or storage slots and can grow beyond this size. The gas cost
+/// multiplier is calculated as `capacity / MIN_BUCKET_SIZE`, so a bucket at minimum
+/// capacity has a 1x multiplier.
+pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
+
 /// Constants for the `EQUIVALENCE` spec.
 pub mod equivalence {
     use revm::interpreter::gas;

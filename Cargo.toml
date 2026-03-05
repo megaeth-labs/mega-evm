@@ -177,6 +177,12 @@ tracing-subscriber = { version = "0.3", default-features = false }
 triehash = { version = "0.8", default-features = false }
 walkdir = { version = "2.5", default-features = false }
 
+[patch.crates-io]
+op-revm = { git = "https://github.com/megaeth-labs/revm.git", rev = "a35d3af6f95d869a8a7f9a756b7e54e94f4471a5" }
+revm = { git = "https://github.com/megaeth-labs/revm.git", rev = "a35d3af6f95d869a8a7f9a756b7e54e94f4471a5" }
+revm-database-interface = { git = "https://github.com/megaeth-labs/revm.git", rev = "a35d3af6f95d869a8a7f9a756b7e54e94f4471a5" }
+revm-database = { git = "https://github.com/megaeth-labs/revm.git", rev = "a35d3af6f95d869a8a7f9a756b7e54e94f4471a5" }
+
 # Speed up compilation time for dev builds by reducing emitted debug info.
 # NOTE: Debuggers may provide less useful information with this setting.
 # Uncomment this section if you're using a debugger.
