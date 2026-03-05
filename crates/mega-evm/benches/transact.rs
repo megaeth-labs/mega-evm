@@ -5,10 +5,11 @@
 //! EVM specifications (EQUIVALENCE vs `MINI_REX`).
 #![allow(missing_docs)]
 
-use alloy_evm::Database;
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
+use mega_evm::{
+    test_utils::MemoryDatabase, MegaContext, MegaDatabase, MegaEvm, MegaSpecId, MegaTransaction,
+};
 use revm::{
     context::{result::ResultAndState, tx::TxEnvBuilder},
     database::{CacheDB, EmptyDB},
@@ -35,7 +36,7 @@ fn erc20_balance_slot(address: Address, mapping_slot: u8) -> B256 {
 }
 
 /// Helper function to create and execute a transaction.
-fn execute_transaction<DB: Database>(
+fn execute_transaction<DB: MegaDatabase>(
     spec: MegaSpecId,
     db: DB,
     caller: Address,
@@ -60,7 +61,7 @@ fn bench_both_specs<DB, F>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     db_setup: F,
 ) where
-    DB: Database + 'static,
+    DB: MegaDatabase + 'static,
     F: Fn() -> DB + 'static,
 {
     for (name, spec) in

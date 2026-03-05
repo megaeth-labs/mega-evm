@@ -10,11 +10,11 @@ use mega_evm::{
         context::{block::BlockEnv, cfg::CfgEnv},
         primitives::eip4844,
     },
-    MegaContext, MegaSpecId, TestExternalEnvs,
+    BucketId, MegaContext, MegaSpecId, TestExternalEnvs,
 };
 use tracing::{debug, trace};
 
-use super::{EvmeError, Result};
+use super::{state::EvmeState, EvmeError, Result};
 
 /// Chain configuration arguments (spec and chain ID)
 #[derive(Args, Debug, Clone)]
@@ -127,18 +127,43 @@ pub struct ExtEnvArgs {
 }
 
 impl ExtEnvArgs {
+    fn parse_bucket_capacities(&self) -> Result<Vec<(BucketId, u64)>> {
+        self.bucket_capacity
+            .iter()
+            .map(|bucket_capacity_str| {
+                let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
+                Ok((bucket_id, capacity))
+            })
+            .collect()
+    }
+
+    /// Returns parsed bucket capacity overrides.
+    pub fn bucket_capacities(&self) -> Result<Vec<(BucketId, u64)>> {
+        self.parse_bucket_capacities()
+    }
+
     /// Creates [`TestExternalEnvs`].
     pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
         let mut external_envs = TestExternalEnvs::new();
-
-        // Parse and configure bucket capacities
-        for bucket_capacity_str in &self.bucket_capacity {
-            let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
+        for (bucket_id, capacity) in self.parse_bucket_capacities()? {
             external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
         }
         debug!(external_envs = ?external_envs, "Evm TestExternalEnvs created");
 
         Ok(external_envs)
+    }
+
+    /// Applies bucket capacity overrides to the provided state database.
+    pub fn apply_bucket_capacities<N, P>(&self, state: &mut EvmeState<N, P>) -> Result<()>
+    where
+        N: alloy_network::Network,
+        P: alloy_provider::Provider<N> + std::fmt::Debug,
+    {
+        let overrides = self.parse_bucket_capacities()?;
+        if !overrides.is_empty() {
+            state.apply_bucket_capacities(overrides);
+        }
+        Ok(())
     }
 }
 
@@ -177,6 +202,20 @@ impl EnvArgs {
     /// Creates [`TestExternalEnvs`].
     pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
         self.ext.create_external_envs()
+    }
+
+    /// Returns parsed bucket capacity overrides.
+    pub fn bucket_capacities(&self) -> Result<Vec<(BucketId, u64)>> {
+        self.ext.bucket_capacities()
+    }
+
+    /// Applies bucket capacity overrides to the given database.
+    pub fn apply_bucket_capacities<N, P>(&self, state: &mut EvmeState<N, P>) -> Result<()>
+    where
+        N: alloy_network::Network,
+        P: alloy_provider::Provider<N> + std::fmt::Debug,
+    {
+        self.ext.apply_bucket_capacities(state)
     }
 
     /// Creates a [`MegaContext`] with all environment configurations.

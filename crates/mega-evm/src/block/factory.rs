@@ -1,13 +1,11 @@
-use alloy_consensus::{Transaction, TxReceipt};
+use alloy_consensus::Transaction;
 use alloy_eips::Encodable2718;
-use alloy_evm::{
-    block::BlockExecutorFor, Database, EvmEnv, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
-};
+use alloy_evm::{EvmEnv, FromRecoveredTx};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{Bytes, B256};
 use revm::{database::State, inspector::NoOpInspector, Inspector};
 
-use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaHardforks, MegaSpecId, MegaTxEnvelope};
+use crate::{BlockLimits, MegaBlockExecutor, MegaDatabase, MegaEvm, MegaHardforks, MegaSpecId};
 
 /// `MegaETH` block executor factory.
 ///
@@ -95,7 +93,7 @@ where
         ReceiptBuilder,
     >
     where
-        DB: Database + 'a,
+        DB: MegaDatabase + 'a,
     {
         let runtime_limits = block_ctx.block_limits.to_evm_tx_runtime_limits();
         let evm = self.evm_factory.create_evm(db, evm_env).with_tx_runtime_limits(runtime_limits);
@@ -126,7 +124,7 @@ where
         ReceiptBuilder,
     >
     where
-        DB: Database + 'a,
+        DB: MegaDatabase + 'a,
         I: Inspector<crate::MegaContext<&'a mut State<DB>, ExtEnvFactory::EnvTypes>> + 'a,
     {
         let runtime_limits = block_ctx.block_limits.to_evm_tx_runtime_limits();
@@ -138,37 +136,10 @@ where
     }
 }
 
-impl<Hardforks, ExtEnvFactory, ReceiptBuilder> alloy_evm::block::BlockExecutorFactory
-    for MegaBlockExecutorFactory<Hardforks, crate::MegaEvmFactory<ExtEnvFactory>, ReceiptBuilder>
-where
-    ReceiptBuilder: OpReceiptBuilder<Transaction = MegaTxEnvelope, Receipt: TxReceipt>,
-    Hardforks: MegaHardforks + Clone,
-    ExtEnvFactory: crate::ExternalEnvFactory + Clone,
-    crate::MegaTransaction: FromRecoveredTx<ReceiptBuilder::Transaction>
-        + FromTxWithEncoded<ReceiptBuilder::Transaction>,
-    Self: 'static,
-{
-    type EvmFactory = crate::MegaEvmFactory<ExtEnvFactory>;
-    type ExecutionCtx<'a> = MegaBlockExecutionCtx;
-    type Transaction = ReceiptBuilder::Transaction;
-    type Receipt = ReceiptBuilder::Receipt;
-
-    fn evm_factory(&self) -> &Self::EvmFactory {
-        self.evm_factory_ref()
-    }
-
-    fn create_executor<'a, DB, I>(
-        &'a self,
-        evm: <Self::EvmFactory as alloy_evm::EvmFactory>::Evm<&'a mut State<DB>, I>,
-        ctx: Self::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self, DB, I>
-    where
-        DB: Database + 'a,
-        I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<&'a mut State<DB>>> + 'a,
-    {
-        MegaBlockExecutor::new(evm, ctx, &self.hardforks, &self.receipt_builder)
-    }
-}
+// Note: We do NOT implement alloy_evm::block::BlockExecutorFactory because it requires
+// DB: Database in the create_executor method, but our MegaBlockExecutor requires DB: MegaDatabase.
+// Instead, we provide our own factory methods (create_executor and create_executor_with_inspector)
+// that work with MegaDatabase.
 
 /// Block execution context for the `MegaETH` chain.
 #[derive(Debug, Clone)]

@@ -67,7 +67,7 @@ use revm::{
     ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
-use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
+use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaDatabase, MegaTransaction};
 
 /// The main EVM implementation for the `MegaETH` chain.
 ///
@@ -131,7 +131,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> core::ops::DerefMut
     }
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
+impl<DB: MegaDatabase, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs> {
     /// Creates a new `MegaETH` EVM instance.
     ///
     /// # Parameters
@@ -299,7 +299,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
 impl<DB, INSP, ExtEnvs> MegaEvm<DB, INSP, ExtEnvs>
 where
-    DB: Database,
+    DB: MegaDatabase,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
     ExtEnvs: ExternalEnvTypes,
 {
@@ -318,7 +318,8 @@ where
     pub fn execute_transaction(
         &mut self,
         tx: MegaTransaction,
-    ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
+    ) -> Result<MegaTransactionOutcome, EVMError<<DB as revm::Database>::Error, MegaTransactionError>>
+    {
         let ResultAndState { result, state } = if self.inspect {
             InspectEvm::inspect_tx(self, tx)?
         } else {
@@ -354,7 +355,8 @@ where
     pub fn inspect_transaction(
         &mut self,
         tx: MegaTransaction,
-    ) -> Result<MegaTransactionOutcome, EVMError<DB::Error, MegaTransactionError>> {
+    ) -> Result<MegaTransactionOutcome, EVMError<<DB as revm::Database>::Error, MegaTransactionError>>
+    {
         let ResultAndState { result, state } = InspectEvm::inspect_tx(self, tx)?;
         let additional_limit = self.ctx().additional_limit.borrow();
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =

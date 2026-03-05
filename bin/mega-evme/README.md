@@ -262,9 +262,9 @@ These options are available across all commands.
 
 ### SALT Bucket Configuration
 
-| Option                       | Description                                 |
-| ---------------------------- | ------------------------------------------- |
-| `--bucket-capacity <ID:CAP>` | Configure bucket capacity (can be repeated) |
+| Option                       | Description                                                                 |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `--bucket-capacity <ID:CAP>` | Override SALT bucket capacity (can be repeated). Applies to the backing DB. |
 
 ```bash
 # Configure multiple buckets

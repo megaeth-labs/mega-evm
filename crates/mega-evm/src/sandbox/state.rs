@@ -237,6 +237,19 @@ impl Database for SandboxDb<'_> {
     }
 }
 
+/// `SaltEnv` implementation for `SandboxDb`.
+///
+/// Provides default SALT bucket capacity (minimum size) for sandbox databases.
+/// This is appropriate since sandboxes are typically used for temporary execution
+/// and don't need dynamic gas pricing.
+impl crate::SaltEnv for SandboxDb<'_> {
+    type Error = SandboxDbError;
+
+    fn get_bucket_capacity(&self, _bucket_id: crate::BucketId) -> Result<u64, Self::Error> {
+        Ok(crate::MIN_BUCKET_SIZE as u64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,7 +7,7 @@ use std::convert::Infallible;
 
 use alloy_consensus::{Signed, Transaction, TxLegacy};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
+use alloy_evm::{block::BlockExecutor, Evm, EvmEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{

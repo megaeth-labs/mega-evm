@@ -1,20 +1,19 @@
 //! External environment for EVM execution.
 //!
 //! This module provides interfaces for accessing external data sources during EVM execution:
-//! - **SALT**: Bucket capacity information for dynamic gas pricing
+//! - **SALT**: Bucket capacity information for dynamic gas pricing (now provided by `MegaDatabase`)
 //! - **Oracle**: Storage from the `MegaETH` oracle contract
 //!
 //! # Architecture
 //!
 //! External environments follow a factory pattern:
-//! 1. [`ExternalEnvFactory`] creates block-specific environment instances
-//! 2. [`ExternalEnvs`] bundles SALT and Oracle implementations
-//! 3. Individual oracle methods (e.g., [`SaltEnv::get_bucket_capacity`]) provide data
+//! 1. [`ExternalEnvFactory`] creates environment instances
+//! 2. [`ExternalEnvs`] bundles Oracle implementations
+//! 3. Individual oracle methods (e.g., [`OracleEnv::get_oracle_storage`]) provide data
 //!
 //! Block context is established at factory creation time, not per oracle call, ensuring
 //! consistent state snapshots throughout execution.
 
-use alloy_primitives::BlockNumber;
 use auto_impl::auto_impl;
 use core::fmt::Debug;
 
@@ -34,59 +33,106 @@ pub use test_utils::*;
 
 /// Type-level specification of external environment implementations.
 ///
-/// This trait associates concrete SALT and Oracle types, allowing generic code to work
+/// This trait associates concrete Oracle types, allowing generic code to work
 /// with any compatible environment configuration.
+///
+/// Note: SALT environment is now provided by the database itself through the
+/// `MegaDatabase` trait, so only Oracle environment needs to be specified here.
 #[auto_impl(&, Box, Arc)]
 pub trait ExternalEnvTypes {
-    /// SALT environment implementation for bucket capacity queries.
-    type SaltEnv: SaltEnv;
     /// Oracle environment implementation for system contract storage queries.
     type OracleEnv: OracleEnv;
 }
 
-/// Tuple implementation for convenient pairing of SALT and Oracle environments.
-impl<A: SaltEnv, B: OracleEnv> ExternalEnvTypes for (A, B) {
-    type SaltEnv = A;
+/// Tuple implementation for convenient pairing of Oracle environments.
+/// Note: The first type parameter is kept for backward compatibility but is no longer used.
+impl<A, B: OracleEnv> ExternalEnvTypes for (A, B) {
     type OracleEnv = B;
 }
 
 /// Bundle of external environment instances for a specific execution context.
 ///
-/// This struct holds concrete SALT and Oracle implementations that are used during
+/// This struct holds concrete Oracle implementation that is used during
 /// EVM execution. Typically created by [`ExternalEnvFactory::external_envs`] at the
 /// start of block processing.
+///
+/// Note: SALT environment is now provided by the database itself through the
+/// `MegaDatabase` trait.
 #[derive(Debug, Clone)]
 pub struct ExternalEnvs<T: ExternalEnvTypes> {
-    /// SALT environment for bucket capacity queries and dynamic gas calculation.
-    pub salt_env: T::SaltEnv,
     /// Oracle environment for reading system contract storage.
     pub oracle_env: T::OracleEnv,
 }
 
 impl Default for ExternalEnvs<EmptyExternalEnv> {
     fn default() -> Self {
-        Self { salt_env: EmptyExternalEnv, oracle_env: EmptyExternalEnv }
+        Self { oracle_env: EmptyExternalEnv }
     }
 }
 
 /// No-op external environment for testing or when oracle functionality is disabled.
 ///
 /// This implementation:
-/// - Returns minimum bucket capacity for all SALT queries
 /// - Returns `None` for all Oracle storage queries
-/// - Assigns all accounts and storage slots to bucket 0
+///
+/// Note: SALT functionality is now provided by `EmptyMegaDB` which implements `MegaDatabase`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EmptyExternalEnv;
 
 impl ExternalEnvTypes for EmptyExternalEnv {
-    type SaltEnv = Self;
     type OracleEnv = Self;
 }
 
 impl ExternalEnvFactory for EmptyExternalEnv {
     type EnvTypes = Self;
 
-    fn external_envs(&self, _block: BlockNumber) -> ExternalEnvs<Self::EnvTypes> {
-        ExternalEnvs { salt_env: *self, oracle_env: *self }
+    fn external_envs(&self) -> ExternalEnvs<Self::EnvTypes> {
+        ExternalEnvs { oracle_env: *self }
+    }
+}
+
+/// Wrapper around `EmptyDB` that implements `MegaDatabase`.
+///
+/// This type is used as the default database for `MegaContext` when no specific
+/// database is provided. It implements both `Database` and `SaltEnv` traits,
+/// satisfying the `MegaDatabase` requirement.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyMegaDB(revm::database::EmptyDB);
+
+impl revm::Database for EmptyMegaDB {
+    type Error = core::convert::Infallible;
+
+    fn basic(
+        &mut self,
+        address: alloy_primitives::Address,
+    ) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        self.0.basic(address)
+    }
+
+    fn code_by_hash(
+        &mut self,
+        code_hash: alloy_primitives::B256,
+    ) -> Result<revm::state::Bytecode, Self::Error> {
+        self.0.code_by_hash(code_hash)
+    }
+
+    fn storage(
+        &mut self,
+        address: alloy_primitives::Address,
+        index: alloy_primitives::U256,
+    ) -> Result<alloy_primitives::U256, Self::Error> {
+        self.0.storage(address, index)
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<alloy_primitives::B256, Self::Error> {
+        self.0.block_hash(number)
+    }
+}
+
+impl SaltEnv for EmptyMegaDB {
+    type Error = core::convert::Infallible;
+
+    fn get_bucket_capacity(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
+        Ok(MIN_BUCKET_SIZE as u64)
     }
 }

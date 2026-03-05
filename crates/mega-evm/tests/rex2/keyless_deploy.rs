@@ -1007,7 +1007,7 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
 /// This exercises the deployment logic in block/executor.rs `pre_execution_changes`.
 #[test]
 fn test_keyless_deploy_contract_deployed_on_rex2_activation() {
-    use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
+    use alloy_evm::{block::BlockExecutor, Evm, EvmEnv};
     use alloy_hardforks::ForkCondition;
     use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
     use alloy_primitives::B256;

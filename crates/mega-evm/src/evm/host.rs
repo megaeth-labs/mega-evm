@@ -6,7 +6,7 @@ use mega_system_contracts::access_control::IMegaAccessControl::VolatileDataAcces
 use std::{format, rc::Rc};
 
 use crate::{
-    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv,
+    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaDatabase, MegaSpecId, OracleEnv,
     VolatileDataAccessTracker, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
@@ -207,7 +207,7 @@ pub trait HostExt: Host {
     fn beneficiary_address(&self) -> Address;
 }
 
-impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
+impl<DB: MegaDatabase, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
     #[inline]
     fn spec_id(&self) -> MegaSpecId {
         self.spec
@@ -222,7 +222,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn sstore_set_storage_gas(&mut self, address: Address, key: U256) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        let result = self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(address, key);
+        let db = self.inner.db_mut();
+        let result = self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(db, address, key);
         result
             .map_err(|e| {
                 *self.error() = Err(ContextError::Custom(format!("{e}")));
@@ -233,7 +234,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn new_account_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
-        let result = self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(address);
+        let db = self.inner.db_mut();
+        let result = self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(db, address);
         result
             .map_err(|e| {
                 *self.error() = Err(ContextError::Custom(format!("{e}")));
@@ -244,7 +246,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn create_contract_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
-        let result = self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(address);
+        let db = self.inner.db_mut();
+        let result = self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(db, address);
         result
             .map_err(|e| {
                 *self.error() = Err(ContextError::Custom(format!("{e}")));

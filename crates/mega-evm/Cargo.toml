@@ -53,8 +53,14 @@ sha2.workspace = true
 
 [features]
 default = ["std", "revm/default", "op-revm/default"]
-std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
-test-utils = ["dep:salt"]
+std = [
+    "revm/std",
+    "op-revm/std",
+    "revm/alloydb",
+    "mega-system-contracts/std",
+    "dep:salt",
+]
+test-utils = []
 
 [[bench]]
 name = "transact"
