@@ -3468,7 +3468,7 @@ dependencies = [
 [[package]]
 name = "op-revm"
 version = "8.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "auto_impl",
  "once_cell",
@@ -4162,7 +4162,7 @@ dependencies = [
 [[package]]
 name = "revm"
 version = "27.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "revm-bytecode",
  "revm-context",
@@ -4179,11 +4179,10 @@ dependencies = [
 
 [[package]]
 name = "revm-bytecode"
-version = "6.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+version = "6.2.1"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "bitvec",
- "once_cell",
  "phf",
  "revm-primitives",
  "serde",
@@ -4192,7 +4191,7 @@ dependencies = [
 [[package]]
 name = "revm-context"
 version = "8.0.4"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "cfg-if",
  "derive-where",
@@ -4207,7 +4206,7 @@ dependencies = [
 [[package]]
 name = "revm-context-interface"
 version = "9.0.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
@@ -4222,7 +4221,7 @@ dependencies = [
 [[package]]
 name = "revm-database"
 version = "7.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "alloy-eips",
  "alloy-provider",
@@ -4238,7 +4237,7 @@ dependencies = [
 [[package]]
 name = "revm-database-interface"
 version = "7.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "auto_impl",
  "either",
@@ -4251,7 +4250,7 @@ dependencies = [
 [[package]]
 name = "revm-handler"
 version = "8.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "auto_impl",
  "derive-where",
@@ -4269,7 +4268,7 @@ dependencies = [
 [[package]]
 name = "revm-inspector"
 version = "8.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "auto_impl",
  "either",
@@ -4304,7 +4303,7 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "24.0.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "revm-bytecode",
  "revm-context-interface",
@@ -4315,7 +4314,7 @@ dependencies = [
 [[package]]
 name = "revm-precompile"
 version = "25.0.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "ark-bls12-381 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ark-bn254",
@@ -4341,18 +4340,19 @@ dependencies = [
 
 [[package]]
 name = "revm-primitives"
-version = "20.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+version = "20.2.1"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "alloy-primitives",
  "num_enum",
+ "once_cell",
  "serde",
 ]
 
 [[package]]
 name = "revm-state"
-version = "7.0.2"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
+version = "7.0.4"
+source = "git+https://github.com/megaeth-labs/revm.git?branch=feat%2Fadd-salt-bucket-capacity-api#75f772690659643ef97c1458d5493f19acd27fee"
 dependencies = [
  "bitflags",
  "revm-bytecode",
