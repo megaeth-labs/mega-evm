@@ -8,7 +8,7 @@
 
 use alloy_evm::Database;
 use alloy_primitives::Bytes;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use revm::{
     handler::FrameResult,
     interpreter::{CallInputs, CallOutcome, Gas, InstructionResult, InterpreterResult},
@@ -16,8 +16,9 @@ use revm::{
 
 use crate::{
     sandbox::execute_keyless_deploy_call, ExternalEnvTypes, IKeylessDeploy, IMegaAccessControl,
-    IOracle, MegaContext, MegaSpecId, OracleEnv, ACCESS_CONTROL_ADDRESS,
-    DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    IMegaLimitControl, IOracle, MegaContext, MegaSpecId, OracleEnv, ACCESS_CONTROL_ADDRESS,
+    DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, LIMIT_CONTROL_ADDRESS,
+    ORACLE_CONTRACT_ADDRESS,
 };
 
 /// The result of a system contract call interception attempt.
@@ -28,6 +29,11 @@ use crate::{
 ///   caller should return this as `FrameInitResult::Result` and push an empty frame to keep the
 ///   limit tracker stack balanced.
 pub type InterceptResult = Option<FrameResult>;
+
+alloy_sol_types::sol! {
+    /// Shared error used by view/control system contract interceptors when value is sent.
+    error NonZeroTransfer();
+}
 
 /// Trait for intercepting calls to system contracts during `frame_init`.
 ///
@@ -87,6 +93,31 @@ pub fn dispatch_system_contract_interceptors<DB: Database, ExtEnvs: ExternalEnvT
         }
     }
 
+    // MegaLimitControl (Rex4+)
+    if spec.is_enabled(LimitControlInterceptor::ACTIVATION_SPEC) {
+        if let Some(result) = LimitControlInterceptor::intercept(ctx, call_inputs, depth) {
+            return Some(result);
+        }
+    }
+
+    None
+}
+
+/// Returns a synthetic revert result when the call carries non-zero transferred value.
+///
+/// This is used by view-style system contract interceptors to prevent silently accepting
+/// value-bearing calls.
+fn reject_non_zero_transfer(call_inputs: &CallInputs) -> InterceptResult {
+    if call_inputs.transfer_value().is_some_and(|value| !value.is_zero()) {
+        return Some(FrameResult::Call(CallOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::Revert,
+                Bytes::copy_from_slice(&NonZeroTransfer::SELECTOR),
+                Gas::new(call_inputs.gas_limit),
+            ),
+            call_inputs.return_memory_offset.clone(),
+        )));
+    }
     None
 }
 
@@ -204,6 +235,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         // disableVolatileDataAccess()
         if IMegaAccessControl::disableVolatileDataAccessCall::abi_decode(&input_bytes).is_ok() {
+            if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                return Some(result);
+            }
             ctx.volatile_data_tracker.borrow_mut().disable_access(caller_journal_depth);
 
             return Some(FrameResult::Call(CallOutcome::new(
@@ -218,6 +252,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         // enableVolatileDataAccess()
         if IMegaAccessControl::enableVolatileDataAccessCall::abi_decode(&input_bytes).is_ok() {
+            if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                return Some(result);
+            }
             let success =
                 ctx.volatile_data_tracker.borrow_mut().enable_access(caller_journal_depth);
 
@@ -245,11 +282,61 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         // isVolatileDataAccessDisabled()
         if IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_decode(&input_bytes).is_ok() {
+            if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                return Some(result);
+            }
             let disabled =
                 ctx.volatile_data_tracker.borrow().volatile_access_disabled(caller_journal_depth);
 
             let output =
                 IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&disabled);
+
+            return Some(FrameResult::Call(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    Bytes::from(output),
+                    Gas::new(call_inputs.gas_limit),
+                ),
+                call_inputs.return_memory_offset.clone(),
+            )));
+        }
+
+        // Unknown selector — not intercepted.
+        None
+    }
+}
+
+/// Interceptor for `MegaLimitControl` system contract calls.
+///
+/// Handles:
+/// - `remainingComputeGas()`: returns remaining compute gas of the current call.
+#[derive(Debug)]
+pub struct LimitControlInterceptor;
+
+impl LimitControlInterceptor {
+    /// The minimum spec required for this interceptor to be active.
+    pub const ACTIVATION_SPEC: MegaSpecId = MegaSpecId::REX4;
+}
+
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtEnvs>
+    for LimitControlInterceptor
+{
+    fn intercept(
+        ctx: &mut MegaContext<DB, ExtEnvs>,
+        call_inputs: &CallInputs,
+        _depth: usize,
+    ) -> InterceptResult {
+        if call_inputs.target_address != LIMIT_CONTROL_ADDRESS {
+            return None;
+        }
+
+        let input_bytes = call_inputs.input.bytes(ctx);
+        if IMegaLimitControl::remainingComputeGasCall::abi_decode(&input_bytes).is_ok() {
+            if let Some(result) = reject_non_zero_transfer(call_inputs) {
+                return Some(result);
+            }
+            let remaining = ctx.additional_limit.borrow().current_call_remaining_compute_gas();
+            let output = IMegaLimitControl::remainingComputeGasCall::abi_encode_returns(&remaining);
 
             return Some(FrameResult::Call(CallOutcome::new(
                 InterpreterResult::new(

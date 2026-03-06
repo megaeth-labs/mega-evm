@@ -33,4 +33,10 @@ contract MegaAccessControl is ISemver, IMegaAccessControl {
         // This function body is never executed - the call is intercepted by the EVM.
         revert NotIntercepted();
     }
+
+    /// @notice Fallback for unknown selectors.
+    /// @dev Ensures non-intercepted calls revert with a stable custom error payload.
+    fallback() external payable {
+        revert NotIntercepted();
+    }
 }

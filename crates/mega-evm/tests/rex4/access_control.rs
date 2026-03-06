@@ -51,6 +51,11 @@ const VOLATILE_DATA_ACCESS_DISABLED_SELECTOR: [u8; 4] =
 /// The 4-byte selector for `DisabledByParent()` error.
 const DISABLED_BY_PARENT_SELECTOR: [u8; 4] = IMegaAccessControl::DisabledByParent::SELECTOR;
 
+/// The 4-byte selector for `NotIntercepted()` error.
+const NOT_INTERCEPTED_SELECTOR: [u8; 4] = IMegaAccessControl::NotIntercepted::SELECTOR;
+/// The 4-byte selector for `NonZeroTransfer()` error.
+const NON_ZERO_TRANSFER_SELECTOR: [u8; 4] = IMegaAccessControl::NonZeroTransfer::SELECTOR;
+
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
@@ -876,9 +881,15 @@ fn test_query_returns_true_for_disabling_frame() {
 
 /// Helper to build a TX that calls the access control contract directly with the given selector.
 fn direct_access_control_tx(selector: &[u8; 4]) -> TxEnv {
+    direct_access_control_tx_with_value(selector, U256::ZERO)
+}
+
+/// Helper to build a TX that calls the access control contract directly with selector and value.
+fn direct_access_control_tx_with_value(selector: &[u8; 4], value: U256) -> TxEnv {
     TxEnvBuilder::default()
         .caller(CALLER)
         .call(ACCESS_CONTROL_ADDRESS)
+        .value(value)
         .gas_limit(100_000_000)
         .data(Bytes::copy_from_slice(selector))
         .build_fill()
@@ -896,6 +907,33 @@ fn test_direct_tx_disable_volatile_data_access() {
         result.result.is_success(),
         "Direct TX to disableVolatileDataAccess should succeed, got: {:?}",
         result.result
+    );
+}
+
+/// Direct TX calling `disableVolatileDataAccess()` with non-zero value should revert.
+#[test]
+fn test_direct_tx_disable_volatile_data_access_with_value_reverts() {
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
+
+    let result = transact(
+        &mut db,
+        direct_access_control_tx_with_value(
+            &DISABLE_VOLATILE_DATA_ACCESS_SELECTOR,
+            U256::from(1_u64),
+        ),
+    )
+    .unwrap();
+    assert!(
+        !result.result.is_success(),
+        "Direct TX with non-zero value should revert, got: {:?}",
+        result.result
+    );
+    let output = result.result.output().expect("Should have output");
+    assert_eq!(output.len(), 4, "non-zero transfer revert should return selector only");
+    assert_eq!(
+        &output[..4],
+        &NON_ZERO_TRANSFER_SELECTOR,
+        "non-zero transfer should revert with NonZeroTransfer()"
     );
 }
 
@@ -930,6 +968,35 @@ fn test_direct_tx_is_volatile_data_access_disabled() {
     let output = result.result.output().expect("Should have output");
     let disabled = U256::from_be_slice(output.as_ref());
     assert_eq!(disabled, U256::ZERO, "Should return false when called directly by TX");
+}
+
+/// Direct TX with unknown selector should fall through and revert with `NotIntercepted()`.
+#[test]
+fn test_direct_tx_unknown_selector_falls_through_and_reverts_not_intercepted() {
+    let unknown_selector = [0xde, 0xad, 0xbe, 0xef];
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(ACCESS_CONTROL_ADDRESS, mega_evm::ACCESS_CONTROL_CODE);
+
+    let result = transact(&mut db, direct_access_control_tx(&unknown_selector)).unwrap();
+    assert!(
+        !result.result.is_success(),
+        "Unknown selector should fall through and revert, got: {:?}",
+        result.result
+    );
+
+    let output = result.result.output().expect("Should have output");
+    assert_eq!(
+        output.len(),
+        4,
+        "Fallback should return only NotIntercepted selector, got {} bytes",
+        output.len()
+    );
+    assert_eq!(
+        &output[..4],
+        &NOT_INTERCEPTED_SELECTOR,
+        "Unknown selector should revert with NotIntercepted()"
+    );
 }
 
 // ============================================================================

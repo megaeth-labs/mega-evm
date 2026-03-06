@@ -126,6 +126,7 @@ When a contract calls `MegaAccessControl.disableVolatileDataAccess()`, the calle
 - When a restricted frame accesses volatile data, it immediately reverts with ABI-encoded `VolatileDataAccessDisabled(uint8 accessType)` error.
   The `accessType` parameter identifies which volatile data triggered the revert (see `VolatileDataAccessType` enum below).
 - The reverted call returns gas to the parent frame (standard revert behavior).
+- Calls carrying non-zero transferred ETH revert and do not modify the disable state.
 - If called multiple times at different depths, the shallowest (more restrictive) activation depth is kept.
 - The restriction is **scoped to the caller's subtree**: when the frame that called `disableVolatileDataAccess()` returns, the restriction is deactivated.
   Sibling calls made by the parent after the disabling frame returns are not affected.
@@ -177,6 +178,7 @@ enum VolatileDataAccessType {
 ```solidity
 interface IMegaAccessControl {
     error NotIntercepted();
+    error NonZeroTransfer();
     error VolatileDataAccessDisabled(VolatileDataAccessType accessType);
     error DisabledByParent();
     function disableVolatileDataAccess() external view;
@@ -193,6 +195,40 @@ DELEGATECALL and CALLCODE to the MegaAccessControl system contract are **not int
 The EVM interception only triggers on CALL and STATICCALL (where `target_address` equals the system contract address).
 For DELEGATECALL and CALLCODE, `target_address` is the caller's own address (not the code address), so the interception does not match.
 The call falls through to the underlying contract code, which reverts with `NotIntercepted()`.
+
+### 3. MegaLimitControl System Contract
+
+Rex4 introduces the **MegaLimitControl** system contract at address `0x6342000000000000000000000000000000000005`.
+This contract currently provides a read-only query for remaining compute gas of the current call.
+The runtime value is returned by EVM interception.
+
+#### `remainingComputeGas()`
+
+Returns the remaining compute gas of the current call as `uint64`.
+In Rex4, the value is the caller's per-frame remaining compute gas.
+Top-level direct TX calls return the TX compute limit minus intrinsic compute gas.
+Inner calls return the caller's frame remaining, reflecting compute gas consumed so far in the caller's frame.
+The returned value is independent from TX detained limit clamping.
+In pre-Rex4, this falls back to TX-level remaining compute gas.
+The returned value is a snapshot at call time and can change after further execution.
+Calls carrying non-zero transferred ETH revert.
+
+#### Contract Interface
+
+```solidity
+interface IMegaLimitControl {
+    error NotIntercepted();
+    error NonZeroTransfer();
+    function remainingComputeGas() external view returns (uint64 remaining);
+}
+```
+
+The contract body reverts with `NotIntercepted()` if called outside the MegaETH EVM.
+
+#### Interception Scope
+
+Interception matches CALL and STATICCALL to `0x6342...0005`.
+DELEGATECALL and CALLCODE are not intercepted for the same reason as `MegaAccessControl`.
 
 ## Inheritance
 
@@ -211,6 +247,7 @@ The semantics of Rex4 are inherited from:
 - Revert data encoding: `crates/mega-evm/src/limit/mod.rs` (`MegaLimitExceeded`, `LimitCheck::revert_data()`).
 - TX runtime limits: `crates/mega-evm/src/evm/limit.rs` (`rex4()`).
 - MegaAccessControl system contract: `crates/mega-evm/src/system/control.rs`, `crates/system-contracts/contracts/MegaAccessControl.sol`.
+- MegaLimitControl system contract: `crates/mega-evm/src/system/limit_control.rs`, `crates/system-contracts/contracts/MegaLimitControl.sol`.
 - Volatile access disable tracking: merged into `VolatileDataAccessTracker` in `crates/mega-evm/src/access/tracker.rs`.
 - Frame init interception: `crates/mega-evm/src/evm/execution.rs` (`frame_init` method).
 - Frame return deactivation: `crates/mega-evm/src/evm/execution.rs` (`frame_return_result` method).

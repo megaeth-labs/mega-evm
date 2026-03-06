@@ -201,6 +201,11 @@ fn main() {
             script_path: "scripts/MegaAccessControlBytecode.s.sol:SaveMegaAccessControlBytecode",
             output_file: "access_control_artifacts.rs",
         },
+        ContractConfig {
+            name: "MegaLimitControl",
+            script_path: "scripts/MegaLimitControlBytecode.s.sol:SaveMegaLimitControlBytecode",
+            output_file: "limit_control_artifacts.rs",
+        },
     ];
 
     // Set up rerun-if-changed triggers

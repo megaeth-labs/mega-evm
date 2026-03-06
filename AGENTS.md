@@ -153,6 +153,7 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 | High-Precision Timestamp | `...0002`      | Sub-second block timestamp                          |
 | Keyless Deploy           | `...0003`      | Deterministic contract deployment via Nick's Method |
 | MegaAccessControl        | `...0004`      | Access control (disableVolatileDataAccess)          |
+| MegaLimitControl         | `...0005`      | Limit query/control (currently remainingComputeGas) |
 
 Key design aspects:
 
@@ -238,6 +239,13 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Never change what an existing spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
+- **Define value-transfer policy explicitly for system contract interceptors.**
+  For read-only or control methods, reject calls with non-zero `transfer_value` in the interceptor.
+  If a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
+- **Do not intercept unknown selectors for system contracts.**
+  Unknown selectors should fall through to on-chain bytecode and revert with a stable custom error such as `NotIntercepted()`.
+- **System contract interceptor tests must cover boundary behaviors.**
+  Include tests for normal intercepted path, non-zero value behavior, unknown selector fallback, and CALL vs DELEGATECALL/CALLCODE interception boundaries.
 - **Respect `no_std` in `mega-evm` crate.**
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.
@@ -248,6 +256,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   This is the standard convention — features are opted-in explicitly.
 - **Use `cargo check` (not `cargo clippy`) for compiler error checking.**
   Use `cargo clippy` only when specifically checking lint warnings.
+- **Before finishing a change, always run full lint and format checks.**
+  Run `cargo clippy --workspace --lib --examples --tests --benches --all-features --locked` before completion.
+  Run `cargo fmt --all --check` before completion.
 - **Keep documentation up to date.**
   When making changes, always check whether related documentation needs updating.
   This includes spec files in `specs/`, docs in `docs/`, and the `CLAUDE.md` itself (e.g., unstable spec marker, spec progression list, system contract table).

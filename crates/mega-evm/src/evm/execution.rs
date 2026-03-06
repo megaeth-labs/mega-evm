@@ -597,8 +597,8 @@ where
 
         // System contract interception dispatch.
         // Each interceptor checks target address and ABI-decodes function selectors.
-        // Side-effect-only interceptors (oracle hint) return None; short-circuiting
-        // interceptors return Some(FrameResult).
+        // Side-effect interceptors (oracle hint) usually return None.
+        // Short-circuiting paths return Some(FrameResult).
         if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
             if let Some(result) =
                 dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
