@@ -35,6 +35,7 @@ const CONTRACT3: Address = address!("0000000000000000000000000000000000300003");
 const REMAINING_COMPUTE_GAS_SELECTOR: [u8; 4] =
     IMegaLimitControl::remainingComputeGasCall::SELECTOR;
 const NOT_INTERCEPTED_SELECTOR: [u8; 4] = IMegaLimitControl::NotIntercepted::SELECTOR;
+const NON_ZERO_TRANSFER_SELECTOR: [u8; 4] = IMegaLimitControl::NonZeroTransfer::SELECTOR;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -270,6 +271,13 @@ fn test_direct_tx_remaining_compute_gas_with_value_reverts() {
         !result.result.is_success(),
         "Direct TX query with non-zero value should revert, got: {:?}",
         result.result
+    );
+    let output = result.result.output().expect("revert should include output");
+    assert_eq!(output.len(), 4, "non-zero transfer revert should return selector only");
+    assert_eq!(
+        &output[..4],
+        &NON_ZERO_TRANSFER_SELECTOR,
+        "non-zero transfer should revert with NonZeroTransfer()"
     );
 }
 

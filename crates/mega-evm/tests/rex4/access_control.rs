@@ -53,6 +53,8 @@ const DISABLED_BY_PARENT_SELECTOR: [u8; 4] = IMegaAccessControl::DisabledByParen
 
 /// The 4-byte selector for `NotIntercepted()` error.
 const NOT_INTERCEPTED_SELECTOR: [u8; 4] = IMegaAccessControl::NotIntercepted::SELECTOR;
+/// The 4-byte selector for `NonZeroTransfer()` error.
+const NON_ZERO_TRANSFER_SELECTOR: [u8; 4] = IMegaAccessControl::NonZeroTransfer::SELECTOR;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -925,6 +927,13 @@ fn test_direct_tx_disable_volatile_data_access_with_value_reverts() {
         !result.result.is_success(),
         "Direct TX with non-zero value should revert, got: {:?}",
         result.result
+    );
+    let output = result.result.output().expect("Should have output");
+    assert_eq!(output.len(), 4, "non-zero transfer revert should return selector only");
+    assert_eq!(
+        &output[..4],
+        &NON_ZERO_TRANSFER_SELECTOR,
+        "non-zero transfer should revert with NonZeroTransfer()"
     );
 }
 

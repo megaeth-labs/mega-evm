@@ -178,6 +178,7 @@ enum VolatileDataAccessType {
 ```solidity
 interface IMegaAccessControl {
     error NotIntercepted();
+    error NonZeroTransfer();
     error VolatileDataAccessDisabled(VolatileDataAccessType accessType);
     error DisabledByParent();
     function disableVolatileDataAccess() external view;
@@ -219,6 +220,7 @@ Calls carrying non-zero transferred ETH revert.
 ```solidity
 interface IMegaLimitControl {
     error NotIntercepted();
+    error NonZeroTransfer();
     function remainingComputeGas() external view returns (uint64 remaining);
 }
 ```
@@ -229,12 +231,6 @@ The contract body reverts with `NotIntercepted()` if called outside the MegaETH 
 
 Interception matches CALL and STATICCALL to `0x6342...0005`.
 DELEGATECALL and CALLCODE are not intercepted for the same reason as `MegaAccessControl`.
-
-### 4. Oracle `sendHint` Value Guard
-
-Rex4 adds a value guard for intercepted `Oracle.sendHint(bytes32,bytes)` calls.
-If the call carries non-zero transferred ETH, the call is rejected before `on_hint` side-effects.
-Pre-Rex4 specs keep the old behavior.
 
 ## Inheritance
 

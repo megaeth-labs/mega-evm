@@ -25,6 +25,8 @@ interface IMegaAccessControl {
 
     /// @notice The call was not intercepted by the EVM (called on unsupported network).
     error NotIntercepted();
+    /// @notice The call carries non-zero transferred ETH for a view/control method.
+    error NonZeroTransfer();
 
     /// @notice Volatile data access was attempted in a frame where it is disabled.
     /// @param accessType The type of volatile data that was accessed.

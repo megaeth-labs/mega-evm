@@ -8,7 +8,7 @@
 
 use alloy_evm::Database;
 use alloy_primitives::Bytes;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use revm::{
     handler::FrameResult,
     interpreter::{CallInputs, CallOutcome, Gas, InstructionResult, InterpreterResult},
@@ -107,7 +107,7 @@ fn reject_non_zero_transfer(call_inputs: &CallInputs) -> InterceptResult {
         return Some(FrameResult::Call(CallOutcome::new(
             InterpreterResult::new(
                 InstructionResult::Revert,
-                Bytes::new(),
+                Bytes::from(IMegaLimitControl::NonZeroTransfer::SELECTOR.to_vec()),
                 Gas::new(call_inputs.gas_limit),
             ),
             call_inputs.return_memory_offset.clone(),
@@ -120,7 +120,6 @@ fn reject_non_zero_transfer(call_inputs: &CallInputs) -> InterceptResult {
 ///
 /// When a call to the oracle contract matches the `sendHint(bytes32,bytes)` selector, the
 /// hint is forwarded to the oracle service backend via `OracleEnv::on_hint`.
-/// In Rex4+, value-bearing calls are rejected before `on_hint` side-effects.
 /// Execution continues normally (no early return).
 #[derive(Debug)]
 pub struct OracleHintInterceptor;
@@ -144,11 +143,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 
         let input_bytes = call_inputs.input.bytes(ctx);
         if let Ok(call) = IOracle::sendHintCall::abi_decode(&input_bytes) {
-            if ctx.spec.is_enabled(MegaSpecId::REX4) {
-                if let Some(result) = reject_non_zero_transfer(call_inputs) {
-                    return Some(result);
-                }
-            }
             ctx.oracle_env.borrow().on_hint(call_inputs.caller, call.topic, call.data);
         }
 

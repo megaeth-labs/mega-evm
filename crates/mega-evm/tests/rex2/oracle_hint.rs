@@ -341,9 +341,9 @@ fn test_on_hint_with_non_zero_value_on_rex2_still_calls_hint() {
     assert_eq!(hints[0].data, hint_data, "Hint data should match");
 }
 
-/// In Rex4, value-bearing `sendHint` is rejected by interceptor before `on_hint`.
+/// In Rex4, value-bearing `sendHint` keeps historical behavior and still triggers `on_hint`.
 #[test]
-fn test_on_hint_with_non_zero_value_on_rex4_reverts_and_not_called() {
+fn test_on_hint_with_non_zero_value_on_rex4_still_calls_hint() {
     let user_topic = B256::from_slice(&[0x42u8; 32]);
     let hint_data = bytes!("deadbeef");
 
@@ -365,5 +365,8 @@ fn test_on_hint_with_non_zero_value_on_rex4_reverts_and_not_called() {
 
     assert!(!result.is_success(), "sendHint with non-zero value should revert, got: {:?}", result);
     let hints = external_envs.recorded_hints();
-    assert!(hints.is_empty(), "Rex4 must reject value-bearing sendHint before calling on_hint");
+    assert_eq!(hints.len(), 1, "Rex4 should still call on_hint for value-bearing sendHint");
+    assert_eq!(hints[0].from, CALLER, "Hint from should be the transaction caller");
+    assert_eq!(hints[0].topic, user_topic, "Hint topic should match");
+    assert_eq!(hints[0].data, hint_data, "Hint data should match");
 }
