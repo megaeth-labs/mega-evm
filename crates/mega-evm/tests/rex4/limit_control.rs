@@ -331,7 +331,7 @@ fn test_remaining_compute_gas_decreases_after_compute_work() {
     );
 }
 
-/// Direct top-level query should return tx_limit minus intrinsic compute gas.
+/// Direct top-level query should return `tx_limit` minus intrinsic compute gas.
 #[test]
 fn test_remaining_compute_gas_exact_value_matches_tracker() {
     let tx_limit = 1_000_000_u64;
