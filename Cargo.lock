@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3138,7 +3138,7 @@ dependencies = [
  "delegate",
  "derive_more",
  "hex",
- "mega-evm 1.4.1",
+ "mega-evm 1.5.0",
  "mega-system-contracts",
  "once_cell",
  "op-alloy-consensus",
@@ -3156,7 +3156,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evme"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3170,7 +3170,7 @@ dependencies = [
  "alloy-transport-http",
  "clap",
  "mega-evm 1.0.1",
- "mega-evm 1.4.1",
+ "mega-evm 1.5.0",
  "op-alloy-consensus",
  "op-alloy-network",
  "op-alloy-rpc-types",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "mega-system-contracts"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -3468,7 +3468,7 @@ dependencies = [
 [[package]]
 name = "op-revm"
 version = "8.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "auto_impl",
  "once_cell",
@@ -4162,7 +4162,7 @@ dependencies = [
 [[package]]
 name = "revm"
 version = "27.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "revm-bytecode",
  "revm-context",
@@ -4180,7 +4180,7 @@ dependencies = [
 [[package]]
 name = "revm-bytecode"
 version = "6.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "bitvec",
  "once_cell",
@@ -4192,7 +4192,7 @@ dependencies = [
 [[package]]
 name = "revm-context"
 version = "8.0.4"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "cfg-if",
  "derive-where",
@@ -4207,7 +4207,7 @@ dependencies = [
 [[package]]
 name = "revm-context-interface"
 version = "9.0.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
@@ -4222,7 +4222,7 @@ dependencies = [
 [[package]]
 name = "revm-database"
 version = "7.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "alloy-eips",
  "alloy-provider",
@@ -4238,7 +4238,7 @@ dependencies = [
 [[package]]
 name = "revm-database-interface"
 version = "7.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "auto_impl",
  "either",
@@ -4251,7 +4251,7 @@ dependencies = [
 [[package]]
 name = "revm-handler"
 version = "8.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "auto_impl",
  "derive-where",
@@ -4269,7 +4269,7 @@ dependencies = [
 [[package]]
 name = "revm-inspector"
 version = "8.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "auto_impl",
  "either",
@@ -4304,7 +4304,7 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "24.0.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "revm-bytecode",
  "revm-context-interface",
@@ -4315,7 +4315,7 @@ dependencies = [
 [[package]]
 name = "revm-precompile"
 version = "25.0.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "ark-bls12-381 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ark-bn254",
@@ -4342,7 +4342,7 @@ dependencies = [
 [[package]]
 name = "revm-primitives"
 version = "20.1.0"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "alloy-primitives",
  "num_enum",
@@ -4352,7 +4352,7 @@ dependencies = [
 [[package]]
 name = "revm-state"
 version = "7.0.2"
-source = "git+https://github.com/megaeth-labs/revm.git?rev=a35d3af6f95d869a8a7f9a756b7e54e94f4471a5#a35d3af6f95d869a8a7f9a756b7e54e94f4471a5"
+source = "git+https://github.com/megaeth-labs/revm.git?rev=975fba4c85ea37e4e3b58d7cef60be8ace5cc22f#975fba4c85ea37e4e3b58d7cef60be8ace5cc22f"
 dependencies = [
  "bitflags",
  "revm-bytecode",
@@ -5022,7 +5022,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "state-test"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -5032,7 +5032,7 @@ dependencies = [
  "hash-db",
  "indicatif",
  "k256",
- "mega-evm 1.4.1",
+ "mega-evm 1.5.0",
  "plain_hasher",
  "serde",
  "serde_json",

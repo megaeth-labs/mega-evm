@@ -13,7 +13,7 @@ exclude = []
 # https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
 resolver = "2"
 [workspace.package]
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 rust-version = "1.86"
 license = "MIT OR Apache-2.0"
@@ -178,10 +178,10 @@ triehash = { version = "0.8", default-features = false }
 walkdir = { version = "2.5", default-features = false }
 
 [patch.crates-io]
-op-revm = { git = "https://github.com/megaeth-labs/revm.git", rev = "a35d3af6f95d869a8a7f9a756b7e54e94f4471a5" }
-revm = { git = "https://github.com/megaeth-labs/revm.git", rev = "a35d3af6f95d869a8a7f9a756b7e54e94f4471a5" }
-revm-database-interface = { git = "https://github.com/megaeth-labs/revm.git", rev = "a35d3af6f95d869a8a7f9a756b7e54e94f4471a5" }
-revm-database = { git = "https://github.com/megaeth-labs/revm.git", rev = "a35d3af6f95d869a8a7f9a756b7e54e94f4471a5" }
+op-revm = { git = "https://github.com/megaeth-labs/revm.git", rev = "975fba4c85ea37e4e3b58d7cef60be8ace5cc22f" }
+revm = { git = "https://github.com/megaeth-labs/revm.git", rev = "975fba4c85ea37e4e3b58d7cef60be8ace5cc22f" }
+revm-database-interface = { git = "https://github.com/megaeth-labs/revm.git", rev = "975fba4c85ea37e4e3b58d7cef60be8ace5cc22f" }
+revm-database = { git = "https://github.com/megaeth-labs/revm.git", rev = "975fba4c85ea37e4e3b58d7cef60be8ace5cc22f" }
 
 # Speed up compilation time for dev builds by reducing emitted debug info.
 # NOTE: Debuggers may provide less useful information with this setting.
