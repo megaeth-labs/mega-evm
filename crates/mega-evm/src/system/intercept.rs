@@ -30,6 +30,11 @@ use crate::{
 ///   limit tracker stack balanced.
 pub type InterceptResult = Option<FrameResult>;
 
+alloy_sol_types::sol! {
+    /// Shared error used by view/control system contract interceptors when value is sent.
+    error NonZeroTransfer();
+}
+
 /// Trait for intercepting calls to system contracts during `frame_init`.
 ///
 /// Implementors check whether an incoming call matches their contract address and function
@@ -107,7 +112,7 @@ fn reject_non_zero_transfer(call_inputs: &CallInputs) -> InterceptResult {
         return Some(FrameResult::Call(CallOutcome::new(
             InterpreterResult::new(
                 InstructionResult::Revert,
-                Bytes::from(IMegaLimitControl::NonZeroTransfer::SELECTOR.to_vec()),
+                Bytes::copy_from_slice(&NonZeroTransfer::SELECTOR),
                 Gas::new(call_inputs.gas_limit),
             ),
             call_inputs.return_memory_offset.clone(),
@@ -304,7 +309,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
 /// Interceptor for `MegaLimitControl` system contract calls.
 ///
 /// Handles:
-/// - `remainingComputeGas()`: returns transaction-level remaining compute gas.
+/// - `remainingComputeGas()`: returns remaining compute gas of the current call.
 #[derive(Debug)]
 pub struct LimitControlInterceptor;
 
@@ -330,11 +335,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
             if let Some(result) = reject_non_zero_transfer(call_inputs) {
                 return Some(result);
             }
-            let (effective_limit, used) = {
-                let additional_limit = ctx.additional_limit.borrow();
-                (additional_limit.compute_gas_limit(), additional_limit.get_usage().compute_gas)
-            };
-            let remaining = effective_limit.saturating_sub(used);
+            let remaining = ctx.additional_limit.borrow().current_call_remaining_compute_gas();
             let output = IMegaLimitControl::remainingComputeGasCall::abi_encode_returns(&remaining);
 
             return Some(FrameResult::Call(CallOutcome::new(

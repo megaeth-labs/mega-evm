@@ -1,7 +1,7 @@
 //! Tests for the `MegaLimitControl` system contract.
 //!
 //! When a contract calls `LIMIT_CONTROL_ADDRESS.remainingComputeGas()`,
-//! the interceptor returns the transaction-level remaining compute gas.
+//! the interceptor returns the remaining compute gas for the current call.
 
 use std::convert::Infallible;
 
@@ -331,13 +331,13 @@ fn test_remaining_compute_gas_decreases_after_compute_work() {
     );
 }
 
-/// With a fixed tx compute limit, returned value should match `effective_limit - used` exactly.
+/// Direct top-level query should return tx_limit minus intrinsic compute gas.
 #[test]
 fn test_remaining_compute_gas_exact_value_matches_tracker() {
     let tx_limit = 1_000_000_u64;
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
 
-    let (result, used_compute, effective_limit) = transact_with_compute_limit(
+    let (result, used_compute, _effective_limit) = transact_with_compute_limit(
         MegaSpecId::REX4,
         &mut db,
         tx_limit,
@@ -347,11 +347,58 @@ fn test_remaining_compute_gas_exact_value_matches_tracker() {
     assert!(result.result.is_success(), "direct query should succeed");
 
     let remaining = decode_remaining_compute_gas(&result);
-    let expected_remaining = effective_limit.saturating_sub(used_compute);
+    assert!(
+        remaining < tx_limit,
+        "top-level remaining should be less than tx_limit due to intrinsic compute gas \
+         (remaining={remaining}, tx_limit={tx_limit})"
+    );
     assert_eq!(
-        remaining, expected_remaining,
-        "remainingComputeGas should equal effective_limit - used (limit={}, used={})",
-        effective_limit, used_compute
+        remaining,
+        tx_limit - used_compute,
+        "top-level remaining should equal tx_limit minus intrinsic compute gas \
+         (tx_limit={tx_limit}, used={used_compute})"
+    );
+}
+
+/// Inner-call query returns the caller's frame remaining, not the 98/100 forwarded child budget.
+///
+/// A contract calling `remainingComputeGas()` with minimal overhead should get a value
+/// above `tx_limit * 98/100`.  If the implementation mistakenly used `max_forward_limit()`
+/// (which applies the 98/100 forwarding ratio), the returned value would be at most
+/// `tx_limit * 98/100`, and this assertion would catch it.
+#[test]
+fn test_remaining_compute_gas_inner_call_returns_frame_remaining() {
+    let tx_limit = 100_000_000_u64;
+    let forwarded_budget = tx_limit / 100 * 98; // 98_000_000
+
+    // Contract with minimal bytecode: just query remainingComputeGas and return.
+    // The small instruction overhead (MSTORE, PUSH, CALL, POP, RETURN) is negligible
+    // compared to the 2% margin between frame remaining and forwarded budget.
+    let contract_code = call_remaining_compute_gas_and_return(BytecodeBuilder::default()).build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, contract_code);
+
+    let (result, _, _) =
+        transact_with_compute_limit(MegaSpecId::REX4, &mut db, tx_limit, default_tx(CONTRACT))
+            .unwrap();
+
+    assert!(result.result.is_success());
+
+    let remaining = decode_remaining_compute_gas(&result);
+
+    // The returned value must be strictly above the forwarded budget.
+    // A correct implementation returns frame.remaining() ≈ tx_limit - small_overhead,
+    // while a wrong implementation (max_forward_limit) would return ≈ forwarded_budget - overhead.
+    assert!(
+        remaining > forwarded_budget,
+        "inner-call remaining ({remaining}) should exceed forwarded budget ({forwarded_budget}); \
+         if not, the implementation is likely returning max_forward_limit (98/100) instead of frame remaining"
+    );
+    assert!(
+        remaining < tx_limit,
+        "inner-call remaining ({remaining}) should be less than tx_limit ({tx_limit}) due to instruction overhead"
     );
 }
 
@@ -394,44 +441,36 @@ fn test_remaining_compute_gas_persistent_after_inner_revert() {
 }
 
 // ============================================================================
-// 3. DETENTION BEHAVIOR
+// 3. DETENTION INTERACTION
 // ============================================================================
 
-/// Accessing volatile data should reduce effective remaining compute gas via detention.
+/// Returned value reflects the caller's frame remaining and is not clamped by TX detained limit.
 #[test]
-fn test_remaining_compute_gas_reflects_detention() {
-    let base_contract_code =
-        call_remaining_compute_gas_and_return(BytecodeBuilder::default()).build();
-
-    let detained_contract_code = call_remaining_compute_gas_and_return(
+fn test_remaining_compute_gas_not_clamped_by_detention_limit() {
+    let tx_limit = 100_000_000_u64;
+    let contract_code = call_remaining_compute_gas_and_return(
         BytecodeBuilder::default().append(TIMESTAMP).append(POP),
     )
     .build();
 
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(CONTRACT, base_contract_code)
-        .account_code(CONTRACT2, detained_contract_code);
+        .account_code(CONTRACT, contract_code);
 
-    let base_result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
-    let detained_result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT2)).unwrap();
+    let (result, _used_compute, _effective_limit) =
+        transact_with_compute_limit(MegaSpecId::REX4, &mut db, tx_limit, default_tx(CONTRACT))
+            .unwrap();
 
-    assert!(base_result.result.is_success());
-    assert!(detained_result.result.is_success());
+    assert!(result.result.is_success(), "query transaction should succeed");
 
-    let base_remaining = decode_remaining_compute_gas(&base_result);
-    let detained_remaining = decode_remaining_compute_gas(&detained_result);
+    let remaining = decode_remaining_compute_gas(&result);
     assert!(
-        detained_remaining < base_remaining,
-        "detention should reduce effective remaining compute gas: detained={}, base={}",
-        detained_remaining,
-        base_remaining
+        remaining > BLOCK_ENV_ACCESS_COMPUTE_GAS,
+        "caller's frame remaining should not be clamped by detained cap (remaining={remaining}, cap={BLOCK_ENV_ACCESS_COMPUTE_GAS})"
     );
     assert!(
-        detained_remaining <= BLOCK_ENV_ACCESS_COMPUTE_GAS,
-        "detained remaining ({}) should not exceed the BLOCK_ENV_ACCESS_COMPUTE_GAS cap ({})",
-        detained_remaining,
-        BLOCK_ENV_ACCESS_COMPUTE_GAS
+        remaining < tx_limit,
+        "caller's frame remaining should be less than tx limit due to consumed gas (remaining={remaining}, tx_limit={tx_limit})"
     );
 }
 

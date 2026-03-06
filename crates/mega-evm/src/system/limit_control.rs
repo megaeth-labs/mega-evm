@@ -1,7 +1,7 @@
 //! The `MegaLimitControl` system contract for the `MegaETH` EVM.
 //!
-//! This contract currently provides a read-only query to return transaction-level remaining
-//! compute gas.
+//! This contract currently provides a read-only query to return remaining compute gas
+//! of the current call.
 //! The runtime result is produced by EVM interception, not by executing on-chain bytecode.
 
 use alloy_evm::Database;

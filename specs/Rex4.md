@@ -199,19 +199,17 @@ The call falls through to the underlying contract code, which reverts with `NotI
 ### 3. MegaLimitControl System Contract
 
 Rex4 introduces the **MegaLimitControl** system contract at address `0x6342000000000000000000000000000000000005`.
-This contract currently provides a read-only query for transaction-level remaining compute gas.
+This contract currently provides a read-only query for remaining compute gas of the current call.
 The runtime value is returned by EVM interception.
 
 #### `remainingComputeGas()`
 
-Returns the remaining transaction-level compute gas as `uint64`.
-The value is computed as `max(0, effective_tx_compute_limit - tx_compute_used)`.
-`effective_tx_compute_limit` includes gas detention (`min(tx_limit, detained_limit)`).
-`tx_compute_used` includes all compute usage accumulated so far in the transaction.
-
-This query is TX-scoped.
-It is not a per-frame remaining budget query.
-In Rex4 where per-frame compute budgets exist, the returned value may be larger than the remaining budget of the current call frame.
+Returns the remaining compute gas of the current call as `uint64`.
+In Rex4, the value is the caller's per-frame remaining compute gas.
+Top-level direct TX calls return the TX compute limit minus intrinsic compute gas.
+Inner calls return the caller's frame remaining, reflecting compute gas consumed so far in the caller's frame.
+The returned value is independent from TX detained limit clamping.
+In pre-Rex4, this falls back to TX-level remaining compute gas.
 The returned value is a snapshot at call time and can change after further execution.
 Calls carrying non-zero transferred ETH revert.
 
