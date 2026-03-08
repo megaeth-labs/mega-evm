@@ -198,13 +198,17 @@ If the transaction has already consumed more than 20M compute gas before the acc
 **Trigger Conditions:**
 Oracle contract access is detected at the frame initialization level, tracking:
 
-| Trigger Type                 | Description                                                  |
-| ---------------------------- | ------------------------------------------------------------ |
-| **Direct transaction call**  | Transaction's `to` address is the oracle contract            |
-| **Internal CALL operations** | CALL, CALLCODE, DELEGATECALL, or STATICCALL targeting oracle |
+| Trigger Type                | Description                                       |
+| --------------------------- | ------------------------------------------------- |
+| **Direct transaction call** | Transaction's `to` address is the oracle contract |
+| **Internal CALL**           | CALL targeting the oracle contract                |
+
+CALLCODE, DELEGATECALL, and STATICCALL bypass oracle access detection in MiniRex.
+CALLCODE and DELEGATECALL execute in the caller's state context (not the oracle's), so they do not constitute oracle access.
+STATICCALL reads the oracle's state but is excluded in MiniRex; Rex fixes this (see [Rex.md](Rex.md) section 2.3).
 
 **Detection Location:**
-Frame-level detection in `frame_init` handler, ensuring comprehensive tracking of both direct and nested oracle calls.
+Frame-level detection in `frame_init` handler, tracking direct and nested CALL operations to the oracle contract.
 
 **Exemption:**
 Transactions sent from the mega system address (`0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`) are exempted from oracle access tracking to enable system operations.
