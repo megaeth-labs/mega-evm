@@ -1,6 +1,6 @@
 //! Tests for oracle contract access detection in Rex spec.
 //!
-//! Rex fixes STATICCALL oracle access detection that was bypassed in MiniRex.
+//! Rex fixes STATICCALL oracle access detection that was bypassed in `MiniRex`.
 //! CALLCODE and DELEGATECALL remain undetected because they execute in the caller's
 //! state context (not the oracle's), so they don't constitute oracle access.
 
@@ -24,9 +24,7 @@ const CALLEE: alloy_primitives::Address = address!("1000000000000000000000000000
 /// Returns a tuple of `(ExecutionResult, oracle_accessed: bool)`.
 fn execute_transaction<
     'a,
-    INSP: Inspector<
-        MegaContext<&'a mut MemoryDatabase, &'a TestExternalEnvs<std::convert::Infallible>>,
-    >,
+    INSP: Inspector<MegaContext<&'a mut MemoryDatabase, &'a TestExternalEnvs<std::convert::Infallible>>>,
 >(
     spec: MegaSpecId,
     db: &'a mut MemoryDatabase,
@@ -67,7 +65,7 @@ fn execute_transaction<
 
 /// Test that STATICCALL to oracle IS detected in Rex.
 ///
-/// Rex fixes the MiniRex bypass: STATICCALL to oracle now triggers oracle access detection.
+/// Rex fixes the `MiniRex` bypass: STATICCALL to oracle now triggers oracle access detection.
 #[test]
 fn test_rex_staticcall_oracle_access_detected() {
     // STATICCALL: gas, addr, argsOff, argsLen, retOff, retLen (6 args, no value)
