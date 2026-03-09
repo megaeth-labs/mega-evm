@@ -46,3 +46,14 @@ pub mod access_control {
         "contracts/interfaces/IMegaAccessControl.sol"
     );
 }
+
+/// `MegaLimitControl` contract bytecode and interface.
+///
+/// Bytecode constants are generated at build time from the versioned artifacts
+/// in the `artifacts/` directory. Interface bindings are generated from the
+/// Solidity source.
+pub mod limit_control {
+    include!(concat!(env!("OUT_DIR"), "/limit_control_artifacts.rs"));
+
+    alloy_sol_types::sol!("contracts/interfaces/IMegaLimitControl.sol");
+}

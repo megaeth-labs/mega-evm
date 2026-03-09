@@ -179,6 +179,19 @@ impl AdditionalLimit {
         self.compute_gas.tx_limit()
     }
 
+    /// Returns the remaining compute gas of the current call.
+    ///
+    /// In Rex4+, returns the minimum of the caller's per-frame remaining compute gas
+    /// and the TX-level detained remaining, reflecting the actual gas available before
+    /// execution halts (whether due to frame budget or gas detention).
+    /// If no frame exists yet (direct TX → system contract), returns the TX-level
+    /// remaining which accounts for intrinsic compute gas.
+    /// In pre-Rex4, falls back to TX-level remaining compute gas.
+    #[inline]
+    pub fn current_call_remaining_compute_gas(&self) -> u64 {
+        self.compute_gas.current_call_remaining()
+    }
+
     /// Sets the compute gas limit to a new value.
     /// This is used to dynamically lower the compute gas limit when volatile data is accessed.
     /// The new limit must be lower than the current limit.

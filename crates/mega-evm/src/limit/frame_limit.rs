@@ -89,9 +89,21 @@ impl<I> FrameLimitTracker<I> {
         self.frame_stack.clear();
     }
 
+    /// Returns the remaining compute gas of the current frame.
+    ///
+    /// If the frame stack is non-empty, returns the top frame's remaining budget.
+    /// If the frame stack is empty (before the first frame is pushed), returns
+    /// the TX-level remaining which accounts for pre-frame usage (e.g. intrinsic compute gas).
+    pub(crate) fn current_frame_remaining(&self) -> u64 {
+        match self.frame_stack.last() {
+            Some(entry) => entry.remaining(),
+            None => self.tx_entry.remaining(),
+        }
+    }
+
     /// Returns the maximum limit that can be forwarded to the next frame.
     /// This is a utility function to help calculate the limit for the next frame.
-    pub(crate) fn max_forward_limit(&self) -> u64 {
+    fn max_forward_limit(&self) -> u64 {
         match self.frame_stack.last() {
             Some(entry) => {
                 let remaining = u128::from(entry.remaining());
