@@ -331,6 +331,68 @@ fn test_remaining_compute_gas_decreases_after_compute_work() {
     );
 }
 
+/// Two sequential queries in the same frame should return decreasing values,
+/// and the difference should be small (only the overhead of the query + glue instructions).
+#[test]
+fn test_remaining_compute_gas_sequential_queries_decrease() {
+    // Contract: query remainingComputeGas twice, return both values as (first, second).
+    // First query result stored at 0x20, second at 0x40, return 64 bytes from 0x20.
+    let code = BytecodeBuilder::default()
+        // First query
+        .mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR)
+        .push_number(32_u64)   // retSize
+        .push_number(0x20_u64) // retOffset — store first result at 0x20
+        .push_number(4_u64)    // argsSize
+        .push_number(0_u64)    // argsOffset
+        .push_number(0_u64)    // value
+        .push_address(LIMIT_CONTROL_ADDRESS)
+        .push_number(100_000_u64)
+        .append(CALL)
+        .append(POP)
+        // Second query (selector still at 0x00)
+        .push_number(32_u64)   // retSize
+        .push_number(0x40_u64) // retOffset — store second result at 0x40
+        .push_number(4_u64)    // argsSize
+        .push_number(0_u64)    // argsOffset
+        .push_number(0_u64)    // value
+        .push_address(LIMIT_CONTROL_ADDRESS)
+        .push_number(100_000_u64)
+        .append(CALL)
+        .append(POP)
+        // Return both (64 bytes from 0x20)
+        .push_number(64_u64)
+        .push_number(0x20_u64)
+        .append(RETURN)
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, code);
+
+    let result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
+    assert!(result.result.is_success());
+
+    let output = result.result.output().expect("should have output");
+    assert_eq!(output.len(), 64, "should return two 32-byte values");
+
+    let first = U256::from_be_slice(&output[..32]).saturating_to::<u64>();
+    let second = U256::from_be_slice(&output[32..64]).saturating_to::<u64>();
+
+    assert!(
+        second < first,
+        "second query should return less than first (first={first}, second={second})"
+    );
+
+    // The difference should be small — only the overhead of the glue instructions
+    // between the two queries (a few PUSHes + CALL + POP ≈ tens of gas).
+    let diff = first - second;
+    assert!(
+        diff < 1000,
+        "difference between sequential queries should be small (diff={diff}), \
+         confirming the query itself doesn't consume significant compute gas"
+    );
+}
+
 /// Direct top-level query should return `tx_limit` minus intrinsic compute gas.
 #[test]
 fn test_remaining_compute_gas_exact_value_matches_tracker() {
