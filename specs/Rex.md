@@ -7,7 +7,7 @@ Rex is the second spec of MegaETH EVM. It modifies MiniRex in four areas:
 1. **Storage Gas Economics**: New formulas using `base × (multiplier - 1)` instead of `base × multiplier`
 2. **Transaction Intrinsic Storage Gas**: All transactions pay 39,000 additional storage gas
 3. **Transaction and Block Limits**: Transaction data and KV update limits increased to match block limits; compute gas limit decreased; state growth limits added
-4. **Consistent behavior among CALL-like opcodes**: DELEGATECALL and STATICCALL now enforce 98/100 gas forwarding and oracle access detection
+4. **Consistent behavior among CALL-like opcodes**: DELEGATECALL, STATICCALL, and CALLCODE now enforce 98/100 gas forwarding; STATICCALL gains oracle access detection
 
 ## 2. Comprehensive List of Changes
 
@@ -83,9 +83,19 @@ Contract creation pays both:
 
 ### 2.3 DELEGATECALL, STATICCALL, and CALLCODE
 
-In MiniRex, CALLCODE, DELEGATECALL, and STATICCALL bypass 98/100 gas forwarding cap and oracle access detection.
+In MiniRex, CALLCODE, DELEGATECALL, and STATICCALL bypass 98/100 gas forwarding cap.
+Additionally, oracle access detection only applies to CALL; STATICCALL, CALLCODE, and DELEGATECALL all bypass it.
 
-Rex unifies the behaviors of all CALL-like opcodes.
+Rex fixes 98/100 gas forwarding for all three opcodes.
+Rex also adds oracle access detection for STATICCALL, aligning it with CALL.
+CALLCODE and DELEGATECALL remain excluded from oracle detection because their `target_address` equals the caller's address (not the callee's), so they never constitute a direct read of the oracle contract's state.
+
+| Opcode         | 98/100 gas forwarding | Oracle access detection |
+| -------------- | --------------------- | ----------------------- |
+| **CALL**       | MiniRex+              | MiniRex+                |
+| **STATICCALL** | Rex+                  | Rex+                    |
+| **DELEGATECALL** | Rex+                | Never                   |
+| **CALLCODE**   | Rex+                  | Never                   |
 
 ### 2.4 Transaction and Block Limits
 

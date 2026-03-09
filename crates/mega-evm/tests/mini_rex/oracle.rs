@@ -10,8 +10,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, SLOAD, SSTORE,
-        TIMESTAMP,
+        CALL, CALLCODE, DELEGATECALL, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY,
+        RETURNDATASIZE, SLOAD, SSTORE, STATICCALL, TIMESTAMP,
     },
     context::{result::ExecutionResult, TxEnv},
     handler::EvmTr,
@@ -993,4 +993,82 @@ fn test_mega_system_address_exempted_from_oracle_tracking() {
         compute_gas_limit.is_none(),
         "Compute gas limit should NOT be set for mega system address transactions"
     );
+}
+
+/// Test that STATICCALL to oracle is NOT detected in MiniRex.
+///
+/// In MiniRex, STATICCALL bypasses oracle access detection along with CALLCODE and
+/// DELEGATECALL. Rex fixes this by adding STATICCALL to the detection path.
+#[test]
+fn test_mini_rex_staticcall_oracle_access_not_detected() {
+    // STATICCALL: gas, addr, argsOff, argsLen, retOff, retLen (6 args, no value)
+    let bytecode = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // retLen, retOff, argsLen, argsOff
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS)
+        .append(STATICCALL)
+        .stop()
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CALLEE, bytecode);
+
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+
+    assert!(result.is_success(), "Transaction should succeed");
+    assert!(!oracle_accessed, "STATICCALL to oracle should not be detected in MiniRex");
+}
+
+/// Test that DELEGATECALL to oracle is NOT detected in MiniRex.
+///
+/// DELEGATECALL sets `target_address` to the caller's own address (not oracle), so the oracle
+/// detection check in `frame_init` does not match.
+#[test]
+fn test_mini_rex_delegatecall_oracle_access_not_detected() {
+    // DELEGATECALL: gas, addr, argsOff, argsLen, retOff, retLen (6 args, no value)
+    let bytecode = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0]) // retLen, retOff, argsLen, argsOff
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS)
+        .append(DELEGATECALL)
+        .stop()
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CALLEE, bytecode);
+
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+
+    assert!(result.is_success(), "Transaction should succeed");
+    assert!(!oracle_accessed, "DELEGATECALL to oracle should not be detected in MiniRex");
+}
+
+/// Test that CALLCODE to oracle is NOT detected in MiniRex.
+///
+/// CALLCODE sets `target_address` to the caller's own address (not oracle), so the oracle
+/// detection check in `frame_init` does not match.
+#[test]
+fn test_mini_rex_callcode_oracle_access_not_detected() {
+    // CALLCODE: gas, addr, value, argsOff, argsLen, retOff, retLen (7 args)
+    let bytecode = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0]) // retLen, retOff, argsLen, argsOff, value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .append(GAS)
+        .append(CALLCODE)
+        .stop()
+        .build();
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CALLEE, bytecode);
+
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+    let (result, _evm, oracle_accessed) =
+        execute_transaction(MegaSpecId::MINI_REX, &mut db, &external_envs, NoOpInspector, CALLEE);
+
+    assert!(result.is_success(), "Transaction should succeed");
+    assert!(!oracle_accessed, "CALLCODE to oracle should not be detected in MiniRex");
 }
