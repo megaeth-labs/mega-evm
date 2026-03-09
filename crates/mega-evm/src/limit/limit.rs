@@ -192,6 +192,13 @@ impl AdditionalLimit {
         self.compute_gas.current_call_remaining()
     }
 
+    /// Returns the detained compute gas limit (independent of the natural TX limit).
+    /// This is the limit set by volatile data access gas detention.
+    #[inline]
+    pub fn detained_compute_gas_limit(&self) -> u64 {
+        self.compute_gas.detained_limit()
+    }
+
     /// Sets the compute gas limit to a new value.
     /// This is used to dynamically lower the compute gas limit when volatile data is accessed.
     /// The new limit must be lower than the current limit.

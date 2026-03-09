@@ -4,24 +4,30 @@ use alloy_primitives::Address;
 /// A tracker for volatile data access with compute gas limit enforcement.
 ///
 /// This tracker manages volatile data access detection (block environment, beneficiary, oracle)
-/// and tracks the compute gas limit to prevent `DoS` attacks.
+/// and tracks the compute gas detention cap to prevent `DoS` attacks.
 ///
 /// # Compute Gas Limit Enforcement
 ///
-/// When volatile data is first accessed in a transaction:
-/// 1. The compute gas limit is determined based on the type:
-///    - `BLOCK_ENV_ACCESS_REMAINING_GAS` (20M) for block environment or beneficiary
-///    - `ORACLE_ACCESS_REMAINING_GAS` (1M) for oracle contract
-/// 2. If additional volatile data is accessed with a different limit, the **most restrictive**
-///    limit (minimum) is applied
-/// 3. The caller is responsible for applying this limit to the `AdditionalLimit`
+/// When volatile data is first accessed in a transaction, this tracker records the cap value:
+/// - `BLOCK_ENV_ACCESS_COMPUTE_GAS` (20M) for block environment or beneficiary
+/// - `ORACLE_ACCESS_COMPUTE_GAS` (configurable: 1M pre-Rex3, 20M Rex3+) for oracle contract
+///
+/// The cap value stored here is the **raw** per-access-type cap. How it is applied depends on
+/// the spec:
+/// - **Pre-REX4**: The cap is an **absolute** compute gas limit for the transaction.
+/// - **REX4+**: The cap is **relative** — `ComputeGasTracker::set_detained_limit()` adds current
+///   usage to produce the effective limit (`usage_at_access + cap`).
+///
+/// If additional volatile data is accessed with a different cap, the **most restrictive**
+/// (minimum) raw cap is stored.
+/// The caller is responsible for applying this cap to the `AdditionalLimit`.
 ///
 /// # Key Properties
 ///
-/// - **Type-Specific Limits**: Block env/beneficiary access → 20M compute gas, Oracle access →
+/// - **Type-Specific Caps**: Block env/beneficiary access → 20M compute gas, Oracle access →
 ///   configurable (1M pre-Rex3, 20M Rex3+)
-/// - **Most Restrictive Wins**: Multiple accesses with different limits → minimum limit applied
-/// - **Order Independent**: Oracle→BlockEnv or BlockEnv→Oracle both result in same final limit
+/// - **Most Restrictive Wins**: Multiple accesses with different caps → minimum cap applied
+/// - **Order Independent**: Oracle→BlockEnv or BlockEnv→Oracle both result in same final cap
 /// - **Compute Gas Only**: Only limits compute gas costs, not storage gas cost
 ///
 /// # Example Flows

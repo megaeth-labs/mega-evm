@@ -438,12 +438,17 @@ where
         Ok(result.map_haltreason(|reason| {
             let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             if additional_limit.is_exceeding_limit_halt(&reason) {
-                if let Some((access_type, volatile_compute_gas_limit)) = volatile_info {
+                if let Some((access_type, _volatile_compute_gas_limit)) = volatile_info {
                     let actual = additional_limit.compute_gas.tx_usage();
-                    if actual > volatile_compute_gas_limit {
+                    let detained_limit = additional_limit.compute_gas.detained_limit();
+                    // Detention is the binding constraint if detained_limit is tighter
+                    // than the natural TX limit AND actual usage exceeds it.
+                    if actual > detained_limit &&
+                        detained_limit < additional_limit.compute_gas.frame_tx_limit()
+                    {
                         return MegaHaltReason::VolatileDataAccessOutOfGas {
                             access_type,
-                            limit: volatile_compute_gas_limit,
+                            limit: detained_limit,
                             actual,
                         };
                     }

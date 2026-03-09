@@ -74,12 +74,15 @@ use revm::{
 /// # Gas Detention Mechanism
 ///
 /// When volatile data (block environment, beneficiary, or oracle) is accessed, the system
-/// implements a global gas detention mechanism:
-/// 1. Remaining gas is immediately limited based on the type of volatile data:
-///    - Block environment or beneficiary: `BLOCK_ENV_ACCESS_REMAINING_GAS` (20M gas)
-///    - Oracle contract: `ORACLE_ACCESS_REMAINING_GAS` (1M gas pre-Rex3, 20M gas Rex3+)
+/// implements a gas detention mechanism:
+/// 1. The compute gas limit is lowered based on the type of volatile data:
+///    - Block environment or beneficiary: `BLOCK_ENV_ACCESS_COMPUTE_GAS` (20M gas)
+///    - Oracle contract: `ORACLE_ACCESS_COMPUTE_GAS` (1M gas pre-Rex3, 20M gas Rex3+)
+///
+///    In pre-REX4, this is an **absolute** cap on total compute gas.
+///    In REX4+, this is a **relative** cap: `usage_at_access + cap`.
 /// 2. Most restrictive limit wins: If multiple volatile data types are accessed, the minimum (most
-///    restrictive) limit applies, regardless of access order
+///    restrictive) effective limit applies, regardless of access order
 /// 3. Detained gas is tracked and refunded at transaction end
 /// 4. Users only pay for actual work performed, not for enforcement gas
 /// 5. This prevents `DoS` attacks while maintaining fair gas accounting

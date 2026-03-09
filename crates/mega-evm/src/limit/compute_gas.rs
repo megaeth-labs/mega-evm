@@ -19,7 +19,9 @@ use crate::{JournalInspectTr, MegaSpecId};
 ///   gas is always persistent, the parent's total gas still increases by the child's actual gas
 ///   used — per-frame limits act as "early termination guardrails", not budget protection.
 /// - **TX-level (detained)**: The effective TX limit may be dynamically lowered by gas detention
-///   (volatile data access). This remains a TX-level halt for all specs including Rex4+.
+///   (volatile data access). In Rex4+ the cap is **relative** to current usage at the access point
+///   (`current_usage + cap`), while pre-Rex4 it is absolute. This remains a TX-level halt for all
+///   specs including Rex4+.
 ///
 /// In pre-Rex4, compute gas is enforced at the TX level only.
 ///
@@ -60,9 +62,20 @@ impl ComputeGasTracker {
         }
     }
 
-    /// Sets the detained compute gas limit to a new value (takes the minimum).
+    /// Sets the detained compute gas limit (takes the minimum of current and new effective limit).
     /// This is used to dynamically lower the compute gas limit when volatile data is accessed.
-    pub(crate) fn set_detained_limit(&mut self, new_limit: u64) {
+    ///
+    /// - **REX4+**: The cap is **relative** to current usage — allows `cap` more compute gas after
+    ///   the access point. Effective limit = `current_usage + cap`.
+    /// - **Pre-REX4**: The cap is **absolute** — effective limit = `cap`.
+    pub(crate) fn set_detained_limit(&mut self, cap: u64) {
+        let new_limit = if self.rex4_enabled {
+            // REX4+: cap is relative to current usage (limits post-access computation)
+            self.tx_usage().saturating_add(cap)
+        } else {
+            // Pre-REX4: cap is absolute
+            cap
+        };
         self.detained_limit = self.detained_limit.min(new_limit);
     }
 
@@ -87,6 +100,16 @@ impl ComputeGasTracker {
         } else {
             tx_remaining
         }
+    }
+
+    /// Returns the current detained compute gas limit.
+    pub(crate) fn detained_limit(&self) -> u64 {
+        self.detained_limit
+    }
+
+    /// Returns the original TX-level compute gas limit (before any detention).
+    pub(crate) fn frame_tx_limit(&self) -> u64 {
+        self.frame_tracker.tx_limit()
     }
 
     /// Records compute gas as persistent usage in the current frame.
