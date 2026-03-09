@@ -402,6 +402,67 @@ fn test_remaining_compute_gas_inner_call_returns_frame_remaining() {
     );
 }
 
+/// Two-level nesting: TX → A → B → `remainingComputeGas()`.
+///
+/// A burns significant compute before calling B. B queries `remainingComputeGas()`.
+/// The returned value should reflect B's frame remaining (derived from A's remaining at
+/// call time, with the 98/100 forwarding ratio applied), NOT A's frame remaining.
+#[test]
+fn test_remaining_compute_gas_two_level_nesting_returns_inner_frame() {
+    let tx_limit = 100_000_000_u64;
+
+    // B: minimal contract that queries remainingComputeGas and returns it.
+    let b_code = call_remaining_compute_gas_and_return(BytecodeBuilder::default()).build();
+
+    // A: burns significant compute, then CALLs B, then returns B's result.
+    // After burning compute, A's frame remaining is reduced. B gets 98/100 of A's remaining.
+    let a_code = burn_compute(BytecodeBuilder::default(), 50_000);
+    // CALL B with retSize=32, retOffset=0x20
+    let a_code = a_code
+        .push_number(32_u64)   // retSize
+        .push_number(0x20_u64) // retOffset
+        .push_number(0_u64)    // argsSize
+        .push_number(0_u64)    // argsOffset
+        .push_number(0_u64)    // value
+        .push_address(CONTRACT2)
+        .push_number(50_000_000_u64) // gas
+        .append(CALL)
+        .append(POP)
+        // Return B's result
+        .push_number(32_u64)
+        .push_number(0x20_u64)
+        .append(RETURN)
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, a_code)
+        .account_code(CONTRACT2, b_code);
+
+    let (result, _, _) =
+        transact_with_compute_limit(MegaSpecId::REX4, &mut db, tx_limit, default_tx(CONTRACT))
+            .unwrap();
+    assert!(result.result.is_success());
+
+    let remaining = decode_remaining_compute_gas(&result);
+
+    // B's frame budget = 98/100 of (A's frame remaining at call time).
+    // A's frame remaining ≈ tx_limit - overhead - burn_compute_cost.
+    // If the implementation incorrectly returned A's frame remaining, we'd see a value
+    // much higher than B's budget (close to A's remaining ≈ tx_limit - burn overhead).
+    // B's budget should be strictly less than 98/100 of tx_limit due to A's compute overhead.
+    let max_b_budget = tx_limit / 100 * 98; // 98_000_000
+    assert!(
+        remaining < max_b_budget,
+        "B's frame remaining ({remaining}) should be less than max possible B budget \
+         ({max_b_budget}), proving it reflects B's frame, not A's"
+    );
+    assert!(
+        remaining > 0,
+        "B's frame remaining should be positive"
+    );
+}
+
 /// Compute gas in reverted inner calls is still persistent and should reduce remaining value.
 #[test]
 fn test_remaining_compute_gas_persistent_after_inner_revert() {
