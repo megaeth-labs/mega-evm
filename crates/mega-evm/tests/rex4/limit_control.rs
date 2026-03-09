@@ -340,21 +340,21 @@ fn test_remaining_compute_gas_sequential_queries_decrease() {
     let code = BytecodeBuilder::default()
         // First query
         .mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR)
-        .push_number(32_u64)   // retSize
+        .push_number(32_u64) // retSize
         .push_number(0x20_u64) // retOffset — store first result at 0x20
-        .push_number(4_u64)    // argsSize
-        .push_number(0_u64)    // argsOffset
-        .push_number(0_u64)    // value
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
         .push_address(LIMIT_CONTROL_ADDRESS)
         .push_number(100_000_u64)
         .append(CALL)
         .append(POP)
         // Second query (selector still at 0x00)
-        .push_number(32_u64)   // retSize
+        .push_number(32_u64) // retSize
         .push_number(0x40_u64) // retOffset — store second result at 0x40
-        .push_number(4_u64)    // argsSize
-        .push_number(0_u64)    // argsOffset
-        .push_number(0_u64)    // value
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
         .push_address(LIMIT_CONTROL_ADDRESS)
         .push_number(100_000_u64)
         .append(CALL)
@@ -481,11 +481,11 @@ fn test_remaining_compute_gas_two_level_nesting_returns_inner_frame() {
     let a_code = burn_compute(BytecodeBuilder::default(), 50_000);
     // CALL B with retSize=32, retOffset=0x20
     let a_code = a_code
-        .push_number(32_u64)   // retSize
+        .push_number(32_u64) // retSize
         .push_number(0x20_u64) // retOffset
-        .push_number(0_u64)    // argsSize
-        .push_number(0_u64)    // argsOffset
-        .push_number(0_u64)    // value
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
         .push_address(CONTRACT2)
         .push_number(50_000_000_u64) // gas
         .append(CALL)
@@ -519,10 +519,7 @@ fn test_remaining_compute_gas_two_level_nesting_returns_inner_frame() {
         "B's frame remaining ({remaining}) should be less than max possible B budget \
          ({max_b_budget}), proving it reflects B's frame, not A's"
     );
-    assert!(
-        remaining > 0,
-        "B's frame remaining should be positive"
-    );
+    assert!(remaining > 0, "B's frame remaining should be positive");
 }
 
 /// Compute gas in reverted inner calls is still persistent and should reduce remaining value.
@@ -581,8 +578,7 @@ fn test_remaining_compute_gas_clamped_by_detention_limit() {
         .account_balance(CALLER, U256::from(1_000_000))
         .account_code(CONTRACT, contract_code);
 
-    let limits = EvmTxRuntimeLimits::no_limits()
-        .with_tx_compute_gas_limit(tx_limit);
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(tx_limit);
     // Set the block env access detention cap so TIMESTAMP triggers detention.
     let limits = EvmTxRuntimeLimits {
         block_env_access_compute_gas_limit: BLOCK_ENV_ACCESS_COMPUTE_GAS,
@@ -602,10 +598,7 @@ fn test_remaining_compute_gas_clamped_by_detention_limit() {
     assert!(result.result.is_success(), "query transaction should succeed");
 
     let remaining = decode_remaining_compute_gas(&result);
-    assert!(
-        remaining > 0,
-        "remaining compute gas should be positive"
-    );
+    assert!(remaining > 0, "remaining compute gas should be positive");
     assert!(
         remaining <= BLOCK_ENV_ACCESS_COMPUTE_GAS,
         "remaining should be capped by detained limit after TIMESTAMP access \
