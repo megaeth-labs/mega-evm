@@ -68,7 +68,11 @@ impl ComputeGasTracker {
 
     /// Returns the remaining compute gas of the current call.
     ///
-    /// In Rex4+, returns the caller's per-frame remaining compute gas.
+    /// In Rex4+, returns the minimum of the caller's per-frame remaining compute gas
+    /// and the TX-level detained remaining. This ensures the returned value reflects
+    /// the actual compute gas available before execution halts, whether due to
+    /// per-frame budget exhaustion or TX-level gas detention (e.g., after volatile
+    /// data access like TIMESTAMP).
     /// If no frame exists yet (direct TX → system contract), returns the TX-level
     /// remaining which accounts for intrinsic compute gas.
     /// In pre-Rex4, falls back to TX-level remaining compute gas.
@@ -77,10 +81,11 @@ impl ComputeGasTracker {
     /// At that point `frame_stack.last()` is the caller's frame, so
     /// `current_frame_remaining()` gives the caller's remaining compute gas.
     pub(crate) fn current_call_remaining(&self) -> u64 {
+        let tx_remaining = self.tx_limit().saturating_sub(self.tx_usage());
         if self.rex4_enabled {
-            self.frame_tracker.current_frame_remaining()
+            self.frame_tracker.current_frame_remaining().min(tx_remaining)
         } else {
-            self.tx_limit().saturating_sub(self.tx_usage())
+            tx_remaining
         }
     }
 

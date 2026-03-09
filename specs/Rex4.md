@@ -205,10 +205,10 @@ The runtime value is returned by EVM interception.
 #### `remainingComputeGas()`
 
 Returns the remaining compute gas of the current call as `uint64`.
-In Rex4, the value is the caller's per-frame remaining compute gas.
+In Rex4, the value is the minimum of the caller's per-frame remaining compute gas and the TX-level detained remaining.
+This ensures the returned value reflects the actual gas available before execution halts, whether due to per-frame budget exhaustion or TX-level gas detention (e.g., after volatile data access).
 Top-level direct TX calls return the TX compute limit minus intrinsic compute gas.
 Inner calls return the caller's frame remaining, reflecting compute gas consumed so far in the caller's frame.
-The returned value is independent from TX detained limit clamping.
 In pre-Rex4, this falls back to TX-level remaining compute gas.
 The returned value is a snapshot at call time and can change after further execution.
 Calls carrying non-zero transferred ETH revert.

@@ -181,7 +181,9 @@ impl AdditionalLimit {
 
     /// Returns the remaining compute gas of the current call.
     ///
-    /// In Rex4+, returns the caller's per-frame remaining compute gas.
+    /// In Rex4+, returns the minimum of the caller's per-frame remaining compute gas
+    /// and the TX-level detained remaining, reflecting the actual gas available before
+    /// execution halts (whether due to frame budget or gas detention).
     /// If no frame exists yet (direct TX → system contract), returns the TX-level
     /// remaining which accounts for intrinsic compute gas.
     /// In pre-Rex4, falls back to TX-level remaining compute gas.

@@ -444,9 +444,10 @@ fn test_remaining_compute_gas_persistent_after_inner_revert() {
 // 3. DETENTION INTERACTION
 // ============================================================================
 
-/// Returned value reflects the caller's frame remaining and is not clamped by TX detained limit.
+/// After volatile data access (TIMESTAMP), the returned value should be capped by the TX
+/// detained limit, reflecting the actual compute gas available before execution halts.
 #[test]
-fn test_remaining_compute_gas_not_clamped_by_detention_limit() {
+fn test_remaining_compute_gas_clamped_by_detention_limit() {
     let tx_limit = 100_000_000_u64;
     let contract_code = call_remaining_compute_gas_and_return(
         BytecodeBuilder::default().append(TIMESTAMP).append(POP),
@@ -457,20 +458,35 @@ fn test_remaining_compute_gas_not_clamped_by_detention_limit() {
         .account_balance(CALLER, U256::from(1_000_000))
         .account_code(CONTRACT, contract_code);
 
-    let (result, _used_compute, _effective_limit) =
-        transact_with_compute_limit(MegaSpecId::REX4, &mut db, tx_limit, default_tx(CONTRACT))
-            .unwrap();
+    let limits = EvmTxRuntimeLimits::no_limits()
+        .with_tx_compute_gas_limit(tx_limit);
+    // Set the block env access detention cap so TIMESTAMP triggers detention.
+    let limits = EvmTxRuntimeLimits {
+        block_env_access_compute_gas_limit: BLOCK_ENV_ACCESS_COMPUTE_GAS,
+        ..limits
+    };
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX4).with_tx_runtime_limits(limits);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let mut tx = MegaTransaction::new(default_tx(CONTRACT));
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 
     assert!(result.result.is_success(), "query transaction should succeed");
 
     let remaining = decode_remaining_compute_gas(&result);
     assert!(
-        remaining > BLOCK_ENV_ACCESS_COMPUTE_GAS,
-        "caller's frame remaining should not be clamped by detained cap (remaining={remaining}, cap={BLOCK_ENV_ACCESS_COMPUTE_GAS})"
+        remaining > 0,
+        "remaining compute gas should be positive"
     );
     assert!(
-        remaining < tx_limit,
-        "caller's frame remaining should be less than tx limit due to consumed gas (remaining={remaining}, tx_limit={tx_limit})"
+        remaining <= BLOCK_ENV_ACCESS_COMPUTE_GAS,
+        "remaining should be capped by detained limit after TIMESTAMP access \
+         (remaining={remaining}, cap={BLOCK_ENV_ACCESS_COMPUTE_GAS})"
     );
 }
 
