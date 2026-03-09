@@ -26,8 +26,8 @@ use revm::{
     },
     interpreter::{
         gas::get_tokens_in_calldata, interpreter::EthInterpreter, interpreter_action::FrameInit,
-        CallOutcome, CreateOutcome, FrameInput, Gas, InitialAndFloorGas, InstructionResult,
-        InterpreterAction, InterpreterResult,
+        CallOutcome, CallScheme, CreateOutcome, FrameInput, Gas, InitialAndFloorGas,
+        InstructionResult, InterpreterAction, InterpreterResult,
     },
     Inspector, Journal,
 };
@@ -573,6 +573,7 @@ where
         frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
+        let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
         let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
         let additional_limit = self.ctx().additional_limit.clone();
 
@@ -580,10 +581,28 @@ where
         // This handles both direct transaction calls and internal CALL operations.
         // Rex3+: Oracle access gas detention is triggered by SLOAD (not CALL), so skip this
         // CALL-based check for Rex3 and later specs.
+        //
+        // The check uses `target_address` which equals the oracle address for CALL and
+        // STATICCALL, but equals the caller's address for CALLCODE and DELEGATECALL (since
+        // those execute in the caller's state context). CALLCODE and DELEGATECALL are therefore
+        // never detected here by design — they do not access oracle state.
+        //
+        // MiniRex: Only CALL triggers oracle access detection. STATICCALL, CALLCODE, and
+        //   DELEGATECALL bypass it.
+        // Rex: STATICCALL is added to oracle access detection (unifying CALL-like behavior).
         if is_mini_rex_enabled && !is_rex3_enabled {
             if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                let detect_oracle = match call_inputs.scheme {
+                    CallScheme::Call => true,
+                    // Rex fixes the bug in MiniRex where STATICCALL bypasses oracle access
+                    // detection.
+                    CallScheme::StaticCall => is_rex_enabled,
+                    // CALLCODE and DELEGATECALL have target_address = caller (not oracle),
+                    // so check_and_mark_oracle_access would never match anyway.
+                    CallScheme::CallCode | CallScheme::DelegateCall => false,
+                };
                 // Mega system address is exempted from volatile data access enforcement.
-                if call_inputs.caller != MEGA_SYSTEM_ADDRESS {
+                if detect_oracle && call_inputs.caller != MEGA_SYSTEM_ADDRESS {
                     let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
                     let mut tracker = volatile_data_tracker.borrow_mut();
                     if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
