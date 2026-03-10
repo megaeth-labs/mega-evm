@@ -11,8 +11,9 @@
 //! 1. REX4: Volatile access after heavy compute succeeds (relative cap allows more gas)
 //! 2. REX4: Post-access cap is still enforced (can't use unlimited gas after access)
 //! 3. REX4: Pre-access usage is not counted against the cap
-//! 4. REX4: Multiple volatile accesses — first access anchors the cap
-//! 5. Pre-REX4: Absolute cap behavior is preserved (backward compatibility)
+//! 4. REX4: TX compute gas limit still wins when detention is not more restrictive
+//! 5. REX4: Multiple volatile accesses — first access anchors the cap
+//! 6. Pre-REX4: Absolute cap behavior is preserved (backward compatibility)
 
 use std::convert::Infallible;
 
@@ -180,6 +181,51 @@ fn test_rex4_pre_access_usage_not_counted_against_cap() {
         compute_gas > BLOCK_ENV_CAP,
         "Total compute gas ({compute_gas}) should exceed absolute 20M cap"
     );
+}
+
+/// REX4: If `usage_at_access + cap` is greater than or equal to the TX compute gas limit,
+/// detention is not the binding constraint.
+/// Exceeding the TX compute gas limit should report `ComputeGasLimitExceeded`, not
+/// `VolatileDataAccessOutOfGas`.
+#[test]
+fn test_rex4_non_binding_detention_reports_compute_gas_limit() {
+    // Burn 10M compute gas, access TIMESTAMP, then burn 16M more.
+    // Relative detention computes ~10M + 20M = ~30M, but the TX limit is only 25M, so the
+    // effective detained limit is clamped to 25M and detention is not more restrictive.
+    let tx_compute_gas_limit = 25_000_000;
+    let builder = append_burn_gas(BytecodeBuilder::default(), 10_000_000);
+    let builder = builder.append(TIMESTAMP).append(POP);
+    let builder = append_burn_gas(builder, 16_000_000);
+    let code = builder.stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, code);
+
+    let tx = default_tx();
+    let (result, _compute_gas, detained_limit) =
+        transact_with_spec(MegaSpecId::REX4, &mut db, tx_compute_gas_limit, BLOCK_ENV_CAP, tx)
+            .unwrap();
+
+    let (limit, actual) = match &result.result {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::ComputeGasLimitExceeded { limit, actual },
+            ..
+        } => (*limit, *actual),
+        _ => {
+            panic!(
+                "Expected ComputeGasLimitExceeded when detention is clamped by TX limit, got {:?}",
+                result.result
+            )
+        }
+    };
+
+    assert_eq!(
+        detained_limit, tx_compute_gas_limit,
+        "Detained limit should be clamped to the TX compute gas limit when detention is not binding"
+    );
+    assert_eq!(limit, tx_compute_gas_limit);
+    assert!(actual > limit, "Actual compute gas should exceed the TX limit");
 }
 
 /// REX4: Multiple volatile accesses — first access anchors the cap.

@@ -12,7 +12,10 @@ use revm::{
 };
 
 use super::{compute_gas, data_size, frame_limit::TxRuntimeLimit, kv_update, state_growth};
-use crate::{EvmTxRuntimeLimits, JournalInspectTr, MegaSpecId, MegaTransaction};
+use crate::{
+    EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction,
+    VolatileDataAccess,
+};
 
 use super::LimitCheck;
 
@@ -197,6 +200,20 @@ impl AdditionalLimit {
     #[inline]
     pub fn detained_compute_gas_limit(&self) -> u64 {
         self.compute_gas.detained_limit()
+    }
+
+    /// Returns the halt reason when gas detention is the binding compute gas constraint.
+    /// Otherwise (detention was not more restrictive than the base TX limit), returns `None`.
+    #[inline]
+    pub(crate) fn detained_compute_gas_halt_reason(
+        &self,
+        access_type: VolatileDataAccess,
+    ) -> Option<MegaHaltReason> {
+        self.compute_gas.is_detained_exceed().then(|| MegaHaltReason::VolatileDataAccessOutOfGas {
+            access_type,
+            limit: self.compute_gas.detained_limit(),
+            actual: self.compute_gas.tx_usage(),
+        })
     }
 
     /// Sets the compute gas limit to a new value.

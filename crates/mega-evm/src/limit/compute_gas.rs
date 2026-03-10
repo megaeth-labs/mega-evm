@@ -107,9 +107,11 @@ impl ComputeGasTracker {
         self.detained_limit
     }
 
-    /// Returns the original TX-level compute gas limit (before any detention).
-    pub(crate) fn frame_tx_limit(&self) -> u64 {
-        self.frame_tracker.tx_limit()
+    /// Returns `true` when gas detention is the binding TX-level constraint, i.e., the detained
+    /// limit is tighter than the base TX limit AND actual usage exceeds it.
+    pub(crate) fn is_detained_exceed(&self) -> bool {
+        let used = self.tx_usage();
+        used > self.detained_limit && self.detained_limit < self.frame_tracker.tx_limit()
     }
 
     /// Records compute gas as persistent usage in the current frame.

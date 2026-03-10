@@ -98,16 +98,10 @@ impl VolatileDataAccessTracker {
         !self.volatile_data_accessed.is_empty()
     }
 
-    /// Returns the volatile data access information: (`access_type`, `compute_gas_limit`).
+    /// Returns the bitmap of volatile data accessed during transaction execution.
     /// Returns None if no volatile data has been accessed.
-    pub fn get_volatile_data_info(&self) -> Option<(VolatileDataAccess, u64)> {
-        if !self.accessed() {
-            return None;
-        }
-
-        let compute_gas_limit = self.compute_gas_limit?;
-
-        Some((self.volatile_data_accessed, compute_gas_limit))
+    pub fn get_volatile_data_info(&self) -> Option<VolatileDataAccess> {
+        self.accessed().then_some(self.volatile_data_accessed)
     }
 
     /// Returns the compute gas limit for the accessed volatile data.
