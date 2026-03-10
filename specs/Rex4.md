@@ -1,31 +1,32 @@
 # Rex4 Specification
 
 Rex4 is the fourth patch to the Rex hardfork.
-It introduces per-frame state growth limits while inheriting all Rex3 behavior.
+It introduces per-frame state growth limits, per-frame budgets for all resource dimensions, relative gas detention caps, and the MegaAccessControl system contract, while inheriting all Rex3 behavior.
 
 ## Changes from Rex3
 
-### 1. Per-Frame State Growth Limits
+### 1. Per-Frame Resource Budgets
 
-Rex4 introduces **per-frame state growth budgets** to prevent a single inner call from consuming the entire transaction's state growth budget.
+Rex4 introduces **per-frame resource budgets** for all four resource dimensions (state growth, data size, KV updates, compute gas) to prevent a single inner call from consuming the entire transaction's budget.
 
 #### Problem
 
-Prior to Rex4, the TX-level state growth limit (1000 new accounts/slots per transaction) is enforced globally.
+Prior to Rex4, all four resource limits (state growth, data size, KV updates, compute gas) are enforced globally at the TX level.
 An inner call frame can consume the entire budget, leaving nothing for the parent frame.
-This makes it difficult for contracts to reason about remaining state growth capacity after calling external contracts.
+This makes it difficult for contracts to reason about remaining resource capacity after calling external contracts.
 
 #### Solution
 
-Each inner call frame receives a fraction of the parent's remaining state growth budget:
+Each inner call frame receives a fraction of the parent's remaining budget for each resource dimension:
 
 - **Top-level frame**: Gets the full TX state growth limit (no reduction).
 - **Inner frames**: Get `remaining * 98 / 100` of the parent's remaining budget.
 
 The 98/100 ratio ensures that the parent always retains at least 2% of its remaining budget after spawning a child frame.
 
-Only state growth has per-frame enforcement.
-The other three resource dimensions (compute gas, data size, KV updates) continue to use TX-level-only enforcement.
+All four resource dimensions (state growth, data size, KV updates, compute gas) use this per-frame enforcement.
+Note that compute gas is always persistent — even after a child frame reverts due to exceeding its per-frame compute gas budget, the parent's total compute gas still increases by the child's actual gas used.
+Per-frame limits act as "early termination guardrails" for compute gas, not budget protection.
 
 #### Constants
 
@@ -66,12 +67,13 @@ Top-level calls Child C (after Child A succeeds):
 
 #### Limit Exceeding Semantics
 
-When an inner frame exceeds its frame-local state growth limit:
+When an inner frame exceeds its frame-local resource limit:
 
 1. The frame's result is changed to **Revert** (not Halt).
 2. Gas is returned to the parent frame (not consumed).
 3. The parent can continue executing after the reverted child call.
-4. The child's state growth is discarded (standard revert behavior).
+4. The child's resource usage is discarded for discardable dimensions (standard revert behavior).
+   For compute gas, the usage is persistent — it still counts toward the parent's total.
 5. The revert data is ABI-encoded as `MegaLimitExceeded(uint8 kind, uint64 limit)` (see below).
 
 This is different from TX-level limit enforcement, which halts the entire transaction with `OutOfGas`.
@@ -98,8 +100,7 @@ The `kind` discriminant values are:
 | 2     | Compute gas  |
 | 3     | State growth |
 
-Currently only state growth has per-frame enforcement, so in practice `kind = 3` is the only value emitted.
-The encoding is general to support future per-frame limits for other resource dimensions.
+All four resource dimensions have per-frame enforcement, so all `kind` values (0–3) can be emitted.
 
 Parent contracts can detect a frame-local limit exceed via low-level call return data or try/catch, and decode it to determine which limit was hit and what the frame's budget was.
 
@@ -229,6 +230,40 @@ The contract body reverts with `NotIntercepted()` if called outside the MegaETH 
 
 Interception matches CALL and STATICCALL to `0x6342...0005`.
 DELEGATECALL and CALLCODE are not intercepted for the same reason as `MegaAccessControl`.
+
+### 4. Relative Gas Detention Cap
+
+Rex4 changes gas detention (volatile data compute gas limiting) from an **absolute** cap to a **relative** cap.
+
+#### Problem
+
+In pre-Rex4, when a transaction accesses volatile data (block env, beneficiary, oracle), the transaction's total compute gas limit is capped at an absolute value (e.g., 20M for block env, 1M/20M for oracle).
+If a transaction has already consumed more compute gas than the cap value before accessing volatile data, it halts immediately — even though the intent is to limit *post-access* computation, not to penalize prior work.
+
+#### Solution
+
+In Rex4+, the detention cap is **relative** to the compute gas usage at the time of access.
+The effective limit becomes `current_usage + cap`, allowing `cap` more compute gas after the access point.
+
+For example, if a transaction has used 25M compute gas before accessing TIMESTAMP:
+- **Pre-Rex4**: Effective limit = 20M → halts immediately (25M > 20M).
+- **Rex4+**: Effective limit = 25M + 20M = 45M → allows 20M more compute gas after access.
+
+The "most restrictive wins" rule still applies: if multiple volatile data types are accessed, each sets its own effective limit, and the minimum is used.
+Because the cap is anchored at the first access point, subsequent accesses at higher usage only set higher effective limits, so the first access remains the most restrictive within the same volatile data category.
+
+#### Example
+
+```text
+TX compute gas limit: 200M
+
+Transaction executes 25M compute gas of pure computation.
+Transaction accesses TIMESTAMP:
+  Effective detained limit = 25M + 20M = 45M (anchored at first access)
+Transaction accesses NUMBER at 30M usage:
+  min(45M, 30M + 20M) = min(45M, 50M) = 45M (first access wins)
+Transaction continues executing until 45M total compute gas → halts.
+```
 
 ## Inheritance
 

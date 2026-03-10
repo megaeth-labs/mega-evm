@@ -103,7 +103,9 @@ pub enum MegaHaltReason {
         /// Can check specific accesses using `has_block_env_access()`,
         /// `has_beneficiary_balance_access()`, `has_oracle_access()`
         access_type: VolatileDataAccess,
-        /// The compute gas limit that was enforced after volatile data access
+        /// The effective detained compute gas limit that was exceeded.
+        /// In REX4+ this is `usage_at_access + cap` (relative); pre-REX4 it equals the raw cap
+        /// (absolute). Always satisfies `actual > limit`.
         limit: u64,
         /// The actual compute gas usage
         actual: u64,

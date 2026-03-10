@@ -35,7 +35,7 @@ use revm::{
 use crate::{
     constants, dispatch_system_contract_interceptors, is_mega_system_transaction,
     sent_from_mega_system_address, ExternalEnvTypes, HostExt, MegaContext, MegaEvm, MegaHaltReason,
-    MegaInstructions, MegaSpecId, MegaTransactionError, TxRuntimeLimit, MEGA_SYSTEM_ADDRESS,
+    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_ADDRESS,
     MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
@@ -438,14 +438,11 @@ where
         Ok(result.map_haltreason(|reason| {
             let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             if additional_limit.is_exceeding_limit_halt(&reason) {
-                if let Some((access_type, volatile_compute_gas_limit)) = volatile_info {
-                    let actual = additional_limit.compute_gas.tx_usage();
-                    if actual > volatile_compute_gas_limit {
-                        return MegaHaltReason::VolatileDataAccessOutOfGas {
-                            access_type,
-                            limit: volatile_compute_gas_limit,
-                            actual,
-                        };
+                if let Some(access_type) = volatile_info {
+                    if let Some(halt) =
+                        additional_limit.detained_compute_gas_halt_reason(access_type)
+                    {
+                        return halt;
                     }
                 }
                 // normal additional limit exceeded (no volatile data access, or detention

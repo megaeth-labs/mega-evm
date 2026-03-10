@@ -68,14 +68,22 @@ pub mod mini_rex {
     pub const TX_KV_UPDATE_LIMIT: u64 = BLOCK_KV_UPDATE_LIMIT * 25 / 100; // 25% of the block limit
 
     /// Gas limit after block environment or beneficiary data access.
-    /// When block environment data or beneficiary account data is accessed, the global compute gas
-    /// is immediately limited to this value to force the transaction to complete quickly and
-    /// prevent `DoS` attacks.
+    /// When block environment data or beneficiary account data is accessed, the compute gas
+    /// is limited to force the transaction to complete quickly and prevent `DoS` attacks.
+    ///
+    /// - **Pre-REX4**: This is an **absolute** cap on the transaction's total compute gas.
+    /// - **REX4+**: This is a **relative** cap — it limits post-access compute gas. The effective
+    ///   limit becomes `current_usage + BLOCK_ENV_ACCESS_COMPUTE_GAS` at the point of access.
     pub const BLOCK_ENV_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
 
     /// Gas limit after oracle contract access.
-    /// When oracle contract is accessed, the global compute gas is immediately limited to this
-    /// value to force the transaction to complete quickly and prevent `DoS` attacks.
+    /// When oracle contract is accessed, the compute gas is limited to force the transaction
+    /// to complete quickly and prevent `DoS` attacks.
+    ///
+    /// - **Pre-REX4**: This is an **absolute** cap on the transaction's total compute gas.
+    /// - **REX4+**: This is a **relative** cap — it limits post-access compute gas. The effective
+    ///   limit becomes `current_usage + ORACLE_ACCESS_COMPUTE_GAS` at the point of access.
+    ///
     /// Note: If block environment was accessed first (20M compute gas limit), then oracle is
     /// accessed, the compute gas will be further restricted to this lower limit (1M compute
     /// gas).
