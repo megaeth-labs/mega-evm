@@ -2,13 +2,10 @@
 //! gas pricing. Storage slots and accounts are organized into buckets, and the gas cost scales
 //! with bucket capacity to incentivize efficient resource allocation.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
 use core::{
     convert::Infallible,
     fmt::{Debug, Display},
 };
-use std::rc::Rc;
 
 use alloy_primitives::{Address, U256};
 use auto_impl::auto_impl;
@@ -45,7 +42,7 @@ pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 /// The trait provides default methods [`bucket_id_for_account`](SaltEnv::bucket_id_for_account)
 /// and [`bucket_id_for_slot`](SaltEnv::bucket_id_for_slot) that can be overridden by
 /// implementations to customize bucket assignment logic.
-#[auto_impl(&, Box, Arc)]
+#[auto_impl(&, Box, Rc, Arc)]
 pub trait SaltEnv: Debug + Unpin {
     /// Error type returned when bucket capacity cannot be retrieved.
     type Error: Display;
@@ -110,22 +107,5 @@ impl SaltEnv for EmptyExternalEnv {
 
     fn bucket_id_for_slot(_address: Address, _key: U256) -> BucketId {
         0 as BucketId
-    }
-}
-
-/// Delegates SALT bucket queries through a shared `Rc` handle without cloning the underlying env.
-impl<T: SaltEnv + ?Sized> SaltEnv for Rc<T> {
-    type Error = T::Error;
-
-    fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-        self.as_ref().get_bucket_capacity(bucket_id)
-    }
-
-    fn bucket_id_for_account(account: Address) -> BucketId {
-        T::bucket_id_for_account(account)
-    }
-
-    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
-        T::bucket_id_for_slot(address, key)
     }
 }

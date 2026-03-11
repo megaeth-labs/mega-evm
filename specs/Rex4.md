@@ -271,16 +271,15 @@ Rex4 fixes the keyless deploy sandbox to share the parent transaction's external
 
 #### Problem
 
-Prior to Rex4, the keyless deploy sandbox creates its `MegaContext` via `MegaContext::new()`, which hardcodes `EmptyExternalEnv`.
-This means `DynamicGasCost` always uses a 1x multiplier (all buckets return `MIN_BUCKET_SIZE`) and `OracleEnv` always returns `None`.
-All storage-related operations in the sandbox (SSTORE, CREATE, new accounts) use incorrect gas pricing, independent of the actual SALT bucket capacities.
+Prior to Rex4, the keyless deploy sandbox uses a fixed 1x gas multiplier for all storage operations and drops oracle hints emitted during construction.
+All storage-related operations in the sandbox (SSTORE, CREATE, new accounts) are charged independently of the actual SALT bucket capacities, and oracle hints from constructors are silently discarded.
 
 #### Solution
 
-In Rex4+, the sandbox shares the parent transaction's SALT env and `OracleEnv` via `Rc` references.
-The sandbox builds its own `DynamicGasCost` from the shared SALT env, so contract creation and storage operations inside keyless deploy constructors are charged correctly without polluting the parent transaction's bucket cache.
+In Rex4, the sandbox inherits the parent transaction's SALT bucket capacities and oracle environment, so storage operations (SSTORE, CREATE, new accounts) are charged with correct dynamic gas pricing and oracle hints are forwarded to the parent.
+The sandbox maintains its own bucket cache to avoid polluting the parent transaction's state.
 
-Pre-Rex4 specs retain the `EmptyExternalEnv` behavior for backward compatibility.
+Pre-Rex4 specs retain the fixed 1x multiplier behavior for backward compatibility.
 
 ## Inheritance
 
