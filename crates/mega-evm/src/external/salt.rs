@@ -42,7 +42,7 @@ pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 /// The trait provides default methods [`bucket_id_for_account`](SaltEnv::bucket_id_for_account)
 /// and [`bucket_id_for_slot`](SaltEnv::bucket_id_for_slot) that can be overridden by
 /// implementations to customize bucket assignment logic.
-#[auto_impl(&, Box, Arc)]
+#[auto_impl(&, Box, Rc, Arc)]
 pub trait SaltEnv: Debug + Unpin {
     /// Error type returned when bucket capacity cannot be retrieved.
     type Error: Display;

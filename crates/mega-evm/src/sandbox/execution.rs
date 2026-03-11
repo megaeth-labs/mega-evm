@@ -20,7 +20,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{string::ToString, vec::Vec};
+use std::{rc::Rc, string::ToString, vec::Vec};
 
 use alloy_consensus::Transaction as AlloyTransaction;
 use alloy_evm::Evm;
@@ -42,7 +42,8 @@ use revm::{
 
 use crate::{
     constants, mark_frame_result_as_exceeding_limit, merge_evm_state_optional_status,
-    ExternalEnvTypes, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TxRuntimeLimit,
+    ExternalEnvTypes, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    TxRuntimeLimit,
 };
 
 use super::tx::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer};
@@ -325,6 +326,13 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
     let mega_spec = ctx.mega_spec();
     let block = ctx.block().clone();
     let chain = ctx.chain().clone();
+
+    // REX4+: Clone Rc references to parent's external envs before `journal_mut()` mutably
+    // borrows `ctx`, after which its fields are no longer accessible.
+    let shared_external_envs = mega_spec
+        .is_enabled(MegaSpecId::REX4)
+        .then(|| (Rc::clone(&ctx.salt_env), Rc::clone(&ctx.oracle_env)));
+
     let journal = ctx.journal_mut();
 
     // Create type-erased sandbox database with split borrows:
@@ -348,59 +356,26 @@ pub fn execute_keyless_deploy_sandbox<DB: alloy_evm::Database, ExtEnvs: External
     }
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation
-    let sandbox_result: Result<SandboxOutcome, KeylessDeployError> = {
-        // Create sandbox context with the type-erased database.
-        // SandboxDb is a concrete type, so MegaContext<SandboxDb, ...> doesn't recurse.
-        // Disable sandbox interception to prevent recursive sandbox creation.
+    if let Some((salt_env, oracle_env)) = shared_external_envs {
+        // REX4+: Share parent's salt env and oracle env with the sandbox
+        // while keeping a fresh dynamic gas cost cache local to the sandbox.
+        let sandbox_ctx = MegaContext::<_, ExtEnvs>::new_with_shared_ext_envs(
+            sandbox_db, mega_spec, salt_env, oracle_env,
+        )
+        .with_block(block)
+        .with_chain(chain)
+        .with_sandbox_disabled(true);
+        let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
+        process_sandbox_transact_result(sandbox_evm.transact_raw(sandbox_tx))
+    } else {
+        // Pre-REX4: Use EmptyExternalEnv for backward compatibility.
         let sandbox_ctx = MegaContext::new(sandbox_db, mega_spec)
             .with_block(block)
             .with_chain(chain)
             .with_sandbox_disabled(true);
         let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
-
-        // Execute the transaction
-        let result = sandbox_evm.transact_raw(sandbox_tx);
-
-        // Process result and extract what we need
-        match result {
-            Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
-                ExecutionResult::Success { gas_used, output, logs, .. } => {
-                    if let revm::context::result::Output::Create(bytecode, Some(created_addr)) =
-                        output
-                    {
-                        // Empty bytecode is treated as failure to prevent replay attacks.
-                        // Without this check, a keyless deploy tx that returns empty code could
-                        // be submitted multiple times, draining the signer's funds.
-                        if bytecode.is_empty() {
-                            return Ok(SandboxOutcome::Failure {
-                                state: sandbox_state,
-                                error: KeylessDeployError::EmptyCodeDeployed { gas_used },
-                            });
-                        }
-                        Ok(SandboxOutcome::Success {
-                            state: sandbox_state,
-                            result: SandboxResult { deploy_address: created_addr, gas_used, logs },
-                        })
-                    } else {
-                        // Contract creation didn't return an address - should never happen
-                        // but we return an error instead of panicking to avoid crashing the node
-                        Err(KeylessDeployError::NoContractCreated)
-                    }
-                }
-                ExecutionResult::Revert { gas_used, output } => Ok(SandboxOutcome::Failure {
-                    state: sandbox_state,
-                    error: KeylessDeployError::ExecutionReverted { gas_used, output },
-                }),
-                ExecutionResult::Halt { gas_used, reason } => Ok(SandboxOutcome::Failure {
-                    state: sandbox_state,
-                    error: KeylessDeployError::ExecutionHalted { gas_used, reason },
-                }),
-            },
-            Err(e) => Err(KeylessDeployError::InternalError(e.to_string())),
-        }
-    };
-
-    sandbox_result
+        process_sandbox_transact_result(sandbox_evm.transact_raw(sandbox_tx))
+    }
 }
 
 /// Outcome of sandbox execution, including state for merging on failure.
@@ -420,6 +395,49 @@ pub enum SandboxOutcome {
         /// Error returned by sandbox execution.
         error: KeylessDeployError,
     },
+}
+
+/// Processes the result of sandbox EVM execution into a [`SandboxOutcome`].
+///
+/// Handles all execution result variants (success, revert, halt) and transact errors.
+fn process_sandbox_transact_result(
+    result: Result<ResultAndState<MegaHaltReason>, impl core::fmt::Display>,
+) -> Result<SandboxOutcome, KeylessDeployError> {
+    match result {
+        Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
+            ExecutionResult::Success { gas_used, output, logs, .. } => {
+                if let revm::context::result::Output::Create(bytecode, Some(created_addr)) = output
+                {
+                    // Empty bytecode is treated as failure to prevent replay attacks.
+                    // Without this check, a keyless deploy tx that returns empty code could
+                    // be submitted multiple times, draining the signer's funds.
+                    if bytecode.is_empty() {
+                        return Ok(SandboxOutcome::Failure {
+                            state: sandbox_state,
+                            error: KeylessDeployError::EmptyCodeDeployed { gas_used },
+                        });
+                    }
+                    Ok(SandboxOutcome::Success {
+                        state: sandbox_state,
+                        result: SandboxResult { deploy_address: created_addr, gas_used, logs },
+                    })
+                } else {
+                    // Contract creation didn't return an address - should never happen
+                    // but we return an error instead of panicking to avoid crashing the node
+                    Err(KeylessDeployError::NoContractCreated)
+                }
+            }
+            ExecutionResult::Revert { gas_used, output } => Ok(SandboxOutcome::Failure {
+                state: sandbox_state,
+                error: KeylessDeployError::ExecutionReverted { gas_used, output },
+            }),
+            ExecutionResult::Halt { gas_used, reason } => Ok(SandboxOutcome::Failure {
+                state: sandbox_state,
+                error: KeylessDeployError::ExecutionHalted { gas_used, reason },
+            }),
+        },
+        Err(e) => Err(KeylessDeployError::InternalError(e.to_string())),
+    }
 }
 
 /// Applies all state changes from sandbox execution to the parent journal.
@@ -449,6 +467,7 @@ fn apply_sandbox_state<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     Ok(())
 }
 
+/// Reads an account nonce from the journal cache first, then falls back to the backing database.
 fn get_account_nonce<DB: alloy_evm::Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     address: Address,

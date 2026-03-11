@@ -53,8 +53,11 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// Additional limits for the EVM.
     pub additional_limit: Rc<RefCell<AdditionalLimit>>,
 
+    /// Shared SALT environment handle.
+    pub(crate) salt_env: Rc<ExtEnvs::SaltEnv>,
+
     /// Calculator for dynamic gas costs during transaction execution.
-    pub dynamic_storage_gas_cost: Rc<RefCell<DynamicGasCost<ExtEnvs::SaltEnv>>>,
+    pub dynamic_storage_gas_cost: Rc<RefCell<DynamicGasCost<Rc<ExtEnvs::SaltEnv>>>>,
 
     /// The oracle environment.
     pub oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
@@ -77,7 +80,7 @@ impl Default for MegaContext<EmptyDB, EmptyExternalEnv> {
 
 /* Constructors */
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
-    /// Creates a new `Context` with the given database, specification, and oracle.
+    /// Creates a new `MegaContext` with [`EmptyExternalEnv`].
     ///
     /// This constructor initializes a new `MegaETH` EVM context with default settings.
     /// For the `MINI_REX` specification, it automatically configures appropriate
@@ -87,16 +90,44 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
     ///
     /// * `db` - The database implementation to use for state storage
     /// * `spec` - The `MegaETH` specification version to use
-    /// * `external_envs` - The external environments for gas cost calculations
     ///
     /// # Returns
     ///
-    /// Returns a new `Context` instance with default configuration.
+    /// Returns a new `MegaContext` instance with default configuration.
     pub fn new(db: DB, spec: MegaSpecId) -> Self {
+        // `OpContext::default()` starts with block number 0, so the parent block number is also 0.
+        let salt_env = Rc::new(EmptyExternalEnv);
+        Self::new_with_shared_ext_envs(db, spec, salt_env, Rc::new(RefCell::new(EmptyExternalEnv)))
+    }
+}
+
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
+    /// Creates a new `MegaContext` with shared external environment references.
+    ///
+    /// Unlike [`MegaContext::new`] which uses [`EmptyExternalEnv`], this constructor accepts
+    /// existing `Rc` references to share a parent context's salt env and oracle env.
+    /// This ensures the sandbox uses the same dynamic gas pricing as the parent.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - The database implementation to use for state storage
+    /// * `spec` - The `MegaETH` specification version to use
+    /// * `salt_env` - Shared salt environment from the parent context
+    /// * `oracle_env` - Shared oracle environment from the parent context
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `MegaContext` instance sharing the parent's external environments while
+    /// keeping a fresh dynamic gas cost cache local to the new context.
+    pub(crate) fn new_with_shared_ext_envs(
+        db: DB,
+        spec: MegaSpecId,
+        salt_env: Rc<ExtEnvs::SaltEnv>,
+        oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
+    ) -> Self {
         let mut inner =
             revm::Context::op().with_db(db).with_cfg(CfgEnv::new_with_spec(spec.into_op_spec()));
 
-        // For the `MINI_REX` spec, we override the contract size and initcode size limits.
         if spec.is_enabled(MegaSpecId::MINI_REX) {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
             inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
@@ -107,12 +138,13 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
             spec,
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(spec, tx_limits))),
+            salt_env: Rc::clone(&salt_env),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
-                EmptyExternalEnv,
+                salt_env,
                 inner.block.number.to::<u64>().saturating_sub(1),
             ))),
-            oracle_env: Rc::new(RefCell::new(EmptyExternalEnv)),
+            oracle_env,
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new(
                 tx_limits.block_env_access_compute_gas_limit,
                 tx_limits.oracle_access_compute_gas_limit,
@@ -163,14 +195,16 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
         }
 
         let tx_limits = EvmTxRuntimeLimits::from_spec(spec);
+        let salt_env = Rc::new(external_envs.salt_env);
         Self {
             spec,
             disable_beneficiary: false,
             additional_limit: Rc::new(RefCell::new(AdditionalLimit::new(spec, tx_limits))),
+            salt_env: Rc::clone(&salt_env),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
-                external_envs.salt_env,
-                inner.block.number.to::<u64>() - 1,
+                salt_env,
+                inner.block.number.to::<u64>().saturating_sub(1),
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: Rc::new(RefCell::new(VolatileDataAccessTracker::new(
@@ -200,6 +234,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             spec: self.spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
+            salt_env: self.salt_env,
             dynamic_storage_gas_cost: self.dynamic_storage_gas_cost,
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
@@ -292,14 +327,16 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     ) -> MegaContext<DB, NewExtEnvTypes> {
         let parent_block_number = self.inner.block.number.to::<u64>().saturating_sub(1);
         let spec = self.spec;
+        let salt_env = Rc::new(external_envs.salt_env);
         MegaContext {
             inner: self.inner,
             spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
+            salt_env: Rc::clone(&salt_env),
             dynamic_storage_gas_cost: Rc::new(RefCell::new(DynamicGasCost::new(
                 spec,
-                external_envs.salt_env,
+                salt_env,
                 parent_block_number,
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
@@ -670,7 +707,10 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
 mod tests {
     use super::*;
 
+    use alloy_primitives::address;
     use revm::{context::CfgEnv, database::EmptyDB};
+
+    use crate::TestExternalEnvs;
 
     #[test]
     fn test_with_cfg_updates_spec() {
@@ -708,5 +748,41 @@ mod tests {
             assert_eq!(current_context.mega_spec(), spec);
             assert_eq!(current_context.inner.cfg.spec, OpSpecId::from(spec));
         }
+    }
+
+    /// Sharing SALT env handles between parent and sandbox must not merge their bucket caches.
+    #[test]
+    fn test_shared_salt_env_keeps_dynamic_gas_cache_isolated() {
+        let external_envs = TestExternalEnvs::new();
+        let parent = MegaContext::new(EmptyDB::default(), MegaSpecId::REX4)
+            .with_external_envs(external_envs.into());
+        let parent_address = address!("0000000000000000000000000000000000100001");
+        let sandbox_address = address!("0000000000000000000000000000000000100002");
+
+        parent
+            .dynamic_storage_gas_cost
+            .borrow_mut()
+            .new_account_gas(parent_address)
+            .expect("parent bucket lookup should succeed");
+        let parent_bucket_ids = parent.accessed_bucket_ids();
+
+        let sandbox =
+            MegaContext::<_, TestExternalEnvs<std::convert::Infallible>>::new_with_shared_ext_envs(
+                EmptyDB::default(),
+                MegaSpecId::REX4,
+                Rc::clone(&parent.salt_env),
+                Rc::clone(&parent.oracle_env),
+            )
+            .with_block(parent.block().clone())
+            .with_chain(parent.chain().clone())
+            .with_sandbox_disabled(true);
+        sandbox
+            .dynamic_storage_gas_cost
+            .borrow_mut()
+            .new_account_gas(sandbox_address)
+            .expect("sandbox bucket lookup should succeed");
+
+        assert_eq!(parent.accessed_bucket_ids(), parent_bucket_ids);
+        assert_ne!(sandbox.accessed_bucket_ids(), parent_bucket_ids);
     }
 }

@@ -265,6 +265,22 @@ Transaction accesses NUMBER at 30M usage:
 Transaction continues executing until 45M total compute gas → halts.
 ```
 
+### 5. Keyless Deploy Salt Environment
+
+Rex4 fixes the keyless deploy sandbox to share the parent transaction's external environments (salt env and oracle env), ensuring correct dynamic gas pricing for storage operations in keyless deploy constructors.
+
+#### Problem
+
+Prior to Rex4, the keyless deploy sandbox uses a fixed 1x gas multiplier for all storage operations and drops oracle hints emitted during construction.
+All storage-related operations in the sandbox (SSTORE, CREATE, new accounts) are charged independently of the actual SALT bucket capacities, and oracle hints from constructors are silently discarded.
+
+#### Solution
+
+In Rex4, the sandbox inherits the parent transaction's SALT bucket capacities and oracle environment, so storage operations (SSTORE, CREATE, new accounts) are charged with correct dynamic gas pricing and oracle hints are forwarded to the parent.
+The sandbox maintains its own bucket cache to avoid polluting the parent transaction's state.
+
+Pre-Rex4 specs retain the fixed 1x multiplier behavior for backward compatibility.
+
 ## Inheritance
 
 Rex4 inherits all Rex3 behavior (including increased oracle access compute gas limit, SLOAD-based oracle gas detention, and keyless deploy compute gas tracking) and all features from Rex2, Rex1, Rex, and MiniRex.
@@ -287,6 +303,7 @@ The semantics of Rex4 are inherited from:
 - Frame init interception: `crates/mega-evm/src/evm/execution.rs` (`frame_init` method).
 - Frame return deactivation: `crates/mega-evm/src/evm/execution.rs` (`frame_return_result` method).
 - Instruction enforcement: `crates/mega-evm/src/evm/instructions.rs` (`wrap_op_detain_gas_unconditional!`, `wrap_op_detain_gas_conditional!`, and `wrap_call_volatile_check!` macros).
+- Keyless deploy sandbox salt env: `crates/mega-evm/src/sandbox/execution.rs` (`execute_keyless_deploy_sandbox`).
 
 ## References
 
