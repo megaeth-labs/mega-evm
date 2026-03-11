@@ -265,6 +265,23 @@ Transaction accesses NUMBER at 30M usage:
 Transaction continues executing until 45M total compute gas → halts.
 ```
 
+### 5. Keyless Deploy Salt Environment
+
+Rex4 fixes the keyless deploy sandbox to share the parent transaction's external environments (salt env and oracle env), ensuring correct dynamic gas pricing for storage operations in keyless deploy constructors.
+
+#### Problem
+
+Prior to Rex4, the keyless deploy sandbox creates its `MegaContext` via `MegaContext::new()`, which hardcodes `EmptyExternalEnv`.
+This means `DynamicGasCost` always uses a 1x multiplier (all buckets return `MIN_BUCKET_SIZE`) and `OracleEnv` always returns `None`.
+All storage-related operations in the sandbox (SSTORE, CREATE, new accounts) use incorrect gas pricing, independent of the actual SALT bucket capacities.
+
+#### Solution
+
+In Rex4+, the sandbox shares the parent transaction's SALT env and `OracleEnv` via `Rc` references.
+The sandbox builds its own `DynamicGasCost` from the shared SALT env, so contract creation and storage operations inside keyless deploy constructors are charged correctly without polluting the parent transaction's bucket cache.
+
+Pre-Rex4 specs retain the `EmptyExternalEnv` behavior for backward compatibility.
+
 ## Inheritance
 
 Rex4 inherits all Rex3 behavior (including increased oracle access compute gas limit, SLOAD-based oracle gas detention, and keyless deploy compute gas tracking) and all features from Rex2, Rex1, Rex, and MiniRex.
@@ -287,6 +304,7 @@ The semantics of Rex4 are inherited from:
 - Frame init interception: `crates/mega-evm/src/evm/execution.rs` (`frame_init` method).
 - Frame return deactivation: `crates/mega-evm/src/evm/execution.rs` (`frame_return_result` method).
 - Instruction enforcement: `crates/mega-evm/src/evm/instructions.rs` (`wrap_op_detain_gas_unconditional!`, `wrap_op_detain_gas_conditional!`, and `wrap_call_volatile_check!` macros).
+- Keyless deploy sandbox salt env: `crates/mega-evm/src/sandbox/execution.rs` (`execute_keyless_deploy_sandbox`).
 
 ## References
 
