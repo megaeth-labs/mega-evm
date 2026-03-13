@@ -107,11 +107,12 @@ pub mod rex3 {
 
 /// Constants for the `REX4` spec.
 pub mod rex4 {
-    /// Numerator of the fraction of parent's remaining state growth budget forwarded to a child
-    /// frame.
+    /// Numerator of the fraction of parent's remaining resource budget forwarded to a child
+    /// frame. Applies to all four resource dimensions (data size, KV updates, compute gas,
+    /// state growth).
     /// Child budget = `parent_remaining` * NUMERATOR / DENOMINATOR.
     pub const FRAME_LIMIT_NUMERATOR: u64 = 98;
-    /// Denominator of the per-frame state growth budget forwarding fraction.
+    /// Denominator of the per-frame resource budget forwarding fraction.
     pub const FRAME_LIMIT_DENOMINATOR: u64 = 100;
 }
 

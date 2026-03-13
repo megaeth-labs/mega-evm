@@ -1,309 +1,124 @@
 # Rex4 Specification
 
+## Abstract
+
 Rex4 is the fourth patch to the Rex hardfork.
-It introduces per-frame state growth limits, per-frame budgets for all resource dimensions, relative gas detention caps, and the MegaAccessControl system contract, while inheriting all Rex3 behavior.
+It introduces per-frame resource budgets, relative gas detention, two system control contracts, and keyless deploy sandbox external-environment inheritance.
+All Rex3 semantics are preserved unless explicitly changed below.
 
-## Changes from Rex3
+## Changes
 
-### 1. Per-Frame Resource Budgets
+### 1. Per-frame resource budgets for all resource dimensions
 
-Rex4 introduces **per-frame resource budgets** for all four resource dimensions (state growth, data size, KV updates, compute gas) to prevent a single inner call from consuming the entire transaction's budget.
+#### Motivation
 
-#### Problem
+Transaction-only enforcement lets inner calls consume nearly all remaining budget.
+Rex4 adds bounded per-frame forwarding so parent and sibling execution remains predictable.
 
-Prior to Rex4, all four resource limits (state growth, data size, KV updates, compute gas) are enforced globally at the TX level.
-An inner call frame can consume the entire budget, leaving nothing for the parent frame.
-This makes it difficult for contracts to reason about remaining resource capacity after calling external contracts.
+#### Semantics
 
-#### Solution
+Previous behavior:
+- Data size, KV updates, compute gas, and state growth are effectively constrained only by transaction-level limits.
 
-Each inner call frame receives a fraction of the parent's remaining budget for each resource dimension:
+New behavior:
+- The top-level frame MUST start with the full transaction budget for each dimension.
+- Each inner frame MUST receive `remaining * 98 / 100` of its parent remaining budget for each dimension.
+- A frame-local exceed MUST revert that frame with `MegaLimitExceeded(uint8 kind, uint64 limit)` and MUST NOT halt the transaction.
+- The `kind` discriminator MUST identify which resource dimension exceeded the frame-local budget.
+- A transaction-level exceed MUST halt with `OutOfGas`.
+- Compute gas used by reverted child frames MUST still count toward transaction compute usage.
 
-- **Top-level frame**: Gets the full TX state growth limit (no reduction).
-- **Inner frames**: Get `remaining * 98 / 100` of the parent's remaining budget.
+### 2. MegaAccessControl system contract
 
-The 98/100 ratio ensures that the parent always retains at least 2% of its remaining budget after spawning a child frame.
+#### Motivation
 
-All four resource dimensions (state growth, data size, KV updates, compute gas) use this per-frame enforcement.
-Note that compute gas is always persistent — even after a child frame reverts due to exceeding its per-frame compute gas budget, the parent's total compute gas still increases by the child's actual gas used.
-Per-frame limits act as "early termination guardrails" for compute gas, not budget protection.
+Detention is reactive after volatile access.
+Rex4 adds proactive subtree-level volatile-access control.
 
-#### Constants
+#### Semantics
 
-| Constant                  | Value | Description                         |
-| ------------------------- | ----- | ----------------------------------- |
-| `FRAME_LIMIT_NUMERATOR`   | 98    | Numerator of the forwarding ratio   |
-| `FRAME_LIMIT_DENOMINATOR` | 100   | Denominator of the forwarding ratio |
+Previous behavior:
+- No runtime subtree switch exists to disable volatile access.
 
-#### Frame Budget Calculation
+New behavior:
+- The access-control interface MUST provide disable, enable, and status-query operations for volatile access.
+- Disabling volatile access MUST apply to the caller frame and all descendants in its subtree.
+- Restricted volatile access MUST revert immediately with `VolatileDataAccessDisabled(uint8 accessType)`.
+- Covered volatile access MUST include block-environment reads, beneficiary-targeted account access (including `SELFDESTRUCT` when targeting the beneficiary), and oracle storage reads.
+- Blocked volatile access MUST NOT update volatile-access tracking and MUST NOT tighten detention.
+- Enabling from a descendant MUST revert with `DisabledByParent()` when the restriction is inherited from an ancestor.
+- Restriction MUST end when the activating frame returns.
+- Value-bearing control calls MUST revert with `NonZeroTransfer()`.
 
-When a new inner call frame is created:
+### 3. MegaLimitControl system contract
 
-1. Compute `remaining` from the parent frame:
-   - `remaining = parent_limit - (used - refund)`, clamped to `[0, parent_limit]`
-   - For the top-level frame, `parent_limit` is the TX state growth limit
-2. Compute child budget: `child_limit = remaining * 98 / 100`
+#### Motivation
 
-#### Example
+Contracts need a deterministic runtime query for effective remaining compute gas under both frame and detention constraints.
 
-```text
-TX state growth limit: 1000
-Top-level frame limit: 1000
+#### Semantics
 
-Top-level calls Child A:
-  Child A budget = 1000 * 98/100 = 980
-  Child A creates 100 storage slots (growth = 100)
+Previous behavior:
+- No dedicated system query returns effective remaining compute gas.
 
-  Child A calls Grandchild B:
-    Remaining for Child A = 980 - 100 = 880
-    Grandchild B budget = 880 * 98/100 = 862
-    Grandchild B creates 862 slots → at frame limit → reverted (absorbed)
+New behavior:
+- The limit-control interface MUST provide `remainingComputeGas() -> uint64`.
+- Returned value in Rex4 MUST equal `min(frame_remaining, tx_detained_remaining)` at call time.
+- Value-bearing calls to this query MUST revert with `NonZeroTransfer()`.
 
-Top-level calls Child C (after Child A succeeds):
-  Growth so far = 100 (Grandchild B's growth was discarded)
-  Remaining = 1000 - 100 = 900
-  Child C budget = 900 * 98/100 = 882
-```
+### 4. Relative gas detention cap
 
-#### Limit Exceeding Semantics
+#### Motivation
 
-When an inner frame exceeds its frame-local resource limit:
+Absolute caps can halt immediately when access occurs late.
+Rex4 limits post-access compute budget without retroactively penalizing pre-access compute.
 
-1. The frame's result is changed to **Revert** (not Halt).
-2. Gas is returned to the parent frame (not consumed).
-3. The parent can continue executing after the reverted child call.
-4. The child's resource usage is discarded for discardable dimensions (standard revert behavior).
-   For compute gas, the usage is persistent — it still counts toward the parent's total.
-5. The revert data is ABI-encoded as `MegaLimitExceeded(uint8 kind, uint64 limit)` (see below).
+#### Semantics
 
-This is different from TX-level limit enforcement, which halts the entire transaction with `OutOfGas`.
+Previous behavior:
+- Effective detained limit is an absolute cap per volatile-access category.
 
-#### Revert Data Encoding
+New behavior:
+- Effective detained limit MUST be `current_usage + cap` at volatile access time.
+- Execution MUST be allowed up to `min(tx_compute_limit, effective_detained_limit)`.
+- Across multiple volatile accesses, the most restrictive effective limit MUST apply.
 
-When a frame-local limit exceed triggers a revert, the revert output carries ABI-encoded data so that parent contracts can identify the cause:
+### 5. Keyless deploy sandbox external-environment inheritance
 
-```solidity
-error MegaLimitExceeded(uint8 kind, uint64 limit);
-```
+#### Motivation
 
-| Field   | Type     | Description                           |
-| ------- | -------- | ------------------------------------- |
-| `kind`  | `uint8`  | Which resource limit was exceeded     |
-| `limit` | `uint64` | The configured limit for this frame   |
+Fixed sandbox pricing and dropped hints can diverge from transaction environment semantics.
+Rex4 aligns sandbox behavior with parent external context while preserving isolation.
 
-The `kind` discriminant values are:
+#### Semantics
 
-| Value | Resource     |
-| ----- | ------------ |
-| 0     | Data size    |
-| 1     | KV updates   |
-| 2     | Compute gas  |
-| 3     | State growth |
+Previous behavior:
+- Sandbox storage-related operations use fixed 1x pricing.
+- Sandbox oracle hints are not forwarded.
 
-All four resource dimensions have per-frame enforcement, so all `kind` values (0–3) can be emitted.
+New behavior:
+- Sandbox execution MUST inherit parent external environment inputs for dynamic pricing and oracle behavior.
+- Sandbox storage-related operations MUST follow parent-context dynamic pricing basis.
+- Sandbox oracle hints MUST be forwarded to the parent context.
+- Sandbox-internal caches MUST remain isolated from parent cache mutation.
+- Pre-Rex4 specs MUST retain prior behavior.
 
-Parent contracts can detect a frame-local limit exceed via low-level call return data or try/catch, and decode it to determine which limit was hit and what the frame's budget was.
-
-### 2. MegaAccessControl System Contract
-
-Rex4 introduces the **MegaAccessControl** system contract at address `0x6342000000000000000000000000000000000004`.
-This contract provides access restriction functions that are intercepted and enforced by the EVM.
-
-#### Volatile Data
-
-The following are considered **volatile data**:
-- Block environment fields: TIMESTAMP, NUMBER, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH
-- Beneficiary account access: BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH, CALL, STATICCALL, DELEGATECALL, CALLCODE, SELFDESTRUCT when targeting the block beneficiary
-- Oracle contract access: SLOAD on the oracle contract
-
-#### `disableVolatileDataAccess()`
-
-When a contract calls `MegaAccessControl.disableVolatileDataAccess()`, the caller's frame and all inner calls that access volatile data will revert with `VolatileDataAccessDisabled(uint8 accessType)` error.
-
-**Semantics:**
-- The caller's own frame **is** restricted.
-  Accessing volatile data after calling `disableVolatileDataAccess()` in the same frame will revert.
-- The restriction applies to all inner call types: CALL, STATICCALL, DELEGATECALL, CALLCODE.
-- When a restricted frame accesses volatile data, it immediately reverts with ABI-encoded `VolatileDataAccessDisabled(uint8 accessType)` error.
-  The `accessType` parameter identifies which volatile data triggered the revert (see `VolatileDataAccessType` enum below).
-- The reverted call returns gas to the parent frame (standard revert behavior).
-- Calls carrying non-zero transferred ETH revert and do not modify the disable state.
-- If called multiple times at different depths, the shallowest (more restrictive) activation depth is kept.
-- The restriction is **scoped to the caller's subtree**: when the frame that called `disableVolatileDataAccess()` returns, the restriction is deactivated.
-  Sibling calls made by the parent after the disabling frame returns are not affected.
-- Blocked volatile data accesses do **not** set the `volatile_data_accessed` bitmap or lower the compute gas limit (gas detention).
-  The access is rejected before it can affect the transaction-level tracking state.
-
-#### `enableVolatileDataAccess()`
-
-Re-enables volatile data access for the caller's frame and all inner calls.
-
-**Semantics:**
-- Succeeds if access is not currently disabled, or if the caller (or a frame at the same depth) was the one that disabled it.
-- Reverts with `DisabledByParent()` (selector `0xcc11219e`) if a parent frame (shallower depth) disabled access.
-  A child frame cannot override a parent's restriction.
-- After a successful call, both the caller and its inner calls can access volatile data again.
-
-#### `isVolatileDataAccessDisabled()`
-
-Queries whether volatile data access is disabled at the caller's current call depth.
-
-**Semantics:**
-- Returns `true` if volatile data access is disabled at the caller's depth, `false` otherwise.
-- This is a read-only query; it does not modify the disable state.
-
-#### `VolatileDataAccessType` Enum
-
-The `VolatileDataAccessType` enum identifies which type of volatile data triggered the revert.
-Discriminant values match the bit positions in the internal `VolatileDataAccess` bitmap.
-
-```solidity
-enum VolatileDataAccessType {
-    BlockNumber,    // 0  — NUMBER opcode
-    Timestamp,      // 1  — TIMESTAMP opcode
-    Coinbase,       // 2  — COINBASE opcode
-    Difficulty,     // 3  — DIFFICULTY opcode
-    GasLimit,       // 4  — GASLIMIT opcode
-    BaseFee,        // 5  — BASEFEE opcode
-    PrevRandao,     // 6  — PREVRANDAO opcode
-    BlockHash,      // 7  — BLOCKHASH opcode
-    BlobBaseFee,    // 8  — BLOBBASEFEE opcode
-    BlobHash,       // 9  — BLOBHASH opcode
-    Beneficiary,    // 10 — BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH/CALL/STATICCALL/DELEGATECALL/CALLCODE/SELFDESTRUCT on beneficiary
-    Oracle          // 11 — SLOAD on oracle contract
-}
-```
-
-#### Contract Interface
-
-```solidity
-interface IMegaAccessControl {
-    error NotIntercepted();
-    error NonZeroTransfer();
-    error VolatileDataAccessDisabled(VolatileDataAccessType accessType);
-    error DisabledByParent();
-    function disableVolatileDataAccess() external view;
-    function enableVolatileDataAccess() external view;
-    function isVolatileDataAccessDisabled() external view returns (bool disabled);
-}
-```
-
-The contract body reverts with `NotIntercepted()` if called outside the MegaETH EVM (e.g., on a network that doesn't support this feature).
-
-#### DELEGATECALL / CALLCODE
-
-DELEGATECALL and CALLCODE to the MegaAccessControl system contract are **not intercepted**.
-The EVM interception only triggers on CALL and STATICCALL (where `target_address` equals the system contract address).
-For DELEGATECALL and CALLCODE, `target_address` is the caller's own address (not the code address), so the interception does not match.
-The call falls through to the underlying contract code, which reverts with `NotIntercepted()`.
-
-### 3. MegaLimitControl System Contract
-
-Rex4 introduces the **MegaLimitControl** system contract at address `0x6342000000000000000000000000000000000005`.
-This contract currently provides a read-only query for remaining compute gas of the current call.
-The runtime value is returned by EVM interception.
-
-#### `remainingComputeGas()`
-
-Returns the remaining compute gas of the current call as `uint64`.
-In Rex4, the value is the minimum of the caller's per-frame remaining compute gas and the TX-level detained remaining.
-This ensures the returned value reflects the actual gas available before execution halts, whether due to per-frame budget exhaustion or TX-level gas detention (e.g., after volatile data access).
-Top-level direct TX calls return the TX compute limit minus intrinsic compute gas.
-Inner calls return the caller's frame remaining, reflecting compute gas consumed so far in the caller's frame.
-In pre-Rex4, this falls back to TX-level remaining compute gas.
-The returned value is a snapshot at call time and can change after further execution.
-Calls carrying non-zero transferred ETH revert.
-
-#### Contract Interface
-
-```solidity
-interface IMegaLimitControl {
-    error NotIntercepted();
-    error NonZeroTransfer();
-    function remainingComputeGas() external view returns (uint64 remaining);
-}
-```
-
-The contract body reverts with `NotIntercepted()` if called outside the MegaETH EVM.
-
-#### Interception Scope
-
-Interception matches CALL and STATICCALL to `0x6342...0005`.
-DELEGATECALL and CALLCODE are not intercepted for the same reason as `MegaAccessControl`.
-
-### 4. Relative Gas Detention Cap
-
-Rex4 changes gas detention (volatile data compute gas limiting) from an **absolute** cap to a **relative** cap.
-
-#### Problem
-
-In pre-Rex4, when a transaction accesses volatile data (block env, beneficiary, oracle), the transaction's total compute gas limit is capped at an absolute value (e.g., 20M for block env, 1M/20M for oracle).
-If a transaction has already consumed more compute gas than the cap value before accessing volatile data, it halts immediately — even though the intent is to limit *post-access* computation, not to penalize prior work.
-
-#### Solution
-
-In Rex4+, the detention cap is **relative** to the compute gas usage at the time of access.
-The effective limit becomes `current_usage + cap`, allowing `cap` more compute gas after the access point.
-
-For example, if a transaction has used 25M compute gas before accessing TIMESTAMP:
-- **Pre-Rex4**: Effective limit = 20M → halts immediately (25M > 20M).
-- **Rex4+**: Effective limit = 25M + 20M = 45M → allows 20M more compute gas after access.
-
-The "most restrictive wins" rule still applies: if multiple volatile data types are accessed, each sets its own effective limit, and the minimum is used.
-Because the cap is anchored at the first access point, subsequent accesses at higher usage only set higher effective limits, so the first access remains the most restrictive within the same volatile data category.
-
-#### Example
-
-```text
-TX compute gas limit: 200M
-
-Transaction executes 25M compute gas of pure computation.
-Transaction accesses TIMESTAMP:
-  Effective detained limit = 25M + 20M = 45M (anchored at first access)
-Transaction accesses NUMBER at 30M usage:
-  min(45M, 30M + 20M) = min(45M, 50M) = 45M (first access wins)
-Transaction continues executing until 45M total compute gas → halts.
-```
-
-### 5. Keyless Deploy Salt Environment
-
-Rex4 fixes the keyless deploy sandbox to share the parent transaction's external environments (salt env and oracle env), ensuring correct dynamic gas pricing for storage operations in keyless deploy constructors.
-
-#### Problem
-
-Prior to Rex4, the keyless deploy sandbox uses a fixed 1x gas multiplier for all storage operations and drops oracle hints emitted during construction.
-All storage-related operations in the sandbox (SSTORE, CREATE, new accounts) are charged independently of the actual SALT bucket capacities, and oracle hints from constructors are silently discarded.
-
-#### Solution
-
-In Rex4, the sandbox inherits the parent transaction's SALT bucket capacities and oracle environment, so storage operations (SSTORE, CREATE, new accounts) are charged with correct dynamic gas pricing and oracle hints are forwarded to the parent.
-The sandbox maintains its own bucket cache to avoid polluting the parent transaction's state.
-
-Pre-Rex4 specs retain the fixed 1x multiplier behavior for backward compatibility.
+## Invariants
+
+- `I-1`: Stable pre-Rex4 semantics MUST remain unchanged.
+- `I-2`: Frame-local exceed MUST revert the frame and MUST NOT halt the transaction.
+- `I-3`: Transaction-level exceed MUST halt with `OutOfGas`.
+- `I-4`: Transaction compute usage MUST be monotonic and include reverted-frame compute usage.
+- `I-5`: Volatile-access disable scope MUST be subtree-local and ancestor-owned.
+- `I-6`: Blocked volatile access MUST NOT update volatile-access tracking or detention.
+- `I-7`: Transaction detained compute limit MUST be monotonic non-increasing.
+- `I-8`: `remainingComputeGas()` MUST NOT exceed either frame-local remaining or transaction-level detained remaining.
+- `I-9`: Keyless deploy sandbox MUST inherit parent external-environment semantics while preserving sandbox cache isolation.
 
 ## Inheritance
 
-Rex4 inherits all Rex3 behavior (including increased oracle access compute gas limit, SLOAD-based oracle gas detention, and keyless deploy compute gas tracking) and all features from Rex2, Rex1, Rex, and MiniRex.
-
-The semantics of Rex4 are inherited from:
-
-- **Rex4** -> **Rex3** -> **Rex2** -> **Rex1** -> **Rex** -> **MiniRex** -> **Optimism Isthmus** -> **Ethereum Prague**
-
-## Implementation References
-
-- Frame state growth limit constants: `crates/mega-evm/src/constants.rs` (`rex4::FRAME_LIMIT_NUMERATOR`, `rex4::FRAME_LIMIT_DENOMINATOR`).
-- Frame limit tracker: `crates/mega-evm/src/limit/frame_limit.rs` (`FrameLimitTracker`, `max_forward_limit()`).
-- State growth tracker (Rex4 per-frame logic): `crates/mega-evm/src/limit/state_growth.rs` (`StateGrowthLimit2`).
-- Absorb logic: `crates/mega-evm/src/limit/limit.rs` (`AdditionalLimit::before_frame_return_result`).
-- Revert data encoding: `crates/mega-evm/src/limit/mod.rs` (`MegaLimitExceeded`, `LimitCheck::revert_data()`).
-- TX runtime limits: `crates/mega-evm/src/evm/limit.rs` (`rex4()`).
-- MegaAccessControl system contract: `crates/mega-evm/src/system/control.rs`, `crates/system-contracts/contracts/MegaAccessControl.sol`.
-- MegaLimitControl system contract: `crates/mega-evm/src/system/limit_control.rs`, `crates/system-contracts/contracts/MegaLimitControl.sol`.
-- Volatile access disable tracking: merged into `VolatileDataAccessTracker` in `crates/mega-evm/src/access/tracker.rs`.
-- Frame init interception: `crates/mega-evm/src/evm/execution.rs` (`frame_init` method).
-- Frame return deactivation: `crates/mega-evm/src/evm/execution.rs` (`frame_return_result` method).
-- Instruction enforcement: `crates/mega-evm/src/evm/instructions.rs` (`wrap_op_detain_gas_unconditional!`, `wrap_op_detain_gas_conditional!`, and `wrap_call_volatile_check!` macros).
-- Keyless deploy sandbox salt env: `crates/mega-evm/src/sandbox/execution.rs` (`execute_keyless_deploy_sandbox`).
+Rex4 inherits Rex3 except for the deltas defined in `Changes`.
+Semantic lineage: `Rex4 -> Rex3 -> Rex2 -> Rex1 -> Rex -> MiniRex -> Optimism Isthmus -> Ethereum Prague`.
 
 ## References
 
@@ -312,3 +127,6 @@ The semantics of Rex4 are inherited from:
 - [Rex1 Specification](Rex1.md)
 - [Rex Specification](Rex.md)
 - [MiniRex Specification](MiniRex.md)
+- [Rex4 Implementation References (Informative)](impl/Rex4-Implementation-References.md)
+- [Rex4 Behavior Details (Informative)](impl/Rex4-Behavior-Details.md)
+- [Resource Accounting](../docs/RESOURCE_ACCOUNTING.md)
