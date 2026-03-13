@@ -27,6 +27,7 @@ revm-inspectors = { workspace = true, features = ["std"] }
 
 # alloy
 alloy-consensus = { workspace = true, features = ["serde"] }
+alloy-trie = { workspace = true }
 alloy-eips.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
