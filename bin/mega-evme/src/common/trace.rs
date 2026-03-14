@@ -8,6 +8,7 @@ use alloy_rpc_types_trace::geth::{
 };
 use clap::{Parser, ValueEnum};
 use mega_evm::{
+    alloy_evm::Database as AlloyDatabase,
     revm::{
         context::{
             result::{ExecutionResult, ResultAndState},
@@ -22,7 +23,7 @@ use mega_evm::{
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use tracing::{debug, info, trace};
 
-use super::{EvmeError, EvmeState};
+use super::EvmeError;
 
 /// Tracer type for execution analysis
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -213,14 +214,13 @@ impl TraceArgs {
     }
 
     /// Execute transaction with optional tracing
-    pub fn execute_transaction<N, P>(
+    pub fn execute_transaction<DB>(
         &self,
-        evm_context: MegaContext<&mut EvmeState<N, P>, TestExternalEnvs>,
+        evm_context: MegaContext<DB, TestExternalEnvs>,
         tx: MegaTransaction,
     ) -> Result<(ExecutionResult<MegaHaltReason>, EvmState, Option<String>), EvmeError>
     where
-        N: alloy_network::Network,
-        P: alloy_provider::Provider<N> + std::fmt::Debug,
+        DB: AlloyDatabase + DatabaseRef,
     {
         if self.is_tracing_enabled() {
             info!(tracer = ?self.tracer, "Evm executing with tracing");

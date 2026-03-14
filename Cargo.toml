@@ -13,7 +13,7 @@ exclude = []
 # https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
 resolver = "2"
 [workspace.package]
-version = "1.5.0"
+version = "1.4.2"
 edition = "2021"
 rust-version = "1.86"
 license = "MIT OR Apache-2.0"
@@ -178,10 +178,8 @@ triehash = { version = "0.8", default-features = false }
 walkdir = { version = "2.5", default-features = false }
 
 [patch.crates-io]
-op-revm = { git = "https://github.com/megaeth-labs/revm.git", branch = "feat/add-salt-bucket-capacity-api" }
-revm = { git = "https://github.com/megaeth-labs/revm.git", branch = "feat/add-salt-bucket-capacity-api" }
-revm-database-interface = { git = "https://github.com/megaeth-labs/revm.git", branch = "feat/add-salt-bucket-capacity-api" }
-revm-database = { git = "https://github.com/megaeth-labs/revm.git", branch = "feat/add-salt-bucket-capacity-api" }
+revm-database-interface = { git = "https://github.com/megaeth-labs/revm-database-interface.git", branch = "main" }
+revm-database = { git = "https://github.com/megaeth-labs/revm-database.git", branch = "main" }
 
 # Speed up compilation time for dev builds by reducing emitted debug info.
 # NOTE: Debuggers may provide less useful information with this setting.

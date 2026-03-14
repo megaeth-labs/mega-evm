@@ -11,11 +11,11 @@ use mega_evm::{
     revm::{
         context::{result::ExecutionResult, BlockEnv, ContextTr},
         context_interface::block::BlobExcessGasAndPrice,
-        database::{states::bundle_state::BundleRetention, StateBuilder},
+        database::{states::bundle_state::BundleRetention, StateBuilder, WrapDatabaseRef},
         DatabaseRef,
     },
     BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
-    MegaEvmFactory, MegaHardforks, MegaSpecId,
+    MegaEvmFactory, MegaHardforks, MegaSpecId, TestDatabaseWrapper,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -226,7 +226,7 @@ impl Cmd {
         let transaction_index = preceding_transactions.len() as u64;
         debug!(transaction_index, "Setting up block executor");
 
-        let (external_env_factory, _bucket_capacities) = self.ext_args.create_external_envs()?;
+        let external_env_factory = self.ext_args.create_external_envs()?;
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_env_factory);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             &hardforks,
@@ -263,6 +263,9 @@ impl Cmd {
         let mut inspector = self.trace_args.create_inspector();
 
         // Create state and block executor with inspector
+        let bucket_capacities = self.ext_args.bucket_capacities()?;
+        let database = TestDatabaseWrapper::new(WrapDatabaseRef::from(&*database))
+            .with_bucket_capacities(bucket_capacities);
         let mut state = StateBuilder::new().with_database(database).with_bundle_update().build();
         let mut block_executor = block_executor_factory.create_executor_with_inspector(
             &mut state,

@@ -141,12 +141,14 @@ const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 ///
 /// This wrapper delegates all database operations to the inner database,
 /// but adds configurable bucket capacity tracking for testing dynamic gas costs.
-#[derive(Debug, Clone)]
+#[derive(derive_more::Debug, Clone)]
 pub struct TestDatabaseWrapper<DB> {
     /// The inner database implementation.
+    #[debug(skip)]
     pub inner: DB,
     /// Bucket capacities. Maps bucket IDs to their capacity values.
     /// Buckets not in this map default to [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
+    #[debug(skip)]
     bucket_capacity: Rc<RefCell<HashMap<BucketId, u64>>>,
 }
 
@@ -170,7 +172,19 @@ impl<DB> TestDatabaseWrapper<DB> {
     ///
     /// `self` for method chaining
     pub fn with_bucket_capacity(self, bucket_id: BucketId, capacity: u64) -> Self {
-        self.bucket_capacity.borrow_mut().insert(bucket_id, capacity);
+        self.with_bucket_capacities([(bucket_id, capacity)])
+    }
+
+    /// Configures multiple bucket capacities at once.
+    ///
+    /// # Returns
+    ///
+    /// `self` for method chaining
+    pub fn with_bucket_capacities(
+        self,
+        bucket_capacities: impl IntoIterator<Item = (BucketId, u64)>,
+    ) -> Self {
+        self.bucket_capacity.borrow_mut().extend(bucket_capacities);
         self
     }
 
@@ -232,5 +246,52 @@ impl<DB: revm::Database> revm::Database for TestDatabaseWrapper<DB> {
             .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64);
 
         Ok((bucket_id as usize, capacity))
+    }
+}
+
+impl<DB: revm::DatabaseRef> revm::DatabaseRef for TestDatabaseWrapper<DB> {
+    type Error = DB::Error;
+
+    fn basic_ref(&self, address: Address) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        self.inner.basic_ref(address)
+    }
+
+    fn code_by_hash_ref(&self, code_hash: B256) -> Result<revm::state::Bytecode, Self::Error> {
+        self.inner.code_by_hash_ref(code_hash)
+    }
+
+    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        self.inner.storage_ref(address, index)
+    }
+
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        self.inner.block_hash_ref(number)
+    }
+
+    fn salt_bucket_capacity_ref(
+        &self,
+        address: Address,
+        index: Option<U256>,
+    ) -> Result<(usize, u64), Self::Error> {
+        let bucket_id = if let Some(key) = index {
+            Self::bucket_id_for_slot(address, key)
+        } else {
+            Self::bucket_id_for_account(address)
+        };
+
+        let capacity = self
+            .bucket_capacity
+            .borrow()
+            .get(&bucket_id)
+            .copied()
+            .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64);
+
+        Ok((bucket_id as usize, capacity))
+    }
+}
+
+impl<DB: revm::DatabaseCommit> revm::DatabaseCommit for TestDatabaseWrapper<DB> {
+    fn commit(&mut self, changes: revm::primitives::HashMap<Address, revm::state::Account>) {
+        self.inner.commit(changes);
     }
 }
