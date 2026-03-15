@@ -5,16 +5,18 @@ use std::str::FromStr;
 use alloy_primitives::{Address, B256, U256};
 use clap::{Args, Parser};
 use mega_evm::{
-    alloy_evm::Database,
     revm::{
         context::{block::BlockEnv, cfg::CfgEnv},
+        database::{DatabaseRef, WrapDatabaseRef},
         primitives::eip4844,
     },
-    MegaContext, MegaSpecId, TestExternalEnvs,
+    BucketId, MegaContext, MegaSpecId, TestDatabaseWrapper, TestExternalEnvs,
 };
 use tracing::{debug, trace};
 
 use super::{EvmeError, Result};
+
+type ConfiguredRefDatabase<DB> = TestDatabaseWrapper<WrapDatabaseRef<DB>>;
 
 /// Chain configuration arguments (spec and chain ID)
 #[derive(Args, Debug, Clone)]
@@ -127,15 +129,17 @@ pub struct ExtEnvArgs {
 }
 
 impl ExtEnvArgs {
+    /// Parses CLI-provided bucket capacity overrides.
+    pub fn bucket_capacities(&self) -> Result<Vec<(BucketId, u64)>> {
+        self.bucket_capacity
+            .iter()
+            .map(|bucket_capacity| parse_bucket_capacity(bucket_capacity))
+            .collect()
+    }
+
     /// Creates [`TestExternalEnvs`].
     pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
-        let mut external_envs = TestExternalEnvs::new();
-
-        // Parse and configure bucket capacities
-        for bucket_capacity_str in &self.bucket_capacity {
-            let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
-            external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
-        }
+        let external_envs = TestExternalEnvs::new();
         debug!(external_envs = ?external_envs, "Evm TestExternalEnvs created");
 
         Ok(external_envs)
@@ -180,13 +184,20 @@ impl EnvArgs {
     }
 
     /// Creates a [`MegaContext`] with all environment configurations.
-    pub fn create_evm_context<DB: Database>(
+    pub fn create_evm_context<DB>(
         &self,
         db: DB,
-    ) -> Result<MegaContext<DB, TestExternalEnvs>> {
+    ) -> Result<MegaContext<ConfiguredRefDatabase<DB>, TestExternalEnvs>>
+    where
+        DB: DatabaseRef,
+        <DB as DatabaseRef>::Error: Send + Sync + 'static,
+    {
         let cfg = self.create_cfg_env()?;
         let block = self.create_block_env()?;
         let external_envs = self.create_external_envs()?;
+        let bucket_capacities = self.ext.bucket_capacities()?;
+        let db = TestDatabaseWrapper::new(WrapDatabaseRef::from(db))
+            .with_bucket_capacities(bucket_capacities);
 
         Ok(MegaContext::new(db, cfg.spec)
             .with_cfg(cfg)
@@ -216,4 +227,26 @@ pub fn parse_bucket_capacity(s: &str) -> Result<(u32, u64)> {
 
     trace!(string = %s, bucket_id = %bucket_id, capacity = %capacity, "Parsed bucket capacity");
     Ok((bucket_id, capacity))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mega_evm::{revm::Database as _, test_utils::MemoryDatabase, MIN_BUCKET_SIZE};
+
+    #[test]
+    fn bucket_capacities_apply_to_wrapped_database() {
+        let address = Address::repeat_byte(0x11);
+        let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_account(address);
+        let capacity = MIN_BUCKET_SIZE as u64 * 4;
+        let args = ExtEnvArgs { bucket_capacity: vec![format!("{bucket_id}:{capacity}")] };
+
+        let wrapped = TestDatabaseWrapper::new(MemoryDatabase::default())
+            .with_bucket_capacities(args.bucket_capacities().unwrap());
+
+        assert_eq!(
+            wrapped.salt_bucket_capacity(address, None).unwrap(),
+            (bucket_id as usize, capacity)
+        );
+    }
 }

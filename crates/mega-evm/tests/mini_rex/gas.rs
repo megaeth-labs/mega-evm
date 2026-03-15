@@ -7,7 +7,7 @@ use mega_evm::{
     constants::{self, mini_rex::SSTORE_SET_STORAGE_GAS},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, SaltEnv, TestExternalEnvs,
+    MegaTransactionError, TestDatabaseWrapper, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2, GAS, LOG0, PUSH0},
@@ -16,16 +16,15 @@ use revm::{
     primitives::Address,
     Inspector,
 };
-use salt::constant::MIN_BUCKET_SIZE;
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const CALLEE: Address = address!("1000000000000000000000000000000000000001");
 const NESTED_CALLEE: Address = address!("1000000000000000000000000000000000000002");
 
 /// Executes a transaction on the EVM.
-fn transact(
+fn transact<DB: revm::Database<Error = Infallible> + core::fmt::Debug>(
     spec: MegaSpecId,
-    db: &mut MemoryDatabase,
+    db: &mut DB,
     external_envs: &TestExternalEnvs,
     caller: Address,
     callee: Option<Address>,
@@ -91,10 +90,7 @@ fn sstore_test_case(
         UpdateMode::Set | UpdateMode::Reset => U256::from(6342),
         UpdateMode::Clear => U256::from(0),
     };
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
-    // An external envs with the given bucket capacity
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+    let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_slot(CALLEE, storage_key);
 
     // a contract that stores a value to the storage slot
     let bytecode = BytecodeBuilder::default().sstore(storage_key, storage_value).stop().build();
@@ -103,9 +99,14 @@ fn sstore_test_case(
         db.set_account_storage(CALLEE, storage_key, U256::from(2333));
     }
 
+    // An external envs with the given bucket capacity
+    let external_envs = TestExternalEnvs::new();
+    let mut db_wrapper = TestDatabaseWrapper::new(db)
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+
     let res = transact(
         spec,
-        &mut db,
+        &mut db_wrapper,
         &external_envs,
         CALLER,
         Some(CALLEE),
@@ -212,9 +213,6 @@ fn test_sstore_cold_then_warm_access() {
     let mut db = MemoryDatabase::default();
 
     let storage_key = U256::from(0);
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
-    let external_envs =
-        TestExternalEnvs::new().with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64);
 
     // Contract that performs two SSTOREs to the same slot:
     // 1. First SSTORE (cold): should charge SSTORE_SET_GAS + COLD_SLOAD_COST
@@ -226,9 +224,14 @@ fn test_sstore_cold_then_warm_access() {
         .build();
     db.set_account_code(CALLEE, bytecode);
 
+    let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_slot(CALLEE, storage_key);
+    let mut db_wrapper =
+        TestDatabaseWrapper::new(db).with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64);
+    let external_envs = TestExternalEnvs::new();
+
     let res = transact(
         MegaSpecId::MINI_REX,
-        &mut db,
+        &mut db_wrapper,
         &external_envs,
         CALLER,
         Some(CALLEE),
@@ -276,11 +279,6 @@ fn ether_transfer_test_case(
 
     let mut db = MemoryDatabase::default();
 
-    // Determine the bucket for the callee and set up the external envs with the required capacity.
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(CALLEE);
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
-
     // Allocate initial balance to the caller.
     db.set_account_balance(CALLER, U256::from(1000));
     // If testing transfer to an existing account, allocate balance to the callee as well.
@@ -288,10 +286,16 @@ fn ether_transfer_test_case(
         db.set_account_balance(CALLEE, U256::from(2333));
     }
 
+    // Determine the bucket for the callee and set up the external envs with the required capacity.
+    let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_account(CALLEE);
+    let external_envs = TestExternalEnvs::new();
+    let mut db_wrapper = TestDatabaseWrapper::new(db)
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+
     // Perform the ether transfer (1 wei) from caller to callee.
     let res = transact(
         spec,
-        &mut db,
+        &mut db_wrapper,
         &external_envs,
         CALLER,
         Some(CALLEE),
@@ -363,12 +367,6 @@ fn nested_ether_transfer_test_case(
 
     let mut db = MemoryDatabase::default();
 
-    // Test address and storage slot
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NESTED_CALLEE);
-    // An external envs with the given bucket capacity
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
-
     // allocate some balance to callee, which will transfer the ether to the nested callee
     db.set_account_balance(CALLEE, U256::from(1000));
     if matches!(mode, UpdateMode::Reset) {
@@ -386,10 +384,17 @@ fn nested_ether_transfer_test_case(
         .build();
     db.set_account_code(CALLEE, bytecode);
 
+    // Test address and storage slot
+    let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_account(NESTED_CALLEE);
+    // An external envs with the given bucket capacity
+    let external_envs = TestExternalEnvs::new();
+    let mut db_wrapper = TestDatabaseWrapper::new(db)
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+
     // transfer 1 wei from caller to callee
     let res = transact(
         spec,
-        &mut db,
+        &mut db_wrapper,
         &external_envs,
         CALLER,
         Some(CALLEE),
@@ -449,13 +454,14 @@ fn test_nested_ether_transfer_gas_unchanged_in_equivalence_spec() {
 /// # Panics
 /// Panics if the transaction fails or if the actual gas used does not match `expected_gas_used`.
 fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_gas_used: u64) {
-    let mut db = MemoryDatabase::default();
+    let db = MemoryDatabase::default();
 
     // Test address and storage slot
     let callee = CALLER.create(0);
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(callee);
+    let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_account(callee);
     // An external envs with the given bucket capacity
-    let external_envs = TestExternalEnvs::new()
+    let external_envs = TestExternalEnvs::new();
+    let mut db_wrapper = TestDatabaseWrapper::new(db)
         .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
     // constructor code
@@ -464,8 +470,9 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
     // println!("calldata_tokens: {:?}", tokens);
 
     // create contract
-    let res = transact(spec, &mut db, &external_envs, CALLER, None, constructor_code, U256::ZERO)
-        .unwrap();
+    let res =
+        transact(spec, &mut db_wrapper, &external_envs, CALLER, None, constructor_code, U256::ZERO)
+            .unwrap();
     assert!(res.result.is_success());
     let gas_used = res.result.gas_used();
     assert_eq!(gas_used, expected_gas_used);
@@ -528,24 +535,13 @@ fn nested_create_contract_test_case(
     let constructor_code = BytecodeBuilder::default().return_with_data([0x00]).build();
     let constructor_len = constructor_code.len();
 
-    // Test address and storage slot
-    let nested_callee = if is_create2 {
-        CALLEE.create2(create2_salt.to_be_bytes(), keccak256(&constructor_code))
-    } else {
-        CALLEE.create(0)
-    };
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(nested_callee);
-    // An external envs with the given bucket capacity
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
-
     // set the code of the calee that transfers ether to the nested callee
     let mut bytecode = BytecodeBuilder::default();
     if is_create2 {
         bytecode = bytecode.push_u256(create2_salt);
     }
     let bytecode = bytecode
-        .mstore(0, constructor_code)
+        .mstore(0, constructor_code.clone())
         .push_number(constructor_len as u64) // call data
         .push_number(0u8)
         .push_number(0u8) // 0 value
@@ -554,10 +550,22 @@ fn nested_create_contract_test_case(
         .build();
     db.set_account_code(CALLEE, bytecode);
 
+    // Test address and storage slot
+    let nested_callee = if is_create2 {
+        CALLEE.create2(create2_salt.to_be_bytes(), keccak256(&constructor_code))
+    } else {
+        CALLEE.create(0)
+    };
+    let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_account(nested_callee);
+    // An external envs with the given bucket capacity
+    let external_envs = TestExternalEnvs::new();
+    let mut db_wrapper = TestDatabaseWrapper::new(db)
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
+
     // transfer 1 wei from caller to callee
     let res = transact(
         spec,
-        &mut db,
+        &mut db_wrapper,
         &external_envs,
         CALLER,
         Some(CALLEE),
@@ -929,17 +937,15 @@ fn test_floor_gas_minimal_calldata() {
 /// This transaction has enough gas for intrinsic costs but not for account creation storage.
 #[test]
 fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
-    use mega_evm::SaltEnv;
-    use std::convert::Infallible;
-
     let mut db = MemoryDatabase::default();
     db.set_account_balance(CALLER, U256::from(10_000_000));
 
     let new_account = address!("9000000000000000000000000000000000000009");
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(new_account);
+    let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_account(new_account);
     let multiplier = 10u64;
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+    let mut db_wrapper = TestDatabaseWrapper::new(db)
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * multiplier);
+    let external_envs = TestExternalEnvs::new();
 
     // MiniRex account creation storage gas: 2,000,000 × 10 = 20,000,000
     // Intrinsic: 21,000
@@ -947,8 +953,8 @@ fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
     let insufficient_gas_limit = 22_000;
 
     // Override gas limit in the test
-    let mut context =
-        MegaContext::new(&mut db, MegaSpecId::MINI_REX).with_external_envs(external_envs.into());
+    let mut context = MegaContext::new(&mut db_wrapper, MegaSpecId::MINI_REX)
+        .with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -975,27 +981,25 @@ fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
 /// Tests that insufficient gas for contract creation storage gas results in OOG (not invalid tx).
 #[test]
 fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
-    use mega_evm::SaltEnv;
-    use std::convert::Infallible;
-
     let mut db = MemoryDatabase::default();
     db.set_account_balance(CALLER, U256::from(10_000_000));
 
     // Empty init code to minimize calldata gas
     let init_code = Bytes::new();
     let created_address = CALLER.create(0);
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(created_address);
+    let bucket_id = TestDatabaseWrapper::<MemoryDatabase>::bucket_id_for_account(created_address);
     let multiplier = 10u64;
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+    let mut db_wrapper = TestDatabaseWrapper::new(db)
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * multiplier);
+    let external_envs = TestExternalEnvs::new();
 
     // MiniRex contract creation storage gas: 2,000,000 × 10 = 20,000,000
     // Base intrinsic for CREATE: 21,000 + 32,000 (CREATE base) = 53,000
     // Set gas limit to cover intrinsic but not storage: 60,000
     let insufficient_gas_limit = 60_000;
 
-    let mut context =
-        MegaContext::new(&mut db, MegaSpecId::MINI_REX).with_external_envs(external_envs.into());
+    let mut context = MegaContext::new(&mut db_wrapper, MegaSpecId::MINI_REX)
+        .with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));

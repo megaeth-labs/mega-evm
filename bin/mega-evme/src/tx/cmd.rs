@@ -92,7 +92,7 @@ impl Cmd {
 
         // Step 3: Execute transaction
         info!("Executing transaction");
-        let evm_context = self.env_args.create_evm_context(&mut state)?;
+        let evm_context = self.env_args.create_evm_context(&state)?;
         let start = Instant::now();
         let (exec_result, evm_state, trace_data) =
             self.trace_args.execute_transaction(evm_context, tx.clone())?;

@@ -21,6 +21,7 @@ mod types;
 
 pub use access::*;
 pub use block::*;
+pub use constants::{MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS};
 pub use evm::*;
 pub use external::*;
 pub use limit::*;

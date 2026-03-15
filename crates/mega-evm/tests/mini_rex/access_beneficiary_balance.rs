@@ -9,6 +9,7 @@ use mega_evm::{
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MsgCallMeta},
     EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    TestDatabaseWrapper,
 };
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, STOP},
@@ -24,8 +25,9 @@ const CALLER_ADDR: Address = address!("0000000000000000000000000000000000100000"
 const CONTRACT_ADDR: Address = address!("0000000000000000000000000000000000100001");
 const NESTED_CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 
-fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, GasInspector, EmptyExternalEnv> {
+fn create_evm() -> MegaEvm<TestDatabaseWrapper<CacheDB<EmptyDB>>, GasInspector, EmptyExternalEnv> {
     let db = CacheDB::<EmptyDB>::default();
+    let db = TestDatabaseWrapper::new(db);
     let mut context = MegaContext::new(db, MegaSpecId::MINI_REX);
 
     let block_env =
@@ -38,15 +40,15 @@ fn create_evm() -> MegaEvm<CacheDB<EmptyDB>, GasInspector, EmptyExternalEnv> {
     MegaEvm::new(context).with_inspector(GasInspector::new())
 }
 
-fn set_account_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
+fn set_account_code(db: &mut TestDatabaseWrapper<CacheDB<EmptyDB>>, address: Address, code: Bytes) {
     let bytecode = Bytecode::new_legacy(code);
     let code_hash = bytecode.hash_slow();
     let account_info = AccountInfo { code: Some(bytecode), code_hash, ..Default::default() };
-    db.insert_account_info(address, account_info);
+    db.inner.insert_account_info(address, account_info);
 }
 
 fn execute_tx(
-    evm: &mut MegaEvm<CacheDB<EmptyDB>, GasInspector, EmptyExternalEnv>,
+    evm: &mut MegaEvm<TestDatabaseWrapper<CacheDB<EmptyDB>>, GasInspector, EmptyExternalEnv>,
     caller: Address,
     to: Option<Address>,
     value: U256,
@@ -75,7 +77,7 @@ fn execute_tx(
 }
 
 fn assert_beneficiary_detection(
-    evm: &MegaEvm<CacheDB<EmptyDB>, GasInspector, EmptyExternalEnv>,
+    evm: &MegaEvm<TestDatabaseWrapper<CacheDB<EmptyDB>>, GasInspector, EmptyExternalEnv>,
     result_and_state: &ResultAndState<MegaHaltReason>,
 ) {
     // Transaction should succeed
@@ -117,7 +119,7 @@ fn test_beneficiary_recipient() {
     let mut evm = create_evm();
 
     // Give caller some balance
-    evm.ctx().db_mut().insert_account_info(
+    evm.ctx().db_mut().inner.insert_account_info(
         CALLER_ADDR,
         AccountInfo { balance: U256::from(1_000_000_000_000_000_000u64), ..Default::default() },
     );

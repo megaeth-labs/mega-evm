@@ -12,7 +12,7 @@ use std::{
     string::{String, ToString},
 };
 
-use alloy_primitives::{map::HashMap, Address, B256};
+use alloy_primitives::{map::HashMap, Address, B256, U256};
 use core::cell::RefCell;
 use revm::{
     database::DBErrorMarker,
@@ -234,6 +234,16 @@ impl Database for SandboxDb<'_> {
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         // Block hashes are not stored in journal state - query database
         self.db.block_hash(number)
+    }
+
+    fn salt_bucket_capacity(
+        &self,
+        _address: Address,
+        _index: Option<U256>,
+    ) -> Result<(usize, u64), Self::Error> {
+        // Return minimum bucket size so sandbox execution is not affected by real SALT state.
+        // Keyless deploy sandbox must be deterministic and isolated from external SALT data.
+        Ok((0, crate::constants::MIN_BUCKET_SIZE as u64))
     }
 }
 
