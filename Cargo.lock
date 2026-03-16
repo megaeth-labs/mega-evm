@@ -690,17 +690,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark-bls12-381"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
-dependencies = [
- "ark-ec 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-serialize 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-std 0.5.0",
-]
-
-[[package]]
 name = "ark-bn254"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -755,27 +744,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark-ec"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
-dependencies = [
- "ahash",
- "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-poly 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-serialize 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-std 0.5.0",
- "educe",
- "fnv",
- "hashbrown 0.15.4",
- "itertools 0.14.0",
- "num-bigint 0.4.6",
- "num-integer",
- "num-traits",
- "rayon",
- "zeroize",
-]
-
-[[package]]
 name = "ark-ed-on-bls12-381-bandersnatch"
 version = "0.5.0"
 source = "git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695#80ca69c37f79d5d00750edc1602af81b5f456695"
@@ -783,17 +751,6 @@ dependencies = [
  "ark-bls12-381 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
  "ark-ec 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
  "ark-ff 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
- "ark-std 0.5.0",
-]
-
-[[package]]
-name = "ark-ed-on-bls12-381-bandersnatch"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
-dependencies = [
- "ark-bls12-381 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-ec 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
  "ark-std 0.5.0",
 ]
 
@@ -876,26 +833,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark-ff"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
-dependencies = [
- "ark-ff-asm 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-ff-macros 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-serialize 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-std 0.5.0",
- "arrayvec",
- "digest 0.10.7",
- "educe",
- "itertools 0.14.0",
- "num-bigint 0.4.6",
- "num-traits",
- "paste",
- "rayon",
- "zeroize",
-]
-
-[[package]]
 name = "ark-ff-asm"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -929,15 +866,6 @@ dependencies = [
 name = "ark-ff-asm"
 version = "0.5.0"
 source = "git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695#80ca69c37f79d5d00750edc1602af81b5f456695"
-dependencies = [
- "quote",
- "syn 2.0.104",
-]
-
-[[package]]
-name = "ark-ff-asm"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
 dependencies = [
  "quote",
  "syn 2.0.104",
@@ -994,18 +922,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark-ff-macros"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
-dependencies = [
- "num-bigint 0.4.6",
- "num-traits",
- "proc-macro2",
- "quote",
- "syn 2.0.104",
-]
-
-[[package]]
 name = "ark-poly"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1028,20 +944,6 @@ dependencies = [
  "ahash",
  "ark-ff 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
  "ark-serialize 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
- "ark-std 0.5.0",
- "educe",
- "fnv",
- "hashbrown 0.15.4",
-]
-
-[[package]]
-name = "ark-poly"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
-dependencies = [
- "ahash",
- "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-serialize 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
  "ark-std 0.5.0",
  "educe",
  "fnv",
@@ -1125,19 +1027,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark-serialize"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
-dependencies = [
- "ark-serialize-derive 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-std 0.5.0",
- "arrayvec",
- "digest 0.10.7",
- "num-bigint 0.4.6",
- "rayon",
-]
-
-[[package]]
 name = "ark-serialize-derive"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1152,16 +1041,6 @@ dependencies = [
 name = "ark-serialize-derive"
 version = "0.5.0"
 source = "git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695#80ca69c37f79d5d00750edc1602af81b5f456695"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.104",
-]
-
-[[package]]
-name = "ark-serialize-derive"
-version = "0.5.0"
-source = "git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517#da450f98b9b4bf1b4c8eec8f96b4501f9705c517"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1289,23 +1168,10 @@ checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
 [[package]]
 name = "banderwagon"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/salt.git?rev=10efc47cf172d69f47d72e4010bca2ec38efb7b8#10efc47cf172d69f47d72e4010bca2ec38efb7b8"
-dependencies = [
- "ark-ec 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-ed-on-bls12-381-bandersnatch 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "ark-serialize 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "hugepage-rs",
- "rayon",
-]
-
-[[package]]
-name = "banderwagon"
-version = "0.1.0"
 source = "git+https://github.com/megaeth-labs/salt.git?rev=v1.0.0#affce3ecf3deb1791ea804fe5409c3e41b8d2883"
 dependencies = [
  "ark-ec 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
- "ark-ed-on-bls12-381-bandersnatch 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
+ "ark-ed-on-bls12-381-bandersnatch",
  "ark-ff 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
  "ark-serialize 0.5.0 (git+https://github.com/megaeth-labs/algebra.git?rev=80ca69c37f79d5d00750edc1602af81b5f456695)",
  "hugepage-rs",
@@ -1577,12 +1443,6 @@ name = "clap_lex"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
-
-[[package]]
-name = "clone_dyn_types"
-version = "0.38.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec3ea6a6cad557cf4394aecff2bda6266914123ad9c46a9cb1c576b10f80438f"
 
 [[package]]
 name = "colorchoice"
@@ -2797,23 +2657,9 @@ dependencies = [
 [[package]]
 name = "ipa-multipoint"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/salt.git?rev=10efc47cf172d69f47d72e4010bca2ec38efb7b8#10efc47cf172d69f47d72e4010bca2ec38efb7b8"
-dependencies = [
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/salt.git?rev=10efc47cf172d69f47d72e4010bca2ec38efb7b8)",
- "hex",
- "itertools 0.10.5",
- "rayon",
- "rustc-hash",
- "sha2 0.9.9",
- "thiserror",
-]
-
-[[package]]
-name = "ipa-multipoint"
-version = "0.1.0"
 source = "git+https://github.com/megaeth-labs/salt.git?rev=v1.0.0#affce3ecf3deb1791ea804fe5409c3e41b8d2883"
 dependencies = [
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/salt.git?rev=v1.0.0)",
+ "banderwagon",
  "hex",
  "itertools 0.10.5",
  "rayon",
@@ -2856,29 +2702,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
-name = "iter_tools"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e68442ead22fbfa506eaa0b613826a373594f86e1e5be6db2d2d1dc1189420e8"
-dependencies = [
- "clone_dyn_types",
- "itertools 0.11.0",
-]
-
-[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1c173a5686ce8bfa551b3563d0c2170bf24ca44da99c7ca4bfdab5418c3fe57"
 dependencies = [
  "either",
 ]
@@ -3095,33 +2922,6 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "1.0.1"
-source = "git+https://github.com/megaeth-labs/mega-evm.git?branch=william%2Ffix%2Fv1.0.1-inspector#76d4aad9be1451efed538b3b2af3a6e8bf0b3099"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-evm",
- "alloy-op-evm",
- "alloy-op-hardforks",
- "alloy-primitives",
- "alloy-sol-types",
- "auto_impl",
- "bitflags",
- "clap",
- "delegate",
- "derive_more",
- "once_cell",
- "op-alloy-consensus",
- "op-alloy-flz",
- "op-revm",
- "revm",
- "salt 1.0.0 (git+https://github.com/megaeth-labs/salt.git?rev=10efc47cf172d69f47d72e4010bca2ec38efb7b8)",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "mega-evm"
 version = "1.4.1"
 dependencies = [
  "alloy-consensus",
@@ -3138,7 +2938,7 @@ dependencies = [
  "delegate",
  "derive_more",
  "hex",
- "mega-evm 1.4.1",
+ "mega-evm",
  "mega-system-contracts",
  "once_cell",
  "op-alloy-consensus",
@@ -3147,7 +2947,7 @@ dependencies = [
  "rand 0.9.2",
  "revm",
  "revm-inspectors",
- "salt 1.0.0 (git+https://github.com/megaeth-labs/salt.git?rev=v1.0.0)",
+ "salt",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3169,8 +2969,7 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport-http",
  "clap",
- "mega-evm 1.0.1",
- "mega-evm 1.4.1",
+ "mega-evm",
  "op-alloy-consensus",
  "op-alloy-network",
  "op-alloy-rpc-types",
@@ -4565,37 +4364,14 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 [[package]]
 name = "salt"
 version = "1.0.0"
-source = "git+https://github.com/megaeth-labs/salt.git?rev=10efc47cf172d69f47d72e4010bca2ec38efb7b8#10efc47cf172d69f47d72e4010bca2ec38efb7b8"
-dependencies = [
- "ark-ff 0.5.0 (git+https://github.com/arkworks-rs/algebra.git?rev=da450f98b9b4bf1b4c8eec8f96b4501f9705c517)",
- "auto_impl",
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/salt.git?rev=10efc47cf172d69f47d72e4010bca2ec38efb7b8)",
- "blake3",
- "derive_more",
- "hex",
- "ipa-multipoint 0.1.0 (git+https://github.com/megaeth-labs/salt.git?rev=10efc47cf172d69f47d72e4010bca2ec38efb7b8)",
- "iter_tools",
- "once_cell",
- "rayon",
- "rustc-hash",
- "serde",
- "serde_arrays",
- "thiserror",
- "tracing",
- "zerocopy 0.7.35",
-]
-
-[[package]]
-name = "salt"
-version = "1.0.0"
 source = "git+https://github.com/megaeth-labs/salt.git?rev=v1.0.0#affce3ecf3deb1791ea804fe5409c3e41b8d2883"
 dependencies = [
  "auto_impl",
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/salt.git?rev=v1.0.0)",
+ "banderwagon",
  "blake3",
  "derive_more",
  "hex",
- "ipa-multipoint 0.1.0 (git+https://github.com/megaeth-labs/salt.git?rev=v1.0.0)",
+ "ipa-multipoint",
  "once_cell",
  "rayon",
  "rustc-hash",
@@ -5045,7 +4821,7 @@ dependencies = [
  "hash-db",
  "indicatif",
  "k256",
- "mega-evm 1.4.1",
+ "mega-evm",
  "plain_hasher",
  "serde",
  "serde_json",

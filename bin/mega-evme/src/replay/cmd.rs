@@ -30,7 +30,7 @@ use crate::{
     run, ChainArgs, EvmeState,
 };
 
-use super::{v1_0_1, ReplayError, Result};
+use super::{ReplayError, Result};
 
 /// Replay a transaction from RPC
 #[derive(Parser, Debug)]
@@ -54,10 +54,6 @@ pub struct Cmd {
     /// Trace configuration
     #[command(flatten)]
     pub trace_args: run::TraceArgs,
-
-    /// Use v1.0.1 of the mega-evm crate
-    #[arg(long = "use-v1-0-1")]
-    pub use_v1_0_1: bool,
 
     /// Override the spec to use (default: auto-detect from chain ID and block timestamp)
     #[arg(long = "override.spec", value_name = "SPEC")]
@@ -167,27 +163,8 @@ impl Cmd {
         info!(preceding_count = preceding_transactions.len(), "Executing preceding transactions");
 
         // Step 7: Execute transactions with inspector
-        let result = if self.use_v1_0_1 {
-            debug!("Using v1.0.1 execution path");
-            if self.tx_override_args.has_overrides() {
-                warn!(
-                    "Transaction overrides are not supported with --use-v1-0-1, ignoring overrides"
-                );
-            }
-            v1_0_1::execute_transactions_v1_0_1(
-                &mut database,
-                &parent_block,
-                &block,
-                evm_env,
-                &provider,
-                preceding_transactions,
-                &target_tx,
-                chain_args.spec_id()?,
-                &self.trace_args,
-            )
-            .await?
-        } else {
-            self.execute_transactions(
+        let result = self
+            .execute_transactions(
                 hardforks,
                 &mut database,
                 &parent_block,
@@ -197,8 +174,7 @@ impl Cmd {
                 preceding_transactions,
                 &target_tx,
             )
-            .await?
-        };
+            .await?;
 
         // Step 8: Output results
         trace!("Writing output results");

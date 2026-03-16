@@ -5,10 +5,8 @@
 
 mod cmd;
 mod hardforks;
-mod v1_0_1;
 
 pub use cmd::Cmd;
-use cmd::ReplayOutcome;
 pub use hardforks::*;
 
 // Re-export EvmeError and Result from common module
