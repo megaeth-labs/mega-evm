@@ -285,10 +285,13 @@ pub trait JournalInspectTr {
     type DBError: core::fmt::Debug;
 
     /// Inspect the account at the given address without marking it as warm.
-    /// If the account is EIP-7702 type, resolves exactly one hop of delegation
-    /// (matching upstream revm behavior).
+    /// If the account is EIP-7702 type, follows delegation.
+    ///
+    /// Starting from REX4, resolves exactly one hop (matching upstream revm behavior).
+    /// Pre-REX4, follows delegation recursively but detects cycles to prevent stack overflow.
     fn inspect_account_delegated(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
     ) -> Result<&mut Account, Self::DBError>;
 
@@ -340,22 +343,49 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
 
     fn inspect_account_delegated(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
     ) -> Result<&mut Account, Self::DBError> {
         let account = inspect_account(self, address)?;
 
-        // If EIP-7702 delegated, resolve exactly one hop (matching upstream revm behavior).
         let delegated_address = account.info.code.as_ref().and_then(|code| match code {
             Bytecode::Eip7702(code) => Some(code.address()),
             _ => None,
         });
-        if let Some(delegated_address) = delegated_address {
+        let Some(delegated_address) = delegated_address else {
+            // Not delegated — reload to satisfy borrow checker and return.
+            let account = self.inner.state.get_mut(&address).unwrap();
+            return Ok(account);
+        };
+
+        if spec.is_enabled(MegaSpecId::REX4) {
+            // REX4+: resolve exactly one hop (matching upstream revm behavior).
             return inspect_account(self, delegated_address);
         }
 
-        // Load account again to bypass the borrow checker.
-        let account = self.inner.state.get_mut(&address).unwrap();
-        Ok(account)
+        // Pre-REX4: follow delegation recursively with cycle detection.
+        // Walk the chain iteratively, collecting visited addresses to detect cycles.
+        let mut current = delegated_address;
+        let mut visited = std::vec![address];
+        loop {
+            let account = inspect_account(self, current)?;
+            let next = account.info.code.as_ref().and_then(|code| match code {
+                Bytecode::Eip7702(code) => Some(code.address()),
+                _ => None,
+            });
+            let Some(next) = next else {
+                // End of chain — reload and return.
+                let account = self.inner.state.get_mut(&current).unwrap();
+                return Ok(account);
+            };
+            if visited.contains(&next) {
+                // Cycle detected — stop here.
+                let account = self.inner.state.get_mut(&current).unwrap();
+                return Ok(account);
+            }
+            visited.push(current);
+            current = next;
+        }
     }
 
     fn inspect_storage(
@@ -372,7 +402,7 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         let account = if is_rex4_enabled {
             inspect_account(self, address)?
         } else {
-            self.inspect_account_delegated(address)?
+            self.inspect_account_delegated(spec, address)?
         };
         if account.storage.contains_key(&key) {
             // Slot already exists, return reference to it.
@@ -380,7 +410,7 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
             let account = if is_rex4_enabled {
                 inspect_account(self, address)?
             } else {
-                self.inspect_account_delegated(address)?
+                self.inspect_account_delegated(spec, address)?
             };
             return Ok(account.storage.get(&key).unwrap());
         }
@@ -393,7 +423,7 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         let account = if is_rex4_enabled {
             inspect_account(self, address)?
         } else {
-            self.inspect_account_delegated(address)?
+            self.inspect_account_delegated(spec, address)?
         };
         account.storage.insert(key, slot);
         // Return reference to the newly inserted slot
@@ -408,12 +438,16 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> JournalInspectTr for MegaContext<DB, ExtEnvs> {
     type DBError = ();
 
-    fn inspect_account_delegated(&mut self, address: Address) -> Result<&mut Account, ()> {
+    fn inspect_account_delegated(
+        &mut self,
+        spec: MegaSpecId,
+        address: Address,
+    ) -> Result<&mut Account, ()> {
         // Split borrow: `journaled_state` and `error` are sibling fields on the inner context,
         // so we can borrow them independently to avoid the double-call workaround.
         let journal = &mut self.inner.journaled_state;
         let error = &mut self.inner.error;
-        journal.inspect_account_delegated(address).map_err(|e| {
+        journal.inspect_account_delegated(spec, address).map_err(|e| {
             *error = Err(ContextError::Custom(format!("{e}")));
         })
     }

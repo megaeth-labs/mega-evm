@@ -1101,7 +1101,8 @@ pub mod storage_gas_ext {
                     return;
                 };
                 let to = to.into_address();
-                let Ok(to_account) = context.host.inspect_account_delegated(to) else {
+                let mega_spec = context.host.spec_id();
+                let Ok(to_account) = context.host.inspect_account_delegated(mega_spec, to) else {
                     context.interpreter.halt(InstructionResult::FatalExternalError);
                     return;
                 };
@@ -1166,7 +1167,7 @@ pub mod storage_gas_ext {
         let creator_address = context.interpreter.input.target_address();
         // Load the creator account without marking it warm (it is already warm since the creator
         // must have been warmed when the current frame begins).
-        let Ok(creator) = context.host.inspect_account_delegated(creator_address) else {
+        let Ok(creator) = context.host.inspect_account_delegated(spec, creator_address) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
