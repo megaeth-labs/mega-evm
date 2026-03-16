@@ -1002,7 +1002,8 @@ pub mod additional_limit_ext {
             context.interpreter.halt(InstructionResult::StackUnderflow);
             return;
         };
-        let Ok(slot) = context.host.inspect_storage(target_address, index) else {
+        let mega_spec = context.host.spec_id();
+        let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
@@ -1304,7 +1305,8 @@ pub mod storage_gas_ext {
             return;
         };
         // The storage slot values
-        let Ok(slot) = context.host.inspect_storage(target_address, index) else {
+        let mega_spec = context.host.spec_id();
+        let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };

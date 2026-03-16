@@ -285,15 +285,21 @@ pub trait JournalInspectTr {
     type DBError: core::fmt::Debug;
 
     /// Inspect the account at the given address without marking it as warm.
-    /// If the account is EIP-7702 type, it should inspect the delegated account.
+    /// If the account is EIP-7702 type, resolves exactly one hop of delegation
+    /// (matching upstream revm behavior).
     fn inspect_account_delegated(
         &mut self,
         address: Address,
     ) -> Result<&mut Account, Self::DBError>;
 
     /// Inspect the storage at the given address and key without marking it as warm.
+    ///
+    /// Starting from REX4, storage is always loaded from the original address without following
+    /// EIP-7702 delegation (matching upstream revm's sload behavior).
+    /// Pre-REX4 specs retain the original behavior that follows delegation.
     fn inspect_storage(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, Self::DBError>;
@@ -321,7 +327,7 @@ fn inspect_account<DB: revm::Database>(
                 .basic(address)?
                 .map(|info| info.into())
                 .unwrap_or_else(|| Account::new_not_existing(transaction_id));
-            // delibrately mark the account as cold since we are only inpecting it, not warming
+            // deliberately mark the account as cold since we are only inspecting it, not warming
             // it.
             account.mark_cold();
             Ok(entry.insert(account))
@@ -354,17 +360,28 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
 
     fn inspect_storage(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, Self::DBError> {
         let transaction_id = self.transaction_id;
-        // Storage belongs to the original address, not the delegate — do not follow
+        let is_rex4_enabled = spec.is_enabled(MegaSpecId::REX4);
+        // REX4+: storage belongs to the original address, not the delegate — do not follow
         // EIP-7702 delegation here (matching upstream revm's sload behavior).
-        let account = inspect_account(self, address)?;
+        // Pre-REX4: follows delegation (original behavior).
+        let account = if is_rex4_enabled {
+            inspect_account(self, address)?
+        } else {
+            self.inspect_account_delegated(address)?
+        };
         if account.storage.contains_key(&key) {
-            // Slot already exists, return reference to it
-            // Need to reload account to satisfy borrow checker
-            let account = inspect_account(self, address)?;
+            // Slot already exists, return reference to it.
+            // Need to reload account to satisfy borrow checker.
+            let account = if is_rex4_enabled {
+                inspect_account(self, address)?
+            } else {
+                self.inspect_account_delegated(address)?
+            };
             return Ok(account.storage.get(&key).unwrap());
         }
         // Slot doesn't exist, load from DB and insert
@@ -373,7 +390,11 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         // deliberately mark the slot as cold since we are only inspecting it, not warming it
         slot.mark_cold();
         // Load account again to bypass the borrow checker and insert the slot
-        let account = inspect_account(self, address)?;
+        let account = if is_rex4_enabled {
+            inspect_account(self, address)?
+        } else {
+            self.inspect_account_delegated(address)?
+        };
         account.storage.insert(key, slot);
         // Return reference to the newly inserted slot
         Ok(account.storage.get(&key).expect("slot should exist"))
@@ -399,12 +420,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> JournalInspectTr for MegaContext<D
 
     fn inspect_storage(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, ()> {
         let journal = &mut self.inner.journaled_state;
         let error = &mut self.inner.error;
-        journal.inspect_storage(address, key).map_err(|e| {
+        journal.inspect_storage(spec, address, key).map_err(|e| {
             *error = Err(ContextError::Custom(format!("{e}")));
         })
     }
