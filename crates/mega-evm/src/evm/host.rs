@@ -299,6 +299,36 @@ pub trait JournalInspectTr {
     ) -> Result<&EvmStorageSlot, Self::DBError>;
 }
 
+/// Load an account into the journal state without following EIP-7702 delegation.
+/// Deliberately marks the account as cold since this is an inspection, not a warming access.
+fn inspect_account<DB: revm::Database>(
+    journal: &mut Journal<DB>,
+    address: Address,
+) -> Result<&mut Account, <DB as revm::Database>::Error> {
+    let transaction_id = journal.transaction_id;
+    match journal.inner.state.entry(address) {
+        Entry::Occupied(entry) => {
+            let account = entry.into_mut();
+            if account.info.code_hash != KECCAK_EMPTY && account.info.code.is_none() {
+                // Load code if not loaded before
+                account.info.code = Some(journal.database.code_by_hash(account.info.code_hash)?);
+            }
+            Ok(account)
+        }
+        Entry::Vacant(entry) => {
+            let mut account = journal
+                .database
+                .basic(address)?
+                .map(|info| info.into())
+                .unwrap_or_else(|| Account::new_not_existing(transaction_id));
+            // delibrately mark the account as cold since we are only inpecting it, not warming
+            // it.
+            account.mark_cold();
+            Ok(entry.insert(account))
+        }
+    }
+}
+
 impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
     type DBError = <DB as revm::Database>::Error;
 
@@ -306,33 +336,15 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         &mut self,
         address: Address,
     ) -> Result<&mut Account, Self::DBError> {
-        let transaction_id = self.transaction_id;
-        let account = match self.inner.state.entry(address) {
-            Entry::Occupied(entry) => {
-                let account = entry.into_mut();
-                if account.info.code_hash != KECCAK_EMPTY && account.info.code.is_none() {
-                    // Load code if not loaded before
-                    account.info.code = Some(self.database.code_by_hash(account.info.code_hash)?);
-                }
-                account
-            }
-            Entry::Vacant(entry) => {
-                let mut account = self
-                    .database
-                    .basic(address)?
-                    .map(|info| info.into())
-                    .unwrap_or_else(|| Account::new_not_existing(transaction_id));
-                // delibrately mark the account as cold since we are only inpecting it, not warming
-                // it.
-                account.mark_cold();
-                entry.insert(account)
-            }
-        };
+        let account = inspect_account(self, address)?;
 
-        // If the account is a delegated account, inspect the delegated account.
-        if let Some(Bytecode::Eip7702(code)) = &account.info.code {
-            let address = code.address();
-            return self.inspect_account_delegated(address);
+        // If EIP-7702 delegated, resolve exactly one hop (matching upstream revm behavior).
+        let delegated_address = account.info.code.as_ref().and_then(|code| match code {
+            Bytecode::Eip7702(code) => Some(code.address()),
+            _ => None,
+        });
+        if let Some(delegated_address) = delegated_address {
+            return inspect_account(self, delegated_address);
         }
 
         // Load account again to bypass the borrow checker.
