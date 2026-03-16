@@ -123,11 +123,8 @@ fn test_self_delegation_via_call() {
     set_eip7702_delegation(&mut db, SELF_DELEGATING, SELF_DELEGATING);
     db.set_account_balance(SELF_DELEGATING, U256::from(1_000_000u64));
 
-    let tx = TxEnvBuilder::default()
-        .caller(CALLER)
-        .call(PARENT)
-        .gas_limit(100_000_000)
-        .build_fill();
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
 
     let result = transact(MegaSpecId::REX4, &mut db, tx);
     assert!(result.is_ok(), "Should complete without stack overflow");
@@ -149,11 +146,8 @@ fn test_two_address_cycle_via_call() {
     db.set_account_balance(CYCLE_A, U256::from(1_000_000u64));
     db.set_account_balance(CYCLE_B, U256::from(1_000_000u64));
 
-    let tx = TxEnvBuilder::default()
-        .caller(CALLER)
-        .call(PARENT)
-        .gas_limit(100_000_000)
-        .build_fill();
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
 
     let result = transact(MegaSpecId::REX4, &mut db, tx);
     assert!(result.is_ok(), "Should complete without stack overflow");
@@ -171,11 +165,8 @@ fn test_self_delegation_via_staticcall() {
     set_eip7702_delegation(&mut db, SELF_DELEGATING, SELF_DELEGATING);
     db.set_account_balance(SELF_DELEGATING, U256::from(1_000_000u64));
 
-    let tx = TxEnvBuilder::default()
-        .caller(CALLER)
-        .call(PARENT)
-        .gas_limit(100_000_000)
-        .build_fill();
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
 
     let result = transact(MegaSpecId::REX4, &mut db, tx);
     assert!(result.is_ok(), "Should complete without stack overflow");
