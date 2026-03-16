@@ -202,6 +202,105 @@ fn test_direct_tx_to_self_delegating() {
 }
 
 // ---------------------------------------------------------------------------
+// CREATE / CREATE2 tests — `inspect_account_delegated` is called on the creator
+// ---------------------------------------------------------------------------
+
+/// Builds a contract whose code executes CREATE with a minimal initcode (STOP).
+///
+/// The CREATE opcode triggers `inspect_account_delegated(creator_address)` to load the
+/// creator's nonce for address derivation and storage gas charging.
+fn build_create_contract() -> Bytes {
+    // initcode: just STOP (1 byte)
+    // PUSH1 0x00 PUSH1 0x00 MSTORE8  — store STOP (0x00) at memory[0]
+    // PUSH1 0x01 PUSH1 0x00 PUSH1 0x00 CREATE
+    BytecodeBuilder::default()
+        .append(PUSH0) // value = 0x00
+        .append(PUSH0) // offset = 0
+        .append(MSTORE8) // memory[0] = 0x00 (STOP opcode)
+        .push_number(1u8) // size = 1
+        .append(PUSH0) // offset = 0
+        .append(PUSH0) // value = 0 wei
+        .append(CREATE)
+        .append(POP) // discard created address
+        .append(STOP)
+        .build()
+}
+
+/// Builds a contract whose code executes CREATE2 with a minimal initcode (STOP) and salt=0.
+fn build_create2_contract() -> Bytes {
+    BytecodeBuilder::default()
+        .append(PUSH0) // value = 0x00
+        .append(PUSH0) // offset = 0
+        .append(MSTORE8) // memory[0] = 0x00 (STOP opcode)
+        .append(PUSH0) // salt = 0
+        .push_number(1u8) // size = 1
+        .append(PUSH0) // offset = 0
+        .append(PUSH0) // value = 0 wei
+        .append(CREATE2)
+        .append(POP) // discard created address
+        .append(STOP)
+        .build()
+}
+
+/// Delegation via `CREATE`: `PARENT` calls `CYCLE_A` (delegates to `CYCLE_B`).
+/// `CYCLE_B`'s code runs in `CYCLE_A`'s context and executes `CREATE`.
+/// `CREATE` calls `inspect_account_delegated(CYCLE_A)` to load the creator's nonce.
+/// `CYCLE_A` delegates to `CYCLE_B`, so the one-hop resolution follows to `CYCLE_B`.
+/// Before the fix, this would recurse if `CYCLE_B` also delegated back.
+#[test]
+fn test_self_delegation_via_create() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000u64));
+
+    // CYCLE_A delegates to CYCLE_B, CYCLE_B has CREATE code
+    set_eip7702_delegation(&mut db, CYCLE_A, CYCLE_B);
+    db.set_account_balance(CYCLE_A, U256::from(1_000_000_000u64));
+    db.set_account_code(CYCLE_B, build_create_contract());
+    db.set_account_balance(CYCLE_B, U256::from(1_000_000_000u64));
+
+    // PARENT calls CYCLE_A
+    db.set_account_code(PARENT, build_call_contract(CYCLE_A));
+    db.set_account_balance(PARENT, U256::from(1_000_000_000u64));
+
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
+
+    let result = transact(MegaSpecId::REX4, &mut db, tx);
+    assert!(result.is_ok(), "CREATE with delegated creator should complete without stack overflow");
+}
+
+/// Two-address delegation cycle (A→B→A) via `CREATE2`.
+///
+/// Same setup as `CREATE` test but uses `CREATE2` opcode.
+/// `PARENT` calls `CYCLE_A` (delegates to `CYCLE_B`). `CYCLE_B`'s code runs `CREATE2` in
+/// `CYCLE_A`'s context. `CREATE2` calls `inspect_account_delegated(CYCLE_A)` for nonce/gas.
+#[test]
+fn test_delegation_cycle_via_create2() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000u64));
+
+    // CYCLE_A delegates to CYCLE_B (which has CREATE2 code).
+    // CYCLE_B also delegates back to CYCLE_A to form the cycle.
+    set_eip7702_delegation(&mut db, CYCLE_A, CYCLE_B);
+    db.set_account_balance(CYCLE_A, U256::from(1_000_000_000u64));
+    db.set_account_code(CYCLE_B, build_create2_contract());
+    set_eip7702_delegation(&mut db, CYCLE_B, CYCLE_A);
+    db.set_account_balance(CYCLE_B, U256::from(1_000_000_000u64));
+
+    db.set_account_code(PARENT, build_call_contract(CYCLE_A));
+    db.set_account_balance(PARENT, U256::from(1_000_000_000u64));
+
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
+
+    let result = transact(MegaSpecId::REX4, &mut db, tx);
+    assert!(
+        result.is_ok(),
+        "CREATE2 with cyclic delegation should complete without stack overflow"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Storage isolation tests — verify `inspect_storage` uses the original address
 // ---------------------------------------------------------------------------
 
