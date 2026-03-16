@@ -205,26 +205,6 @@ fn test_direct_tx_to_self_delegating() {
 // Storage isolation tests — verify `inspect_storage` uses the original address
 // ---------------------------------------------------------------------------
 
-/// Builds a contract whose code does `SLOAD(0)`, stores the result at memory[0], and
-/// returns it as 32-byte returndata.
-fn build_sload_and_return() -> Bytes {
-    BytecodeBuilder::default()
-        .append(PUSH0) // slot 0
-        .append(SLOAD)
-        .append(PUSH0) // mem offset 0
-        .append(MSTORE)
-        .push_number(32u8) // 32 bytes
-        .append(PUSH0) // mem offset 0
-        .append(RETURN)
-        .build()
-}
-
-/// Builds a contract whose code does `SSTORE(slot=1, value=0x77)` then STOPs.
-/// This triggers the wrapped SSTORE which calls `inspect_storage(target_address, 1)`.
-fn build_sstore_contract() -> Bytes {
-    BytecodeBuilder::default().sstore(U256::from(1), U256::from(0x77)).append(STOP).build()
-}
-
 /// Builds a contract that sequentially CALLs `first` then `second`, returning the
 /// 32-byte returndata from the second call.
 fn build_two_calls_return_second(first: Address, second: Address) -> Bytes {
@@ -256,63 +236,25 @@ fn build_two_calls_return_second(first: Address, second: Address) -> Bytes {
         .build()
 }
 
-/// `inspect_storage` must not pollute the delegate's journal entry with the delegator's
-/// storage.
-///
-/// The bug: `inspect_storage` followed EIP-7702 delegation, so when called with address A
-/// (which delegates to B), it loaded A's storage from DB but cached it in B's journal
-/// account.
-/// A subsequent `sload(B, slot)` would find the polluted cache and return A's value.
+/// Sets up and runs the `inspect_storage` pollution scenario for a given spec.
 ///
 /// Setup:
 /// - DELEGATOR delegates to DELEGATE via EIP-7702.
-/// - DELEGATE's code does `SSTORE(slot=1, 0x77)`, triggering the wrapped SSTORE which calls
-///   `inspect_storage(DELEGATOR, 1)` (because `target_address` = DELEGATOR).
+/// - DELEGATE's code does `SSTORE(slot=1, 0x77)` then `SLOAD(1)` then RETURN.
 /// - DELEGATOR has storage[1] = 42, DELEGATE has storage[1] = 99.
 ///
 /// PARENT's code does two sequential CALLs in one transaction:
 ///   1. CALL DELEGATOR — runs DELEGATE's code in DELEGATOR's context. The wrapped SSTORE calls
-///      `inspect_storage(DELEGATOR, 1)`. With the bug: loads `db.storage(DELEGATOR, 1)` = 42,
-///      caches it in DELEGATE's journal account at slot 1.
-///   2. CALL DELEGATE directly — runs DELEGATE's SLOAD(1) code (different code here) and returns
-///      the value. With the bug: revm's `sload(DELEGATE, 1)` finds the polluted cache entry (42)
-///      and returns it instead of going to DB to get 99.
+///      `inspect_storage(DELEGATOR, 1)`.
+///   2. CALL DELEGATE directly — runs DELEGATE's code in its own context.
 ///
-/// We verify the second call returns 99 (DELEGATE's own storage).
-#[test]
-fn test_inspect_storage_does_not_pollute_delegate_journal() {
+/// Returns the `ResultAndState` for spec-specific assertions.
+fn run_inspect_storage_pollution_scenario(spec: MegaSpecId) -> ResultAndState<MegaHaltReason> {
     let mut db = MemoryDatabase::default();
     db.set_account_balance(CALLER, U256::from(1_000_000_000u64));
 
-    // DELEGATE: code does SSTORE(1, 0x77) to trigger inspect_storage via wrapped SSTORE.
-    // It also has storage[1] = 99 which should never be confused with DELEGATOR's.
-    db.set_account_code(DELEGATE, build_sstore_contract());
-    db.set_account_storage(DELEGATE, U256::from(1), U256::from(99));
-    db.set_account_balance(DELEGATE, U256::from(1_000_000u64));
-
-    // DELEGATOR: delegates to DELEGATE, storage[1] = 42
-    set_eip7702_delegation(&mut db, DELEGATOR, DELEGATE);
-    db.set_account_storage(DELEGATOR, U256::from(1), U256::from(42));
-    db.set_account_balance(DELEGATOR, U256::from(1_000_000u64));
-
-    // READER: a separate contract that does SLOAD(1) and returns the value.
-    // We use a different address so it has no EIP-7702 involvement.
-    const READER: Address = address!("0000000000000000000000000000000000500007");
-    db.set_account_code(READER, build_sload_and_return());
-
-    // We want READER's code deployed at DELEGATE for the second call, but DELEGATE
-    // already has SSTORE code. Instead, we set up a different approach:
-    // PARENT calls DELEGATOR first (SSTORE triggers inspect_storage pollution),
-    // then calls DELEGATE directly. For the second call, DELEGATE's code runs in
-    // DELEGATE's context. But DELEGATE's code is the SSTORE contract, not SLOAD...
-    //
-    // Better approach: use two separate DELEGATE contracts.
-    // Actually, the simplest approach: DELEGATE's code does SSTORE(1, 0x77) then
-    // SLOAD(1) then RETURN. When called via DELEGATOR, the SSTORE triggers pollution
-    // and SLOAD reads DELEGATOR's storage. When called directly, SLOAD should read
-    // DELEGATE's storage.
-
-    // Rebuild DELEGATE with code that does SSTORE(1, 0x77) then SLOAD(1) then RETURN
+    // DELEGATE: code does SSTORE(1, 0x77) then SLOAD(1) then RETURN.
+    // Has storage[1] = 99 which should never be confused with DELEGATOR's.
     let delegate_code = BytecodeBuilder::default()
         .sstore(U256::from(1), U256::from(0x77))
         .push_number(1u8) // slot 1
@@ -324,6 +266,13 @@ fn test_inspect_storage_does_not_pollute_delegate_journal() {
         .append(RETURN)
         .build();
     db.set_account_code(DELEGATE, delegate_code);
+    db.set_account_storage(DELEGATE, U256::from(1), U256::from(99));
+    db.set_account_balance(DELEGATE, U256::from(1_000_000u64));
+
+    // DELEGATOR: delegates to DELEGATE, storage[1] = 42
+    set_eip7702_delegation(&mut db, DELEGATOR, DELEGATE);
+    db.set_account_storage(DELEGATOR, U256::from(1), U256::from(42));
+    db.set_account_balance(DELEGATOR, U256::from(1_000_000u64));
 
     // PARENT: calls DELEGATOR first (triggers inspect_storage), then DELEGATE directly
     db.set_account_code(PARENT, build_two_calls_return_second(DELEGATOR, DELEGATE));
@@ -332,39 +281,54 @@ fn test_inspect_storage_does_not_pollute_delegate_journal() {
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
 
-    let result = transact(MegaSpecId::REX4, &mut db, tx).expect("transaction should succeed");
+    let result = transact(spec, &mut db, tx).expect("transaction should succeed");
     assert!(result.result.is_success(), "execution should succeed: {:?}", result.result);
 
     let output = result.result.output().expect("should have output");
     let second_call_sload = U256::from_be_slice(output);
-
-    // The second call runs DELEGATE's code in DELEGATE's own context.
-    // SSTORE(1, 0x77) writes to DELEGATE's slot 1 (overwriting 99 with 0x77).
-    // SLOAD(1) should then return 0x77 (the just-written value).
-    //
-    // With the bug: inspect_storage during the first call cached DELEGATOR's slot 1
-    // (value=42) into DELEGATE's journal. When the second call's SSTORE runs,
-    // inspect_storage finds the polluted entry and uses wrong original_value for gas
-    // accounting. More importantly, if SLOAD happens before the journal processes
-    // the SSTORE, it returns the polluted value.
-    //
-    // After SSTORE(1, 0x77), SLOAD(1) should return 0x77 regardless. The pollution
-    // affects original_value tracking (gas refund calculations), not present_value.
-    // So we check original_value in the final state instead.
+    // After SSTORE(1, 0x77), SLOAD(1) should return 0x77 (the just-written value)
+    // regardless of spec — the pollution only affects original_value, not present_value.
     assert_eq!(
         second_call_sload,
         U256::from(0x77),
         "SLOAD after SSTORE should return the just-written value"
     );
 
-    // The real check: verify DELEGATE's slot 1 has the correct original_value.
-    // With the bug, original_value would be 42 (DELEGATOR's) instead of 99 (DELEGATE's).
+    result
+}
+
+/// REX4+: `inspect_storage` no longer follows EIP-7702 delegation, so the delegate's
+/// journal is not polluted.
+/// DELEGATE's slot 1 `original_value` should be 99 (its own DB value).
+#[test]
+fn test_inspect_storage_does_not_pollute_delegate_journal_rex4() {
+    let result = run_inspect_storage_pollution_scenario(MegaSpecId::REX4);
+
     let delegate_account = result.state.get(&DELEGATE).expect("DELEGATE should be in state");
     let slot =
         delegate_account.storage.get(&U256::from(1)).expect("slot 1 should exist in DELEGATE");
     assert_eq!(
         slot.original_value(),
         U256::from(99),
-        "DELEGATE's slot 1 original_value should be 99 (its own), not 42 (DELEGATOR's)"
+        "REX4: DELEGATE's slot 1 original_value should be 99 (its own), not 42 (DELEGATOR's)"
+    );
+}
+
+/// Pre-REX4: `inspect_storage` follows EIP-7702 delegation (original behavior), so the
+/// delegate's journal gets polluted with the delegator's storage value.
+/// DELEGATE's slot 1 `original_value` will be 42 (DELEGATOR's value) instead of 99.
+#[test]
+fn test_inspect_storage_pollutes_delegate_journal_pre_rex4() {
+    let result = run_inspect_storage_pollution_scenario(MegaSpecId::REX3);
+
+    let delegate_account = result.state.get(&DELEGATE).expect("DELEGATE should be in state");
+    let slot =
+        delegate_account.storage.get(&U256::from(1)).expect("slot 1 should exist in DELEGATE");
+    // Pre-REX4 preserves the old behavior: inspect_storage follows delegation and
+    // pollutes the delegate's journal with the delegator's storage value.
+    assert_eq!(
+        slot.original_value(),
+        U256::from(42),
+        "Pre-REX4: DELEGATE's slot 1 original_value should be 42 (polluted from DELEGATOR)"
     );
 }
