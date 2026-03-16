@@ -358,20 +358,22 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, Self::DBError> {
         let transaction_id = self.transaction_id;
-        let account = self.inspect_account_delegated(address)?;
+        // Storage belongs to the original address, not the delegate — do not follow
+        // EIP-7702 delegation here (matching upstream revm's sload behavior).
+        let account = inspect_account(self, address)?;
         if account.storage.contains_key(&key) {
             // Slot already exists, return reference to it
             // Need to reload account to satisfy borrow checker
-            let account = self.inspect_account_delegated(address)?;
+            let account = inspect_account(self, address)?;
             return Ok(account.storage.get(&key).unwrap());
         }
         // Slot doesn't exist, load from DB and insert
         let slot = self.database.storage(address, key)?;
         let mut slot = EvmStorageSlot::new(slot, transaction_id);
-        // delibrately mark the slot as cold since we are only inpecting it, not warming it
+        // deliberately mark the slot as cold since we are only inspecting it, not warming it
         slot.mark_cold();
         // Load account again to bypass the borrow checker and insert the slot
-        let account = self.inspect_account_delegated(address)?;
+        let account = inspect_account(self, address)?;
         account.storage.insert(key, slot);
         // Return reference to the newly inserted slot
         Ok(account.storage.get(&key).expect("slot should exist"))
