@@ -5,12 +5,12 @@ on:
 
 jobs:
   require-label:
-    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     steps:
       - name: Check for required labels
+        if: github.actor != 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
