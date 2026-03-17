@@ -22,7 +22,12 @@ jobs:
           fi
 
           if ! echo "$LABELS" | grep -q '^comp:'; then
-            echo "::error::PR must have at least one comp: label (comp:core, comp:mega-evme)"
+            echo "::error::PR must have at least one comp: label (comp:core, comp:mega-evme, comp:misc)"
+            FAIL=1
+          fi
+
+          if ! echo "$LABELS" | grep -q '^api:'; then
+            echo "::error::PR must have at least one api: label (api:breaking, api:unchanged)"
             FAIL=1
           fi
 
