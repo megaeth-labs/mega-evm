@@ -20,20 +20,13 @@ comment:
 
 ignore:
   - "bin/**/*"
+  - "crates/mega-evme/**/*"
   - "crates/state-test/**/*"
   - "crates/system-contracts/**/*"
   - "crates/mega-evm/benches/**/*"
   - "crates/mega-evm/src/external/test_utils.rs"
   - "crates/mega-evm/src/test_utils/**/*"
   - "crates/mega-evm/tests/**/*"
-
-flag_management:
-  individual_flags:
-    - name: mega-evm-core
-      statuses:
-        - type: project
-          target: auto
-          threshold: 1%
 
 fixes:
   - "/home/runner/work/mega-evm/mega-evm/::"

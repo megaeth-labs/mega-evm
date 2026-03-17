@@ -57,5 +57,5 @@ jobs:
           flags: mega-evm-core
           name: mega-evm-core
           token: ${{ secrets.CODECOV_TOKEN }}
-          env_vars: OS,RUST
+          env_vars: RUST
           verbose: true
