@@ -2,24 +2,9 @@ name: Auto Triage
 on:
   issues:
     types: [opened]
-  pull_request:
-    types: [opened]
 
 jobs:
-  pr-triage-label:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    permissions:
-      pull-requests: write
-    steps:
-      - name: Add triage:needed label to PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh pr edit ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --add-label "triage:needed"
-
   triage-issue:
-    if: github.event_name == 'issues'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
