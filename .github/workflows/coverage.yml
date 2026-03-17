@@ -38,16 +38,6 @@ jobs:
       - name: Generate coverage reports
         run: scripts/coverage_mega_evm.sh
 
-      - name: Publish coverage summary
-        run: |
-          {
-            echo "## mega-evm core coverage"
-            echo
-            echo '```text'
-            grep '^TOTAL' target/coverage/mega-evm/report.txt || cat target/coverage/mega-evm/report.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
