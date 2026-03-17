@@ -1,7 +1,7 @@
 name: Claude Label Check
 on:
   pull_request:
-    types: [labeled, unlabeled]
+    types: [opened, reopened, labeled, unlabeled]
 
 concurrency:
   group: claude-label-check-${{ github.event.pull_request.number }}
@@ -33,7 +33,7 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            A label was just changed on this PR. Check if the current labels are correct.
+            Check if the current labels on this PR are correct.
 
             Read the PR diff using `gh pr diff` and check the current labels using `gh pr view`.
             Fetch the complete list of available labels using `gh label list`.
