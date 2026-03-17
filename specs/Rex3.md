@@ -1,75 +1,83 @@
 # Rex3 Specification
 
+## Abstract
+
 Rex3 is the third patch to the Rex hardfork.
-It introduces several behavioral changes while inheriting all Rex2 behavior.
+It increases the oracle access compute gas cap, changes oracle gas detention from CALL-based to SLOAD-based triggering, and fixes keyless deploy compute gas tracking.
+All Rex2 semantics are preserved unless explicitly changed below.
 
-## Changes from Rex2
+## Changes
 
-### 1. Oracle Access Compute Gas Limit Increase
+### 1. Oracle access compute gas limit increase
 
-Rex3 increases the compute gas cap applied after oracle contract access:
+#### Motivation
 
-- **Previous limit (MINI_REX through REX2):** 1,000,000 (1M) compute gas
-- **New limit (REX3):** 20,000,000 (20M) compute gas
+The 1M compute gas cap after oracle access is too restrictive for legitimate use cases, causing frequent `VolatileDataAccessOutOfGas` halts in contracts that need to perform meaningful computation after reading oracle data.
 
-The block environment access compute gas limit remains unchanged at 20M.
-When both block environment and oracle are accessed, both caps are now equal (20M), so neither is more restrictive than the other.
+#### Semantics
 
-Note that the further restricted compute gas limit is enforced on the compute gas consumption across the entire transaction execution.
-That is, if the transaction has already consumed more than 20M compute gas before accessing volatile data (e.g., from an oracle contract or the block environment), the transaction execution will halt immediately.
+Previous behavior:
+- Oracle access (triggered by CALL to the oracle address) caps compute gas at 1,000,000 (1M).
 
-This change allows transactions that read oracle data to perform more computation after the oracle access, reducing the frequency of `VolatileDataAccessOutOfGas` halts for legitimate use cases.
+New behavior:
+- Oracle storage reads (SLOAD from the oracle contract) MUST cap compute gas at 20,000,000 (20M).
+- The block environment access cap remains at 20M (unchanged).
+- When both block environment and oracle storage are read, both caps are equal (20M), so neither is more restrictive than the other.
 
-### 2. Oracle Gas Detention Triggers on SLOAD (not CALL)
+### 2. Oracle gas detention triggers on SLOAD
 
-In specs prior to Rex3 (MINI_REX through REX2), oracle gas detention is triggered when any CALL targets the oracle contract address.
-This means simply calling the oracle contract — even without reading any storage — activates gas detention.
+#### Motivation
 
-Rex3 changes this so that oracle gas detention is triggered by SLOAD from the oracle contract's storage, not by CALL to the oracle contract.
-This more accurately captures actual oracle data access: only transactions that read oracle storage values trigger gas detention.
+CALL-based oracle detection triggers detention when simply calling the oracle contract, even without reading any storage.
+SLOAD-based detection more accurately captures actual oracle data access.
 
-- **Previous behavior (MINI_REX through REX2):** CALL to oracle contract → triggers gas detention
-- **New behavior (REX3):** SLOAD from oracle contract storage → triggers gas detention
+#### Semantics
 
-The SLOAD-based detention is caller-agnostic: any SLOAD that reads from the oracle contract's storage triggers detention, regardless of which contract initiated the call chain.
-For example, if Contract A calls Contract B, which then calls the oracle contract, the oracle's SLOAD triggers detention for the entire transaction.
+Previous behavior:
+- CALL to the oracle contract address triggers gas detention.
 
-DELEGATECALL to the oracle contract does **not** trigger detention.
-This is because DELEGATECALL executes the oracle's code in the caller's context, so SLOAD reads the caller's storage, not the oracle contract's storage.
+New behavior:
+- SLOAD from the oracle contract's storage MUST trigger gas detention.
+- CALL to the oracle contract address alone MUST NOT trigger gas detention; however, if the CALL results in an SLOAD from the oracle contract's storage, that SLOAD triggers detention.
+- The SLOAD-based trigger MUST be caller-agnostic: any SLOAD reading the oracle contract's storage triggers detention regardless of call depth.
+- DELEGATECALL to the oracle contract MUST NOT trigger detention, because SLOAD in a DELEGATECALL context reads the caller's storage, not the oracle contract's storage.
+- Transactions from `MEGA_SYSTEM_ADDRESS` MUST be exempted from oracle gas detention.
+- The exemption MUST check the transaction sender (`TxEnv.caller`), not the frame-level caller.
 
-The `MEGA_SYSTEM_ADDRESS` exemption applies to the SLOAD-based path, but with a semantic difference from pre-Rex3.
-In the pre-Rex3 CALL-based path, the exemption checked the frame-level caller (`call_inputs.caller`).
-In Rex3, the exemption checks the transaction sender (`TxEnv.caller` via `Host::caller()`), which means the entire transaction from `MEGA_SYSTEM_ADDRESS` is exempted regardless of call depth.
+### 3. Keyless deploy compute gas tracking
 
-### 3. Keyless Deploy Compute Gas Tracking
+#### Motivation
 
-The 100K overhead gas for sandbox execution is deducted from frame gas but never recorded as compute gas.
-This means keyless deploy transactions don't count toward the 200M per-transaction compute gas limit.
+The 100K overhead gas for keyless deploy sandbox execution is deducted from frame gas but not recorded as compute gas, meaning keyless deploy transactions do not count toward the per-transaction compute gas limit.
 
-Rex3 fixes this by recording the keyless deploy overhead gas (100K) as compute gas.
-If this causes the compute gas limit to be exceeded, the execution will halt.
+#### Semantics
 
-- **Previous behavior (REX2):** Keyless deploy overhead gas not counted toward compute gas limit
-- **New behavior (REX3):** 100K overhead gas recorded as compute gas
+Previous behavior:
+- Keyless deploy overhead gas (100K) is not counted toward the compute gas limit.
+
+New behavior:
+- The 100K keyless deploy overhead MUST be recorded as compute gas.
+- If recording the overhead causes the compute gas limit to be exceeded, execution MUST halt.
+
+## Invariants
+
+- `I-1`: Stable Rex2 semantics MUST remain unchanged.
+- `I-2`: DELEGATECALL to the oracle contract MUST NOT trigger gas detention.
+- `I-3`: `MEGA_SYSTEM_ADDRESS` transactions MUST be exempted from oracle gas detention regardless of call depth.
 
 ## Inheritance
 
-Rex3 inherits all Rex2 behavior (including SELFDESTRUCT with EIP-6780 semantics, KeylessDeploy system contract, compute gas limit reset between transactions) and all features from Rex1, Rex, and MiniRex.
-
-The semantics of Rex3 are inherited from:
-
-- **Rex3** -> **Rex2** -> **Rex1** -> **Rex** -> **MiniRex** -> **Optimism Isthmus** -> **Ethereum Prague**
-
-## Implementation References
-
-- Oracle access compute gas limit constant: `crates/mega-evm/src/constants.rs` (`rex3::ORACLE_ACCESS_COMPUTE_GAS`).
-- Oracle SLOAD gas detention: `crates/mega-evm/src/evm/host.rs` (`sload` method), `crates/mega-evm/src/evm/instructions.rs` (`rex3::instruction_table`, `volatile_data_ext::sload`).
-- Keyless deploy compute gas: `crates/mega-evm/src/evm/execution.rs` (`frame_init`, keyless deploy section).
-- Gas detention mechanism: `crates/mega-evm/src/evm/instructions.rs` (`wrap_op_detain_gas!`), `crates/mega-evm/src/access/tracker.rs` (`VolatileDataAccessTracker`).
+Rex3 inherits Rex2 except for the deltas defined in `Changes`.
+Semantic lineage: `Rex3 -> Rex2 -> Rex1 -> Rex -> MiniRex -> Optimism Isthmus -> Ethereum Prague`.
 
 ## References
 
 - [Rex2 Specification](Rex2.md)
+- [Rex4 Specification](Rex4.md)
 - [Rex1 Specification](Rex1.md)
 - [Rex Specification](Rex.md)
 - [MiniRex Specification](MiniRex.md)
+- [Rex3 Behavior Details (Informative)](impl/Rex3-Behavior-Details.md)
+- [Rex3 Implementation References (Informative)](impl/Rex3-Implementation-References.md)
+- [Oracle Service](../docs/ORACLE_SERVICE.md)
+- [Keyless Deployment](../docs/KEYLESS_DEPLOYMENT.md)

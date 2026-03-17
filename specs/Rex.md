@@ -1,206 +1,144 @@
 # Rex Specification
 
-## 1. Introduction
+## Abstract
 
-Rex is the second spec of MegaETH EVM. It modifies MiniRex in four areas:
+Rex is the first major upgrade after MiniRex.
+It introduces transaction intrinsic storage gas, revised storage gas economics with lower base costs, consistent gas forwarding and oracle detection across all CALL-like opcodes, and adjusted transaction and block resource limits including a new state growth dimension.
+All MiniRex semantics are preserved unless explicitly changed below.
 
-1. **Storage Gas Economics**: New formulas using `base × (multiplier - 1)` instead of `base × multiplier`
-2. **Transaction Intrinsic Storage Gas**: All transactions pay 39,000 additional storage gas
-3. **Transaction and Block Limits**: Transaction data and KV update limits increased to match block limits; compute gas limit decreased; state growth limits added
-4. **Consistent behavior among CALL-like opcodes**: DELEGATECALL, STATICCALL, and CALLCODE now enforce 98/100 gas forwarding; STATICCALL gains oracle access detection
+## Changes
 
-## 2. Comprehensive List of Changes
+### 1. Transaction intrinsic storage gas
 
-Rex inherits all MiniRex features and modifications (see [MiniRex.md](MiniRex.md)) with the following changes:
+#### Motivation
 
-### 2.1 Transaction Intrinsic Storage Gas
+MiniRex charges no storage gas at the transaction intrinsic level.
+Rex adds a flat storage gas cost to every transaction to account for the per-transaction state overhead imposed on nodes.
 
-All transactions pay 39,000 additional storage gas on top of the standard 21,000 intrinsic gas.
+#### Semantics
 
-| Spec        | Compute Gas | Storage Gas | Total  |
-| ----------- | ----------- | ----------- | ------ |
-| **MiniRex** | 21,000      | 0           | 21,000 |
-| **Rex**     | 21,000      | 39,000      | 60,000 |
+Previous behavior:
+- Transaction intrinsic gas is 21,000 (compute gas only, no storage gas component).
 
-### 2.2 Storage Gas Economics
+New behavior:
+- Every transaction MUST pay 39,000 additional storage gas on top of the standard 21,000 compute intrinsic gas.
+- Total intrinsic gas becomes 60,000 (21,000 compute + 39,000 storage).
 
-#### 2.2.1 SSTORE Storage Gas
+| Spec | Compute Gas | Storage Gas | Total |
+| --- | --- | --- | --- |
+| **MiniRex** | 21,000 | 0 | 21,000 |
+| **Rex** | 21,000 | 39,000 | 60,000 |
 
-| Spec        | Formula                     | Multiplier=1 | Multiplier=2 | Multiplier=4 |
-| ----------- | --------------------------- | ------------ | ------------ | ------------ |
-| **MiniRex** | `2,000,000 × multiplier`    | 2,000,000    | 4,000,000    | 8,000,000    |
-| **Rex**     | `20,000 × (multiplier - 1)` | 0            | 20,000       | 60,000       |
+### 2. Storage gas economics
 
-Applied when SSTORE executes with `0 == original_value == current_value != new_value`.
+#### Motivation
 
-#### 2.2.2 Account Creation Storage Gas
+MiniRex uses `base × multiplier` for dynamic storage gas, which charges a full base cost even at the minimum bucket size (multiplier = 1).
+Rex changes the formula to `base × (multiplier - 1)` so that operations in uncrowded state regions incur zero storage gas, while operations in crowded regions scale proportionally.
 
-| Spec        | Formula                     | Multiplier=1 | Multiplier=2 | Multiplier=4 |
-| ----------- | --------------------------- | ------------ | ------------ | ------------ |
-| **MiniRex** | `2,000,000 × multiplier`    | 2,000,000    | 4,000,000    | 8,000,000    |
-| **Rex**     | `25,000 × (multiplier - 1)` | 0            | 25,000       | 75,000       |
+#### Semantics
 
-Applied when:
+Previous behavior:
+- SSTORE (0→non-0): `2,000,000 × multiplier`
+- Account creation: `2,000,000 × multiplier`
+- Contract creation: `2,000,000 × multiplier` (same as account creation)
 
-- Value transfer to non-existent account
-- CALL or CALLCODE with non-zero value to empty account (EIP-161)
-- Contract creation uses separate cost (see 2.2.3)
+New behavior:
+- SSTORE (0→non-0) MUST cost `20,000 × (multiplier - 1)`.
+- Account creation MUST cost `25,000 × (multiplier - 1)`.
+- Contract creation MUST cost `32,000 × (multiplier - 1)`.
+- Contract creation of a new account MUST pay both contract creation gas and account creation gas.
+- `multiplier` = `bucket_capacity / MIN_BUCKET_SIZE`.
+- At `multiplier = 1`, all three operations MUST cost zero storage gas.
+- Unchanged operations: code deposit (10,000/byte), LOG topic (3,750/topic), LOG data (80/byte), calldata zero (40/byte), calldata non-zero (160/byte), calldata floor zero (100/byte), calldata floor non-zero (400/byte).
 
-#### 2.2.3 Contract Creation Storage Gas
+| Operation | MiniRex | Rex |
+| --- | --- | --- |
+| **SSTORE (0→non-0)** | 2M × m | 20k × (m-1) |
+| **Account creation** | 2M × m | 25k × (m-1) |
+| **Contract creation** | 2M × m | 32k × (m-1) |
 
-| Spec        | Formula                     | Multiplier=1 | Multiplier=2 | Multiplier=4 |
-| ----------- | --------------------------- | ------------ | ------------ | ------------ |
-| **MiniRex** | Same as account creation    | 2,000,000    | 4,000,000    | 8,000,000    |
-| **Rex**     | `32,000 × (multiplier - 1)` | 0            | 32,000       | 96,000       |
+### 3. Consistent behavior among CALL-like opcodes
 
-Applied when:
+#### Motivation
 
-- CREATE or CREATE2 opcode
-- Contract creation transaction
+In MiniRex, CALLCODE, DELEGATECALL, and STATICCALL bypass the 98/100 gas forwarding cap.
+Additionally, oracle access detection only applies to CALL; STATICCALL bypasses it even when targeting the oracle contract.
 
-Contract creation pays both:
+#### Semantics
 
-1. Contract creation storage gas: `32,000 × (multiplier - 1)`
-2. Account creation storage gas: `25,000 × (multiplier - 1)` (if new account)
+Previous behavior:
+- Only CALL enforces 98/100 gas forwarding.
+- Only CALL triggers oracle access detection.
 
-#### 2.2.4 Storage Gas Summary
+New behavior:
+- CALLCODE, DELEGATECALL, and STATICCALL MUST enforce the 98/100 gas forwarding cap, consistent with CALL.
+- STATICCALL MUST trigger oracle access detection when targeting the oracle contract, consistent with CALL.
+- CALLCODE and DELEGATECALL MUST NOT trigger oracle access detection, because their `target_address` equals the caller's address (not the callee's), so they never constitute a direct read of the oracle contract's state.
 
-| Operation                 | MiniRex     | Rex           |
-| ------------------------- | ----------- | ------------- |
-| **Transaction Intrinsic** | -           | 39,000 (flat) |
-| **SSTORE (0→non-0)**      | 2M × m      | 20k × (m-1)   |
-| **Account Creation**      | 2M × m      | 25k × (m-1)   |
-| **Contract Creation**     | 2M × m      | 32k × (m-1)   |
-| **Code Deposit**          | 10k/byte    | 10k/byte      |
-| **LOG Topic**             | 3,750/topic | 3,750/topic   |
-| **LOG Data**              | 80/byte     | 80/byte       |
-| **Calldata (zero)**       | 40/byte     | 40/byte       |
-| **Calldata (non-zero)**   | 160/byte    | 160/byte      |
-| **Floor (zero)**          | 100/byte    | 100/byte      |
-| **Floor (non-zero)**      | 400/byte    | 400/byte      |
+| Opcode | 98/100 gas forwarding | Oracle access detection |
+| --- | --- | --- |
+| **CALL** | MiniRex+ | MiniRex+ |
+| **STATICCALL** | Rex+ | Rex+ |
+| **DELEGATECALL** | Rex+ | Never |
+| **CALLCODE** | Rex+ | Never |
 
-`m` = `bucket_capacity / MIN_BUCKET_SIZE`
+### 4. Transaction and block limits
 
-### 2.3 DELEGATECALL, STATICCALL, and CALLCODE
+#### Motivation
 
-In MiniRex, CALLCODE, DELEGATECALL, and STATICCALL bypass 98/100 gas forwarding cap.
-Additionally, oracle access detection only applies to CALL; STATICCALL, CALLCODE, and DELEGATECALL all bypass it.
+MiniRex transaction limits for data size and KV updates are 25% of block limits.
+Rex raises transaction limits to match block limits, lowers the compute gas limit, and introduces state growth limits to prevent unbounded state expansion.
 
-Rex fixes 98/100 gas forwarding for all three opcodes.
-Rex also adds oracle access detection for STATICCALL, aligning it with CALL.
-CALLCODE and DELEGATECALL remain excluded from oracle detection because their `target_address` equals the caller's address (not the callee's), so they never constitute a direct read of the oracle contract's state.
+#### Semantics
 
-| Opcode         | 98/100 gas forwarding | Oracle access detection |
-| -------------- | --------------------- | ----------------------- |
-| **CALL**       | MiniRex+              | MiniRex+                |
-| **STATICCALL** | Rex+                  | Rex+                    |
-| **DELEGATECALL** | Rex+                | Never                   |
-| **CALLCODE**   | Rex+                  | Never                   |
+Previous behavior:
+- Transaction data size limit: 3.125 MB (25% of block).
+- Transaction KV update limit: 125,000 (25% of block).
+- Transaction compute gas limit: 1,000,000,000 (1B).
+- State growth: unlimited.
 
-### 2.4 Transaction and Block Limits
+New behavior:
+- Transaction data size limit MUST be 12.5 MB (equal to block limit).
+- Transaction KV update limit MUST be 500,000 (equal to block limit).
+- Transaction compute gas limit MUST be 200,000,000 (200M).
+- Transaction state growth limit MUST be 1,000.
+- Block state growth limit MUST be 1,000.
+- Block data size limit (12.5 MB), block KV update limit (500,000), and block compute gas limit (unlimited) MUST remain unchanged.
+- State growth MUST count: new storage slots (SSTORE 0→non-0) and new accounts created (via CREATE, CREATE2, or CALL with value transfer to empty account per EIP-161).
+- Transaction-level state growth exceed MUST halt with `OutOfGas`.
+- Block-level state growth enforcement: the last transaction exceeding the limit MUST be included; subsequent transactions MUST be rejected.
 
-#### 2.4.1 Transaction Data and KV Update Limits
+| Limit | Level | MiniRex | Rex | Change |
+| --- | --- | --- | --- | --- |
+| **Data Size** | Transaction | 3.125 MB | **12.5 MB** | 4× increase |
+| | Block | 12.5 MB | 12.5 MB | — |
+| **KV Updates** | Transaction | 125,000 | **500,000** | 4× increase |
+| | Block | 500,000 | 500,000 | — |
+| **Compute Gas** | Transaction | 1,000,000,000 | **200,000,000** | 5× decrease |
+| | Block | Unlimited | Unlimited | — |
+| **State Growth** | Transaction | Unlimited | **1,000** | New limit |
+| | Block | Unlimited | **1,000** | New limit |
 
-**Data Size Limit:**
+## Invariants
 
-| Spec        | Transaction Limit | Block Limit |
-| ----------- | ----------------- | ----------- |
-| **MiniRex** | 3.125 MB (25%)    | 12.5 MB     |
-| **Rex**     | **12.5 MB**       | 12.5 MB     |
+- `I-1`: Storage gas for SSTORE, account creation, and contract creation MUST be zero when `multiplier = 1`.
+- `I-2`: All four CALL-like opcodes (CALL, STATICCALL, DELEGATECALL, CALLCODE) MUST enforce 98/100 gas forwarding.
+- `I-3`: DELEGATECALL and CALLCODE MUST NOT trigger oracle access detection.
+- `I-4`: Transaction-level state growth exceed MUST halt with `OutOfGas`.
+- `I-5`: The max total gas limit (storage + compute gas) for a transaction or block is not limited by the EVM spec; it is a chain-configurable parameter.
 
-**KV Update Limit:**
+## Inheritance
 
-| Spec        | Transaction Limit | Block Limit |
-| ----------- | ----------------- | ----------- |
-| **MiniRex** | 125,000 (25%)     | 500,000     |
-| **Rex**     | **500,000**       | 500,000     |
+Rex inherits MiniRex except for the deltas defined in `Changes`.
+Semantic lineage: `Rex -> MiniRex -> Optimism Isthmus -> Ethereum Prague`.
 
-**Changes:**
-
-- Transaction data limit: 3.125 MB → 12.5 MB (4× increase)
-- Transaction KV update limit: 125,000 → 500,000 (4× increase)
-- Transaction limits now equal block limits (1:1 ratio)
-
-**Impact:**
-
-- Single transaction can use full block capacity
-- Block can still contain multiple small transactions
-- Block limits unchanged
-
-#### 2.4.2 Transaction Compute Gas Limit
-
-| Spec        | Transaction Limit      | Block Limit          |
-| ----------- | ---------------------- | -------------------- |
-| **MiniRex** | 1,000,000,000 (1B)     | Unlimited (u64::MAX) |
-| **Rex**     | **200,000,000 (200M)** | Unlimited (u64::MAX) |
-
-**Changes:**
-
-- Transaction compute gas limit: 1B → 200M (5× decrease)
-- Block compute gas limit: Unlimited (unchanged)
-
-**Note**: The max total gas limit (storage + compute gas) is unlimited.
-
-#### 2.4.3 State Growth Limits
-
-| Spec        | Transaction Limit    | Block Limit          |
-| ----------- | -------------------- | -------------------- |
-| **MiniRex** | Unlimited (u64::MAX) | Unlimited (u64::MAX) |
-| **Rex**     | **1,000**            | **1,000**            |
-
-**What Counts as State Growth:**
-
-- New storage slots (SSTORE 0→non-0) after transaction execution.
-- New accounts created
-- New contract code deployed
-
-**Enforcement:**
-
-- Transaction-level: Halts with OutOfGas when exceeded
-- Block-level: Last transaction exceeding limit included, subsequent rejected
-
-#### 2.4.4 Summary
-
-| Limit            | Level       | MiniRex              | Rex                  | Change      |
-| ---------------- | ----------- | -------------------- | -------------------- | ----------- |
-| **Data Size**    | Transaction | 3.125 MB             | **12.5 MB**          | 4× increase |
-|                  | Block       | 12.5 MB              | 12.5 MB              | -           |
-| **KV Updates**   | Transaction | 125,000              | **500,000**          | 4× increase |
-|                  | Block       | 500,000              | 500,000              | -           |
-| **Compute Gas**  | Transaction | 1,000,000,000        | **200,000,000**      | 5× decrease |
-|                  | Block       | Unlimited (u64::MAX) | Unlimited (u64::MAX) | -           |
-| **State Growth** | Transaction | Unlimited (u64::MAX) | **1,000**            | New limit   |
-|                  | Block       | Unlimited (u64::MAX) | **1,000**            | New limit   |
-
-**Notes:**
-
-- All limits checked during/after execution
-- KV updates: all storage writes (including updates to existing slots)
-- State growth: only new entries (0→non-0 writes, new accounts, new code)
-- The max total gas limit for either a single transaction or a whole block is not limited by the EVM spec; it is a chain-configurable parameter.
-
-## 3. Specification Mapping
-
-The semantics of Rex spec are inherited and customized from:
-
-- **Rex** → **MiniRex** → **Optimism Isthmus** → **Ethereum Prague**
-
-## 4. Implementation References
-
-- Gas rules and limits: `crates/mega-evm/src/constants.rs` (module `rex`),
-  `crates/mega-evm/src/external/gas.rs` (dynamic storage/account/contract gas),
-  `crates/mega-evm/src/evm/execution.rs` (intrinsic storage gas, account/contract creation storage gas),
-  `crates/mega-evm/src/evm/limit.rs` (tx runtime limits and trackers).
-- Call-like opcode gas forwarding: `crates/mega-evm/src/evm/instructions.rs`
-  (`forward_gas_ext`, `rex::instruction_table`).
-- SELFDESTRUCT disabled (inherited from MiniRex): `crates/mega-evm/src/evm/instructions.rs`
-  (`mini_rex::instruction_table`).
-- State merge and touched accounts: `crates/mega-evm/src/evm/state.rs` (`merge_evm_state`,
-  `merge_evm_state_optional_status`).
-
-## 5. References
+## References
 
 - [MiniRex Specification](MiniRex.md)
+- [Rex1 Specification](Rex1.md)
+- [Rex Behavior Details (Informative)](impl/Rex-Behavior-Details.md)
+- [Rex Implementation References (Informative)](impl/Rex-Implementation-References.md)
 - [Dual Gas Model](../docs/DUAL_GAS_MODEL.md)
 - [Resource Accounting](../docs/RESOURCE_ACCOUNTING.md)
 - [Block and Transaction Limits](../docs/BLOCK_AND_TX_LIMITS.md)
