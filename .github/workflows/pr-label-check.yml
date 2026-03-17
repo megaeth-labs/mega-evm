@@ -5,6 +5,7 @@ on:
 
 jobs:
   require-label:
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
