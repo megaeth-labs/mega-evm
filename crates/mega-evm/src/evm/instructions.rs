@@ -1002,7 +1002,8 @@ pub mod additional_limit_ext {
             context.interpreter.halt(InstructionResult::StackUnderflow);
             return;
         };
-        let Ok(slot) = context.host.inspect_storage(target_address, index) else {
+        let mega_spec = context.host.spec_id();
+        let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
@@ -1100,7 +1101,8 @@ pub mod storage_gas_ext {
                     return;
                 };
                 let to = to.into_address();
-                let Ok(to_account) = context.host.inspect_account_delegated(to) else {
+                let mega_spec = context.host.spec_id();
+                let Ok(to_account) = context.host.inspect_account_delegated(mega_spec, to) else {
                     context.interpreter.halt(InstructionResult::FatalExternalError);
                     return;
                 };
@@ -1165,7 +1167,7 @@ pub mod storage_gas_ext {
         let creator_address = context.interpreter.input.target_address();
         // Load the creator account without marking it warm (it is already warm since the creator
         // must have been warmed when the current frame begins).
-        let Ok(creator) = context.host.inspect_account_delegated(creator_address) else {
+        let Ok(creator) = context.host.inspect_account_delegated(spec, creator_address) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
@@ -1304,7 +1306,8 @@ pub mod storage_gas_ext {
             return;
         };
         // The storage slot values
-        let Ok(slot) = context.host.inspect_storage(target_address, index) else {
+        let mega_spec = context.host.spec_id();
+        let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };

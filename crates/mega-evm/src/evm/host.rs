@@ -285,18 +285,57 @@ pub trait JournalInspectTr {
     type DBError: core::fmt::Debug;
 
     /// Inspect the account at the given address without marking it as warm.
-    /// If the account is EIP-7702 type, it should inspect the delegated account.
+    /// If the account is EIP-7702 type, follows delegation.
+    ///
+    /// Starting from REX4, resolves exactly one hop (matching upstream revm behavior).
+    /// Pre-REX4, follows delegation recursively but detects cycles to prevent stack overflow.
     fn inspect_account_delegated(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
     ) -> Result<&mut Account, Self::DBError>;
 
     /// Inspect the storage at the given address and key without marking it as warm.
+    ///
+    /// Starting from REX4, storage is always loaded from the original address without following
+    /// EIP-7702 delegation (matching upstream revm's sload behavior).
+    /// Pre-REX4 specs retain the original behavior that follows delegation.
     fn inspect_storage(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, Self::DBError>;
+}
+
+/// Load an account into the journal state without following EIP-7702 delegation.
+/// Deliberately marks the account as cold since this is an inspection, not a warming access.
+fn inspect_account<DB: revm::Database>(
+    journal: &mut Journal<DB>,
+    address: Address,
+) -> Result<&mut Account, <DB as revm::Database>::Error> {
+    let transaction_id = journal.transaction_id;
+    match journal.inner.state.entry(address) {
+        Entry::Occupied(entry) => {
+            let account = entry.into_mut();
+            if account.info.code_hash != KECCAK_EMPTY && account.info.code.is_none() {
+                // Load code if not loaded before
+                account.info.code = Some(journal.database.code_by_hash(account.info.code_hash)?);
+            }
+            Ok(account)
+        }
+        Entry::Vacant(entry) => {
+            let mut account = journal
+                .database
+                .basic(address)?
+                .map(|info| info.into())
+                .unwrap_or_else(|| Account::new_not_existing(transaction_id));
+            // deliberately mark the account as cold since we are only inspecting it, not warming
+            // it.
+            account.mark_cold();
+            Ok(entry.insert(account))
+        }
+    }
 }
 
 impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
@@ -304,62 +343,88 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
 
     fn inspect_account_delegated(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
     ) -> Result<&mut Account, Self::DBError> {
-        let transaction_id = self.transaction_id;
-        let account = match self.inner.state.entry(address) {
-            Entry::Occupied(entry) => {
-                let account = entry.into_mut();
-                if account.info.code_hash != KECCAK_EMPTY && account.info.code.is_none() {
-                    // Load code if not loaded before
-                    account.info.code = Some(self.database.code_by_hash(account.info.code_hash)?);
-                }
-                account
-            }
-            Entry::Vacant(entry) => {
-                let mut account = self
-                    .database
-                    .basic(address)?
-                    .map(|info| info.into())
-                    .unwrap_or_else(|| Account::new_not_existing(transaction_id));
-                // delibrately mark the account as cold since we are only inpecting it, not warming
-                // it.
-                account.mark_cold();
-                entry.insert(account)
-            }
+        let account = inspect_account(self, address)?;
+
+        let delegated_address = account.info.code.as_ref().and_then(|code| match code {
+            Bytecode::Eip7702(code) => Some(code.address()),
+            _ => None,
+        });
+        let Some(delegated_address) = delegated_address else {
+            // Not delegated — reload to satisfy borrow checker and return.
+            let account = self.inner.state.get_mut(&address).unwrap();
+            return Ok(account);
         };
 
-        // If the account is a delegated account, inspect the delegated account.
-        if let Some(Bytecode::Eip7702(code)) = &account.info.code {
-            let address = code.address();
-            return self.inspect_account_delegated(address);
+        if spec.is_enabled(MegaSpecId::REX4) {
+            // REX4+: resolve exactly one hop (matching upstream revm behavior).
+            return inspect_account(self, delegated_address);
         }
 
-        // Load account again to bypass the borrow checker.
-        let account = self.inner.state.get_mut(&address).unwrap();
-        Ok(account)
+        // Pre-REX4: follow delegation recursively with cycle detection.
+        // Walk the chain iteratively, collecting visited addresses to detect cycles.
+        let mut current = delegated_address;
+        let mut visited = std::vec![address];
+        loop {
+            let account = inspect_account(self, current)?;
+            let next = account.info.code.as_ref().and_then(|code| match code {
+                Bytecode::Eip7702(code) => Some(code.address()),
+                _ => None,
+            });
+            let Some(next) = next else {
+                // End of chain — reload and return.
+                let account = self.inner.state.get_mut(&current).unwrap();
+                return Ok(account);
+            };
+            if visited.contains(&next) {
+                // Cycle detected — stop here.
+                let account = self.inner.state.get_mut(&current).unwrap();
+                return Ok(account);
+            }
+            visited.push(current);
+            current = next;
+        }
     }
 
     fn inspect_storage(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, Self::DBError> {
         let transaction_id = self.transaction_id;
-        let account = self.inspect_account_delegated(address)?;
+        let is_rex4_enabled = spec.is_enabled(MegaSpecId::REX4);
+        // REX4+: storage belongs to the original address, not the delegate — do not follow
+        // EIP-7702 delegation here (matching upstream revm's sload behavior).
+        // Pre-REX4: follows delegation (original behavior).
+        let account = if is_rex4_enabled {
+            inspect_account(self, address)?
+        } else {
+            self.inspect_account_delegated(spec, address)?
+        };
         if account.storage.contains_key(&key) {
-            // Slot already exists, return reference to it
-            // Need to reload account to satisfy borrow checker
-            let account = self.inspect_account_delegated(address)?;
+            // Slot already exists, return reference to it.
+            // Need to reload account to satisfy borrow checker.
+            let account = if is_rex4_enabled {
+                inspect_account(self, address)?
+            } else {
+                self.inspect_account_delegated(spec, address)?
+            };
             return Ok(account.storage.get(&key).unwrap());
         }
         // Slot doesn't exist, load from DB and insert
         let slot = self.database.storage(address, key)?;
         let mut slot = EvmStorageSlot::new(slot, transaction_id);
-        // delibrately mark the slot as cold since we are only inpecting it, not warming it
+        // deliberately mark the slot as cold since we are only inspecting it, not warming it
         slot.mark_cold();
         // Load account again to bypass the borrow checker and insert the slot
-        let account = self.inspect_account_delegated(address)?;
+        let account = if is_rex4_enabled {
+            inspect_account(self, address)?
+        } else {
+            self.inspect_account_delegated(spec, address)?
+        };
         account.storage.insert(key, slot);
         // Return reference to the newly inserted slot
         Ok(account.storage.get(&key).expect("slot should exist"))
@@ -373,24 +438,29 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> JournalInspectTr for MegaContext<DB, ExtEnvs> {
     type DBError = ();
 
-    fn inspect_account_delegated(&mut self, address: Address) -> Result<&mut Account, ()> {
+    fn inspect_account_delegated(
+        &mut self,
+        spec: MegaSpecId,
+        address: Address,
+    ) -> Result<&mut Account, ()> {
         // Split borrow: `journaled_state` and `error` are sibling fields on the inner context,
         // so we can borrow them independently to avoid the double-call workaround.
         let journal = &mut self.inner.journaled_state;
         let error = &mut self.inner.error;
-        journal.inspect_account_delegated(address).map_err(|e| {
+        journal.inspect_account_delegated(spec, address).map_err(|e| {
             *error = Err(ContextError::Custom(format!("{e}")));
         })
     }
 
     fn inspect_storage(
         &mut self,
+        spec: MegaSpecId,
         address: Address,
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, ()> {
         let journal = &mut self.inner.journaled_state;
         let error = &mut self.inner.error;
-        journal.inspect_storage(address, key).map_err(|e| {
+        journal.inspect_storage(spec, address, key).map_err(|e| {
             *error = Err(ContextError::Custom(format!("{e}")));
         })
     }

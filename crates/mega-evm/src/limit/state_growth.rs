@@ -97,16 +97,13 @@ use crate::{FrameLimitTracker, JournalInspectTr, MegaSpecId, TxRuntimeLimit};
 /// See module-level documentation for details on the net growth model and frame-based tracking.
 #[derive(Debug, Clone)]
 pub(crate) struct StateGrowthTracker {
-    rex4_enabled: bool,
+    spec: MegaSpecId,
     frame_tracker: FrameLimitTracker<()>,
 }
 
 impl StateGrowthTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
-        Self {
-            frame_tracker: FrameLimitTracker::new(tx_limit),
-            rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
-        }
+        Self { spec, frame_tracker: FrameLimitTracker::new(tx_limit) }
     }
 
     /// Pushes a new frame onto the tracker.
@@ -114,7 +111,7 @@ impl StateGrowthTracker {
     /// For pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced
     /// (the TX-level check in `check_limit()` uses `net_usage()` instead).
     fn push_frame(&mut self) {
-        if self.rex4_enabled {
+        if self.spec.is_enabled(MegaSpecId::REX4) {
             self.frame_tracker.push_frame(());
         } else {
             self.frame_tracker.push_frame_with_limit(u64::MAX, ());
@@ -165,7 +162,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
     /// For pre-Rex4, the check is TX-level: total net growth across all frames is compared
     /// against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
-        if self.rex4_enabled {
+        if self.spec.is_enabled(MegaSpecId::REX4) {
             self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::StateGrowth)
         } else {
             // Pre-Rex4: check total growth across all frames against the TX-level limit.
@@ -215,7 +212,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
                 // EIP-161: only value transfers to empty accounts count as creating an account.
                 if call_inputs.transfers_value() {
                     let to_account =
-                        journal.inspect_account_delegated(call_inputs.target_address)?;
+                        journal.inspect_account_delegated(self.spec, call_inputs.target_address)?;
                     let is_empty = to_account.state_clear_aware_is_empty(SpecId::PRAGUE);
                     if is_empty {
                         self.record_growth(1);
