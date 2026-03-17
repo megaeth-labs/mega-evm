@@ -1,0 +1,49 @@
+name: PR Triage
+on:
+  pull_request:
+    types: [opened, synchronize, labeled, unlabeled]
+
+jobs:
+  require-label:
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check for required labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json labels --jq '.labels[].name')
+          FAIL=0
+
+          if echo "$LABELS" | grep -q '^triage:needed$'; then
+            echo "::error::PR still has triage:needed label — please triage before merging"
+            FAIL=1
+          fi
+
+          if ! echo "$LABELS" | grep -q '^spec:'; then
+            echo "::error::PR must have at least one spec: label (spec:unstable, spec:stable, spec:new)"
+            FAIL=1
+          fi
+
+          if ! echo "$LABELS" | grep -q '^comp:'; then
+            echo "::error::PR must have at least one comp: label (comp:core, comp:mega-evme, comp:misc)"
+            FAIL=1
+          fi
+
+          if ! echo "$LABELS" | grep -q '^api:'; then
+            echo "::error::PR must have at least one api: label (api:breaking, api:unchanged)"
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "Current labels: $LABELS"
+            echo ""
+            echo "Available labels:"
+            gh label list --repo ${{ github.repository }}
+            exit 1
+          fi
+
+          echo "Labels OK:"
+          echo "$LABELS"

@@ -1,0 +1,32 @@
+name: Auto Triage
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage-issue:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            ISSUE NUMBER: ${{ github.event.issue.number }}
+
+            Triage this newly opened issue.
+
+            1. Read the issue using `gh issue view ${{ github.event.issue.number }}`.
+            2. Fetch available labels using `gh label list`.
+            3. Based on the issue content and the codebase, apply the appropriate labels using `gh issue edit ${{ github.event.issue.number }} --add-label "label1,label2"`.
+            4. Remove the `triage:needed` label using `gh issue edit ${{ github.event.issue.number }} --remove-label "triage:needed"`.
+            5. If the issue is unclear or you are not confident about the labels, leave `triage:needed` and add a comment asking for clarification.
