@@ -146,3 +146,52 @@ impl Display for MegaSpecId {
         write!(f, "{}", s)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_SPECS: [(MegaSpecId, &str); 7] = [
+        (MegaSpecId::EQUIVALENCE, name::EQUIVALENCE),
+        (MegaSpecId::MINI_REX, name::MINI_REX),
+        (MegaSpecId::REX, name::REX),
+        (MegaSpecId::REX1, name::REX1),
+        (MegaSpecId::REX2, name::REX2),
+        (MegaSpecId::REX3, name::REX3),
+        (MegaSpecId::REX4, name::REX4),
+    ];
+
+    #[test]
+    fn spec_names_roundtrip_and_display() {
+        for (spec, expected_name) in ALL_SPECS {
+            assert_eq!(<&'static str>::from(spec), expected_name);
+            assert_eq!(MegaSpecId::from_str(expected_name).unwrap(), spec);
+            assert_eq!(spec.to_string(), expected_name);
+        }
+
+        assert_eq!(MegaSpecId::default(), MegaSpecId::REX4);
+        assert_eq!(MegaSpecId::from_str("unknown"), Err(UnknownHardfork));
+    }
+
+    #[test]
+    fn all_specs_map_to_isthmus_and_prague() {
+        for (spec, _) in ALL_SPECS {
+            assert_eq!(spec.into_op_spec(), OpSpecId::ISTHMUS);
+            assert_eq!(spec.into_eth_spec(), EthSpecId::PRAGUE);
+            assert_eq!(revm::primitives::hardfork::SpecId::from(spec), EthSpecId::PRAGUE);
+            assert_eq!(OpSpecId::from(spec), OpSpecId::ISTHMUS);
+        }
+    }
+
+    #[test]
+    fn spec_order_is_backward_compatible() {
+        assert!(MegaSpecId::REX4.is_enabled(MegaSpecId::REX3));
+        assert!(MegaSpecId::REX4.is_enabled(MegaSpecId::EQUIVALENCE));
+        assert!(MegaSpecId::MINI_REX.is_enabled(MegaSpecId::EQUIVALENCE));
+        assert!(MegaSpecId::REX2.is_enabled(MegaSpecId::REX1));
+
+        assert!(!MegaSpecId::EQUIVALENCE.is_enabled(MegaSpecId::MINI_REX));
+        assert!(!MegaSpecId::REX1.is_enabled(MegaSpecId::REX2));
+        assert!(!MegaSpecId::REX3.is_enabled(MegaSpecId::REX4));
+    }
+}
