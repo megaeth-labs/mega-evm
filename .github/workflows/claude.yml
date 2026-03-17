@@ -11,10 +11,6 @@ on:
   issues:
     types: [opened]
 
-concurrency:
-  group: claude-label-check-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
-
 jobs:
   interactive:
     if: |
