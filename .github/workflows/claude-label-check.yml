@@ -1,0 +1,42 @@
+name: Claude Label Check
+on:
+  pull_request:
+    types: [labeled, unlabeled]
+
+concurrency:
+  group: claude-label-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Skip if the label change came from the github-actions bot (auto-labeling)
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Debounce
+        run: sleep 15
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            A label was just changed on this PR. Check if the current labels are correct.
+
+            Read the PR diff using `gh pr diff` and check the current labels using `gh pr view`.
+            Fetch the complete list of available labels using `gh label list`.
+            If any labels are incorrect or missing, comment on the PR explaining why.
+            Do NOT add or remove labels yourself. Only comment.
+            If all labels look correct, do nothing — no comment needed.
