@@ -1,77 +1,70 @@
 # Rex2 Specification
 
-Rex2 is the second patch to the Rex hardfork. It restores the `SELFDESTRUCT` opcode with
-post-Cancun (EIP-6780) semantics while inheriting all Rex1 behavior.
+## Abstract
 
-## Changes from Rex1
+Rex2 is the second patch to the Rex hardfork.
+It re-enables the `SELFDESTRUCT` opcode with post-Cancun (EIP-6780) semantics and introduces the KeylessDeploy system contract for deterministic contract deployment with gas limit overrides.
+All Rex1 semantics are preserved unless explicitly changed below.
 
-### 1. SELFDESTRUCT Re-enabled (EIP-6780)
+## Changes
 
-Rex2 re-enables `SELFDESTRUCT` with EIP-6780 semantics:
+### 1. SELFDESTRUCT re-enabled (EIP-6780)
 
-- `SELFDESTRUCT` is no longer an invalid opcode.
-- If a contract was **created in the same transaction**, `SELFDESTRUCT` removes the contract and
-  its storage, as in the pre-Cancun behavior.
-- If a contract was **not** created in the same transaction, `SELFDESTRUCT` only transfers the
-  remaining balance to the beneficiary and does **not** delete code or storage.
+#### Motivation
 
-### 2. KeylessDeploy System Contract
+MiniRex completely disabled `SELFDESTRUCT`, making it an invalid opcode.
+Rex2 restores it with EIP-6780 semantics to support contracts that rely on same-transaction self-destruct patterns.
 
-Rex2 introduces the **KeylessDeploy** system contract to enable keyless deployment (Nick's Method)
-on MegaETH with custom gas limits.
+#### Semantics
 
-**System Contract Address**: `0x6342000000000000000000000000000000000003`
+Previous behavior:
+- `SELFDESTRUCT` halts execution with `InvalidFEOpcode`.
 
-**Why it's needed**: MegaETH's gas model prices operations differently than Ethereum. Contracts
-that deploy successfully via keyless transactions on Ethereum may run out of gas on MegaETH.
-Since modifying the signed transaction to increase the gas limit would change the recovered signer
-(and thus the deployment address), a system contract is needed to apply a gas limit override at
-execution time while preserving the original signature.
+New behavior:
+- `SELFDESTRUCT` MUST be a valid opcode.
+- If the contract was created in the same transaction, `SELFDESTRUCT` MUST remove the contract's code and storage and transfer the remaining balance to the beneficiary.
+- If the contract was not created in the same transaction, `SELFDESTRUCT` MUST only transfer the remaining balance to the beneficiary and MUST NOT delete code or storage.
 
-**Restriction**: The system contract must be called directly in a transaction (`depth == 0`). Calls
-from other contracts will revert with `NotIntercepted()`. This prevents wrap-and-revert attacks
-that could avoid gas charges.
+### 2. KeylessDeploy system contract
 
-**Interface**:
+#### Motivation
 
-```solidity
-interface IKeylessDeploy {
-    function keylessDeploy(
-        bytes calldata keylessDeploymentTransaction,
-        uint256 gasLimitOverride
-    ) external returns (uint64 gasUsed, address deployedAddress, bytes memory errorData);
-}
-```
+MegaETH's gas model prices operations differently than Ethereum.
+Contracts that deploy successfully via keyless transactions (Nick's Method) on Ethereum may run out of gas on MegaETH.
+Since modifying the signed transaction to increase the gas limit would change the recovered signer and the deployment address, a system contract is needed to apply a gas limit override at execution time while preserving the original signature.
 
-For detailed usage instructions, examples, and security considerations, see the
-[Keyless Deployment documentation](../docs/KEYLESS_DEPLOYMENT.md).
+#### Semantics
+
+Previous behavior:
+- No system-level support for keyless deployment with gas limit overrides.
+
+New behavior:
+- A system contract MUST be deployed at `0x6342000000000000000000000000000000000003`.
+- The contract MUST provide `keylessDeploy(bytes keylessDeploymentTransaction, uint256 gasLimitOverride)` returning `(uint64 gasUsed, address deployedAddress, bytes errorData)`.
+- The contract MUST only be intercepted at call depth 0 (direct transaction call).
+- Calls from other contracts (depth > 0) MUST NOT be intercepted and MUST fall through to on-chain bytecode, reverting with `NotIntercepted()`.
+- Value-bearing calls to the contract MUST revert.
+- Unknown selectors MUST NOT be intercepted and MUST fall through to on-chain bytecode, reverting with `NotIntercepted()`.
+- The keyless deploy sandbox MUST charge a fixed overhead of 100,000 gas for RLP decoding, signature recovery, and state filtering.
+
+## Invariants
+
+- `I-1`: Stable Rex1 semantics MUST remain unchanged.
+- `I-2`: `SELFDESTRUCT` of a contract not created in the same transaction MUST NOT delete code or storage.
+- `I-3`: KeylessDeploy interception MUST only occur at depth 0.
 
 ## Inheritance
 
-Rex2 inherits all Rex1 behavior (including compute gas limit reset between transactions) and all
-features from Rex and MiniRex.
-
-The semantics of Rex2 are inherited from:
-
-- **Rex2** -> **Rex1** -> **Rex** -> **MiniRex** -> **Optimism Isthmus** -> **Ethereum Prague**
-
-## Implementation References
-
-- SELFDESTRUCT (EIP-6780) enablement: `crates/mega-evm/src/evm/instructions.rs`
-  (`rex2::instruction_table`) and `crates/mega-evm/src/evm/state.rs`
-  (`merge_evm_state_optional_status`).
-- KeylessDeploy system contract: `crates/mega-evm/src/system/keyless_deploy.rs`
-  (pre-execution deployment), `crates/mega-evm/src/evm/execution.rs` (frame_init interception),
-  `crates/mega-evm/src/sandbox/execution.rs` (`execute_keyless_deploy_call`, `apply_sandbox_state`).
-- Gas rules and limits (inherited from Rex/Rex1): `crates/mega-evm/src/constants.rs`,
-  `crates/mega-evm/src/evm/execution.rs`, `crates/mega-evm/src/evm/limit.rs`.
-- State merge and touched accounts: `crates/mega-evm/src/evm/state.rs` (`merge_evm_state`,
-  `merge_evm_state_optional_status`).
+Rex2 inherits Rex1 except for the deltas defined in `Changes`.
+Semantic lineage: `Rex2 -> Rex1 -> Rex -> MiniRex -> Optimism Isthmus -> Ethereum Prague`.
 
 ## References
 
 - [Rex1 Specification](Rex1.md)
+- [Rex3 Specification](Rex3.md)
 - [Rex Specification](Rex.md)
 - [MiniRex Specification](MiniRex.md)
+- [Rex2 Behavior Details (Informative)](impl/Rex2-Behavior-Details.md)
+- [Rex2 Implementation References (Informative)](impl/Rex2-Implementation-References.md)
 - [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)
 - [Keyless Deployment](../docs/KEYLESS_DEPLOYMENT.md)
