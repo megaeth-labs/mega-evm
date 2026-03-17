@@ -3,6 +3,8 @@
 ## Always check
 
 - New or modified EVM logic has accompanying tests
+- PR must not patch upstream dependencies unless there is a strong justification in the PR description
+- Any change to a public API or interface must have a clear reason documented in an inline comment or the PR description
 
 ## Logging
 
