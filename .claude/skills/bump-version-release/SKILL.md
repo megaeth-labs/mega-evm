@@ -1,6 +1,6 @@
 ---
 name: bump-version-release
-description: Bumps the workspace version in Cargo.toml and Cargo.lock, creates a version bump PR, waits for CI, and creates a GitHub release with auto-generated notes. Use when releasing a new version, bumping version, creating a release, tagging a release, or running a release workflow.
+description: Use when releasing a new version, bumping version, or creating a GitHub release.
 user-invocable: true
 ---
 
