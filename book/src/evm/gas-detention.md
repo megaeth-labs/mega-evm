@@ -21,16 +21,18 @@ The **most restrictive cap wins** when multiple volatile sources are accessed.
 
 ### Rex4: Relative Gas Detention Cap
 
-Starting from Rex4, gas detention caps are calculated as a fraction of the compute gas limit rather than fixed values.
-This means the effective cap scales with the transaction's compute gas budget.
+Starting from Rex4, gas detention uses **relative caps** instead of absolute caps.
+The effective detained limit is `current_usage + cap` at the time of volatile access.
+This means a transaction that has already consumed compute gas before accessing volatile data is not retroactively penalized — it can still use the full cap amount of compute gas after the access.
 
 ## How It Works
 
 1. A transaction accesses volatile data (e.g., reads `TIMESTAMP`)
-2. The `VolatileDataAccessTracker` records this access
-3. After each volatile opcode, remaining compute gas is capped
-4. If `compute_gas_used` already exceeds the cap, execution halts with `OutOfGas`
-5. Excess gas beyond the cap is "detained" and refunded at transaction end
+2. The access is recorded and the effective detained limit is calculated
+3. After each volatile opcode, remaining compute gas is capped at the effective detained limit
+4. Pre-Rex4 (absolute cap): if `compute_gas_used` already exceeds the cap, execution halts with `OutOfGas`
+5. Rex4+ (relative cap): the effective limit is `current_usage + cap`, so the transaction can always perform at least `cap` more gas of computation after the access
+6. Excess gas beyond the effective limit is "detained" and refunded at transaction end
 
 ## Example
 
@@ -51,6 +53,6 @@ Transaction starts with 200M compute gas budget
 | MiniRex     | 20M                         | 1M         | CALL to oracle contract          |
 | Rex–Rex2    | 20M                         | 1M         | CALL to oracle contract          |
 | Rex3        | 20M                         | 20M        | SLOAD from oracle storage        |
-| Rex4        | Relative to compute limit   | Relative   | SLOAD from oracle storage        |
+| Rex4        | 20M (relative)              | 20M (relative) | SLOAD from oracle storage    |
 
 The shift from CALL-based to SLOAD-based oracle detention (Rex3) means simply calling the oracle without reading its storage no longer activates gas detention.

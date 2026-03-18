@@ -68,7 +68,8 @@ Refines the storage gas economics introduced in MINI_REX:
 
 ### REX4
 
-- **Per-frame state growth limits** — Prevents a single inner call from consuming the entire state growth budget
-- **MegaAccessControl system contract** — Allows contracts to disable volatile data access detection
-- **MegaLimitControl system contract** — Allows querying remaining compute gas budget
-- **Relative gas detention cap** — Volatile data access caps use relative remaining gas
+- **Per-frame resource budgets** — All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
+- **Relative gas detention cap** — Effective detained limit is `current_usage + cap` instead of an absolute cap
+- **MegaAccessControl system contract** — Allows contracts to proactively disable volatile data access for a call subtree
+- **MegaLimitControl system contract** — Allows querying effective remaining compute gas under detention and frame limits
+- **Keyless deploy sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior
