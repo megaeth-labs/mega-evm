@@ -184,3 +184,213 @@ fn merge_evm_storage(this: &mut EvmStorage, other: &EvmStorage) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{address, Address, B256, U256};
+    use revm::{
+        database::{InMemoryDB, State},
+        state::{AccountInfo, EvmStorageSlot},
+    };
+
+    const TEST_ADDRESS: Address = address!("1000000000000000000000000000000000000001");
+
+    fn account_with_status(status: AccountStatus) -> Account {
+        Account {
+            info: AccountInfo {
+                balance: U256::from(1),
+                nonce: 1,
+                code_hash: B256::ZERO,
+                code: None,
+            },
+            transaction_id: 0,
+            storage: Default::default(),
+            status,
+        }
+    }
+
+    #[test]
+    fn state_exposes_accessed_block_hashes() {
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+        state.block_hashes.insert(1, B256::ZERO);
+        state.block_hashes.insert(2, B256::from([2_u8; 32]));
+
+        let hashes = state.get_accessed_block_hashes();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes.get(&1), Some(&B256::ZERO));
+        assert_eq!(hashes.get(&2), Some(&B256::from([2_u8; 32])));
+    }
+
+    #[test]
+    fn merge_evm_state_replaces_created_selfdestructed_accounts_with_empty_touched_accounts() {
+        let mut this = EvmState::default();
+        this.insert(TEST_ADDRESS, Account::default().with_cold_mark());
+
+        let mut other_account = account_with_status(AccountStatus::Created);
+        other_account.mark_selfdestruct();
+        let other = EvmState::from_iter([(TEST_ADDRESS, other_account)]);
+
+        merge_evm_state(&mut this, &other);
+
+        let merged = this.get_mut(&TEST_ADDRESS).unwrap();
+        assert!(merged.is_touched());
+        assert!(!merged.is_selfdestructed());
+        assert_eq!(merged.info, AccountInfo::default());
+        assert!(merged.storage.is_empty());
+        assert!(merged.mark_warm_with_transaction_id(0), "coldness should be preserved");
+    }
+
+    #[test]
+    fn merge_evm_state_marks_new_accounts_and_storage_as_cold_and_clears_local_flags() {
+        let mut other_account =
+            account_with_status(AccountStatus::Created | AccountStatus::CreatedLocal);
+        other_account.status |= AccountStatus::SelfDestructedLocal;
+        other_account
+            .storage
+            .insert(U256::from(1), EvmStorageSlot::new_changed(U256::ZERO, U256::from(5), 0));
+        let other = EvmState::from_iter([(TEST_ADDRESS, other_account)]);
+
+        let mut this = EvmState::default();
+        merge_evm_state(&mut this, &other);
+
+        let merged = this.get(&TEST_ADDRESS).unwrap();
+        assert!(merged.status.contains(AccountStatus::Cold));
+        assert!(merged.status.contains(AccountStatus::Created));
+        assert!(!merged.status.contains(AccountStatus::CreatedLocal));
+        assert!(!merged.status.contains(AccountStatus::SelfDestructedLocal));
+
+        let mut slot = merged.storage.get(&U256::from(1)).unwrap().clone();
+        assert_eq!(slot.present_value(), U256::from(5));
+        assert!(slot.mark_warm_with_transaction_id(0), "new slots should be marked cold");
+    }
+
+    #[test]
+    fn merge_evm_state_optional_status_can_skip_or_merge_status_flags() {
+        let mut base_account =
+            account_with_status(AccountStatus::SelfDestructed | AccountStatus::Cold);
+        let mut base_slot = EvmStorageSlot::new(U256::from(1), 0);
+        base_slot.mark_cold();
+        base_account.storage.insert(U256::from(1), base_slot);
+        let base_state = EvmState::from_iter([(TEST_ADDRESS, base_account)]);
+
+        let mut other_account =
+            account_with_status(AccountStatus::Created | AccountStatus::CreatedLocal);
+        other_account.info.balance = U256::from(9);
+        other_account
+            .storage
+            .insert(U256::from(1), EvmStorageSlot::new_changed(U256::ZERO, U256::from(9), 0));
+        let other_state = EvmState::from_iter([(TEST_ADDRESS, other_account)]);
+
+        let mut without_status_merge = base_state.clone();
+        merge_evm_state_optional_status(&mut without_status_merge, &other_state, false);
+        let without_status_merge_account = without_status_merge.get(&TEST_ADDRESS).unwrap();
+        assert!(without_status_merge_account.status.contains(AccountStatus::SelfDestructed));
+        assert!(without_status_merge_account.status.contains(AccountStatus::Cold));
+        assert!(!without_status_merge_account.status.contains(AccountStatus::Created));
+        assert_eq!(
+            without_status_merge_account.storage.get(&U256::from(1)).unwrap().present_value(),
+            U256::from(9)
+        );
+        let mut preserved_slot =
+            without_status_merge_account.storage.get(&U256::from(1)).unwrap().clone();
+        assert!(preserved_slot.mark_warm_with_transaction_id(0));
+
+        let mut with_status_merge = base_state;
+        merge_evm_state(&mut with_status_merge, &other_state);
+        let with_status_merge_account = with_status_merge.get(&TEST_ADDRESS).unwrap();
+        assert!(!with_status_merge_account.is_selfdestructed());
+        assert!(with_status_merge_account.status.contains(AccountStatus::Created));
+        assert!(with_status_merge_account.status.contains(AccountStatus::Cold));
+    }
+
+    #[test]
+    fn merge_empty_other_state_is_noop() {
+        let mut this =
+            EvmState::from_iter([(TEST_ADDRESS, account_with_status(AccountStatus::Cold))]);
+        let other = EvmState::default();
+
+        merge_evm_state(&mut this, &other);
+
+        assert_eq!(this.len(), 1);
+        let account = this.get(&TEST_ADDRESS).unwrap();
+        assert_eq!(account.info.balance, U256::from(1));
+    }
+
+    #[test]
+    fn merge_evm_state_overwrites_existing_account_storage_and_preserves_slot_coldness() {
+        let addr2 = address!("2000000000000000000000000000000000000001");
+
+        let mut base_account = account_with_status(AccountStatus::Touched | AccountStatus::Cold);
+        let mut base_slot = EvmStorageSlot::new(U256::from(10), 0);
+        base_slot.mark_cold();
+        base_account.storage.insert(U256::from(1), base_slot);
+        base_account.storage.insert(U256::from(2), EvmStorageSlot::new(U256::from(20), 0));
+        let mut this = EvmState::from_iter([(TEST_ADDRESS, base_account)]);
+
+        let mut other_account = account_with_status(AccountStatus::Touched);
+        other_account.info.balance = U256::from(99);
+        other_account
+            .storage
+            .insert(U256::from(1), EvmStorageSlot::new_changed(U256::from(10), U256::from(42), 0));
+        other_account
+            .storage
+            .insert(U256::from(3), EvmStorageSlot::new_changed(U256::ZERO, U256::from(77), 0));
+        let other = EvmState::from_iter([
+            (TEST_ADDRESS, other_account),
+            (addr2, account_with_status(AccountStatus::Touched)),
+        ]);
+
+        merge_evm_state(&mut this, &other);
+
+        assert_eq!(this.len(), 2);
+
+        let merged = this.get(&TEST_ADDRESS).unwrap();
+        assert_eq!(merged.info.balance, U256::from(99));
+        assert_eq!(merged.storage.get(&U256::from(1)).unwrap().present_value(), U256::from(42),);
+        {
+            let mut existing_slot = merged.storage.get(&U256::from(1)).unwrap().clone();
+            assert!(
+                existing_slot.mark_warm_with_transaction_id(0),
+                "existing slot should have preserved original coldness"
+            );
+        }
+        assert_eq!(merged.storage.get(&U256::from(2)).unwrap().present_value(), U256::from(20),);
+        let mut new_slot = merged.storage.get(&U256::from(3)).unwrap().clone();
+        assert_eq!(new_slot.present_value(), U256::from(77));
+        assert!(new_slot.mark_warm_with_transaction_id(0), "new slot from other should be cold");
+
+        let new_account = this.get(&addr2).unwrap();
+        assert!(new_account.status.contains(AccountStatus::Cold));
+    }
+
+    #[test]
+    fn merge_selfdestructed_account_not_in_base_is_inserted_as_cold_empty() {
+        let mut other_account = account_with_status(AccountStatus::Created);
+        other_account.mark_selfdestruct();
+        other_account.info.balance = U256::from(999);
+        let other = EvmState::from_iter([(TEST_ADDRESS, other_account)]);
+
+        let mut this = EvmState::default();
+        merge_evm_state(&mut this, &other);
+
+        let merged = this.get(&TEST_ADDRESS).unwrap();
+        assert!(merged.is_touched());
+        assert!(!merged.is_selfdestructed());
+        assert_eq!(merged.info, AccountInfo::default());
+        assert!(merged.status.contains(AccountStatus::Cold));
+    }
+
+    #[test]
+    #[should_panic(expected = "EIP-6780 must be applied")]
+    fn merge_evm_state_panics_for_selfdestructed_account_without_created_flag() {
+        let mut other_account = account_with_status(AccountStatus::Touched);
+        other_account.mark_selfdestruct();
+        other_account.status.remove(AccountStatus::Created);
+        let other = EvmState::from_iter([(TEST_ADDRESS, other_account)]);
+
+        let mut this = EvmState::default();
+        merge_evm_state(&mut this, &other);
+    }
+}
