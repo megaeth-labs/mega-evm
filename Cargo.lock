@@ -4226,7 +4226,7 @@ dependencies = [
 [[package]]
 name = "revm-database"
 version = "7.0.5"
-source = "git+https://github.com/megaeth-labs/revm-database.git?branch=main#d66e7cf2077d2c3b8c8e8187d25221743ef6dd10"
+source = "git+https://github.com/megaeth-labs/revm-database.git?branch=main#4d02dca6d7a9dfea0ff015e18f8c7a293e8e110d"
 dependencies = [
  "alloy-eips",
  "alloy-provider",
@@ -4242,7 +4242,7 @@ dependencies = [
 [[package]]
 name = "revm-database-interface"
 version = "7.0.5"
-source = "git+https://github.com/megaeth-labs/revm-database-interface.git?branch=main#583c3d378ebba0c200089aadc04eb8a0387124dc"
+source = "git+https://github.com/megaeth-labs/revm-database-interface.git?branch=main#2b452541adfe9961bf87df874ac9de492d660106"
 dependencies = [
  "auto_impl",
  "either",

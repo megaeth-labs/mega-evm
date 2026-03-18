@@ -207,8 +207,8 @@ impl<DB> TestDatabaseWrapper<DB> {
         )
     }
 
-    fn salt_bucket_capacity_value(&self, address: Address, index: Option<U256>) -> (BucketId, u64) {
-        let bucket_id = if let Some(key) = index {
+    fn salt_bucket_capacity_value(&self, address: Address, slot: Option<U256>) -> (BucketId, u64) {
+        let bucket_id = if let Some(key) = slot {
             Self::bucket_id_for_slot(address, key)
         } else {
             Self::bucket_id_for_account(address)
@@ -247,9 +247,9 @@ impl<DB: revm::Database> revm::Database for TestDatabaseWrapper<DB> {
     fn salt_bucket_capacity(
         &self,
         address: Address,
-        index: Option<U256>,
+        slot: Option<U256>,
     ) -> Result<(u32, u64), Self::Error> {
-        Ok(self.salt_bucket_capacity_value(address, index))
+        Ok(self.salt_bucket_capacity_value(address, slot))
     }
 }
 
@@ -275,9 +275,9 @@ impl<DB: revm::DatabaseRef> revm::DatabaseRef for TestDatabaseWrapper<DB> {
     fn salt_bucket_capacity_ref(
         &self,
         address: Address,
-        index: Option<U256>,
+        slot: Option<U256>,
     ) -> Result<(u32, u64), Self::Error> {
-        Ok(self.salt_bucket_capacity_value(address, index))
+        Ok(self.salt_bucket_capacity_value(address, slot))
     }
 }
 

@@ -642,20 +642,20 @@ where
     fn salt_bucket_capacity_inner(
         &self,
         address: Address,
-        index: Option<U256>,
+        slot: Option<U256>,
     ) -> Result<(BucketId, u64)> {
         match &self.backend {
-            EvmeBackend::Empty(db) => db.salt_bucket_capacity(address, index).map_err(|e| {
+            EvmeBackend::Empty(db) => db.salt_bucket_capacity(address, slot).map_err(|e| {
                 EvmeError::Other(format!(
                     "Failed to fetch salt bucket capacity for {} at slot {:?}: {:?} from empty state.",
-                    address, index, e
+                    address, slot, e
                 ))
             }),
             EvmeBackend::Forked(db) => {
-                db.salt_bucket_capacity(address, index).map_err(|e| {
+                db.salt_bucket_capacity(address, slot).map_err(|e| {
                     EvmeError::RpcError(format!(
                         "Failed to fetch salt bucket capacity for {} at slot {:?}: {:?} from forked state.",
-                        address, index, e
+                        address, slot, e
                     ))
                 })
             }
@@ -786,9 +786,9 @@ where
     fn salt_bucket_capacity(
         &self,
         address: Address,
-        index: Option<U256>,
+        slot: Option<U256>,
     ) -> std::result::Result<(u32, u64), Self::Error> {
-        self.salt_bucket_capacity_inner(address, index)
+        self.salt_bucket_capacity_inner(address, slot)
     }
 }
 
@@ -913,8 +913,8 @@ where
     fn salt_bucket_capacity_ref(
         &self,
         address: Address,
-        index: Option<U256>,
+        slot: Option<U256>,
     ) -> std::result::Result<(u32, u64), Self::Error> {
-        self.salt_bucket_capacity_inner(address, index)
+        self.salt_bucket_capacity_inner(address, slot)
     }
 }
