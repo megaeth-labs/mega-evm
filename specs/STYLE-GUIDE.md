@@ -12,7 +12,7 @@ Each spec produces three files:
 | --- | --- | --- |
 | **Normative spec** | `specs/{Spec}.md` | Defines what the EVM MUST do. This is the source of truth. |
 | **Behavior details** | `specs/impl/{Spec}-Behavior-Details.md` | Informative. Elaborates on semantics with concrete values, examples, edge cases, and rationale. |
-| **Implementation references** | `specs/impl/{Spec}-Implementation-References.md` | Informative. Maps spec clauses and invariants to source files and tests. |
+| **Implementation references** | `specs/impl/{Spec}-Implementation-References.md` | Informative. Maps spec clauses and invariants to source files. |
 
 Each companion doc MUST open with a disclaimer stating that it is informative, that normative semantics are defined in the spec, and that the normative spec wins on conflict.
 The exact wording MAY vary, but MUST convey these three points.
@@ -31,11 +31,13 @@ Implementation-References template:
 
 ## Normative Spec Structure
 
-This guide covers **patch specs** (Rex, Rex1, Rex2, Rex3, Rex4, and future patches) — specs that modify an existing MegaETH spec by describing behavioral deltas.
+There are two spec categories: **patch specs** and **base specs**.
+A patch spec describes behavioral deltas from an existing MegaETH spec (e.g., Rex3 patches Rex2).
+A base spec defines complete EVM behavior from a parent layer (e.g., MiniRex builds on Optimism Isthmus).
 
-For **base specs** (currently only MiniRex), see [BASE-SPEC-GUIDE.md](BASE-SPEC-GUIDE.md).
+### Patch specs
 
-The normative spec file MUST use the following top-level sections in order:
+Patch specs (Rex, Rex1, Rex2, Rex3, Rex4, and future patches) MUST use the following structure:
 
 ```markdown
 # {Spec} Specification
@@ -55,47 +57,69 @@ The normative spec file MUST use the following top-level sections in order:
 ## References
 ```
 
-### Abstract
+**Abstract**: One paragraph. State what the spec is, summarize changes, state inheritance baseline.
 
-- One paragraph.
-- State what this spec is (e.g., "Rex3 is the third patch to the Rex hardfork.").
-- Summarize the changes introduced (enumerate briefly).
-- State the inheritance baseline (e.g., "All Rex2 semantics are preserved unless explicitly changed below.").
+**Changes**: Each change is `### N. {Title}` with:
+- `#### Motivation` — Why this change is needed. 1–3 sentences.
+- `#### Semantics` — Use the "Previous behavior / New behavior" pattern:
+  ```
+  Previous behavior:
+  - ...
 
-### Changes
+  New behavior:
+  - ...
+  ```
 
-- Each change is a numbered subsection: `### 1. {Title}`.
-- Each change contains two sub-subsections:
-  - `#### Motivation` — Why this change is needed. 1–3 sentences. Focus on the problem being solved, not the implementation.
-  - `#### Semantics` — What the EVM does differently. Use the "Previous behavior / New behavior" pattern:
-    ```
-    Previous behavior:
-    - ...
+**Invariants**: Numbered `I-1`, `I-2`, etc. Each a single MUST/MUST NOT sentence.
 
-    New behavior:
-    - ...
-    ```
-- Tables with concrete values (gas costs, limits, formulas) belong in Semantics.
+**Inheritance**: One sentence + full lineage, e.g.:
+`Semantic lineage: Rex3 -> Rex2 -> Rex1 -> Rex -> MiniRex -> Optimism Isthmus -> Ethereum Prague.`
 
-### Invariants
+**References**: Links to predecessor specs (and successor if they exist), companion docs, related docs, external standards.
 
-- Numbered list: `I-1`, `I-2`, etc.
-- Each invariant is a single sentence stating a correctness property using MUST/MUST NOT.
-- Invariants capture cross-cutting properties that span multiple changes or that are critical to preserve.
+### Base specs
 
-### Inheritance
+Base specs (currently only MiniRex) MUST use the following structure:
 
-- One sentence stating the inheritance chain, e.g.:
-  `Rex3 inherits Rex2 except for the deltas defined in Changes.`
-- Followed by the full lineage:
-  `Semantic lineage: Rex3 -> Rex2 -> Rex1 -> Rex -> MiniRex -> Optimism Isthmus -> Ethereum Prague.`
+```markdown
+# {Spec} Specification
 
-### References
+## Abstract
 
-- Links to predecessor specs (and successor specs, if they exist).
-- Links to companion impl docs.
-- Links to related docs (e.g., `docs/RESOURCE_ACCOUNTING.md`).
-- Links to external standards (e.g., EIP links).
+## Base Layer
+
+## Specifications
+
+### N. {Feature title}
+#### Rationale
+#### Semantics
+
+## Invariants
+
+## References
+```
+
+**Abstract**: One paragraph. State what the spec is and what parent layer it builds on.
+
+**Base Layer**: Declare the parent layer and state that all parent semantics are inherited unless overridden.
+
+**Specifications**: Each feature is `### N. {Title}` with:
+- `#### Rationale` — Why this feature exists. MAY be longer than a patch spec's Motivation.
+- `#### Semantics` — Define behavior directly using MUST/MUST NOT. No Previous/New pattern.
+
+**Invariants**: Same format as patch specs.
+
+**References**: Links to successor specs, companion docs, related docs, external standards.
+
+### Key differences
+
+| Aspect | Base spec | Patch spec |
+| --- | --- | --- |
+| Top-level section | `## Specifications` | `## Changes` |
+| Subsection header | `#### Rationale` | `#### Motivation` |
+| Semantics style | Define behavior directly | Previous/New behavior diff |
+| Lineage section | `## Base Layer` | `## Inheritance` |
+| Rationale length | MAY be longer (design justification) | 1–3 sentences |
 
 ## Writing Conventions
 
@@ -135,7 +159,7 @@ Tables SHOULD include the predecessor spec's values for comparison where relevan
 - One sentence, one line (for diff readability).
 - Prefer active voice.
 - Avoid narrative or tutorial-style exposition in the normative spec — move that to Behavior-Details.
-- Keep the Abstract and Motivation sections brief.
+- Keep the Abstract and Motivation/Rationale sections brief (Rationale in base specs MAY be longer).
 
 ## Companion Doc Conventions
 
@@ -144,11 +168,12 @@ Tables SHOULD include the predecessor spec's values for comparison where relevan
 Content that belongs here:
 - Concrete addresses, selector values, error signatures.
 - Edge case explanations.
-- Background context and rationale that is too long for Motivation.
+- Background context and rationale that is too long for Motivation/Rationale.
 - Solidity interfaces.
 - Usage examples where they help developers understand the semantics.
+- For base specs: migration impact and developer guidance (e.g., how existing contracts are affected).
 
-Structure: use the same change numbering as the normative spec (e.g., `## N. {Change title} details`).
+Structure: use the same numbering as the normative spec (e.g., `## N. {Feature/Change title} details`).
 
 #### Usage examples
 
@@ -172,13 +197,13 @@ If a scenario cannot be verified against existing code or tests, it MUST NOT be 
 ### Implementation-References
 
 Content that belongs here:
-- Mapping from each spec change to source files.
+- Mapping from each spec feature/change to source files.
 - Maintenance notes.
 
-Structure follows the Rex4-Implementation-References.md exemplar:
-- `## Change Mapping` with subsections matching the normative spec's change numbers.
+Structure:
+- `## Change Mapping` (patch specs) or `## Specification Mapping` (base specs), with subsections matching the normative spec's numbering.
   Each subsection MUST contain two parts:
-  - **Spec clauses** — enumerate the key normative requirements from the spec change.
+  - **Spec clauses** — enumerate the key normative requirements.
   - **Implementation** — list the source files that implement those clauses.
 - `## Invariant Mapping` listing each invariant with its implementation coverage.
 - `## Maintenance Notes` with update instructions.
