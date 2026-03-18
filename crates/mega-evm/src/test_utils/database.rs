@@ -106,7 +106,7 @@ impl revm::Database for MemoryDatabase {
         &self,
         _address: Address,
         _index: Option<U256>,
-    ) -> Result<(usize, u64), Self::Error> {
+    ) -> Result<(u32, u64), Self::Error> {
         // For testing, return minimum bucket size (multiplier = 1)
         Ok((0, MIN_BUCKET_SIZE as u64))
     }
@@ -183,7 +183,7 @@ impl revm::Database for ErrorInjectingDatabase {
         &self,
         address: Address,
         index: Option<U256>,
-    ) -> Result<(usize, u64), Self::Error> {
+    ) -> Result<(u32, u64), Self::Error> {
         self.inner.salt_bucket_capacity(address, index).map_err(|e| match e {})
     }
 }

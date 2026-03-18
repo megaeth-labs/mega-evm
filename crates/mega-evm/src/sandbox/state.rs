@@ -240,7 +240,7 @@ impl Database for SandboxDb<'_> {
         &self,
         _address: Address,
         _index: Option<U256>,
-    ) -> Result<(usize, u64), Self::Error> {
+    ) -> Result<(u32, u64), Self::Error> {
         // Return minimum bucket size so sandbox execution is not affected by real SALT state.
         // Keyless deploy sandbox must be deterministic and isolated from external SALT data.
         Ok((0, crate::constants::MIN_BUCKET_SIZE as u64))

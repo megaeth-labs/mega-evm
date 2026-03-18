@@ -49,7 +49,7 @@ impl DynamicGasCost {
     ) -> Result<u64, DB::Error> {
         // increase the gas cost according to the bucket capacity
         let (bucket_id, capacity) = db.salt_bucket_capacity(address, Some(key))?;
-        let multiplier = self.load_bucket_cost_multiplier(bucket_id as BucketId, capacity)?;
+        let multiplier = self.load_bucket_cost_multiplier(bucket_id, capacity)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
             constants::rex::SSTORE_SET_STORAGE_GAS_BASE * (multiplier - 1)
@@ -69,7 +69,7 @@ impl DynamicGasCost {
     ) -> Result<u64, DB::Error> {
         // increase the gas cost according to the bucket capacity
         let (bucket_id, capacity) = db.salt_bucket_capacity(address, None)?;
-        let multiplier = self.load_bucket_cost_multiplier(bucket_id as BucketId, capacity)?;
+        let multiplier = self.load_bucket_cost_multiplier(bucket_id, capacity)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
             constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1)
@@ -89,7 +89,7 @@ impl DynamicGasCost {
     ) -> Result<u64, DB::Error> {
         // increase the gas cost according to the bucket capacity
         let (bucket_id, capacity) = db.salt_bucket_capacity(address, None)?;
-        let multiplier = self.load_bucket_cost_multiplier(bucket_id as BucketId, capacity)?;
+        let multiplier = self.load_bucket_cost_multiplier(bucket_id, capacity)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
             constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE * (multiplier - 1)

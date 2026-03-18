@@ -2091,7 +2091,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "778e2ac28f6c47af28e4907f13ffd1e1ddbd400980a9abd7c8df189bf578a5ad"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3242,7 +3242,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4226,7 +4226,7 @@ dependencies = [
 [[package]]
 name = "revm-database"
 version = "7.0.5"
-source = "git+https://github.com/megaeth-labs/revm-database.git?branch=main#d595aae506017ce954bdd2112bc0c41e6ffa6eb8"
+source = "git+https://github.com/megaeth-labs/revm-database.git?branch=main#d66e7cf2077d2c3b8c8e8187d25221743ef6dd10"
 dependencies = [
  "alloy-eips",
  "alloy-provider",
@@ -4242,7 +4242,7 @@ dependencies = [
 [[package]]
 name = "revm-database-interface"
 version = "7.0.5"
-source = "git+https://github.com/megaeth-labs/revm-database-interface.git?branch=main#630c2c56c2508cbe8a332edf2d1a51bd4dee9056"
+source = "git+https://github.com/megaeth-labs/revm-database-interface.git?branch=main#583c3d378ebba0c200089aadc04eb8a0387124dc"
 dependencies = [
  "auto_impl",
  "either",
@@ -4500,7 +4500,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5738,7 +5738,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

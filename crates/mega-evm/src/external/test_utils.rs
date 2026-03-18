@@ -206,6 +206,23 @@ impl<DB> TestDatabaseWrapper<DB> {
             address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
         )
     }
+
+    fn salt_bucket_capacity_value(&self, address: Address, index: Option<U256>) -> (BucketId, u64) {
+        let bucket_id = if let Some(key) = index {
+            Self::bucket_id_for_slot(address, key)
+        } else {
+            Self::bucket_id_for_account(address)
+        };
+
+        let capacity = self
+            .bucket_capacity
+            .borrow()
+            .get(&bucket_id)
+            .copied()
+            .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64);
+
+        (bucket_id, capacity)
+    }
 }
 
 impl<DB: revm::Database> revm::Database for TestDatabaseWrapper<DB> {
@@ -231,21 +248,8 @@ impl<DB: revm::Database> revm::Database for TestDatabaseWrapper<DB> {
         &self,
         address: Address,
         index: Option<U256>,
-    ) -> Result<(usize, u64), Self::Error> {
-        let bucket_id = if let Some(key) = index {
-            Self::bucket_id_for_slot(address, key)
-        } else {
-            Self::bucket_id_for_account(address)
-        };
-
-        let capacity = self
-            .bucket_capacity
-            .borrow()
-            .get(&bucket_id)
-            .copied()
-            .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64);
-
-        Ok((bucket_id as usize, capacity))
+    ) -> Result<(u32, u64), Self::Error> {
+        Ok(self.salt_bucket_capacity_value(address, index))
     }
 }
 
@@ -272,21 +276,8 @@ impl<DB: revm::DatabaseRef> revm::DatabaseRef for TestDatabaseWrapper<DB> {
         &self,
         address: Address,
         index: Option<U256>,
-    ) -> Result<(usize, u64), Self::Error> {
-        let bucket_id = if let Some(key) = index {
-            Self::bucket_id_for_slot(address, key)
-        } else {
-            Self::bucket_id_for_account(address)
-        };
-
-        let capacity = self
-            .bucket_capacity
-            .borrow()
-            .get(&bucket_id)
-            .copied()
-            .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64);
-
-        Ok((bucket_id as usize, capacity))
+    ) -> Result<(u32, u64), Self::Error> {
+        Ok(self.salt_bucket_capacity_value(address, index))
     }
 }
 
