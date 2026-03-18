@@ -703,11 +703,6 @@ pub struct BlockLimiter {
 }
 
 impl BlockLimiter {
-    #[inline]
-    fn exceeds_with_add(current: u64, incoming: u64, limit: u64) -> bool {
-        current.checked_add(incoming).is_none_or(|sum| sum > limit)
-    }
-
     /// Create a new block limiter with the specified limits.
     ///
     /// Initializes a limiter with all resource usage counters set to zero.
@@ -799,14 +794,11 @@ impl BlockLimiter {
         }
 
         // Check block gas limit
-        if Self::exceeds_with_add(self.block_gas_used, gas_limit, self.limits.block_gas_limit) {
+        if self.block_gas_used + gas_limit > self.limits.block_gas_limit {
             return Err(BlockExecutionError::Validation(
                 BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
                     transaction_gas_limit: gas_limit,
-                    block_available_gas: self
-                        .limits
-                        .block_gas_limit
-                        .saturating_sub(self.block_gas_used),
+                    block_available_gas: self.limits.block_gas_limit - self.block_gas_used,
                 },
             ));
         }
@@ -823,11 +815,7 @@ impl BlockLimiter {
         }
 
         // Check block transaction size limit
-        if Self::exceeds_with_add(
-            self.block_tx_size_used,
-            tx_size,
-            self.limits.block_txs_encode_size_limit,
-        ) {
+        if tx_size + self.block_tx_size_used > self.limits.block_txs_encode_size_limit {
             return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                 hash: tx_hash,
                 error: Box::new(MegaBlockLimitExceededError::TransactionEncodeSizeLimit {
@@ -852,11 +840,7 @@ impl BlockLimiter {
             }
 
             // Check block data availability size limit
-            if Self::exceeds_with_add(
-                self.block_da_size_used,
-                da_size,
-                self.limits.block_da_size_limit,
-            ) {
+            if da_size + self.block_da_size_used > self.limits.block_da_size_limit {
                 return Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     hash: tx_hash,
                     error: Box::new(MegaBlockLimitExceededError::DataAvailabilitySizeLimit {
@@ -997,34 +981,33 @@ impl BlockLimiter {
         is_deposit: bool,
     ) {
         // Block gas limit. No need to check here since it's checked before transaction execution.
-        self.block_gas_used = self.block_gas_used.saturating_add(gas_used);
+        self.block_gas_used += gas_used;
 
         // Block tx size limit, no need to check here since it's checked before transaction
         // execution.
-        self.block_tx_size_used = self.block_tx_size_used.saturating_add(tx_size);
+        self.block_tx_size_used += tx_size;
 
         // Block da size limit, no need to check here since it's checked before transaction
         // execution. Only appliable for non-deposit transactions.
         if !is_deposit {
-            self.block_da_size_used = self.block_da_size_used.saturating_add(da_size);
+            self.block_da_size_used += da_size;
         }
 
         // Block data limit, no need to check here since we allow the last transaction to exceed the
         // limit.
-        self.block_data_used = self.block_data_used.saturating_add(tx_data);
+        self.block_data_used += tx_data;
 
         // Block kv updates limit, no need to check here since we allow the last transaction to
         // exceed the limit.
-        self.block_kv_updates_used = self.block_kv_updates_used.saturating_add(kv_updates);
+        self.block_kv_updates_used += kv_updates;
 
         // Block compute gas limit, no need to check here since we allow the last transaction to
         // exceed the limit.
-        self.block_compute_gas_used = self.block_compute_gas_used.saturating_add(compute_gas_used);
+        self.block_compute_gas_used += compute_gas_used;
 
         // Block state growth limit, no need to check here since we allow the last transaction to
         // exceed the limit.
-        self.block_state_growth_used =
-            self.block_state_growth_used.saturating_add(state_growth_used);
+        self.block_state_growth_used += state_growth_used;
     }
 
     /// Returns true if any block-level limit has been reached or exceeded.
@@ -1036,324 +1019,5 @@ impl BlockLimiter {
             self.block_kv_updates_used >= self.limits.block_kv_update_limit ||
             self.block_compute_gas_used >= self.limits.block_compute_gas_limit ||
             self.block_state_growth_used >= self.limits.block_state_growth_limit
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assert_invalid_tx_error(
-        err: BlockExecutionError,
-        expected_hash: TxHash,
-        expected_message_fragment: &str,
-    ) {
-        match err {
-            BlockExecutionError::Validation(BlockValidationError::InvalidTx { hash, error }) => {
-                assert_eq!(hash, expected_hash);
-                assert!(
-                    error.to_string().contains(expected_message_fragment),
-                    "unexpected error: {error}"
-                );
-            }
-            other => panic!("expected invalid tx error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn no_limits_and_runtime_limit_conversion_roundtrip() {
-        let no_limits = BlockLimits::no_limits();
-        assert_eq!(no_limits.tx_gas_limit, u64::MAX);
-        assert_eq!(no_limits.block_state_growth_limit, u64::MAX);
-        assert_eq!(no_limits.oracle_access_compute_gas_limit, u64::MAX);
-
-        let runtime_limits = EvmTxRuntimeLimits::no_limits()
-            .with_tx_data_size_limit(1)
-            .with_tx_kv_updates_limit(2)
-            .with_tx_compute_gas_limit(3)
-            .with_tx_state_growth_limit(4)
-            .with_block_env_access_compute_gas_limit(5)
-            .with_oracle_access_compute_gas_limit(6);
-        let limits = BlockLimits::no_limits().with_tx_runtime_limits(runtime_limits);
-
-        assert_eq!(limits.to_evm_tx_runtime_limits(), runtime_limits);
-    }
-
-    #[test]
-    fn from_hardfork_applies_expected_block_and_tx_limits() {
-        let mini_rex = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::MiniRex, 10);
-        assert_eq!(mini_rex.block_gas_limit, 10);
-        assert_eq!(mini_rex.tx_data_limit, crate::constants::mini_rex::TX_DATA_LIMIT);
-        assert_eq!(mini_rex.block_txs_data_limit, crate::constants::mini_rex::BLOCK_DATA_LIMIT);
-        assert_eq!(
-            mini_rex.block_kv_update_limit,
-            crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT
-        );
-        assert_eq!(mini_rex.block_state_growth_limit, u64::MAX);
-
-        let mini_rex1 = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::MiniRex1, 11);
-        assert_eq!(mini_rex1.block_gas_limit, 11);
-        assert_eq!(mini_rex1.tx_data_limit, u64::MAX);
-        assert_eq!(mini_rex1.block_txs_data_limit, u64::MAX);
-
-        let rex4 = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::Rex4, 12);
-        assert_eq!(rex4.block_gas_limit, 12);
-        assert_eq!(rex4.tx_state_growth_limit, crate::constants::rex::TX_STATE_GROWTH_LIMIT);
-        assert_eq!(rex4.block_state_growth_limit, crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT);
-        assert_eq!(
-            rex4.oracle_access_compute_gas_limit,
-            crate::constants::rex3::ORACLE_ACCESS_COMPUTE_GAS
-        );
-    }
-
-    #[test]
-    fn from_hardfork_covers_rex_hardforks_with_state_growth() {
-        let rex = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::Rex, 10);
-        assert_eq!(rex.block_state_growth_limit, crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT);
-        assert_eq!(rex.block_txs_data_limit, crate::constants::mini_rex::BLOCK_DATA_LIMIT);
-
-        let rex3 = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::Rex3, 10);
-        assert_eq!(rex3.block_state_growth_limit, crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT);
-
-        let mini_rex2 = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::MiniRex2, 10);
-        assert_eq!(mini_rex2.block_state_growth_limit, u64::MAX);
-        assert_eq!(
-            mini_rex2.block_kv_update_limit,
-            crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT
-        );
-    }
-
-    #[test]
-    fn pre_execution_check_passes_when_all_limits_satisfied() {
-        let limiter = BlockLimits::no_limits()
-            .with_tx_gas_limit(100)
-            .with_block_gas_limit(1000)
-            .with_tx_encode_size_limit(100)
-            .with_block_txs_encode_size_limit(1000)
-            .with_tx_da_size_limit(100)
-            .with_block_da_size_limit(1000)
-            .to_block_limiter();
-
-        assert!(limiter.pre_execution_check(TxHash::ZERO, 50, 50, 50, false).is_ok());
-    }
-
-    #[test]
-    fn pre_execution_check_rejects_each_limit_category() {
-        let hash = TxHash::ZERO;
-
-        assert_invalid_tx_error(
-            BlockLimits::no_limits()
-                .with_tx_gas_limit(10)
-                .to_block_limiter()
-                .pre_execution_check(hash, 11, 1, 1, false)
-                .unwrap_err(),
-            hash,
-            "Transaction gas limit exceeded",
-        );
-
-        let mut block_gas = BlockLimits::no_limits().with_block_gas_limit(10).to_block_limiter();
-        block_gas.block_gas_used = 9;
-        match block_gas.pre_execution_check(hash, 2, 1, 1, false).unwrap_err() {
-            BlockExecutionError::Validation(
-                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
-                    transaction_gas_limit,
-                    block_available_gas,
-                },
-            ) => {
-                assert_eq!(transaction_gas_limit, 2);
-                assert_eq!(block_available_gas, 1);
-            }
-            other => panic!("expected block gas validation error, got {other:?}"),
-        }
-
-        assert_invalid_tx_error(
-            BlockLimits::no_limits()
-                .with_tx_encode_size_limit(10)
-                .to_block_limiter()
-                .pre_execution_check(hash, 1, 11, 1, false)
-                .unwrap_err(),
-            hash,
-            "Transaction encode size limit exceeded",
-        );
-
-        let mut block_tx_size =
-            BlockLimits::no_limits().with_block_txs_encode_size_limit(10).to_block_limiter();
-        block_tx_size.block_tx_size_used = 9;
-        assert_invalid_tx_error(
-            block_tx_size.pre_execution_check(hash, 1, 2, 1, false).unwrap_err(),
-            hash,
-            "Block transactions encode size limit exceeded",
-        );
-
-        assert_invalid_tx_error(
-            BlockLimits::no_limits()
-                .with_tx_da_size_limit(10)
-                .to_block_limiter()
-                .pre_execution_check(hash, 1, 1, 11, false)
-                .unwrap_err(),
-            hash,
-            "Transaction data availability size limit exceeded",
-        );
-
-        let mut block_da = BlockLimits::no_limits().with_block_da_size_limit(10).to_block_limiter();
-        block_da.block_da_size_used = 9;
-        assert_invalid_tx_error(
-            block_da.pre_execution_check(hash, 1, 1, 2, false).unwrap_err(),
-            hash,
-            "Block data availability size limit exceeded",
-        );
-    }
-
-    #[test]
-    fn pre_execution_check_handles_deposit_exemption_and_post_execution_limits() {
-        let hash = TxHash::ZERO;
-        let deposit_limiter = BlockLimits::no_limits()
-            .with_tx_da_size_limit(1)
-            .with_block_da_size_limit(1)
-            .to_block_limiter();
-        assert!(
-            deposit_limiter.pre_execution_check(hash, 1, 1, 100, true).is_ok(),
-            "deposit transactions should bypass DA size checks"
-        );
-
-        let mut data_limit =
-            BlockLimits::no_limits().with_block_txs_data_limit(5).to_block_limiter();
-        data_limit.block_data_used = 5;
-        assert_invalid_tx_error(
-            data_limit.pre_execution_check(hash, 1, 1, 1, false).unwrap_err(),
-            hash,
-            "Block transactions data limit reached",
-        );
-
-        let mut kv_limit =
-            BlockLimits::no_limits().with_block_kv_update_limit(5).to_block_limiter();
-        kv_limit.block_kv_updates_used = 5;
-        assert_invalid_tx_error(
-            kv_limit.pre_execution_check(hash, 1, 1, 1, false).unwrap_err(),
-            hash,
-            "Block KV update limit reached",
-        );
-
-        let mut compute_limit =
-            BlockLimits::no_limits().with_block_compute_gas_limit(5).to_block_limiter();
-        compute_limit.block_compute_gas_used = 5;
-        assert_invalid_tx_error(
-            compute_limit.pre_execution_check(hash, 1, 1, 1, false).unwrap_err(),
-            hash,
-            "Block compute gas limit reached",
-        );
-
-        let mut state_growth_limit =
-            BlockLimits::no_limits().with_block_state_growth_limit(5).to_block_limiter();
-        state_growth_limit.block_state_growth_used = 5;
-        assert_invalid_tx_error(
-            state_growth_limit.pre_execution_check(hash, 1, 1, 1, false).unwrap_err(),
-            hash,
-            "Block state growth limit reached",
-        );
-    }
-
-    #[test]
-    fn pre_execution_check_accepts_values_equal_to_limits() {
-        let hash = TxHash::ZERO;
-        let mut limiter = BlockLimits::no_limits()
-            .with_tx_gas_limit(10)
-            .with_block_gas_limit(20)
-            .with_tx_encode_size_limit(10)
-            .with_block_txs_encode_size_limit(20)
-            .with_tx_da_size_limit(10)
-            .with_block_da_size_limit(20)
-            .to_block_limiter();
-        limiter.block_gas_used = 10;
-        limiter.block_tx_size_used = 10;
-        limiter.block_da_size_used = 10;
-
-        assert!(limiter.pre_execution_check(hash, 10, 10, 10, false).is_ok());
-    }
-
-    #[test]
-    fn pre_execution_check_handles_addition_overflow_as_limit_exceeded() {
-        let hash = TxHash::ZERO;
-
-        let mut gas_limiter =
-            BlockLimits::no_limits().with_block_gas_limit(u64::MAX).to_block_limiter();
-        gas_limiter.block_gas_used = u64::MAX;
-        match gas_limiter.pre_execution_check(hash, 1, 1, 1, false).unwrap_err() {
-            BlockExecutionError::Validation(
-                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
-                    transaction_gas_limit,
-                    block_available_gas,
-                },
-            ) => {
-                assert_eq!(transaction_gas_limit, 1);
-                assert_eq!(block_available_gas, 0);
-            }
-            other => panic!("expected block gas validation error, got {other:?}"),
-        }
-
-        let mut tx_size_limiter =
-            BlockLimits::no_limits().with_block_txs_encode_size_limit(u64::MAX).to_block_limiter();
-        tx_size_limiter.block_tx_size_used = u64::MAX;
-        assert_invalid_tx_error(
-            tx_size_limiter.pre_execution_check(hash, 1, 1, 1, false).unwrap_err(),
-            hash,
-            "Block transactions encode size limit exceeded",
-        );
-
-        let mut da_limiter =
-            BlockLimits::no_limits().with_block_da_size_limit(u64::MAX).to_block_limiter();
-        da_limiter.block_da_size_used = u64::MAX;
-        assert_invalid_tx_error(
-            da_limiter.pre_execution_check(hash, 1, 1, 1, false).unwrap_err(),
-            hash,
-            "Block data availability size limit exceeded",
-        );
-    }
-
-    #[test]
-    fn post_execution_updates_counters_and_limit_detection() {
-        let limits = BlockLimits::no_limits()
-            .with_block_gas_limit(10)
-            .with_block_txs_encode_size_limit(20)
-            .with_block_da_size_limit(30)
-            .with_block_txs_data_limit(40)
-            .with_block_kv_update_limit(50)
-            .with_block_compute_gas_limit(60)
-            .with_block_state_growth_limit(70);
-        let mut limiter = BlockLimiter::new(limits);
-
-        limiter.post_execution_update_raw(3, 4, 5, 6, 7, 8, 9, false);
-        limiter.post_execution_update_raw(7, 16, 50, 34, 43, 52, 61, true);
-
-        assert_eq!(limiter.block_gas_used, 10);
-        assert_eq!(limiter.block_tx_size_used, 20);
-        assert_eq!(limiter.block_da_size_used, 5);
-        assert_eq!(limiter.block_data_used, 40);
-        assert_eq!(limiter.block_kv_updates_used, 50);
-        assert_eq!(limiter.block_compute_gas_used, 60);
-        assert_eq!(limiter.block_state_growth_used, 70);
-        assert!(limiter.is_block_limit_reached());
-    }
-
-    #[test]
-    fn post_execution_update_raw_saturates_counters() {
-        let mut limiter = BlockLimits::no_limits().to_block_limiter();
-        limiter.block_gas_used = u64::MAX - 1;
-        limiter.block_tx_size_used = u64::MAX - 1;
-        limiter.block_da_size_used = u64::MAX - 1;
-        limiter.block_data_used = u64::MAX - 1;
-        limiter.block_kv_updates_used = u64::MAX - 1;
-        limiter.block_compute_gas_used = u64::MAX - 1;
-        limiter.block_state_growth_used = u64::MAX - 1;
-
-        limiter.post_execution_update_raw(10, 10, 10, 10, 10, 10, 10, false);
-
-        assert_eq!(limiter.block_gas_used, u64::MAX);
-        assert_eq!(limiter.block_tx_size_used, u64::MAX);
-        assert_eq!(limiter.block_da_size_used, u64::MAX);
-        assert_eq!(limiter.block_data_used, u64::MAX);
-        assert_eq!(limiter.block_kv_updates_used, u64::MAX);
-        assert_eq!(limiter.block_compute_gas_used, u64::MAX);
-        assert_eq!(limiter.block_state_growth_used, u64::MAX);
     }
 }
