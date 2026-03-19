@@ -89,10 +89,8 @@ mod tests {
     use alloy_primitives::{keccak256, B256};
     use revm::{database::InMemoryDB, state::AccountInfo};
 
-    use crate::MegaHardforkConfig;
+    use crate::{MegaHardfork, MegaHardforkConfig};
     use alloy_hardforks::ForkCondition;
-
-    use crate::MegaHardfork;
 
     #[test]
     fn test_volatile_data_access_disabled_selector() {

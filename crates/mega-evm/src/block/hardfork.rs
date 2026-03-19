@@ -37,6 +37,8 @@ impl MegaHardfork {
     /// Gets the `MegaSpecId` associated with this hardfork.
     #[allow(clippy::match_same_arms)]
     pub fn spec_id(&self) -> MegaSpecId {
+        // Note: MiniRex1 and MiniRex2 are patch hardforks that intentionally reverted to
+        // previously released specs rather than introducing new EVM semantics.
         match self {
             Self::MiniRex => MegaSpecId::MINI_REX,
             Self::MiniRex1 => MegaSpecId::EQUIVALENCE,

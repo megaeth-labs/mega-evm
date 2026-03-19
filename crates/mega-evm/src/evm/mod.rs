@@ -483,60 +483,56 @@ mod tests {
     }
 
     #[test]
-    fn test_revm_execute_and_inspect_interfaces_work() {
-        {
-            let mut db = MemoryDatabase::default()
-                .account_balance(CALLER, U256::from(1_000_000))
-                .account_code(CALLEE, Bytes::new());
-            let mut evm = MegaEvm::new(configure_context(&mut db));
-            let block = revm::context::BlockEnv { gas_limit: 222_222, ..Default::default() };
-            ExecuteEvm::set_block(&mut evm, block);
-            assert_eq!(evm.block_env_ref().gas_limit, 222_222);
+    fn test_revm_execute_one_finalize_commit_works() {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(CALLEE, Bytes::new());
+        let mut evm = MegaEvm::new(configure_context(&mut db));
+        let block = revm::context::BlockEnv { gas_limit: 222_222, ..Default::default() };
+        ExecuteEvm::set_block(&mut evm, block);
+        assert_eq!(evm.block_env_ref().gas_limit, 222_222);
 
-            let one: ExecutionResult<MegaHaltReason> =
-                ExecuteEvm::transact_one(&mut evm, mega_tx()).unwrap();
-            assert!(one.is_success());
-            let state = ExecuteEvm::finalize(&mut evm);
-            ExecuteCommitEvm::commit(&mut evm, state);
-        }
+        let one: ExecutionResult<MegaHaltReason> =
+            ExecuteEvm::transact_one(&mut evm, mega_tx()).unwrap();
+        assert!(one.is_success());
+        let state = ExecuteEvm::finalize(&mut evm);
+        ExecuteCommitEvm::commit(&mut evm, state);
+    }
 
-        {
-            let mut db = MemoryDatabase::default()
-                .account_balance(CALLER, U256::from(1_000_000))
-                .account_code(CALLEE, Bytes::new());
-            let mut evm = MegaEvm::new(configure_context(&mut db));
-            evm.ctx().set_tx(mega_tx());
-            let replay: ExecResultAndState<ExecutionResult<MegaHaltReason>, EvmState> =
-                ExecuteEvm::replay(&mut evm).unwrap();
-            assert!(replay.result.is_success());
-        }
+    #[test]
+    fn test_revm_replay_works() {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(CALLEE, Bytes::new());
+        let mut evm = MegaEvm::new(configure_context(&mut db));
+        evm.ctx().set_tx(mega_tx());
+        let replay: ExecResultAndState<ExecutionResult<MegaHaltReason>, EvmState> =
+            ExecuteEvm::replay(&mut evm).unwrap();
+        assert!(replay.result.is_success());
+    }
 
-        {
-            let mut db = MemoryDatabase::default()
-                .account_balance(CALLER, U256::from(1_000_000))
-                .account_code(CALLEE, Bytes::new());
-            let mut evm = MegaEvm::new(configure_context(&mut db));
-            InspectEvm::set_inspector(&mut evm, NoOpInspector);
-            let inspected: ExecutionResult<MegaHaltReason> =
-                InspectEvm::inspect_one_tx(&mut evm, mega_tx()).unwrap();
-            assert!(inspected.is_success());
-        }
+    #[test]
+    fn test_revm_inspect_one_tx_works() {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(CALLEE, Bytes::new());
+        let mut evm = MegaEvm::new(configure_context(&mut db));
+        InspectEvm::set_inspector(&mut evm, NoOpInspector);
+        let inspected: ExecutionResult<MegaHaltReason> =
+            InspectEvm::inspect_one_tx(&mut evm, mega_tx()).unwrap();
+        assert!(inspected.is_success());
+    }
 
-        {
-            let mut db = MemoryDatabase::default()
-                .account_balance(CALLER, U256::from(1_000_000))
-                .account_code(CALLEE, Bytes::new());
-            let mut evm = MegaEvm::new(configure_context(&mut db));
-            let system_call: ExecutionResult<MegaHaltReason> =
-                SystemCallEvm::transact_system_call_with_caller(
-                    &mut evm,
-                    CALLER,
-                    CALLEE,
-                    Bytes::new(),
-                )
+    #[test]
+    fn test_revm_system_call_with_caller_works() {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(CALLEE, Bytes::new());
+        let mut evm = MegaEvm::new(configure_context(&mut db));
+        let system_call: ExecutionResult<MegaHaltReason> =
+            SystemCallEvm::transact_system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
                 .unwrap();
-            assert!(system_call.is_success());
-        }
+        assert!(system_call.is_success());
     }
 
     #[test]
