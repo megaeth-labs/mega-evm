@@ -109,7 +109,7 @@ mod tests {
     use crate::VolatileDataAccessType;
 
     #[test]
-    fn empty_access_has_no_flags() {
+    fn test_empty_access_has_no_flags() {
         let access = VolatileDataAccess::empty();
 
         assert!(!access.has_block_env_access());
@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn block_env_helpers_ignore_non_block_flags() {
+    fn test_block_env_helpers_ignore_non_block_flags() {
         let access = VolatileDataAccess::TIMESTAMP |
             VolatileDataAccess::BLOB_HASH |
             VolatileDataAccess::BENEFICIARY_BALANCE |
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn from_volatile_data_access_type_covers_all_variants() {
+    fn test_from_volatile_data_access_type_covers_all_variants() {
         let expected: &[(VolatileDataAccessType, VolatileDataAccess)] = &[
             (VolatileDataAccessType::BlockNumber, VolatileDataAccess::BLOCK_NUMBER),
             (VolatileDataAccessType::Timestamp, VolatileDataAccess::TIMESTAMP),
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn all_block_env_flags_counted_correctly() {
+    fn test_all_block_env_flags_counted_correctly() {
         let all_block_env = VolatileDataAccess::BLOCK_NUMBER |
             VolatileDataAccess::TIMESTAMP |
             VolatileDataAccess::COINBASE |

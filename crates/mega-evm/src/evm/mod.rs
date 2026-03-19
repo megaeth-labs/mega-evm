@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn mega_evm_builder_chain_produces_working_evm() {
+    fn test_mega_evm_builder_chain_produces_working_evm() {
         let mut db = MemoryDatabase::default()
             .account_balance(CALLER, U256::from(1_000_000))
             .account_code(CALLEE, Bytes::new());
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn alloy_evm_interface_methods_execute_transactions() {
+    fn test_alloy_evm_interface_methods_execute_transactions() {
         let mut db = MemoryDatabase::default()
             .account_balance(CALLER, U256::from(1_000_000))
             .account_code(CALLEE, Bytes::new());
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn revm_execute_and_inspect_interfaces_work() {
+    fn test_revm_execute_and_inspect_interfaces_work() {
         {
             let mut db = MemoryDatabase::default()
                 .account_balance(CALLER, U256::from(1_000_000))
@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn mega_evm_exposes_state_wrapper_block_hashes() {
+    fn test_mega_evm_exposes_state_wrapper_block_hashes() {
         let mut db = MemoryDatabase::default();
         let mut state = State::builder().with_database(&mut db).build();
         state.block_hashes.insert(7, B256::from([7_u8; 32]));
@@ -550,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn convenience_execution_methods_work() {
+    fn test_convenience_execution_methods_work() {
         let mut db = MemoryDatabase::default()
             .account_balance(CALLER, U256::from(1_000_000))
             .account_code(CALLEE, Bytes::new());
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_transaction_fails_with_insufficient_balance() {
+    fn test_execute_transaction_fails_with_insufficient_balance() {
         let mut db = MemoryDatabase::default().account_code(CALLEE, Bytes::new());
         let mut evm = MegaEvm::new(configure_context(&mut db));
 

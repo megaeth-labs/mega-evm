@@ -233,6 +233,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Always test logic changes.**
   Any logic change or modification to mega-evm should be equipped with tests if there is no specific reason of not adding tests.
   The agent should always consider accompanying tests or suggest to add additional tests.
+- **Use `test_` prefix for Rust test function names.**
+  New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
+  If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **Do NOT modify behavior for existing stable specs.**
   All specs in `MegaSpecId` are currently stable (frozen).
   New EVM behavior, gas cost changes, or opcode modifications **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.

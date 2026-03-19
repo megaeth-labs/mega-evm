@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn state_exposes_accessed_block_hashes() {
+    fn test_state_exposes_accessed_block_hashes() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
         state.block_hashes.insert(1, B256::ZERO);
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_evm_state_replaces_created_selfdestructed_accounts_with_empty_touched_accounts() {
+    fn test_merge_evm_state_replaces_created_selfdestructed_accounts_with_empty_touched_accounts() {
         let mut this = EvmState::default();
         this.insert(TEST_ADDRESS, Account::default().with_cold_mark());
 
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_evm_state_marks_new_accounts_and_storage_as_cold_and_clears_local_flags() {
+    fn test_merge_evm_state_marks_new_accounts_and_storage_as_cold_and_clears_local_flags() {
         let mut other_account =
             account_with_status(AccountStatus::Created | AccountStatus::CreatedLocal);
         other_account.status |= AccountStatus::SelfDestructedLocal;
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_evm_state_optional_status_can_skip_or_merge_status_flags() {
+    fn test_merge_evm_state_optional_status_can_skip_or_merge_status_flags() {
         let mut base_account =
             account_with_status(AccountStatus::SelfDestructed | AccountStatus::Cold);
         let mut base_slot = EvmStorageSlot::new(U256::from(1), 0);
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_empty_other_state_is_noop() {
+    fn test_merge_empty_other_state_is_noop() {
         let mut this =
             EvmState::from_iter([(TEST_ADDRESS, account_with_status(AccountStatus::Cold))]);
         let other = EvmState::default();
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_evm_state_overwrites_existing_account_storage_and_preserves_slot_coldness() {
+    fn test_merge_evm_state_overwrites_existing_account_storage_and_preserves_slot_coldness() {
         let addr2 = address!("2000000000000000000000000000000000000001");
 
         let mut base_account = account_with_status(AccountStatus::Touched | AccountStatus::Cold);
@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_selfdestructed_account_not_in_base_is_inserted_as_cold_empty() {
+    fn test_merge_selfdestructed_account_not_in_base_is_inserted_as_cold_empty() {
         let mut other_account = account_with_status(AccountStatus::Created);
         other_account.mark_selfdestruct();
         other_account.info.balance = U256::from(999);
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "EIP-6780 must be applied")]
-    fn merge_evm_state_panics_for_selfdestructed_account_without_created_flag() {
+    fn test_merge_evm_state_panics_for_selfdestructed_account_without_created_flag() {
         let mut other_account = account_with_status(AccountStatus::Touched);
         other_account.mark_selfdestruct();
         other_account.status.remove(AccountStatus::Created);

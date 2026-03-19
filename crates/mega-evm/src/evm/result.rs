@@ -146,7 +146,7 @@ mod tests {
     use revm::context::result::OutOfGasError;
 
     #[test]
-    fn base_halt_reasons_convert_roundtrip() {
+    fn test_base_halt_reasons_convert_roundtrip() {
         let eth_reason = EthHaltReason::OutOfGas(OutOfGasError::Basic);
         let mega_from_eth = MegaHaltReason::from(eth_reason);
         let mega_from_op = MegaHaltReason::from(OpHaltReason::Base(eth_reason));
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn mega_specific_halt_reasons_do_not_convert_to_eth() {
+    fn test_mega_specific_halt_reasons_do_not_convert_to_eth() {
         let reason = MegaHaltReason::VolatileDataAccessOutOfGas {
             access_type: VolatileDataAccess::ORACLE,
             limit: 100,
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn op_specific_halt_reason_does_not_convert_to_eth() {
+    fn test_op_specific_halt_reason_does_not_convert_to_eth() {
         let op_reason = OpHaltReason::FailedDeposit;
         let mega = MegaHaltReason::from(op_reason.clone());
         assert_eq!(mega, MegaHaltReason::Base(op_reason));
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn all_mega_specific_variants_fail_eth_conversion() {
+    fn test_all_mega_specific_variants_fail_eth_conversion() {
         let variants: Vec<MegaHaltReason> = vec![
             MegaHaltReason::DataLimitExceeded { limit: 1, actual: 2 },
             MegaHaltReason::KVUpdateLimitExceeded { limit: 1, actual: 2 },

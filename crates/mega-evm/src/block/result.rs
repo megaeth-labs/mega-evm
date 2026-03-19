@@ -182,7 +182,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transaction_limit_error_reports_usage_and_limit() {
+    fn test_transaction_limit_error_reports_usage_and_limit() {
         let cases = [
             (MegaTxLimitExceededError::TransactionGasLimit { tx_gas_limit: 31, limit: 30 }, 31, 30),
             (
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn block_limit_error_reports_block_usage_and_limit() {
+    fn test_block_limit_error_reports_block_usage_and_limit() {
         let cases = [
             (MegaBlockLimitExceededError::TransactionDataLimit { block_used: 1, limit: 10 }, 1, 10),
             (MegaBlockLimitExceededError::KVUpdateLimit { block_used: 2, limit: 11 }, 2, 11),

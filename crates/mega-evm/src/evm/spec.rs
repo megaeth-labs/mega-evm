@@ -162,7 +162,7 @@ mod tests {
     ];
 
     #[test]
-    fn spec_names_roundtrip_and_display() {
+    fn test_spec_names_roundtrip_and_display() {
         for (spec, expected_name) in ALL_SPECS {
             assert_eq!(<&'static str>::from(spec), expected_name);
             assert_eq!(MegaSpecId::from_str(expected_name).unwrap(), spec);
@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn all_specs_map_to_isthmus_and_prague() {
+    fn test_all_specs_map_to_isthmus_and_prague() {
         for (spec, _) in ALL_SPECS {
             assert_eq!(spec.into_op_spec(), OpSpecId::ISTHMUS);
             assert_eq!(spec.into_eth_spec(), EthSpecId::PRAGUE);
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_order_is_backward_compatible() {
+    fn test_spec_order_is_backward_compatible() {
         assert!(MegaSpecId::REX4.is_enabled(MegaSpecId::REX3));
         assert!(MegaSpecId::REX4.is_enabled(MegaSpecId::EQUIVALENCE));
         assert!(MegaSpecId::MINI_REX.is_enabled(MegaSpecId::EQUIVALENCE));

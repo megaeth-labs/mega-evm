@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn mega_transaction_ext_works_for_envelope_and_recovered_types() {
+    fn test_mega_transaction_ext_works_for_envelope_and_recovered_types() {
         let tx = legacy_envelope();
         let recovered = Recovered::new_unchecked(tx.clone(), CALLER);
 
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn enriched_mega_tx_new_slow_computes_hash_and_sizes() {
+    fn test_enriched_mega_tx_new_slow_computes_hash_and_sizes() {
         let tx = MockTx {
             nonce: 7,
             gas_limit: 21_000,
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn enriched_mega_tx_delegates_recovered_transaction_methods() {
+    fn test_enriched_mega_tx_delegates_recovered_transaction_methods() {
         let tx_env = TxEnv {
             caller: CALLER,
             gas_limit: 21_000,

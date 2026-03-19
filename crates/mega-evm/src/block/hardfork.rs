@@ -307,7 +307,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mega_hardfork_spec_ids_match_expected_specs() {
+    fn test_mega_hardfork_spec_ids_match_expected_specs() {
+        // Note: MiniRex1 and MiniRex2 are patch hardforks that reverted to earlier specs.
         let cases = [
             (MegaHardfork::MiniRex, MegaSpecId::MINI_REX),
             (MegaHardfork::MiniRex1, MegaSpecId::EQUIVALENCE),
@@ -325,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn default_config_contains_upstream_forks_and_no_mega_forks() {
+    fn test_default_config_contains_upstream_forks_and_no_mega_forks() {
         let config = MegaHardforkConfig::default();
 
         assert_eq!(
@@ -341,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn config_builder_helpers_override_and_remove_hardforks() {
+    fn test_config_builder_helpers_override_and_remove_hardforks() {
         let mut config = MegaHardforkConfig::new()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
             .with(MegaHardfork::Rex4, ForkCondition::Timestamp(80));
@@ -367,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn with_all_activated_enables_all_mega_hardforks() {
+    fn test_with_all_activated_enables_all_mega_hardforks() {
         let config = MegaHardforkConfig::default().with_all_activated();
 
         for hardfork in [
@@ -385,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn hardfork_and_spec_id_follow_latest_active_timestamp() {
+    fn test_hardfork_and_spec_id_follow_latest_active_timestamp() {
         let config = MegaHardforkConfig::default()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
             .with(MegaHardfork::MiniRex1, ForkCondition::Timestamp(20))
@@ -415,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn first_hardfork_block_handles_genesis_and_parent_activation_boundaries() {
+    fn test_first_hardfork_block_handles_genesis_and_parent_activation_boundaries() {
         let config =
             MegaHardforkConfig::default().with(MegaHardfork::Rex2, ForkCondition::Timestamp(100));
 
@@ -426,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_id_with_gaps_in_hardfork_configuration() {
+    fn test_spec_id_with_gaps_in_hardfork_configuration() {
         let config = MegaHardforkConfig::default()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
             .with(MegaHardfork::Rex4, ForkCondition::Timestamp(20));
@@ -439,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_hardfork_wins_when_multiple_activate_at_same_timestamp() {
+    fn test_latest_hardfork_wins_when_multiple_activate_at_same_timestamp() {
         let config = MegaHardforkConfig::default()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
             .with(MegaHardfork::Rex2, ForkCondition::Timestamp(10))

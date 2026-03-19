@@ -98,7 +98,7 @@ mod tests {
     use alloy_primitives::{Address, Bytes, B256, U256};
 
     #[test]
-    fn empty_external_env_factory_returns_minimum_bucket_and_no_oracle() {
+    fn test_empty_external_env_factory_returns_minimum_bucket_and_no_oracle() {
         let envs = EmptyExternalEnv.external_envs(42);
 
         assert_eq!(envs.salt_env.get_bucket_capacity(123).unwrap(), MIN_BUCKET_SIZE as u64);
