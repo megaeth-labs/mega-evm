@@ -75,7 +75,7 @@ pub trait SaltEnv: Debug + Unpin {
     /// # Arguments
     ///
     /// * `account` - The account address to map
-    fn bucket_id_for_account(account: Address) -> BucketId;
+    fn bucket_id_for_account(&self, account: Address) -> BucketId;
 
     /// Maps a storage slot to its bucket ID.
     ///
@@ -86,7 +86,7 @@ pub trait SaltEnv: Debug + Unpin {
     ///
     /// * `address` - The contract address owning the storage
     /// * `key` - The storage slot key
-    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId;
+    fn bucket_id_for_slot(&self, address: Address, key: U256) -> BucketId;
 }
 
 /// No-op implementation that returns minimum bucket size for all buckets.
@@ -101,11 +101,11 @@ impl SaltEnv for EmptyExternalEnv {
         Ok(MIN_BUCKET_SIZE as u64)
     }
 
-    fn bucket_id_for_account(_account: Address) -> BucketId {
+    fn bucket_id_for_account(&self, _account: Address) -> BucketId {
         0 as BucketId
     }
 
-    fn bucket_id_for_slot(_address: Address, _key: U256) -> BucketId {
+    fn bucket_id_for_slot(&self, _address: Address, _key: U256) -> BucketId {
         0 as BucketId
     }
 }

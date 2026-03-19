@@ -49,7 +49,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         key: U256,
     ) -> Result<u64, SaltEnvImpl::Error> {
         // increase the gas cost according to the bucket capacity
-        let bucket_id = SaltEnvImpl::bucket_id_for_slot(address, key);
+        let bucket_id = self.salt_env.bucket_id_for_slot(address, key);
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
@@ -65,7 +65,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     /// [`NEWACCOUNT`](revm::interpreter::gas::NEWACCOUNT) gas cost in the original EVM.
     pub fn new_account_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
         // increase the gas cost according to the bucket capacity
-        let bucket_id = SaltEnvImpl::bucket_id_for_account(address);
+        let bucket_id = self.salt_env.bucket_id_for_account(address);
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
@@ -81,7 +81,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     /// [`CREATE`](revm::interpreter::gas::CREATE) gas cost in the original EVM.
     pub fn create_contract_gas(&mut self, address: Address) -> Result<u64, SaltEnvImpl::Error> {
         // increase the gas cost according to the bucket capacity
-        let bucket_id = SaltEnvImpl::bucket_id_for_account(address);
+        let bucket_id = self.salt_env.bucket_id_for_account(address);
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {

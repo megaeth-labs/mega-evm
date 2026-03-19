@@ -177,12 +177,12 @@ impl<Error: Unpin + Display> SaltEnv for TestExternalEnvs<Error> {
     }
 
     /// Maps accounts to buckets by hashing the address.
-    fn bucket_id_for_account(account: Address) -> BucketId {
+    fn bucket_id_for_account(&self, account: Address) -> BucketId {
         salt::state::hasher::bucket_id(account.as_slice())
     }
 
     /// Maps storage slots to buckets by hashing the concatenation of address and slot key.
-    fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
+    fn bucket_id_for_slot(&self, address: Address, key: U256) -> BucketId {
         salt::state::hasher::bucket_id(
             address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
         )

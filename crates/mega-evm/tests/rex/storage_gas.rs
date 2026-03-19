@@ -63,7 +63,7 @@ fn test_sstore_minimum_bucket_zero_gas() {
 
     let storage_key = U256::ZERO;
     let storage_value = U256::from(0x42);
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_slot(CALLEE, storage_key);
 
     // Deploy contract with SSTORE operation
     let bytecode = BytecodeBuilder::default().sstore(storage_key, storage_value).stop().build();
@@ -112,7 +112,7 @@ fn test_sstore_with_multiplier_charges_storage_gas() {
 
     let storage_key = U256::ZERO;
     let storage_value = U256::from(0x42);
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_slot(CALLEE, storage_key);
 
     let bytecode = BytecodeBuilder::default().sstore(storage_key, storage_value).stop().build();
 
@@ -161,7 +161,7 @@ fn test_sstore_multiplier_scaling() {
 
         let storage_key = U256::ZERO;
         let storage_value = U256::from(0x42);
-        let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
+        let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_slot(CALLEE, storage_key);
 
         let bytecode = BytecodeBuilder::default().sstore(storage_key, storage_value).stop().build();
 
@@ -210,7 +210,7 @@ fn test_sstore_reset_no_storage_gas() {
     let mut db = MemoryDatabase::default();
 
     let storage_key = U256::ZERO;
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_slot(CALLEE, storage_key);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_slot(CALLEE, storage_key);
 
     // Bytecode that sets a value then resets it to different non-zero value
     let bytecode = BytecodeBuilder::default()
@@ -267,7 +267,7 @@ fn test_new_account_minimum_bucket_zero_gas() {
 
     db.set_account_balance(CALLER, U256::from(100_000_000_000u64));
 
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NEW_ACCOUNT);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NEW_ACCOUNT);
     let external_envs =
         TestExternalEnvs::new().with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64);
 
@@ -303,7 +303,7 @@ fn test_new_account_with_multiplier() {
 
         db.set_account_balance(CALLER, U256::from(1_000_000_000_000u64));
 
-        let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NEW_ACCOUNT);
+        let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NEW_ACCOUNT);
         let bucket_capacity = MIN_BUCKET_SIZE as u64 * multiplier;
         let external_envs =
             TestExternalEnvs::new().with_bucket_capacity(bucket_id, bucket_capacity);
@@ -336,7 +336,7 @@ fn test_existing_account_no_storage_gas() {
     // Pre-create the account
     db.set_account_balance(NEW_ACCOUNT, U256::from(1_000));
 
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NEW_ACCOUNT);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NEW_ACCOUNT);
     let bucket_capacity = MIN_BUCKET_SIZE as u64 * 10; // High multiplier
     let external_envs = TestExternalEnvs::new().with_bucket_capacity(bucket_id, bucket_capacity);
 
@@ -409,7 +409,7 @@ fn test_contract_creation_with_multiplier() {
         // Calculate the deterministic contract address (RLP(sender, nonce))
         // For nonce=0: keccak256(rlp([sender, 0]))[12:]
         let created_address = CALLER.create(0);
-        let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(created_address);
+        let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(created_address);
         let bucket_capacity = MIN_BUCKET_SIZE as u64 * multiplier;
 
         let external_envs =
@@ -455,7 +455,7 @@ fn test_contract_creation_costs_more_than_account() {
 
     // Contract creation
     let created_address = CALLER.create(0);
-    let contract_bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(created_address);
+    let contract_bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(created_address);
     let contract_external_envs =
         TestExternalEnvs::new().with_bucket_capacity(contract_bucket_id, bucket_capacity);
 
@@ -473,7 +473,7 @@ fn test_contract_creation_costs_more_than_account() {
     .expect("Contract creation should succeed");
 
     // Account creation
-    let account_bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NEW_ACCOUNT);
+    let account_bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NEW_ACCOUNT);
     let account_external_envs =
         TestExternalEnvs::new().with_bucket_capacity(account_bucket_id, bucket_capacity);
 
@@ -520,9 +520,9 @@ fn test_combined_contract_creation_and_sstore() {
 
     // Get both bucket IDs
     let created_address = CALLER.create(0);
-    let contract_bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(created_address);
+    let contract_bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(created_address);
     let storage_bucket_id =
-        TestExternalEnvs::<Infallible>::bucket_id_for_slot(created_address, storage_key);
+        TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_slot(created_address, storage_key);
 
     let external_envs = TestExternalEnvs::new()
         .with_bucket_capacity(contract_bucket_id, bucket_capacity)
@@ -573,7 +573,7 @@ fn test_rex_vs_minirex_comparison() {
     let multiplier = 10u64;
     let bucket_capacity = MIN_BUCKET_SIZE as u64 * multiplier;
 
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NEW_ACCOUNT);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NEW_ACCOUNT);
     let external_envs = TestExternalEnvs::new().with_bucket_capacity(bucket_id, bucket_capacity);
 
     // Account creation comparison
@@ -620,7 +620,7 @@ fn test_large_multiplier_linear_scaling() {
     let multiplier = 100u64;
     let bucket_capacity = MIN_BUCKET_SIZE as u64 * multiplier;
 
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NEW_ACCOUNT);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NEW_ACCOUNT);
     let external_envs = TestExternalEnvs::new().with_bucket_capacity(bucket_id, bucket_capacity);
 
     let result = transact(
@@ -668,7 +668,7 @@ fn test_create_opcode() {
 
     db.set_account_code(CALLEE, creator_bytecode);
 
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(CALLEE.create(0));
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(CALLEE.create(0));
     let external_envs =
         TestExternalEnvs::default().with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * 10);
 
@@ -718,7 +718,7 @@ fn test_create2_opcode() {
 
     db.set_account_code(CALLEE, creator_bytecode);
 
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(
+    let bucket_id = TestExternalEnvs::<Infallible>::new().bucket_id_for_account(
         CALLEE.create2(salt.to_be_bytes(), keccak256(&deployed_contract)),
     );
     let external_envs =
@@ -770,7 +770,7 @@ fn test_call_opcode_creates_account() {
 
     db.set_account_code(CALLEE, caller_bytecode);
 
-    let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(NEW_ACCOUNT);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NEW_ACCOUNT);
     let external_envs =
         TestExternalEnvs::default().with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * 10);
 
