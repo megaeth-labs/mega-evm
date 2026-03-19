@@ -91,7 +91,8 @@ fn sstore_test_case(
         UpdateMode::Set | UpdateMode::Reset => U256::from(6342),
         UpdateMode::Clear => U256::from(0),
     };
-    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_slot(CALLEE, storage_key);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new()
+        .bucket_id_for_slot(CALLEE, storage_key);
     // An external envs with the given bucket capacity
     let external_envs = TestExternalEnvs::new()
         .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
@@ -212,7 +213,8 @@ fn test_sstore_cold_then_warm_access() {
     let mut db = MemoryDatabase::default();
 
     let storage_key = U256::from(0);
-    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_slot(CALLEE, storage_key);
+    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new()
+        .bucket_id_for_slot(CALLEE, storage_key);
     let external_envs =
         TestExternalEnvs::new().with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64);
 
@@ -277,7 +279,8 @@ fn ether_transfer_test_case(
     let mut db = MemoryDatabase::default();
 
     // Determine the bucket for the callee and set up the external envs with the required capacity.
-    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(CALLEE);
+    let bucket_id =
+        TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(CALLEE);
     let external_envs = TestExternalEnvs::new()
         .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
 
@@ -364,7 +367,8 @@ fn nested_ether_transfer_test_case(
     let mut db = MemoryDatabase::default();
 
     // Test address and storage slot
-    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NESTED_CALLEE);
+    let bucket_id =
+        TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(NESTED_CALLEE);
     // An external envs with the given bucket capacity
     let external_envs = TestExternalEnvs::new()
         .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
@@ -453,7 +457,8 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
 
     // Test address and storage slot
     let callee = CALLER.create(0);
-    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(callee);
+    let bucket_id =
+        TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(callee);
     // An external envs with the given bucket capacity
     let external_envs = TestExternalEnvs::new()
         .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
@@ -534,7 +539,8 @@ fn nested_create_contract_test_case(
     } else {
         CALLEE.create(0)
     };
-    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(nested_callee);
+    let bucket_id =
+        TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(nested_callee);
     // An external envs with the given bucket capacity
     let external_envs = TestExternalEnvs::new()
         .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * (expansion_times + 1));
@@ -936,7 +942,8 @@ fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
     db.set_account_balance(CALLER, U256::from(10_000_000));
 
     let new_account = address!("9000000000000000000000000000000000000009");
-    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(new_account);
+    let bucket_id =
+        TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(new_account);
     let multiplier = 10u64;
     let external_envs = TestExternalEnvs::new()
         .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
@@ -984,7 +991,8 @@ fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
     // Empty init code to minimize calldata gas
     let init_code = Bytes::new();
     let created_address = CALLER.create(0);
-    let bucket_id = TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(created_address);
+    let bucket_id =
+        TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(created_address);
     let multiplier = 10u64;
     let external_envs = TestExternalEnvs::new()
         .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);

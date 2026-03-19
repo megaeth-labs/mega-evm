@@ -97,12 +97,14 @@ fn execute_keyless_deploy_with_envs(
 
 /// Computes the bucket ID for the CREATE2 factory contract (the deployed address).
 fn contract_bucket_id() -> u32 {
-    TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(CREATE2_FACTORY_CONTRACT)
+    TestExternalEnvs::<core::convert::Infallible>::new()
+        .bucket_id_for_account(CREATE2_FACTORY_CONTRACT)
 }
 
 /// Computes the bucket ID for the CREATE2 factory deployer signer.
 fn deployer_bucket_id() -> u32 {
-    TestExternalEnvs::<core::convert::Infallible>::new().bucket_id_for_account(CREATE2_FACTORY_DEPLOYER)
+    TestExternalEnvs::<core::convert::Infallible>::new()
+        .bucket_id_for_account(CREATE2_FACTORY_DEPLOYER)
 }
 
 /// Creates a pre-EIP-155 keyless deploy transaction with deterministic signature.
