@@ -142,7 +142,7 @@ impl<Error: Unpin + Clone + Display + 'static> TestExternalEnvs<Error> {
 impl<Error: Unpin + Clone + Display> ExternalEnvFactory for TestExternalEnvs<Error> {
     type EnvTypes = Self;
 
-    fn external_envs(&self, _block: BlockNumber) -> ExternalEnvs<Self::EnvTypes> {
+    fn external_envs(&self) -> ExternalEnvs<Self::EnvTypes> {
         ExternalEnvs { salt_env: self.clone(), oracle_env: self.clone() }
     }
 }

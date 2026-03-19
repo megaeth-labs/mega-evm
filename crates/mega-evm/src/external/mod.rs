@@ -14,7 +14,6 @@
 //! Block context is established at factory creation time, not per oracle call, ensuring
 //! consistent state snapshots throughout execution.
 
-use alloy_primitives::BlockNumber;
 use auto_impl::auto_impl;
 use core::fmt::Debug;
 
@@ -86,7 +85,7 @@ impl ExternalEnvTypes for EmptyExternalEnv {
 impl ExternalEnvFactory for EmptyExternalEnv {
     type EnvTypes = Self;
 
-    fn external_envs(&self, _block: BlockNumber) -> ExternalEnvs<Self::EnvTypes> {
+    fn external_envs(&self) -> ExternalEnvs<Self::EnvTypes> {
         ExternalEnvs { salt_env: *self, oracle_env: *self }
     }
 }
