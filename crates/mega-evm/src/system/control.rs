@@ -114,6 +114,12 @@ mod tests {
     }
 
     #[test]
+    fn test_access_control_contract_code_hash_matches() {
+        let computed_hash = keccak256(&ACCESS_CONTROL_CODE);
+        assert_eq!(computed_hash, ACCESS_CONTROL_CODE_HASH);
+    }
+
+    #[test]
     fn test_volatile_data_access_disabled_revert_data_encodes_error() {
         let revert_data = volatile_data_access_disabled_revert_data(VolatileDataAccessType::Oracle);
         let decoded =
@@ -171,6 +177,7 @@ mod tests {
 
         assert_eq!(account.info.code_hash, ACCESS_CONTROL_CODE_HASH);
         assert_eq!(account.info.code.as_ref().unwrap().original_bytes(), ACCESS_CONTROL_CODE);
+        assert!(!account.is_created(), "idempotent deploy should not re-create the account");
     }
 
     #[test]

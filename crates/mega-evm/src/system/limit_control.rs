@@ -127,6 +127,7 @@ mod tests {
 
         assert_eq!(account.info.code_hash, LIMIT_CONTROL_CODE_HASH);
         assert_eq!(account.info.code.as_ref().unwrap().original_bytes(), LIMIT_CONTROL_CODE);
+        assert!(!account.is_created(), "idempotent deploy should not re-create the account");
     }
 
     #[test]
