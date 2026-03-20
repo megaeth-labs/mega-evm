@@ -37,6 +37,8 @@ impl MegaHardfork {
     /// Gets the `MegaSpecId` associated with this hardfork.
     #[allow(clippy::match_same_arms)]
     pub fn spec_id(&self) -> MegaSpecId {
+        // Note: MiniRex1 and MiniRex2 are patch hardforks that intentionally reverted to
+        // previously released specs rather than introducing new EVM semantics.
         match self {
             Self::MiniRex => MegaSpecId::MINI_REX,
             Self::MiniRex1 => MegaSpecId::EQUIVALENCE,
@@ -299,5 +301,155 @@ impl MegaHardforks for MegaHardforkConfig {
             Some(condition) => *condition,
             None => ForkCondition::Never,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mega_hardfork_spec_ids_match_expected_specs() {
+        // Note: MiniRex1 and MiniRex2 are patch hardforks that reverted to earlier specs.
+        let cases = [
+            (MegaHardfork::MiniRex, MegaSpecId::MINI_REX),
+            (MegaHardfork::MiniRex1, MegaSpecId::EQUIVALENCE),
+            (MegaHardfork::MiniRex2, MegaSpecId::MINI_REX),
+            (MegaHardfork::Rex, MegaSpecId::REX),
+            (MegaHardfork::Rex1, MegaSpecId::REX1),
+            (MegaHardfork::Rex2, MegaSpecId::REX2),
+            (MegaHardfork::Rex3, MegaSpecId::REX3),
+            (MegaHardfork::Rex4, MegaSpecId::REX4),
+        ];
+
+        for (hardfork, expected_spec) in cases {
+            assert_eq!(hardfork.spec_id(), expected_spec);
+        }
+    }
+
+    #[test]
+    fn test_default_config_contains_upstream_forks_and_no_mega_forks() {
+        let config = MegaHardforkConfig::default();
+
+        assert_eq!(
+            config.ethereum_fork_activation(EthereumHardfork::Frontier),
+            ForkCondition::Block(0)
+        );
+        assert_eq!(
+            config.ethereum_fork_activation(EthereumHardfork::Prague),
+            ForkCondition::Timestamp(0)
+        );
+        assert_eq!(config.op_fork_activation(OpHardfork::Isthmus), ForkCondition::Timestamp(0));
+        assert_eq!(config.mega_fork_activation(MegaHardfork::MiniRex), ForkCondition::Never);
+    }
+
+    #[test]
+    fn test_config_builder_helpers_override_and_remove_hardforks() {
+        let mut config = MegaHardforkConfig::new()
+            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
+            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(80));
+
+        assert_eq!(config.get(MegaHardfork::MiniRex), Some(&ForkCondition::Timestamp(10)));
+        assert_eq!(config.get(MegaHardfork::Rex4), Some(&ForkCondition::Timestamp(80)));
+
+        config.insert(MegaHardfork::MiniRex, ForkCondition::Timestamp(20));
+        assert_eq!(config.get(MegaHardfork::MiniRex), Some(&ForkCondition::Timestamp(20)));
+
+        let config = config.without(MegaHardfork::MiniRex);
+        assert_eq!(config.get(MegaHardfork::MiniRex), None);
+
+        let from_iter = MegaHardforkConfig::from(
+            [
+                (MegaHardfork::MiniRex, ForkCondition::Timestamp(1)),
+                (MegaHardfork::Rex2, ForkCondition::Timestamp(2)),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(from_iter.get(MegaHardfork::MiniRex), Some(&ForkCondition::Timestamp(1)));
+        assert_eq!(from_iter.get(MegaHardfork::Rex2), Some(&ForkCondition::Timestamp(2)));
+    }
+
+    #[test]
+    fn test_with_all_activated_enables_all_mega_hardforks() {
+        let config = MegaHardforkConfig::default().with_all_activated();
+
+        for hardfork in [
+            MegaHardfork::MiniRex,
+            MegaHardfork::MiniRex1,
+            MegaHardfork::MiniRex2,
+            MegaHardfork::Rex,
+            MegaHardfork::Rex1,
+            MegaHardfork::Rex2,
+            MegaHardfork::Rex3,
+            MegaHardfork::Rex4,
+        ] {
+            assert_eq!(config.mega_fork_activation(hardfork), ForkCondition::Timestamp(0));
+        }
+    }
+
+    #[test]
+    fn test_hardfork_and_spec_id_follow_latest_active_timestamp() {
+        let config = MegaHardforkConfig::default()
+            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
+            .with(MegaHardfork::MiniRex1, ForkCondition::Timestamp(20))
+            .with(MegaHardfork::MiniRex2, ForkCondition::Timestamp(30))
+            .with(MegaHardfork::Rex, ForkCondition::Timestamp(40))
+            .with(MegaHardfork::Rex1, ForkCondition::Timestamp(50))
+            .with(MegaHardfork::Rex2, ForkCondition::Timestamp(60))
+            .with(MegaHardfork::Rex3, ForkCondition::Timestamp(70))
+            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(80));
+
+        let expected = [
+            (0, None, MegaSpecId::EQUIVALENCE),
+            (15, Some(MegaHardfork::MiniRex), MegaSpecId::MINI_REX),
+            (25, Some(MegaHardfork::MiniRex1), MegaSpecId::EQUIVALENCE),
+            (35, Some(MegaHardfork::MiniRex2), MegaSpecId::MINI_REX),
+            (45, Some(MegaHardfork::Rex), MegaSpecId::REX),
+            (55, Some(MegaHardfork::Rex1), MegaSpecId::REX1),
+            (65, Some(MegaHardfork::Rex2), MegaSpecId::REX2),
+            (75, Some(MegaHardfork::Rex3), MegaSpecId::REX3),
+            (85, Some(MegaHardfork::Rex4), MegaSpecId::REX4),
+        ];
+
+        for (timestamp, expected_hardfork, expected_spec) in expected {
+            assert_eq!(config.hardfork(timestamp), expected_hardfork);
+            assert_eq!(config.spec_id(timestamp), expected_spec);
+        }
+    }
+
+    #[test]
+    fn test_first_hardfork_block_handles_genesis_and_parent_activation_boundaries() {
+        let config =
+            MegaHardforkConfig::default().with(MegaHardfork::Rex2, ForkCondition::Timestamp(100));
+
+        assert!(config.first_hardfork_block(MegaHardfork::Rex2, 99, (1, 100)));
+        assert!(config.first_hardfork_block(MegaHardfork::Rex2, 99, (2, 100)));
+        assert!(!config.first_hardfork_block(MegaHardfork::Rex2, 100, (3, 101)));
+        assert!(!config.first_hardfork_block(MegaHardfork::Rex2, 99, (2, 99)));
+    }
+
+    #[test]
+    fn test_spec_id_with_gaps_in_hardfork_configuration() {
+        let config = MegaHardforkConfig::default()
+            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
+            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(20));
+
+        assert_eq!(config.spec_id(5), MegaSpecId::EQUIVALENCE);
+        assert_eq!(config.spec_id(15), MegaSpecId::MINI_REX);
+        assert_eq!(config.spec_id(25), MegaSpecId::REX4);
+        assert_eq!(config.hardfork(15), Some(MegaHardfork::MiniRex));
+        assert_eq!(config.hardfork(25), Some(MegaHardfork::Rex4));
+    }
+
+    #[test]
+    fn test_latest_hardfork_wins_when_multiple_activate_at_same_timestamp() {
+        let config = MegaHardforkConfig::default()
+            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
+            .with(MegaHardfork::Rex2, ForkCondition::Timestamp(10))
+            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(10));
+
+        assert_eq!(config.hardfork(9), None);
+        assert_eq!(config.hardfork(10), Some(MegaHardfork::Rex4));
+        assert_eq!(config.spec_id(10), MegaSpecId::REX4);
     }
 }
