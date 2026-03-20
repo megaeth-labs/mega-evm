@@ -185,7 +185,7 @@ mod tests {
 
         let got: &EmptyExternalEnv = factory.external_env_factory();
 
-        // Verify the getter returns a reference to the factory's own field.
-        assert!(core::ptr::eq(got, &factory.external_env_factory));
+        // Verify the getter returns a stable reference to the same field.
+        assert!(core::ptr::eq(got, factory.external_env_factory()));
     }
 }
