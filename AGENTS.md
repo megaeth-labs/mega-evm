@@ -52,7 +52,7 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX1` → `MINI_REX2` → `REX` → `REX1` → `REX2` → `REX3` → `REX4`
+Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4`
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
@@ -63,6 +63,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX1` → `MINI_REX2` → `R
   - Specifications of each spec can be found in `./specs`, which should always be maintained to be consistent with the implementation.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Multiple hardforks can map to one spec.
+  `MiniRex1` and `MiniRex2` are hardforks that reuse `EQUIVALENCE` and `MINI_REX` respectively.
   Defined in `crates/mega-evm/src/block/hardfork.rs`.
 - All specs use `OpSpecId::ISTHMUS` as the Optimism base layer.
   But this is subject to change in the future.

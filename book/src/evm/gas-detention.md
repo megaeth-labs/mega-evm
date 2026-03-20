@@ -30,8 +30,8 @@ This means a transaction that has already consumed compute gas before accessing 
 1. A transaction accesses volatile data (e.g., reads `TIMESTAMP`)
 2. The access is recorded and the effective detained limit is calculated
 3. After each volatile opcode, remaining compute gas is capped at the effective detained limit
-4. If the cap is exceeded, apply the spec-specific rule:
-   - **Pre-Rex4 (absolute cap)**: if `compute_gas_used` already exceeds the cap, execution halts with `VolatileDataAccessOutOfGas`
+4. Apply the spec-specific rule:
+   - **Pre-Rex4 (absolute cap)**: at the moment of volatile access, if `compute_gas_used` already exceeds the cap, execution halts immediately with `VolatileDataAccessOutOfGas`; otherwise remaining compute gas is capped to `cap - compute_gas_used`
    - **Rex4+ (relative cap)**: the effective limit is `current_usage + cap`, so the transaction can always perform at least `cap` more gas of computation after the access
 5. Excess gas beyond the effective limit is "detained" and refunded at transaction end
 

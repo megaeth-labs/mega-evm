@@ -2,7 +2,7 @@
 
 ## Overview
 
-MegaETH enforces **seven types of resource limits**, each with both transaction-level and block-level variants.
+MegaETH enforces resource limits across multiple dimensions, checked in two phases.
 Four of these are MegaETH-specific post-execution limits that go beyond standard EVM gas:
 
 1. **Compute Gas** — Computational opcode cost
