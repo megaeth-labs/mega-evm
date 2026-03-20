@@ -181,9 +181,15 @@ mod tests {
 
     #[test]
     fn test_external_env_factory_getter() {
-        let factory = MegaEvmFactory::new();
-        // The default factory uses EmptyExternalEnv; verify the getter
-        // returns a reference to it.
-        let _env: &EmptyExternalEnv = factory.external_env_factory();
+        let factory =
+            MegaEvmFactory::new().with_external_env_factory(EmptyExternalEnv);
+
+        let got: &EmptyExternalEnv = factory.external_env_factory();
+
+        // Verify the getter returns a reference to the factory's own field.
+        assert!(core::ptr::eq(
+            got,
+            &factory.external_env_factory,
+        ));
     }
 }
