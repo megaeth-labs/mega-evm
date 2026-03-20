@@ -7,6 +7,8 @@ This section documents each MegaETH network upgrade, describing what changed, wh
 | Upgrade | Key Changes |
 | ------- | ----------- |
 | [MiniRex](minirex.md) | Dual gas model, multidimensional resource limits, gas detention, 98/100 gas forwarding, SELFDESTRUCT disabled, system contracts (Oracle, Timestamp) |
+| MiniRex1 | Rollback: reverted to Equivalence spec (maps to `EQUIVALENCE`) |
+| MiniRex2 | Restoration: re-activated MiniRex spec (maps to `MINI_REX`) |
 | [Rex](rex.md) | Transaction intrinsic storage gas, revised storage gas economics (`base × (multiplier − 1)`), consistent CALL-like opcode behavior, state growth tracking |
 | [Rex1](rex1.md) | Fix: compute gas limit reset between transactions |
 | [Rex2](rex2.md) | SELFDESTRUCT re-enabled (EIP-6780), KeylessDeploy system contract |

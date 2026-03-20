@@ -112,7 +112,7 @@ The following opcodes MUST trigger block environment gas detention:
 **Beneficiary account access** — cap: 20,000,000 (20M):
 
 Any operation that accesses the beneficiary account MUST trigger gas detention:
-- Reading beneficiary's balance (`BALANCE`, `SELFBALANCE`)
+- Reading beneficiary's balance via `BALANCE` (any caller) or via `SELFBALANCE` (only when the current contract is the beneficiary)
 - Accessing beneficiary's code (`EXTCODECOPY`, `EXTCODESIZE`, `EXTCODEHASH`)
 - Transaction sender is the beneficiary
 - Transaction recipient (CALL target) is the beneficiary
