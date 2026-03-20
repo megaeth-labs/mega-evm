@@ -8,6 +8,16 @@ All resource trackers are **frame-aware**: usage within a subcall is discarded i
 
 **Exception**: Compute gas accumulates globally and is **never** reverted, because CPU cycles cannot be undone.
 
+## Per-Frame Limits (Rex4+)
+
+Starting from Rex4, per-frame budgets apply to all four dimensions: compute gas, data size, KV updates, and state growth.
+The top-level frame starts with the full transaction budget for each dimension.
+Each inner frame receives `remaining × 98/100` of its parent's remaining budget for each dimension.
+If an inner frame exceeds its local budget, that frame reverts with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
+The parent frame can continue executing after a child frame reverts.
+Transaction-level exceeds still halt the full transaction with `OutOfGas`.
+Compute gas consumed by reverted child frames still counts toward total transaction compute gas usage.
+
 ## Compute Gas
 
 Tracks cumulative gas consumed during EVM instruction execution, separate from the standard gas limit.
@@ -26,10 +36,12 @@ Tracks cumulative gas consumed during EVM instruction execution, separate from t
 
 When `compute_gas_used > effective_compute_gas_limit`, the transaction halts with `OutOfGas`.
 The effective limit may be reduced by [gas detention](gas-detention.md).
+In Rex4+, frame-local compute gas exceeds cause the current frame to revert according to the per-frame limit rules above.
 
 ## Data Size
 
 Tracks the total bytes of data generated during execution.
+In Rex4+, data size also uses the per-frame budget rules described above.
 
 ### Non-Discardable (Permanent)
 
@@ -61,6 +73,7 @@ Tracked within frames, discarded on revert:
 ## KV Updates
 
 Tracks the number of state-modifying key-value operations.
+In Rex4+, KV updates also use the per-frame budget rules described above.
 
 ### Non-Discardable
 
@@ -100,16 +113,4 @@ Tracks net increase in blockchain state: new accounts and new storage slots.
 
 The counter can go negative during execution.
 Reported growth is clamped to minimum of zero.
-
-### Per-Frame Limits (Rex4+)
-
-Starting from Rex4, state growth is also enforced at the per-frame level:
-
-- **Top-level frame**: Gets the full TX state growth limit
-- **Inner frames**: Each receives `remaining × 98/100` of the parent's remaining budget
-
-When an inner frame exceeds its budget:
-- The frame **reverts** (not halt)
-- Gas is returned to the parent
-- The parent can continue executing
-- Revert data is ABI-encoded as `MegaLimitExceeded(uint8 kind, uint64 limit)`
+In Rex4+, state growth also uses the shared per-frame budget rules described above.
