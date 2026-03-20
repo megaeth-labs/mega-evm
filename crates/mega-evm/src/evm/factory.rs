@@ -87,6 +87,11 @@ impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
         self
     }
 
+    /// Returns a reference to the external environment factory.
+    pub fn external_env_factory(&self) -> &ExtEnvFactory {
+        &self.external_env_factory
+    }
+
     /// Sets the external environment factory for the EVM.
     ///
     /// # Parameters
