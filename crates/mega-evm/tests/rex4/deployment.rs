@@ -2,7 +2,7 @@
 
 use alloy_evm::{block::BlockExecutor, Database, Evm, EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, Bytes, B256};
 use mega_evm::{
     test_utils::MemoryDatabase, BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx,
     MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
@@ -10,8 +10,10 @@ use mega_evm::{
     LIMIT_CONTROL_CODE, LIMIT_CONTROL_CODE_HASH,
 };
 use revm::{
-    context::BlockEnv, database::State, inspector::NoOpInspector, primitives::KECCAK_EMPTY,
-    primitives::U256,
+    context::BlockEnv,
+    database::State,
+    inspector::NoOpInspector,
+    primitives::{KECCAK_EMPTY, U256},
 };
 
 type TestState<'db> = State<&'db mut MemoryDatabase>;
@@ -85,11 +87,7 @@ fn assert_contract_deployed<DB: Database>(
     );
 }
 
-fn assert_contract_not_deployed<DB: Database>(
-    db: &mut State<DB>,
-    address: Address,
-    name: &str,
-) {
+fn assert_contract_not_deployed<DB: Database>(db: &mut State<DB>, address: Address, name: &str) {
     let cache_acc = db.load_cache_account(address).expect("should load cache account");
     let code_hash = cache_acc.account_info().map_or(KECCAK_EMPTY, |info| info.code_hash);
     assert_eq!(code_hash, KECCAK_EMPTY, "{name} should not have deployed code for this spec");
