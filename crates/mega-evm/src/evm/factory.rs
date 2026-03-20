@@ -88,6 +88,9 @@ impl<ExtEnvFactory> MegaEvmFactory<ExtEnvFactory> {
     }
 
     /// Returns a reference to the external environment factory.
+    ///
+    /// This is useful for inspecting or cloning the factory after construction,
+    /// since the field is private and the struct is `#[non_exhaustive]`.
     pub fn external_env_factory(&self) -> &ExtEnvFactory {
         &self.external_env_factory
     }
@@ -169,5 +172,18 @@ impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
         inspector: I,
     ) -> Self::Evm<DB, I> {
         Self::create_evm(self, db, input).with_inspector(inspector)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_external_env_factory_getter() {
+        let factory = MegaEvmFactory::new();
+        // The default factory uses EmptyExternalEnv; verify the getter
+        // returns a reference to it.
+        let _env: &EmptyExternalEnv = factory.external_env_factory();
     }
 }
