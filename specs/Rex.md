@@ -105,7 +105,9 @@ New behavior:
 - Transaction state growth limit MUST be 1,000.
 - Block state growth limit MUST be 1,000.
 - Block data size limit (12.5 MB), block KV update limit (500,000), and block compute gas limit (unlimited) MUST remain unchanged.
-- State growth MUST count: new storage slots (SSTORE 0→non-0) and new accounts created (via CREATE, CREATE2, or CALL with value transfer to empty account per EIP-161).
+- State growth MUST count net new storage slots and net new accounts.
+- Net new storage slots are slots that go from zero to non-zero and remain non-zero at transaction end.
+- Net new accounts are accounts that exist at transaction end and did not exist before the transaction.
 - Transaction-level state growth exceed MUST halt with `OutOfGas`.
 - Block-level state growth enforcement: the last transaction exceeding the limit MUST be included; subsequent transactions MUST be rejected.
 

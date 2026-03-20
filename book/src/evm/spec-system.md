@@ -10,12 +10,13 @@ The codebase distinguishes between two related concepts:
 - **Hardfork (`MegaHardfork`)** — Defines network upgrade events: *when* specs are activated.
 
 Multiple hardforks can map to the same spec.
-For example, both `MiniRex` and `MiniRex2` hardforks use the `MINI_REX` spec.
+A hardfork can also map to an older spec.
+For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
 
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → MINI_REX1 → MINI_REX2 → REX → REX1 → REX2 → REX3 → REX4
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4
 ```
 
 Each newer spec includes all previous behaviors.

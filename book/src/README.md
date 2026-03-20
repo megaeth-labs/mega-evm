@@ -19,7 +19,7 @@ Key differences from a standard EVM include:
 | ---------------- | ---------------------------------------------------------------- |
 | **Base EVM**     | [revm v27.1.0 (v83)](https://github.com/bluealloy/revm)         |
 | **Optimism EVM** | [op-revm v8.1.0 (v83)](https://github.com/bluealloy/op-revm)    |
-| **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/core)           |
+| **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy)          |
 
 ## Spec Progression
 
@@ -27,7 +27,7 @@ MegaETH EVM uses a spec system (`MegaSpecId`) that defines EVM behavior at each 
 Each newer spec includes all previous behaviors:
 
 ```
-EQUIVALENCE → MINI_REX → MINI_REX1 → MINI_REX2 → REX → REX1 → REX2 → REX3 → REX4
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4
 ```
 
 See [Spec System](evm/spec-system.md) for details.
