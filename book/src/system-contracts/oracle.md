@@ -15,11 +15,16 @@ Smart contracts can access external information (price feeds, randomness, timest
 - **Simple storage model** — Direct access to storage slots via `uint256` keys
 - **Restricted writes** — Only `MEGA_SYSTEM_ADDRESS` can write oracle data
 - **Public reads** — Anyone can read oracle data
+- **Versioned bytecode** — Pre-Rex2 deploys Oracle v1.0.0, and Rex2+ deploys Oracle v1.1.0 with `sendHint`
 
 ## Interface
 
 ```solidity
 interface IOracle {
+    /// @notice Executes multiple oracle calls in one transaction
+    function multiCall(bytes[] calldata data)
+        external returns (bytes[] memory results);
+
     /// @notice Reads a value from a specific storage slot
     function getSlot(uint256 slot) external view returns (bytes32 value);
 
@@ -37,17 +42,30 @@ interface IOracle {
         uint256[] calldata slots,
         bytes32[] calldata values
     ) external;
+
+    /// @notice Sends a hint to the oracle backend
+    /// @dev Available from Rex2 onward
+    function sendHint(bytes32 topic, bytes calldata data) external view;
+
+    /// @notice Emits an oracle log
+    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS
+    function emitLog(bytes32 topic, bytes calldata data) external;
+
+    /// @notice Emits multiple oracle logs
+    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS
+    function emitLogs(bytes32 topic, bytes[] calldata dataVector) external;
 }
 ```
 
 ## Gas Detention Impact
 
-Reading oracle storage triggers [gas detention](../evm/gas-detention.md):
+Oracle access can trigger [gas detention](../evm/gas-detention.md), but the trigger changes by spec:
 
-| Spec    | Trigger                          | Compute Gas Cap |
-| ------- | -------------------------------- | --------------- |
-| MiniRex–Rex2 | CALL to oracle contract     | 1M              |
-| Rex3+   | SLOAD from oracle storage        | 20M             |
+| Spec         | Trigger                          | Compute Gas Cap |
+| ------------ | -------------------------------- | --------------- |
+| MiniRex      | CALL to oracle contract          | 1M              |
+| Rex–Rex2     | CALL or STATICCALL to oracle contract | 1M         |
+| Rex3+        | SLOAD from oracle storage        | 20M             |
 
 This means transactions that read oracle data have a limited compute gas budget after the read.
 Design your contracts accordingly — perform oracle reads as late as possible.

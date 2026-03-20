@@ -17,8 +17,8 @@ They are deployed idempotently during block execution, gated by hardfork activat
 
 ### MEGA_SYSTEM_ADDRESS
 
-The `MEGA_SYSTEM_ADDRESS` (`0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`) is a special account controlled by the sequencer.
-It can call whitelisted system contracts as deposit-like transactions — no signature or fee required.
+The `MEGA_SYSTEM_ADDRESS` (`0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`) is a special account intended for sequencer-managed maintenance operations.
+mega-evm processes matching whitelisted transactions from this address as deposit-like transactions, bypassing signature validation and execution-fee charging.
 This is how the sequencer updates oracle storage.
 
 See [Mega System Transactions](system-tx.md) for details.
@@ -30,5 +30,6 @@ This ensures that the behavior of existing specs is preserved across upgrades.
 
 ### Interceptor Pattern
 
-System contracts use a Rust-level **interceptor** for performance-critical paths.
-Unknown selectors fall through to the on-chain Solidity bytecode, which reverts with `NotIntercepted()`.
+Some system contracts use Rust-level **interceptors** for performance-critical paths.
+KeylessDeploy, MegaAccessControl, and MegaLimitControl rely on intercepted selectors, and unsupported calls fall through to on-chain bytecode that reverts with `NotIntercepted()`.
+The Oracle contract also has intercepted behavior for `sendHint`, while its other methods execute via deployed bytecode.

@@ -177,8 +177,8 @@ See [System Contracts Overview](../system-contracts/README.md) for the full regi
 
 ## Concept Deep Dives
 
-| Topic | Page |
-| ----- | ---- |
+| Topic | Description |
+| ----- | ----------- |
 | [Spec System](spec-system.md) | How MegaETH versions EVM behavior through a linear spec progression |
 | [Dual Gas Model](dual-gas-model.md) | Compute gas vs storage gas formulas and SALT mechanics |
 | [Resource Limits](resource-limits.md) | Transaction and block limit values, two-phase checking, enforcement |
