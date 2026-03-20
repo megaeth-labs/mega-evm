@@ -70,7 +70,7 @@ assert(deployed == 0x4e59b44847b379578588920ca78fbf26c0b4956c);
 
 ## Deployment Checklist
 
-1. **Check preconditions** — Signer nonce must be <= 1, deployment address must have no code
+1. **Check preconditions** — Signed transaction nonce must be exactly 0, signer on-chain nonce must be <= 1, and deployment address must have no code
 2. **Fund minimally** — Transfer exactly `gasLimitOverride × gasPrice + value` to the signer
 3. **Deploy immediately** — Call `keylessDeploy` as soon as possible after funding
 4. **Verify** — Confirm contract exists at expected address
@@ -87,26 +87,42 @@ assert(deployed == 0x4e59b44847b379578588920ca78fbf26c0b4956c);
 
 ## Error Handling
 
-**Validation errors** — The call reverts. No state changes, signer is not charged.
+**Validation errors** — The call reverts.
+No state changes are applied from the keyless deploy sandbox.
+The signer is not charged.
 
 | Error                    | Cause                            |
 | ------------------------ | -------------------------------- |
 | `MalformedEncoding()`    | Invalid RLP encoding             |
 | `NotContractCreation()`  | Transaction has a `to` address   |
 | `NotPreEIP155()`         | v is not 27 or 28               |
+| `NoEtherTransfer()`      | `keylessDeploy` call includes non-zero value |
 | `InvalidSignature()`     | Cannot recover signer            |
+| `NonZeroTxNonce()`       | Signed transaction nonce is not 0 |
 | `SignerNonceTooHigh()`   | Signer nonce > 1                 |
 | `InsufficientBalance()`  | Signer lacks funds               |
 | `ContractAlreadyExists()`| Address already has code         |
 | `GasLimitTooLow()`       | Override < transaction's limit   |
+| `InsufficientComputeGas()` | Frame-local compute gas budget is below keyless deploy overhead |
 
-**Execution errors** — The call returns normally with error in `errorData`. Signer is charged for gas.
+**Execution errors** — The call returns normally with error in `errorData`.
+The signer is charged for gas.
 
 | Error                    | Cause                            |
 | ------------------------ | -------------------------------- |
 | `ExecutionReverted()`    | Init code reverted               |
 | `ExecutionHalted()`      | Out of gas, stack overflow, etc. |
 | `EmptyCodeDeployed()`    | Init code returned empty bytecode|
+
+**Internal or fallback errors** — The call reverts.
+These indicate defensive checks or fallback-to-bytecode behavior.
+
+| Error                    | Cause                            |
+| ------------------------ | -------------------------------- |
+| `NoContractCreated()`    | CREATE execution succeeded but did not return a created address |
+| `AddressMismatch()`      | Actual deployed address differs from expected Nick's Method address |
+| `InternalError()`        | Unexpected internal/database failure during sandbox processing |
+| `NotIntercepted()`       | Call was not intercepted (for example unknown selector or non-top-level call) |
 
 ## Gas Accounting
 

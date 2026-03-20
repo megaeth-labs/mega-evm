@@ -128,7 +128,7 @@ New behavior:
 - `I-2`: All four CALL-like opcodes (CALL, STATICCALL, DELEGATECALL, CALLCODE) MUST enforce 98/100 gas forwarding.
 - `I-3`: DELEGATECALL and CALLCODE MUST NOT trigger oracle access detection.
 - `I-4`: Transaction-level state growth exceed MUST halt with `OutOfGas`.
-- `I-5`: The max total gas limit (storage + compute gas) for a transaction or block is not limited by the EVM spec; it is a chain-configurable parameter.
+- `I-5`: The EVM spec MUST NOT limit the max total gas limit (storage + compute gas) for a transaction or block; this is a chain-configurable parameter.
 
 ## Inheritance
 
