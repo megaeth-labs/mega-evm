@@ -83,9 +83,25 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
 
             Review this pull request following the guidelines in CLAUDE.md and REVIEW.md.
-            Be concise and actionable. Only comment on issues that matter.
 
-            Use `gh pr comment` for top-level feedback.
+            ## Conversation awareness
+
+            Before posting any feedback:
+            1. Read the existing PR comments and review threads using `gh pr view --comments` and `gh pr view --json reviews`.
+            2. Check which review threads are already resolved vs unresolved.
+            3. Do NOT re-raise points that have already been addressed or resolved in the conversation history.
+            4. Do NOT repeat feedback that you or another bot already posted on this PR.
+            5. If this is a `synchronize` event (new push), focus your review on the new changes and whether previous feedback was addressed. Do not re-review unchanged code.
+
+            ## Review style
+
+            - Calibrate review effort to the size and risk of the PR. A trivial getter does not need the same scrutiny as a new opcode.
+            - Be concise. Batch all feedback into ONE top-level `gh pr comment` and a small number of inline comments. Do NOT post multiple top-level comments.
+            - Only comment on issues that actually matter. Skip trivial style nits that don't affect correctness or maintainability.
+            - Never repeat the same point in multiple places. Say it once, in the most relevant location.
+            - If the PR is clean or all prior feedback has been addressed, a single "LGTM" comment is sufficient. Do not manufacture feedback just to have something to say.
+
+            Use `gh pr comment` for top-level feedback (exactly one comment).
             Use `mcp__github_inline_comment__create_inline_comment` (with `confirmed: true`) to highlight specific code issues.
 
   label-check:
@@ -115,7 +131,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
-            --allowedTools "Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh label list:*),Bash(git log:*),Bash(git diff:*),Bash(ls:*)"
+            --allowedTools "Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh api:*),Bash(gh label list:*),Bash(git log:*),Bash(git diff:*),Bash(ls:*)"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -124,7 +140,15 @@ jobs:
 
             Read the PR diff using `gh pr diff` and check the current labels using `gh pr view`.
             Fetch the complete list of available labels using `gh label list`.
-            If any labels are incorrect or missing, comment on the PR explaining why.
+
+            Before commenting, check existing PR comments using `gh pr view --comments`.
+            If you already posted a label-related comment on this PR:
+            - If the labels have been fixed to match your suggestions, delete your previous comment using `gh api` — the feedback is no longer relevant.
+            - If there are still label issues but they changed, edit your existing comment using `gh pr comment --edit-last` instead of posting a new one.
+            - If the labels are unchanged from your previous comment, do nothing.
+            Only post a NEW comment if there is no prior label-related comment from you AND there are label issues to report.
+
+            If any labels are incorrect or missing, post exactly ONE comment explaining all label issues.
             Do NOT add or remove labels yourself. Only comment.
             If all labels look correct, do nothing — no comment needed.
 
