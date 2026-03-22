@@ -54,7 +54,7 @@ Transaction starts with 200M compute gas budget
 | Spec        | Block Env / Beneficiary Cap | Oracle Cap | Oracle Trigger                   |
 | ----------- | --------------------------- | ---------- | -------------------------------- |
 | MiniRex     | 20M                         | 1M         | CALL to oracle contract          |
-| Rex–Rex2    | 20M                         | 1M         | CALL to oracle contract          |
+| Rex–Rex2    | 20M                         | 1M         | CALL or STATICCALL to oracle contract |
 | Rex3        | 20M                         | 20M        | SLOAD from oracle storage        |
 | Rex4        | 20M (relative)              | 20M (relative) | SLOAD from oracle storage    |
 

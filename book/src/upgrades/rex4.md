@@ -6,6 +6,7 @@ description: Rex4 adds per-frame resource budgets, relative gas detention, two n
 
 This page is an informative summary of the Rex4 specification.
 For the full normative definition, see the Rex4 spec in the mega-evm repository.
+
 > **Note**: Rex4 is the current unstable specification and is subject to change before activation.
 
 ## Summary
