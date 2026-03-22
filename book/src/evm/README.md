@@ -130,7 +130,7 @@ See [Gas Detention](gas-detention.md) for details.
 
 `SELFDESTRUCT` is enabled with post-Cancun (EIP-6780) semantics:
 
-- If the contract was created in the same transaction, `SELFDESTRUCT` removes code and storage and transfers the balance to the beneficiary.
+- If the contract was created in the same transaction, `SELFDESTRUCT` removes code and storage and transfers the balance to the target address.
 - If the contract was not created in the same transaction, `SELFDESTRUCT` only transfers the balance — code and storage are preserved.
 
 ## Contract Size Limits

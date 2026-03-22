@@ -22,8 +22,8 @@ Second, it introduces the **KeylessDeploy** system contract, which enables deter
 
 #### New behavior
 - `SELFDESTRUCT` is a valid opcode.
-- If the contract was created in the same transaction, `SELFDESTRUCT` removes the contract's code and storage and transfers the remaining balance to the beneficiary.
-- If the contract was not created in the same transaction, `SELFDESTRUCT` only transfers the remaining balance to the beneficiary — code and storage are preserved.
+- If the contract was created in the same transaction, `SELFDESTRUCT` removes the contract's code and storage and transfers the remaining balance to the target address.
+- If the contract was not created in the same transaction, `SELFDESTRUCT` only transfers the remaining balance to the target address — code and storage are preserved.
 
 This is the standard EIP-6780 behavior already used across Ethereum post-Cancun.
 
