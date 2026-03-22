@@ -205,5 +205,7 @@ Structure:
   Each subsection MUST contain two parts:
   - **Spec clauses** — enumerate the key normative requirements.
   - **Implementation** — list the source files that implement those clauses.
+  Implementation references map to production source files only.
+  Test file links are not included — tests can be discovered via the corresponding test directory (e.g., `crates/mega-evm/tests/{spec}/`).
 - `## Invariant Mapping` listing each invariant with its implementation coverage.
 - `## Maintenance Notes` with update instructions.

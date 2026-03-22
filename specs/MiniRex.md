@@ -88,6 +88,8 @@ Capping compute gas after volatile data access forces transactions that touch th
 #### Semantics
 
 When volatile data is accessed, the transaction's remaining compute gas MUST be immediately capped.
+The cap is absolute: total compute gas usage MUST NOT exceed `cap`.
+Remaining compute gas becomes `max(0, cap − consumed)`.
 If the transaction has already consumed more than the cap before the access, execution MUST halt immediately with `VolatileDataAccessOutOfGas`.
 When multiple volatile data categories are accessed, the most restrictive cap MUST apply.
 Detained gas (excess beyond the cap) MUST be refunded at transaction end.
