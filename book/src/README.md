@@ -17,8 +17,8 @@ Key differences from a standard EVM include:
 
 | Component        | Version                                                          |
 | ---------------- | ---------------------------------------------------------------- |
-| **Base EVM**     | [revm v27.1.0 (v83)](https://github.com/bluealloy/revm)         |
-| **Optimism EVM** | [op-revm v8.1.0 (v83)](https://github.com/bluealloy/op-revm)    |
+| **Base EVM**     | [revm v27.1.0](https://github.com/bluealloy/revm)               |
+| **Optimism EVM** | [op-revm v8.1.0](https://github.com/bluealloy/op-revm)          |
 | **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy)          |
 
 ## Spec Progression

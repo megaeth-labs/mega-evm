@@ -12,12 +12,14 @@ Detained gas is effectively refunded — users only pay for actual computation p
 
 ## Volatile Data Categories
 
-| Category                    | Trigger                                                | Cap (Rex3+)   |
+| Category                    | Trigger                                                | Cap           |
 | --------------------------- | ------------------------------------------------------ | ------------- |
 | Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, etc. or beneficiary access | 20M           |
 | Oracle                      | SLOAD from oracle contract storage                      | 20M           |
 
 The **most restrictive cap wins** when multiple volatile sources are accessed.
+Cap values above reflect Rex4 (relative semantics).
+For per-spec values and the evolution from absolute to relative caps, see [Evolution Across Specs](#evolution-across-specs) below.
 
 ### Rex4: Relative Gas Detention Cap
 

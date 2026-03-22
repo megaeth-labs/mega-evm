@@ -63,8 +63,8 @@ Oracle access can trigger [gas detention](../evm/gas-detention.md), but the trig
 
 | Spec         | Trigger                          | Compute Gas Cap |
 | ------------ | -------------------------------- | --------------- |
-| MiniRex      | CALL to oracle contract          | 1M              |
-| Rex–Rex2     | CALL or STATICCALL to oracle contract | 1M         |
+| MiniRex      | CALL to oracle contract                | 1M              |
+| Rex–Rex2     | CALL or STATICCALL to oracle contract  | 1M              |
 | Rex3+        | SLOAD from oracle storage        | 20M             |
 
 This means transactions that read oracle data have a limited compute gas budget after the read.
