@@ -22,7 +22,7 @@ Finally, the keyless deploy sandbox overhead (100K gas) is now properly tracked 
 ### Oracle Access Compute Gas Limit Increase
 
 #### Previous behavior
-- Oracle access (triggered by CALL to the oracle address) caps compute gas at 1,000,000 (1M).
+- Oracle access (triggered by CALL or STATICCALL to the oracle address) caps compute gas at 1,000,000 (1M).
 
 #### New behavior
 - Oracle storage reads (SLOAD from the oracle contract) cap compute gas at 20,000,000 (20M).
@@ -32,8 +32,8 @@ Finally, the keyless deploy sandbox overhead (100K gas) is now properly tracked 
 ### Oracle Gas Detention Triggers on SLOAD
 
 #### Previous behavior
-- CALL to the oracle contract address triggers gas detention.
-- Any CALL to the oracle triggers detention even without reading storage.
+- CALL or STATICCALL to the oracle contract address triggers gas detention.
+- Any CALL or STATICCALL to the oracle triggers detention even without reading storage.
 
 #### New behavior
 - SLOAD from the oracle contract's storage triggers gas detention.
