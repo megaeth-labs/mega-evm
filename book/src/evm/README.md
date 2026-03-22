@@ -138,9 +138,9 @@ See [Gas Detention](gas-detention.md) for details.
 | Limit          | Value                    |
 | -------------- | ------------------------ |
 | Max contract   | 524,288 bytes (512 KB)   |
-| Max initcode   | 536,576 bytes (512 KB + 24 KB) |
+| Max initcode   | 548,864 bytes (512 KB + 24 KB) |
 
-These are 21× larger than standard Ethereum limits (24 KB / 48 KB).
+The contract size limit is 21× larger than standard Ethereum (24 KB); the initcode limit is ~11× larger (48 KB).
 
 ## System Contracts
 

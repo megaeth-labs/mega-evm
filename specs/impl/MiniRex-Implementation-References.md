@@ -80,7 +80,7 @@ Implementation:
 
 Spec clauses:
 - Max contract size: 524,288 bytes (512 KB).
-- Max initcode size: 536,576 bytes (512 KB + 24 KB).
+- Max initcode size: 548,864 bytes (512 KB + 24 KB).
 
 Implementation:
 - [crates/mega-evm/src/constants.rs](../../crates/mega-evm/src/constants.rs) (`mini_rex::MAX_CONTRACT_SIZE`, `mini_rex::MAX_INITCODE_SIZE`)
