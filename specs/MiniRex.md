@@ -167,7 +167,7 @@ MegaETH's architecture supports larger contracts than standard Ethereum.
 
 - Maximum contract size MUST be 524,288 bytes (512 KB).
   Standard EVM (EIP-170): 24,576 bytes (24 KB).
-- Maximum initcode size MUST be 536,576 bytes (512 KB + 24 KB).
+- Maximum initcode size MUST be 548,864 bytes (512 KB + 24 KB).
   Standard EVM (EIP-3860): 49,152 bytes (48 KB).
 
 ### 7. Increased precompile gas costs

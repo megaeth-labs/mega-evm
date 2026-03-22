@@ -118,7 +118,7 @@ The 98/100 rule reduces this to approximately 10 gas.
 
 #### New behavior
 - Maximum contract size: 524,288 bytes (512 KB) — a 21× increase.
-- Maximum initcode size: 536,576 bytes (512 KB + 24 KB).
+- Maximum initcode size: 548,864 bytes (512 KB + 24 KB).
 
 ### Precompile Gas Overrides
 
