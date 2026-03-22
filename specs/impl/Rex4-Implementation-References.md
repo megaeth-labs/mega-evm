@@ -6,8 +6,8 @@ If this mapping conflicts with the normative spec text, the normative spec wins.
 
 ## Scope
 
-This document maps each Rex4 spec change and invariant to implementation and tests.
-It is intended for code navigation, auditing, and regression test discovery.
+This document maps each Rex4 spec change and invariant to implementation.
+It is intended for code navigation and auditing.
 
 ## Change Mapping
 
@@ -29,10 +29,6 @@ Implementation:
 - [crates/mega-evm/src/limit/limit.rs](../../crates/mega-evm/src/limit/limit.rs)
 - [crates/mega-evm/src/limit/mod.rs](../../crates/mega-evm/src/limit/mod.rs)
 
-Tests:
-- [crates/mega-evm/tests/rex4/frame_limits.rs](../../crates/mega-evm/tests/rex4/frame_limits.rs)
-- [crates/mega-evm/tests/rex4/frame_state_growth.rs](../../crates/mega-evm/tests/rex4/frame_state_growth.rs)
-
 ### 2. MegaAccessControl system contract
 
 Spec clauses:
@@ -52,9 +48,6 @@ Implementation:
 - [crates/mega-evm/src/evm/instructions.rs](../../crates/mega-evm/src/evm/instructions.rs)
 - [crates/system-contracts/contracts/MegaAccessControl.sol](../../crates/system-contracts/contracts/MegaAccessControl.sol)
 
-Tests:
-- [crates/mega-evm/tests/rex4/access_control.rs](../../crates/mega-evm/tests/rex4/access_control.rs)
-
 ### 3. MegaLimitControl system contract
 
 Spec clauses:
@@ -70,9 +63,6 @@ Implementation:
 - [crates/mega-evm/src/limit/compute_gas.rs](../../crates/mega-evm/src/limit/compute_gas.rs)
 - [crates/system-contracts/contracts/MegaLimitControl.sol](../../crates/system-contracts/contracts/MegaLimitControl.sol)
 
-Tests:
-- [crates/mega-evm/tests/rex4/limit_control.rs](../../crates/mega-evm/tests/rex4/limit_control.rs)
-
 ### 4. Relative gas detention cap
 
 Spec clauses:
@@ -83,9 +73,6 @@ Implementation:
 - [crates/mega-evm/src/limit/compute_gas.rs](../../crates/mega-evm/src/limit/compute_gas.rs)
 - [crates/mega-evm/src/access/tracker.rs](../../crates/mega-evm/src/access/tracker.rs)
 - [crates/mega-evm/src/limit/limit.rs](../../crates/mega-evm/src/limit/limit.rs)
-
-Tests:
-- [crates/mega-evm/tests/rex4/gas_detention.rs](../../crates/mega-evm/tests/rex4/gas_detention.rs)
 
 ### 5. Keyless deploy sandbox external-environment inheritance
 
@@ -101,40 +88,24 @@ Implementation:
 - [crates/mega-evm/src/external/gas.rs](../../crates/mega-evm/src/external/gas.rs)
 - [crates/mega-evm/src/external/oracle.rs](../../crates/mega-evm/src/external/oracle.rs)
 
-Tests:
-- [crates/mega-evm/tests/rex4/keyless_deploy.rs](../../crates/mega-evm/tests/rex4/keyless_deploy.rs)
-
 ## Invariant Mapping
 
-- `I-1`: Legacy behavior compatibility.
-  Coverage:
-  [crates/mega-evm/tests/rex4/gas_detention.rs](../../crates/mega-evm/tests/rex4/gas_detention.rs),
-  [crates/mega-evm/tests/rex3/oracle_gas_limit.rs](../../crates/mega-evm/tests/rex3/oracle_gas_limit.rs),
-  [crates/mega-evm/tests/rex2/keyless_deploy.rs](../../crates/mega-evm/tests/rex2/keyless_deploy.rs).
-- `I-2` and `I-3`: Frame-local revert versus transaction halt.
-  Coverage:
-  [crates/mega-evm/tests/rex4/frame_limits.rs](../../crates/mega-evm/tests/rex4/frame_limits.rs),
-  [crates/mega-evm/tests/rex4/frame_state_growth.rs](../../crates/mega-evm/tests/rex4/frame_state_growth.rs).
-- `I-4`: Monotonic transaction compute usage including reverted frames.
-  Coverage:
-  [crates/mega-evm/tests/rex4/frame_limits.rs](../../crates/mega-evm/tests/rex4/frame_limits.rs).
-- `I-5` and `I-6`: Subtree-local volatile-disable and non-marking of blocked access.
-  Coverage:
-  [crates/mega-evm/tests/rex4/access_control.rs](../../crates/mega-evm/tests/rex4/access_control.rs).
-- `I-7`: Monotonic non-increasing detained limit.
-  Coverage:
-  [crates/mega-evm/src/limit/compute_gas.rs](../../crates/mega-evm/src/limit/compute_gas.rs),
-  [crates/mega-evm/tests/rex4/gas_detention.rs](../../crates/mega-evm/tests/rex4/gas_detention.rs).
-- `I-8`: `remainingComputeGas()` bounded by frame and detained remaining.
-  Coverage:
-  [crates/mega-evm/tests/rex4/limit_control.rs](../../crates/mega-evm/tests/rex4/limit_control.rs).
-- `I-9`: Keyless deploy inheritance plus sandbox cache isolation.
-  Coverage:
-  [crates/mega-evm/src/sandbox/execution.rs](../../crates/mega-evm/src/sandbox/execution.rs),
-  [crates/mega-evm/tests/rex4/keyless_deploy.rs](../../crates/mega-evm/tests/rex4/keyless_deploy.rs).
+- `I-1`: Stable pre-Rex4 semantics unchanged.
+  Implementation: spec-gated branching throughout the codebase.
+- `I-2` and `I-3`: Frame-local exceed reverts the frame; transaction-level exceed halts.
+  Implementation: [crates/mega-evm/src/limit/limit.rs](../../crates/mega-evm/src/limit/limit.rs), per-dimension trackers.
+- `I-4`: Transaction compute usage is monotonic and includes reverted-frame compute usage.
+  Implementation: [crates/mega-evm/src/limit/compute_gas.rs](../../crates/mega-evm/src/limit/compute_gas.rs) (persistent usage model).
+- `I-5` and `I-6`: Volatile-access disable scope is subtree-local and ancestor-owned; blocked access does not update tracking.
+  Implementation: [crates/mega-evm/src/system/control.rs](../../crates/mega-evm/src/system/control.rs), [crates/mega-evm/src/access/tracker.rs](../../crates/mega-evm/src/access/tracker.rs).
+- `I-7`: Transaction detained compute limit is monotonic non-increasing.
+  Implementation: [crates/mega-evm/src/limit/compute_gas.rs](../../crates/mega-evm/src/limit/compute_gas.rs).
+- `I-8`: `remainingComputeGas()` does not exceed either frame-local remaining or transaction-level detained remaining.
+  Implementation: [crates/mega-evm/src/system/limit_control.rs](../../crates/mega-evm/src/system/limit_control.rs).
+- `I-9`: Keyless deploy sandbox inherits parent external-environment semantics while preserving sandbox cache isolation.
+  Implementation: [crates/mega-evm/src/sandbox/execution.rs](../../crates/mega-evm/src/sandbox/execution.rs).
 
 ## Maintenance Notes
 
 Update this mapping when Rex4 semantics change.
 Update this mapping when implementation locations move.
-Update this mapping when new tests are added or existing tests are renamed.

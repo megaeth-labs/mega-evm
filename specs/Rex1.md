@@ -1,87 +1,47 @@
 # Rex1 Specification
 
-## 1. Introduction
+## Abstract
 
-Rex1 is the first patch to the Rex hardfork. It addresses a bug in the compute gas limit handling between transactions within the same block.
+Rex1 is the first patch to the Rex hardfork.
+It fixes a bug where the compute gas limit lowered by volatile data access in one transaction persists to subsequent transactions within the same block.
+All Rex semantics are preserved unless explicitly changed below.
 
-**Key Change:**
+## Changes
 
-- **Compute Gas Limit Reset**: The transaction's compute gas limit is now properly reset between transactions, preventing the lowered limit from volatile data access in one transaction from affecting subsequent transactions.
+### 1. Compute gas limit reset between transactions
 
-## 2. Background
+#### Motivation
 
-### 2.1 The Problem
+When a transaction accesses volatile data (e.g., the oracle contract or block environment fields), the compute gas limit is lowered for that transaction to restrict post-access computation.
+In Rex, this lowered limit persists across transactions executed on the same EVM instance within a block, causing subsequent transactions to fail unexpectedly.
 
-In Rex (and earlier specs), when a transaction accesses volatile data such as the oracle contract, the compute gas limit is lowered to prevent excessive computation after accessing time-sensitive data. For example:
+#### Semantics
 
-- Oracle contract access lowers compute gas limit to 1,000,000 (1M)
-- Block environment access lowers compute gas limit to 20,000,000 (20M)
+Previous behavior:
+- The detained compute gas limit persists across transactions within the same block.
+- A later transaction may inherit a lowered limit from an earlier transaction's volatile data access and halt with `ComputeGasLimitExceeded` even though it never accessed volatile data itself.
 
-However, a bug existed where this lowered limit would persist to subsequent transactions executed on the same EVM instance within a block. This caused unexpected behavior:
+New behavior:
+- The compute gas limit MUST reset to the configured transaction compute gas limit at the start of each transaction.
+- The compute gas usage MUST reset to zero at the start of each transaction.
+- Gas detention from volatile data access MUST be scoped to the transaction that triggered it and MUST NOT affect subsequent transactions.
 
-1. **TX1**: Accesses oracle contract → compute gas limit lowered to 1M
-2. **TX2**: Normal transaction requiring >1M compute gas → **fails unexpectedly**
+## Invariants
 
-TX2 would fail with `ComputeGasLimitExceeded` even though it never accessed any volatile data, because it inherited the lowered limit from TX1.
+- `I-1`: Stable Rex semantics MUST remain unchanged except for the compute gas limit reset.
+- `I-2`: Volatile data access gas detention MUST NOT affect subsequent transactions in the same block.
 
-### 2.2 The Fix
+## Inheritance
 
-Rex1 ensures that the compute gas limit is reset to its original configured value at the start of each transaction. This means:
+Rex1 inherits Rex except for the deltas defined in `Changes`.
+Semantic lineage: `Rex1 -> Rex -> MiniRex -> Optimism Isthmus -> Ethereum Prague`.
 
-1. **TX1**: Accesses oracle contract → compute gas limit lowered to 1M for this transaction only
-2. **TX2**: Starts fresh with full compute gas limit (e.g., 10M) → executes normally
-
-## 3. Specification
-
-### 3.1 Compute Gas Limit Reset
-
-| Spec         | Behavior                                                                      |
-| ------------ | ----------------------------------------------------------------------------- |
-| **Pre-Rex1** | Compute gas limit persists across transactions within the same block          |
-| **Rex1**     | Compute gas limit resets to configured value at the start of each transaction |
-
-In other words, the further restricted compute gas limit after volatile data access is enforced _only_ on the current transaction execution.
-If the transaction has already consumed more than the further restricted compute gas limit before the access, the execution will halt immediately.
-Later transactions in the same block are not affected.
-
-
-### 3.2 What Gets Reset
-
-At the start of each transaction (in the `reset()` method of `AdditionalLimit`), the following are reset when Rex1 is enabled:
-
-- `compute_gas_limit`: Reset to the configured transaction compute gas limit
-- `compute_gas_used`: Reset to 0
-
-### 3.3 What Remains Unchanged
-
-Rex1 does not change any other behavior from Rex:
-
-- Storage gas economics remain the same
-- Transaction intrinsic storage gas remains 39,000
-- Transaction and block limits remain the same
-- DELEGATECALL/STATICCALL behavior remains consistent with Rex
-- All other volatile data access detection and limiting behavior remains the same
-
-## 4. Specification Mapping
-
-The semantics of Rex1 spec are inherited from:
-
-- **Rex1** → **Rex** → **MiniRex** → **Optimism Isthmus** → **Ethereum Prague**
-
-## 5. Implementation References
-
-- Compute gas limit reset: `crates/mega-evm/src/evm/limit.rs` (`AdditionalLimit::reset`) and
-  `crates/mega-evm/src/evm/context.rs` (`MegaContext::on_new_tx`).
-- Inherited gas rules and opcode behavior: `crates/mega-evm/src/evm/execution.rs` and
-  `crates/mega-evm/src/evm/instructions.rs` (see Rex for full behavior).
-- SELFDESTRUCT disabled (inherited from MiniRex): `crates/mega-evm/src/evm/instructions.rs`
-  (`mini_rex::instruction_table`).
-- State merge and touched accounts: `crates/mega-evm/src/evm/state.rs` (`merge_evm_state`,
-  `merge_evm_state_optional_status`).
-
-## 6. References
+## References
 
 - [Rex Specification](Rex.md)
+- [Rex2 Specification](Rex2.md)
 - [MiniRex Specification](MiniRex.md)
+- [Rex1 Behavior Details (Informative)](impl/Rex1-Behavior-Details.md)
+- [Rex1 Implementation References (Informative)](impl/Rex1-Implementation-References.md)
 - [Block and Transaction Limits](../docs/BLOCK_AND_TX_LIMITS.md)
 - [Oracle Service](../docs/ORACLE_SERVICE.md)
