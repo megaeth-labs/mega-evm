@@ -17,7 +17,7 @@ The 1M compute gas cap after oracle access is too restrictive for legitimate use
 #### Semantics
 
 Previous behavior:
-- Oracle access (triggered by CALL to the oracle address) caps compute gas at 1,000,000 (1M).
+- Oracle access (triggered by CALL or STATICCALL to the oracle address) caps compute gas at 1,000,000 (1M).
 
 New behavior:
 - Oracle storage reads (SLOAD from the oracle contract) MUST cap compute gas at 20,000,000 (20M).
@@ -34,7 +34,7 @@ SLOAD-based detection more accurately captures actual oracle data access.
 #### Semantics
 
 Previous behavior:
-- CALL to the oracle contract address triggers gas detention.
+- CALL or STATICCALL to the oracle contract address triggers gas detention.
 
 New behavior:
 - SLOAD from the oracle contract's storage MUST trigger gas detention.
