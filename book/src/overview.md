@@ -1,4 +1,4 @@
-# MegaETH EVM
+# Overview
 
 A specialized Ethereum Virtual Machine (EVM) implementation tailored for [MegaETH](https://megaeth.com), built on top of [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
 

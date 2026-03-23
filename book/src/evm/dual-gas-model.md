@@ -17,12 +17,12 @@ This separation enables independent pricing of computational work versus storage
 | Operation                  | Storage Gas Formula        | Notes                                                 |
 | -------------------------- | -------------------------- | ----------------------------------------------------- |
 | **Transaction Intrinsic**  | 39,000 (flat)              | All transactions pay this base storage gas            |
-| **SSTORE (0 → non-0)**    | 20,000 × (multiplier - 1)  | Only for zero-to-non-zero transitions                 |
+| **SSTORE (0 → non-0)**    | 20,000 × (multiplier - 1)  | When `original == 0 AND present == 0 AND new != 0`   |
 | **Account Creation**       | 25,000 × (multiplier - 1)  | Value transfer to empty account                       |
 | **Contract Creation**      | 32,000 × (multiplier - 1)  | CREATE/CREATE2 opcodes or creation transactions       |
 | **Code Deposit**           | 10,000/byte                | Per byte when contract creation succeeds              |
-| **LOG Topic**              | 3,750/topic                | Per topic, regardless of revert                       |
-| **LOG Data**               | 80/byte                    | Per byte, regardless of revert                        |
+| **LOG Topic**              | 3,750/topic                | Storage gas is permanent regardless of revert         |
+| **LOG Data**               | 80/byte                    | Storage gas is permanent regardless of revert         |
 | **Calldata (zero)**        | 40/byte                    | Per zero byte in transaction input                    |
 | **Calldata (non-zero)**    | 160/byte                   | Per non-zero byte in transaction input                |
 | **Floor (zero)**           | 100/byte                   | EIP-7623 floor cost for zero bytes                    |
@@ -32,6 +32,7 @@ This separation enables independent pricing of computational work versus storage
 
 Storage gas costs scale dynamically based on **SALT bucket capacity**.
 Each account and storage slot maps to a SALT bucket in MegaETH's blockchain state.
+A SALT bucket measures how "crowded" a state region is — the more state entries in a bucket, the larger its capacity grows.
 
 **Formula**: `multiplier = bucket_capacity / MIN_BUCKET_SIZE`
 
@@ -39,6 +40,9 @@ Each account and storage slot maps to a SALT bucket in MegaETH's blockchain stat
 - When `multiplier > 1`: linear scaling based on bucket capacity expansion
 
 This mechanism prevents state bloat by making storage more expensive in crowded state regions.
+
+The SALT bucket capacity depends on on-chain state and cannot be predicted from contract code alone.
+Use `eth_estimateGas` on a MegaETH RPC endpoint for accurate gas estimates — the endpoint accounts for SALT multipliers and all resource dimensions.
 
 ## Transaction Intrinsic Costs
 

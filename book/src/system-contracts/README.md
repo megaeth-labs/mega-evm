@@ -1,9 +1,9 @@
-# System Contracts Overview
+# Overview
 
 MegaETH pre-deploys **system contracts** at well-known addresses.
 They are deployed idempotently during block execution, gated by hardfork activation.
 
-## Contract Registry
+## Registry
 
 | Contract             | Address                                        | Since  | Purpose                               |
 | -------------------- | ---------------------------------------------- | ------ | ------------------------------------- |

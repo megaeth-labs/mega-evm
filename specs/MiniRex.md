@@ -31,7 +31,7 @@ Storage gas MUST be charged for the following operations:
 
 | Operation | Storage Gas | Condition |
 | --- | --- | --- |
-| **SSTORE (0→non-0)** | 2,000,000 × multiplier | Only zero-to-non-zero transitions |
+| **SSTORE (0→non-0)** | 2,000,000 × multiplier | When `original == 0 AND present == 0 AND new != 0` (EIP-2200 terminology) |
 | **Account creation** | 2,000,000 × multiplier | Contract creation or value transfer to empty account |
 | **Code deposit** | 10,000/byte | Per byte when contract creation succeeds |
 | **LOG topic** | 3,750/topic | Per topic, regardless of revert |

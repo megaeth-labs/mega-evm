@@ -1,8 +1,8 @@
-# Network Upgrades
+# Overview
 
 This section documents each MegaETH network upgrade, describing what changed, why, and what developers need to know.
 
-## Upgrade History
+## History
 
 | Upgrade | Key Changes |
 | ------- | ----------- |

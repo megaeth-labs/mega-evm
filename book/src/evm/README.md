@@ -1,4 +1,4 @@
-# Current EVM Standard
+# Overview
 
 This page describes the current MegaETH EVM behavior as a single reference.
 It reflects the latest spec (Rex4) and serves as the starting point for developers building on MegaETH.
@@ -34,12 +34,12 @@ total gas used = compute gas + storage gas
 | Operation                  | Storage Gas Formula         | Notes                                             |
 | -------------------------- | --------------------------- | ------------------------------------------------- |
 | **Transaction intrinsic**  | 39,000 (flat)               | All transactions pay this base storage gas         |
-| **SSTORE (0 → non-0)**    | 20,000 × (multiplier − 1)  | Only for zero-to-non-zero transitions              |
+| **SSTORE (0 → non-0)**    | 20,000 × (multiplier − 1)  | When `original == 0 AND present == 0 AND new != 0` |
 | **Account creation**       | 25,000 × (multiplier − 1)  | Value transfer to empty account                    |
 | **Contract creation**      | 32,000 × (multiplier − 1)  | CREATE/CREATE2 opcodes or creation transactions    |
 | **Code deposit**           | 10,000/byte                 | Per byte when contract creation succeeds           |
-| **LOG topic**              | 3,750/topic                 | Per topic, regardless of revert                    |
-| **LOG data**               | 80/byte                     | Per byte, regardless of revert                     |
+| **LOG topic**              | 3,750/topic                 | Storage gas is permanent regardless of revert; data size usage is rolled back on revert |
+| **LOG data**               | 80/byte                     | Storage gas is permanent regardless of revert; data size usage is rolled back on revert |
 | **Calldata (zero)**        | 40/byte                     | Per zero byte in transaction input                 |
 | **Calldata (non-zero)**    | 160/byte                    | Per non-zero byte in transaction input             |
 | **Floor (zero)**           | 100/byte                    | EIP-7623 floor cost for zero bytes                 |
@@ -54,6 +54,10 @@ Storage gas costs for SSTORE, account creation, and contract creation scale dyna
 - At `multiplier = 1` (minimum bucket size): **zero storage gas** — fresh storage is free.
 - At `multiplier > 1`: linear scaling makes crowded state regions more expensive.
 
+> **Gas estimation**: Use `eth_estimateGas` on a MegaETH RPC endpoint for accurate gas estimates.
+> The endpoint accounts for SALT multipliers, storage gas, and all resource dimensions.
+> Do not attempt to compute gas costs manually — the dynamic multiplier depends on on-chain SALT bucket state.
+
 See [Dual Gas Model](dual-gas-model.md) for details.
 
 ## Multidimensional Resource Limits
@@ -67,8 +71,9 @@ MegaETH enforces four independent post-execution resource limits beyond standard
 | KV updates       | 500,000                  | 500,000         |
 | State growth     | 1,000                    | 1,000           |
 
-When any transaction-level limit is exceeded during execution, the transaction halts with `OutOfGas`.
-Remaining gas is preserved and refunded — not consumed.
+When any transaction-level limit is exceeded during execution, the transaction halts with `OutOfGas` (status=0).
+Gas consumed up to the halt point is charged; remaining gas is refunded to the sender.
+The transaction receipt reflects `gas_used` equal to the gas actually consumed, not `gas_limit`.
 
 ### Per-Frame Resource Budgets
 
@@ -93,6 +98,10 @@ See [Resource Limits](resource-limits.md) and [Resource Accounting](resource-acc
 
 All CALL-like opcodes (CALL, STATICCALL, DELEGATECALL, CALLCODE) and CREATE/CREATE2 forward at most **98/100** of remaining gas to subcalls, replacing the standard EVM's 63/64 rule.
 This prevents call-depth attacks under MegaETH's high gas limits.
+
+> **Migration note**: Contracts that compute gas forwarding amounts assuming the standard 63/64 rule (EIP-150) will see different behavior.
+> The parent frame retains 2% instead of ~1.6%, so subcalls receive slightly less gas.
+> Review any patterns that rely on precise gas forwarding calculations.
 
 ## Gas Detention
 
