@@ -5,8 +5,10 @@
 Mega System Transactions are special transactions used by the MegaETH sequencer to perform state maintenance operations.
 They enable the sequencer to interact with whitelisted system contracts without incurring transaction fees.
 
-> **Scope**: mega-evm defines how these transactions are identified and executed.
-> Whether only the sequencer may admit them to the chain is enforced by components outside this EVM implementation.
+{% hint style="info" %}
+mega-evm defines how these transactions are identified and executed.
+Whether only the sequencer may admit them to the chain is enforced by components outside this EVM implementation.
+{% endhint %}
 
 ## Definition
 

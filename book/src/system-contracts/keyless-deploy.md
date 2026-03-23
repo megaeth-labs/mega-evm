@@ -75,8 +75,10 @@ assert(deployed == 0x4e59b44847b379578588920ca78fbf26c0b4956c);
 3. **Deploy immediately** — Call `keylessDeploy` as soon as possible after funding
 4. **Verify** — Confirm contract exists at expected address
 
-> **Warning**: Do not leave excess funds in the signer address.
-> The `keylessDeploy` call is permissionless — anyone can call it and drain the signer's balance through repeated failed deployments.
+{% hint style="danger" %}
+Do not leave excess funds in the signer address.
+The `keylessDeploy` call is permissionless — anyone can call it and drain the signer's balance through repeated failed deployments.
+{% endhint %}
 
 ## Well-Known Keyless Transactions
 

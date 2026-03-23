@@ -5,7 +5,9 @@
 The MegaETH Oracle Service provides a trust-minimized mechanism for bringing off-chain data on-chain through a sequencer-operated oracle contract.
 Smart contracts can access external information (price feeds, randomness, timestamps, etc.) without relying on third-party oracle providers.
 
-> **Trust Assumption**: Using the built-in oracle service requires trusting the sequencer to publish accurate oracle data on-chain.
+{% hint style="warning" %}
+**Trust Assumption**: Using the built-in oracle service requires trusting the sequencer to publish accurate oracle data on-chain.
+{% endhint %}
 
 ## Contract Details
 

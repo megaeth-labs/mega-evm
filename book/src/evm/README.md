@@ -57,9 +57,11 @@ Storage gas costs for SSTORE, account creation, and contract creation scale dyna
 - At `multiplier = 1` (minimum bucket size): **zero storage gas** — fresh storage is free.
 - At `multiplier > 1`: linear scaling makes crowded state regions more expensive.
 
-> **Gas estimation**: Use `eth_estimateGas` on a MegaETH RPC endpoint for accurate gas estimates.
-> The endpoint accounts for SALT multipliers, storage gas, and all resource dimensions.
-> Do not attempt to compute gas costs manually — the dynamic multiplier depends on on-chain SALT bucket state.
+{% hint style="info" %}
+**Gas estimation**: Use `eth_estimateGas` on a MegaETH RPC endpoint for accurate gas estimates.
+The endpoint accounts for SALT multipliers, storage gas, and all resource dimensions.
+Do not attempt to compute gas costs manually — the dynamic multiplier depends on on-chain SALT bucket state.
+{% endhint %}
 
 See [Dual Gas Model](dual-gas-model.md) for details.
 
@@ -102,9 +104,11 @@ See [Resource Limits](resource-limits.md) and [Resource Accounting](resource-acc
 All CALL-like opcodes (CALL, STATICCALL, DELEGATECALL, CALLCODE) and CREATE/CREATE2 forward at most **98/100** of remaining gas to subcalls, replacing the standard EVM's 63/64 rule.
 This prevents call-depth attacks under MegaETH's high gas limits.
 
-> **Migration note**: Contracts that compute gas forwarding amounts assuming the standard 63/64 rule (EIP-150) will see different behavior.
-> The parent frame retains 2% instead of ~1.6%, so subcalls receive slightly less gas.
-> Review any patterns that rely on precise gas forwarding calculations.
+{% hint style="warning" %}
+**Migration note**: Contracts that compute gas forwarding amounts assuming the standard 63/64 rule (EIP-150) will see different behavior.
+The parent frame retains 2% instead of ~1.6%, so subcalls receive slightly less gas.
+Review any patterns that rely on precise gas forwarding calculations.
+{% endhint %}
 
 ## Gas Detention
 
