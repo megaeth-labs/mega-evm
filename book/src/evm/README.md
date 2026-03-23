@@ -4,7 +4,9 @@ This page describes the current MegaETH EVM behavior as a single reference.
 For incremental changes introduced by each upgrade, see the [Network Upgrades](../upgrades/README.md) section.
 For deep dives on individual topics, see the linked concept pages below.
 
-> **Warning**: This page reflects Rex4, which is currently unstable and subject to change before activation.
+{% hint style="warning" %}
+This page reflects Rex4, which is currently unstable and subject to change before activation.
+{% endhint %}
 
 ## Base Layer
 
