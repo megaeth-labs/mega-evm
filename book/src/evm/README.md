@@ -1,9 +1,10 @@
 # Overview
 
 This page describes the current MegaETH EVM behavior as a single reference.
-It reflects the latest spec (Rex4) and serves as the starting point for developers building on MegaETH.
 For incremental changes introduced by each upgrade, see the [Network Upgrades](../upgrades/README.md) section.
 For deep dives on individual topics, see the linked concept pages below.
+
+> **Warning**: This page reflects Rex4, which is currently unstable and subject to change before activation.
 
 ## Base Layer
 
@@ -149,7 +150,7 @@ See [Gas Detention](gas-detention.md) for details.
 | Max contract   | 524,288 bytes (512 KB)   |
 | Max initcode   | 548,864 bytes (512 KB + 24 KB) |
 
-The contract size limit is 21× larger than standard Ethereum (24 KB); the initcode limit is ~11× larger (48 KB).
+The contract size limit is 21× larger than the standard Ethereum limit (24 KB); the initcode limit is ~11× larger than the standard Ethereum limit (48 KB).
 
 ## System Contracts
 

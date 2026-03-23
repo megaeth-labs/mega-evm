@@ -57,6 +57,18 @@ When any post-execution limit is exceeded during execution:
 - Transaction **fails** (status=0) but is **still included** in the block
 - Failed transactions still count toward block limits
 
+### Frame-Level Violations (Rex4+)
+
+When a call frame exceeds its frame-local budget:
+
+- That frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)` — the transaction does **not** halt
+- The parent frame can continue executing after the child reverts
+- Compute gas consumed by the reverted frame still counts toward the transaction total
+
+Transaction-level limits still apply independently; exceeding them halts the transaction with `OutOfGas`.
+
+See [Resource Accounting](resource-accounting.md) for per-frame budget forwarding details.
+
 ### Block-Level Violations
 
 - The last transaction that causes the block to exceed a limit is **allowed to complete and be included**
