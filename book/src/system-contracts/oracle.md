@@ -59,6 +59,14 @@ interface IOracle {
 }
 ```
 
+## EVM-Level Behaviors
+
+**Forced-cold SLOAD**: All SLOAD operations on the oracle contract use cold access gas cost (2,100 gas) regardless of EIP-2929 warm/cold tracking state.
+This ensures deterministic gas costs during replay.
+
+**`sendHint` interception**: `sendHint` is intercepted at the EVM level before frame execution — the hint is forwarded to the oracle backend via the external oracle environment.
+The call still proceeds to on-chain execution after interception.
+
 ## Gas Detention Impact
 
 Oracle access can trigger [gas detention](../evm/gas-detention.md), but the trigger changes by spec:

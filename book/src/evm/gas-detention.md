@@ -14,8 +14,12 @@ Detained gas is effectively refunded — users only pay for actual computation p
 
 | Category                    | Trigger                                                | Cap           |
 | --------------------------- | ------------------------------------------------------ | ------------- |
-| Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, etc. or beneficiary access | 20M           |
+| Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, PREVRANDAO, BLOCKHASH, BLOBBASEFEE, BLOBHASH, or beneficiary access | 20M           |
 | Oracle                      | SLOAD from oracle contract storage                      | 20M           |
+
+In Rex4, `SELFDESTRUCT` targeting the beneficiary also triggers beneficiary gas detention.
+
+Transactions from `MEGA_SYSTEM_ADDRESS` are exempt from oracle gas detention.
 
 The **most restrictive cap wins** when multiple volatile sources are accessed.
 Cap values above reflect Rex4 (relative semantics).

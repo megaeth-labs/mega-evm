@@ -174,8 +174,10 @@ MegaETH pre-deploys system contracts at well-known addresses:
 
 You can disable volatile data access for your frame and all descendant calls by calling `disableVolatileDataAccess()`.
 While disabled, any volatile access reverts immediately with `VolatileDataAccessDisabled(uint8 accessType)` — no gas detention is triggered.
-A descendant frame cannot re-enable access disabled by an ancestor.
-The restriction ends when the disabling frame returns.
+Call `enableVolatileDataAccess()` to lift the restriction for your frame and descendants.
+Reverts with `DisabledByParent()` if an ancestor frame holds the disable.
+Call `isVolatileDataAccessDisabled()` to query whether volatile data access is currently disabled.
+The restriction automatically ends when the disabling frame returns.
 
 ### MegaLimitControl
 
