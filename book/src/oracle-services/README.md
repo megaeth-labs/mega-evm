@@ -31,7 +31,7 @@ Using oracle data requires trusting the sequencer to provide accurate values.
 
 | Service | Storage Slots | Since | Description |
 | ------- | ------------- | ----- | ----------- |
-| [High-Precision Timestamp](timestamp.md) | 0–7 | [MiniRex](../evm/spec-system.md#mini_rex) | Microsecond-resolution timestamps |
+| [High-Precision Timestamp](timestamp.md) | 0–7 | [MiniRex](../hardfork-spec.md#mini_rex) | Microsecond-resolution timestamps |
 
 ## Reading Oracle Data
 

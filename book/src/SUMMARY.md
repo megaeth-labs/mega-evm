@@ -1,11 +1,11 @@
 # Summary
 
 [Overview](Overview.md)
+[Hardforks and Specs](hardfork-spec.md)
 
 ## MegaEVM
 
 - [Overview](evm/README.md)
-- [Spec System](evm/spec-system.md)
 - [Dual Gas Model](evm/dual-gas-model.md)
 - [Resource Limits](evm/resource-limits.md)
 - [Resource Accounting](evm/resource-accounting.md)

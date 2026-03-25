@@ -1,15 +1,16 @@
-# Overview
+# System Contracts
 
-MegaETH pre-deploys **system contracts** at well-known addresses.
-They are deployed idempotently during block execution, gated by hardfork activation.
+MegaETH pre-deploys **system contracts** at well-known addresses as part of the protocol.
+They provide infrastructure services (oracle storage, keyless deployment, access control) that are available to all smart contracts on the network.
+System contracts are deployed idempotently during block execution, gated by hardfork activation.
 
 ## Registry
 
 | Contract             | Address                                        | Since  | Purpose                               |
 | -------------------- | ---------------------------------------------- | ------ | ------------------------------------- |
-| Oracle               | `0x6342000000000000000000000000000000000001`    | [MiniRex](../evm/spec-system.md#mini_rex) | Off-chain data key-value storage      |
-| High-Precision Timestamp | `0x6342000000000000000000000000000000000002` | [MiniRex](../evm/spec-system.md#mini_rex) | Sub-second block timestamp ([oracle service](../oracle-services/timestamp.md)) |
-| KeylessDeploy        | `0x6342000000000000000000000000000000000003`    | [Rex2](../evm/spec-system.md#rex2)   | Deterministic cross-chain deployment  |
+| Oracle               | `0x6342000000000000000000000000000000000001`    | [MiniRex](../hardfork-spec.md#mini_rex) | Off-chain data key-value storage      |
+| High-Precision Timestamp | `0x6342000000000000000000000000000000000002` | [MiniRex](../hardfork-spec.md#mini_rex) | Sub-second block timestamp ([oracle service](../oracle-services/timestamp.md)) |
+| KeylessDeploy        | `0x6342000000000000000000000000000000000003`    | [Rex2](../hardfork-spec.md#rex2)   | Deterministic cross-chain deployment  |
 
 {% hint style="info" %}
 **Rex4 (unstable): New System Contracts**
@@ -27,7 +28,7 @@ See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
 ### MEGA_SYSTEM_ADDRESS
 
 The `MEGA_SYSTEM_ADDRESS` (`0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`) is a special account intended for sequencer-managed maintenance operations.
-mega-evm processes matching whitelisted transactions from this address as deposit-like transactions, bypassing signature validation and execution-fee charging.
+Whitelisted transactions from this address are processed as deposit-like transactions, bypassing signature validation and execution-fee charging.
 This is how the sequencer updates oracle storage.
 
 See [Mega System Transactions](system-tx.md) for details.

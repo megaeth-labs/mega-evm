@@ -272,4 +272,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
 
 ## Book Documentation Conventions (`book/src/`)
 
+The book is the public-facing specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
+It is framed as a protocol specification, not as documentation for a specific crate.
+
 All conventions for writing and editing the book (audience, content rules, upgrade page format, writing style) are defined in [`book/SITE_DOC_FORMAT.md`](book/SITE_DOC_FORMAT.md).

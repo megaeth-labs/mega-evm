@@ -2,7 +2,7 @@
 
 The High-Precision Timestamp oracle service provides **microsecond-resolution timestamps** to smart contracts, far exceeding the second-precision `block.timestamp` available in standard EVM.
 
-**Available since**: [MiniRex](../evm/spec-system.md#mini_rex)
+**Available since**: [MiniRex](../hardfork-spec.md#mini_rex)
 
 ## Why Sub-Second Timestamps?
 

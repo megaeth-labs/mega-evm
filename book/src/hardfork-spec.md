@@ -1,17 +1,21 @@
-# Spec System
+# Hardforks and Specs
 
-MegaEVM uses a **spec system** (`MegaSpecId`) to define EVM behavior at each stage of the protocol's evolution.
+MegaETH versions MegaEVM behavior through **hardforks** and **specs**.
+This page defines both concepts and summarizes what each spec introduces.
 
-## Spec vs Hardfork
+## Hardfork vs Spec
 
-The codebase distinguishes between two related concepts:
+The protocol distinguishes between two related concepts:
 
-- **[Spec (`MegaSpecId`)](../glossary.md#spec-megaspecid)** — Defines EVM behavior: *what* the EVM does.
-- **[Hardfork (`MegaHardfork`)](../glossary.md#hardfork-megahardfork)** — Defines network upgrade events: *when* specs are activated.
+- **[Hardfork](../glossary.md#hardfork-megahardfork)** — A network upgrade event: *when* changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior). Represented as `MegaHardfork` in the reference implementation.
+- **[Spec](../glossary.md#spec-megaspecid)** — A set of MegaEVM behaviors: *what* the EVM does. A spec captures only the execution-layer semantics. Represented as `MegaSpecId` in the reference implementation.
 
 Multiple hardforks can map to the same spec.
 A hardfork can also map to an older spec.
 For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
+
+This book documents specs (MegaEVM behavior).
+Protocol-level changes outside MegaEVM that are part of a hardfork are not covered here.
 
 ## Spec Progression
 
@@ -20,20 +24,20 @@ EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 (unstable)
 ```
 
 Each newer spec includes all previous behaviors.
-All specs use `OpSpecId::ISTHMUS` as the Optimism base layer.
+All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
 The latest spec (currently REX4) may be marked **unstable**, meaning its semantics can still change before network activation.
 
 ### Backward Compatibility
 
 EVM semantics for stable (activated) specs are frozen.
 A new spec may add behavior or change the unstable spec, but it never alters what an existing stable spec does.
-Every patch spec carries the invariant: "Stable pre-{Spec} semantics MUST remain unchanged."
+Every spec carries the invariant: "Stable pre-{Spec} semantics MUST remain unchanged."
 
 This means:
 - Contracts deployed under a given spec will continue to behave identically after future upgrades.
 - Adding or modifying a system contract requires introducing a new spec.
 - Changing gas costs, opcode behavior, or resource limits requires a new spec.
-- Code should use `spec.is_enabled(MegaSpecId::X)` to gate spec-specific behavior.
+- Implementations should gate spec-specific behavior on the active spec (e.g., `spec.is_enabled(MINI_REX)`).
 
 ## Spec Summary
 

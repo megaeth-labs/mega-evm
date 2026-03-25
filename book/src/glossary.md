@@ -56,9 +56,11 @@ The parent call frame can continue executing.
 Distinct from a transaction-level exceed, which **halts** the entire transaction.
 Per-call-frame resource budgets are introduced in Rex4.
 
-**Spec (`MegaSpecId`)** — Defines MegaEVM behavior: what the EVM does at a given stage.
+**Spec (`MegaSpecId`)** — A set of MegaEVM behaviors: what the EVM does at a given stage.
+Captures only execution-layer semantics.
 Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4`.
-See [spec system](evm/spec-system.md).
+See [Hardforks and Specs](hardfork-spec.md).
 
-**Hardfork (`MegaHardfork`)** — Defines a network upgrade event: when a spec is activated.
+**Hardfork (`MegaHardfork`)** — A network upgrade event: when changes are activated on the chain.
+A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior).
 Multiple hardforks can map to the same spec (e.g., MiniRex1 → EQUIVALENCE, MiniRex2 → MINI_REX).

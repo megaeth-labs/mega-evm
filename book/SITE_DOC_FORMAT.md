@@ -1,12 +1,13 @@
 # Book Documentation Guide
 
 This file defines conventions and rules for writing and editing the public-facing book (`book/src/`), hosted via GitBook.
+The book is the specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
 
 ## Audience
 
 The book serves two audiences:
 
-1. **App builders** — need to understand current EVM behavior to develop and optimize dApps.
+1. **App builders** — need to understand current MegaEVM behavior to develop and optimize dApps.
 2. **Node builders** — need unambiguous behavioral details and the full history of changes across specs.
 
 ### Audience routing by section
@@ -14,9 +15,9 @@ The book serves two audiences:
 | Section | Primary audience | Purpose |
 |---|---|---|
 | `Overview.md` | Both | Landing page — motivation, audience routing, spec progression |
-| `evm/README.md` | App builders | Quick reference for current EVM behavior (latest stable spec) |
-| `evm/*.md` (concept pages) | Node builders | Detailed mechanics of specific EVM features |
-| `evm/spec-system.md` | Node builders | Spec vs hardfork definitions, full progression, links to upgrade pages |
+| `evm/README.md` | App builders | Quick reference for current MegaEVM behavior (latest stable spec) |
+| `evm/*.md` (concept pages) | Node builders | Detailed mechanics of specific MegaEVM features |
+| `hardfork-spec.md` | Node builders | Hardfork vs spec definitions, full progression, links to upgrade pages |
 | `system-contracts/` | App builders | How to use system contracts (interfaces, addresses, examples) |
 | `oracle-services/` | App builders | How to use oracle-backed services (interfaces, code examples) |
 | `upgrades/` | Node builders | What changed per spec, previous vs new behavior, compatibility boundaries |
@@ -44,12 +45,12 @@ Readability is important but must never compromise accuracy.
 ### Spec versioning
 
 - **Main content describes the latest stable spec only.**
-  Pages outside of `upgrades/` and `evm/spec-system.md` must present only the behavior of the latest stable (activated) spec in their main content.
+  Pages outside of `upgrades/` and `hardfork-spec.md` must present only the behavior of the latest stable (activated) spec in their main content.
   Unstable spec behavior should be placed in a GitBook info hint box (e.g., `{% hint style="info" %}**Rex4 (unstable): ...**{% endhint %}`), not in the main prose or tables.
   Previous stable spec behavior (e.g., MiniRex values superseded by Rex) should also not appear in the main content — it belongs in the corresponding upgrade page under `upgrades/`.
   Each upgrade page must include "Previous behavior" for every changed behavior, so readers can deduce the full history by reading upgrade pages in sequence.
 - **State backward compatibility explicitly.**
-  The guarantee that stable specs are frozen must appear in the Overview, the Spec System page, and each upgrade page.
+  The guarantee that stable specs are frozen must appear in the Overview, the Hardforks and Specs page, and each upgrade page.
 - **Mark the unstable spec explicitly everywhere it appears.**
   The unstable spec must be labeled in the spec progression diagram, the spec summary list, the spec's heading, and with a GitBook warning hint.
   When a new spec is introduced or the unstable spec is stabilized, update all these locations.
@@ -71,9 +72,9 @@ Readability is important but must never compromise accuracy.
   Do not over-link — subsequent uses on the same page should not be linked.
 - **Link common concepts to the glossary.**
   References to common concepts (e.g., call frame, compute gas, storage gas, volatile data, SALT bucket, multiplier, beneficiary, detained limit) should link to their glossary entry on first use per page.
-- **Link spec names to spec-system.md.**
-  Whenever a spec is mentioned by name (e.g., MiniRex, Rex, Rex3), link it to the corresponding section heading in `evm/spec-system.md`.
-  Each spec section in `spec-system.md` should in turn link to its upgrade page under `upgrades/`.
+- **Link spec names to hardfork-spec.md.**
+  Whenever a spec is mentioned by name (e.g., MiniRex, Rex, Rex3), link it to the corresponding section heading in `hardfork-spec.md`.
+  Each spec section in `hardfork-spec.md` should in turn link to its upgrade page under `upgrades/`.
 
 ### Style
 
@@ -109,8 +110,8 @@ Overview pages orient the reader before diving into details.
 
 **Top-level `Overview.md` additionally includes:**
 
-- Motivation (why a modified EVM)
-- EVM version table
+- Motivation (why MegaETH differs from standard Ethereum)
+- Reference implementation version table
 - Spec progression with backward-compatibility notice and unstable spec warning
 
 **Do not** use an overview page as a pure reference card — provide a brief orientation before tables and details.
@@ -137,7 +138,7 @@ This template applies to `evm/*.md` concept pages, `system-contracts/*.md` pages
 
 **Each system contract must have its own dedicated page** under `system-contracts/` with the contract interface, usage guidance, and deployment history.
 
-### Spec system page (`evm/spec-system.md`)
+### Hardforks and Specs page (`hardfork-spec.md`)
 
 This page is the central reference for spec and hardfork definitions.
 

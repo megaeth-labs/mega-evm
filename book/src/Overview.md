@@ -1,8 +1,13 @@
 # Overview
 
-MegaEVM is a specialized Ethereum Virtual Machine built on [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm) for the [MegaETH](https://megaeth.com) network.
+This book is the specification for the [MegaETH](https://megaeth.com) blockchain's execution layer.
+It covers everything that differs from standard Ethereum and Optimism: the EVM modifications, system contracts, oracle services, resource metering, and the upgrade history that defines how these features evolved.
 
-## Why a Modified EVM?
+The reference implementation is [MegaEVM](https://github.com/megaeth-labs/mega-evm), built on [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
+All standard EVM semantics are inherited from Optimism Isthmus (Ethereum Prague) unless explicitly overridden.
+Contracts that don't touch MegaETH-specific features behave identically to Optimism.
+
+## Why MegaETH Differs from Standard Ethereum
 
 MegaETH is designed for real-time performance: sub-millisecond block times, extremely low base fees, and transaction gas limits far higher than Ethereum's.
 These properties break assumptions that standard EVM gas pricing relies on.
@@ -11,39 +16,38 @@ Under standard EVM rules, MegaETH's low fees and high gas limits would make stor
 A single transaction could bloat on-chain state or history data for nearly free.
 At the same time, MegaETH's parallel transaction execution requires mechanisms to detect and limit conflicts between concurrently executing transactions that read shared data.
 
-MegaEVM solves these problems with a targeted set of modifications on top of Optimism Isthmus (Ethereum Prague):
+MegaETH addresses these problems with a targeted set of protocol-level modifications:
 
 - **[Dual Gas Model](evm/dual-gas-model.md)** — Adds a [storage gas](glossary.md#storage-gas) dimension on top of standard [compute gas](glossary.md#compute-gas), so state-heavy operations pay their true cost even when base fees are low.
 - **[Multidimensional Resource Limits](evm/resource-limits.md)** — Enforces four independent per-transaction limits (compute gas, data size, KV updates, state growth) beyond the standard gas limit, preventing any single resource from being exhausted by a single transaction.
 - **[Gas Detention](evm/gas-detention.md)** — Caps remaining compute gas after a transaction reads [volatile data](glossary.md#volatile-data) (block environment, oracle storage), forcing such transactions to terminate quickly and reducing parallel execution conflicts.
 - **[Dynamic Gas Costs](evm/dual-gas-model.md#dynamic-salt-multiplier)** — Scales storage gas based on [SALT bucket](glossary.md#salt-bucket) capacity, making writes to crowded state regions progressively more expensive while keeping fresh storage free.
-- **[System Contracts](system-contracts/README.md)** — Pre-deployed contracts providing oracle services, high-precision timestamps, keyless deployment, and runtime access/limit control.
-
-All standard EVM semantics are inherited unless explicitly overridden.
-Contracts that don't touch MegaETH-specific features (storage-heavy patterns, volatile data, system contracts) behave identically to Optimism.
+- **[System Contracts](system-contracts/README.md)** — Pre-deployed protocol contracts providing oracle storage, high-precision timestamps, keyless deployment, and runtime access/limit control.
+- **[Oracle Services](oracle-services/README.md)** — Sequencer-operated data feeds (timestamps, price feeds) built on the Oracle system contract.
 
 ## How to Use This Book
 
 This book serves two audiences:
 
 **App builders** — developers building smart contracts and dApps on MegaETH.
-Start with the [EVM Overview](evm/README.md) for a complete reference of current behavior, then check the [System Contracts](system-contracts/README.md) for available infrastructure.
+Start with the [MegaEVM Overview](evm/README.md) for a complete reference of current behavior, then check the [System Contracts](system-contracts/README.md) and [Oracle Services](oracle-services/README.md) for available infrastructure.
 You primarily need to understand how gas costs differ and what resource limits apply to your transactions.
 
 **Node builders** — teams implementing MegaETH-compatible execution clients.
-Start with the [Spec System](evm/spec-system.md) to understand how behavior is versioned, then read each [Network Upgrade](upgrades/README.md) page for the exact behavioral deltas introduced at each spec.
+Start with [Hardforks and Specs](hardfork-spec.md) to understand how behavior is versioned, then read each [Network Upgrade](upgrades/README.md) page for the exact behavioral deltas introduced at each spec.
 
-## EVM Version
+## Reference Implementation
 
 | Component        | Version                                                          |
 | ---------------- | ---------------------------------------------------------------- |
-| **EVM**     | [revm v27.1.0](https://github.com/bluealloy/revm)               |
+| **MegaEVM**      | [mega-evm](https://github.com/megaeth-labs/mega-evm)            |
+| **Base EVM**     | [revm v27.1.0](https://github.com/bluealloy/revm)               |
 | **Optimism EVM** | [op-revm v8.1.0](https://github.com/bluealloy/op-revm)          |
 | **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/evm)            |
 
 ## Spec Progression
 
-MegaEVM uses a spec system (`MegaSpecId`) that defines EVM behavior at each stage.
+MegaETH uses a spec system to version MegaEVM behavior at each stage of the protocol's evolution.
 Each newer spec includes all previous behaviors:
 
 ```
@@ -69,4 +73,4 @@ Rex4 is the current unstable specification and is subject to change before activ
 {% endhint %}
 
 
-See [Spec System](evm/spec-system.md) for the full spec-vs-hardfork distinction and details.
+See [Hardforks and Specs](hardfork-spec.md) for full details.

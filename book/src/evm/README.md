@@ -1,6 +1,6 @@
 # Overview
 
-This page describes the current stable MegaEVM behavior (through [Rex3](spec-system.md#rex3)) as a single reference.
+This page describes the current stable MegaEVM behavior (through [Rex3](../hardfork-spec.md#rex3)) as a single reference.
 For incremental changes introduced by each upgrade, see the [Network Upgrades](../upgrades/README.md) section.
 For deep dives on individual topics, see the linked concept pages below.
 
@@ -159,9 +159,9 @@ MegaETH pre-deploys system contracts at well-known addresses:
 
 | Contract                 | Address                                         | Since   | Purpose                                             |
 | ------------------------ | ----------------------------------------------- | ------- | --------------------------------------------------- |
-| [Oracle](../system-contracts/oracle.md) | `0x634200...0001` | [MiniRex](spec-system.md#mini_rex) | Off-chain data key-value storage with hint support   |
-| [High-Precision Timestamp](../oracle-services/timestamp.md) | `0x634200...0002` | [MiniRex](spec-system.md#mini_rex) | Sub-second timestamps ([oracle service](../oracle-services/README.md)) |
-| [KeylessDeploy](../system-contracts/keyless-deploy.md) | `0x634200...0003` | [Rex2](spec-system.md#rex2) | Deterministic cross-chain deployment (Nick's Method) |
+| [Oracle](../system-contracts/oracle.md) | `0x634200...0001` | [MiniRex](../hardfork-spec.md#mini_rex) | Off-chain data key-value storage with hint support   |
+| [High-Precision Timestamp](../oracle-services/timestamp.md) | `0x634200...0002` | [MiniRex](../hardfork-spec.md#mini_rex) | Sub-second timestamps ([oracle service](../oracle-services/README.md)) |
+| [KeylessDeploy](../system-contracts/keyless-deploy.md) | `0x634200...0003` | [Rex2](../hardfork-spec.md#rex2) | Deterministic cross-chain deployment (Nick's Method) |
 
 {% hint style="info" %}
 **Rex4 (unstable): New System Contracts**
@@ -196,7 +196,7 @@ See [System Contracts Overview](../system-contracts/README.md) for the full regi
 
 | Topic | Description |
 | ----- | ----------- |
-| [Spec System](spec-system.md) | How MegaETH versions EVM behavior through a linear spec progression |
+| [Hardforks and Specs](../hardfork-spec.md) | How MegaETH versions MegaEVM behavior through hardforks and a linear spec progression |
 | [Dual Gas Model](dual-gas-model.md) | Compute gas vs storage gas formulas and SALT mechanics |
 | [Resource Limits](resource-limits.md) | Transaction and block limit values, two-phase checking, enforcement |
 | [Resource Accounting](resource-accounting.md) | How each resource dimension is tracked during execution |

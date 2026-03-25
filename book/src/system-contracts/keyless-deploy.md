@@ -6,7 +6,7 @@
 
 **Address**: `0x6342000000000000000000000000000000000003`
 
-**Available**: [Rex2](../evm/spec-system.md#rex2) hardfork onwards
+**Available**: [Rex2](../hardfork-spec.md#rex2) hardfork onwards
 
 ## The Problem
 

@@ -23,7 +23,7 @@ Using oracle services requires trusting the sequencer to provide accurate values
 - **Simple storage model** — Direct access to storage slots via `uint256` keys
 - **Restricted writes** — Only `MEGA_SYSTEM_ADDRESS` can write oracle data
 - **Public reads** — Anyone can read oracle data
-- **Versioned bytecode** — Pre-[Rex2](../evm/spec-system.md#rex2) deploys Oracle v1.0.0, and Rex2+ deploys Oracle v1.1.0 with `sendHint`
+- **Versioned bytecode** — Pre-[Rex2](../hardfork-spec.md#rex2) deploys Oracle v1.0.0, and Rex2+ deploys Oracle v1.1.0 with `sendHint`
 
 ## Interface
 
