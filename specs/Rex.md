@@ -44,7 +44,8 @@ Applied when:
 
 - Value transfer to non-existent account
 - CALL or CALLCODE with non-zero value to empty account (EIP-161)
-- Contract creation uses separate cost (see 2.2.3)
+
+Contract creation does not charge account creation storage gas; it has its own cost (see 2.2.3).
 
 #### 2.2.3 Contract Creation Storage Gas
 
@@ -58,10 +59,8 @@ Applied when:
 - CREATE or CREATE2 opcode
 - Contract creation transaction
 
-Contract creation pays both:
-
-1. Contract creation storage gas: `32,000 × (multiplier - 1)`
-2. Account creation storage gas: `25,000 × (multiplier - 1)` (if new account)
+Contract creation storage gas already subsumes account creation cost.
+Account creation storage gas does not apply to contract creation.
 
 #### 2.2.4 Storage Gas Summary
 
