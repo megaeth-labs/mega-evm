@@ -130,6 +130,7 @@ This distinction ensures the signer can be charged for gas even when deployment 
 | `InsufficientBalance()`                        | Signer lacks funds                                                     |
 | `ContractAlreadyExists()`                      | Address already has code                                               |
 | `GasLimitTooLow(txGasLimit, providedGasLimit)` | Override < transaction's limit                                         |
+| `InsufficientComputeGas(limit, used)`          | Remaining compute gas insufficient for keyless deploy overhead (Rex3+) |
 | `NotIntercepted()`                             | Called from contract (not top-level)                                   |
 | `NoContractCreated()`                          | Defensive: EVM bug (see [Implementation Notes](#implementation-notes)) |
 | `AddressMismatch()`                            | Defensive: EVM bug (see [Implementation Notes](#implementation-notes)) |

@@ -18,7 +18,8 @@ At minimum bucket size, `multiplier = 1` and all dynamic storage gas costs are z
 SSTORE storage gas applies only to zero-to-non-zero transitions (`0 == original_value == current_value != new_value`).
 Writes that update an existing non-zero value or clear a value to zero do not incur dynamic storage gas.
 
-Contract creation (via CREATE, CREATE2, or contract creation transaction) pays the contract creation base (`32,000 × (multiplier - 1)`) plus, if the target account is new, the account creation base (`25,000 × (multiplier - 1)`).
+Contract creation (via CREATE, CREATE2, or contract creation transaction) pays only the contract creation base (`32,000 × (multiplier - 1)`).
+Contract creation storage gas subsumes account creation cost; account creation storage gas does not apply to contract creation.
 
 Operations whose storage gas is unchanged from MiniRex:
 

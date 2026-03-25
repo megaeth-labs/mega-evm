@@ -41,7 +41,7 @@ A new **state growth** resource dimension is introduced with per-transaction and
 - Account creation: `25,000 × (multiplier − 1)`
 - Contract creation: `32,000 × (multiplier − 1)`
 - At `multiplier = 1` (minimum bucket size), all three operations cost **zero storage gas**.
-- Contract creation of a new account pays both contract creation gas and account creation gas.
+- Contract creation storage gas subsumes account creation cost; account creation storage gas does not apply to contract creation.
 - All other storage gas operations (code deposit, LOG, calldata) remain unchanged from MiniRex.
 
 #### Example

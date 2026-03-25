@@ -56,7 +56,7 @@ Implementation:
 - [crates/mega-evm/src/access/volatile.rs](../../crates/mega-evm/src/access/volatile.rs) (`VolatileDataAccess` — bitflag structure for access types)
 - [crates/mega-evm/src/evm/host.rs](../../crates/mega-evm/src/evm/host.rs) (block env access marking, oracle SLOAD forced cold)
 - [crates/mega-evm/src/evm/execution.rs](../../crates/mega-evm/src/evm/execution.rs) (`frame_init` — CALL-based oracle detection, MEGA_SYSTEM_ADDRESS exemption)
-- [crates/mega-evm/src/evm/instructions.rs](../../crates/mega-evm/src/evm/instructions.rs) (`volatile_data_ext` — block env and beneficiary opcode wrappers, `compute_gas_ext` — gas cap enforcement after volatile access)
+- [crates/mega-evm/src/evm/instructions.rs](../../crates/mega-evm/src/evm/instructions.rs) (`volatile_data_ext` — block env and beneficiary opcode wrappers with gas cap enforcement after volatile access, `compute_gas_ext` — compute gas usage tracking)
 - [crates/mega-evm/src/constants.rs](../../crates/mega-evm/src/constants.rs) (`mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS` = 20M, `mini_rex::ORACLE_ACCESS_COMPUTE_GAS` = 1M)
 
 ### 4. Modified gas forwarding (98/100 rule)

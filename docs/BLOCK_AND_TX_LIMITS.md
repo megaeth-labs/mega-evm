@@ -234,7 +234,7 @@ The REX specification is the production-ready hardfork with higher transaction-l
 
 **Key differences from MINI_REX:**
 
-- Higher compute gas limit per transaction (200M vs 1B)
+- Lower compute gas limit per transaction (200M vs 1B)
 - Transaction-level data and KV update limits match block limits (allows single large transaction)
 - Introduces state growth limits to track net new storage slots created
 - Uses a new dynamic storage gas model with SALT bucket capacity scaling
@@ -270,7 +270,7 @@ All other limits remain the same as REX.
 
 ### 2. Failed Transactions Are Included
 
-Failed transactions (that exceed tx-level limits 4-6) are still included in blocks because:
+Failed transactions (that exceed tx-level limits 4-7) are still included in blocks because:
 
 - They consumed computational resources during execution
 - Including them ensures attackers pay for wasted resources
@@ -386,7 +386,7 @@ Track these metrics for block construction optimization:
 
 The MegaEVM limit system provides a robust framework for resource management:
 
-1. **Six limit types** cover all critical resources
+1. **Seven limit types** cover all critical resources
 2. **Two-level enforcement** distinguishes between invalid transactions and capacity issues
 3. **Two-phase checking** optimizes performance while ensuring accuracy
 4. **Failed transactions are included** to ensure resource accountability

@@ -200,7 +200,7 @@ MegaETH requires pre-deployed system contracts for oracle services and high-prec
 - `I-3`: Transaction halted by a resource limit MUST preserve remaining gas for refund.
 - `I-4`: When multiple volatile data categories are accessed, the most restrictive cap MUST apply.
 - `I-5`: SLOAD on the oracle contract MUST always use cold access cost (2100 gas).
-- `I-6`: Subcalls MUST receive at most 98/100 of remaining gas.
+- `I-6`: Subcalls via CALL, CREATE, and CREATE2 MUST receive at most 98/100 of remaining gas (CALLCODE, DELEGATECALL, and STATICCALL use standard 63/64 forwarding in MiniRex).
 
 ## References
 
