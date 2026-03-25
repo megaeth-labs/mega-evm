@@ -5,10 +5,10 @@
 MegaETH enforces resource limits across multiple dimensions, checked in two phases.
 Four of these are MegaETH-specific post-execution limits that go beyond standard EVM gas:
 
-1. **[Compute Gas](../glossary.md#compute-gas)** — Computational opcode cost
-2. **Data Size** — Calldata + logs + storage writes + code deploy + account updates
-3. **KV Updates** — Storage writes + account modifications (net, with refunds)
-4. **State Growth** — Net new accounts + net new storage slots
+1. **[Compute Gas](resource-accounting.md#compute-gas)** — Computational opcode cost
+2. **[Data Size](resource-accounting.md#data-size)** — Calldata + logs + storage writes + code deploy + account updates
+3. **[KV Updates](resource-accounting.md#kv-updates)** — Storage writes + account modifications (net, with refunds)
+4. **[State Growth](resource-accounting.md#state-growth)** — Net new accounts + net new storage slots
 
 ## Limit Values
 
