@@ -9,7 +9,7 @@ For the full normative definition, see the MiniRex spec in the mega-evm reposito
 
 ## Summary
 
-MiniRex is the foundational MegaETH EVM spec, building on Optimism Isthmus (Ethereum Prague).
+MiniRex is the foundational MegaEVM spec, building on Optimism Isthmus (Ethereum Prague).
 It introduces a **dual gas model** that separates compute gas from storage gas, enabling independent pricing of computational work versus storage burden.
 This is critical because MegaETH's extremely low base fees and high gas limits would otherwise make storage operations dramatically underpriced.
 
@@ -59,7 +59,7 @@ Storage gas schedule:
 | KV updates       | 125,000                   | 500,000         |
 
 - When any limit is exceeded, the transaction halts with `OutOfGas` and remaining gas is preserved for refund.
-- All trackers are frame-aware: reverted inner calls discard their tracked usage (except compute gas, which is never reverted).
+- All trackers are call-frame-aware: reverted inner calls discard their tracked usage (except compute gas, which is never reverted).
 
 ### Gas Detention (Volatile Data Access Control)
 

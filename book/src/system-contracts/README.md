@@ -7,11 +7,20 @@ They are deployed idempotently during block execution, gated by hardfork activat
 
 | Contract             | Address                                        | Since  | Purpose                               |
 | -------------------- | ---------------------------------------------- | ------ | ------------------------------------- |
-| Oracle               | `0x6342000000000000000000000000000000000001`    | MiniRex | Off-chain data key-value storage      |
-| High-Precision Timestamp | `0x6342000000000000000000000000000000000002` | MiniRex | Sub-second block timestamp            |
-| KeylessDeploy        | `0x6342000000000000000000000000000000000003`    | Rex2   | Deterministic cross-chain deployment  |
-| MegaAccessControl    | `0x6342000000000000000000000000000000000004`    | Rex4   | Disable volatile data access detection |
-| MegaLimitControl     | `0x6342000000000000000000000000000000000005`    | Rex4   | Query remaining compute gas budget    |
+| Oracle               | `0x6342000000000000000000000000000000000001`    | [MiniRex](../evm/spec-system.md#mini_rex) | Off-chain data key-value storage      |
+| High-Precision Timestamp | `0x6342000000000000000000000000000000000002` | [MiniRex](../evm/spec-system.md#mini_rex) | Sub-second block timestamp ([oracle service](../oracle-services/timestamp.md)) |
+| KeylessDeploy        | `0x6342000000000000000000000000000000000003`    | [Rex2](../evm/spec-system.md#rex2)   | Deterministic cross-chain deployment  |
+
+{% hint style="info" %}
+**Rex4 (unstable): New System Contracts**
+
+| Contract          | Address                                        | Purpose                               |
+| ----------------- | ---------------------------------------------- | ------------------------------------- |
+| MegaAccessControl | `0x6342000000000000000000000000000000000004`    | Disable [volatile data](../glossary.md#volatile-data) access detection |
+| MegaLimitControl  | `0x6342000000000000000000000000000000000005`    | Query remaining [compute gas](../glossary.md#compute-gas) budget    |
+
+See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+{% endhint %}
 
 ## Key Design Aspects
 
@@ -31,5 +40,5 @@ This ensures that the behavior of existing specs is preserved across upgrades.
 ### Interceptor Pattern
 
 Some system contracts use Rust-level **interceptors** for performance-critical paths.
-KeylessDeploy, MegaAccessControl, and MegaLimitControl rely on intercepted selectors, and unsupported calls fall through to on-chain bytecode that reverts with `NotIntercepted()`.
+KeylessDeploy relies on intercepted selectors, and unsupported calls fall through to on-chain bytecode that reverts with `NotIntercepted()`.
 The Oracle contract also has intercepted behavior for `sendHint`, while its other methods execute via deployed bytecode.

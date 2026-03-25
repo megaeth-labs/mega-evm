@@ -5,30 +5,21 @@
 MegaETH enforces resource limits across multiple dimensions, checked in two phases.
 Four of these are MegaETH-specific post-execution limits that go beyond standard EVM gas:
 
-1. **Compute Gas** — Computational opcode cost
+1. **[Compute Gas](../glossary.md#compute-gas)** — Computational opcode cost
 2. **Data Size** — Calldata + logs + storage writes + code deploy + account updates
 3. **KV Updates** — Storage writes + account modifications (net, with refunds)
 4. **State Growth** — Net new accounts + net new storage slots
 
 ## Limit Values
 
-### Rex Configuration (Production)
-
 | Resource         | Transaction Limit        | Block Limit     |
 | ---------------- | ------------------------ | --------------- |
-| Compute Gas      | 200,000,000 (200M)      | —               |
+| Compute Gas      | 200,000,000 (200M)      | Unlimited       |
 | Data Size        | 13,107,200 (12.5 MB)    | 13,107,200      |
 | KV Updates       | 500,000                  | 500,000         |
 | State Growth     | 1,000                    | 1,000           |
 
-### MiniRex Configuration
-
-| Resource         | Transaction Limit         | Block Limit     |
-| ---------------- | ------------------------- | --------------- |
-| Compute Gas      | 1,000,000,000 (1B)       | —               |
-| Data Size        | 3,276,800 (3.125 MB)     | 13,107,200      |
-| KV Updates       | 125,000                   | 500,000         |
-| State Growth     | —                         | —               |
+For previous limit values (MiniRex configuration), see the [MiniRex](../upgrades/minirex.md) upgrade page.
 
 ## Two-Phase Checking
 
@@ -40,7 +31,7 @@ Checked before transaction execution:
 - **Transaction Size** — Encoded transaction size
 - **DA Size** — Data availability size (deposit transactions exempt)
 
-### Phase 2: Post-Execution (Precise Enforcement)
+### Phase 2: Runtime Enforcement (Precise)
 
 Checked during and after execution:
 
@@ -57,17 +48,13 @@ When any post-execution limit is exceeded during execution:
 - Transaction **fails** (status=0) but is **still included** in the block
 - Failed transactions still count toward block limits
 
-### Frame-Level Violations (Rex4+)
-
-When a call frame exceeds its frame-local budget:
-
-- That frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)` — the transaction does **not** halt
-- The parent frame can continue executing after the child reverts
-- Compute gas consumed by the reverted frame still counts toward the transaction total
-
-Transaction-level limits still apply independently; exceeding them halts the transaction with `OutOfGas`.
-
-See [Resource Accounting](resource-accounting.md) for per-frame budget forwarding details.
+{% hint style="info" %}
+**Rex4 (unstable): Call-Frame-Level Violations** — Rex4 adds per-call-frame resource budgets.
+Each inner call frame receives `remaining × 98/100` of its parent's remaining budget.
+When a call frame exceeds its local budget, it **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)` — the parent does **not** halt.
+The parent can continue executing; compute gas consumed by reverted frames still counts toward the transaction total.
+See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+{% endhint %}
 
 ### Block-Level Violations
 

@@ -1,16 +1,17 @@
 # Overview
 
-This page describes the current MegaETH EVM behavior as a single reference.
+This page describes the current stable MegaEVM behavior (through [Rex3](spec-system.md#rex3)) as a single reference.
 For incremental changes introduced by each upgrade, see the [Network Upgrades](../upgrades/README.md) section.
 For deep dives on individual topics, see the linked concept pages below.
 
-{% hint style="warning" %}
-This page reflects Rex4, which is currently unstable and subject to change before activation.
+{% hint style="info" %}
+Rex4 features are shown in highlighted boxes throughout this page but are not yet active on the network.
+See [Rex4 Network Upgrade](../upgrades/rex4.md) for the full unstable spec.
 {% endhint %}
 
 ## Base Layer
 
-MegaETH EVM builds on Optimism Isthmus (Ethereum Prague).
+MegaEVM builds on Optimism Isthmus (Ethereum Prague).
 All standard EVM semantics are inherited unless explicitly overridden.
 
 ## Dual Gas Model
@@ -21,8 +22,8 @@ Every transaction's total gas cost is the sum of two independent components:
 total gas used = compute gas + storage gas
 ```
 
-- **Compute gas** — Standard Optimism EVM (Isthmus) gas costs for all opcodes and operations.
-- **Storage gas** — Additional costs for operations that impose persistent storage burden on nodes.
+- **[Compute gas](../glossary.md#compute-gas)** — Standard Optimism EVM (Isthmus) gas costs for all opcodes and operations.
+- **[Storage gas](../glossary.md#storage-gas)** — Additional costs for operations that impose persistent storage burden on nodes.
 
 ### Transaction Intrinsic Costs
 
@@ -43,16 +44,16 @@ total gas used = compute gas + storage gas
 | **Code deposit**           | 10,000/byte                 | Per byte when contract creation succeeds           |
 | **LOG topic**              | 3,750/topic                 | Storage gas is permanent regardless of revert; data size usage is rolled back on revert |
 | **LOG data**               | 80/byte                     | Storage gas is permanent regardless of revert; data size usage is rolled back on revert |
-| **Calldata (zero)**        | 40/byte                     | Per zero byte in transaction input                 |
-| **Calldata (non-zero)**    | 160/byte                    | Per non-zero byte in transaction input             |
-| **Floor (zero)**           | 100/byte                    | EIP-7623 floor cost for zero bytes                 |
-| **Floor (non-zero)**       | 400/byte                    | EIP-7623 floor cost for non-zero bytes             |
+| **Calldata (zero)**        | 40/byte                     | 10 × standard EVM zero-byte cost (4)               |
+| **Calldata (non-zero)**    | 160/byte                    | 10 × standard EVM non-zero-byte cost (16)          |
+| **Floor (zero)**           | 100/byte                    | 10 × EIP-7623 floor cost for zero bytes (10)       |
+| **Floor (non-zero)**       | 400/byte                    | 10 × EIP-7623 floor cost for non-zero bytes (40)   |
 
 ### Dynamic SALT Multiplier
 
-Storage gas costs for SSTORE, account creation, and contract creation scale dynamically based on SALT bucket capacity.
+Storage gas costs for SSTORE, account creation, and contract creation scale dynamically based on [SALT bucket](../glossary.md#salt-bucket) capacity.
 
-**Formula**: `multiplier = bucket_capacity / MIN_BUCKET_SIZE`
+**Formula**: `multiplier = bucket_capacity /` [`MIN_BUCKET_SIZE`](../glossary.md#min_bucket_size)
 
 - At `multiplier = 1` (minimum bucket size): **zero storage gas** — fresh storage is free.
 - At `multiplier > 1`: linear scaling makes crowded state regions more expensive.
@@ -80,22 +81,15 @@ When any transaction-level limit is exceeded during execution, the transaction h
 Gas consumed up to the halt point is charged; remaining gas is refunded to the sender.
 The transaction receipt reflects `gas_used` equal to the gas actually consumed, not `gas_limit`.
 
-### Per-Frame Resource Budgets
+Block-level limits are enforced across transactions: the last transaction that causes cumulative usage to exceed a block limit is allowed to complete and be included, but subsequent transactions are rejected before execution.
 
-Each call frame receives a bounded share of the remaining resources:
-
-- The top-level frame starts with the full transaction budget for each dimension.
-- Each inner frame receives `remaining × 98/100` of its parent's remaining budget.
-- A frame-local exceed **reverts** that frame with `MegaLimitExceeded(uint8 kind, uint64 limit)` — it does not halt the transaction.
-- The parent frame can continue executing after a child frame reverts.
-- Compute gas consumed by reverted child frames still counts toward the transaction total.
-
-| kind | Resource     |
-| ---- | ------------ |
-| 0    | Data size    |
-| 1    | KV updates   |
-| 2    | Compute gas  |
-| 3    | State growth |
+{% hint style="info" %}
+**Rex4 (unstable): Per-Call-Frame Resource Budgets** — Rex4 adds per-call-frame enforcement on top of transaction-level limits.
+Each inner call frame receives `remaining × 98/100` of its parent's remaining budget for each dimension.
+A call-frame-local exceed **reverts** that call frame with `MegaLimitExceeded(uint8 kind, uint64 limit)` — it does not halt the transaction.
+Compute gas consumed by reverted child frames still counts toward the transaction total.
+See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+{% endhint %}
 
 See [Resource Limits](resource-limits.md) and [Resource Accounting](resource-accounting.md) for details.
 
@@ -106,13 +100,13 @@ This prevents call-depth attacks under MegaETH's high gas limits.
 
 {% hint style="warning" %}
 **Migration note**: Contracts that compute gas forwarding amounts assuming the standard 63/64 rule (EIP-150) will see different behavior.
-The parent frame retains 2% instead of ~1.6%, so subcalls receive slightly less gas.
+The parent call frame retains 2% instead of ~1.6%, so subcalls receive slightly less gas.
 Review any patterns that rely on precise gas forwarding calculations.
 {% endhint %}
 
 ## Gas Detention
 
-Accessing **volatile data** — block environment fields, the beneficiary's account, or oracle storage — triggers a compute gas cap that forces the transaction to terminate quickly.
+Accessing **[volatile data](../glossary.md#volatile-data)** — block environment fields, the [beneficiary's](../glossary.md#beneficiary) account, or oracle storage — triggers a compute gas cap that forces the transaction to terminate quickly.
 This reduces parallel execution conflicts without banning the access outright.
 Detained gas is refunded at transaction end.
 
@@ -121,23 +115,24 @@ Detained gas is refunded at transaction end.
 | Category                    | Trigger                                               | Cap   |
 | --------------------------- | ----------------------------------------------------- | ----- |
 | Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, etc. or beneficiary access | 20M  |
-| Oracle                      | SLOAD from oracle contract storage                     | 20M  |
+| Oracle                      | SLOAD from [oracle contract](../system-contracts/oracle.md) storage | 20M  |
 
-### Relative Cap
+### Absolute Cap
 
-The effective detained limit is calculated relative to current usage:
+The [detained limit](../glossary.md#detained-limit) is an absolute cap on total compute gas for the transaction.
+If the transaction has already consumed more gas than the cap when the volatile access occurs, execution halts immediately with `VolatileDataAccessOutOfGas`.
+Across multiple volatile accesses, the most restrictive cap applies.
 
-```
-effective_detained_limit = current_usage + cap
-```
-
-A transaction that has consumed 25M compute gas before reading TIMESTAMP gets an effective limit of 25M + 20M = 45M — it can still perform 20M more gas of computation after the access.
-
-Across multiple volatile accesses, the most restrictive effective limit applies.
+{% hint style="info" %}
+**Rex4 (unstable): Relative Cap** — Rex4 changes detention from an absolute cap to a relative cap.
+The effective detained limit becomes `current_usage + cap` at the time of access.
+A transaction that has consumed 25M compute gas before reading TIMESTAMP gets an effective limit of 25M + 20M = 45M — it can still perform 20M more gas after the access.
+See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+{% endhint %}
 
 ### Oracle Forced-Cold SLOAD
 
-All SLOAD operations on the oracle contract use cold access gas cost (2100 gas) regardless of EIP-2929 warm/cold tracking state.
+All SLOAD operations on the [oracle contract](../system-contracts/oracle.md) use cold access gas cost (2100 gas) regardless of EIP-2929 warm/cold tracking state.
 This ensures deterministic gas costs during block replay.
 
 See [Gas Detention](gas-detention.md) for details.
@@ -162,27 +157,31 @@ The contract size limit is 21× larger than the standard Ethereum limit (24 KB);
 
 MegaETH pre-deploys system contracts at well-known addresses:
 
-| Contract                 | Address                                         | Purpose                                             |
-| ------------------------ | ----------------------------------------------- | --------------------------------------------------- |
-| Oracle                   | `0x634200...0001`                                | Off-chain data key-value storage with hint support   |
-| High-Precision Timestamp | `0x634200...0002`                                | Sub-second block timestamp                           |
-| KeylessDeploy            | `0x634200...0003`                                | Deterministic cross-chain deployment (Nick's Method) |
-| MegaAccessControl        | `0x634200...0004`                                | Proactive volatile data access control               |
-| MegaLimitControl         | `0x634200...0005`                                | Query remaining compute gas budget                   |
+| Contract                 | Address                                         | Since   | Purpose                                             |
+| ------------------------ | ----------------------------------------------- | ------- | --------------------------------------------------- |
+| [Oracle](../system-contracts/oracle.md) | `0x634200...0001` | [MiniRex](spec-system.md#mini_rex) | Off-chain data key-value storage with hint support   |
+| [High-Precision Timestamp](../oracle-services/timestamp.md) | `0x634200...0002` | [MiniRex](spec-system.md#mini_rex) | Sub-second timestamps ([oracle service](../oracle-services/README.md)) |
+| [KeylessDeploy](../system-contracts/keyless-deploy.md) | `0x634200...0003` | [Rex2](spec-system.md#rex2) | Deterministic cross-chain deployment (Nick's Method) |
 
-### MegaAccessControl
+{% hint style="info" %}
+**Rex4 (unstable): New System Contracts**
 
-You can disable volatile data access for your frame and all descendant calls by calling `disableVolatileDataAccess()`.
-While disabled, any volatile access reverts immediately with `VolatileDataAccessDisabled(uint8 accessType)` — no gas detention is triggered.
-Call `enableVolatileDataAccess()` to lift the restriction for your frame and descendants.
-Reverts with `DisabledByParent()` if an ancestor frame holds the disable.
-Call `isVolatileDataAccessDisabled()` to query whether volatile data access is currently disabled.
-The restriction automatically ends when the disabling frame returns.
+| Contract          | Address              | Purpose                                |
+| ----------------- | -------------------- | -------------------------------------- |
+| MegaAccessControl | `0x634200...0004`    | Proactive volatile data access control |
+| MegaLimitControl  | `0x634200...0005`    | Query remaining compute gas budget     |
 
-### MegaLimitControl
+**MegaAccessControl** — Disable volatile data access for your call frame and all descendant calls via `disableVolatileDataAccess()`.
+While disabled, any volatile access reverts with `VolatileDataAccessDisabled(uint8 accessType)` — no gas detention is triggered.
+Call `enableVolatileDataAccess()` to lift the restriction; reverts with `DisabledByParent()` if an ancestor call frame holds the disable.
+Call `isVolatileDataAccessDisabled()` to query the current state.
+The restriction automatically ends when the disabling call frame returns.
 
-You can query your effective remaining compute gas by calling `remainingComputeGas()`.
-The returned value equals `min(frame_remaining, tx_detained_remaining)` at call time — a single reliable number accounting for both frame budgets and detention.
+**MegaLimitControl** — Query effective remaining compute gas via `remainingComputeGas()`.
+Returns `min(frame_remaining, tx_detained_remaining)` at call time.
+
+See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+{% endhint %}
 
 See [System Contracts Overview](../system-contracts/README.md) for the full registry and details.
 

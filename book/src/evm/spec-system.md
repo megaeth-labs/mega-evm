@@ -1,13 +1,13 @@
 # Spec System
 
-MegaETH EVM uses a **spec system** (`MegaSpecId`) to define EVM behavior at each stage of the protocol's evolution.
+MegaEVM uses a **spec system** (`MegaSpecId`) to define EVM behavior at each stage of the protocol's evolution.
 
 ## Spec vs Hardfork
 
 The codebase distinguishes between two related concepts:
 
-- **Spec (`MegaSpecId`)** — Defines EVM behavior: *what* the EVM does.
-- **Hardfork (`MegaHardfork`)** — Defines network upgrade events: *when* specs are activated.
+- **[Spec (`MegaSpecId`)](../glossary.md#spec-megaspecid)** — Defines EVM behavior: *what* the EVM does.
+- **[Hardfork (`MegaHardfork`)](../glossary.md#hardfork-megahardfork)** — Defines network upgrade events: *when* specs are activated.
 
 Multiple hardforks can map to the same spec.
 A hardfork can also map to an older spec.
@@ -16,17 +16,30 @@ For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), 
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 (unstable)
 ```
 
 Each newer spec includes all previous behaviors.
 All specs use `OpSpecId::ISTHMUS` as the Optimism base layer.
+The latest spec (currently REX4) may be marked **unstable**, meaning its semantics can still change before network activation.
+
+### Backward Compatibility
+
+EVM semantics for stable (activated) specs are frozen.
+A new spec may add behavior or change the unstable spec, but it never alters what an existing stable spec does.
+Every patch spec carries the invariant: "Stable pre-{Spec} semantics MUST remain unchanged."
+
+This means:
+- Contracts deployed under a given spec will continue to behave identically after future upgrades.
+- Adding or modifying a system contract requires introducing a new spec.
+- Changing gas costs, opcode behavior, or resource limits requires a new spec.
+- Code should use `spec.is_enabled(MegaSpecId::X)` to gate spec-specific behavior.
 
 ## Spec Summary
 
 ### EQUIVALENCE
 
-The default spec.
+The baseline spec.
 Maintains full compatibility with Optimism Isthmus EVM.
 Adds block environment access tracking for parallel execution support.
 
@@ -41,6 +54,8 @@ The first spec to introduce MegaETH-specific modifications:
 - **SELFDESTRUCT disabled**
 - **Large contract support** — 512 KB contracts (21x increase from 24 KB)
 
+*See [MiniRex Network Upgrade](../upgrades/minirex.md) for full details.*
+
 ### REX
 
 Refines the storage gas economics introduced in MINI_REX:
@@ -51,15 +66,21 @@ Refines the storage gas economics introduced in MINI_REX:
 - **Security fixes** — DELEGATECALL, STATICCALL, CALLCODE properly enforce gas forwarding and oracle access detection
 - **State growth tracking** — New resource limit dimension
 
+*See [Rex Network Upgrade](../upgrades/rex.md) for full details.*
+
 ### REX1
 
 - **Limit reset fix** — Resets compute gas limits at the start of each transaction
 - Inherits Rex semantics fully
 
+*See [Rex1 Network Upgrade](../upgrades/rex1.md) for full details.*
+
 ### REX2
 
 - **SELFDESTRUCT restored** — Re-enabled with EIP-6780 semantics
 - **KeylessDeploy system contract** — Enables deterministic cross-chain deployment (Nick's Method)
+
+*See [Rex2 Network Upgrade](../upgrades/rex2.md) for full details.*
 
 ### REX3
 
@@ -67,10 +88,18 @@ Refines the storage gas economics introduced in MINI_REX:
 - **SLOAD-based oracle detention** — Triggers on SLOAD from oracle storage instead of CALL to oracle contract
 - **Keyless deploy compute gas tracking** — Records the 100K overhead as compute gas
 
-### REX4
+*See [Rex3 Network Upgrade](../upgrades/rex3.md) for full details.*
 
-- **Per-frame resource budgets** — All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
+### REX4 (unstable)
+
+{% hint style="warning" %}
+Rex4 is the current unstable specification and is subject to change before activation.
+{% endhint %}
+
+- **Per-call-frame resource budgets** — All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
 - **Relative gas detention cap** — Effective detained limit is `current_usage + cap` instead of an absolute cap
 - **MegaAccessControl system contract** — Allows contracts to proactively disable volatile data access for a call subtree
-- **MegaLimitControl system contract** — Allows querying effective remaining compute gas under detention and frame limits
+- **MegaLimitControl system contract** — Allows querying effective remaining compute gas under detention and call frame limits
 - **Keyless deploy sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior
+
+*See [Rex4 Network Upgrade](../upgrades/rex4.md) for full details.*

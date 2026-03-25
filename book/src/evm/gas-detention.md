@@ -3,9 +3,9 @@
 ## Purpose
 
 MegaETH's parallel EVM needs to minimize conflicts between concurrent transactions.
-**Volatile data** — block environment fields, the beneficiary's account, and oracle storage — is frequently read by many transactions and is a major source of conflicts.
+**[Volatile data](../glossary.md#volatile-data)** — block environment fields, the [beneficiary's](../glossary.md#beneficiary) account, and oracle storage — is frequently read by many transactions and is a major source of conflicts.
 
-Gas detention restricts computation after volatile data is accessed by **capping the remaining compute gas**.
+Gas detention restricts computation after volatile data is accessed by **capping the remaining [compute gas](../glossary.md#compute-gas)**.
 This forces transactions that touch volatile data to terminate quickly, reducing conflicts without banning the access outright.
 
 Detained gas is effectively refunded — users only pay for actual computation performed.
@@ -17,28 +17,22 @@ Detained gas is effectively refunded — users only pay for actual computation p
 | Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, PREVRANDAO, BLOCKHASH, BLOBBASEFEE, BLOBHASH, or beneficiary access | 20M           |
 | Oracle                      | SLOAD from oracle contract storage                      | 20M           |
 
-In Rex4, `SELFDESTRUCT` targeting the beneficiary also triggers beneficiary gas detention.
-
 Transactions from `MEGA_SYSTEM_ADDRESS` are exempt from oracle gas detention.
 
 The **most restrictive cap wins** when multiple volatile sources are accessed.
-Cap values above reflect Rex4 (relative semantics).
-For per-spec values and the evolution from absolute to relative caps, see [Evolution Across Specs](#evolution-across-specs) below.
 
-### Rex4: Relative Gas Detention Cap
-
-Starting from Rex4, gas detention uses **relative caps** instead of absolute caps.
-The effective detained limit is `current_usage + cap` at the time of volatile access.
-This means a transaction that has already consumed compute gas before accessing volatile data is not retroactively penalized — it can still use the full cap amount of compute gas after the access.
+{% hint style="info" %}
+**Rex4 (unstable)**: `SELFDESTRUCT` targeting the beneficiary also triggers beneficiary gas detention.
+Rex4 also changes detention from absolute caps to **relative caps** — the effective detained limit becomes `current_usage + cap` at the time of volatile access, so a transaction can always perform at least `cap` more gas of computation after the access.
+See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+{% endhint %}
 
 ## How It Works
 
 1. A transaction accesses volatile data (e.g., reads `TIMESTAMP`)
-2. The access is recorded and the effective detained limit is calculated
-3. After each volatile opcode, remaining compute gas is capped at the effective detained limit
-4. Apply the spec-specific rule:
-   - **Pre-Rex4 (absolute cap)**: at the moment of volatile access, if `compute_gas_used` already exceeds the cap, execution halts immediately with `VolatileDataAccessOutOfGas`; otherwise remaining compute gas is capped to `cap - compute_gas_used`
-   - **Rex4+ (relative cap)**: the effective limit is `current_usage + cap`, so the transaction can always perform at least `cap` more gas of computation after the access
+2. The access is recorded and the detained limit is set as an absolute cap on total compute gas
+3. After each volatile opcode, remaining compute gas is capped at the detained limit
+4. If `compute_gas_used` already exceeds the cap at the moment of access, execution halts immediately with `VolatileDataAccessOutOfGas`; otherwise remaining compute gas is capped to `cap - compute_gas_used`
 5. Excess gas beyond the effective limit is "detained" and refunded at transaction end
 
 ## Example
@@ -47,19 +41,13 @@ This means a transaction that has already consumed compute gas before accessing 
 Transaction starts with 200M compute gas budget
 
 1. Normal computation uses 5M gas
-2. Transaction reads TIMESTAMP → triggers block env detention
-3. Compute gas is now capped at: 5M (used) + 20M (cap) = 25M effective limit
-4. Transaction can perform at most 20M more gas of computation
-5. At transaction end, the detained 175M gas is refunded
+2. Transaction reads TIMESTAMP → triggers block env detention (20M absolute cap)
+3. Compute gas is now capped at 20M total
+4. Transaction can perform at most 15M more gas of computation (20M cap - 5M used)
+5. At transaction end, the detained 180M gas is refunded
 ```
 
-## Evolution Across Specs
+## History
 
-| Spec        | Block Env / Beneficiary Cap | Oracle Cap | Oracle Trigger                   |
-| ----------- | --------------------------- | ---------- | -------------------------------- |
-| MiniRex     | 20M                         | 1M         | CALL to oracle contract          |
-| Rex–Rex2    | 20M                         | 1M         | CALL or STATICCALL to oracle contract |
-| Rex3        | 20M                         | 20M        | SLOAD from oracle storage        |
-| Rex4        | 20M (relative)              | 20M (relative) | SLOAD from oracle storage    |
-
-The shift from CALL-based to SLOAD-based oracle detention (Rex3) means simply calling the oracle without reading its storage no longer activates gas detention.
+Gas detention caps and triggers have evolved across specs.
+For the full history, see the [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex3](../upgrades/rex3.md) upgrade pages.

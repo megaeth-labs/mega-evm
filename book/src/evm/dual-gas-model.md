@@ -2,7 +2,7 @@
 
 ## Principle
 
-Operations that impose storage costs on nodes (state storage, history data) are charged additional **storage gas** on top of standard EVM **compute gas**.
+Operations that impose storage costs on nodes (state storage, history data) are charged additional **[storage gas](../glossary.md#storage-gas)** on top of standard EVM **[compute gas](../glossary.md#compute-gas)**.
 
 The **overall gas cost** reported in transaction receipts is the sum of both:
 
@@ -12,7 +12,7 @@ total gas used = compute gas + storage gas
 
 This separation enables independent pricing of computational work versus storage burden.
 
-## Storage Gas Costs (Rex)
+## Storage Gas Costs
 
 | Operation                  | Storage Gas Formula        | Notes                                                 |
 | -------------------------- | -------------------------- | ----------------------------------------------------- |
@@ -23,18 +23,18 @@ This separation enables independent pricing of computational work versus storage
 | **Code Deposit**           | 10,000/byte                | Per byte when contract creation succeeds              |
 | **LOG Topic**              | 3,750/topic                | Storage gas is permanent regardless of revert         |
 | **LOG Data**               | 80/byte                    | Storage gas is permanent regardless of revert         |
-| **Calldata (zero)**        | 40/byte                    | Per zero byte in transaction input                    |
-| **Calldata (non-zero)**    | 160/byte                   | Per non-zero byte in transaction input                |
-| **Floor (zero)**           | 100/byte                   | EIP-7623 floor cost for zero bytes                    |
-| **Floor (non-zero)**       | 400/byte                   | EIP-7623 floor cost for non-zero bytes                |
+| **Calldata (zero)**        | 40/byte                    | 10 × standard EVM zero-byte cost (4)                  |
+| **Calldata (non-zero)**    | 160/byte                   | 10 × standard EVM non-zero-byte cost (16)             |
+| **Floor (zero)**           | 100/byte                   | 10 × EIP-7623 floor cost for zero bytes (10)          |
+| **Floor (non-zero)**       | 400/byte                   | 10 × EIP-7623 floor cost for non-zero bytes (40)      |
 
 ## Dynamic SALT Multiplier
 
-Storage gas costs scale dynamically based on **SALT bucket capacity**.
+Storage gas costs scale dynamically based on **[SALT bucket](../glossary.md#salt-bucket) capacity**.
 Each account and storage slot maps to a SALT bucket in MegaETH's blockchain state.
 A SALT bucket measures how "crowded" a state region is — the more state entries in a bucket, the larger its capacity grows.
 
-**Formula**: `multiplier = bucket_capacity / MIN_BUCKET_SIZE`
+**Formula**: `multiplier = bucket_capacity /` [`MIN_BUCKET_SIZE`](../glossary.md#min_bucket_size)
 
 - When `multiplier = 1` (minimum bucket size): **zero storage gas** — no penalty for fresh storage
 - When `multiplier > 1`: linear scaling based on bucket capacity expansion
@@ -48,21 +48,10 @@ Use `eth_estimateGas` on a MegaETH RPC endpoint for accurate gas estimates — t
 
 All transactions pay both compute gas and storage gas as intrinsic costs:
 
-| Spec        | Compute Gas | Storage Gas | Total  |
-| ----------- | ----------- | ----------- | ------ |
-| **MiniRex** | 21,000      | 0           | 21,000 |
-| **Rex+**    | 21,000      | 39,000      | 60,000 |
+| Component   | Cost   |
+| ----------- | ------ |
+| Compute gas | 21,000 |
+| Storage gas | 39,000 |
+| **Total**   | 60,000 |
 
-## Historical: MiniRex vs Rex
-
-MiniRex was the first hardfork to introduce the dual gas model.
-Rex significantly refined the formulas:
-
-| Operation                 | MiniRex Formula          | Rex Formula               |
-| ------------------------- | ------------------------ | ------------------------- |
-| **Transaction Intrinsic** | 0                        | 39,000 (flat)             |
-| **SSTORE (0→non-0)**     | 2,000,000 × multiplier   | 20,000 × (multiplier-1)  |
-| **Account Creation**      | 2,000,000 × multiplier   | 25,000 × (multiplier-1)  |
-| **Contract Creation**     | 2,000,000 × multiplier   | 32,000 × (multiplier-1)  |
-
-The Rex formula `base × (multiplier - 1)` means fresh storage (multiplier=1) is free, unlike MiniRex's formula which always charged storage gas.
+For the historical evolution of storage gas costs (including MiniRex's different formula), see the [MiniRex](../upgrades/minirex.md) and [Rex](../upgrades/rex.md) upgrade pages.

@@ -1,12 +1,18 @@
-# Oracle Service
+# Oracle Contract
 
 ## Overview
 
-The MegaETH Oracle Service provides a trust-minimized mechanism for bringing off-chain data on-chain through a sequencer-operated oracle contract.
-Smart contracts can access external information (price feeds, randomness, timestamps, etc.) without relying on third-party oracle providers.
+The Oracle contract is the centralized storage backend for MegaEVM's [oracle services](../oracle-services/README.md).
+It provides a simple key-value store where the sequencer writes off-chain data (timestamps, price feeds, etc.) via [system transactions](system-tx.md), and oracle service wrapper contracts read from it.
+
+{% hint style="info" %}
+**For contract developers**: You typically do not interact with the Oracle contract directly.
+Use the higher-level [oracle services](../oracle-services/README.md) instead — they provide typed interfaces and dedicated wrapper contracts (e.g., [High-Precision Timestamp](../oracle-services/timestamp.md) at `0x6342...0002`).
+{% endhint %}
 
 {% hint style="warning" %}
-**Trust Assumption**: Using the built-in oracle service requires trusting the sequencer to publish accurate oracle data on-chain.
+**Trust Assumption**: Oracle data is published by the sequencer.
+Using oracle services requires trusting the sequencer to provide accurate values.
 {% endhint %}
 
 ## Contract Details
@@ -17,7 +23,7 @@ Smart contracts can access external information (price feeds, randomness, timest
 - **Simple storage model** — Direct access to storage slots via `uint256` keys
 - **Restricted writes** — Only `MEGA_SYSTEM_ADDRESS` can write oracle data
 - **Public reads** — Anyone can read oracle data
-- **Versioned bytecode** — Pre-Rex2 deploys Oracle v1.0.0, and Rex2+ deploys Oracle v1.1.0 with `sendHint`
+- **Versioned bytecode** — Pre-[Rex2](../evm/spec-system.md#rex2) deploys Oracle v1.0.0, and Rex2+ deploys Oracle v1.1.0 with `sendHint`
 
 ## Interface
 
@@ -46,7 +52,9 @@ interface IOracle {
     ) external;
 
     /// @notice Sends a hint to the oracle backend
-    /// @dev Available from Rex2 onward
+    /// @dev Available from Rex2 onward.
+    /// Declared `view` because it does not mutate on-chain state;
+    /// the hint is processed by the sequencer outside the EVM.
     function sendHint(bytes32 topic, bytes calldata data) external view;
 
     /// @notice Emits an oracle log
@@ -64,24 +72,20 @@ interface IOracle {
 **Forced-cold SLOAD**: All SLOAD operations on the oracle contract use cold access gas cost (2,100 gas) regardless of EIP-2929 warm/cold tracking state.
 This ensures deterministic gas costs during replay.
 
-**`sendHint` interception**: `sendHint` is intercepted at the EVM level before frame execution — the hint is forwarded to the oracle backend via the external oracle environment.
+**`sendHint` interception**: `sendHint` is intercepted at the EVM level before call frame execution — the hint is forwarded to the oracle backend via the external oracle environment.
 The call still proceeds to on-chain execution after interception.
 
 ## Gas Detention Impact
 
-Oracle access can trigger [gas detention](../evm/gas-detention.md), but the trigger changes by spec:
-
-| Spec         | Trigger                          | Compute Gas Cap |
-| ------------ | -------------------------------- | --------------- |
-| MiniRex      | CALL to oracle contract                | 1M              |
-| Rex–Rex2     | CALL or STATICCALL to oracle contract  | 1M              |
-| Rex3+        | SLOAD from oracle storage        | 20M             |
-
+Oracle access triggers [gas detention](../glossary.md#gas-detention).
+An SLOAD from the oracle contract's storage caps remaining [compute gas](../glossary.md#compute-gas) at 20M.
 This means transactions that read oracle data have a limited compute gas budget after the read.
 Design your contracts accordingly — perform oracle reads as late as possible.
 
+For the history of oracle detention triggers and cap values across specs, see the [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex3](../upgrades/rex3.md) upgrade pages.
+
 ## Oracle Services
 
-The sequencer may operate multiple high-level oracle services using the central storage.
-Each service uses unique storage slots to avoid collision.
-The specific services provided are determined by the sequencer and are outside the scope of the EVM specification.
+The sequencer operates high-level oracle services using the central storage.
+Each service is allocated a range of storage slots to avoid collision.
+See [Oracle Services](../oracle-services/README.md) for available services, including the [High-Precision Timestamp](../oracle-services/timestamp.md).

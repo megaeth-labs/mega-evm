@@ -4,7 +4,7 @@ This file provides guidance to AI agents (e.g., claude code, codex, cursor, etc.
 
 ## Project Overview
 
-MegaETH EVM (mega-evm) — a specialized EVM implementation for MegaETH, built on **revm** and **op-revm** by customizing several hooks exposed by trait of revm.
+MegaEVM (mega-evm) — a specialized EVM implementation for MegaETH, built on **revm** and **op-revm** by customizing several hooks exposed by trait of revm.
 
 ## Build & Development Commands
 
@@ -265,6 +265,11 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Run `cargo fmt --all --check` before completion.
 - **Keep documentation up to date.**
   When making changes, always check whether related documentation needs updating.
-  This includes spec files in `specs/`, docs in `docs/`, and the `CLAUDE.md` itself (e.g., unstable spec marker, spec progression list, system contract table).
+  The primary documentation is the book (`book/src/`).
+  Also update this `AGENTS.md` when relevant (e.g., unstable spec marker, spec progression list, system contract table).
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.
+
+## Book Documentation Conventions (`book/src/`)
+
+All conventions for writing and editing the book (audience, content rules, upgrade page format, writing style) are defined in [`book/SITE_DOC_FORMAT.md`](book/SITE_DOC_FORMAT.md).

@@ -6,7 +6,7 @@
 
 **Address**: `0x6342000000000000000000000000000000000003`
 
-**Available**: Rex2 hardfork onwards
+**Available**: [Rex2](../evm/spec-system.md#rex2) hardfork onwards
 
 ## The Problem
 
@@ -105,7 +105,7 @@ The signer is not charged.
 | `InsufficientBalance()`  | Signer lacks funds               |
 | `ContractAlreadyExists()`| Address already has code         |
 | `GasLimitTooLow()`       | Override < transaction's limit   |
-| `InsufficientComputeGas()` | Frame-local compute gas budget is below keyless deploy overhead |
+| `InsufficientComputeGas()` | Call-frame-local compute gas budget is below keyless deploy overhead |
 
 **Execution errors** — The call returns normally with error in `errorData`.
 The signer is charged for gas.

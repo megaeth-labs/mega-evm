@@ -4,19 +4,18 @@ This page specifies how MegaETH tracks resource usage across the four independen
 
 ## Revert Behavior
 
-All resource trackers are **frame-aware**: usage within a subcall is discarded if the subcall reverts, and merged into the parent on success.
+All resource trackers are **call-frame-aware**: usage within a subcall is discarded if the subcall reverts, and merged into the parent on success.
 
-**Exception**: Compute gas accumulates globally and is **never** reverted, because CPU cycles cannot be undone.
+**Exception**: [Compute gas](../glossary.md#compute-gas) accumulates globally and is **never** reverted, because CPU cycles cannot be undone.
 
-## Per-Frame Limits (Rex4+)
-
-Starting from Rex4, per-frame budgets apply to all four dimensions: compute gas, data size, KV updates, and state growth.
-The top-level frame starts with the full transaction budget for each dimension.
-Each inner frame receives `remaining × 98/100` of its parent's remaining budget for each dimension.
-If an inner frame exceeds its local budget, that frame reverts with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
-The parent frame can continue executing after a child frame reverts.
-Transaction-level exceeds still halt the full transaction with `OutOfGas`.
-Compute gas consumed by reverted child frames still counts toward total transaction compute gas usage.
+{% hint style="info" %}
+**Rex4 (unstable): Per-Call-Frame Limits** — Rex4 adds per-call-frame budgets for all four dimensions.
+The top-level call frame starts with the full transaction budget.
+Each inner call frame receives `remaining × 98/100` of its parent's remaining budget.
+If an inner call frame exceeds its local budget, it reverts with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
+The parent can continue executing; compute gas consumed by reverted frames still counts toward the transaction total.
+See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+{% endhint %}
 
 ## Compute Gas
 
@@ -36,12 +35,10 @@ Tracks cumulative gas consumed during EVM instruction execution, separate from t
 
 When `compute_gas_used > effective_compute_gas_limit`, the transaction halts with `OutOfGas`.
 The effective limit may be reduced by [gas detention](gas-detention.md).
-In Rex4+, frame-local compute gas exceeds cause the current frame to revert according to the per-frame limit rules above.
 
 ## Data Size
 
 Tracks the total bytes of data generated during execution.
-In Rex4+, data size also uses the per-frame budget rules described above.
 
 ### Non-Discardable (Permanent)
 
@@ -73,7 +70,6 @@ Tracked within frames, discarded on revert:
 ## KV Updates
 
 Tracks the number of state-modifying key-value operations.
-In Rex4+, KV updates also use the per-frame budget rules described above.
 
 ### Non-Discardable
 
@@ -94,7 +90,7 @@ In Rex4+, KV updates also use the per-frame budget rules described above.
 ### Account Update Deduplication
 
 Both data size and KV update tracking deduplicate account updates within a call frame.
-When a CALL with value or CREATE occurs, the caller's update is counted only if not already marked as updated in the current frame.
+When a CALL with value or CREATE occurs, the caller's update is counted only if not already marked as updated in the current call frame.
 
 ## State Growth
 
@@ -113,4 +109,3 @@ Tracks net increase in blockchain state: new accounts and new storage slots.
 
 The counter can go negative during execution.
 Reported growth is clamped to minimum of zero.
-In Rex4+, state growth also uses the shared per-frame budget rules described above.

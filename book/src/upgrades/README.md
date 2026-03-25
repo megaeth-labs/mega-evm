@@ -13,7 +13,7 @@ This section documents each MegaETH network upgrade, describing what changed, wh
 | [Rex1](rex1.md) | Fix: compute gas limit reset between transactions |
 | [Rex2](rex2.md) | SELFDESTRUCT re-enabled (EIP-6780), KeylessDeploy system contract |
 | [Rex3](rex3.md) | Oracle gas cap raised to 20M, SLOAD-based oracle detention, keyless deploy compute gas tracking |
-| [Rex4](rex4.md) | Per-frame resource budgets, relative gas detention, MegaAccessControl, MegaLimitControl, sandbox environment inheritance |
+| [Rex4](rex4.md) | Per-call-frame resource budgets, relative gas detention, MegaAccessControl, MegaLimitControl, sandbox environment inheritance |
 
 ## How to Read These Pages
 

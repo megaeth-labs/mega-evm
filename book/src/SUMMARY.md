@@ -2,7 +2,7 @@
 
 [Overview](Overview.md)
 
-## MegaETH EVM
+## MegaEVM
 
 - [Overview](evm/README.md)
 - [Spec System](evm/spec-system.md)
@@ -17,6 +17,11 @@
 - [Oracle Service](system-contracts/oracle.md)
 - [Keyless Deployment](system-contracts/keyless-deploy.md)
 - [Mega System Transactions](system-contracts/system-tx.md)
+
+## Oracle Services
+
+- [Overview](oracle-services/README.md)
+- [High-Precision Timestamp](oracle-services/timestamp.md)
 
 ## Network Upgrades
 

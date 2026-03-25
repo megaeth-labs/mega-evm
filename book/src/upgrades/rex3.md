@@ -40,12 +40,12 @@ Finally, the keyless deploy sandbox overhead (100K gas) is now properly tracked 
 - CALL to the oracle contract address alone does not trigger gas detention — only an SLOAD from the oracle's storage triggers it.
 - The SLOAD-based trigger is caller-agnostic: any SLOAD reading the oracle contract's storage triggers detention regardless of call depth.
 - DELEGATECALL to the oracle does not trigger detention — SLOAD in a DELEGATECALL context reads the caller's storage, not the oracle's.
-- Transactions from `MEGA_SYSTEM_ADDRESS` are exempted from oracle gas detention (unchanged, but the exemption now checks the transaction sender rather than the frame-level caller).
+- Transactions from `MEGA_SYSTEM_ADDRESS` are exempted from oracle gas detention (unchanged, but the exemption now checks the transaction sender rather than the call-frame-level caller).
 
 ### Keyless Deploy Compute Gas Tracking
 
 #### Previous behavior
-- The 100K overhead gas for keyless deploy sandbox execution is deducted from frame gas but not recorded as compute gas.
+- The 100K overhead gas for keyless deploy sandbox execution is deducted from call frame gas but not recorded as compute gas.
 - Keyless deploy transactions do not count the overhead toward the per-transaction compute gas limit.
 
 #### New behavior
@@ -73,7 +73,7 @@ All pre-Rex3 behavior is unchanged.
 The shift from CALL-based to SLOAD-based oracle detection more accurately captures actual oracle data access.
 DELEGATECALL to the oracle is excluded because SLOAD in a DELEGATECALL context reads the caller's storage, not the oracle's — this is consistent with Rex2 behavior.
 
-The `MEGA_SYSTEM_ADDRESS` exemption now checks `TxEnv.caller` (the transaction sender) rather than the frame-level caller, meaning the entire transaction from the system address is exempted regardless of call depth.
+The `MEGA_SYSTEM_ADDRESS` exemption now checks `TxEnv.caller` (the transaction sender) rather than the call-frame-level caller, meaning the entire transaction from the system address is exempted regardless of call depth.
 
 ## References
 
