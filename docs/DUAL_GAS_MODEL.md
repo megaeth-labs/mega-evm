@@ -85,9 +85,8 @@ Applied when creating a contract through CREATE/CREATE2 opcodes or contract crea
 | **MiniRex** | `2,000,000 × multiplier`    | 2,000,000    | 4,000,000    | 8,000,000    |
 | **Rex**     | `32,000 × (multiplier - 1)` | 0            | 32,000       | 96,000       |
 
-**Note**: In Rex, contract creation pays both:
-1. Contract creation storage gas: `32,000 × (multiplier - 1)`
-2. Account creation storage gas: `25,000 × (multiplier - 1)` (if creating a new account)
+**Note**: Contract creation storage gas subsumes account creation cost — only `32,000 × (multiplier - 1)` is charged.
+Account creation storage gas applies only to CALL-initiated account creation, not to contract creation.
 
 In MiniRex, contract creation used the same formula as account creation.
 
