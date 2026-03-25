@@ -1,7 +1,8 @@
 # Summary
 
 [Overview](Overview.md)
-[Hardforks and Specs](hardfork-spec.md)
+
+- [Hardforks and Specs](hardfork-spec.md)
 
 ## MegaEVM
 
