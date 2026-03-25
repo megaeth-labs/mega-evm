@@ -10,6 +10,8 @@ Four of these are MegaETH-specific post-execution limits that go beyond standard
 3. **[KV Updates](resource-accounting.md#kv-updates)** — Storage writes + account modifications (net, with refunds)
 4. **[State Growth](resource-accounting.md#state-growth)** — Net new accounts + net new storage slots
 
+For detailed tracking rules, revert behavior, and what exactly counts toward each dimension, see [Resource Accounting](resource-accounting.md).
+
 ## Limit Values
 
 | Resource         | Transaction Limit        | Block Limit     |
