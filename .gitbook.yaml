@@ -1,5 +1,5 @@
-root: ./book/src/
+root: ./docs/
 
 structure:
-  readme: Overview.md
-  summary: SUMMARY.md
+  readme: overview.md
+  summary: toc.md

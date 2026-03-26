@@ -45,5 +45,5 @@ Storage gas economics, transaction intrinsic storage gas, resource limits, CALL-
 
 ## References
 
-- [mega-evm repository](https://github.com/megaeth-labs/mega-evm) — see `specs/Rex1.md` for the full normative specification
+- [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
 - [Gas Detention](../evm/gas-detention.md) — background on the gas detention mechanism

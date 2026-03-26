@@ -60,7 +60,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
   - _At present, `REX4` is the unstable spec._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
-  - Specifications of each spec can be found in `./specs`, which should always be maintained to be consistent with the implementation.
+  - Specifications of each spec can be found in the upgrade pages under `docs/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Multiple hardforks can map to one spec.
   `MiniRex1` and `MiniRex2` are hardforks that reuse `EQUIVALENCE` and `MINI_REX` respectively.
@@ -75,7 +75,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 - **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement.
   This module defines how a block in MegaETH block should be executed.
 - **`limit/`** — Resource limit tracking: compute gas, data size, KV updates, state growth (each in its own module).
-  MegaETH introduces additional resource metering mechanism (documentation in `docs/RESOURCE_ACCOUNTING.md`) and this module implements their logic as utility structs to be used by mega-evm.
+  MegaETH introduces additional resource metering mechanism and this module implements their logic as utility structs to be used by mega-evm.
 - **`access/`** — Block env access tracking and volatile data detection for parallel execution.
   MegaETH incorporates parallel EVM, so it is essential to reduce the conflicts between transactions by restricting the access to some "hot" resources.
   This module collects the logic of tracking the access to such hot resources during transaction execution.
@@ -265,14 +265,14 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Run `cargo fmt --all --check` before completion.
 - **Keep documentation up to date.**
   When making changes, always check whether related documentation needs updating.
-  The primary documentation is the book (`book/src/`).
+  The primary documentation is in `docs/`.
   Also update this `AGENTS.md` when relevant (e.g., unstable spec marker, spec progression list, system contract table).
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.
 
-## Book Documentation Conventions (`book/src/`)
+## Book Documentation Conventions (`docs/`)
 
 The book is the public-facing specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
 It is framed as a protocol specification, not as documentation for a specific crate.
 
-All conventions for writing and editing the book (audience, content rules, upgrade page format, writing style) are defined in [`book/SITE_DOC_FORMAT.md`](book/SITE_DOC_FORMAT.md).
+All conventions for writing and editing the book (audience, content rules, upgrade page format, writing style) are defined in [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).

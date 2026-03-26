@@ -77,6 +77,6 @@ The [`MEGA_SYSTEM_ADDRESS`](../system-contracts/system-tx.md) exemption now chec
 
 ## References
 
-- [mega-evm repository](https://github.com/megaeth-labs/mega-evm) — see `specs/Rex3.md` for the full normative specification
+- [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
 - [Gas Detention](../evm/gas-detention.md) — background on the gas detention mechanism
 - [Oracle Service](../system-contracts/oracle.md) — oracle contract documentation

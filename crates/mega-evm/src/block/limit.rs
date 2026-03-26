@@ -180,7 +180,6 @@
 //!
 //! - [`crate::evm::limit`] - Transaction-level limit enforcement during execution
 //! - [`crate::MegaBlockExecutor`] - Block executor that orchestrates limit checks
-//! - [Block and Transaction Limits Documentation](../../../docs/BLOCK_AND_TX_LIMITS.md)
 
 #[cfg(not(feature = "std"))]
 use alloc as std;

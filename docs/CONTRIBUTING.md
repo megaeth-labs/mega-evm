@@ -1,6 +1,8 @@
 # Book Documentation Guide
 
-This file defines conventions and rules for writing and editing the public-facing book (`book/src/`), hosted via GitBook.
+This file defines conventions and rules for writing and editing the public-facing book (`docs/`), hosted via GitBook.
+
+For GitBook markdown syntax, custom blocks, configuration files, and best practices, refer to the [GitBook skill.md](https://gitbook.com/docs/skill.md).
 The book is the specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
 
 ## Audience
@@ -14,7 +16,7 @@ The book serves two audiences:
 
 | Section | Primary audience | Purpose |
 |---|---|---|
-| `Overview.md` | Both | Landing page — motivation, audience routing, spec progression |
+| `overview.md` | Both | Landing page — motivation, audience routing, spec progression |
 | `evm/overview.md` | App builders | Quick reference for current MegaEVM behavior (latest stable spec) |
 | `evm/*.md` (concept pages) | Node builders | Detailed mechanics of specific MegaEVM features |
 | `hardfork-spec.md` | Node builders | Hardfork vs spec definitions, full progression, links to upgrade pages |
@@ -124,13 +126,13 @@ Readability is important but must never compromise accuracy.
   ```
   This keeps unstable content discoverable but visually de-emphasized compared to stable behavior.
   **Exceptions** — the following pages present unstable spec content as plain text (no expandable):
-  - `Overview.md` spec progression list — the unstable spec appears as a regular bullet alongside stable specs.
+  - `overview.md` spec progression list — the unstable spec appears as a regular bullet alongside stable specs.
   - `hardfork-spec.md` — the unstable spec has its own section like every other spec; content is shown directly.
   - The unstable spec's own upgrade page under `upgrades/` — the entire page is about that spec, so an expandable would be redundant.
 
 ## Page templates
 
-### Overview pages (`Overview.md` and `*/overview.md`)
+### Overview pages (`overview.md` and `*/overview.md`)
 
 Overview pages orient the reader before diving into details.
 
@@ -140,7 +142,7 @@ Overview pages orient the reader before diving into details.
 2. **Audience routing or content summary** — where to start based on your role (top-level), or a table/list of what the section contains (section-level).
 3. **Summary table or feature list** — registry table, history table, or key feature list as appropriate.
 
-**Top-level `Overview.md` additionally includes:**
+**Top-level `overview.md` additionally includes:**
 
 - Motivation (why MegaETH differs from standard Ethereum)
 - Reference implementation version table
@@ -186,9 +188,7 @@ This page is the central reference for spec and hardfork definitions.
 
 ### Upgrade pages (`upgrades/*.md`)
 
-Upgrade pages are informative summaries of repository specs.
-Treat the repository spec (`specs/*.md`) as the normative source of truth.
-If the page conflicts with the repository spec, the repository spec wins.
+Upgrade pages are informative summaries of each spec's changes.
 
 **Required structure:**
 
@@ -206,7 +206,6 @@ If the page conflicts with the repository spec, the repository spec wins.
 
    ```md
    This page is an informative summary of the <SpecName> specification.
-   For the full normative definition, see the <SpecName> spec in the mega-evm repository.
    ```
 
    For the unstable spec, add a plain-text notice that the spec is unstable and subject to change (no expandable — the entire page is about that spec).
@@ -230,8 +229,8 @@ If the page conflicts with the repository spec, the repository spec wins.
    - ...
    ```
 
-   Keep every `Previous behavior` and `New behavior` distinction from the repository spec.
-   Do not merge changes so aggressively that the mapping back to the normative spec becomes unclear.
+   Keep every `Previous behavior` and `New behavior` distinction clear.
+   Do not merge changes so aggressively that the mapping becomes unclear.
 
 5. **Developer Impact** — what contract authors, integrators, and tooling authors need to care about.
    Focus on observable behavior and design implications.
@@ -242,8 +241,7 @@ If the page conflicts with the repository spec, the repository spec wins.
    State whether pre-upgrade behavior remains unchanged for older specs.
 
 7. **References** — link only high-value supporting documents.
-   Do not use relative paths to files inside the source repository — the public page lives in a separate docs repo.
-   Link to the repository itself (e.g., `https://github.com/megaeth-labs/mega-evm`) and mention the spec path.
+   Link to the repository itself (e.g., `https://github.com/megaeth-labs/mega-evm`) where relevant.
 
 **Allowed content in upgrade pages:**
 
@@ -275,7 +273,7 @@ The glossary is a flat reference of MegaETH-specific terms.
 
 Before finalizing any page:
 
-- [ ] The repository spec remains the semantic source of truth.
+- [ ] The upgrade pages are the semantic source of truth.
 - [ ] All required elements for this page type are present.
 - [ ] Constants and values match source code.
 - [ ] Behavior is attributed to the correct spec.

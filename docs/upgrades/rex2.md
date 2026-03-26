@@ -78,6 +78,6 @@ KeylessDeploy sandbox state (deployed contract, nonce changes) is merged into ma
 
 ## References
 
-- [mega-evm repository](https://github.com/megaeth-labs/mega-evm) — see `specs/Rex2.md` for the full normative specification
+- [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
 - [Keyless Deployment](../system-contracts/keyless-deploy.md) — detailed usage guide and examples
 - [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) — SELFDESTRUCT only in same transaction

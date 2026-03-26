@@ -39,7 +39,7 @@ Multiple hardforks can map to the same spec. For example, both `MiniRex` and `Mi
 - **Gas Detention**: Volatile data access (block env, beneficiary, oracle) triggers gas limiting with refunds
 - **Enhanced Security**: Comprehensive limit enforcement preserving remaining gas on limit violations
 
-For complete MiniRex specification, see **[MiniRex.md](./specs/MiniRex.md)**.
+For complete MiniRex specification, see the [MiniRex upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/minirex.html).
 
 ### REX Spec
 
@@ -50,14 +50,14 @@ For complete MiniRex specification, see **[MiniRex.md](./specs/MiniRex.md)**.
 - **Critical Security Fixes**: DELEGATECALL, STATICCALL, and CALLCODE now properly enforce 98/100 gas forwarding and oracle access detection
 - **MiniRex Foundation**: Inherits all MiniRex features including multidimensional gas model, compute gas detention, and enhanced security
 
-For complete Rex specification, see **[Rex.md](./specs/Rex.md)**.
+For complete Rex specification, see the [Rex upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex.html).
 
 ### REX1 Spec
 
 - **Limit Reset Fix**: Resets compute gas limits at the start of each transaction
 - **No Other Behavioral Changes**: Inherits Rex semantics fully
 
-For complete Rex1 specification, see **[Rex1.md](./specs/Rex1.md)**.
+For complete Rex1 specification, see the [Rex1 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex1.html).
 
 ### REX2 Spec
 
@@ -65,7 +65,7 @@ For complete Rex1 specification, see **[Rex1.md](./specs/Rex1.md)**.
 - **KeylessDeploy System Contract**: Enables keyless deployment (Nick's Method) with custom gas limits
 - **Rex1 Baseline**: Inherits Rex1 behavior for all other features
 
-For complete Rex2 specification, see **[Rex2.md](./specs/Rex2.md)**.
+For complete Rex2 specification, see the [Rex2 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex2.html).
 
 ### REX3 Spec
 
@@ -74,7 +74,7 @@ For complete Rex2 specification, see **[Rex2.md](./specs/Rex2.md)**.
 - **Keyless Deploy Compute Gas Tracking**: Records the 100K keyless deploy overhead as compute gas
 - **Rex2 Baseline**: Inherits all Rex2 behavior
 
-For complete Rex3 specification, see **[Rex3.md](./specs/Rex3.md)**.
+For complete Rex3 specification, see the [Rex3 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex3.html).
 
 ## Quick Start
 

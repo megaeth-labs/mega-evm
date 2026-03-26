@@ -171,7 +171,7 @@ Gas detention caps are absolute — if compute gas consumed already exceeds the 
 
 ## References
 
-- [mega-evm repository](https://github.com/megaeth-labs/mega-evm) — see `specs/MiniRex.md` for the full normative specification
+- [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
 - [Dual Gas Model](../evm/dual-gas-model.md) — compute gas vs storage gas details
 - [Resource Limits](../evm/resource-limits.md) — limit values and enforcement behavior
 - [Gas Detention](../evm/gas-detention.md) — volatile data detection and cap mechanics

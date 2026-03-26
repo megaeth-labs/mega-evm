@@ -123,6 +123,6 @@ State growth violations halt the transaction with `OutOfGas` and refund remainin
 
 ## References
 
-- [mega-evm repository](https://github.com/megaeth-labs/mega-evm) — see `specs/Rex.md` for the full normative specification
+- [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
 - [Dual Gas Model](../evm/dual-gas-model.md) — storage gas formulas and SALT mechanics
 - [Resource Limits](../evm/resource-limits.md) — limit values and enforcement behavior

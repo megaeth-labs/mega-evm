@@ -183,6 +183,6 @@ Once volatile data is accessed, no subsequent operation can raise the detained l
 
 ## References
 
-- [mega-evm repository](https://github.com/megaeth-labs/mega-evm) — see `specs/Rex4.md` for the full normative specification
+- [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
 - [Resource Accounting](../evm/resource-accounting.md) — how MegaETH tracks resource usage across all dimensions
 - [Gas Detention](../evm/gas-detention.md) — background on the gas detention mechanism

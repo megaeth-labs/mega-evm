@@ -1,6 +1,6 @@
 # Table of contents
 
-* [Overview](Overview.md)
+* [MegaETH Specification](overview.md "Overview")
 * [Hardforks and Specs](hardfork-spec.md)
 
 ## MegaEVM
