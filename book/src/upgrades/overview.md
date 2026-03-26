@@ -10,10 +10,14 @@ This section documents each MegaETH network upgrade, describing what changed, wh
 
 ### [MiniRex](minirex.md)
 
-| Network | Activation |
-| ------- | ---------- |
-| Testnet | Genesis (0) |
-| Mainnet | Genesis (0) |
+{% tabs %}
+{% tab title="Testnet" %}
+Genesis (0)
+{% endtab %}
+{% tab title="Mainnet" %}
+Genesis (0)
+{% endtab %}
+{% endtabs %}
 
 [Dual gas model](../evm/dual-gas-model.md), [multidimensional resource limits](../evm/resource-limits.md), [gas detention](../evm/gas-detention.md), 98/100 gas forwarding, SELFDESTRUCT disabled, system contracts ([Oracle](../system-contracts/oracle.md), [Timestamp](../oracle-services/timestamp.md))
 
@@ -23,10 +27,14 @@ This section documents each MegaETH network upgrade, describing what changed, wh
 
 ### MiniRex1
 
-| Network | Activation |
-| ------- | ---------- |
-| Testnet | Not activated |
-| Mainnet | Dec 4, 2025, 10:53 UTC (1764845637) |
+{% tabs %}
+{% tab title="Testnet" %}
+Not activated
+{% endtab %}
+{% tab title="Mainnet" %}
+Dec 4, 2025, 10:53 UTC (1764845637)
+{% endtab %}
+{% endtabs %}
 
 Rollback: reverted to Equivalence spec (maps to `EQUIVALENCE`).
 The MiniRex features were deactivated on the network; no chain reorg or state rollback occurred.
@@ -38,10 +46,14 @@ Contracts deployed during MiniRex remained on-chain.
 
 ### MiniRex2
 
-| Network | Activation |
-| ------- | ---------- |
-| Testnet | Not activated |
-| Mainnet | Dec 4, 2025, 12:05 UTC (1764849932) |
+{% tabs %}
+{% tab title="Testnet" %}
+Not activated
+{% endtab %}
+{% tab title="Mainnet" %}
+Dec 4, 2025, 12:05 UTC (1764849932)
+{% endtab %}
+{% endtabs %}
 
 Restoration: re-activated MiniRex spec (maps to `MINI_REX`).
 All MiniRex features (dual gas model, resource limits, gas detention) were re-enabled.
@@ -52,10 +64,14 @@ All MiniRex features (dual gas model, resource limits, gas detention) were re-en
 
 ### [Rex](rex.md)
 
-| Network | Activation |
-| ------- | ---------- |
-| Testnet | Dec 2, 2025, 16:56 UTC (1764694618) |
-| Mainnet | Dec 4, 2025, 12:39 UTC (1764851940) |
+{% tabs %}
+{% tab title="Testnet" %}
+Dec 2, 2025, 16:56 UTC (1764694618)
+{% endtab %}
+{% tab title="Mainnet" %}
+Dec 4, 2025, 12:39 UTC (1764851940)
+{% endtab %}
+{% endtabs %}
 
 Transaction intrinsic [storage gas](../glossary.md#storage-gas), revised storage gas economics (`base × (multiplier − 1)`), consistent CALL-like opcode behavior, [state growth](../evm/resource-accounting.md#state-growth) tracking
 
@@ -65,10 +81,14 @@ Transaction intrinsic [storage gas](../glossary.md#storage-gas), revised storage
 
 ### [Rex1](rex1.md)
 
-| Network | Activation |
-| ------- | ---------- |
-| Testnet | Dec 19, 2025, 12:33 UTC (1766147599) |
-| Mainnet | Dec 21, 2025, 02:00 UTC (1766282400) |
+{% tabs %}
+{% tab title="Testnet" %}
+Dec 19, 2025, 12:33 UTC (1766147599)
+{% endtab %}
+{% tab title="Mainnet" %}
+Dec 21, 2025, 02:00 UTC (1766282400)
+{% endtab %}
+{% endtabs %}
 
 Fix: [compute gas](../glossary.md#compute-gas) limit reset between transactions
 
@@ -78,10 +98,14 @@ Fix: [compute gas](../glossary.md#compute-gas) limit reset between transactions
 
 ### [Rex2](rex2.md)
 
-| Network | Activation |
-| ------- | ---------- |
-| Testnet | Feb 3, 2026, 11:00 UTC (1770116400) |
-| Mainnet | Feb 4, 2026, 23:00 UTC (1770246000) |
+{% tabs %}
+{% tab title="Testnet" %}
+Feb 3, 2026, 11:00 UTC (1770116400)
+{% endtab %}
+{% tab title="Mainnet" %}
+Feb 4, 2026, 23:00 UTC (1770246000)
+{% endtab %}
+{% endtabs %}
 
 SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [KeylessDeploy](../system-contracts/keyless-deploy.md) system contract
 
@@ -91,10 +115,14 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 ### [Rex3](rex3.md)
 
-| Network | Activation |
-| ------- | ---------- |
-| Testnet | Feb 18, 2026, 02:00 UTC (1771380000) |
-| Mainnet | Feb 21, 2026, 02:00 UTC (1771639200) |
+{% tabs %}
+{% tab title="Testnet" %}
+Feb 18, 2026, 02:00 UTC (1771380000)
+{% endtab %}
+{% tab title="Mainnet" %}
+Feb 21, 2026, 02:00 UTC (1771639200)
+{% endtab %}
+{% endtabs %}
 
 [Oracle](../system-contracts/oracle.md) gas cap raised to 20M, SLOAD-based oracle detention, keyless deploy compute gas tracking
 
@@ -104,10 +132,14 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 ### [Rex4](rex4.md)
 
-| Network | Activation |
-| ------- | ---------- |
-| Testnet | TBD |
-| Mainnet | TBD |
+{% tabs %}
+{% tab title="Testnet" %}
+TBD
+{% endtab %}
+{% tab title="Mainnet" %}
+TBD
+{% endtab %}
+{% endtabs %}
 
 Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, MegaAccessControl, MegaLimitControl, sandbox environment inheritance
 
