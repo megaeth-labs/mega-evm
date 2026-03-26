@@ -9,7 +9,7 @@ For the full normative definition, see the Rex1 spec in the mega-evm repository.
 
 ## Summary
 
-Rex1 is a patch release that fixes a single critical bug: the compute gas limit lowered by volatile data access in one transaction persisted to subsequent transactions within the same block.
+Rex1 is a patch release that fixes a single critical bug: the [compute gas](../glossary.md#compute-gas) limit lowered by [volatile data](../glossary.md#volatile-data) access in one transaction persisted to subsequent transactions within the same block.
 This caused unrelated transactions to fail unexpectedly.
 
 ## What Changed
@@ -17,7 +17,7 @@ This caused unrelated transactions to fail unexpectedly.
 ### Compute Gas Limit Reset Between Transactions
 
 #### Previous behavior
-- The detained compute gas limit persists across transactions within the same block.
+- The [detained](../glossary.md#detained-limit) compute gas limit persists across transactions within the same block.
 - A later transaction may inherit a lowered limit from an earlier transaction's volatile data access and halt with `ComputeGasLimitExceeded` even though it never accessed volatile data itself.
 
 For example:

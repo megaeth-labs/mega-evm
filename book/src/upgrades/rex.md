@@ -10,12 +10,12 @@ For the full normative definition, see the Rex spec in the mega-evm repository.
 ## Summary
 
 Rex is the first major upgrade after MiniRex.
-It significantly refines the storage gas economics introduced in MiniRex, changing the formula from `base × multiplier` to `base × (multiplier − 1)` so that operations in uncrowded state regions incur **zero storage gas**.
+It significantly refines the [storage gas](../glossary.md#storage-gas) economics introduced in MiniRex, changing the formula from `base × multiplier` to `base × (multiplier − 1)` so that operations in uncrowded state regions incur **zero storage gas**.
 A flat 39,000 storage gas is added to every transaction's intrinsic cost to account for per-transaction state overhead.
 
-Rex also fixes inconsistencies in MiniRex where CALLCODE, DELEGATECALL, and STATICCALL bypassed the 98/100 gas forwarding cap and oracle access detection.
+Rex also fixes inconsistencies in MiniRex where CALLCODE, DELEGATECALL, and STATICCALL bypassed the 98/100 gas forwarding cap and [oracle](../system-contracts/oracle.md) access detection.
 All CALL-like opcodes now behave consistently.
-A new **state growth** resource dimension is introduced with per-transaction and per-block limits to prevent unbounded state expansion.
+A new **[state growth](../evm/resource-accounting.md#state-growth)** [resource dimension](../glossary.md#resource-dimension) is introduced with per-transaction and per-block limits to prevent unbounded state expansion.
 
 ## What Changed
 
@@ -34,7 +34,7 @@ A new **state growth** resource dimension is introduced with per-transaction and
 - SSTORE (0→non-0): `2,000,000 × multiplier`
 - Account creation: `2,000,000 × multiplier`
 - Contract creation: `2,000,000 × multiplier`
-- At minimum bucket size (multiplier = 1), storage gas is still charged at the full base cost.
+- At minimum bucket size ([multiplier](../glossary.md#multiplier) = 1), storage gas is still charged at the full base cost.
 
 #### New behavior
 - SSTORE (0→non-0): `20,000 × (multiplier − 1)`
@@ -46,7 +46,7 @@ A new **state growth** resource dimension is introduced with per-transaction and
 
 #### Example
 
-A contract writes a new storage slot in an uncrowded state region (bucket capacity = MIN_BUCKET_SIZE, so multiplier = 1).
+A contract writes a new storage slot in an uncrowded state region (bucket capacity = [MIN_BUCKET_SIZE](../glossary.md#min_bucket_size), so multiplier = 1).
 Under MiniRex, this SSTORE costs 2,000,000 storage gas.
 Under Rex, it costs `20,000 × (1 − 1)` = 0 storage gas.
 Storage writes in uncrowded regions are effectively free from the storage gas perspective, while crowded regions still pay proportionally.
@@ -60,7 +60,7 @@ Storage writes in uncrowded regions are effectively free from the storage gas pe
 
 #### New behavior
 - CALLCODE, DELEGATECALL, and STATICCALL all enforce the 98/100 gas forwarding cap.
-- STATICCALL triggers oracle access detection when targeting the oracle contract (consistent with CALL).
+- STATICCALL triggers oracle access detection when targeting the [oracle contract](../system-contracts/oracle.md) (consistent with CALL).
 - CALLCODE and DELEGATECALL do not trigger oracle access detection — their `target_address` equals the caller's address, so they never constitute a direct oracle read.
 
 | Opcode         | 98/100 gas forwarding | Oracle access detection |
@@ -92,7 +92,7 @@ Storage writes in uncrowded regions are effectively free from the storage gas pe
 | State growth   | Transaction | Unlimited   | **1,000**    |
 | State growth   | Block       | Unlimited   | **1,000**    |
 
-State growth counts net new entries: new storage slots (SSTORE 0→non-0) and new accounts (CREATE, CREATE2, or CALL with value to empty account).
+[State growth](../evm/resource-accounting.md#state-growth) counts net new entries: new storage slots (SSTORE 0→non-0) and new accounts (CREATE, CREATE2, or CALL with value to empty account).
 
 ## Developer Impact
 

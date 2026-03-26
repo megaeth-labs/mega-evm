@@ -9,9 +9,9 @@ For the full normative definition, see the Rex3 spec in the mega-evm repository.
 
 ## Summary
 
-Rex3 addresses two issues with oracle gas detention and fixes a gap in keyless deploy resource accounting.
+Rex3 addresses two issues with [oracle](../system-contracts/oracle.md) [gas detention](../evm/gas-detention.md) and fixes a gap in [keyless deploy](../system-contracts/keyless-deploy.md) resource accounting.
 
-The oracle access compute gas cap is increased from 1M to **20M**, matching the block environment cap.
+The oracle access [compute gas](../glossary.md#compute-gas) cap is increased from 1M to **20M**, matching the block environment cap.
 The 1M cap was too restrictive for legitimate use cases, causing frequent `VolatileDataAccessOutOfGas` halts in contracts that need meaningful computation after reading oracle data.
 
 Oracle detention is also changed from CALL-based to **SLOAD-based** triggering — simply calling the oracle contract without reading its storage no longer activates gas detention.
@@ -73,7 +73,7 @@ All pre-Rex3 behavior is unchanged.
 The shift from CALL-based to SLOAD-based oracle detection more accurately captures actual oracle data access.
 DELEGATECALL to the oracle is excluded because SLOAD in a DELEGATECALL context reads the caller's storage, not the oracle's — this is consistent with Rex2 behavior.
 
-The `MEGA_SYSTEM_ADDRESS` exemption now checks `TxEnv.caller` (the transaction sender) rather than the call-frame-level caller, meaning the entire transaction from the system address is exempted regardless of call depth.
+The [`MEGA_SYSTEM_ADDRESS`](../system-contracts/system-tx.md) exemption now checks `TxEnv.caller` (the transaction sender) rather than the call-frame-level caller, meaning the entire transaction from the system address is exempted regardless of call depth.
 
 ## References
 

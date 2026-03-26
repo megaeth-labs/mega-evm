@@ -13,14 +13,14 @@ Rex4 is the current unstable specification and is subject to change before activ
 
 ## Summary
 
-Rex4 introduces **per-call-frame resource budgets** across all four resource dimensions (compute gas, data size, KV updates, and state growth).
-Before Rex4, resource limits only applied at the transaction level, which meant a single inner call could consume nearly the entire budget and leave parent or sibling calls unable to execute predictably.
+Rex4 introduces **per-[call-frame](../glossary.md#call-frame) resource budgets** across all four [resource dimensions](../glossary.md#resource-dimension) ([compute gas](../glossary.md#compute-gas), data size, KV updates, and state growth).
+Before Rex4, [resource limits](../evm/resource-limits.md) only applied at the transaction level, which meant a single inner call could consume nearly the entire budget and leave parent or sibling calls unable to execute predictably.
 Per-call-frame budgets give each call frame a bounded share of remaining resources, making nested execution more predictable for contract authors.
 
-Rex4 also shifts gas detention from absolute caps to **relative caps**, so transactions that access volatile data late in execution are no longer penalized for compute work done before the access.
-Two new system contracts — **MegaAccessControl** and **MegaLimitControl** — give contracts runtime control over volatile data access and the ability to query their effective remaining compute gas budget.
+Rex4 also shifts [gas detention](../evm/gas-detention.md) from absolute caps to **relative caps**, so transactions that access [volatile data](../glossary.md#volatile-data) late in execution are no longer penalized for compute work done before the access.
+Two new [system contracts](../system-contracts/README.md) — **MegaAccessControl** and **MegaLimitControl** — give contracts runtime control over volatile data access and the ability to query their effective remaining compute gas budget.
 
-Finally, the keyless deploy sandbox now inherits the parent transaction's external environment for dynamic gas pricing and oracle behavior, improving accuracy for contracts deployed via Nick's Method.
+Finally, the [keyless deploy](../system-contracts/keyless-deploy.md) sandbox now inherits the parent transaction's external environment for dynamic gas pricing and [oracle](../system-contracts/oracle.md) behavior, improving accuracy for contracts deployed via Nick's Method.
 
 ## What Changed
 
@@ -33,7 +33,7 @@ Finally, the keyless deploy sandbox now inherits the parent transaction's extern
 #### New behavior
 - The top-level call frame starts with the full transaction budget for each resource dimension.
 - Each inner call frame receives `remaining × 98 / 100` of its parent's remaining budget.
-- When a call frame exceeds its local budget, it reverts with `MegaLimitExceeded(uint8 kind, uint64 limit)` (does not halt the transaction).
+- When a call frame exceeds its local budget, it reverts with [`MegaLimitExceeded(uint8 kind, uint64 limit)`](../glossary.md#call-frame-local-exceed) (does not halt the transaction).
 - The parent call frame can continue executing after a child call frame reverts due to a call-frame-local limit.
 - Transaction-level exceeds still halt the entire transaction with `OutOfGas`.
 - Compute gas consumed by reverted child frames still counts toward the transaction's total compute gas usage.
@@ -129,7 +129,7 @@ interface IMegaLimitControl {
 - If a transaction had already consumed more compute gas than the cap before accessing volatile data, execution halted immediately.
 
 #### New behavior
-- The effective detained limit is `current_usage + cap` at the time of volatile access.
+- The effective [detained limit](../glossary.md#detained-limit) is `current_usage + cap` at the time of volatile access.
 - Execution continues up to `min(tx_compute_limit, effective_detained_limit)`.
 - Across multiple volatile accesses, the most restrictive effective limit applies.
 - Transactions that access volatile data late in execution can still use the full cap amount of compute gas after the access.

@@ -27,42 +27,58 @@ Using oracle services requires trusting the sequencer to provide accurate values
 
 ## Interface
 
+### Public — Read Methods
+
 ```solidity
 interface IOracle {
-    /// @notice Executes multiple oracle calls in one transaction
-    function multiCall(bytes[] calldata data)
-        external returns (bytes[] memory results);
-
     /// @notice Reads a value from a specific storage slot
     function getSlot(uint256 slot) external view returns (bytes32 value);
-
-    /// @notice Writes a value to a specific storage slot
-    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS
-    function setSlot(uint256 slot, bytes32 value) external;
 
     /// @notice Reads values from multiple storage slots
     function getSlots(uint256[] calldata slots)
         external view returns (bytes32[] memory values);
+}
+```
+
+### Internal — Used by Oracle Services
+
+The following methods are used internally by [oracle service](../oracle-services/README.md) wrapper contracts to communicate with the sequencer.
+They are not intended for direct use by application contracts.
+
+```solidity
+interface IOracle {
+    /// @notice Sends a hint to the sequencer's oracle backend.
+    /// @dev Available from Rex2 onward. Used by oracle service wrappers
+    /// to request data from the sequencer at runtime (e.g., requesting
+    /// a fresh timestamp before reading it). Does not mutate on-chain state.
+    function sendHint(bytes32 topic, bytes calldata data) external view;
+
+    /// @notice Executes multiple oracle calls in one transaction
+    function multiCall(bytes[] calldata data)
+        external returns (bytes[] memory results);
+}
+```
+
+### Sequencer-Only — Write Methods
+
+These methods can only be called by `MEGA_SYSTEM_ADDRESS` via [system transactions](system-tx.md).
+Calls from any other address will revert.
+
+```solidity
+interface IOracle {
+    /// @notice Writes a value to a specific storage slot
+    function setSlot(uint256 slot, bytes32 value) external;
 
     /// @notice Writes values to multiple storage slots
-    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS
     function setSlots(
         uint256[] calldata slots,
         bytes32[] calldata values
     ) external;
 
-    /// @notice Sends a hint to the oracle backend
-    /// @dev Available from Rex2 onward.
-    /// Declared `view` because it does not mutate on-chain state;
-    /// the hint is processed by the sequencer outside the EVM.
-    function sendHint(bytes32 topic, bytes calldata data) external view;
-
     /// @notice Emits an oracle log
-    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS
     function emitLog(bytes32 topic, bytes calldata data) external;
 
     /// @notice Emits multiple oracle logs
-    /// @dev Can only be called by MEGA_SYSTEM_ADDRESS
     function emitLogs(bytes32 topic, bytes[] calldata dataVector) external;
 }
 ```
@@ -72,8 +88,9 @@ interface IOracle {
 **Forced-cold SLOAD**: All SLOAD operations on the oracle contract use cold access gas cost (2,100 gas) regardless of EIP-2929 warm/cold tracking state.
 This ensures deterministic gas costs during replay.
 
-**`sendHint` interception**: `sendHint` is intercepted at the EVM level before call frame execution — the hint is forwarded to the oracle backend via the external oracle environment.
-The call still proceeds to on-chain execution after interception.
+**`sendHint` interception**: When an oracle service wrapper calls `sendHint`, the EVM intercepts the call and forwards the hint to the sequencer's oracle backend before the call frame executes.
+The sequencer uses this to prepare data (e.g., capture the current timestamp) so it is available when the transaction subsequently reads oracle storage.
+The call then proceeds to on-chain execution normally (the Solidity function body runs as a no-op `view` function).
 
 ## Gas Detention Impact
 

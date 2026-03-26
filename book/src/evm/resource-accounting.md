@@ -4,7 +4,7 @@ This page specifies how MegaETH tracks resource usage across the four independen
 
 ## Revert Behavior
 
-All resource trackers are **call-frame-aware**: usage within a subcall is discarded if the subcall reverts, and merged into the parent on success.
+All resource trackers are **[call-frame](../glossary.md#call-frame)-aware**: usage within a subcall is discarded if the subcall reverts, and merged into the parent on success.
 
 **Exception**: [Compute gas](../glossary.md#compute-gas) accumulates globally and is **never** reverted, because CPU cycles cannot be undone.
 

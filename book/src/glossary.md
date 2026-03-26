@@ -2,9 +2,9 @@
 
 ## Compute gas
 
-The gas cost for pure computational work (opcode execution, memory expansion, precompiles).
+Standard EVM gas — identical to Ethereum (Optimism Isthmus / Ethereum Prague).
 
-Standard Optimism EVM (Isthmus) gas costs.
+Every opcode costs the same compute gas as it does on mainnet Ethereum (e.g., `ADD` = 3 gas, cold `SLOAD` = 2,100 gas).
 
 One of the two components of total gas cost in MegaETH's [dual gas model](evm/dual-gas-model.md).
 

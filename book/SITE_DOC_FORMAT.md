@@ -98,6 +98,9 @@ Readability is important but must never compromise accuracy.
   Write "Unlimited" or "No limit", not "—".
   Dashes are ambiguous (could mean "not applicable", "unknown", or "unlimited").
 - One sentence, one line.
+- **Use hint boxes for developer-facing tips and practical guidance.**
+  Actionable advice aimed at dapp builders — such as how to set `gas_limit`, which RPC endpoint to use, or how a MegaETH concept maps to familiar Ethereum behavior — should be placed in a `{% hint style="info" %}` box rather than inline prose.
+  This visually separates "what you need to do" from "how it works" and makes tips scannable.
 
 ## Page templates
 

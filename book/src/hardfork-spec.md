@@ -51,10 +51,10 @@ Adds block environment access tracking for parallel execution support.
 
 The first spec to introduce MegaETH-specific modifications:
 
-- **Dual gas model** — Compute gas + storage gas
-- **Multidimensional resource limits** — Compute gas (1B), data size (3.125 MB), KV updates (125K)
-- **Dynamic gas costs** — SALT bucket-based scaling
-- **Gas detention** — Volatile data access triggers gas limiting
+- **[Dual gas model](evm/dual-gas-model.md)** — [Compute gas](glossary.md#compute-gas) + [storage gas](glossary.md#storage-gas)
+- **[Multidimensional resource limits](evm/resource-limits.md)** — Compute gas (1B), data size (3.125 MB), KV updates (125K)
+- **[Dynamic gas costs](evm/dual-gas-model.md#dynamic-salt-multiplier)** — [SALT bucket](glossary.md#salt-bucket)-based scaling
+- **[Gas detention](evm/gas-detention.md)** — [Volatile data](glossary.md#volatile-data) access triggers gas limiting
 - **SELFDESTRUCT disabled**
 - **Large contract support** — 512 KB contracts (21x increase from 24 KB)
 
@@ -62,13 +62,13 @@ The first spec to introduce MegaETH-specific modifications:
 
 ### REX
 
-Refines the storage gas economics introduced in MINI_REX:
+Refines the [storage gas](glossary.md#storage-gas) economics introduced in MINI_REX:
 
 - **Refined storage gas formulas** — Gradual scaling (20K–32K base costs vs MiniRex's 2M)
 - **Transaction intrinsic storage gas** — 39,000 flat fee for all transactions
-- **Zero cost fresh storage** — Minimum-sized SALT buckets charge 0 storage gas
+- **Zero cost fresh storage** — Minimum-sized [SALT buckets](glossary.md#salt-bucket) charge 0 storage gas
 - **Security fixes** — DELEGATECALL, STATICCALL, CALLCODE properly enforce gas forwarding and oracle access detection
-- **State growth tracking** — New resource limit dimension
+- **[State growth](evm/resource-accounting.md#state-growth) tracking** — New [resource limit](evm/resource-limits.md) dimension
 
 *See [Rex Network Upgrade](upgrades/rex.md) for full details.*
 
@@ -81,16 +81,16 @@ Refines the storage gas economics introduced in MINI_REX:
 
 ### REX2
 
-- **SELFDESTRUCT restored** — Re-enabled with EIP-6780 semantics
-- **KeylessDeploy system contract** — Enables deterministic cross-chain deployment (Nick's Method)
+- **SELFDESTRUCT restored** — Re-enabled with [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics
+- **[KeylessDeploy](system-contracts/keyless-deploy.md) system contract** — Enables deterministic cross-chain deployment (Nick's Method)
 
 *See [Rex2 Network Upgrade](upgrades/rex2.md) for full details.*
 
 ### REX3
 
 - **Increased oracle access gas limit** — Raised from 1M to 20M
-- **SLOAD-based oracle detention** — Triggers on SLOAD from oracle storage instead of CALL to oracle contract
-- **Keyless deploy compute gas tracking** — Records the 100K overhead as compute gas
+- **SLOAD-based [oracle](system-contracts/oracle.md) detention** — Triggers on SLOAD from oracle storage instead of CALL to oracle contract
+- **[Keyless deploy](system-contracts/keyless-deploy.md) [compute gas](glossary.md#compute-gas) tracking** — Records the 100K overhead as compute gas
 
 *See [Rex3 Network Upgrade](upgrades/rex3.md) for full details.*
 
@@ -100,10 +100,10 @@ Refines the storage gas economics introduced in MINI_REX:
 Rex4 is the current unstable specification and is subject to change before activation.
 {% endhint %}
 
-- **Per-call-frame resource budgets** — All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
-- **Relative gas detention cap** — Effective detained limit is `current_usage + cap` instead of an absolute cap
-- **MegaAccessControl system contract** — Allows contracts to proactively disable volatile data access for a call subtree
+- **Per-[call-frame](glossary.md#call-frame) resource budgets** — All four [resource dimensions](glossary.md#resource-dimension) (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
+- **Relative [gas detention](evm/gas-detention.md) cap** — Effective [detained limit](glossary.md#detained-limit) is `current_usage + cap` instead of an absolute cap
+- **MegaAccessControl system contract** — Allows contracts to proactively disable [volatile data](glossary.md#volatile-data) access for a call subtree
 - **MegaLimitControl system contract** — Allows querying effective remaining compute gas under detention and call frame limits
-- **Keyless deploy sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior
+- **[Keyless deploy](system-contracts/keyless-deploy.md) sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior
 
 *See [Rex4 Network Upgrade](upgrades/rex4.md) for full details.*

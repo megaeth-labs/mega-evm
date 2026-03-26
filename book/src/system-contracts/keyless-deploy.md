@@ -10,7 +10,7 @@
 
 ## The Problem
 
-MegaETH's gas model prices operations differently than Ethereum.
+MegaETH's [gas model](../evm/dual-gas-model.md) prices operations differently than Ethereum.
 Contracts deployed via Nick's Method on Ethereum may run out of gas on MegaETH.
 
 With Nick's Method, **any change to signed transaction fields invalidates the signature**, so the gas limit cannot simply be increased.
@@ -105,7 +105,7 @@ The signer is not charged.
 | `InsufficientBalance()`  | Signer lacks funds               |
 | `ContractAlreadyExists()`| Address already has code         |
 | `GasLimitTooLow()`       | Override < transaction's limit   |
-| `InsufficientComputeGas()` | Call-frame-local compute gas budget is below keyless deploy overhead |
+| `InsufficientComputeGas()` | [Call-frame](../glossary.md#call-frame)-local [compute gas](../glossary.md#compute-gas) budget is below keyless deploy overhead |
 
 **Execution errors** — The call returns normally with error in `errorData`.
 The signer is charged for gas.

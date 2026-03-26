@@ -10,11 +10,11 @@ For the full normative definition, see the MiniRex spec in the mega-evm reposito
 ## Summary
 
 MiniRex is the foundational MegaEVM spec, building on Optimism Isthmus (Ethereum Prague).
-It introduces a **dual gas model** that separates compute gas from storage gas, enabling independent pricing of computational work versus storage burden.
+It introduces a **[dual gas model](../evm/dual-gas-model.md)** that separates [compute gas](../glossary.md#compute-gas) from [storage gas](../glossary.md#storage-gas), enabling independent pricing of computational work versus storage burden.
 This is critical because MegaETH's extremely low base fees and high gas limits would otherwise make storage operations dramatically underpriced.
 
-MiniRex also adds **multidimensional resource limits** (compute gas, data size, KV updates), **gas detention** to restrict computation after volatile data access for parallel execution, and a **98/100 gas forwarding rule** to prevent call-depth attacks under high gas limits.
-Two system contracts — Oracle and High-Precision Timestamp — provide essential infrastructure services.
+MiniRex also adds **[multidimensional resource limits](../evm/resource-limits.md)** (compute gas, data size, KV updates), **[gas detention](../evm/gas-detention.md)** to restrict computation after [volatile data](../glossary.md#volatile-data) access for parallel execution, and a **98/100 gas forwarding rule** to prevent call-depth attacks under high gas limits.
+Two system contracts — [Oracle](../system-contracts/oracle.md) and [High-Precision Timestamp](../oracle-services/timestamp.md) — provide essential infrastructure services.
 
 ## What Changed
 
@@ -27,7 +27,7 @@ Two system contracts — Oracle and High-Precision Timestamp — provide essenti
 - Every transaction's total gas cost is the sum of compute gas and storage gas.
 - Compute gas covers standard EVM opcode costs.
 - Storage gas is an additional charge for operations that impose persistent storage burden.
-- Storage gas costs scale dynamically based on SALT bucket capacity: `multiplier = bucket_capacity / MIN_BUCKET_SIZE`.
+- Storage gas costs scale dynamically based on [SALT bucket](../glossary.md#salt-bucket) capacity: [`multiplier`](../glossary.md#multiplier) `= bucket_capacity /` [`MIN_BUCKET_SIZE`](../glossary.md#min_bucket_size).
 
 Storage gas schedule:
 
@@ -41,8 +41,8 @@ Storage gas schedule:
 | **LOG data**               | 80/byte                     |
 | **Calldata (zero)**        | 40/byte                     |
 | **Calldata (non-zero)**    | 160/byte                    |
-| **Floor (zero)**           | 100/byte                    |
-| **Floor (non-zero)**       | 400/byte                    |
+| **Calldata floor (zero)**  | 100/byte                    |
+| **Calldata floor (non-zero)** | 400/byte                 |
 
 ### Multidimensional Resource Limits
 
@@ -59,7 +59,7 @@ Storage gas schedule:
 | KV updates       | 125,000                   | 500,000         |
 
 - When any limit is exceeded, the transaction halts with `OutOfGas` and remaining gas is preserved for refund.
-- All trackers are call-frame-aware: reverted inner calls discard their tracked usage (except compute gas, which is never reverted).
+- All trackers are [call-frame](../glossary.md#call-frame)-aware: reverted inner calls discard their tracked usage (except compute gas, which is never reverted).
 
 ### Gas Detention (Volatile Data Access Control)
 
@@ -72,14 +72,14 @@ Storage gas schedule:
 
 | Category                    | Trigger                                               | Cap   |
 | --------------------------- | ----------------------------------------------------- | ----- |
-| Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, etc. or beneficiary access | 20M  |
-| Oracle                      | CALL to oracle contract address                        | 1M   |
+| Block env / [Beneficiary](../glossary.md#beneficiary) | NUMBER, TIMESTAMP, COINBASE, etc. or beneficiary access | 20M  |
+| Oracle                      | CALL to [oracle contract](../system-contracts/oracle.md) address | 1M   |
 
 - Block environment opcodes: NUMBER, TIMESTAMP, COINBASE, DIFFICULTY, GASLIMIT, BASEFEE, PREVRANDAO, BLOCKHASH, BLOBBASEFEE, BLOBHASH.
 - Beneficiary access includes balance reads, code reads, and when the sender or recipient is the beneficiary.
 - The most restrictive cap wins when multiple volatile sources are accessed.
 - Oracle SLOAD is always forced cold (2100 gas) for deterministic replay.
-- Transactions from `MEGA_SYSTEM_ADDRESS` are exempted from oracle detention.
+- Transactions from [`MEGA_SYSTEM_ADDRESS`](../system-contracts/system-tx.md) are exempted from oracle detention.
 
 #### Example
 
@@ -91,7 +91,7 @@ Transactions that never touch volatile data face no cap at all, maximizing paral
 ### Modified Gas Forwarding (98/100 Rule)
 
 #### Previous behavior
-- Standard EVM: subcalls receive at most 63/64 of remaining gas (EIP-150).
+- Standard EVM: subcalls receive at most 63/64 of remaining gas ([EIP-150](https://eips.ethereum.org/EIPS/eip-150)).
 
 #### New behavior
 - Subcalls receive at most 98/100 of remaining gas.
@@ -113,8 +113,8 @@ The 98/100 rule reduces this to approximately 10 gas.
 ### Contract Size Limits
 
 #### Previous behavior
-- Maximum contract size: 24,576 bytes (24 KB, EIP-170).
-- Maximum initcode size: 49,152 bytes (48 KB, EIP-3860).
+- Maximum contract size: 24,576 bytes (24 KB, [EIP-170](https://eips.ethereum.org/EIPS/eip-170)).
+- Maximum initcode size: 49,152 bytes (48 KB, [EIP-3860](https://eips.ethereum.org/EIPS/eip-3860)).
 
 #### New behavior
 - Maximum contract size: 524,288 bytes (512 KB) — a 21× increase.
@@ -127,7 +127,7 @@ The 98/100 rule reduces this to approximately 10 gas.
 
 #### New behavior
 - KZG Point Evaluation (`0x0A`): 100,000 gas (2× standard Prague cost).
-- ModExp (`0x05`): EIP-7883 gas schedule.
+- ModExp (`0x05`): [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) gas schedule.
 
 ### System Contracts
 
@@ -135,15 +135,15 @@ The 98/100 rule reduces this to approximately 10 gas.
 - No MegaETH-specific system contracts.
 
 #### New behavior
-- **Oracle** (`0x6342000000000000000000000000000000000001`) — Off-chain data key-value storage with hint support.
-- **High-Precision Timestamp** (`0x6342000000000000000000000000000000000002`) — Sub-second block timestamp.
+- **[Oracle](../system-contracts/oracle.md)** (`0x6342000000000000000000000000000000000001`) — Off-chain data key-value storage with hint support.
+- **[High-Precision Timestamp](../oracle-services/timestamp.md)** (`0x6342000000000000000000000000000000000002`) — Sub-second block timestamp.
 - Both contracts are deployed idempotently during block execution when MiniRex activates.
 
 ## Developer Impact
 
 **Storage gas is a new cost dimension you must account for.**
 Total gas cost = compute gas + storage gas.
-Local gas estimation tools may be inaccurate due to dynamic SALT-based multipliers — use MegaETH's native gas estimation APIs.
+Local gas estimation tools may be inaccurate due to dynamic [SALT](../glossary.md#salt)-based [multipliers](../glossary.md#multiplier) — use MegaETH's native gas estimation APIs.
 
 **Your transactions must respect three independent limits** (compute gas, data size, KV updates).
 Exceeding any one of them halts execution with remaining gas refunded.

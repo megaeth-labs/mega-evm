@@ -10,8 +10,8 @@ For the full normative definition, see the Rex2 spec in the mega-evm repository.
 ## Summary
 
 Rex2 makes two changes.
-First, it restores the `SELFDESTRUCT` opcode with post-Cancun (EIP-6780) semantics — MiniRex had completely disabled it.
-Second, it introduces the **KeylessDeploy** system contract, which enables deterministic cross-chain contract deployment via Nick's Method with a gas limit override to account for MegaETH's different gas pricing.
+First, it restores the `SELFDESTRUCT` opcode with post-Cancun ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)) semantics — MiniRex had completely disabled it.
+Second, it introduces the **[KeylessDeploy](../system-contracts/keyless-deploy.md)** system contract, which enables deterministic cross-chain contract deployment via Nick's Method with a gas limit override to account for MegaETH's different [gas pricing](../evm/dual-gas-model.md).
 
 ## What Changed
 
@@ -71,7 +71,7 @@ This prevents wrap-and-revert attacks.
 
 All pre-Rex2 behavior is unchanged.
 
-The SELFDESTRUCT restoration uses the same EIP-6780 semantics already implemented in the underlying revm.
+The SELFDESTRUCT restoration uses the same [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics already implemented in the underlying revm.
 The "same transaction" check means only contracts created via CREATE or CREATE2 within the currently executing transaction are eligible for full destruction.
 
 KeylessDeploy sandbox state (deployed contract, nonce changes) is merged into main execution on success and discarded on failure.

@@ -15,9 +15,9 @@ Detained gas is effectively refunded — users only pay for actual computation p
 | Category                    | Trigger                                                | Cap           |
 | --------------------------- | ------------------------------------------------------ | ------------- |
 | Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, DIFFICULTY/PREVRANDAO, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH, or beneficiary access | 20M           |
-| Oracle                      | SLOAD from oracle contract storage                      | 20M           |
+| Oracle                      | SLOAD from [oracle contract](../system-contracts/oracle.md) storage | 20M           |
 
-Transactions from `MEGA_SYSTEM_ADDRESS` are exempt from oracle gas detention.
+Transactions from [`MEGA_SYSTEM_ADDRESS`](../system-contracts/system-tx.md) are exempt from oracle gas detention.
 
 The **most restrictive cap wins** when multiple volatile sources are accessed.
 

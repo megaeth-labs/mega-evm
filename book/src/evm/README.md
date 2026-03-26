@@ -22,8 +22,33 @@ Every transaction's total gas cost is the sum of two independent components:
 total gas used = compute gas + storage gas
 ```
 
-- **[Compute gas](../glossary.md#compute-gas)** — Standard Optimism EVM (Isthmus) gas costs for all opcodes and operations.
-- **[Storage gas](../glossary.md#storage-gas)** — Additional costs for operations that impose persistent storage burden on nodes.
+- **[Compute gas](../glossary.md#compute-gas)** — The gas you already know from Ethereum.
+- **[Storage gas](../glossary.md#storage-gas)** — An additional charge for operations that impose persistent storage burden on nodes.
+
+### Compute Gas Is Standard EVM Gas
+
+Compute gas in MegaETH is **identical** to gas on Ethereum (specifically, Optimism Isthmus / Ethereum Prague).
+Every opcode costs exactly the same compute gas as it would on mainnet Ethereum: an `ADD` costs 3 gas, a cold `SLOAD` costs 2,100 gas, a `CALL` to a warm address costs 100 gas, and so on.
+If you have existing gas intuition from Ethereum development, it applies directly to compute gas on MegaETH.
+
+Storage gas is the only new dimension.
+It is charged on top of compute gas for operations that grow on-chain state — see the [Storage Gas Schedule](#storage-gas-schedule) below.
+
+### How Gas Limit, Compute Gas, and Storage Gas Relate
+
+Your transaction's `gas_limit` field works the same way as on Ethereum — it sets the maximum total gas you are willing to spend.
+Both compute gas and storage gas are deducted from this single `gas_limit` budget.
+If total gas consumed (compute + storage) exceeds `gas_limit`, the transaction runs out of gas just like on Ethereum.
+
+On top of the standard `gas_limit`, MegaETH enforces an additional **[compute gas limit](resource-limits.md)** (currently 200M) that caps just the compute portion.
+A transaction can be halted by either ceiling: running out of total gas (`gas_limit`) or exceeding the compute gas limit — whichever is hit first.
+
+{% hint style="info" %}
+**In practice:**
+- **`gas_limit`** — Set this to cover your expected total gas (compute + storage). The `eth_estimateGas` endpoint returns a value that accounts for both.
+- **`gas_used` in receipts** — Reports total gas consumed (compute + storage), just like Ethereum.
+- **Compute gas limit** — An invisible additional ceiling. You don't set it; the protocol enforces it. Most transactions stay well under 200M compute gas.
+{% endhint %}
 
 ### Transaction Intrinsic Costs
 
@@ -42,12 +67,20 @@ total gas used = compute gas + storage gas
 | **Account creation**       | 25,000 × (multiplier − 1)  | Value transfer to empty account                    |
 | **Contract creation**      | 32,000 × (multiplier − 1)  | CREATE/CREATE2 opcodes or creation transactions    |
 | **Code deposit**           | 10,000/byte                 | Per byte when contract creation succeeds           |
-| **LOG topic**              | 3,750/topic                 | Storage gas is permanent regardless of revert; data size usage is rolled back on revert |
-| **LOG data**               | 80/byte                     | Storage gas is permanent regardless of revert; data size usage is rolled back on revert |
+| **LOG topic**              | 3,750/topic                 | Per topic                                          |
+| **LOG data**               | 80/byte                     | Per byte of log data                               |
 | **Calldata (zero)**        | 40/byte                     | 10 × standard EVM zero-byte cost (4)               |
 | **Calldata (non-zero)**    | 160/byte                    | 10 × standard EVM non-zero-byte cost (16)          |
-| **Floor (zero)**           | 100/byte                    | 10 × EIP-7623 floor cost for zero bytes (10)       |
-| **Floor (non-zero)**       | 400/byte                    | 10 × EIP-7623 floor cost for non-zero bytes (40)   |
+| **Calldata floor (zero)**  | 100/byte                    | 10 × standard EVM floor cost for zero bytes (10)   |
+| **Calldata floor (non-zero)** | 400/byte                 | 10 × standard EVM floor cost for non-zero bytes (40) |
+
+**Calldata floor cost**: [EIP-7623](https://eips.ethereum.org/EIPS/eip-7623) introduced a minimum ("floor") charge for calldata.
+After execution, if the total gas consumed is less than the calldata floor cost, the transaction is charged the floor cost instead.
+This prevents data-heavy transactions from underpaying for their calldata by performing minimal computation.
+MegaETH applies the same 10× storage gas multiplier to the floor cost as it does to the standard calldata cost.
+
+**Revert behavior for LOG**: LOG storage gas follows standard EVM gas semantics — gas spent in a reverted call frame is consumed and not refunded, just like compute gas.
+However, the [data size](resource-accounting.md) tracked for the same LOG is rolled back on revert, since the log itself is discarded.
 
 ### Dynamic SALT Multiplier
 
@@ -68,7 +101,7 @@ See [Dual Gas Model](dual-gas-model.md) for details.
 
 ## Multidimensional Resource Limits
 
-MegaETH enforces four independent post-execution resource limits beyond standard gas:
+In addition to the standard gas limit, MegaETH enforces four independent resource ceilings during execution:
 
 | Resource         | Transaction Limit        | Block Limit     |
 | ---------------- | ------------------------ | --------------- |
@@ -85,8 +118,8 @@ Block-level limits are enforced across transactions: the last transaction that c
 
 {% hint style="info" %}
 **Rex4 (unstable): Per-Call-Frame Resource Budgets** — Rex4 adds per-call-frame enforcement on top of transaction-level limits.
-Each inner call frame receives `remaining × 98/100` of its parent's remaining budget for each dimension.
-A call-frame-local exceed **reverts** that call frame with `MegaLimitExceeded(uint8 kind, uint64 limit)` — it does not halt the transaction.
+Each inner [call frame](../glossary.md#call-frame) receives `remaining × 98/100` of its parent's remaining budget for each dimension.
+A [call-frame-local exceed](../glossary.md#call-frame-local-exceed) **reverts** that call frame with `MegaLimitExceeded(uint8 kind, uint64 limit)` — it does not halt the transaction.
 Compute gas consumed by reverted child frames still counts toward the transaction total.
 See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
 {% endhint %}
@@ -99,7 +132,7 @@ All CALL-like opcodes (CALL, STATICCALL, DELEGATECALL, CALLCODE) and CREATE/CREA
 This prevents call-depth attacks under MegaETH's high gas limits.
 
 {% hint style="warning" %}
-**Migration note**: Contracts that compute gas forwarding amounts assuming the standard 63/64 rule (EIP-150) will see different behavior.
+**Migration note**: Contracts that compute gas forwarding amounts assuming the standard 63/64 rule ([EIP-150](https://eips.ethereum.org/EIPS/eip-150)) will see different behavior.
 The parent call frame retains 2% instead of ~1.6%, so subcalls receive slightly less gas.
 Review any patterns that rely on precise gas forwarding calculations.
 {% endhint %}
@@ -132,14 +165,14 @@ See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
 
 ### Oracle Forced-Cold SLOAD
 
-All SLOAD operations on the [oracle contract](../system-contracts/oracle.md) use cold access gas cost (2100 gas) regardless of EIP-2929 warm/cold tracking state.
+All SLOAD operations on the [oracle contract](../system-contracts/oracle.md) use cold access gas cost (2100 gas) regardless of [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929) warm/cold tracking state.
 This ensures deterministic gas costs during block replay.
 
 See [Gas Detention](gas-detention.md) for details.
 
-## SELFDESTRUCT (EIP-6780)
+## SELFDESTRUCT ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780))
 
-`SELFDESTRUCT` is enabled with post-Cancun (EIP-6780) semantics:
+`SELFDESTRUCT` is enabled with post-Cancun ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)) semantics:
 
 - If the contract was created in the same transaction, `SELFDESTRUCT` removes code and storage and transfers the balance to the target address.
 - If the contract was not created in the same transaction, `SELFDESTRUCT` only transfers the balance — code and storage are preserved.
@@ -190,7 +223,7 @@ See [System Contracts Overview](../system-contracts/README.md) for the full regi
 | Precompile             | Address | Cost Override                          |
 | ---------------------- | ------- | -------------------------------------- |
 | KZG Point Evaluation   | `0x0A`  | 100,000 gas (2× standard Prague cost)  |
-| ModExp                 | `0x05`  | EIP-7883 gas schedule                  |
+| ModExp                 | `0x05`  | [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) gas schedule                  |
 
 ## Concept Deep Dives
 

@@ -2,13 +2,16 @@
 
 ## Overview
 
-MegaETH enforces resource limits across multiple dimensions, checked in two phases.
-Four of these are MegaETH-specific post-execution limits that go beyond standard EVM gas:
+In addition to the standard EVM gas limit (which caps total gas = compute + storage), MegaETH enforces four independent resource ceilings during execution:
 
-1. **[Compute Gas](../glossary.md#compute-gas)** — Computational opcode cost
+1. **[Compute Gas](../glossary.md#compute-gas)** — Computational opcode cost (tracked separately from total gas)
 2. **Data Size** — Calldata + logs + storage writes + code deploy + account updates
 3. **KV Updates** — Storage writes + account modifications (net, with refunds)
 4. **State Growth** — Net new accounts + net new storage slots
+
+These limits are **additional constraints** on top of your transaction's `gas_limit`.
+A transaction that stays within its `gas_limit` can still be halted if it exceeds the compute gas ceiling or any other resource limit.
+See [Dual Gas Model](dual-gas-model.md) for how `gas_limit`, compute gas, and storage gas relate.
 
 For detailed tracking rules, revert behavior, and what exactly counts toward each dimension, see [Resource Accounting](resource-accounting.md).
 
@@ -51,7 +54,7 @@ When any post-execution limit is exceeded during execution:
 - Failed transactions still count toward block limits
 
 {% hint style="info" %}
-**Rex4 (unstable): Call-Frame-Level Violations** — Rex4 adds per-call-frame resource budgets.
+**Rex4 (unstable): Call-Frame-Level Violations** — Rex4 adds per-[call-frame](../glossary.md#call-frame) resource budgets.
 Each inner call frame receives `remaining × 98/100` of its parent's remaining budget.
 When a call frame exceeds its local budget, it **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)` — the parent does **not** halt.
 The parent can continue executing; compute gas consumed by reverted frames still counts toward the transaction total.
