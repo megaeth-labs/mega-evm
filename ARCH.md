@@ -19,7 +19,6 @@ The implementation exposes multiple EVM versions (`MegaSpecId`). String names an
 mapping live in `crates/mega-evm/src/evm/spec.rs` and `crates/mega-evm/src/block/hardfork.rs`.
 
 Available specs: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`.
-See `specs/MiniRex.md`, `specs/Rex.md`, `specs/Rex1.md`, `specs/Rex2.md` for full behavior.
 
 ### EQUIVALENCE
 
@@ -27,7 +26,7 @@ Default spec that maintains equivalence with Optimism Isthmus EVM.
 
 ### MINI_REX
 
-The EVM version used for `Mini-Rex` hardfork of MegaETH. **See [MiniRex.md](./specs/MiniRex.md) for complete specification.**
+The EVM version used for `Mini-Rex` hardfork of MegaETH.
 
 **Major Features**:
 - **Multidimensional Gas Model**: Independent limits for compute gas (1B), data size (3.125 MB), and KV updates (125K)
