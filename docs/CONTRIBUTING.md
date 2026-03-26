@@ -1,13 +1,13 @@
-# Book Documentation Guide
+# Documentation Guide
 
-This file defines conventions and rules for writing and editing the public-facing book (`docs/`), hosted via GitBook.
+This file defines conventions and rules for writing and editing the public-facing documentation (`docs/`), hosted via GitBook.
 
 For GitBook markdown syntax, custom blocks, configuration files, and best practices, refer to the [GitBook skill.md](https://gitbook.com/docs/skill.md).
-The book is the specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
+The documentation is the specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
 
 ## Audience
 
-The book serves two audiences:
+The documentation serves two audiences:
 
 1. **App builders** — need to understand current MegaEVM behavior to develop and optimize dApps.
 2. **Node builders** — need unambiguous behavioral details and the full history of changes across specs.
@@ -267,7 +267,7 @@ The glossary is a flat reference of MegaETH-specific terms.
 - No subsections or tables — flat list only.
 - Link to concept pages and external repos where relevant.
 - Mark unstable-spec terms inline: `*(Rex4, unstable)*`.
-- Every MegaETH-specific concept that appears in the book must have a glossary entry.
+- Every MegaETH-specific concept that appears in the documentation must have a glossary entry.
 
 ## Checklist
 
