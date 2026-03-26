@@ -12,10 +12,10 @@ This section documents each MegaETH network upgrade, describing what changed, wh
 
 {% tabs %}
 {% tab title="Testnet" %}
-Genesis (0)
+`0` (Genesis)
 {% endtab %}
 {% tab title="Mainnet" %}
-Genesis (0)
+`0` (Genesis)
 {% endtab %}
 {% endtabs %}
 
@@ -32,7 +32,7 @@ Genesis (0)
 N/A
 {% endtab %}
 {% tab title="Mainnet" %}
-Dec 4, 2025, 10:53 UTC (1764845637)
+`1764845637` (Dec 4, 2025, 10:53 UTC)
 {% endtab %}
 {% endtabs %}
 
@@ -51,7 +51,7 @@ Contracts deployed during MiniRex remained on-chain.
 N/A
 {% endtab %}
 {% tab title="Mainnet" %}
-Dec 4, 2025, 12:05 UTC (1764849932)
+`1764849932` (Dec 4, 2025, 12:05 UTC)
 {% endtab %}
 {% endtabs %}
 
@@ -66,10 +66,10 @@ All MiniRex features (dual gas model, resource limits, gas detention) were re-en
 
 {% tabs %}
 {% tab title="Testnet" %}
-Dec 2, 2025, 16:56 UTC (1764694618)
+`1764694618` (Dec 2, 2025, 16:56 UTC)
 {% endtab %}
 {% tab title="Mainnet" %}
-Dec 4, 2025, 12:39 UTC (1764851940)
+`1764851940` (Dec 4, 2025, 12:39 UTC)
 {% endtab %}
 {% endtabs %}
 
@@ -83,10 +83,10 @@ Transaction intrinsic [storage gas](../glossary.md#storage-gas), revised storage
 
 {% tabs %}
 {% tab title="Testnet" %}
-Dec 19, 2025, 12:33 UTC (1766147599)
+`1766147599` (Dec 19, 2025, 12:33 UTC)
 {% endtab %}
 {% tab title="Mainnet" %}
-Dec 21, 2025, 02:00 UTC (1766282400)
+`1766282400` (Dec 21, 2025, 02:00 UTC)
 {% endtab %}
 {% endtabs %}
 
@@ -100,10 +100,10 @@ Fix: [compute gas](../glossary.md#compute-gas) limit reset between transactions
 
 {% tabs %}
 {% tab title="Testnet" %}
-Feb 3, 2026, 11:00 UTC (1770116400)
+`1770116400` (Feb 3, 2026, 11:00 UTC)
 {% endtab %}
 {% tab title="Mainnet" %}
-Feb 4, 2026, 23:00 UTC (1770246000)
+`1770246000` (Feb 4, 2026, 23:00 UTC)
 {% endtab %}
 {% endtabs %}
 
@@ -117,10 +117,10 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 {% tabs %}
 {% tab title="Testnet" %}
-Feb 18, 2026, 02:00 UTC (1771380000)
+`1771380000` (Feb 18, 2026, 02:00 UTC)
 {% endtab %}
 {% tab title="Mainnet" %}
-Feb 21, 2026, 02:00 UTC (1771639200)
+`1771639200` (Feb 21, 2026, 02:00 UTC)
 {% endtab %}
 {% endtabs %}
 
