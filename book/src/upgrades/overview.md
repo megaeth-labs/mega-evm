@@ -29,7 +29,7 @@ Genesis (0)
 
 {% tabs %}
 {% tab title="Testnet" %}
-Not activated
+N/A
 {% endtab %}
 {% tab title="Mainnet" %}
 Dec 4, 2025, 10:53 UTC (1764845637)
@@ -48,7 +48,7 @@ Contracts deployed during MiniRex remained on-chain.
 
 {% tabs %}
 {% tab title="Testnet" %}
-Not activated
+N/A
 {% endtab %}
 {% tab title="Mainnet" %}
 Dec 4, 2025, 12:05 UTC (1764849932)
