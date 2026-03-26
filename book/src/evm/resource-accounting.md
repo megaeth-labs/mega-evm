@@ -8,14 +8,18 @@ All resource trackers are **[call-frame](../glossary.md#call-frame)-aware**: usa
 
 **Exception**: [Compute gas](../glossary.md#compute-gas) accumulates globally and is **never** reverted, because CPU cycles cannot be undone.
 
-{% hint style="info" %}
-**Rex4 (unstable): Per-Call-Frame Limits** — Rex4 adds per-call-frame budgets for all four dimensions.
+<details>
+
+<summary>Rex4 (unstable): Per-Call-Frame Limits</summary>
+
+Rex4 adds per-call-frame budgets for all four dimensions.
 The top-level call frame starts with the full transaction budget.
 Each inner call frame receives `remaining × 98/100` of its parent's remaining budget.
 If an inner call frame exceeds its local budget, it reverts with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 The parent can continue executing; compute gas consumed by reverted frames still counts toward the transaction total.
 See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
-{% endhint %}
+
+</details>
 
 ## Compute Gas
 

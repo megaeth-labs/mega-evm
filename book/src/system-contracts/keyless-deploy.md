@@ -56,30 +56,63 @@ interface IKeylessDeploy {
 - `deployedAddress` — Deployed contract address (zero if failed)
 - `errorData` — ABI-encoded error if failed, empty on success
 
+## Transaction Format
+
+The `keylessDeploymentTransaction` must be a pre-[EIP-155](https://eips.ethereum.org/EIPS/eip-155) legacy transaction ([EIP-2718](https://eips.ethereum.org/EIPS/eip-2718) typed envelopes are rejected).
+The RLP-encoded bytes must contain the following fields:
+
+| Field    | Requirement                                                |
+| -------- | ---------------------------------------------------------- |
+| nonce    | Must be 0                                                  |
+| gasPrice | Any value (used as-is for signer gas charging)             |
+| gasLimit | Any value (must be ≤ `gasLimitOverride`)                   |
+| to       | Must be empty (contract creation)                          |
+| value    | ETH to transfer to created contract (deducted from signer) |
+| data     | Contract initialization bytecode                           |
+| v        | 27 or 28 (pre-EIP-155, no chain ID)                        |
+| r, s     | Signature components (randomly generated — no private key) |
+
 ## Execution Flow
 
 The contract intercepts calls at depth 0 only (direct transaction calls).
 DELEGATECALL, CALLCODE, and non-top-level calls fall through to on-chain bytecode, which would revert.
 
+{% hint style="info" %}
+**Why depth 0 only?** If a contract could call `keylessDeploy`, observe the result, and then revert the outer call, the signer's gas charge would be rolled back — enabling free spam.
+By requiring depth 0, the sandbox result IS the transaction result; there is no outer context that can revert after the signer has been charged.
+{% endhint %}
+
 When `keylessDeploy` is called:
 
 1. **Charge overhead** — A fixed 100,000 [compute gas](../glossary.md#compute-gas) overhead is deducted from the caller's gas for RLP decoding, signature recovery, and state filtering.
-2. **Reject value transfer** — The `keylessDeploy` call itself must not include ETH value.
+2. **Reject value transfer** — The `keylessDeploy` call itself must not include ETH value (`msg.value` must be 0). This is separate from the `value` field in the inner keyless transaction — see step 6.
 3. **Decode and validate the keyless transaction** — RLP-decode the pre-EIP-155 transaction bytes. Reject if `to` is not null (must be a contract creation), nonce is not 0, or `v` is not 27 or 28.
 4. **Validate gas limit override** — `gasLimitOverride` must be ≥ the transaction's original gas limit.
 5. **Recover signer and compute deploy address** — Recover the signer via `ecrecover`. Compute the deploy address as `keccak256(rlp([signer, 0]))[12:]`. Reject if the signer's on-chain nonce is > 1 or the deploy address already has code.
+
+{% hint style="info" %}
+**Why nonce ≤ 1, not just 0?** Someone may have attempted to broadcast the original keyless transaction directly on MegaETH before using this system contract.
+That transaction fails due to higher gas costs, but the attempt still increments the signer's nonce from 0 to 1.
+Allowing nonce ≤ 1 means keyless deploy still works after such a failed direct broadcast.
+{% endhint %}
 6. **Execute in a sandbox** — Launch an isolated EVM execution with:
    - The same block environment and spec as the outer transaction
    - **State**: the sandbox reads from the outer transaction's current journal state (including any changes made earlier in the same transaction), not a snapshot of pre-transaction state. All account state is unmodified except: the signer's nonce is **always overridden to 0** in the sandbox's view, regardless of the signer's actual on-chain nonce. This is required because Nick's Method relies on `nonce = 0` to produce the correct deployment address.
-   - **Transaction fields**: `caller` = recovered signer, `nonce` = 0, `gas_limit` = `gasLimitOverride`, `gas_price` = original transaction's gas price, `input` and `value` from the original transaction
+   - **Transaction fields**: `caller` = recovered signer, `nonce` = 0, `gas_limit` = `gasLimitOverride`, `gas_price` = original transaction's gas price (used as-is — not validated against base fee, not subject to EIP-1559, not split between L1/L2 fees), `input` and `value` from the original transaction
+   - **Value transfer**: if the original keyless transaction has a non-zero `value` field, that ETH is transferred from the signer to the newly created contract. On execution failure (init code revert or out of gas), the value transfer is automatically undone by the EVM.
    - **Balance check**: the signer must have sufficient balance to cover `gasLimitOverride × gasPrice + value`
    - **Isolation**: the `KeylessDeploy` interceptor is disabled inside the sandbox (no recursive keyless deploys). Accounts accessed by the sandbox do not affect warm/cold tracking in the outer transaction.
-7. **Apply state changes** — On both success and failure, all sandbox state changes are merged into the parent journal. This includes: signer balance deduction (`gasUsed × gasPrice`), signer nonce set to 1 (incremented from the overridden 0), and deployed contract code if successful. Because the sandbox always starts from nonce 0, the merged nonce is always 1 — it never accumulates across calls.
-8. **Return result** — On success: return `gasUsed` and `deployedAddress`. On execution failure (init code revert, out of gas): return the error in `errorData` with `deployedAddress = 0`. Execution failures return success at the EVM level (not revert) so that state changes persist and the signer is always charged.
+7. **Apply state changes** — On both success and failure, all sandbox state changes are merged into the parent journal. This includes: signer balance deduction (`gasUsed × gasPrice`), signer nonce set to 1 (incremented from the overridden 0), and deployed contract code if successful. On success, logs emitted during contract initialization are propagated to the outer transaction context (log addresses reflect the actual emitting contract, ordering is preserved). Because the sandbox always starts from nonce 0, the merged nonce is always 1 — it never accumulates across calls.
+8. **Return result** — On success: return `gasUsed` and `deployedAddress`. On execution failure (init code revert, out of gas, or empty bytecode): return the error in `errorData` with `deployedAddress = 0`. Execution failures return success at the EVM level (not revert) so that state changes persist and the signer is always charged.
+
+{% hint style="info" %}
+**Why empty bytecode is treated as failure**: If init code returns empty bytecode, the result is `EmptyCodeDeployed` (an execution error, not success).
+This prevents infinite replay: `ContractAlreadyExists` only checks for non-empty code, so without this rule an attacker could repeatedly call `keylessDeploy` for a broken deployment that produces empty code — draining the signer's balance indefinitely.
+{% endhint %}
 
 ## Quick Start
 
-{% hint style="warning" %}
+{% hint style="danger" %}
 MegaETH's [storage gas](../glossary.md#storage-gas) — especially the [code deposit cost](../evm/dual-gas-model.md#storage-gas-costs) of 10,000 gas per byte — can make keyless deployment transactions significantly more expensive than on Ethereum.
 A contract with 24 KB of bytecode incurs ~240M storage gas for the code deposit alone.
 If you need to deploy a **well-known** contract via Nick's Method, consider reaching out to the MegaETH team for assistance rather than funding the deployment yourself.
@@ -145,6 +178,7 @@ If the signer has more balance than needed for a single deployment attempt, repe
 | CREATE2 Factory        | `0x3fab184622dc19b6109349b94811493bf2a45362` | `0x4e59b44847b379578588920ca78fbf26c0b4956c` | [Deterministic Deployment Proxy](https://github.com/Arachnid/deterministic-deployment-proxy) |
 | EIP-1820 Registry      | `0xa990077c3205cbDf861e17Fa532eeB069cE9fF96` | `0x1820a4B7618BdE71Dce8cdc73aAB6C95905faD24` | [EIP-1820](https://eips.ethereum.org/EIPS/eip-1820) |
 
+
 ## Error Handling
 
 **Validation errors** — The call reverts.
@@ -158,21 +192,21 @@ The signer is not charged.
 | `NotPreEIP155()`         | v is not 27 or 28               |
 | `NoEtherTransfer()`      | `keylessDeploy` call includes non-zero value |
 | `InvalidSignature()`     | Cannot recover signer            |
-| `NonZeroTxNonce()`       | Signed transaction nonce is not 0 |
-| `SignerNonceTooHigh()`   | Signer nonce > 1                 |
+| `NonZeroTxNonce(uint64 txNonce)` | Signed transaction nonce is not 0 |
+| `SignerNonceTooHigh(uint64 signerNonce)` | Signer nonce > 1          |
 | `InsufficientBalance()`  | Signer lacks funds               |
 | `ContractAlreadyExists()`| Address already has code         |
-| `GasLimitTooLow()`       | Override < transaction's limit   |
-| `InsufficientComputeGas()` | [Call-frame](../glossary.md#call-frame)-local [compute gas](../glossary.md#compute-gas) budget is below keyless deploy overhead |
+| `GasLimitTooLow(uint64 txGasLimit, uint64 providedGasLimit)` | Override < transaction's limit |
+| `InsufficientComputeGas(uint64 limit, uint64 used)` | [Call-frame](../glossary.md#call-frame)-local [compute gas](../glossary.md#compute-gas) budget is below keyless deploy overhead |
 
 **Execution errors** — The call returns normally with error in `errorData`.
 The signer is charged for gas.
 
 | Error                    | Cause                            |
 | ------------------------ | -------------------------------- |
-| `ExecutionReverted()`    | Init code reverted               |
-| `ExecutionHalted()`      | Out of gas, stack overflow, etc. |
-| `EmptyCodeDeployed()`    | Init code returned empty bytecode|
+| `ExecutionReverted(uint64 gasUsed, bytes output)` | Init code reverted |
+| `ExecutionHalted(uint64 gasUsed)` | Out of gas, stack overflow, etc. |
+| `EmptyCodeDeployed(uint64 gasUsed)` | Init code returned empty bytecode |
 
 **Internal or fallback errors** — The call reverts.
 These indicate defensive checks or fallback-to-bytecode behavior.
@@ -181,7 +215,7 @@ These indicate defensive checks or fallback-to-bytecode behavior.
 | ------------------------ | -------------------------------- |
 | `NoContractCreated()`    | CREATE execution succeeded but did not return a created address |
 | `AddressMismatch()`      | Actual deployed address differs from expected Nick's Method address |
-| `InternalError()`        | Unexpected internal/database failure during sandbox processing |
+| `InternalError(string message)` | Unexpected internal/database failure during sandbox processing |
 | `NotIntercepted()`       | Call was not intercepted (for example unknown selector or non-top-level call) |
 
 ## Gas Accounting

@@ -15,7 +15,7 @@ The book serves two audiences:
 | Section | Primary audience | Purpose |
 |---|---|---|
 | `Overview.md` | Both | Landing page — motivation, audience routing, spec progression |
-| `evm/README.md` | App builders | Quick reference for current MegaEVM behavior (latest stable spec) |
+| `evm/overview.md` | App builders | Quick reference for current MegaEVM behavior (latest stable spec) |
 | `evm/*.md` (concept pages) | Node builders | Detailed mechanics of specific MegaEVM features |
 | `hardfork-spec.md` | Node builders | Hardfork vs spec definitions, full progression, links to upgrade pages |
 | `system-contracts/` | App builders | How to use system contracts (interfaces, addresses, examples) |
@@ -46,13 +46,13 @@ Readability is important but must never compromise accuracy.
 
 - **Main content describes the latest stable spec only.**
   Pages outside of `upgrades/` and `hardfork-spec.md` must present only the behavior of the latest stable (activated) spec in their main content.
-  Unstable spec behavior should be placed in a GitBook info hint box (e.g., `{% hint style="info" %}**Rex4 (unstable): ...**{% endhint %}`), not in the main prose or tables.
+  Unstable spec behavior should be placed in a GitBook expandable block (e.g., `<details><summary>Rex4 (unstable): ...</summary>...</details>`), not in the main prose or tables.
   Previous stable spec behavior (e.g., MiniRex values superseded by Rex) should also not appear in the main content — it belongs in the corresponding upgrade page under `upgrades/`.
   Each upgrade page must include "Previous behavior" for every changed behavior, so readers can deduce the full history by reading upgrade pages in sequence.
 - **State backward compatibility explicitly.**
   The guarantee that stable specs are frozen must appear in the Overview, the Hardforks and Specs page, and each upgrade page.
 - **Mark the unstable spec explicitly everywhere it appears.**
-  The unstable spec must be labeled in the spec progression diagram, the spec summary list, the spec's heading, and with a GitBook warning hint.
+  The unstable spec must be labeled in the spec progression diagram, the spec summary list, the spec's heading, and with a GitBook expandable block.
   When a new spec is introduced or the unstable spec is stabilized, update all these locations.
 
 ### Terminology and naming
@@ -98,13 +98,39 @@ Readability is important but must never compromise accuracy.
   Write "Unlimited" or "No limit", not "—".
   Dashes are ambiguous (could mean "not applicable", "unknown", or "unlimited").
 - One sentence, one line.
-- **Use hint boxes for developer-facing tips and practical guidance.**
-  Actionable advice aimed at dapp builders — such as how to set `gas_limit`, which RPC endpoint to use, or how a MegaETH concept maps to familiar Ethereum behavior — should be placed in a `{% hint style="info" %}` box rather than inline prose.
-  This visually separates "what you need to do" from "how it works" and makes tips scannable.
+- **Use the correct hint box level for each purpose.**
+  Hint boxes use four severity levels, each reserved for a specific purpose:
+
+  | Level | Style | Purpose |
+  |---|---|---|
+  | Success | `{% hint style="success" %}` | User tips — actionable positive guidance for dapp builders (how to set `gas_limit`, which RPC to use, practical advice) |
+  | Info | `{% hint style="info" %}` | Rationale — explains *why* a design decision was made, not *what* it does |
+  | Warning | `{% hint style="warning" %}` | Cautions — important caveats that are not developer pitfalls but need attention (e.g., trust assumptions in upgrade pages) |
+  | Danger | `{% hint style="danger" %}` | Developer pitfalls — common mistakes, migration risks, or footguns that can cause loss of funds or unexpected behavior |
+
+  Do not use hint levels interchangeably.
+  Every hint box must match exactly one of these four categories.
+- **Use expandable blocks for unstable spec behavior.**
+  Behavior in the current unstable spec should be placed in a `<details>` / `<summary>` expandable block, collapsed by default.
+  The summary line should start with the spec name and "(unstable)".
+  Example:
+  ```md
+  <details>
+  <summary>Rex4 (unstable): Feature Name</summary>
+
+  Description of the unstable behavior.
+
+  </details>
+  ```
+  This keeps unstable content discoverable but visually de-emphasized compared to stable behavior.
+  **Exceptions** — the following pages present unstable spec content as plain text (no expandable):
+  - `Overview.md` spec progression list — the unstable spec appears as a regular bullet alongside stable specs.
+  - `hardfork-spec.md` — the unstable spec has its own section like every other spec; content is shown directly.
+  - The unstable spec's own upgrade page under `upgrades/` — the entire page is about that spec, so an expandable would be redundant.
 
 ## Page templates
 
-### Overview pages (`Overview.md` and `*/README.md`)
+### Overview pages (`Overview.md` and `*/overview.md`)
 
 Overview pages orient the reader before diving into details.
 
@@ -138,8 +164,9 @@ This template applies to `evm/*.md` concept pages, `system-contracts/*.md` pages
 - **Contract address and spec** — for system contracts: the address and "Available since: \<SpecName\>".
 - **Solidity interface** — with NatSpec, for system contracts and oracle services.
 - **Code examples** — usage snippets for developer-facing pages.
-- **Trust assumptions or warnings** — use `{% hint style="warning" %}` for trust boundaries or migration risks.
-- **Unstable spec behavior** — use `{% hint style="info" %}` for behavior in the unstable spec, never in main prose or tables.
+- **Trust assumptions** — use `{% hint style="info" %}` for trust boundaries and design rationale.
+- **Developer pitfalls** — use `{% hint style="danger" %}` for migration risks, common mistakes, or footguns.
+- **Unstable spec behavior** — use `<details>` / `<summary>` expandable blocks for behavior in the unstable spec, never in main prose or tables.
 - **Cross-links** — to related topic pages, upgrade pages, or glossary entries.
 
 **Each system contract must have its own dedicated page** under `system-contracts/` with the contract interface, usage guidance, and deployment history.
@@ -151,7 +178,7 @@ This page is the central reference for spec and hardfork definitions.
 **Required elements:**
 
 1. **Spec vs hardfork distinction** — define both concepts and their relationship.
-2. **Spec progression** — ordered list or diagram of all specs, with the unstable spec clearly marked via `{% hint style="warning" %}`.
+2. **Spec progression** — ordered list or diagram of all specs, with the unstable spec clearly marked via an expandable block.
 3. **Per-spec sections** — one section per spec, each containing:
    - Brief summary of what the spec introduces.
    - Link to the corresponding upgrade page under `upgrades/`.
@@ -182,7 +209,7 @@ If the page conflicts with the repository spec, the repository spec wins.
    For the full normative definition, see the <SpecName> spec in the mega-evm repository.
    ```
 
-   For the unstable spec, add `{% hint style="warning" %}` after the notice.
+   For the unstable spec, add a plain-text notice that the spec is unstable and subject to change (no expandable — the entire page is about that spec).
 
 3. **Summary** — two to four short paragraphs.
    Explain what changed, what problem it solves, and the most important impact for developers.

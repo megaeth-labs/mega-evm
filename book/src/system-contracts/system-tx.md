@@ -3,7 +3,7 @@
 ## Overview
 
 Mega System Transactions are special transactions used by the MegaETH sequencer to perform state maintenance operations.
-They enable the sequencer to interact with whitelisted [system contracts](README.md) without incurring transaction fees.
+They enable the sequencer to interact with whitelisted [system contracts](overview.md) without incurring transaction fees.
 
 {% hint style="info" %}
 mega-evm defines how these transactions are identified and executed.
@@ -29,8 +29,9 @@ A transaction is a Mega System Transaction if:
 Mega system transactions have unique properties:
 
 1. **Zero transaction fees** — No L2 gas fees, L1 data fees, operator fees, or base fee charges
-2. **Deposit-like processing** — Bypasses signature validation, skips nonce verification and balance checks (nonce still increments)
-3. **No beneficiary impact** — No state changes to block beneficiary or fee vaults
+2. **Deposit-like processing** — Bypasses signature validation, skips nonce verification, and skips balance checks for gas fees
+3. **Nonce handling** — Nonce verification is skipped (the transaction is accepted regardless of the sender's current nonce), but the sender's nonce still increments after execution
+4. **No beneficiary impact** — No state changes to block beneficiary or fee vaults
 
 In production, these transactions are expected to be injected by the sequencer.
 Admission policy is outside the scope of mega-evm itself.

@@ -15,6 +15,12 @@ Storage gas is the only new dimension MegaETH introduces.
 This separation enables independent pricing of computational work versus storage burden.
 
 {% hint style="info" %}
+**Why a dual gas model?** MegaETH features extremely low base fees and high transaction gas limits.
+Under standard EVM gas pricing, operations that impose storage costs on nodes (state writes, logs, calldata) become dramatically underpriced, leading to unsustainable state bloat and history data growth.
+Separating gas into compute and storage dimensions allows these costs to be priced independently.
+{% endhint %}
+
+{% hint style="success" %}
 Both compute gas and storage gas are deducted from the same `gas_limit` budget that you set on your transaction — just like standard Ethereum gas accounting.
 Your `gas_limit` must be large enough to cover both components, and `gas_used` in the receipt reflects the combined total.
 {% endhint %}
@@ -26,7 +32,7 @@ Your `gas_limit` must be large enough to cover both components, and `gas_used` i
 | **Transaction Intrinsic**  | 39,000 (flat)              | All transactions pay this base storage gas            |
 | **SSTORE (0 → non-0)**    | 20,000 × (multiplier - 1)  | Writing a non-zero value to a slot that was zero before this transaction |
 | **Account Creation**       | 25,000 × (multiplier - 1)  | Value transfer to empty account                       |
-| **Contract Creation**      | 32,000 × (multiplier - 1)  | CREATE/CREATE2 opcodes or creation transactions       |
+| **Contract Creation**      | 32,000 × (multiplier - 1)  | CREATE/CREATE2 opcodes or creation transactions (charged regardless of whether initcode succeeds or fails) |
 | **Code Deposit**           | 10,000/byte                | Per byte when contract creation succeeds              |
 | **LOG Topic**              | 3,750/topic                | Per topic                                             |
 | **LOG Data**               | 80/byte                    | Per byte of log data                                  |
@@ -42,6 +48,12 @@ MegaETH applies the same 10× storage gas multiplier to the floor cost as it doe
 
 **Revert behavior for LOG**: LOG storage gas follows standard EVM gas semantics — gas spent in a reverted call frame is consumed and not refunded, just like compute gas.
 However, the [data size](resource-accounting.md) tracked for the same LOG is rolled back on revert, since the log itself is discarded.
+
+{% hint style="danger" %}
+**No storage gas refund for SSTORE resets**: Setting a storage slot back to its original value within the same transaction does **not** refund the storage gas that was charged when the slot was first written.
+A contract that repeatedly writes and resets the same slot will accumulate storage gas on every zero-to-non-zero transition.
+Use [transient storage](https://eips.ethereum.org/EIPS/eip-1153) (`TSTORE`/`TLOAD`) for scratch data that does not need to persist across transactions.
+{% endhint %}
 
 ## Dynamic SALT Multiplier
 

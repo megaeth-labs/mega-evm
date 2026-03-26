@@ -12,12 +12,28 @@ Detained gas is effectively refunded — users only pay for actual computation p
 
 ## Volatile Data Categories
 
-| Category                    | Trigger                                                | Cap           |
-| --------------------------- | ------------------------------------------------------ | ------------- |
-| Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, DIFFICULTY/PREVRANDAO, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH, or beneficiary access | 20M           |
-| Oracle                      | SLOAD from [oracle contract](../system-contracts/oracle.md) storage | 20M           |
+### Block Environment and Beneficiary — Cap: 20M
 
-{% hint style="info" %}
+The following opcodes trigger block environment gas detention:
+
+NUMBER, TIMESTAMP, COINBASE, DIFFICULTY/PREVRANDAO, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH.
+
+Any operation that accesses the [beneficiary](../glossary.md#beneficiary) (block coinbase) account also triggers gas detention:
+
+- `BALANCE` on the beneficiary address
+- `SELFBALANCE` when the current contract is the beneficiary
+- `EXTCODECOPY`, `EXTCODESIZE`, `EXTCODEHASH` on the beneficiary address
+- Transaction sender is the beneficiary
+- Transaction recipient (CALL target) is the beneficiary
+- Accessing the beneficiary account via `DELEGATECALL`
+
+### Oracle — Cap: 20M
+
+SLOAD from the [oracle contract](../system-contracts/oracle.md) storage triggers oracle gas detention.
+The trigger is SLOAD-based (not CALL-based): simply calling the oracle contract without reading its storage does not activate detention.
+DELEGATECALL to the oracle contract does **not** trigger detention, because SLOAD in a DELEGATECALL context reads the caller's storage, not the oracle contract's storage.
+
+{% hint style="success" %}
 The 20M cap is in [compute gas](../glossary.md#compute-gas), which is identical to standard Ethereum gas.
 For reference, a typical Uniswap V3 swap costs ~150K gas and a complex multi-hop aggregation ~500K gas on Ethereum mainnet.
 20M compute gas is ample headroom for most contract interactions after a volatile data read.
@@ -27,11 +43,15 @@ Transactions from [`MEGA_SYSTEM_ADDRESS`](../system-contracts/system-tx.md) are 
 
 The **most restrictive cap wins** when multiple volatile sources are accessed.
 
-{% hint style="info" %}
-**Rex4 (unstable)**: `SELFDESTRUCT` targeting the beneficiary also triggers beneficiary gas detention.
+<details>
+
+<summary>Rex4 (unstable): Gas Detention Changes</summary>
+
+`SELFDESTRUCT` targeting the beneficiary also triggers beneficiary gas detention.
 Rex4 also changes detention from absolute caps to **relative caps** — the effective detained limit becomes `current_usage + cap` at the time of volatile access, so a transaction can always perform at least `cap` more gas of computation after the access.
 See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
-{% endhint %}
+
+</details>
 
 ## How It Works
 

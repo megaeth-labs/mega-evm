@@ -93,7 +93,7 @@ The service is allocated slots 0–7 in the Oracle contract, but currently only 
   In practice, the oracle timestamp is very close to real time because the sequencer captures it immediately before execution.
 - **Monotonicity**: Within a block, successive transactions see non-decreasing timestamps.
 
-{% hint style="warning" %}
+{% hint style="info" %}
 The timestamp is provided by the sequencer and requires trusting the sequencer's clock.
 The `block.timestamp × 1,000,000` cap provides a coarse upper-bound sanity check.
 {% endhint %}

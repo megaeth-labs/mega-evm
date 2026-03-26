@@ -22,19 +22,19 @@ MegaETH addresses these problems with a targeted set of protocol-level modificat
 - **[Multidimensional Resource Limits](evm/resource-limits.md)** — Enforces four independent per-transaction limits (compute gas, data size, KV updates, state growth) beyond the standard gas limit, preventing any single resource from being exhausted by a single transaction.
 - **[Gas Detention](evm/gas-detention.md)** — Caps remaining compute gas after a transaction reads [volatile data](glossary.md#volatile-data) (block environment, oracle storage), forcing such transactions to terminate quickly and reducing parallel execution conflicts.
 - **[Dynamic Gas Costs](evm/dual-gas-model.md#dynamic-salt-multiplier)** — Scales storage gas based on [SALT bucket](glossary.md#salt-bucket) capacity, making writes to crowded state regions progressively more expensive while keeping fresh storage free.
-- **[System Contracts](system-contracts/README.md)** — Pre-deployed protocol contracts providing oracle storage, high-precision timestamps, keyless deployment, and runtime access/limit control.
-- **[Oracle Services](oracle-services/README.md)** — Sequencer-operated data feeds (timestamps, price feeds) built on the Oracle system contract.
+- **[System Contracts](system-contracts/overview.md)** — Pre-deployed protocol contracts providing oracle storage, high-precision timestamps, keyless deployment, and runtime access/limit control.
+- **[Oracle Services](oracle-services/overview.md)** — Sequencer-operated data feeds (timestamps, price feeds) built on the Oracle system contract.
 
 ## How to Use This Book
 
 This book serves two audiences:
 
 **App builders** — developers building smart contracts and dApps on MegaETH.
-Start with the [MegaEVM Overview](evm/README.md) for a complete reference of current behavior, then check the [System Contracts](system-contracts/README.md) and [Oracle Services](oracle-services/README.md) for available infrastructure.
+Start with the [MegaEVM Overview](evm/overview.md) for a complete reference of current behavior, then check the [System Contracts](system-contracts/overview.md) and [Oracle Services](oracle-services/overview.md) for available infrastructure.
 You primarily need to understand how gas costs differ and what resource limits apply to your transactions.
 
 **Node builders** — teams implementing MegaETH-compatible execution clients.
-Start with [Hardforks and Specs](hardfork-spec.md) to understand how behavior is versioned, then read each [Network Upgrade](upgrades/README.md) page for the exact behavioral deltas introduced at each spec.
+Start with [Hardforks and Specs](hardfork-spec.md) to understand how behavior is versioned, then read each [Network Upgrade](upgrades/overview.md) page for the exact behavioral deltas introduced at each spec.
 
 ## Reference Implementation
 
@@ -67,10 +67,5 @@ Contracts deployed under a given spec will continue to behave identically, regar
 - **REX2** — SELFDESTRUCT re-enabled (EIP-6780), KeylessDeploy system contract.
 - **REX3** — Oracle gas cap raised to 20M, SLOAD-based oracle detention, keyless deploy compute gas tracking.
 - **REX4** *(unstable)* — Per-call-frame resource budgets, relative gas detention, MegaAccessControl and MegaLimitControl system contracts.
-
-{% hint style="warning" %}
-Rex4 is the current unstable specification and is subject to change before activation.
-{% endhint %}
-
 
 See [Hardforks and Specs](hardfork-spec.md) for full details.

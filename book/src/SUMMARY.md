@@ -5,7 +5,7 @@
 
 ## MegaEVM
 
-* [Overview](evm/README.md)
+* [Overview](evm/overview.md)
 * [Dual Gas Model](evm/dual-gas-model.md)
 * [Resource Limits](evm/resource-limits.md)
 * [Resource Accounting](evm/resource-accounting.md)
@@ -13,19 +13,19 @@
 
 ## System Contracts
 
-* [Overview](system-contracts/README.md)
+* [Overview](system-contracts/overview.md)
 * [Oracle Service](system-contracts/oracle.md)
 * [Keyless Deployment](system-contracts/keyless-deploy.md)
 * [Mega System Transactions](system-contracts/system-tx.md)
 
 ## Oracle Services
 
-* [Overview](oracle-services/README.md)
+* [Overview](oracle-services/overview.md)
 * [High-Precision Timestamp](oracle-services/timestamp.md)
 
 ## Network Upgrades
 
-* [Overview](upgrades/README.md)
+* [Overview](upgrades/overview.md)
 * [MiniRex](upgrades/minirex.md)
 * [Rex](upgrades/rex.md)
 * [Rex1](upgrades/rex1.md)

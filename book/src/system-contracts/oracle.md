@@ -2,15 +2,15 @@
 
 ## Overview
 
-The Oracle contract is the centralized storage backend for MegaEVM's [oracle services](../oracle-services/README.md).
+The Oracle contract is the centralized storage backend for MegaEVM's [oracle services](../oracle-services/overview.md).
 It provides a simple key-value store where the sequencer writes off-chain data (timestamps, price feeds, etc.) via [system transactions](system-tx.md), and oracle service wrapper contracts read from it.
 
-{% hint style="info" %}
+{% hint style="success" %}
 **For contract developers**: You typically do not interact with the Oracle contract directly.
-Use the higher-level [oracle services](../oracle-services/README.md) instead — they provide typed interfaces and dedicated wrapper contracts (e.g., [High-Precision Timestamp](../oracle-services/timestamp.md) at `0x6342...0002`).
+Use the higher-level [oracle services](../oracle-services/overview.md) instead — they provide typed interfaces and dedicated wrapper contracts (e.g., [High-Precision Timestamp](../oracle-services/timestamp.md) at `0x6342...0002`).
 {% endhint %}
 
-{% hint style="warning" %}
+{% hint style="info" %}
 **Trust Assumption**: Oracle data is published by the sequencer.
 Using oracle services requires trusting the sequencer to provide accurate values.
 {% endhint %}
@@ -44,7 +44,7 @@ interface IOracle {
 
 ### Internal — Used by Oracle Services
 
-The following methods are used internally by [oracle service](../oracle-services/README.md) wrapper contracts to communicate with the sequencer.
+The following methods are used internally by [oracle service](../oracle-services/overview.md) wrapper contracts to communicate with the sequencer.
 They are not intended for direct use by application contracts.
 
 ```solidity
@@ -107,4 +107,4 @@ For the history of oracle detention triggers and cap values across specs, see th
 
 The sequencer operates high-level oracle services using the central storage.
 Each service is allocated a range of storage slots to avoid collision.
-See [Oracle Services](../oracle-services/README.md) for available services, including the [High-Precision Timestamp](../oracle-services/timestamp.md).
+See [Oracle Services](../oracle-services/overview.md) for available services, including the [High-Precision Timestamp](../oracle-services/timestamp.md).
