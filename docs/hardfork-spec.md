@@ -14,7 +14,7 @@ Multiple hardforks can map to the same spec.
 A hardfork can also map to an older spec.
 For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
 
-This book documents specs (MegaEVM behavior).
+This documentation covers specs (MegaEVM behavior).
 Protocol-level changes outside MegaEVM that are part of a hardfork are not covered here.
 
 ## Spec Progression

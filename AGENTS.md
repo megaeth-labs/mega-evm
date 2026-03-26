@@ -270,9 +270,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.
 
-## Book Documentation Conventions (`docs/`)
+## Documentation Conventions (`docs/`)
 
-The book is the public-facing specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
+The documentation is the public-facing specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
 It is framed as a protocol specification, not as documentation for a specific crate.
 
-All conventions for writing and editing the book (audience, content rules, upgrade page format, writing style) are defined in [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).
+All conventions for writing and editing the documentation (audience, content rules, upgrade page format, writing style) are defined in [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).

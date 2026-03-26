@@ -1,6 +1,6 @@
 # MegaETH Specification
 
-This book is the specification for the [MegaETH](https://megaeth.com) blockchain's execution layer.
+This documentation is the specification for the [MegaETH](https://megaeth.com) blockchain's execution layer.
 It covers everything that differs from standard Ethereum and Optimism: the EVM modifications, system contracts, oracle services, resource metering, and the upgrade history that defines how these features evolved.
 
 The reference implementation is [MegaEVM](https://github.com/megaeth-labs/mega-evm), built on [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
@@ -25,9 +25,9 @@ MegaETH addresses these problems with a targeted set of protocol-level modificat
 - **[System Contracts](system-contracts/overview.md)** — Pre-deployed protocol contracts providing oracle storage, high-precision timestamps, keyless deployment, and runtime access/limit control.
 - **[Oracle Services](oracle-services/overview.md)** — Sequencer-operated data feeds (timestamps, price feeds) built on the Oracle system contract.
 
-## How to Use This Book
+## How to Use This Documentation
 
-This book serves two audiences:
+This documentation serves two audiences:
 
 **App builders** — developers building smart contracts and dApps on MegaETH.
 Start with the [MegaEVM Overview](evm/overview.md) for a complete reference of current behavior, then check the [System Contracts](system-contracts/overview.md) and [Oracle Services](oracle-services/overview.md) for available infrastructure.
