@@ -128,24 +128,15 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 {% endupdate %}
 
-{% update date="TBD" %}
+{% endupdates %}
+
+## Upcoming (Unstable)
 
 ### [Rex4](rex4.md)
 
-{% tabs %}
-{% tab title="Testnet" %}
-TBD
-{% endtab %}
-{% tab title="Mainnet" %}
-TBD
-{% endtab %}
-{% endtabs %}
+Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, MegaAccessControl, MegaLimitControl, sandbox environment inheritance.
 
-Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, MegaAccessControl, MegaLimitControl, sandbox environment inheritance
-
-{% endupdate %}
-
-{% endupdates %}
+Rex4 is the current unstable specification and is subject to change before activation.
 
 ## How to Read These Pages
 
