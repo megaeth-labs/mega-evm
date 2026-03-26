@@ -75,6 +75,9 @@ Readability is important but must never compromise accuracy.
 - **Link spec names to hardfork-spec.md.**
   Whenever a spec is mentioned by name (e.g., MiniRex, Rex, Rex3), link it to the corresponding section heading in `hardfork-spec.md`.
   Each spec section in `hardfork-spec.md` should in turn link to its upgrade page under `upgrades/`.
+- **Anchor targets must be headings.**
+  Any content that is the target of a `#fragment` link must be a markdown heading (`##`, `###`, etc.), not bold text or other inline formatting.
+  GitBook only generates anchors from headings.
 
 ### Style
 
