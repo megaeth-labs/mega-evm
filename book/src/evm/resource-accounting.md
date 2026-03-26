@@ -46,7 +46,7 @@ Counted at transaction start, never reverted:
 
 | Data Type                      | Size                            |
 | ------------------------------ | ------------------------------- |
-| Base transaction data          | 110 bytes                       |
+| Base transaction data          | 110 bytes (fixed estimate of the RLP-encoded transaction envelope excluding calldata) |
 | Calldata                       | `tx.input().len()`              |
 | Access list                    | Sum of entry sizes              |
 | EIP-7702 authorizations        | 101 bytes each                  |

@@ -17,6 +17,12 @@ Detained gas is effectively refunded — users only pay for actual computation p
 | Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, DIFFICULTY/PREVRANDAO, GASLIMIT, BASEFEE, BLOCKHASH, BLOBBASEFEE, BLOBHASH, or beneficiary access | 20M           |
 | Oracle                      | SLOAD from [oracle contract](../system-contracts/oracle.md) storage | 20M           |
 
+{% hint style="info" %}
+The 20M cap is in [compute gas](../glossary.md#compute-gas), which is identical to standard Ethereum gas.
+For reference, a typical Uniswap V3 swap costs ~150K gas and a complex multi-hop aggregation ~500K gas on Ethereum mainnet.
+20M compute gas is ample headroom for most contract interactions after a volatile data read.
+{% endhint %}
+
 Transactions from [`MEGA_SYSTEM_ADDRESS`](../system-contracts/system-tx.md) are exempt from oracle gas detention.
 
 The **most restrictive cap wins** when multiple volatile sources are accessed.

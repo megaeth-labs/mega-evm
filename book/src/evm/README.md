@@ -63,7 +63,7 @@ A transaction can be halted by either ceiling: running out of total gas (`gas_li
 | Operation                  | Storage Gas Formula         | Notes                                             |
 | -------------------------- | --------------------------- | ------------------------------------------------- |
 | **Transaction intrinsic**  | 39,000 (flat)               | All transactions pay this base storage gas         |
-| **SSTORE (0 → non-0)**    | 20,000 × (multiplier − 1)  | When `original == 0 AND present == 0 AND new != 0` |
+| **SSTORE (0 → non-0)**    | 20,000 × (multiplier − 1)  | Writing a non-zero value to a slot that was zero before this transaction |
 | **Account creation**       | 25,000 × (multiplier − 1)  | Value transfer to empty account                    |
 | **Contract creation**      | 32,000 × (multiplier − 1)  | CREATE/CREATE2 opcodes or creation transactions    |
 | **Code deposit**           | 10,000/byte                 | Per byte when contract creation succeeds           |
@@ -103,12 +103,14 @@ See [Dual Gas Model](dual-gas-model.md) for details.
 
 In addition to the standard gas limit, MegaETH enforces four independent resource ceilings during execution:
 
-| Resource         | Transaction Limit        | Block Limit     |
-| ---------------- | ------------------------ | --------------- |
-| Compute gas      | 200,000,000 (200M)      | Unlimited       |
-| Data size        | 13,107,200 (12.5 MB)    | 13,107,200      |
-| KV updates       | 500,000                  | 500,000         |
-| State growth     | 1,000                    | 1,000           |
+| Resource         | Transaction Limit        | Block Limit                  |
+| ---------------- | ------------------------ | ---------------------------- |
+| Compute gas      | 200,000,000 (200M)      | No separate limit (see note) |
+| Data size        | 13,107,200 (12.5 MB)    | 13,107,200                   |
+| KV updates       | 500,000                  | 500,000                      |
+| State growth     | 1,000                    | 1,000                        |
+
+Compute gas has no dedicated block limit because it is already constrained by the block's standard gas limit (`block.gasLimit` from the block header), which caps the sum of all transactions' total gas (compute + storage) in a block.
 
 When any transaction-level limit is exceeded during execution, the transaction halts with `OutOfGas` (status=0).
 Gas consumed up to the halt point is charged; remaining gas is refunded to the sender.
@@ -149,6 +151,12 @@ Detained gas is refunded at transaction end.
 | --------------------------- | ----------------------------------------------------- | ----- |
 | Block env / Beneficiary     | NUMBER, TIMESTAMP, COINBASE, etc. or beneficiary access | 20M  |
 | Oracle                      | SLOAD from [oracle contract](../system-contracts/oracle.md) storage | 20M  |
+
+{% hint style="info" %}
+The 20M cap is in [compute gas](../glossary.md#compute-gas), which is identical to standard Ethereum gas.
+For reference, a typical Uniswap V3 swap costs ~150K gas and a complex multi-hop aggregation ~500K gas on Ethereum mainnet.
+20M compute gas is ample headroom for most contract interactions after a volatile data read.
+{% endhint %}
 
 ### Absolute Cap
 
@@ -192,17 +200,17 @@ MegaETH pre-deploys system contracts at well-known addresses:
 
 | Contract                 | Address                                         | Since   | Purpose                                             |
 | ------------------------ | ----------------------------------------------- | ------- | --------------------------------------------------- |
-| [Oracle](../system-contracts/oracle.md) | `0x634200...0001` | [MiniRex](../hardfork-spec.md#mini_rex) | Off-chain data key-value storage with hint support   |
-| [High-Precision Timestamp](../oracle-services/timestamp.md) | `0x634200...0002` | [MiniRex](../hardfork-spec.md#mini_rex) | Sub-second timestamps ([oracle service](../oracle-services/README.md)) |
-| [KeylessDeploy](../system-contracts/keyless-deploy.md) | `0x634200...0003` | [Rex2](../hardfork-spec.md#rex2) | Deterministic cross-chain deployment (Nick's Method) |
+| [Oracle](../system-contracts/oracle.md) | `0x6342000000000000000000000000000000000001` | [MiniRex](../hardfork-spec.md#mini_rex) | Off-chain data key-value storage |
+| [High-Precision Timestamp](../oracle-services/timestamp.md) | `0x6342000000000000000000000000000000000002` | [MiniRex](../hardfork-spec.md#mini_rex) | Sub-second timestamps ([oracle service](../oracle-services/README.md)) |
+| [KeylessDeploy](../system-contracts/keyless-deploy.md) | `0x6342000000000000000000000000000000000003` | [Rex2](../hardfork-spec.md#rex2) | Deterministic cross-chain deployment (Nick's Method) |
 
 {% hint style="info" %}
 **Rex4 (unstable): New System Contracts**
 
 | Contract          | Address              | Purpose                                |
 | ----------------- | -------------------- | -------------------------------------- |
-| MegaAccessControl | `0x634200...0004`    | Proactive volatile data access control |
-| MegaLimitControl  | `0x634200...0005`    | Query remaining compute gas budget     |
+| MegaAccessControl | `0x6342000000000000000000000000000000000004` | Proactive volatile data access control |
+| MegaLimitControl  | `0x6342000000000000000000000000000000000005` | Query remaining compute gas budget     |
 
 **MegaAccessControl** — Disable volatile data access for your call frame and all descendant calls via `disableVolatileDataAccess()`.
 While disabled, any volatile access reverts with `VolatileDataAccessDisabled(uint8 accessType)` — no gas detention is triggered.
@@ -223,7 +231,7 @@ See [System Contracts Overview](../system-contracts/README.md) for the full regi
 | Precompile             | Address | Cost Override                          |
 | ---------------------- | ------- | -------------------------------------- |
 | KZG Point Evaluation   | `0x0A`  | 100,000 gas (2× standard Prague cost)  |
-| ModExp                 | `0x05`  | [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) gas schedule                  |
+| ModExp                 | `0x05`  | [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) gas schedule (raises the cost floor, making large-exponent calls more expensive than pre-7883 pricing) |
 
 ## Concept Deep Dives
 

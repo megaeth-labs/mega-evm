@@ -17,12 +17,14 @@ For detailed tracking rules, revert behavior, and what exactly counts toward eac
 
 ## Limit Values
 
-| Resource         | Transaction Limit        | Block Limit     |
-| ---------------- | ------------------------ | --------------- |
-| Compute Gas      | 200,000,000 (200M)      | Unlimited       |
-| Data Size        | 13,107,200 (12.5 MB)    | 13,107,200      |
-| KV Updates       | 500,000                  | 500,000         |
-| State Growth     | 1,000                    | 1,000           |
+| Resource         | Transaction Limit        | Block Limit                  |
+| ---------------- | ------------------------ | ---------------------------- |
+| Compute Gas      | 200,000,000 (200M)      | No separate limit (see note) |
+| Data Size        | 13,107,200 (12.5 MB)    | 13,107,200                   |
+| KV Updates       | 500,000                  | 500,000                      |
+| State Growth     | 1,000                    | 1,000                        |
+
+Compute gas has no dedicated block limit because it is already constrained by the block's standard gas limit (`block.gasLimit` from the block header), which caps the sum of all transactions' total gas (compute + storage) in a block.
 
 For previous limit values (MiniRex configuration), see the [MiniRex](../upgrades/minirex.md) upgrade page.
 

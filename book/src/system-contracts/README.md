@@ -38,8 +38,10 @@ See [Mega System Transactions](system-tx.md) for details.
 Any system contract modification requires a new spec.
 This ensures that the behavior of existing specs is preserved across upgrades.
 
-### Interceptor Pattern
+### Intercepted Methods
 
-Some system contracts use Rust-level **interceptors** for performance-critical paths.
-[KeylessDeploy](keyless-deploy.md) relies on intercepted selectors, and unsupported calls fall through to on-chain bytecode that reverts with `NotIntercepted()`.
-The [Oracle](oracle.md) contract also has intercepted behavior for `sendHint`, while its other methods execute via deployed bytecode.
+Some system contract methods are handled at the EVM level rather than by on-chain bytecode.
+These methods are only available via direct CALL — DELEGATECALL and CALLCODE to system contract addresses are not intercepted and fall through to on-chain bytecode.
+
+- [KeylessDeploy](keyless-deploy.md): `keylessDeploy` is intercepted at depth 0 only. Unknown selectors or non-top-level calls fall through to on-chain bytecode, which reverts with `NotIntercepted()`.
+- [Oracle](oracle.md): `sendHint` is intercepted to forward hints to the sequencer. All other methods execute via deployed bytecode.

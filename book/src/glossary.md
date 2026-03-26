@@ -40,7 +40,7 @@ Bucket capacity is determined by on-chain state of the parent block and cannot b
 
 ## MIN_BUCKET_SIZE
 
-The smallest possible SALT bucket capacity.
+The smallest possible SALT bucket capacity, equal to **256** (2⁸).
 
 A bucket at minimum size has `multiplier = 1`, meaning dynamic storage gas (SSTORE, account creation, contract creation) is zero in Rex+ economics.
 
@@ -76,7 +76,8 @@ The effective compute gas cap imposed by [gas detention](evm/gas-detention.md).
 
 An absolute cap on total compute gas for the transaction; if the transaction has already consumed more gas than the cap when the volatile access occurs, execution halts immediately.
 
-Rex4 (unstable) changes this to a relative cap: `current_usage + cap` at the time of volatile access.
+> **Rex4 (unstable)**: Changes this to a relative cap — `current_usage + cap` at the time of volatile access.
+> See the [Rex4 upgrade page](upgrades/rex4.md) for details.
 
 ## Beneficiary
 

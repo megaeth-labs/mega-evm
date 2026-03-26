@@ -24,7 +24,7 @@ Your `gas_limit` must be large enough to cover both components, and `gas_used` i
 | Operation                  | Storage Gas Formula        | Notes                                                 |
 | -------------------------- | -------------------------- | ----------------------------------------------------- |
 | **Transaction Intrinsic**  | 39,000 (flat)              | All transactions pay this base storage gas            |
-| **SSTORE (0 → non-0)**    | 20,000 × (multiplier - 1)  | When `original == 0 AND present == 0 AND new != 0`   |
+| **SSTORE (0 → non-0)**    | 20,000 × (multiplier - 1)  | Writing a non-zero value to a slot that was zero before this transaction |
 | **Account Creation**       | 25,000 × (multiplier - 1)  | Value transfer to empty account                       |
 | **Contract Creation**      | 32,000 × (multiplier - 1)  | CREATE/CREATE2 opcodes or creation transactions       |
 | **Code Deposit**           | 10,000/byte                | Per byte when contract creation succeeds              |

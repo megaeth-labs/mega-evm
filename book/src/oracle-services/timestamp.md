@@ -88,6 +88,9 @@ The service is allocated slots 0–7 in the Oracle contract, but currently only 
 - **Upper bound**: The timestamp is capped at `block.timestamp × 1,000,000`.
   It will never exceed the block timestamp converted to microseconds.
   This ensures the oracle timestamp is consistent with the block-level timestamp.
+- **Lower bound**: The timestamp reflects the sequencer's wall-clock time at transaction execution.
+  There is no protocol-enforced lower bound beyond monotonicity.
+  In practice, the oracle timestamp is very close to real time because the sequencer captures it immediately before execution.
 - **Monotonicity**: Within a block, successive transactions see non-decreasing timestamps.
 
 {% hint style="warning" %}

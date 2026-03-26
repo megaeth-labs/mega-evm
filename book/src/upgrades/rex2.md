@@ -48,7 +48,7 @@ interface IKeylessDeploy {
 
 - `keylessDeploymentTransaction` is the RLP-encoded pre-EIP-155 transaction.
 - `gasLimitOverride` replaces the gas limit in the original transaction.
-- The sandbox charges a fixed overhead of 100,000 gas for RLP decoding, signature recovery, and state filtering.
+- The sandbox charges a fixed overhead of 100,000 gas (deducted from the caller's total gas, tracked as [compute gas](../glossary.md#compute-gas) from Rex3 onward) for RLP decoding, signature recovery, and state filtering.
 - Calls from other contracts (depth > 0) are not intercepted and fall through to on-chain bytecode, reverting with `NotIntercepted()`.
 - Value-bearing calls are rejected.
 - Unknown selectors are not intercepted and fall through to on-chain bytecode.

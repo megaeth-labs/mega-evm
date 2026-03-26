@@ -19,6 +19,8 @@ Using oracle services requires trusting the sequencer to provide accurate values
 
 **Address**: `0x6342000000000000000000000000000000000001`
 
+**Source**: [`Oracle.sol`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/contracts/Oracle.sol)
+
 **Key Properties**:
 - **Simple storage model** — Direct access to storage slots via `uint256` keys
 - **Restricted writes** — Only `MEGA_SYSTEM_ADDRESS` can write oracle data

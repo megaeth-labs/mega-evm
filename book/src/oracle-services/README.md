@@ -6,21 +6,35 @@ They provide real-time off-chain data to smart contracts through the oracle cont
 ## How Oracle Services Work
 
 Oracle services are **not** system contracts themselves — they are high-level services that use the Oracle contract (`0x6342...0001`) as a shared storage layer.
-Each service is allocated a range of storage slots in the Oracle contract and provides data by writing to those slots via [system transactions](../system-contracts/system-tx.md).
+Each service is allocated a range of storage slots in the Oracle contract.
 
-The key design property is **lazy evaluation**: oracle data is only published on-chain when a transaction actually reads it.
+### Real-Time Data Feeding
 
-```
-1. Transaction executes and reads an oracle storage slot (SLOAD)
-2. The sequencer detects the access and captures the current value
-3. A system transaction calling Oracle.setSlots() is generated
-4. The system transaction is included in the block BEFORE the user transaction
-5. Validators see consistent state: oracle write → user read
-```
+The sequencer maintains an **oracle service manager** that coordinates all oracle services.
+For each user transaction, the sequencer feeds real-time data through the following lifecycle:
 
-This means:
+1. **Open window** — Before executing a transaction, the sequencer opens an oracle window.
+   Each oracle service takes a **snapshot** of its current data at this moment.
+   For example, the timestamp oracle captures the current wall-clock time in microseconds (capped at `block.timestamp × 1,000,000`).
+   Oracle data remains stable within the window — the same transaction always sees the same values.
+
+2. **Transaction executes** — When the EVM encounters an SLOAD on the oracle contract's address, it calls into the oracle service manager instead of reading on-chain storage.
+   The manager resolves the slot from the snapshot and **records that the slot was accessed**.
+
+3. **Close window** — After the transaction finishes, the sequencer closes the window and collects all accessed slots with their snapshot values.
+
+4. **Generate system transaction** — If any oracle slots were accessed, the sequencer generates a signed [system transaction](../system-contracts/system-tx.md) that calls `Oracle.setSlots()` to write those values to on-chain storage.
+
+5. **Block ordering** — The system transaction is placed **before** the user transaction in the final block.
+   This way, validators and replayers see the oracle write first, then the user read — producing consistent state without needing the oracle service manager.
+
+### Lazy Evaluation
+
+The key design property is that oracle data is only published on-chain when a transaction actually reads it:
+
 - If no transaction reads oracle data in a block, no oracle system transaction is generated.
 - Only the slots that were actually accessed are published, minimizing on-chain storage updates.
+- Each transaction gets its own oracle window with a fresh snapshot, so successive transactions can see updated values (e.g., increasing timestamps).
 
 {% hint style="warning" %}
 **Trust assumption**: Oracle services are operated by the sequencer.
