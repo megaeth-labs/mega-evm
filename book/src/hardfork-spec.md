@@ -7,8 +7,8 @@ This page defines both concepts and summarizes what each spec introduces.
 
 The protocol distinguishes between two related concepts:
 
-- **[Hardfork](../glossary.md#hardfork-megahardfork)** — A network upgrade event: *when* changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior). Represented as `MegaHardfork` in the reference implementation.
-- **[Spec](../glossary.md#spec-megaspecid)** — A set of MegaEVM behaviors: *what* the EVM does. A spec captures only the execution-layer semantics. Represented as `MegaSpecId` in the reference implementation.
+- **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: *when* changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior). Represented as `MegaHardfork` in the reference implementation.
+- **[Spec](glossary.md#spec-megaspecid)** — A set of MegaEVM behaviors: *what* the EVM does. A spec captures only the execution-layer semantics. Represented as `MegaSpecId` in the reference implementation.
 
 Multiple hardforks can map to the same spec.
 A hardfork can also map to an older spec.
@@ -58,7 +58,7 @@ The first spec to introduce MegaETH-specific modifications:
 - **SELFDESTRUCT disabled**
 - **Large contract support** — 512 KB contracts (21x increase from 24 KB)
 
-*See [MiniRex Network Upgrade](../upgrades/minirex.md) for full details.*
+*See [MiniRex Network Upgrade](upgrades/minirex.md) for full details.*
 
 ### REX
 
@@ -70,21 +70,21 @@ Refines the storage gas economics introduced in MINI_REX:
 - **Security fixes** — DELEGATECALL, STATICCALL, CALLCODE properly enforce gas forwarding and oracle access detection
 - **State growth tracking** — New resource limit dimension
 
-*See [Rex Network Upgrade](../upgrades/rex.md) for full details.*
+*See [Rex Network Upgrade](upgrades/rex.md) for full details.*
 
 ### REX1
 
 - **Limit reset fix** — Resets compute gas limits at the start of each transaction
 - Inherits Rex semantics fully
 
-*See [Rex1 Network Upgrade](../upgrades/rex1.md) for full details.*
+*See [Rex1 Network Upgrade](upgrades/rex1.md) for full details.*
 
 ### REX2
 
 - **SELFDESTRUCT restored** — Re-enabled with EIP-6780 semantics
 - **KeylessDeploy system contract** — Enables deterministic cross-chain deployment (Nick's Method)
 
-*See [Rex2 Network Upgrade](../upgrades/rex2.md) for full details.*
+*See [Rex2 Network Upgrade](upgrades/rex2.md) for full details.*
 
 ### REX3
 
@@ -92,7 +92,7 @@ Refines the storage gas economics introduced in MINI_REX:
 - **SLOAD-based oracle detention** — Triggers on SLOAD from oracle storage instead of CALL to oracle contract
 - **Keyless deploy compute gas tracking** — Records the 100K overhead as compute gas
 
-*See [Rex3 Network Upgrade](../upgrades/rex3.md) for full details.*
+*See [Rex3 Network Upgrade](upgrades/rex3.md) for full details.*
 
 ### REX4 (unstable)
 
@@ -106,4 +106,4 @@ Rex4 is the current unstable specification and is subject to change before activ
 - **MegaLimitControl system contract** — Allows querying effective remaining compute gas under detention and call frame limits
 - **Keyless deploy sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior
 
-*See [Rex4 Network Upgrade](../upgrades/rex4.md) for full details.*
+*See [Rex4 Network Upgrade](upgrades/rex4.md) for full details.*
