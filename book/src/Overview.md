@@ -1,4 +1,4 @@
-# Overview
+# MegaETH Specification
 
 This book is the specification for the [MegaETH](https://megaeth.com) blockchain's execution layer.
 It covers everything that differs from standard Ethereum and Optimism: the EVM modifications, system contracts, oracle services, resource metering, and the upgrade history that defines how these features evolved.
