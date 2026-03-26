@@ -4,10 +4,6 @@ This section documents each MegaETH network upgrade, describing what changed, wh
 
 ## Hardfork History
 
-{% updates %}
-
-{% update date="2025-12-04" %}
-
 ### [MiniRex](minirex.md)
 
 {% tabs %}
@@ -20,10 +16,6 @@ This section documents each MegaETH network upgrade, describing what changed, wh
 {% endtabs %}
 
 [Dual gas model](../evm/dual-gas-model.md), [multidimensional resource limits](../evm/resource-limits.md), [gas detention](../evm/gas-detention.md), 98/100 gas forwarding, SELFDESTRUCT disabled, system contracts ([Oracle](../system-contracts/oracle.md), [Timestamp](../oracle-services/timestamp.md))
-
-{% endupdate %}
-
-{% update date="2025-12-04" %}
 
 ### MiniRex1
 
@@ -40,10 +32,6 @@ Rollback: reverted to Equivalence spec (maps to `EQUIVALENCE`).
 The MiniRex features were deactivated on the network; no chain reorg or state rollback occurred.
 Contracts deployed during MiniRex remained on-chain.
 
-{% endupdate %}
-
-{% update date="2025-12-04" %}
-
 ### MiniRex2
 
 {% tabs %}
@@ -58,10 +46,6 @@ N/A
 Restoration: re-activated MiniRex spec (maps to `MINI_REX`).
 All MiniRex features (dual gas model, resource limits, gas detention) were re-enabled.
 
-{% endupdate %}
-
-{% update date="2025-12-04" %}
-
 ### [Rex](rex.md)
 
 {% tabs %}
@@ -74,10 +58,6 @@ All MiniRex features (dual gas model, resource limits, gas detention) were re-en
 {% endtabs %}
 
 Transaction intrinsic [storage gas](../glossary.md#storage-gas), revised storage gas economics (`base × (multiplier − 1)`), consistent CALL-like opcode behavior, [state growth](../evm/resource-accounting.md#state-growth) tracking
-
-{% endupdate %}
-
-{% update date="2025-12-21" %}
 
 ### [Rex1](rex1.md)
 
@@ -92,10 +72,6 @@ Transaction intrinsic [storage gas](../glossary.md#storage-gas), revised storage
 
 Fix: [compute gas](../glossary.md#compute-gas) limit reset between transactions
 
-{% endupdate %}
-
-{% update date="2026-02-04" %}
-
 ### [Rex2](rex2.md)
 
 {% tabs %}
@@ -109,10 +85,6 @@ Fix: [compute gas](../glossary.md#compute-gas) limit reset between transactions
 
 SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [KeylessDeploy](../system-contracts/keyless-deploy.md) system contract
 
-{% endupdate %}
-
-{% update date="2026-02-21" %}
-
 ### [Rex3](rex3.md)
 
 {% tabs %}
@@ -125,10 +97,6 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 {% endtabs %}
 
 [Oracle](../system-contracts/oracle.md) gas cap raised to 20M, SLOAD-based oracle detention, keyless deploy compute gas tracking
-
-{% endupdate %}
-
-{% endupdates %}
 
 ## Upcoming (Unstable)
 
