@@ -13,10 +13,11 @@
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_sol_types::SolCall;
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    EvmTxRuntimeLimits, IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, MegaTransactionError, ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -38,6 +39,9 @@ const SENDER_CONTRACT: Address = address!("0000000000000000000000000000000000200
 const RECEIVER: Address = address!("0000000000000000000000000000000000200002");
 /// An empty contract (STOP immediately).
 const EMPTY_RECEIVER: Address = address!("0000000000000000000000000000000000200003");
+/// The 4-byte selector for `disableVolatileDataAccess()`.
+const DISABLE_VOLATILE_DATA_ACCESS_SELECTOR: [u8; 4] =
+    IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -77,6 +81,47 @@ fn build_transfer_contract(to: Address) -> Bytes {
         .push_number(0_u64) // gas = 0 (rely on stipend)
         .append(CALL)
         // Return the success flag (1 = success, 0 = revert)
+        .push_number(0_u64) // offset
+        .append(MSTORE)
+        .push_number(32_u64) // size
+        .push_number(0_u64) // offset
+        .append(RETURN)
+        .build()
+}
+
+/// Builds bytecode for a contract that does CALLCODE(gas=0, to, value=1 wei, ...) to simulate
+/// a stipend-limited CALLCODE with value transfer.
+fn build_callcode_transfer_contract(to: Address) -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(1_u64) // value = 1 wei
+        .push_address(to)
+        .push_number(0_u64) // gas = 0 (rely on stipend)
+        .append(CALLCODE)
+        .push_number(0_u64) // offset
+        .append(MSTORE)
+        .push_number(32_u64) // size
+        .push_number(0_u64) // offset
+        .append(RETURN)
+        .build()
+}
+
+/// Builds bytecode for a contract that CALLs a system contract with value and 4 bytes calldata.
+/// This exercises the `frame_init` interception path, which uses `push_empty_frame()`.
+fn build_value_call_with_selector(to: Address, selector: [u8; 4]) -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, selector)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(1_u64) // value = 1 wei
+        .push_address(to)
+        .push_number(0_u64) // gas = 0 (rely on stipend)
+        .append(CALL)
         .push_number(0_u64) // offset
         .append(MSTORE)
         .push_number(32_u64) // size
@@ -194,6 +239,29 @@ fn test_log2_in_receive_succeeds_under_rex4() {
         ExecutionResult::Success { output, .. } => {
             let success_flag = U256::from_be_slice(&output.data()[..32]);
             assert_eq!(success_flag, U256::from(1), "inner CALL with LOG2 should succeed");
+        }
+        other => panic!("expected Success, got {other:?}"),
+    }
+}
+
+/// Under REX4, CALLCODE with value transfer should also receive `STORAGE_GAS_STIPEND`.
+/// The callee code executes in the caller's context, but the gas semantics still include
+/// the extra storage-only stipend.
+#[test]
+fn test_callcode_gets_storage_gas_stipend() {
+    let sender_code = build_callcode_transfer_contract(RECEIVER);
+    let receiver_code = build_log1_receiver();
+    let mut db = setup_db(&[(SENDER_CONTRACT, sender_code), (RECEIVER, receiver_code)]);
+
+    let result = transact(MegaSpecId::REX4, &mut db, default_tx()).unwrap();
+    match &result.result {
+        ExecutionResult::Success { output, .. } => {
+            let success_flag = U256::from_be_slice(&output.data()[..32]);
+            assert_eq!(
+                success_flag,
+                U256::from(1),
+                "inner CALLCODE should succeed under REX4 with STORAGE_GAS_STIPEND"
+            );
         }
         other => panic!("expected Success, got {other:?}"),
     }
@@ -422,6 +490,31 @@ fn test_storage_gas_stipend_cannot_be_used_for_compute() {
                 success_flag,
                 U256::ZERO,
                 "callee doing pure compute (>2300 gas) should fail even with STORAGE_GAS_STIPEND"
+            );
+        }
+        other => panic!("expected Success, got {other:?}"),
+    }
+}
+
+/// The compute gas cap must also be applied on the early `frame_init` interception path.
+/// Value-transferring calls to intercepted system contracts go through `push_empty_frame()`,
+/// which should consume the pending per-frame compute cap.
+#[test]
+fn test_storage_gas_stipend_compute_cap_applied_on_intercepted_call() {
+    let sender_code = build_value_call_with_selector(
+        ACCESS_CONTROL_ADDRESS,
+        DISABLE_VOLATILE_DATA_ACCESS_SELECTOR,
+    );
+    let mut db = setup_db(&[(SENDER_CONTRACT, sender_code)]);
+
+    let result = transact(MegaSpecId::REX4, &mut db, default_tx()).unwrap();
+    match &result.result {
+        ExecutionResult::Success { output, .. } => {
+            let success_flag = U256::from_be_slice(&output.data()[..32]);
+            assert_eq!(
+                success_flag,
+                U256::ZERO,
+                "intercepted CALL with non-zero value should revert via system contract interceptor"
             );
         }
         other => panic!("expected Success, got {other:?}"),
