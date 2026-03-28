@@ -61,7 +61,7 @@ use revm::{
 /// - Compute gas: Standard call costs
 /// - Storage gas: Dynamic bucket-based costs for new account creation (when transferring to empty
 ///   account)
-/// - REX4+: Value-transferring `CALL`/`CALLCODE` receives additional `STORAGE_GAS_STIPEND` for
+/// - REX4+: Value-transferring `CALL`/`CALLCODE` receives additional `STORAGE_CALL_STIPEND` for
 ///   storage-gas-heavy operations such as `LOG`
 /// - REX4+: Compute gas remains capped at the original `forwarded_gas + CALL_STIPEND`, so the extra
 ///   stipend cannot be used for pure computation
@@ -613,34 +613,14 @@ pub mod forward_gas_ext {
                         // Recalculate the child gas
                         let new_child_gas = capped_forwarded_gas + transfer_gas_stipend;
 
-                        // REX4+: Add STORAGE_GAS_STIPEND for CALL/CALLCODE with value
-                        // transfer. The extra gas can only be consumed by storage gas
-                        // operations (LOG's 10x multiplier) because the compute gas limit
-                        // remains at the original level. Unused stipend is burned on
-                        // frame return.
-                        let mega_spec = context.host.spec_id();
-                        let storage_stipend =
-                            if has_transfer && mega_spec.is_enabled(MegaSpecId::REX4) {
-                                let stipend = constants::rex4::STORAGE_GAS_STIPEND as u128;
-                                context
-                                    .host
-                                    .additional_limit()
-                                    .borrow_mut()
-                                    .set_pending_storage_gas_stipend(
-                                        stipend as u64,
-                                        new_child_gas as u64,
-                                    );
-                                stipend
-                            } else {
-                                0
-                            };
-
                         //  Return the gas to the parent call.
                         context.interpreter.gas.erase_cost(gas_to_return as u64);
 
-                        // Set the child call gas limit to the capped value plus any
-                        // storage gas stipend.
-                        call_inputs.gas_limit = (new_child_gas + storage_stipend) as u64;
+                        // Set the child call gas limit to the capped value.
+                        // Note: REX4+ STORAGE_CALL_STIPEND is applied later in
+                        // AdditionalLimit::before_frame_init, which owns the full
+                        // stipend lifecycle (grant → compute cap → burn on return).
+                        call_inputs.gas_limit = new_child_gas as u64;
                     }
                     Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
                         // The forwarded gas to the child create should be further restricted to the

@@ -1,5 +1,5 @@
 ---
-description: Rex4 adds per-call-frame resource budgets, a storage gas stipend for value transfers, relative gas detention, two new system contracts for access control and limit queries, and keyless deploy sandbox improvements.
+description: Rex4 adds per-call-frame resource budgets, a storage call stipend for value transfers, relative gas detention, two new system contracts for access control and limit queries, and keyless deploy sandbox improvements.
 ---
 
 # Rex4 Network Upgrade
@@ -18,7 +18,7 @@ Per-call-frame budgets give each call frame a bounded share of remaining resourc
 Rex4 also shifts [gas detention](../evm/gas-detention.md) from absolute caps to **relative caps**, so transactions that access [volatile data](../glossary.md#volatile-data) late in execution are no longer penalized for compute work done before the access.
 Two new [system contracts](../system-contracts/overview.md) — **MegaAccessControl** and **MegaLimitControl** — give contracts runtime control over volatile data access and the ability to query their effective remaining compute gas budget.
 
-Rex4 also introduces a **storage gas stipend** for value-transferring calls, so that contracts receiving ETH via `transfer()` or `send()` can emit events without running out of gas.
+Rex4 also introduces a **storage call stipend** for value-transferring calls, so that contracts receiving ETH via `transfer()` or `send()` can emit events without running out of gas.
 
 Finally, the [keyless deploy](../system-contracts/keyless-deploy.md) sandbox now inherits the parent transaction's external environment for dynamic gas pricing and [oracle](../system-contracts/oracle.md) behavior, improving accuracy for contracts deployed via Nick's Method.
 
@@ -122,7 +122,7 @@ interface IMegaLimitControl {
 }
 ```
 
-### Storage Gas Stipend for Value Transfers
+### Storage Call Stipend for Value Transfers
 
 #### Previous behavior
 
@@ -134,10 +134,10 @@ interface IMegaLimitControl {
 
 #### New behavior
 
-- When `CALL` or `CALLCODE` transfers value (value > 0), the callee receives an additional **storage gas stipend** of 23,000 gas on top of the standard `CALL_STIPEND` (2,300).
-- The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_GAS_STIPEND (23,000)`.
+- When `CALL` or `CALLCODE` transfers value (value > 0), the callee receives an additional **storage call stipend** of 23,000 gas on top of the standard `CALL_STIPEND` (2,300).
+- The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_CALL_STIPEND (23,000)`.
 - The callee's [compute gas](../glossary.md#compute-gas) limit remains at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by [storage gas](../glossary.md#storage-gas) operations (the 10× LOG topic/data costs).
-- On return, unused storage gas stipend is **burned** — it is never returned to the caller.
+- On return, unused storage call stipend is **burned** — it is never returned to the caller.
 - `DELEGATECALL` and `STATICCALL` are unaffected (no value transfer, no stipend).
 - The compute gas cap ensures the callee cannot perform state-modifying operations (SSTORE, CALL with value, CREATE) with the extra gas, preserving the reentrancy protection properties of the original `CALL_STIPEND`.
 
@@ -146,7 +146,7 @@ interface IMegaLimitControl {
 | LOG1 (1 topic, 0 bytes) | 750 | 3,750 | 4,500 | ✅ |
 | LOG2 (SafeReceived) | 1,125 | 7,500 | 8,625 | ✅ |
 | LOG3 (Transfer) | 1,500 | 11,250 | 12,750 | ✅ |
-| LOG4 + 32 bytes data | ~2,075 | 17,560 | ~19,635 | ✅ |
+| LOG4 + 32 bytes data | ~2,131 | 17,560 | ~19,691 | ✅ |
 | LOG4 + 64 bytes data | ~2,387 | 20,120 | ~22,507 | ✅ |
 
 ### Relative Gas Detention Cap
@@ -190,7 +190,7 @@ This is useful for library contracts or aggregators that call untrusted code.
 This accounts for both call-frame-level budgets and detention, giving you a single reliable number for gas-aware logic.
 
 **Contracts receiving ETH via `transfer()` or `send()`** can now safely emit events in their `receive()` or `fallback()` functions.
-The storage gas stipend provides enough gas for LOG operations with the 10× storage gas multiplier.
+The storage call stipend provides enough gas for LOG operations with the 10× storage gas multiplier.
 No changes are needed to existing contracts — this fix is transparent to both senders and receivers.
 
 **Deployers using keyless deployment** will see more accurate gas costs in Rex4 because the sandbox now uses the same dynamic pricing as the parent transaction.
@@ -214,7 +214,7 @@ Once volatile data is accessed, no subsequent operation can raise the detained l
 `MegaAccessControl` and `MegaLimitControl` intercept `CALL` and `STATICCALL` only.
 `DELEGATECALL` and `CALLCODE` to these addresses are not intercepted and fall through to on-chain bytecode, which reverts with `NotIntercepted()`.
 
-The storage gas stipend is burned on return — the caller never recovers the unused portion.
+The storage call stipend is burned on return — the caller never recovers the unused portion.
 This prevents contracts from exploiting value-transferring calls to generate free gas.
 
 ## References

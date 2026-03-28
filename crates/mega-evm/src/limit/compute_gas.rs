@@ -116,7 +116,7 @@ impl ComputeGasTracker {
 
     /// Caps the current (top) frame's compute gas budget.
     ///
-    /// Used by `STORAGE_GAS_STIPEND`: the child's total gas (`gas_limit`) includes the stipend,
+    /// Used by `STORAGE_CALL_STIPEND`: the child's total gas (`gas_limit`) includes the stipend,
     /// but compute gas must remain bounded at the original `forwarded_gas + CALL_STIPEND`.
     /// This method tightens the per-frame compute gas limit to enforce that cap.
     pub(crate) fn cap_current_frame_limit(&mut self, cap: u64) {

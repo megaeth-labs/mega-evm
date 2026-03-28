@@ -34,9 +34,9 @@ use revm::{
 
 use crate::{
     constants, dispatch_system_contract_interceptors, is_mega_system_transaction,
-    sent_from_mega_system_address, ExternalEnvTypes, HostExt, MegaContext, MegaEvm, MegaHaltReason,
-    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_ADDRESS,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    sent_from_mega_system_address, AdditionalLimit, ExternalEnvTypes, HostExt, MegaContext,
+    MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError,
+    MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -567,11 +567,12 @@ where
 
     fn frame_init(
         &mut self,
-        frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
+        mut frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
         let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
+        let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
         let additional_limit = self.ctx().additional_limit.clone();
 
         // Check if this is a call to the oracle contract and mark it as accessed.
@@ -611,6 +612,16 @@ where
             }
         }
 
+        let storage_call_stipend = if is_rex4_enabled {
+            if let FrameInput::Call(call_inputs) = &mut frame_init.frame_input {
+                AdditionalLimit::apply_storage_call_stipend(frame_init.depth, call_inputs)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // System contract interception dispatch.
         // Each interceptor checks target address and ABI-decodes function selectors.
         // Side-effect interceptors (oracle hint) usually return None.
@@ -623,17 +634,20 @@ where
                 // `frame_return_result` / `last_frame_result` will pop a frame, but
                 // `after_frame_init` (which normally pushes) was skipped.
                 if is_mini_rex_enabled {
-                    additional_limit.borrow_mut().push_empty_frame();
+                    additional_limit
+                        .borrow_mut()
+                        .push_empty_frame(storage_call_stipend.map_or(0, |grant| grant.stipend));
                 }
                 return Ok(FrameInitResult::Result(result));
             }
         }
 
         if is_mini_rex_enabled {
-            if let Some(frame_result) = additional_limit
-                .borrow_mut()
-                .before_frame_init(&frame_init, self.ctx().journal_mut())?
-            {
+            if let Some(frame_result) = additional_limit.borrow_mut().before_frame_init(
+                &frame_init,
+                self.ctx().journal_mut(),
+                storage_call_stipend,
+            )? {
                 return Ok(FrameInitResult::Result(frame_result));
             }
         }
@@ -780,7 +794,7 @@ where
             // frame) was skipped, but `before_frame_return_result` (which pops) will still
             // run. Push an empty frame to keep the limit tracker stack balanced.
             if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-                ctx.additional_limit.borrow_mut().push_empty_frame();
+                ctx.additional_limit.borrow_mut().push_empty_frame(0);
             }
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));

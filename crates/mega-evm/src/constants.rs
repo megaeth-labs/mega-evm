@@ -115,7 +115,7 @@ pub mod rex4 {
     /// Denominator of the per-frame resource budget forwarding fraction.
     pub const FRAME_LIMIT_DENOMINATOR: u64 = 100;
 
-    /// Additional gas stipend for storage operations in CALL/CALLCODE with value transfer.
+    /// Additional call stipend for storage operations in CALL/CALLCODE with value transfer.
     ///
     /// `MegaETH`'s 10x storage gas multiplier on LOG opcodes causes even a simple `LOG1` to cost
     /// 4,500 gas (750 compute + 3,750 storage), exceeding the EVM's `CALL_STIPEND` of 2,300.
@@ -126,8 +126,8 @@ pub mod rex4 {
     /// The callee's compute gas limit remains at the original level (`forwarded_gas +
     /// CALL_STIPEND`), so the extra gas can only be consumed by storage gas operations (e.g.,
     /// the 10x LOG topic/data costs).
-    /// On return, unused `STORAGE_GAS_STIPEND` is burned — it is never returned to the caller.
-    pub const STORAGE_GAS_STIPEND: u64 = 23_000;
+    /// On return, unused `STORAGE_CALL_STIPEND` is burned — it is never returned to the caller.
+    pub const STORAGE_CALL_STIPEND: u64 = 23_000;
 }
 
 /// Constants for the `REX` spec.

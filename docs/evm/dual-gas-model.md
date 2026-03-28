@@ -50,14 +50,14 @@ MegaETH applies the same 10× storage gas multiplier to the floor cost as it doe
 However, the [data size](resource-accounting.md) tracked for the same LOG is rolled back on revert, since the log itself is discarded.
 
 <details>
-<summary>Rex4 (unstable): Storage gas stipend for value transfers</summary>
+<summary>Rex4 (unstable): Storage call stipend for value transfers</summary>
 
 The 10× storage gas on LOG opcodes causes even a simple `LOG1` to cost 4,500 gas, exceeding the EVM's `CALL_STIPEND` of 2,300.
 This breaks `transfer()` / `send()` to contracts that emit events in `receive()`.
 
-Rex4 introduces an additional **storage gas stipend** (23,000 gas) for value-transferring `CALL` and `CALLCODE` opcodes.
+Rex4 introduces an additional **storage call stipend** (23,000 gas) for value-transferring `CALL` and `CALLCODE` opcodes.
 The callee's [compute gas](../glossary.md#compute-gas) limit remains unchanged, so the extra gas can only be consumed by storage gas operations.
-Unused storage gas stipend is burned on return.
+Unused storage call stipend is burned on return.
 See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
 
 </details>

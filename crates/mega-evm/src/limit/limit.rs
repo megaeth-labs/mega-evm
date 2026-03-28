@@ -9,14 +9,15 @@ use revm::{
     context::result::{HaltReason, OutOfGasError},
     handler::{EthFrame, FrameResult, ItemOrResult},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, CreateOutcome,
-        FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult, SStoreResult,
+        interpreter::EthInterpreter, interpreter_action::FrameInit, CallInputs, CallOutcome,
+        CallScheme, CreateOutcome, FrameInput, Gas, InstructionResult, InterpreterAction,
+        InterpreterResult, SStoreResult,
     },
 };
 
 use super::{compute_gas, data_size, frame_limit::TxRuntimeLimit, kv_update, state_growth};
 use crate::{
-    EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction,
+    constants, EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction,
     VolatileDataAccess,
 };
 
@@ -87,24 +88,24 @@ pub struct AdditionalLimit {
     /// A tracker for the total compute gas consumed during transaction execution.
     pub(crate) compute_gas: compute_gas::ComputeGasTracker,
 
-    /// Pending `STORAGE_GAS_STIPEND` to be consumed by the next frame push (REX4+).
-    /// Set by `forward_gas_ext` when CALL/CALLCODE with value transfer adds the stipend
-    /// to the child's `gas_limit`.
-    /// Consumed by `before_frame_init` or `push_empty_frame`.
-    pub(crate) pending_storage_gas_stipend: u64,
-
-    /// Pending per-frame compute gas cap for the next child frame (REX4+).
-    /// When `STORAGE_GAS_STIPEND` is added, the child's total gas includes the stipend, but
-    /// its compute gas must remain bounded at the original `forwarded_gas + CALL_STIPEND`.
-    /// This cap is applied after the compute gas frame is pushed in `before_frame_init`.
-    pub(crate) pending_compute_gas_cap: Option<u64>,
-
-    /// Stack of `STORAGE_GAS_STIPEND` amounts per frame (REX4+).
+    /// Stack of `STORAGE_CALL_STIPEND` amounts per frame (REX4+).
     /// Aligned with the frame lifecycle: pushed in `before_frame_init`/`push_empty_frame`,
     /// popped in `before_frame_return_result`.
     /// On frame return, the stipend amount is burned from the returned gas so that it is
     /// not returned to the parent.
-    pub(crate) storage_gas_stipend_stack: Vec<u64>,
+    pub(crate) storage_call_stipend_stack: Vec<u64>,
+}
+
+/// Metadata for a granted `STORAGE_CALL_STIPEND`.
+///
+/// `stipend` is burned on frame return, while `compute_gas_cap` preserves the original
+/// compute-only budget so the extra gas cannot be used for pure computation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StorageCallStipendGrant {
+    /// The extra gas added to the callee's `gas_limit`.
+    pub(crate) stipend: u64,
+    /// The original child gas limit before the stipend was added.
+    pub(crate) compute_gas_cap: u64,
 }
 
 /// The usage of the additional limits.
@@ -131,9 +132,7 @@ impl AdditionalLimit {
             data_size: data_size::DataSizeTracker::new(spec, limits.tx_data_size_limit),
             kv_update: kv_update::KVUpdateTracker::new(spec, limits.tx_kv_updates_limit),
             compute_gas: compute_gas::ComputeGasTracker::new(spec, limits.tx_compute_gas_limit),
-            pending_storage_gas_stipend: 0,
-            pending_compute_gas_cap: None,
-            storage_gas_stipend_stack: Vec::new(),
+            storage_call_stipend_stack: Vec::new(),
         }
     }
 }
@@ -174,9 +173,7 @@ impl AdditionalLimit {
         self.state_growth.reset();
         self.data_size.reset();
         self.kv_update.reset();
-        self.pending_storage_gas_stipend = 0;
-        self.pending_compute_gas_cap = None;
-        self.storage_gas_stipend_stack.clear();
+        self.storage_call_stipend_stack.clear();
     }
 
     /// Gets the usage of the additional limits.
@@ -196,16 +193,12 @@ impl AdditionalLimit {
     /// Used when `frame_init` returns an early `Result` (e.g., inspector interception,
     /// access control interception) without going through `after_frame_init`.
     #[inline]
-    pub(crate) fn push_empty_frame(&mut self) {
+    pub(crate) fn push_empty_frame(&mut self, storage_call_stipend: u64) {
         self.state_growth.push_empty_frame();
         self.data_size.push_empty_frame();
         self.kv_update.push_empty_frame();
         self.compute_gas.push_empty_frame();
-        self.storage_gas_stipend_stack.push(self.pending_storage_gas_stipend);
-        self.pending_storage_gas_stipend = 0;
-        if let Some(cap) = self.pending_compute_gas_cap.take() {
-            self.compute_gas.cap_current_frame_limit(cap);
-        }
+        self.storage_call_stipend_stack.push(storage_call_stipend);
     }
 
     /// Returns the current effective compute gas limit (may be detained/lowered by volatile
@@ -257,18 +250,29 @@ impl AdditionalLimit {
         self.compute_gas.set_detained_limit(new_limit);
     }
 
-    /// Sets the pending `STORAGE_GAS_STIPEND` and per-frame compute gas cap for the next child
-    /// frame.
+    /// Applies `STORAGE_CALL_STIPEND` to a qualifying internal `CALL`/`CALLCODE`.
     ///
-    /// Called from `forward_gas_ext` when adding the stipend to the child's `gas_limit`.
-    /// `compute_gas_cap` is the original gas limit before the stipend was added
-    /// (`forwarded_gas + CALL_STIPEND`), ensuring the child cannot use the stipend for
-    /// compute-intensive operations.
-    /// Both values are consumed by the next `before_frame_init` or `push_empty_frame`.
+    /// The stipend is only granted to child call frames (`depth > 0`), never to the
+    /// top-level transaction frame even though revm represents it as `CallScheme::Call`.
+    ///
+    /// Returns the stipend grant metadata when the stipend is granted.
     #[inline]
-    pub(crate) fn set_pending_storage_gas_stipend(&mut self, amount: u64, compute_gas_cap: u64) {
-        self.pending_storage_gas_stipend = amount;
-        self.pending_compute_gas_cap = Some(compute_gas_cap);
+    pub(crate) fn apply_storage_call_stipend(
+        depth: usize,
+        call_inputs: &mut CallInputs,
+    ) -> Option<StorageCallStipendGrant> {
+        let is_internal_call = depth != 0;
+        let is_value_transfer = call_inputs.transfers_value();
+        let is_call_or_callcode =
+            matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode);
+        if !(is_internal_call && is_value_transfer && is_call_or_callcode) {
+            return None;
+        }
+
+        let stipend = constants::rex4::STORAGE_CALL_STIPEND;
+        let compute_gas_cap = call_inputs.gas_limit;
+        call_inputs.gas_limit = call_inputs.gas_limit.saturating_add(stipend);
+        Some(StorageCallStipendGrant { stipend, compute_gas_cap })
     }
 
     /// Checks if any of the configured limits have been exceeded.
@@ -376,26 +380,27 @@ impl AdditionalLimit {
 
     /// Hook called before a new execution frame is initialized. Returns `Some(FrameResult)` if the
     /// limit is exceeded and the frame should terminate early with the returned `FrameResult`.
+    ///
+    /// For REX4+ value-transferring internal `CALL`/`CALLCODE`, this method also records the
+    /// already-applied `STORAGE_CALL_STIPEND`: it caps the per-frame compute gas budget at the
+    /// original gas limit and pushes the stipend amount to the burn stack.
     pub(crate) fn before_frame_init<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
         &mut self,
         frame_init: &FrameInit,
         journal: &mut JOURNAL,
+        storage_stipend: Option<StorageCallStipendGrant>,
     ) -> Result<Option<FrameResult>, JOURNAL::DBError> {
-        // new frame in frame limit trackers
+        // Push new frame in frame limit trackers.
         self.state_growth.before_frame_init(frame_init, journal)?;
         self.data_size.before_frame_init(frame_init, journal)?;
         self.kv_update.before_frame_init(frame_init, journal)?;
         self.compute_gas.before_frame_init(frame_init, journal)?;
 
-        // Push the pending storage gas stipend for this frame.
-        self.storage_gas_stipend_stack.push(self.pending_storage_gas_stipend);
-        self.pending_storage_gas_stipend = 0;
-
-        // Apply the per-frame compute gas cap for STORAGE_GAS_STIPEND frames.
-        // The child's total gas includes the stipend, but compute must remain bounded
-        // at the original `forwarded_gas + CALL_STIPEND`.
-        if let Some(cap) = self.pending_compute_gas_cap.take() {
-            self.compute_gas.cap_current_frame_limit(cap);
+        if let Some(grant) = storage_stipend {
+            self.storage_call_stipend_stack.push(grant.stipend);
+            self.compute_gas.cap_current_frame_limit(grant.compute_gas_cap);
+        } else {
+            self.storage_call_stipend_stack.push(0);
         }
 
         if self.check_limit().exceeded_limit() {
@@ -544,9 +549,9 @@ impl AdditionalLimit {
         self.kv_update.before_frame_return_result::<LAST_FRAME>(result);
         self.compute_gas.before_frame_return_result::<LAST_FRAME>(result);
 
-        // Burn the STORAGE_GAS_STIPEND from the returned gas.
+        // Burn the STORAGE_CALL_STIPEND from the returned gas.
         //
-        // The child's gas_limit was inflated by STORAGE_GAS_STIPEND:
+        // The child's gas_limit was inflated by STORAGE_CALL_STIPEND:
         //   gas_limit = original_limit + stipend
         //
         // After execution the child has `remaining` gas left. Without the burn the
@@ -558,12 +563,13 @@ impl AdditionalLimit {
         //   burn           = remaining - min(remaining, original_limit)
         //   returned       = remaining - burn          (≤ original_limit)
         if !duplicate_return_frame_result {
-            let stipend = self.storage_gas_stipend_stack.pop().unwrap_or(0);
+            let stipend = self.storage_call_stipend_stack.pop().unwrap_or(0);
             if stipend > 0 {
                 let gas = result.gas_mut();
                 let original_limit = gas.limit().saturating_sub(stipend);
                 let burn = gas.remaining().saturating_sub(original_limit);
                 if burn > 0 {
+                    // Infallible: burn ≤ remaining by construction.
                     let _ = gas.record_cost(burn);
                 }
             }

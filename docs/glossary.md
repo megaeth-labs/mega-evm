@@ -14,14 +14,14 @@ Additional gas charged for operations that impose persistent storage burden on n
 
 The other component of total gas cost.
 
-## Storage gas stipend
+## Storage call stipend
 
 Additional 23,000 gas granted to the callee when `CALL` or `CALLCODE` transfers value (value > 0).
 
 Introduced in Rex4 to compensate for the 10× storage gas multiplier on LOG opcodes, which causes LOG events to exceed the standard EVM `CALL_STIPEND` (2,300 gas).
 
 The callee's [compute gas](#compute-gas) limit is not increased — only storage gas operations can consume the extra gas.
-Unused storage gas stipend is burned on return to prevent gas leakage.
+Unused storage call stipend is burned on return to prevent gas leakage.
 
 See [Rex4 Network Upgrade](upgrades/rex4.md) for details.
 

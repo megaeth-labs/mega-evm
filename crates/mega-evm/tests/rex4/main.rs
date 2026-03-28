@@ -7,4 +7,4 @@ mod frame_state_growth;
 mod gas_detention;
 mod keyless_deploy;
 mod limit_control;
-mod storage_gas_stipend;
+mod storage_call_stipend;
