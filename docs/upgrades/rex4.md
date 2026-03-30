@@ -147,7 +147,9 @@ interface IMegaLimitControl {
 | LOG2 (SafeReceived) | 1,125 | 7,500 | 8,625 | ✅ |
 | LOG3 (Transfer) | 1,500 | 11,250 | 12,750 | ✅ |
 | LOG4 + 32 bytes data | ~2,131 | 17,560 | ~19,691 | ✅ |
-| LOG4 + 64 bytes data | ~2,387 | 20,120 | ~22,507 | ✅ |
+
+Compute gas values above exclude memory expansion costs and surrounding bytecode overhead.
+For a pure `transfer()` / `send()` call, the 2,300-gas compute cap is enough for raw LOG opcodes up to LOG4 with small data payloads, provided the surrounding `receive()` / `fallback()` logic also fits within that compute budget.
 
 ### Relative Gas Detention Cap
 
