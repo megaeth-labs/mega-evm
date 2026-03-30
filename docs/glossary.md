@@ -16,7 +16,8 @@ The other component of total gas cost.
 
 ## Storage call stipend
 
-Additional 23,000 gas granted to the callee when `CALL` or `CALLCODE` transfers value (value > 0).
+Additional 23,000 gas granted to the callee of an internal `CALL` or `CALLCODE` that transfers value (value > 0).
+Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract](system-contracts/overview.md) interceptions do not qualify.
 
 Introduced in Rex4 to compensate for the 10× storage gas multiplier on LOG opcodes, which causes LOG events to exceed the standard EVM `CALL_STIPEND` (2,300 gas).
 

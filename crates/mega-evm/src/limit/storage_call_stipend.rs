@@ -29,14 +29,14 @@ pub(crate) struct StorageCallStipendTracker {
     /// Zero when disabled (pre-REX4).
     stipend_amount: u64,
     /// Per-frame stipend amounts.
-    /// Pushed in `before_frame_init` / `push_empty_frame`, popped in `before_frame_return_result`.
+    /// Pushed in `apply` / `push_empty_frame`, popped in `before_frame_return_result`.
     stack: Vec<u64>,
 }
 
-/// Metadata for a granted `STORAGE_CALL_STIPEND`, returned by `before_frame_init` and
-/// consumed by `after_frame_init`.
+/// Internal metadata for a granted `STORAGE_CALL_STIPEND`, produced and consumed within
+/// [`StorageCallStipendTracker::apply`].
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct StorageCallStipendGrant {
+struct StorageCallStipendGrant {
     /// The extra gas added to the callee's `gas_limit`.
     stipend: u64,
     /// The original child gas limit before the stipend was added.
@@ -67,29 +67,17 @@ impl StorageCallStipendTracker {
         self.stack.push(0);
     }
 
-    /// Detects whether a `STORAGE_CALL_STIPEND` should be granted and inflates `gas_limit`
-    /// in place.
-    ///
-    /// Must be called **before** the other trackers push their frames, because the inflated
-    /// `gas_limit` affects subsequent frame initialization.
-    /// Returns the grant metadata to be passed to `after_frame_init`.
-    pub(crate) fn before_frame_init(
-        &self,
-        frame_init: &mut FrameInit,
-    ) -> Option<StorageCallStipendGrant> {
-        self.detect_and_apply(frame_init)
-    }
-
-    /// Pushes the stipend to the stack and caps the per-frame compute gas budget.
+    /// Detects whether a `STORAGE_CALL_STIPEND` should be granted, inflates `gas_limit`,
+    /// pushes the stipend to the stack, and caps the per-frame compute gas budget.
     ///
     /// Must be called **after** `compute_gas.before_frame_init()` so that the compute gas
     /// frame exists for `cap_current_frame_limit` to tighten.
-    pub(crate) fn after_frame_init(
+    pub(crate) fn apply(
         &mut self,
-        grant: Option<StorageCallStipendGrant>,
+        frame_init: &mut FrameInit,
         compute_gas: &mut compute_gas::ComputeGasTracker,
     ) {
-        if let Some(grant) = grant {
+        if let Some(grant) = self.detect_and_apply(frame_init) {
             self.stack.push(grant.stipend);
             compute_gas.cap_current_frame_limit(grant.compute_gas_cap);
         } else {

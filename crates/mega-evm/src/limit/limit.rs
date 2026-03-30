@@ -358,17 +358,15 @@ impl AdditionalLimit {
         frame_init: &mut FrameInit,
         journal: &mut JOURNAL,
     ) -> Result<Option<FrameResult>, JOURNAL::DBError> {
-        // REX4+: detect and inflate gas_limit before other trackers see frame_init.
-        let stipend_grant = self.storage_call_stipend.before_frame_init(frame_init);
-
         // Push new frame in frame limit trackers.
         self.state_growth.before_frame_init(frame_init, journal)?;
         self.data_size.before_frame_init(frame_init, journal)?;
         self.kv_update.before_frame_init(frame_init, journal)?;
         self.compute_gas.before_frame_init(frame_init, journal)?;
 
-        // Push stipend to stack and cap compute gas (needs compute frame to exist).
-        self.storage_call_stipend.after_frame_init(stipend_grant, &mut self.compute_gas);
+        // REX4+: detect value-transferring CALL/CALLCODE, inflate gas_limit, push stipend
+        // to stack, and cap per-frame compute gas budget.
+        self.storage_call_stipend.apply(frame_init, &mut self.compute_gas);
 
         if self.check_limit().exceeded_limit() {
             // if the limit is exceeded, create an error frame result and return it directly

@@ -121,8 +121,8 @@ pub mod rex4 {
     /// 4,500 gas (750 compute + 3,750 storage), exceeding the EVM's `CALL_STIPEND` of 2,300.
     /// This breaks `transfer()` / `send()` to contracts that emit events in `receive()`.
     ///
-    /// When a CALL or CALLCODE transfers value (value > 0), the callee receives this extra gas
-    /// on top of the standard `CALL_STIPEND`.
+    /// When an internal CALL or CALLCODE transfers value (value > 0), the callee receives this
+    /// extra gas on top of the standard `CALL_STIPEND`.
     /// The callee's compute gas limit remains at the original level (`forwarded_gas +
     /// CALL_STIPEND`), so the extra gas can only be consumed by storage gas operations (e.g.,
     /// the 10x LOG topic/data costs).

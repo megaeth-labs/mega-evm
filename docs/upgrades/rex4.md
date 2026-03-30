@@ -134,12 +134,12 @@ interface IMegaLimitControl {
 
 #### New behavior
 
-- When `CALL` or `CALLCODE` transfers value (value > 0), the callee receives an additional **storage call stipend** of 23,000 gas on top of the standard `CALL_STIPEND` (2,300).
+- When an internal `CALL` or `CALLCODE` transfers value (value > 0), the callee receives an additional **storage call stipend** of 23,000 gas on top of the standard `CALL_STIPEND` (2,300).
 - The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_CALL_STIPEND (23,000)`.
 - The callee's [compute gas](../glossary.md#compute-gas) limit remains at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by [storage gas](../glossary.md#storage-gas) operations (the 10× LOG topic/data costs).
 - On return, unused storage call stipend is **burned** — it is never returned to the caller.
-- `DELEGATECALL` and `STATICCALL` are unaffected (no value transfer, no stipend).
-- The compute gas cap ensures the callee cannot perform state-modifying operations (SSTORE, CALL with value, CREATE) with the extra gas, preserving the reentrancy protection properties of the original `CALL_STIPEND`.
+- Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract](../system-contracts/overview.md) interceptions do not receive the stipend.
+- The compute gas cap ensures the callee cannot use the extra gas for computation, preserving the reentrancy protection properties of the original `CALL_STIPEND`.
 
 | Event type | Compute gas | Storage gas | Total gas | Fits in 25,300? |
 | ---------- | ----------- | ----------- | --------- | --------------- |

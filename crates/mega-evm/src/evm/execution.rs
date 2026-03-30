@@ -615,9 +615,8 @@ where
         // Each interceptor checks target address and ABI-decodes function selectors.
         // Side-effect interceptors (oracle hint) usually return None.
         // Short-circuiting paths return Some(FrameResult).
-        // These synthetic results skip `AdditionalLimit::before_frame_init`, so they do not
-        // receive `STORAGE_CALL_STIPEND`; we only push an empty tracking frame to keep the
-        // additional-limit stacks aligned.
+        // These synthetic results skip `AdditionalLimit::before_frame_init`; we only push an
+        // empty tracking frame to keep the additional-limit stacks aligned.
         if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
             if let Some(result) =
                 dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
