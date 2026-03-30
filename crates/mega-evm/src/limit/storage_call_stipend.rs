@@ -127,6 +127,14 @@ impl StorageCallStipendTracker {
         }
     }
 
+    /// Returns the stipend amount for the current (topmost) frame, or 0 if the stack is empty
+    /// or the current frame has no stipend.
+    ///
+    /// Used by `rescue_gas` to exclude system-granted stipend gas from the rescued amount.
+    pub(crate) fn current_frame_stipend(&self) -> u64 {
+        self.stack.last().copied().unwrap_or(0)
+    }
+
     /// Detects whether a `STORAGE_CALL_STIPEND` should be granted to a `CALL`/`CALLCODE`
     /// with value transfer, and if so, inflates `gas_limit` in place.
     ///

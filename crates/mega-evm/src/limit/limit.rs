@@ -314,7 +314,14 @@ impl AdditionalLimit {
     /// remaining gas, we need to record so that we can give it back to the transaction sender
     /// afterwards.
     pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
-        self.rescued_gas += gas.remaining();
+        let stipend = self.storage_call_stipend.current_frame_stipend();
+        let effective_remaining = if stipend > 0 {
+            let original_limit = gas.limit().saturating_sub(stipend);
+            gas.remaining().min(original_limit)
+        } else {
+            gas.remaining()
+        };
+        self.rescued_gas += effective_remaining;
     }
 
     /// Rescue remaining gas from a frame result if a TX-level additional limit has been
@@ -379,6 +386,8 @@ impl AdditionalLimit {
                 return_memory_offset,
                 output,
             );
+            // `rescue_gas` excludes the active STORAGE_CALL_STIPEND automatically,
+            // so the sender never recovers system-granted gas.
             self.try_rescue_gas(result.gas());
             return Ok(Some(result));
         }

@@ -42,6 +42,10 @@ const RECEIVER: Address = address!("0000000000000000000000000000000000200002");
 const EMPTY_RECEIVER: Address = address!("0000000000000000000000000000000000200003");
 /// An intermediate contract for nested value-transfer tests.
 const MIDDLE_CONTRACT: Address = address!("0000000000000000000000000000000000200005");
+/// A fresh address not in the database (triggers state growth when receiving value).
+const NEW_EMPTY_ADDR: Address = address!("0000000000000000000000000000000000300001");
+/// An EOA in the database with balance but no code.
+const EOA_RECEIVER: Address = address!("0000000000000000000000000000000000200008");
 /// The 4-byte selector for `disableVolatileDataAccess()`.
 const DISABLE_VOLATILE_DATA_ACCESS_SELECTOR: [u8; 4] =
     IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
@@ -56,8 +60,17 @@ fn transact(
     db: &mut MemoryDatabase,
     tx: TxEnv,
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
-    let mut context =
-        MegaContext::new(db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+    transact_with_limits(spec, db, tx, EvmTxRuntimeLimits::no_limits())
+}
+
+/// Executes a transaction with custom runtime limits.
+fn transact_with_limits(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    tx: TxEnv,
+    limits: EvmTxRuntimeLimits,
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+    let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(limits);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -752,4 +765,91 @@ fn test_nested_value_transfer_stipend_stack() {
         }
         other => panic!("expected Success, got {other:?}"),
     }
+}
+
+/// When a frame-local state growth limit is exceeded during a value-transferring CALL to a
+/// new address, the `STORAGE_CALL_STIPEND` must not leak to the parent.
+///
+/// Under REX4, per-frame budgets make this a frame-local revert (not a TX halt).
+/// The stipend is burned via `before_frame_return_result`; this test verifies the burn
+/// is correct even when the child frame never actually executes (early-return from
+/// `before_frame_init`).
+///
+/// `rescue_gas` also caps rescued gas at the pre-stipend limit (via
+/// `current_frame_stipend`), which covers the TX-level rescue paths in
+/// `before_frame_init` and `after_frame_run`. Those paths are difficult to trigger in
+/// integration tests because Rex4 per-frame budgets fire before TX-level checks.
+#[test]
+fn test_stipend_not_leaked_on_frame_local_limit_exceed() {
+    // SENDER_CONTRACT does CALL(gas=0, to=NEW_EMPTY_ADDR, value=1).
+    // NEW_EMPTY_ADDR is not in the DB, so state_growth records +1 in before_frame_init.
+    // With state_growth_limit=1, the child's frame-local budget is floor(1 * 98/100) = 0,
+    // so the +1 growth exceeds the child's budget and it reverts.
+    let sender_code = build_transfer_contract(NEW_EMPTY_ADDR);
+    let mut db = setup_db(&[(SENDER_CONTRACT, sender_code)]);
+
+    let tx = default_tx();
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(1);
+    let result = transact_with_limits(MegaSpecId::REX4, &mut db, tx, limits).unwrap();
+
+    // Parent catches the child's frame-local revert; TX succeeds.
+    match &result.result {
+        ExecutionResult::Success { output, .. } => {
+            let success_flag = U256::from_be_slice(&output.data()[..32]);
+            assert_eq!(
+                success_flag,
+                U256::ZERO,
+                "inner CALL should revert due to frame-local state growth exceed"
+            );
+        }
+        other => panic!("expected Success (inner revert), got {other:?}"),
+    }
+
+    // Verify gas accounting: if the 23,000 stipend leaked, gas_used would be ~23,000 lower.
+    let gas_used = match &result.result {
+        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        _ => unreachable!(),
+    };
+    // Intrinsic gas (~21,000) + CALL costs (cold access 2,600 + new account 25,000 +
+    // value transfer 9,000 + gas_stipend deduction 2,300) + parent opcodes.
+    // Total should be well above 50,000. If stipend leaked, gas_used would drop by ~23,000.
+    assert!(
+        gas_used > 50_000,
+        "gas_used {gas_used} is too low — STORAGE_CALL_STIPEND may have leaked to parent"
+    );
+}
+
+/// When CALL with value targets an EOA (no code), revm's `frame_init` returns a Result
+/// immediately without creating an interpreter frame. The `STORAGE_CALL_STIPEND` must
+/// still be burned via `before_frame_return_result` and not leak to the parent.
+///
+/// This exercises the `after_frame_init` Result path, which is distinct from the normal
+/// frame execution path tested by `test_storage_call_stipend_burned_on_return`.
+#[test]
+fn test_stipend_burned_on_eoa_value_transfer() {
+    let sender_code = build_transfer_contract(EOA_RECEIVER);
+    let mut db = setup_db(&[(SENDER_CONTRACT, sender_code)]);
+    db.set_account_balance(EOA_RECEIVER, U256::from(1_000_000u128));
+
+    let result = transact(MegaSpecId::REX4, &mut db, default_tx()).unwrap();
+    match &result.result {
+        ExecutionResult::Success { output, .. } => {
+            let success_flag = U256::from_be_slice(&output.data()[..32]);
+            assert_eq!(success_flag, U256::from(1), "inner CALL to EOA should succeed");
+        }
+        other => panic!("expected Success, got {other:?}"),
+    }
+
+    let gas_used = match &result.result {
+        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        _ => unreachable!(),
+    };
+    // Intrinsic gas + CALL costs (cold access 2,600 + value transfer 9,000 +
+    // gas_stipend deduction 2,300) + parent opcodes.
+    // If the 23,000 stipend leaked via the after_frame_init Result path,
+    // gas_used would drop by ~23,000.
+    assert!(
+        gas_used > 50_000,
+        "gas_used {gas_used} is too low — STORAGE_CALL_STIPEND may have leaked on EOA transfer"
+    );
 }
