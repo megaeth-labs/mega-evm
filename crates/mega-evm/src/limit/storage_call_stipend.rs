@@ -25,7 +25,9 @@ use crate::{constants, MegaSpecId};
 /// never recovers more than the original (pre-stipend) gas limit.
 #[derive(Debug, Clone)]
 pub(crate) struct StorageCallStipendTracker {
-    rex4_enabled: bool,
+    /// The stipend amount to grant per qualifying frame.
+    /// Zero when disabled (pre-REX4).
+    stipend_amount: u64,
     /// Per-frame stipend amounts.
     /// Pushed in `before_frame_init` / `push_empty_frame`, popped in `before_frame_return_result`.
     stack: Vec<u64>,
@@ -43,7 +45,16 @@ pub(crate) struct StorageCallStipendGrant {
 
 impl StorageCallStipendTracker {
     pub(crate) fn new(spec: MegaSpecId) -> Self {
-        Self { rex4_enabled: spec.is_enabled(MegaSpecId::REX4), stack: Vec::new() }
+        Self { stipend_amount: Self::stipend_for_spec(spec), stack: Vec::new() }
+    }
+
+    /// Returns the stipend amount for the given spec.
+    fn stipend_for_spec(spec: MegaSpecId) -> u64 {
+        if spec.is_enabled(MegaSpecId::REX4) {
+            constants::rex4::STORAGE_CALL_STIPEND
+        } else {
+            0
+        }
     }
 
     pub(crate) fn reset(&mut self) {
@@ -122,7 +133,7 @@ impl StorageCallStipendTracker {
     /// The stipend is only granted to child call frames (`depth > 0`), never to the
     /// top-level transaction frame.
     fn detect_and_apply(&self, frame_init: &mut FrameInit) -> Option<StorageCallStipendGrant> {
-        if !self.rex4_enabled {
+        if self.stipend_amount == 0 {
             return None;
         }
         let FrameInput::Call(call_inputs) = &mut frame_init.frame_input else {
@@ -136,7 +147,7 @@ impl StorageCallStipendTracker {
             return None;
         }
 
-        let stipend = constants::rex4::STORAGE_CALL_STIPEND;
+        let stipend = self.stipend_amount;
         let compute_gas_cap = call_inputs.gas_limit;
         call_inputs.gas_limit = call_inputs.gas_limit.saturating_add(stipend);
         Some(StorageCallStipendGrant { stipend, compute_gas_cap })
