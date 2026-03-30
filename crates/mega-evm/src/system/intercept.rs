@@ -46,6 +46,10 @@ alloy_sol_types::sol! {
 ///   never dispatched to interceptors.
 /// - When the method returns `Some(FrameResult)`, the caller is responsible for calling
 ///   `additional_limit.push_empty_frame()` to keep the frame tracker stack balanced.
+/// - Returning `Some(FrameResult)` produces a **synthetic** result, not a real child EVM frame. As
+///   a consequence, `STORAGE_CALL_STIPEND` is not applied on this short-circuit path. If a future
+///   interceptor needs full child-frame gas semantics for a value-bearing call, it must extend
+///   stipend handling explicitly instead of assuming it happens automatically.
 /// - When the method returns `None`, the caller proceeds as if no interception occurred.
 pub trait SystemContractInterceptor<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// Attempts to intercept a call to a system contract.

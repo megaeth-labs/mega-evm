@@ -133,6 +133,33 @@ fn build_value_call_with_selector(to: Address, selector: [u8; 4]) -> Bytes {
         .build()
 }
 
+/// Builds bytecode that measures gas consumed by an intercepted CALL carrying the given value.
+///
+/// The returned 32-byte word is `gas_before - gas_after` measured around the CALL region.
+fn build_measured_call_with_selector(to: Address, selector: [u8; 4], value: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, selector)
+        .append(GAS)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(value)
+        .push_address(to)
+        .push_number(0_u64) // gas = 0
+        .append(CALL)
+        .append(POP) // discard success flag
+        .append(GAS)
+        .append(SWAP1)
+        .append(SUB)
+        .push_number(0x20_u64)
+        .append(MSTORE)
+        .push_number(32_u64)
+        .push_number(0x20_u64)
+        .append(RETURN)
+        .build()
+}
+
 /// Builds bytecode for a contract that emits LOG1 with 0 bytes data.
 /// Total cost: 750 compute + 3,750 storage = 4,500 gas.
 fn build_log1_receiver() -> Bytes {
@@ -534,12 +561,10 @@ fn test_storage_call_stipend_cannot_be_used_for_compute() {
     }
 }
 
-/// Value-transferring calls that are intercepted in `frame_init` should still go through
-/// the storage-call-stipend bookkeeping path.
-/// No EVM frame executes here, but the synthetic result must still be wrapped in an empty
-/// tracking frame so return-time stipend burning stays stack-aligned.
+/// Calls intercepted in `frame_init` should still push an empty tracking frame so the
+/// additional-limit stacks remain aligned even though no EVM frame executes.
 #[test]
-fn test_storage_call_stipend_applied_on_intercepted_call() {
+fn test_intercepted_call_keeps_limit_tracker_stack_aligned() {
     let sender_code = build_value_call_with_selector(
         ACCESS_CONTROL_ADDRESS,
         DISABLE_VOLATILE_DATA_ACCESS_SELECTOR,
@@ -558,6 +583,68 @@ fn test_storage_call_stipend_applied_on_intercepted_call() {
         }
         other => panic!("expected Success, got {other:?}"),
     }
+}
+
+/// A synthetic intercepted value-bearing call should not leak `STORAGE_CALL_STIPEND` gas back
+/// to the caller.
+///
+/// We compare the gas delta of the same intercepted call with and without value transfer.
+/// The value-bearing case should still cost materially more because the CALLVALUE cost remains,
+/// while no storage-call stipend is granted on the synthetic interception path.
+#[test]
+fn test_intercepted_value_call_does_not_leak_storage_call_stipend() {
+    let sender_with_value_addr = address!("0000000000000000000000000000000000200006");
+    let sender_no_value_addr = address!("0000000000000000000000000000000000200007");
+    let sender_with_value = build_measured_call_with_selector(
+        ACCESS_CONTROL_ADDRESS,
+        DISABLE_VOLATILE_DATA_ACCESS_SELECTOR,
+        1,
+    );
+    let sender_no_value = build_measured_call_with_selector(
+        ACCESS_CONTROL_ADDRESS,
+        DISABLE_VOLATILE_DATA_ACCESS_SELECTOR,
+        0,
+    );
+
+    let mut db = setup_db(&[
+        (sender_with_value_addr, sender_with_value),
+        (sender_no_value_addr, sender_no_value),
+    ]);
+    db.set_account_balance(sender_with_value_addr, U256::from(1_000_000_000u128));
+    db.set_account_balance(sender_no_value_addr, U256::from(1_000_000_000u128));
+
+    let tx_with_value = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(sender_with_value_addr)
+        .gas_limit(100_000_000)
+        .build_fill();
+    let result_with_value = transact(MegaSpecId::REX4, &mut db, tx_with_value).unwrap();
+    let gas_delta_with_value = match &result_with_value.result {
+        ExecutionResult::Success { output, .. } => {
+            U256::from_be_slice(&output.data()[..32]).to::<u64>()
+        }
+        other => panic!("expected Success, got {other:?}"),
+    };
+
+    let tx_no_value = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(sender_no_value_addr)
+        .gas_limit(100_000_000)
+        .build_fill();
+    let result_no_value = transact(MegaSpecId::REX4, &mut db, tx_no_value).unwrap();
+    let gas_delta_no_value = match &result_no_value.result {
+        ExecutionResult::Success { output, .. } => {
+            U256::from_be_slice(&output.data()[..32]).to::<u64>()
+        }
+        other => panic!("expected Success, got {other:?}"),
+    };
+
+    let diff = gas_delta_with_value.saturating_sub(gas_delta_no_value);
+    assert!(
+        diff >= 6000,
+        "synthetic intercepted value call should not leak STORAGE_CALL_STIPEND. \
+         gas_delta_with_value={gas_delta_with_value}, gas_delta_no_value={gas_delta_no_value}, diff={diff}"
+    );
 }
 
 /// Top-level keyless deploy interception must preserve the gas already consumed by the

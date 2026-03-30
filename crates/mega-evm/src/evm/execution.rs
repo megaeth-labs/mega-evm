@@ -34,9 +34,9 @@ use revm::{
 
 use crate::{
     constants, dispatch_system_contract_interceptors, is_mega_system_transaction,
-    sent_from_mega_system_address, AdditionalLimit, ExternalEnvTypes, HostExt, MegaContext,
-    MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError,
-    MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    sent_from_mega_system_address, ExternalEnvTypes, HostExt, MegaContext, MegaEvm, MegaHaltReason,
+    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_ADDRESS,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -572,7 +572,6 @@ where
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
         let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
-        let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
         let additional_limit = self.ctx().additional_limit.clone();
 
         // Check if this is a call to the oracle contract and mark it as accessed.
@@ -612,20 +611,13 @@ where
             }
         }
 
-        let storage_call_stipend = if is_rex4_enabled {
-            if let FrameInput::Call(call_inputs) = &mut frame_init.frame_input {
-                AdditionalLimit::apply_storage_call_stipend(frame_init.depth, call_inputs)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         // System contract interception dispatch.
         // Each interceptor checks target address and ABI-decodes function selectors.
         // Side-effect interceptors (oracle hint) usually return None.
         // Short-circuiting paths return Some(FrameResult).
+        // These synthetic results skip `AdditionalLimit::before_frame_init`, so they do not
+        // receive `STORAGE_CALL_STIPEND`; we only push an empty tracking frame to keep the
+        // additional-limit stacks aligned.
         if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
             if let Some(result) =
                 dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
@@ -634,20 +626,17 @@ where
                 // `frame_return_result` / `last_frame_result` will pop a frame, but
                 // `after_frame_init` (which normally pushes) was skipped.
                 if is_mini_rex_enabled {
-                    additional_limit
-                        .borrow_mut()
-                        .push_empty_frame(storage_call_stipend.map_or(0, |grant| grant.stipend));
+                    additional_limit.borrow_mut().push_empty_frame();
                 }
                 return Ok(FrameInitResult::Result(result));
             }
         }
 
         if is_mini_rex_enabled {
-            if let Some(frame_result) = additional_limit.borrow_mut().before_frame_init(
-                &frame_init,
-                self.ctx().journal_mut(),
-                storage_call_stipend,
-            )? {
+            if let Some(frame_result) = additional_limit
+                .borrow_mut()
+                .before_frame_init(&mut frame_init, self.ctx().journal_mut())?
+            {
                 return Ok(FrameInitResult::Result(frame_result));
             }
         }
@@ -794,7 +783,7 @@ where
             // frame) was skipped, but `before_frame_return_result` (which pops) will still
             // run. Push an empty frame to keep the limit tracker stack balanced.
             if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-                ctx.additional_limit.borrow_mut().push_empty_frame(0);
+                ctx.additional_limit.borrow_mut().push_empty_frame();
             }
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));

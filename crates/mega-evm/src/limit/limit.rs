@@ -1,7 +1,4 @@
-#[cfg(not(feature = "std"))]
-use alloc as std;
 use core::ops::Range;
-use std::vec::Vec;
 
 use alloy_primitives::{Address, Bytes, U256};
 use op_revm::OpHaltReason;
@@ -9,15 +6,17 @@ use revm::{
     context::result::{HaltReason, OutOfGasError},
     handler::{EthFrame, FrameResult, ItemOrResult},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, CallInputs, CallOutcome,
-        CallScheme, CreateOutcome, FrameInput, Gas, InstructionResult, InterpreterAction,
-        InterpreterResult, SStoreResult,
+        interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, CreateOutcome,
+        FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult, SStoreResult,
     },
 };
 
-use super::{compute_gas, data_size, frame_limit::TxRuntimeLimit, kv_update, state_growth};
+use super::{
+    compute_gas, data_size, frame_limit::TxRuntimeLimit, kv_update, state_growth,
+    storage_call_stipend,
+};
 use crate::{
-    constants, EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction,
+    EvmTxRuntimeLimits, JournalInspectTr, MegaHaltReason, MegaSpecId, MegaTransaction,
     VolatileDataAccess,
 };
 
@@ -60,6 +59,10 @@ use super::LimitCheck;
 /// - **KV Updates**: Tracks transaction caller + authority updates, storage writes (when original ≠
 ///   new), and account updates from value transfers and creates
 /// - **State Growth**: Tracks net new accounts + net new storage slots
+///
+/// Additionally, this struct manages the `STORAGE_CALL_STIPEND` (Rex4+): extra gas granted to
+/// value-transferring `CALL`/`CALLCODE` for storage operations, with a per-frame compute gas
+/// cap and burn-on-return to prevent gas leakage.
 #[derive(Debug)]
 pub struct AdditionalLimit {
     /// A flag to indicate if the limit has been exceeded, set when the limit is exceeded. The
@@ -88,24 +91,8 @@ pub struct AdditionalLimit {
     /// A tracker for the total compute gas consumed during transaction execution.
     pub(crate) compute_gas: compute_gas::ComputeGasTracker,
 
-    /// Stack of `STORAGE_CALL_STIPEND` amounts per frame (REX4+).
-    /// Aligned with the frame lifecycle: pushed in `before_frame_init`/`push_empty_frame`,
-    /// popped in `before_frame_return_result`.
-    /// On frame return, the stipend amount is burned from the returned gas so that it is
-    /// not returned to the parent.
-    pub(crate) storage_call_stipend_stack: Vec<u64>,
-}
-
-/// Metadata for a granted `STORAGE_CALL_STIPEND`.
-///
-/// `stipend` is burned on frame return, while `compute_gas_cap` preserves the original
-/// compute-only budget so the extra gas cannot be used for pure computation.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct StorageCallStipendGrant {
-    /// The extra gas added to the callee's `gas_limit`.
-    pub(crate) stipend: u64,
-    /// The original child gas limit before the stipend was added.
-    pub(crate) compute_gas_cap: u64,
+    /// A tracker for the `STORAGE_CALL_STIPEND` granted to value-transferring calls (REX4+).
+    pub(crate) storage_call_stipend: storage_call_stipend::StorageCallStipendTracker,
 }
 
 /// The usage of the additional limits.
@@ -132,7 +119,7 @@ impl AdditionalLimit {
             data_size: data_size::DataSizeTracker::new(spec, limits.tx_data_size_limit),
             kv_update: kv_update::KVUpdateTracker::new(spec, limits.tx_kv_updates_limit),
             compute_gas: compute_gas::ComputeGasTracker::new(spec, limits.tx_compute_gas_limit),
-            storage_call_stipend_stack: Vec::new(),
+            storage_call_stipend: storage_call_stipend::StorageCallStipendTracker::new(spec),
         }
     }
 }
@@ -173,7 +160,7 @@ impl AdditionalLimit {
         self.state_growth.reset();
         self.data_size.reset();
         self.kv_update.reset();
-        self.storage_call_stipend_stack.clear();
+        self.storage_call_stipend.reset();
     }
 
     /// Gets the usage of the additional limits.
@@ -193,12 +180,12 @@ impl AdditionalLimit {
     /// Used when `frame_init` returns an early `Result` (e.g., inspector interception,
     /// access control interception) without going through `after_frame_init`.
     #[inline]
-    pub(crate) fn push_empty_frame(&mut self, storage_call_stipend: u64) {
+    pub(crate) fn push_empty_frame(&mut self) {
         self.state_growth.push_empty_frame();
         self.data_size.push_empty_frame();
         self.kv_update.push_empty_frame();
         self.compute_gas.push_empty_frame();
-        self.storage_call_stipend_stack.push(storage_call_stipend);
+        self.storage_call_stipend.push_empty_frame();
     }
 
     /// Returns the current effective compute gas limit (may be detained/lowered by volatile
@@ -248,31 +235,6 @@ impl AdditionalLimit {
     #[inline]
     pub fn set_compute_gas_limit(&mut self, new_limit: u64) {
         self.compute_gas.set_detained_limit(new_limit);
-    }
-
-    /// Applies `STORAGE_CALL_STIPEND` to a qualifying internal `CALL`/`CALLCODE`.
-    ///
-    /// The stipend is only granted to child call frames (`depth > 0`), never to the
-    /// top-level transaction frame even though revm represents it as `CallScheme::Call`.
-    ///
-    /// Returns the stipend grant metadata when the stipend is granted.
-    #[inline]
-    pub(crate) fn apply_storage_call_stipend(
-        depth: usize,
-        call_inputs: &mut CallInputs,
-    ) -> Option<StorageCallStipendGrant> {
-        let is_internal_call = depth != 0;
-        let is_value_transfer = call_inputs.transfers_value();
-        let is_call_or_callcode =
-            matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode);
-        if !(is_internal_call && is_value_transfer && is_call_or_callcode) {
-            return None;
-        }
-
-        let stipend = constants::rex4::STORAGE_CALL_STIPEND;
-        let compute_gas_cap = call_inputs.gas_limit;
-        call_inputs.gas_limit = call_inputs.gas_limit.saturating_add(stipend);
-        Some(StorageCallStipendGrant { stipend, compute_gas_cap })
     }
 
     /// Checks if any of the configured limits have been exceeded.
@@ -381,27 +343,25 @@ impl AdditionalLimit {
     /// Hook called before a new execution frame is initialized. Returns `Some(FrameResult)` if the
     /// limit is exceeded and the frame should terminate early with the returned `FrameResult`.
     ///
-    /// For REX4+ value-transferring internal `CALL`/`CALLCODE`, this method also records the
-    /// already-applied `STORAGE_CALL_STIPEND`: it caps the per-frame compute gas budget at the
-    /// original gas limit and pushes the stipend amount to the burn stack.
+    /// For REX4+ value-transferring internal `CALL`/`CALLCODE`, this method also applies the
+    /// `STORAGE_CALL_STIPEND`: it inflates `gas_limit`, caps the per-frame compute gas budget
+    /// at the original gas limit, and pushes the stipend amount to the burn stack.
     pub(crate) fn before_frame_init<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
         &mut self,
-        frame_init: &FrameInit,
+        frame_init: &mut FrameInit,
         journal: &mut JOURNAL,
-        storage_stipend: Option<StorageCallStipendGrant>,
     ) -> Result<Option<FrameResult>, JOURNAL::DBError> {
+        // REX4+: detect and inflate gas_limit before other trackers see frame_init.
+        let stipend_grant = self.storage_call_stipend.before_frame_init(frame_init);
+
         // Push new frame in frame limit trackers.
         self.state_growth.before_frame_init(frame_init, journal)?;
         self.data_size.before_frame_init(frame_init, journal)?;
         self.kv_update.before_frame_init(frame_init, journal)?;
         self.compute_gas.before_frame_init(frame_init, journal)?;
 
-        if let Some(grant) = storage_stipend {
-            self.storage_call_stipend_stack.push(grant.stipend);
-            self.compute_gas.cap_current_frame_limit(grant.compute_gas_cap);
-        } else {
-            self.storage_call_stipend_stack.push(0);
-        }
+        // Push stipend to stack and cap compute gas (needs compute frame to exist).
+        self.storage_call_stipend.after_frame_init(stipend_grant, &mut self.compute_gas);
 
         if self.check_limit().exceeded_limit() {
             // if the limit is exceeded, create an error frame result and return it directly
@@ -549,31 +509,8 @@ impl AdditionalLimit {
         self.kv_update.before_frame_return_result::<LAST_FRAME>(result);
         self.compute_gas.before_frame_return_result::<LAST_FRAME>(result);
 
-        // Burn the STORAGE_CALL_STIPEND from the returned gas.
-        //
-        // The child's gas_limit was inflated by STORAGE_CALL_STIPEND:
-        //   gas_limit = original_limit + stipend
-        //
-        // After execution the child has `remaining` gas left. Without the burn the
-        // parent would recover all of `remaining`, including unused stipend. We cap
-        // the returnable gas at `original_limit` so the parent never recovers more
-        // than it would have without the stipend:
-        //
-        //   original_limit = gas_limit - stipend
-        //   burn           = remaining - min(remaining, original_limit)
-        //   returned       = remaining - burn          (≤ original_limit)
-        if !duplicate_return_frame_result {
-            let stipend = self.storage_call_stipend_stack.pop().unwrap_or(0);
-            if stipend > 0 {
-                let gas = result.gas_mut();
-                let original_limit = gas.limit().saturating_sub(stipend);
-                let burn = gas.remaining().saturating_sub(original_limit);
-                if burn > 0 {
-                    // Infallible: burn ≤ remaining by construction.
-                    let _ = gas.record_cost(burn);
-                }
-            }
-        }
+        // Pop stipend from stack and burn unused stipend (Rex4+).
+        self.storage_call_stipend.before_frame_return_result::<LAST_FRAME>(result);
 
         // Frame-level limit handling (Rex4+): check if the child frame exceeded its
         // frame-local budget. The detection may not have happened during execution, so
