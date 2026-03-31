@@ -1,0 +1,151 @@
+//! Tracks the `STORAGE_CALL_STIPEND` granted to value-transferring `CALL`/`CALLCODE` frames
+//! under REX4+.
+//!
+//! The tracker maintains a per-frame stack of stipend amounts, aligned with the EVM call stack.
+//! On frame return the unused stipend is burned so that it cannot leak back to the caller.
+//! Synthetic system-contract interception results that short-circuit `frame_init` do not pass
+//! through this tracker; they only push an empty tracking frame for stack alignment.
+
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
+use revm::{
+    handler::FrameResult,
+    interpreter::{interpreter_action::FrameInit, CallScheme, FrameInput},
+};
+
+use super::compute_gas;
+use crate::{constants, MegaSpecId};
+
+/// Tracks per-frame `STORAGE_CALL_STIPEND` grants.
+///
+/// Each child frame entry records the stipend amount that was added to its `gas_limit`.
+/// On frame return, the unused portion is burned from the returned gas so that the caller
+/// never recovers more than the original (pre-stipend) gas limit.
+#[derive(Debug, Clone)]
+pub(crate) struct StorageCallStipendTracker {
+    /// The stipend amount to grant per qualifying frame.
+    /// Zero when disabled (pre-REX4).
+    stipend_amount: u64,
+    /// Per-frame stipend amounts.
+    /// Pushed in `before_frame_init` / `push_empty_frame`, popped in `before_frame_return_result`.
+    stack: Vec<u64>,
+}
+
+/// Internal metadata for a granted `STORAGE_CALL_STIPEND`, produced and consumed within
+/// [`StorageCallStipendTracker::before_frame_init`].
+#[derive(Clone, Copy, Debug)]
+struct StorageCallStipendGrant {
+    /// The extra gas added to the callee's `gas_limit`.
+    stipend: u64,
+    /// The original child gas limit before the stipend was added.
+    compute_gas_cap: u64,
+}
+
+impl StorageCallStipendTracker {
+    pub(crate) fn new(spec: MegaSpecId) -> Self {
+        Self { stipend_amount: Self::stipend_for_spec(spec), stack: Vec::new() }
+    }
+
+    /// Returns the stipend amount for the given spec.
+    fn stipend_for_spec(spec: MegaSpecId) -> u64 {
+        if spec.is_enabled(MegaSpecId::REX4) {
+            constants::rex4::STORAGE_CALL_STIPEND
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.stack.clear();
+    }
+
+    /// Pushes a zero-stipend entry for an empty frame (system contract / inspector
+    /// interception).
+    pub(crate) fn push_empty_frame(&mut self) {
+        self.stack.push(0);
+    }
+
+    /// Detects whether a `STORAGE_CALL_STIPEND` should be granted, inflates `gas_limit`,
+    /// pushes the stipend to the stack, and caps the per-frame compute gas budget.
+    ///
+    /// Must be called **after** `compute_gas.before_frame_init()` so that the compute gas
+    /// frame exists for `cap_current_frame_limit` to tighten.
+    pub(crate) fn before_frame_init(
+        &mut self,
+        frame_init: &mut FrameInit,
+        compute_gas: &mut compute_gas::ComputeGasTracker,
+    ) {
+        if let Some(grant) = self.detect_and_apply(frame_init) {
+            self.stack.push(grant.stipend);
+            compute_gas.cap_current_frame_limit(grant.compute_gas_cap);
+        } else {
+            self.stack.push(0);
+        }
+    }
+
+    /// Burns the unused `STORAGE_CALL_STIPEND` from the returned gas.
+    ///
+    /// The child's `gas_limit` was inflated by `stipend`:
+    ///
+    ///   `original_limit = gas_limit - stipend`
+    ///   `burn           = remaining - min(remaining, original_limit)`
+    ///   `returned       = remaining - burn          (≤ original_limit)`
+    ///
+    /// The burn applies identically regardless of whether the child succeeded or reverted,
+    /// because there is no discardable usage to roll back.
+    ///
+    /// `LAST_FRAME` matches the other trackers' hook signature so the top-level duplicate
+    /// `last_frame_result` call can safely no-op on an empty stack.
+    pub(crate) fn before_frame_return_result<const LAST_FRAME: bool>(
+        &mut self,
+        result: &mut FrameResult,
+    ) {
+        assert!(LAST_FRAME || !self.stack.is_empty(), "frame stack is empty");
+        let stipend = self.stack.pop().unwrap_or(0);
+        if stipend > 0 {
+            let gas = result.gas_mut();
+            let original_limit = gas.limit().saturating_sub(stipend);
+            let burn = gas.remaining().saturating_sub(original_limit);
+            if burn > 0 {
+                // Infallible: burn ≤ remaining by construction.
+                let _ = gas.record_cost(burn);
+            }
+        }
+    }
+
+    /// Returns the stipend amount for the current (topmost) frame, or 0 if the stack is empty
+    /// or the current frame has no stipend.
+    ///
+    /// Used by `rescue_gas` to exclude system-granted stipend gas from the rescued amount.
+    pub(crate) fn current_frame_stipend(&self) -> u64 {
+        self.stack.last().copied().unwrap_or(0)
+    }
+
+    /// Detects whether a `STORAGE_CALL_STIPEND` should be granted to a `CALL`/`CALLCODE`
+    /// with value transfer, and if so, inflates `gas_limit` in place.
+    ///
+    /// The stipend is only granted to child call frames (`depth > 0`), never to the
+    /// top-level transaction frame.
+    fn detect_and_apply(&self, frame_init: &mut FrameInit) -> Option<StorageCallStipendGrant> {
+        if self.stipend_amount == 0 {
+            return None;
+        }
+        let FrameInput::Call(call_inputs) = &mut frame_init.frame_input else {
+            return None;
+        };
+        let is_internal_call = frame_init.depth != 0;
+        let is_value_transfer = call_inputs.transfers_value();
+        let is_call_or_callcode =
+            matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode);
+        if !(is_internal_call && is_value_transfer && is_call_or_callcode) {
+            return None;
+        }
+
+        let stipend = self.stipend_amount;
+        let compute_gas_cap = call_inputs.gas_limit;
+        call_inputs.gas_limit = call_inputs.gas_limit.saturating_add(stipend);
+        Some(StorageCallStipendGrant { stipend, compute_gas_cap })
+    }
+}

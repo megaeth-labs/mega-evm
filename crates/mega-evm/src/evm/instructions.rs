@@ -61,6 +61,10 @@ use revm::{
 /// - Compute gas: Standard call costs
 /// - Storage gas: Dynamic bucket-based costs for new account creation (when transferring to empty
 ///   account)
+/// - REX4+: Value-transferring `CALL`/`CALLCODE` receives additional `STORAGE_CALL_STIPEND` for
+///   storage-gas-heavy operations such as `LOG`
+/// - REX4+: Compute gas remains capped at the original `forwarded_gas + CALL_STIPEND`, so the extra
+///   stipend cannot be used for pure computation
 /// - Gas forwarding: 98/100 rule (2% withheld vs. standard 1.5%)
 /// - Oracle detection: Handled at frame level (in `frame_init`), applies gas detention for both
 ///   direct transaction calls and internal CALL operations
@@ -613,6 +617,9 @@ pub mod forward_gas_ext {
                         context.interpreter.gas.erase_cost(gas_to_return as u64);
 
                         // Set the child call gas limit to the capped value.
+                        // Note: REX4+ STORAGE_CALL_STIPEND is applied later in
+                        // AdditionalLimit::before_frame_init, which owns the full
+                        // stipend lifecycle (grant → compute cap → burn on return).
                         call_inputs.gas_limit = new_child_gas as u64;
                     }
                     Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {

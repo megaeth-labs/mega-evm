@@ -567,7 +567,7 @@ where
 
     fn frame_init(
         &mut self,
-        frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
+        mut frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
@@ -615,6 +615,8 @@ where
         // Each interceptor checks target address and ABI-decodes function selectors.
         // Side-effect interceptors (oracle hint) usually return None.
         // Short-circuiting paths return Some(FrameResult).
+        // These synthetic results skip `AdditionalLimit::before_frame_init`; we only push an
+        // empty tracking frame to keep the additional-limit stacks aligned.
         if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
             if let Some(result) =
                 dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
@@ -632,7 +634,7 @@ where
         if is_mini_rex_enabled {
             if let Some(frame_result) = additional_limit
                 .borrow_mut()
-                .before_frame_init(&frame_init, self.ctx().journal_mut())?
+                .before_frame_init(&mut frame_init, self.ctx().journal_mut())?
             {
                 return Ok(FrameInitResult::Result(frame_result));
             }
