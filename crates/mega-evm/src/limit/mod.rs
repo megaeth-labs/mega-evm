@@ -8,6 +8,7 @@ mod kv_update;
 #[allow(clippy::module_inception)]
 mod limit;
 mod state_growth;
+mod storage_call_stipend;
 
 pub use data_size::*;
 pub(crate) use frame_limit::{FrameLimitTracker, TxRuntimeLimit};
