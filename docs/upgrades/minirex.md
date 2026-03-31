@@ -1,5 +1,5 @@
 ---
-description: MiniRex introduces the dual gas model, multidimensional resource limits, gas detention for parallel execution, modified gas forwarding, and MegaETH's first system contracts.
+description: MiniRex network upgrade — the foundational MegaEVM spec built on Optimism Isthmus (Ethereum Prague).
 ---
 
 # MiniRex Network Upgrade
@@ -14,7 +14,7 @@ It introduces a **[dual gas model](../evm/dual-gas-model.md)** that separates [c
 This is critical because MegaETH's extremely low base fees and high gas limits would otherwise make storage operations dramatically underpriced.
 
 MiniRex also adds **[multidimensional resource limits](../evm/resource-limits.md)** (compute gas, data size, KV updates), **[gas detention](../evm/gas-detention.md)** to restrict computation after [volatile data](../glossary.md#volatile-data) access for parallel execution, and a **98/100 gas forwarding rule** to prevent call-depth attacks under high gas limits.
-Two system contracts — [Oracle](../system-contracts/oracle.md) and [High-Precision Timestamp](../oracle-services/timestamp.md) — provide essential infrastructure services.
+Two system contracts — [Oracle](../system-contracts/oracle.md) and [High-Precision Timestamp](../system-contracts/high-precision-timestamp.md) — provide essential infrastructure services.
 
 ## What Changed
 
@@ -136,7 +136,7 @@ The 98/100 rule reduces this to approximately 10 gas.
 
 #### New behavior
 - **[Oracle](../system-contracts/oracle.md)** (`0x6342000000000000000000000000000000000001`) — Off-chain data key-value storage with hint support.
-- **[High-Precision Timestamp](../oracle-services/timestamp.md)** (`0x6342000000000000000000000000000000000002`) — Sub-second block timestamp.
+- **[High-Precision Timestamp](../system-contracts/high-precision-timestamp.md)** (`0x6342000000000000000000000000000000000002`) — Sub-second block timestamp.
 - Both contracts are deployed idempotently during block execution when MiniRex activates.
 
 ## Developer Impact

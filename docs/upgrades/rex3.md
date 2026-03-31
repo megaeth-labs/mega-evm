@@ -1,5 +1,5 @@
 ---
-description: Rex3 increases the oracle gas detention cap to 20M, changes oracle detention to SLOAD-based triggering, and fixes keyless deploy compute gas tracking.
+description: Rex3 network upgrade — oracle detention revised to SLOAD-based triggering with 20M cap.
 ---
 
 # Rex3 Network Upgrade

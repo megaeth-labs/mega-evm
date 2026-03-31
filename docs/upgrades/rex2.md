@@ -1,5 +1,5 @@
 ---
-description: Rex2 re-enables SELFDESTRUCT with EIP-6780 semantics and introduces the KeylessDeploy system contract for deterministic cross-chain deployment.
+description: Rex2 network upgrade — SELFDESTRUCT restored with EIP-6780, KeylessDeploy system contract added.
 ---
 
 # Rex2 Network Upgrade
@@ -26,6 +26,17 @@ Second, it introduces the **[KeylessDeploy](../system-contracts/keyless-deploy.m
 - If the contract was not created in the same transaction, `SELFDESTRUCT` only transfers the remaining balance to the target address — code and storage are preserved.
 
 This is the standard EIP-6780 behavior already used across Ethereum post-Cancun.
+
+### Oracle Bytecode Update
+
+#### Previous behavior
+- Oracle bytecode version `1.0.0` (code hash `0xe9b044afb735a0f569faeb248088b4f267578f60722f87d06ec3867b250a2c34`).
+- No `sendHint` function.
+
+#### New behavior
+- Oracle bytecode version `1.1.0` (code hash `0x06df675a69e53ea2a3c948521e330b3801740fede324a1cef2044418f8e09242`).
+- Adds the `sendHint(bytes32,bytes)` function to the deployed bytecode.
+- Introduces [call interception](../system-contracts/interception.md) for `sendHint` hint forwarding.
 
 ### KeylessDeploy System Contract
 

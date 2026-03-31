@@ -1,5 +1,5 @@
 ---
-description: Rex introduces transaction intrinsic storage gas, revised storage gas economics with zero-cost fresh storage, consistent CALL-like opcode behavior, and state growth tracking.
+description: Rex network upgrade — revised storage gas economics, 39K intrinsic storage gas, and state growth tracking.
 ---
 
 # Rex Network Upgrade

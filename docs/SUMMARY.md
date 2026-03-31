@@ -1,6 +1,6 @@
 # Table of contents
 
-* [MegaETH Specification](overview.md "Overview")
+* [MegaETH Specification](overview.md)
 * [Hardforks and Specs](hardfork-spec.md)
 
 ## MegaEVM
@@ -10,18 +10,19 @@
 * [Resource Limits](evm/resource-limits.md)
 * [Resource Accounting](evm/resource-accounting.md)
 * [Gas Detention](evm/gas-detention.md)
+* [Gas Forwarding](evm/gas-forwarding.md)
+* [Contract Limits](evm/contract-limits.md)
+* [Precompiles](evm/precompiles.md)
+* [SELFDESTRUCT](evm/selfdestruct.md)
 
 ## System Contracts
 
 * [Overview](system-contracts/overview.md)
-* [Oracle Service](system-contracts/oracle.md)
+* [Oracle](system-contracts/oracle.md)
+* [High-Precision Timestamp](system-contracts/high-precision-timestamp.md)
 * [Keyless Deployment](system-contracts/keyless-deploy.md)
+* [Call Interception](system-contracts/interception.md)
 * [Mega System Transactions](system-contracts/system-tx.md)
-
-## Oracle Services
-
-* [Overview](oracle-services/overview.md)
-* [High-Precision Timestamp](oracle-services/timestamp.md)
 
 ## Network Upgrades
 

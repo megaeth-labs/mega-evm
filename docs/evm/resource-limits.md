@@ -1,114 +1,186 @@
+---
+description: MegaETH per-transaction and per-block resource limits — compute gas, data size, KV updates, and state growth ceilings with enforcement semantics.
+spec: Rex3
+---
+
 # Multidimensional Resource Limits
 
-## Overview
+This page specifies the limits MegaETH enforces on transaction execution and block construction.
+It defines the limit set, the split between pre-execution and runtime enforcement, and the outcomes of transaction-level and block-level violations.
 
-In addition to the standard EVM gas limit (which caps total gas = compute + storage), MegaETH enforces four independent resource ceilings during execution:
+## Motivation
 
-1. **[Compute Gas](../glossary.md#compute-gas)** — Computational opcode cost (tracked separately from total gas)
-2. **Data Size** — Calldata + logs + storage writes + code deploy + account updates
-3. **KV Updates** — Storage writes + account modifications (net, with refunds)
-4. **State Growth** — Net new accounts + net new storage slots
+The transaction `gas_limit` alone is insufficient to protect MegaETH from resource-heavy transactions.
+A transaction may remain within its total gas budget while still producing excessive state growth, too many key-value updates, or too much execution data.
 
-These limits are **additional constraints** on top of your transaction's `gas_limit`.
-A transaction that stays within its `gas_limit` can still be halted if it exceeds the compute gas ceiling or any other resource limit.
-See [Dual Gas Model](dual-gas-model.md) for how `gas_limit`, compute gas, and storage gas relate.
+MegaETH therefore enforces independent resource ceilings in addition to the standard gas limit.
+Without those ceilings, a transaction could remain valid under gas accounting while still imposing disproportionate execution, storage, or networking costs on nodes.
 
-For detailed tracking rules, revert behavior, and what exactly counts toward each dimension, see [Resource Accounting](resource-accounting.md).
+Resource limits also need deterministic block-building semantics.
+Implementations must agree on which transactions are rejected permanently, which are skipped for the current block, which are included as failed, and when the last transaction that exceeds a block-level runtime limit is still allowed.
 
-## All Resource Limits
+## Specification
 
-MegaETH enforces seven resource limits, split into two phases:
+The named constants referenced in this section are defined later in [Constants](#constants).
 
-| # | Resource | Phase | Transaction Limit | Block Limit |
-| - | -------- | ----- | ----------------- | ----------- |
-| 1 | [Gas Limit](https://ethereum.org/en/developers/docs/gas/#block-size) | Pre-execution | Sequencer-configured | `block.gasLimit` from block header |
-| 2 | Transaction Size | Pre-execution | Sequencer-configured | Sequencer-configured |
-| 3 | [DA Size](https://docs.optimism.io/stack/transactions/transaction-fees#the-l1-data-fee) | Pre-execution | Sequencer-configured | Sequencer-configured |
-| 4 | [Compute Gas](../glossary.md#compute-gas) | Runtime | 200,000,000 (200M) | No separate limit (see note) |
-| 5 | Data Size | Runtime | 13,107,200 (12.5 MB) | 13,107,200 |
-| 6 | KV Updates | Runtime | 500,000 | 500,000 |
-| 7 | State Growth | Runtime | 1,000 | 1,000 |
+### Overview
 
-**Notes:**
-- **Gas Limit** (1) — Standard [Ethereum gas limit](https://ethereum.org/en/developers/docs/gas/#block-size) semantics. The `gas_limit` field on the transaction must fit within both the per-transaction cap and the block's remaining gas budget.
-- **DA Size** (3) — Inherited from the [Optimism rollup model](https://docs.optimism.io/stack/transactions/transaction-fees#the-l1-data-fee). Constrains the compressed size of transaction data posted to L1. [Deposit transactions](https://docs.optimism.io/stack/transactions/deposit-flow) (L1 → L2) are exempt since they are already posted on L1.
-- **Compute Gas** (4) — No dedicated block limit because it is already constrained by the block's gas limit (#1), which caps the sum of all transactions' total gas (compute + storage) in a block.
-- **Pre-execution limits** (1–3) are **sequencer-configured** — the specific numeric values are set by the sequencer, not hardcoded in the EVM spec.
-- **Runtime limits** (4–7) are protocol-level constants. The values above are from the Rex spec onward. For MiniRex values, see the [MiniRex](../upgrades/minirex.md) upgrade page. The Equivalence spec imposes no MegaETH-specific resource limits — only standard Ethereum/Optimism gas limits apply.
+MegaETH enforces seven distinct resource limits:
 
-## Two-Phase Checking
+1. standard gas limit,
+2. transaction encoded size,
+3. data-availability size,
+4. [compute gas](../glossary.md#compute-gas),
+5. data size,
+6. KV updates,
+7. state growth.
 
-### Phase 1: Pre-Execution (Fast Reject)
+Limits 1–3 are checked before execution.
+Limits 4–7 are enforced during execution and accumulated at block level after execution.
 
-The three pre-execution limits (gas limit, transaction size, DA size) are checked before execution begins.
-Transactions that exceed a **transaction-level** pre-execution limit are rejected permanently.
-Transactions that exceed a **block-level** pre-execution limit are skipped for the current block but may fit in a future block.
+For exact counting rules of compute gas, data size, KV updates, and state growth, see [Resource Accounting](resource-accounting.md).
+For the relationship between total gas, compute gas, and storage gas, see [Dual Gas Model](dual-gas-model.md).
 
-### Phase 2: Runtime Enforcement (Precise)
+### Limit Set
 
-The four runtime limits (compute gas, data size, KV updates, state growth) are checked during and after execution.
+A node MUST enforce the following limits:
 
-## Enforcement Behavior
+| Resource | Phase | Transaction Limit | Block Limit |
+| -------- | ----- | ----------------- | ----------- |
+| [Gas Limit](https://ethereum.org/en/developers/docs/gas/#block-size) | Pre-execution | Sequencer-configured | `block.gasLimit` from block header |
+| Transaction Size | Pre-execution | Sequencer-configured | Sequencer-configured |
+| [DA Size](https://docs.optimism.io/stack/transactions/transaction-fees#the-l1-data-fee) | Pre-execution | Sequencer-configured | Sequencer-configured |
+| [Compute Gas](../glossary.md#compute-gas) | Runtime | `TX_COMPUTE_GAS_LIMIT` | No separate limit |
+| Data Size | Runtime | `TX_DATA_LIMIT` | `BLOCK_DATA_LIMIT` |
+| KV Updates | Runtime | `TX_KV_UPDATE_LIMIT` | `BLOCK_KV_UPDATE_LIMIT` |
+| State Growth | Runtime | `TX_STATE_GROWTH_LIMIT` | `BLOCK_STATE_GROWTH_LIMIT` |
 
-### Transaction-Level Violations
+The absence of a separate block-level compute gas limit means that cumulative block compute gas is bounded only indirectly by the block gas limit.
 
-When any post-execution limit is exceeded during execution:
+### Pre-Execution Limits
 
-- Transaction halts with `OutOfGas` error
-- Remaining gas is **preserved** (not consumed), refunded to sender
-- Transaction **fails** (status=0) but is **still included** in the block
-- Failed transactions still count toward block limits
+#### Standard Gas Limit
 
-<details>
+A node MUST apply standard Ethereum gas-limit semantics.
+The transaction's `gas_limit` field MUST fit within both the sequencer-configured per-transaction gas cap and the remaining block gas budget from the block header.
 
-<summary>Rex4 (unstable): Call-Frame-Level Violations</summary>
+#### Transaction Size
 
-Without per-frame budgets, a single inner call can consume nearly all remaining resources, leaving parent and sibling execution unpredictable.
-Rex4 adds per-[call-frame](../glossary.md#call-frame) resource budgets: each inner call frame receives `remaining × 98/100` of its parent's remaining budget.
-When a call frame exceeds its local budget, it **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)` — the parent does **not** halt.
-The parent can continue executing; compute gas consumed by reverted frames still counts toward the transaction total.
-See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+A node MUST check the EIP-2718 encoded transaction size before execution.
+Transactions that exceed the configured transaction-size limit MUST be rejected permanently.
+Transactions that fit the transaction-level size limit but would cause the block's cumulative encoded transaction size to exceed the configured block-level size limit MUST be skipped for the current block.
 
-</details>
+#### DA Size
 
-### Block-Level Violations
+A node MUST check the compressed data-availability size of each non-deposit transaction before execution.
+Transactions that exceed the configured transaction-level DA size limit MUST be rejected permanently.
+Transactions that fit the transaction-level DA size limit but would cause the block's cumulative DA size to exceed the configured block-level DA size limit MUST be skipped for the current block.
 
-- The last transaction that causes the block to exceed a limit is **allowed to complete and be included**
-- Subsequent transactions are rejected before execution
-- This maximizes block utilization
+Deposit transactions MUST be exempt from DA size limit checks.
+Their DA size MAY still be tracked for monitoring purposes.
 
-## Block Building Workflow
+### Runtime Transaction-Level Limits
 
-When constructing a block, the sequencer processes transactions from the mempool in order:
+A node MUST enforce the following runtime transaction-level limits during execution:
 
-1. **Pre-execution check** — For each candidate transaction:
-   - Check **transaction-level** limits (all 7 dimensions). If violated → **reject permanently** (transaction is invalid and can never be included in any block).
-   - Check **block-level** pre-execution limits (gas, tx size, DA size). If the transaction would cause the block to exceed these limits → **skip** (transaction may fit in a future block, try next candidate).
-   - Check if any **block-level** runtime limit (compute gas, data size, KV updates, state growth) was already exceeded by a previous transaction. If so → **skip**.
+- `TX_COMPUTE_GAS_LIMIT`
+- `TX_DATA_LIMIT`
+- `TX_KV_UPDATE_LIMIT`
+- `TX_STATE_GROWTH_LIMIT`
 
-2. **Execute transaction** — Run the transaction. If any runtime transaction-level limit is exceeded during execution, the transaction **fails** (status=0) but is still included.
+If any runtime transaction-level limit is exceeded during execution, the transaction MUST:
 
-3. **Update block counters** — Add the transaction's resource usage to the block's cumulative counters. This transaction is allowed even if it causes cumulative usage to exceed a block-level runtime limit — it is the **last transaction** that pushed the block over the limit.
+1. halt,
+2. preserve its remaining gas,
+3. produce a failed receipt (`status = 0`),
+4. and still be included in the block.
 
-4. **Include transaction** — Commit the transaction to the block (whether it succeeded or failed).
+The failed transaction's actual resource usage MUST still count toward the block's cumulative resource counters.
 
-5. **Continue** — Move to the next candidate. If block-level limits have been exceeded, remaining candidates will be skipped in step 1.
+### Runtime Block-Level Limits
 
-The key difference between pre-execution and runtime block limits: pre-execution limits are checked **before** execution, so transactions that would exceed them are never executed. Runtime limits can only be determined **after** execution, so the transaction that causes the block to exceed is always allowed and included — only subsequent transactions are skipped.
+A node MUST maintain cumulative block counters for:
 
-{% hint style="info" %}
-**Why failed transactions are still included**: Runtime limits (compute gas, data size, KV updates, state growth) can only be checked during execution — the sequencer cannot know whether a transaction will exceed them without actually running it.
-If failed transactions were excluded from the block, an attacker could submit transactions that consume expensive computation, exceed a runtime limit, and get excluded — wasting the sequencer's resources for free.
-By including failed transactions on-chain and charging their gas, the attacker pays for the computation they consumed.
-{% endhint %}
+- data size,
+- KV updates,
+- state growth,
+- and compute gas.
 
-### Transaction Outcomes Summary
+The node MUST update those cumulative counters after transaction execution.
+
+For data size, KV updates, and state growth, the first transaction that causes the cumulative block usage to meet or exceed the block-level limit MUST still be included in the block.
+Subsequent candidate transactions MUST be skipped before execution once the block is already at or above the corresponding block-level runtime limit.
+
+Although block compute gas usage MAY be tracked, the protocol does not impose a separate block-level compute gas cap.
+
+### Two-Phase Block Building Workflow
+
+When constructing a block, a node or sequencer MUST process candidate transactions in the following order:
+
+1. Perform pre-execution validation.
+2. If a transaction violates a transaction-level pre-execution limit, reject it permanently.
+3. If a transaction would exceed a block-level pre-execution limit, skip it for the current block.
+4. If any stable block-level runtime limit is already reached or exceeded from prior included transactions, skip later candidate transactions that depend on that resource category.
+5. Execute the transaction.
+6. If a runtime transaction-level limit is exceeded, include the transaction as failed.
+7. Update cumulative block counters with the transaction's actual resource usage.
+8. Include the transaction in the block.
+
+### Outcomes
 
 | Outcome | Cause | Receipt | Block Impact |
 | ------- | ----- | ------- | ------------ |
-| **Success** | Transaction completes within all limits | status=1, includes logs | Counts toward all block limits |
-| **Failed** | Transaction-level runtime limit exceeded | status=0, no logs, remaining gas refunded | Still included, counts toward all block limits |
-| **Skipped** | Block-level limit already reached | No receipt generated | No impact, deferred to future block |
-| **Rejected** | Transaction-level pre-execution limit exceeded | No receipt generated | Permanently invalid, discarded |
+| Success | Transaction completes within all applicable limits | `status = 1` | Counts toward all relevant block counters |
+| Failed | Runtime transaction-level limit exceeded | `status = 0` | Still included and counts toward all relevant block counters |
+| Skipped | Current block cannot admit the transaction without violating a block-level limit | No receipt | Not included; may be reconsidered in a later block |
+| Rejected | Transaction-level pre-execution limit exceeded | No receipt | Permanently invalid |
 
+<details>
+<summary>Rex4 (unstable): Per-call-frame runtime budgets</summary>
 
+Rex4 adds per-[call-frame](../glossary.md#call-frame) budgets for compute gas, data size, KV updates, and state growth.
+Each inner call frame receives `remaining × FRAME_LIMIT_NUMERATOR / FRAME_LIMIT_DENOMINATOR` of its parent call frame's remaining budget.
+If a child call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
+The parent call frame MAY continue execution.
+
+</details>
+
+## Constants
+
+| Constant | Value | Description |
+| -------- | ----- | ----------- |
+| `TX_COMPUTE_GAS_LIMIT` | 200,000,000 | Maximum compute gas per transaction |
+| `TX_DATA_LIMIT` | 13,107,200 | Maximum data size per transaction |
+| `BLOCK_DATA_LIMIT` | 13,107,200 | Maximum cumulative block data size |
+| `TX_KV_UPDATE_LIMIT` | 500,000 | Maximum KV updates per transaction |
+| `BLOCK_KV_UPDATE_LIMIT` | 500,000 | Maximum cumulative block KV updates |
+| `TX_STATE_GROWTH_LIMIT` | 1,000 | Maximum state growth per transaction |
+| `BLOCK_STATE_GROWTH_LIMIT` | 1,000 | Maximum cumulative block state growth |
+| `FRAME_LIMIT_NUMERATOR` | 98 | Numerator of per-call-frame budget forwarding in Rex4 |
+| `FRAME_LIMIT_DENOMINATOR` | 100 | Denominator of per-call-frame budget forwarding in Rex4 |
+
+## Rationale
+
+**Why split limits into pre-execution and runtime phases?**
+Gas limit, encoded transaction size, and DA size are known before execution and can be checked cheaply.
+Compute gas, data size, KV updates, and state growth depend on actual execution and therefore cannot be known precisely in advance.
+
+**Why include failed runtime-limited transactions?**
+The node must execute a transaction to know whether it exceeds a runtime limit.
+If such transactions were excluded from the block, an attacker could force repeated expensive executions at no cost.
+Including failed transactions ensures that the sender pays for the resources consumed.
+
+**Why allow the first transaction to push a block over a runtime block limit?**
+Runtime block limits are known only after execution.
+Allowing the first over-limit transaction to be included maximizes block utilization while preserving deterministic block-building behavior for later transactions.
+
+**Why no separate stable block-level compute gas limit?**
+Cumulative block compute gas is already indirectly constrained by the block gas limit.
+The stable protocol therefore does not need a second independent block-level compute gas ceiling.
+
+## Spec History
+
+- [MiniRex](../upgrades/minirex.md) introduced compute gas, data size, and KV update limits, with transaction-level data and KV limits set to 25% of the corresponding block limits.
+- [Rex](../upgrades/rex.md) changed the stable runtime transaction-level limits to `TX_COMPUTE_GAS_LIMIT = 200,000,000`, `TX_DATA_LIMIT = 13,107,200`, `TX_KV_UPDATE_LIMIT = 500,000`, and introduced state-growth limits.
+- [Rex3](../upgrades/rex3.md) retained the stable resource-limit set.
+- [Rex4](../upgrades/rex4.md) adds unstable per-call-frame runtime budgets.

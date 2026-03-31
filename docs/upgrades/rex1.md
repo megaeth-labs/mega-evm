@@ -1,5 +1,5 @@
 ---
-description: Rex1 fixes a bug where gas detention from volatile data access leaks across transactions within the same block.
+description: Rex1 network upgrade — patch release fixing cross-transaction gas detention state leak.
 ---
 
 # Rex1 Network Upgrade

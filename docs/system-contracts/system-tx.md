@@ -1,42 +1,73 @@
+---
+description: Mega system transactions — sender/recipient identification rules, whitelisted contracts, and execution bypass semantics.
+spec: Rex3
+---
+
 # Mega System Transactions
 
-## Overview
+This page specifies how MegaETH identifies and processes Mega System Transactions.
+These transactions provide protocol-level maintenance access to whitelisted system contracts.
 
-Mega System Transactions are special transactions used by the MegaETH sequencer to perform state maintenance operations.
-They enable the sequencer to interact with whitelisted [system contracts](overview.md) without incurring transaction fees.
+## Motivation
 
-{% hint style="info" %}
-mega-evm defines how these transactions are identified and executed.
-Whether only the sequencer may admit them to the chain is enforced by components outside this EVM implementation.
-{% endhint %}
+MegaETH needs a protocol-native mechanism for sequencer-managed maintenance operations such as updating Oracle state.
+Those operations must execute with special fee and validation semantics while remaining part of the verifiable execution model.
 
-## Definition
+Mega System Transactions provide that mechanism.
 
-A transaction is a Mega System Transaction if:
+## Specification
 
-- It is a legacy transaction
-- Its signer is the `MEGA_SYSTEM_ADDRESS` (`0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`)
-- Its target is within the `MEGA_SYSTEM_TX_WHITELIST`
+### Identification
 
-## Whitelisted Contracts
+A transaction MUST be classified as a Mega System Transaction if and only if all of the following are true:
 
-| Contract         | Address                                        |
-| ---------------- | ---------------------------------------------- |
-| Oracle Contract  | `0x6342000000000000000000000000000000000001`    |
+1. the transaction type is legacy (`0x0`),
+2. the signer is `MEGA_SYSTEM_ADDRESS`,
+3. the transaction target is a `CALL` to an address in `MEGA_SYSTEM_TX_WHITELIST`.
 
-## Processing
+CREATE transactions from `MEGA_SYSTEM_ADDRESS` MUST NOT be treated as Mega System Transactions.
 
-Mega system transactions have unique properties:
+### Stable Whitelist
 
-1. **Zero transaction fees** — No L2 gas fees, L1 data fees, operator fees, or base fee charges
-2. **Deposit-like processing** — Bypasses signature validation, skips nonce verification, and skips balance checks for gas fees
-3. **Nonce handling** — Nonce verification is skipped (the transaction is accepted regardless of the sender's current nonce), but the sender's nonce still increments after execution
-4. **No beneficiary impact** — No state changes to block beneficiary or fee vaults
+`MEGA_SYSTEM_TX_WHITELIST` MUST contain only `ORACLE_CONTRACT_ADDRESS`.
 
-In production, these transactions are expected to be injected by the sequencer.
-Admission policy is outside the scope of mega-evm itself.
+### Processing Semantics
 
-## Use Case
+When a transaction is classified as a Mega System Transaction, a node MUST process it with the following special semantics:
 
-The primary use case is updating oracle storage.
-The sequencer publishes off-chain data (price feeds, etc.) to the [Oracle Contract](oracle.md) via system transactions, making it available to all smart contracts at minimal cost.
+- It MUST bypass ordinary signature validation.
+- It MUST bypass gas-fee charging.
+- It MUST bypass nonce validation.
+- It MUST bypass balance checks for gas fees.
+- It MUST preserve `MEGA_SYSTEM_ADDRESS` as the caller seen by the target contract.
+
+Although nonce validation is bypassed, the sender nonce MUST still increment after execution.
+
+Mega System Transactions MUST NOT cause state changes to the block beneficiary or fee vaults.
+
+### Scope
+
+This page specifies the execution semantics of Mega System Transactions.
+Admission policy — including which external actor is allowed to inject such transactions into the chain — is outside the scope of this specification.
+
+## Constants
+
+| Constant | Value | Description |
+| -------- | ----- | ----------- |
+| `MEGA_SYSTEM_ADDRESS` | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Special maintenance sender address |
+| `MEGA_SYSTEM_TX_WHITELIST` | `{ ORACLE_CONTRACT_ADDRESS }` | Stable whitelist of callable system-contract targets |
+
+## Rationale
+
+**Why special transaction semantics instead of ordinary calls?**
+Protocol maintenance operations such as Oracle updates must execute with deterministic behavior that is not coupled to ordinary fee payment and admission semantics.
+Giving them distinct execution treatment makes that behavior explicit.
+
+**Why preserve the caller as `MEGA_SYSTEM_ADDRESS`?**
+Whitelisted target contracts must be able to distinguish protocol-maintenance calls from ordinary user calls.
+Preserving the caller identity provides that signal without introducing a separate call context type.
+
+## Spec History
+
+- [MiniRex](../upgrades/minirex.md) introduced Mega System Transactions and the `MEGA_SYSTEM_ADDRESS` mechanism.
+- [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable semantics.

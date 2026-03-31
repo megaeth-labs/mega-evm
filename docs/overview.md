@@ -1,11 +1,18 @@
+---
+description: MegaETH formal specification — normative behavioral definitions for EVM execution, system contracts, oracle services, and protocol upgrades.
+spec: Rex3
+---
+
 # MegaETH Specification
 
-This documentation is the specification for the [MegaETH](https://megaeth.com) blockchain's execution layer.
-It covers everything that differs from standard Ethereum and Optimism: the EVM modifications, system contracts, oracle services, resource metering, and the upgrade history that defines how these features evolved.
+This is the formal specification of MegaETH's verifiable behavior — the complete, normative definition of how MegaETH processes transactions, enforces resource limits, and manages protocol state.
+It covers every behavioral difference from standard Ethereum and Optimism: the EVM modifications, system contracts, oracle services, resource metering, and the upgrade history that defines how these features evolved.
+
+Any node implementation that produces the same outputs given the same inputs for every case defined in this specification is a correct MegaETH node.
 
 The reference implementation is [MegaEVM](https://github.com/megaeth-labs/mega-evm), built on [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
 All standard EVM semantics are inherited from Optimism Isthmus (Ethereum Prague) unless explicitly overridden.
-Contracts that don't touch MegaETH-specific features behave identically to Optimism.
+Transactions that don't touch MegaETH-specific features behave identically to Optimism.
 
 ## Why MegaETH Differs from Standard Ethereum
 
@@ -23,18 +30,18 @@ MegaETH addresses these problems with a targeted set of protocol-level modificat
 - **[Gas Detention](evm/gas-detention.md)** — Caps remaining compute gas after a transaction reads [volatile data](glossary.md#volatile-data) (block environment, oracle storage), forcing such transactions to terminate quickly and reducing parallel execution conflicts.
 - **[Dynamic Gas Costs](evm/dual-gas-model.md#dynamic-salt-multiplier)** — Scales storage gas based on [SALT bucket](glossary.md#salt-bucket) capacity, making writes to crowded state regions progressively more expensive while keeping fresh storage free.
 - **[System Contracts](system-contracts/overview.md)** — Pre-deployed protocol contracts providing oracle storage, high-precision timestamps, keyless deployment, and runtime access/limit control.
-- **[Oracle Services](oracle-services/overview.md)** — Sequencer-operated data feeds (timestamps, price feeds) built on the Oracle system contract.
 
 ## How to Use This Documentation
 
-This documentation serves two audiences:
+This specification targets teams implementing MegaETH-compatible execution clients, auditors verifying protocol correctness, and anyone who needs the exact behavioral semantics of MegaEVM.
 
-**App builders** — developers building smart contracts and dApps on MegaETH.
-Start with the [MegaEVM Overview](evm/overview.md) for a complete reference of current behavior, then check the [System Contracts](system-contracts/overview.md) and [Oracle Services](oracle-services/overview.md) for available infrastructure.
-You primarily need to understand how gas costs differ and what resource limits apply to your transactions.
-
-**Node builders** — teams implementing MegaETH-compatible execution clients.
 Start with [Hardforks and Specs](hardfork-spec.md) to understand how behavior is versioned, then read each [Network Upgrade](upgrades/overview.md) page for the exact behavioral deltas introduced at each spec.
+For the current stable behavior as a single reference, see the [MegaEVM Overview](evm/overview.md).
+
+{% hint style="info" %}
+If you are building smart contracts or dApps on MegaETH, the [Developer Docs](../dev/overview.md) provide practical guidance with code examples.
+This specification is the normative reference that the developer docs summarize.
+{% endhint %}
 
 ## Reference Implementation
 
@@ -47,7 +54,7 @@ Start with [Hardforks and Specs](hardfork-spec.md) to understand how behavior is
 
 ## Spec Progression
 
-MegaETH uses a spec system to version MegaEVM behavior at each stage of the protocol's evolution.
+MegaETH uses a spec system to version its verifiable behavior at each stage of the protocol's evolution.
 Each newer spec includes all previous behaviors:
 
 ```
@@ -69,3 +76,7 @@ Contracts deployed under a given spec will continue to behave identically, regar
 - **REX4** *(unstable)* — Per-call-frame resource budgets, relative gas detention, MegaAccessControl and MegaLimitControl system contracts.
 
 See [Hardforks and Specs](hardfork-spec.md) for full details.
+
+---
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this specification are to be interpreted as described in [BCP 14](https://www.rfc-editor.org/info/bcp14) ([RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174)) when, and only when, they appear in all capitals, as shown here.
