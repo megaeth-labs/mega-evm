@@ -210,7 +210,7 @@ fn bench_subcall_variant(
                 let tx = TxEnvBuilder::new()
                     .caller(CALLER)
                     .call(CONTRACT)
-                    .gas_limit(u64::MAX)
+                    .gas_limit(10_000_000_000)
                     .build_fill();
                 let mut mega_tx = MegaTransaction::new(tx);
                 mega_tx.enveloped_tx = Some(Bytes::new());
