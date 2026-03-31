@@ -4,7 +4,7 @@ use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_primitives::{B256, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::Block;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
@@ -62,6 +62,40 @@ pub struct Cmd {
     /// Transaction override configuration
     #[command(flatten)]
     pub tx_override_args: TxOverrideArgs,
+
+    /// Output format: "human" (default) or "json" (structured, for benchmarking)
+    #[arg(long = "output", value_name = "FORMAT", default_value = "human")]
+    pub output_format: OutputFormat,
+}
+
+/// Output format for replay results.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable summary with receipt and trace
+    #[default]
+    Human,
+    /// Structured JSON for benchmarking
+    Json,
+}
+
+/// Phase timing breakdown for benchmarking.
+#[derive(Debug, serde::Serialize)]
+pub(super) struct PhaseTiming {
+    pub pre_execution_ms: f64,
+    pub preceding_txs_ms: f64,
+    pub target_tx_ms: f64,
+    pub commit_ms: f64,
+    pub total_ms: f64,
+}
+
+/// Benchmark-relevant metrics extracted from the transaction outcome.
+#[derive(Debug, serde::Serialize)]
+pub(super) struct BenchMetrics {
+    pub compute_gas_used: u64,
+    pub data_size: u64,
+    pub kv_updates: u64,
+    pub state_growth: u64,
+    pub mgas_per_sec: f64,
 }
 
 /// Replay-specific execution outcome
@@ -73,6 +107,10 @@ pub(super) struct ReplayOutcome {
     pub original_tx: Transaction,
     /// The transaction receipt
     pub receipt: OpTxReceipt,
+    /// Phase timing breakdown
+    pub timing: PhaseTiming,
+    /// Benchmark metrics
+    pub bench_metrics: BenchMetrics,
 }
 
 impl Cmd {
@@ -247,12 +285,15 @@ impl Cmd {
             &mut inspector,
         );
 
-        // Apply pre-execution changes
+        // Phase 2: Apply pre-execution changes
+        let t_pre = Instant::now();
         block_executor
             .apply_pre_execution_changes()
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
+        let pre_exec_duration = t_pre.elapsed();
 
-        // Execute preceding transactions
+        // Phase 3: Execute preceding transactions
+        let t_preceding = Instant::now();
         for tx_hash in &preceding_transactions {
             debug!(tx_hash = %tx_hash, "Executing preceding transaction");
             let tx = provider
@@ -269,9 +310,10 @@ impl Cmd {
                 .commit_transaction_outcome(outcome)
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
         }
+        let preceding_duration = t_preceding.elapsed();
         debug!(preceding_count = preceding_transactions.len(), "Preceding transactions executed");
 
-        // Execute target transaction
+        // Phase 4: Execute target transaction
         info!("Executing target transaction");
         if self.tx_override_args.has_overrides() {
             info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
@@ -288,10 +330,20 @@ impl Cmd {
             .unwrap_or(0);
 
         block_executor.inspector_mut().fuse();
+        let t_target = Instant::now();
         let outcome = block_executor
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
+        let target_tx_duration = t_target.elapsed();
+
         trace!(tx_hash = %target_tx.inner.inner.tx_hash(), outcome = ?outcome, "Target transaction executed");
+
+        // Extract benchmark metrics before consuming outcome
+        let compute_gas_used = outcome.inner.compute_gas_used;
+        let data_size = outcome.inner.data_size;
+        let kv_updates = outcome.inner.kv_updates;
+        let state_growth = outcome.inner.state_growth_used;
+
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
 
@@ -322,12 +374,30 @@ impl Cmd {
             )
         });
 
-        // Commit transaction outcome
+        // Phase 5: Commit transaction outcome
+        let t_commit = Instant::now();
         let gas_used = block_executor
             .commit_transaction_outcome(outcome)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {}", e)))?;
+        let commit_duration = t_commit.elapsed();
 
         let duration = start.elapsed();
+
+        // Build phase timing and benchmark metrics
+        let timing = PhaseTiming {
+            pre_execution_ms: pre_exec_duration.as_secs_f64() * 1000.0,
+            preceding_txs_ms: preceding_duration.as_secs_f64() * 1000.0,
+            target_tx_ms: target_tx_duration.as_secs_f64() * 1000.0,
+            commit_ms: commit_duration.as_secs_f64() * 1000.0,
+            total_ms: duration.as_secs_f64() * 1000.0,
+        };
+
+        let target_secs = target_tx_duration.as_secs_f64();
+        let mgas_per_sec =
+            if target_secs > 0.0 { gas_used as f64 / target_secs / 1_000_000.0 } else { 0.0 };
+
+        let bench_metrics =
+            BenchMetrics { compute_gas_used, data_size, kv_updates, state_growth, mgas_per_sec };
 
         // Obtain receipt envelope
         let (evm, block_result) = block_executor
@@ -367,6 +437,8 @@ impl Cmd {
             },
             original_tx: target_tx.clone(),
             receipt,
+            timing,
+            bench_metrics,
         })
     }
 
@@ -390,25 +462,74 @@ impl Cmd {
 
     /// Output execution results
     fn output_results(&self, result: &ReplayOutcome) -> Result<()> {
-        // Print human-readable summary
-        print_execution_summary(
-            &result.outcome.exec_result,
-            result.receipt.contract_address,
-            result.outcome.exec_time,
-        );
+        if matches!(self.output_format, OutputFormat::Json) {
+            self.output_json(result)?;
+        } else {
+            // Print human-readable summary
+            print_execution_summary(
+                &result.outcome.exec_result,
+                result.receipt.contract_address,
+                result.outcome.exec_time,
+            );
 
-        print_receipt(&result.receipt);
+            print_receipt(&result.receipt);
 
-        print_execution_trace(
-            result.outcome.trace_data.as_deref(),
-            self.trace_args.trace_output_file.as_deref(),
-        )?;
+            print_execution_trace(
+                result.outcome.trace_data.as_deref(),
+                self.trace_args.trace_output_file.as_deref(),
+            )?;
 
-        // Dump state if requested
-        if self.dump_args.dump {
-            self.dump_args.dump_evm_state(&result.outcome.state)?;
+            // Dump state if requested
+            if self.dump_args.dump {
+                self.dump_args.dump_evm_state(&result.outcome.state)?;
+            }
         }
 
+        Ok(())
+    }
+
+    /// Output structured JSON for benchmarking.
+    fn output_json(&self, result: &ReplayOutcome) -> Result<()> {
+        let status = if result.outcome.exec_result.is_success() {
+            "success"
+        } else {
+            match &result.outcome.exec_result {
+                ExecutionResult::Revert { .. } => "revert",
+                ExecutionResult::Halt { .. } => "halt",
+                _ => "unknown",
+            }
+        };
+
+        let output = serde_json::json!({
+            "tx_hash": format!("{:#x}", self.tx_hash),
+            "status": status,
+            "gas_used": result.outcome.exec_result.gas_used(),
+            "timing": {
+                "pre_execution_ms": result.timing.pre_execution_ms,
+                "preceding_txs_ms": result.timing.preceding_txs_ms,
+                "target_tx_ms": result.timing.target_tx_ms,
+                "commit_ms": result.timing.commit_ms,
+                "total_ms": result.timing.total_ms,
+            },
+            "performance": {
+                "mgas_per_sec": result.bench_metrics.mgas_per_sec,
+            },
+            "gas_breakdown": {
+                "compute_gas": result.bench_metrics.compute_gas_used,
+                "storage_gas_approx": result.outcome.exec_result.gas_used().saturating_sub(result.bench_metrics.compute_gas_used),
+            },
+            "resource_usage": {
+                "data_size": result.bench_metrics.data_size,
+                "kv_updates": result.bench_metrics.kv_updates,
+                "state_growth": result.bench_metrics.state_growth,
+            },
+        });
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output)
+                .map_err(|e| ReplayError::Other(format!("JSON serialization failed: {e}")))?
+        );
         Ok(())
     }
 }
