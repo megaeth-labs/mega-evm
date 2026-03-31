@@ -315,6 +315,10 @@ impl AdditionalLimit {
     /// afterwards.
     pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
         let stipend = self.storage_call_stipend.current_frame_stipend();
+        debug_assert_eq!(
+            stipend, 0,
+            "rescue_gas called with active stipend {stipend} — inflated gas would leak"
+        );
         let effective_remaining = if stipend > 0 {
             let original_limit = gas.limit().saturating_sub(stipend);
             gas.remaining().min(original_limit)
