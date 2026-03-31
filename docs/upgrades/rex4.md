@@ -138,6 +138,8 @@ interface IMegaLimitControl {
 - The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_CALL_STIPEND (23,000)`.
 - The callee's [compute gas](../glossary.md#compute-gas) limit remains at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by [storage gas](../glossary.md#storage-gas) operations (the 10× LOG topic/data costs).
 - On return, unused storage call stipend is **burned** — it is never returned to the caller.
+  The burn-on-return rule extends to all frame termination paths, including early termination from [resource limit](../evm/resource-accounting.md) violations.
+  When a transaction-level resource limit is exceeded during a stipend-bearing frame, the rescued gas (refunded to the sender) excludes the stipend amount.
 - Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract](../system-contracts/overview.md) interceptions do not receive the stipend.
 - The compute gas cap ensures the callee cannot use the extra gas for computation, preserving the reentrancy protection properties of the original `CALL_STIPEND`.
 

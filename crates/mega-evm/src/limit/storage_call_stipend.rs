@@ -29,12 +29,12 @@ pub(crate) struct StorageCallStipendTracker {
     /// Zero when disabled (pre-REX4).
     stipend_amount: u64,
     /// Per-frame stipend amounts.
-    /// Pushed in `apply` / `push_empty_frame`, popped in `before_frame_return_result`.
+    /// Pushed in `before_frame_init` / `push_empty_frame`, popped in `before_frame_return_result`.
     stack: Vec<u64>,
 }
 
 /// Internal metadata for a granted `STORAGE_CALL_STIPEND`, produced and consumed within
-/// [`StorageCallStipendTracker::apply`].
+/// [`StorageCallStipendTracker::before_frame_init`].
 #[derive(Clone, Copy, Debug)]
 struct StorageCallStipendGrant {
     /// The extra gas added to the callee's `gas_limit`.
@@ -72,7 +72,7 @@ impl StorageCallStipendTracker {
     ///
     /// Must be called **after** `compute_gas.before_frame_init()` so that the compute gas
     /// frame exists for `cap_current_frame_limit` to tighten.
-    pub(crate) fn apply(
+    pub(crate) fn before_frame_init(
         &mut self,
         frame_init: &mut FrameInit,
         compute_gas: &mut compute_gas::ComputeGasTracker,

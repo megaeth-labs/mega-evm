@@ -366,7 +366,7 @@ impl AdditionalLimit {
 
         // REX4+: detect value-transferring CALL/CALLCODE, inflate gas_limit, push stipend
         // to stack, and cap per-frame compute gas budget.
-        self.storage_call_stipend.apply(frame_init, &mut self.compute_gas);
+        self.storage_call_stipend.before_frame_init(frame_init, &mut self.compute_gas);
 
         if self.check_limit().exceeded_limit() {
             // if the limit is exceeded, create an error frame result and return it directly

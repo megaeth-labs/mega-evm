@@ -143,6 +143,18 @@ MegaETH's parallel EVM needs to minimize conflicts between concurrent transactio
 This forces transactions that touch volatile data to terminate quickly, reducing parallel execution conflicts without banning the access outright.
 Detained gas is effectively refunded — users only pay for actual computation performed.
 
+#### Storage Call Stipend (Rex4+)
+
+MegaETH's 10× storage gas multiplier on LOG opcodes causes even `LOG1` to cost 4,500 gas, exceeding the EVM's `CALL_STIPEND` of 2,300.
+Rex4 introduces `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`.
+The stipend inflates the child's total gas but a per-frame compute gas cap keeps the extra gas usable only for storage-gas-heavy operations (LOG topic/data costs).
+Unused stipend is burned on return — the caller never recovers it.
+
+The stipend lifecycle is managed by `StorageCallStipendTracker` (`limit/storage_call_stipend.rs`), which maintains a per-frame stack aligned with the EVM call stack.
+The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for `cap_current_frame_limit`).
+
+The storage call stipend is subject to the general gas leakage pitfalls described below.
+
 #### System Contracts
 
 MegaETH pre-deploys system contracts at well-known addresses (`0x634200...0001`, `0002`, `0003`, etc.).
@@ -176,6 +188,24 @@ mega-evm requires external context beyond revm's standard `BlockEnv`/`CfgEnv`, p
   Oracle reads in `sload` are **always forced cold** for deterministic replay.
   The `on_hint(from, topic, data)` callback enables synchronous oracle hints during execution.
 - An `EmptyExternalEnv` implementation disables both features (returns minimum bucket size, no oracle data) for testing or standalone use.
+
+### Gas Leakage Pitfalls
+
+Any mechanism that grants, inflates, or adjusts gas on a per-frame basis (e.g., `STORAGE_CALL_STIPEND`, and any future per-frame gas adjustment) must account for all frame termination paths.
+Failing to do so can cause system-granted gas to leak back to the parent call frame or the transaction sender.
+The following paths are common sources of leakage:
+
+1. **System contract interception** (`system/intercept.rs`): Interceptors short-circuit `frame_init` before `AdditionalLimit::before_frame_init` runs, producing a synthetic `FrameResult` without a real child EVM frame.
+   Any per-frame gas adjustment applied in `before_frame_init` is skipped on this path.
+   The `push_empty_frame()` call maintains stack alignment but does not apply adjustments.
+   Synthetic results must not assume any per-frame gas mechanism was applied.
+2. **Gas rescue on TX-level limit exceed** (`limit/limit.rs`): When a transaction-level resource limit is exceeded, `rescue_gas` captures remaining gas for sender refund.
+   If a frame's gas was inflated by a per-frame mechanism, the rescued amount must exclude the inflated portion — otherwise the sender recovers system-granted gas that should have been burned.
+3. **Frame return** (`limit/limit.rs`): `before_frame_return_result` is the final hook before gas is returned to the parent.
+   Any per-frame gas adjustment must be unwound here (e.g., burning unused granted gas).
+   The unwinding must apply identically on success and revert — conditional unwinding can leak gas on one path.
+
+When adding a new per-frame gas mechanism, verify that all three paths handle it correctly and add tests for each.
 
 ## Test Organization (`crates/mega-evm/tests/`)
 
