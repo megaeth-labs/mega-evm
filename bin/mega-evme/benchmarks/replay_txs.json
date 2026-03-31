@@ -1,0 +1,16 @@
+{
+  "rpc_url": "https://mainnet.megaeth.com/rpc",
+  "warn_threshold_pct": 20,
+  "fail_threshold_pct": 40,
+  "transactions": [
+    {
+      "name": "swap_contract_call",
+      "hash": "0x56bc501e32336433bdecea6161ab6d4aae02acbd00166ac4732f6647bf466032",
+      "description": "Contract interaction with compute + storage gas, 7 KV updates, 2KB+ input data.",
+      "expected": {
+        "status": "success",
+        "gas_used": 408420
+      }
+    }
+  ]
+}

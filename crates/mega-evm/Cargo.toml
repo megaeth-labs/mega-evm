@@ -57,7 +57,7 @@ std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
 test-utils = ["dep:salt"]
 
 [[bench]]
-name = "transact"
+name = "block_bench"
 harness = false
 
 [[bench]]
@@ -66,4 +66,16 @@ harness = false
 
 [[bench]]
 name = "ctt"
+harness = false
+
+[[bench]]
+name = "mega_bench"
+harness = false
+
+[[bench]]
+name = "revm_bench"
+harness = false
+
+[[bench]]
+name = "transact"
 harness = false

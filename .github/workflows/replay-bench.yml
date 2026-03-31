@@ -1,0 +1,151 @@
+name: Replay Benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  replay-correctness:
+    name: Replay correctness check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Build mega-evme
+        run: cargo build --release -p mega-evme
+
+      - name: Run correctness check
+        run: |
+          export PATH="$PWD/target/release:$PATH"
+          bash bin/mega-evme/benchmarks/replay_runner.sh correctness
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-correctness-results
+          path: replay_results.json
+
+      - name: Comment on PR (failure)
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('replay_results.json')) return;
+            const results = JSON.parse(fs.readFileSync('replay_results.json', 'utf8'));
+            let body = '## Replay Mismatch Detected\n\n';
+            body += '| Transaction | Status | Gas | Mgas/s |\n';
+            body += '|-------------|--------|-----|--------|\n';
+            for (const r of results) {
+              const si = r.status_match
+                ? 'match'
+                : r.error
+                  ? `**${r.error}**`
+                  : `**expected ${r.expected_status}, got ${r.actual_status}**`;
+              const gi = r.gas_match
+                ? 'match'
+                : r.error
+                  ? `**${r.error}**`
+                  : `**expected ${r.expected_gas}, got ${r.actual_gas}**`;
+              const mgas = r.mgas_per_sec ? r.mgas_per_sec.toFixed(2) : 'N/A';
+              body += `| ${r.name} | ${si} | ${gi} | ${mgas} |\n`;
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  replay-perf:
+    name: Replay performance comparison
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Build feature binary
+        run: |
+          cargo build --release -p mega-evme
+          cp target/release/mega-evme mega-evme-feature
+
+      - name: Determine baseline commit
+        id: baseline
+        run: |
+          BASELINE=$(git merge-base HEAD origin/main)
+          echo "commit=$BASELINE" >> "$GITHUB_OUTPUT"
+          echo "Baseline commit: $BASELINE"
+
+      - name: Build baseline binary
+        run: |
+          git checkout ${{ steps.baseline.outputs.commit }}
+          git submodule update --init --recursive
+          cargo build --release -p mega-evme
+          cp target/release/mega-evme mega-evme-baseline
+          git checkout -
+
+      - name: Run ABBA performance comparison
+        run: |
+          export PATH="$PWD:$PATH"
+          bash bin/mega-evme/benchmarks/replay_runner.sh perf ./mega-evme-baseline ./mega-evme-feature 3
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-perf-results
+          path: replay_perf_results.json
+
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('replay_perf_results.json')) return;
+            const results = JSON.parse(fs.readFileSync('replay_perf_results.json', 'utf8'));
+            let body = '## Replay Performance Comparison\n\n';
+            body += '| Transaction | Baseline | Feature | Delta | |\n';
+            body += '|-------------|----------|---------|-------|-|\n';
+            for (const r of results) {
+              const icon = r.delta_pct < -40 ? ':x:' : r.delta_pct < -20 ? ':warning:' : ':white_check_mark:';
+              const sign = r.delta_pct > 0 ? '+' : '';
+              body += `| ${r.name} | ${r.baseline_mgas.toFixed(2)} Mgas/s | ${r.feature_mgas.toFixed(2)} Mgas/s | ${sign}${r.delta_pct.toFixed(1)}% | ${icon} |\n`;
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
