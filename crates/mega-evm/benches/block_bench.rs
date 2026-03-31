@@ -263,7 +263,7 @@ fn bench_block_deploy(c: &mut Criterion) {
 
 /// Benchmark spec comparison for block execution.
 ///
-/// NOTE: All specs run with `all_hardforks_config()`, so even EQUIVALENCE and MINI_REX
+/// NOTE: All specs run with `all_hardforks_config()`, so even `EQUIVALENCE` and `MINI_REX`
 /// deploy Rex4 system contracts during `pre_execution_changes`. This is intentional —
 /// the benchmark isolates EVM execution behavior differences across specs, not system
 /// contract deployment overhead.
