@@ -48,8 +48,11 @@ def replay_command(
             capture_output=True,
             text=True,
             check=False,
+            timeout=120,
         )
     except FileNotFoundError:
+        return False, None
+    except subprocess.TimeoutExpired:
         return False, None
 
     if proc.returncode != 0:

@@ -135,6 +135,7 @@ jobs:
             const fs = require('fs');
             if (!fs.existsSync('replay_perf_results.json')) return;
             const results = JSON.parse(fs.readFileSync('replay_perf_results.json', 'utf8'));
+            if (results.length === 0) return;
             let body = '## Replay Performance Comparison\n\n';
             body += '| Transaction | Baseline | Feature | Delta | |\n';
             body += '|-------------|----------|---------|-------|-|\n';

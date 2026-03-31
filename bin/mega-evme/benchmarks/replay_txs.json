@@ -11,6 +11,15 @@
         "status": "success",
         "gas_used": 408420
       }
+    },
+    {
+      "name": "token_transfer",
+      "hash": "0xc68b00e612d3d9df337165dda8296630e19acb2d112b7409789d4cbddca8f4ff",
+      "description": "Lighter contract call with state growth, 3 KV updates, balanced compute/storage gas.",
+      "expected": {
+        "status": "success",
+        "gas_used": 97994
+      }
     }
   ]
 }

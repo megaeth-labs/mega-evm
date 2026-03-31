@@ -525,7 +525,11 @@ impl Cmd {
             },
         });
 
-        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output)
+                .map_err(|e| ReplayError::Other(format!("JSON serialization failed: {e}")))?
+        );
         Ok(())
     }
 }
