@@ -1,21 +1,26 @@
+---
+description: MegaETH hardfork and spec versioning — how behavioral changes are versioned, activated, and tracked across network upgrades.
+spec: Rex3
+---
+
 # Hardforks and Specs
 
-MegaETH versions MegaEVM behavior through **hardforks** and **specs**.
+MegaETH versions its verifiable behavior through **hardforks** and **specs**.
 This page defines both concepts and summarizes what each spec introduces.
 
 ## Hardfork vs Spec
 
 The protocol distinguishes between two related concepts:
 
-- **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: *when* changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior). Represented as `MegaHardfork` in the reference implementation.
-- **[Spec](glossary.md#spec-megaspecid)** — A set of MegaEVM behaviors: *what* the EVM does. A spec captures only the execution-layer semantics. Represented as `MegaSpecId` in the reference implementation.
+- **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: _when_ changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior). Represented as `MegaHardfork` in the reference implementation.
+- **[Spec](glossary.md#spec-megaspecid)** — A set of MegaETH verifiable behaviors: _what_ a correct node does. A spec captures the execution-layer semantics that determine node correctness. Represented as `MegaSpecId` in the reference implementation.
 
 Multiple hardforks can map to the same spec.
 A hardfork can also map to an older spec.
 For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
 
-This documentation covers specs (MegaEVM behavior).
-Protocol-level changes outside MegaEVM that are part of a hardfork are not covered here.
+This documentation covers specs — the verifiable behavioral definitions that determine correctness of a MegaETH node.
+Protocol-level changes outside the verifiable execution layer (e.g., networking, peer discovery) that are part of a hardfork are not covered here.
 
 ## Spec Progression
 
@@ -34,10 +39,11 @@ A new spec may add behavior or change the unstable spec, but it never alters wha
 Every spec carries the invariant: "Stable pre-{Spec} semantics MUST remain unchanged."
 
 This means:
+
 - Contracts deployed under a given spec will continue to behave identically after future upgrades.
 - Adding or modifying a system contract requires introducing a new spec.
 - Changing gas costs, opcode behavior, or resource limits requires a new spec.
-- Implementations should gate spec-specific behavior on the active spec (e.g., `spec.is_enabled(MINI_REX)`).
+- Implementations MUST gate spec-specific behavior on the active spec.
 
 ## Spec Summary
 
@@ -58,7 +64,7 @@ The first spec to introduce MegaETH-specific modifications:
 - **SELFDESTRUCT disabled**
 - **Large contract support** — 512 KB contracts (21x increase from 24 KB)
 
-*See [MiniRex Network Upgrade](upgrades/minirex.md) for full details.*
+_See [MiniRex Network Upgrade](upgrades/minirex.md) for full details._
 
 ### REX
 
@@ -70,21 +76,21 @@ Refines the [storage gas](glossary.md#storage-gas) economics introduced in MINI_
 - **Security fixes** — DELEGATECALL, STATICCALL, CALLCODE properly enforce gas forwarding and oracle access detection
 - **[State growth](evm/resource-accounting.md#state-growth) tracking** — New [resource limit](evm/resource-limits.md) dimension
 
-*See [Rex Network Upgrade](upgrades/rex.md) for full details.*
+_See [Rex Network Upgrade](upgrades/rex.md) for full details._
 
 ### REX1
 
 - **Limit reset fix** — Resets compute gas limits at the start of each transaction
 - Inherits Rex semantics fully
 
-*See [Rex1 Network Upgrade](upgrades/rex1.md) for full details.*
+_See [Rex1 Network Upgrade](upgrades/rex1.md) for full details._
 
 ### REX2
 
 - **SELFDESTRUCT restored** — Re-enabled with [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics
 - **[KeylessDeploy](system-contracts/keyless-deploy.md) system contract** — Enables deterministic cross-chain deployment (Nick's Method)
 
-*See [Rex2 Network Upgrade](upgrades/rex2.md) for full details.*
+_See [Rex2 Network Upgrade](upgrades/rex2.md) for full details._
 
 ### REX3
 
@@ -92,7 +98,7 @@ Refines the [storage gas](glossary.md#storage-gas) economics introduced in MINI_
 - **SLOAD-based [oracle](system-contracts/oracle.md) detention** — Triggers on SLOAD from oracle storage instead of CALL to oracle contract
 - **[Keyless deploy](system-contracts/keyless-deploy.md) [compute gas](glossary.md#compute-gas) tracking** — Records the 100K overhead as compute gas
 
-*See [Rex3 Network Upgrade](upgrades/rex3.md) for full details.*
+_See [Rex3 Network Upgrade](upgrades/rex3.md) for full details._
 
 ### REX4 (unstable)
 
@@ -102,9 +108,9 @@ Rex4 is the current unstable specification and is subject to change before activ
 
 - **Per-[call-frame](glossary.md#call-frame) resource budgets** — All four [resource dimensions](glossary.md#resource-dimension) (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
 - **Relative [gas detention](evm/gas-detention.md) cap** — Effective [detained limit](glossary.md#detained-limit) is `current_usage + cap` instead of an absolute cap
-- **Storage call stipend** — Value-transferring CALL/CALLCODE receives an additional 23,000 gas for [storage gas](glossary.md#storage-gas) operations, fixing LOG events in `receive()` under the [dual gas model](evm/dual-gas-model.md)
+- **Storage gas stipend** — Value-transferring CALL/CALLCODE receives an additional 23,000 gas for [storage gas](glossary.md#storage-gas) operations, fixing LOG events in `receive()` under the [dual gas model](evm/dual-gas-model.md)
 - **MegaAccessControl system contract** — Allows contracts to proactively disable [volatile data](glossary.md#volatile-data) access for a call subtree
 - **MegaLimitControl system contract** — Allows querying effective remaining compute gas under detention and call frame limits
 - **[Keyless deploy](system-contracts/keyless-deploy.md) sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior
 
-*See [Rex4 Network Upgrade](upgrades/rex4.md) for full details.*
+_See [Rex4 Network Upgrade](upgrades/rex4.md) for full details._

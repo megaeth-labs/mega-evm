@@ -1,5 +1,5 @@
 ---
-description: Rex3 increases the oracle gas detention cap to 20M, changes oracle detention to SLOAD-based triggering, and fixes keyless deploy compute gas tracking.
+description: Rex3 network upgrade — oracle detention revised to SLOAD-based triggering with 20M cap.
 ---
 
 # Rex3 Network Upgrade
@@ -22,9 +22,11 @@ Finally, the keyless deploy sandbox overhead (100K gas) is now properly tracked 
 ### Oracle Access Compute Gas Limit Increase
 
 #### Previous behavior
+
 - Oracle access (triggered by CALL or STATICCALL to the oracle address) caps compute gas at 1,000,000 (1M).
 
 #### New behavior
+
 - Oracle storage reads (SLOAD from the oracle contract) cap compute gas at 20,000,000 (20M).
 - The block environment access cap remains at 20M (unchanged).
 - When both block environment and oracle storage are accessed, neither is more restrictive than the other.
@@ -32,10 +34,12 @@ Finally, the keyless deploy sandbox overhead (100K gas) is now properly tracked 
 ### Oracle Gas Detention Triggers on SLOAD
 
 #### Previous behavior
+
 - CALL or STATICCALL to the oracle contract address triggers gas detention.
 - Any CALL or STATICCALL to the oracle triggers detention even without reading storage.
 
 #### New behavior
+
 - SLOAD from the oracle contract's storage triggers gas detention.
 - CALL to the oracle contract address alone does not trigger gas detention — only an SLOAD from the oracle's storage triggers it.
 - The SLOAD-based trigger is caller-agnostic: any SLOAD reading the oracle contract's storage triggers detention regardless of call depth.
@@ -45,10 +49,12 @@ Finally, the keyless deploy sandbox overhead (100K gas) is now properly tracked 
 ### Keyless Deploy Compute Gas Tracking
 
 #### Previous behavior
+
 - The 100K overhead gas for keyless deploy sandbox execution is deducted from call frame gas but not recorded as compute gas.
 - Keyless deploy transactions do not count the overhead toward the per-transaction compute gas limit.
 
 #### New behavior
+
 - The 100K keyless deploy overhead is recorded as compute gas.
 - If recording the overhead causes the compute gas limit to be exceeded, execution halts.
 
