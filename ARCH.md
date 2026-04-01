@@ -92,7 +92,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 
 **Purpose**: Prevents permanent contract destruction in MINI_REX spec.
 
-**Behavior**: 
+**Behavior**:
 - Returns `InvalidFEOpcode` when executed
 - Maintains contract state integrity
 - Prevents malicious contract destruction
