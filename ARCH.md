@@ -29,6 +29,7 @@ Default spec that maintains equivalence with Optimism Isthmus EVM.
 The EVM version used for `Mini-Rex` hardfork of MegaETH.
 
 **Major Features**:
+
 - **Multidimensional Gas Model**: Independent limits for compute gas (1B), data size (3.125 MB), and KV updates (125K)
 - **Compute Gas Tracking**: Separate tracking for computational costs with gas detention for volatile data access
 - **Dynamic Gas Costs**: SALT bucket-based scaling for storage and account operations
@@ -44,6 +45,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 **Purpose**: Prevents state bloat by scaling gas costs based on SALT bucket capacity.
 
 **Implementation**:
+
 - **Storage Operations**: `SSTORE_SET_GAS × (bucket_capacity / MIN_BUCKET_SIZE)`
 - **Account Creation**: `NEW_ACCOUNT_GAS × (bucket_capacity / MIN_BUCKET_SIZE)`
 - **Bucket Mapping**: Storage uses `address || slot_key`, accounts use `address`
@@ -57,6 +59,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 **Purpose**: Separate tracking for computational work to enable independent resource pricing and gas detention for volatile data access.
 
 **Implementation Details**:
+
 - **Compute Gas Limit**: 1,000,000,000 gas per transaction (separate from standard gas limit)
 - **Tracking**: Monitors all gas consumed during EVM instruction execution across nested calls
 - **LOG Operations**: Only compute portion tracked (375 base + 375/topic + 8/byte)
@@ -76,6 +79,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 **Purpose**: Split LOG costs into compute gas (for EVM execution) and storage gas (for persistence) to enable independent resource pricing.
 
 **Implementation Details**:
+
 - **Compute Gas** (tracked in compute gas limit):
   - Base: 375 gas, Topics: 375 gas/topic, Data: 8 gas/byte
 - **Storage Gas** (tracked in standard gas limit):
@@ -92,12 +96,14 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 
 **Purpose**: Prevents permanent contract destruction in MINI_REX spec.
 
-**Behavior**: 
+**Behavior**:
+
 - Returns `InvalidFEOpcode` when executed
 - Maintains contract state integrity
 - Prevents malicious contract destruction
 
 **Implementation**:
+
 - `crates/mega-evm/src/evm/instructions.rs` (`mini_rex::instruction_table` maps `SELFDESTRUCT` to
   `control::invalid`; `rex2::instruction_table` re-enables it later)
 
@@ -106,6 +112,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 **Files**: `crates/mega-evm/src/evm/execution.rs`, `crates/mega-evm/src/evm/instructions.rs`, `crates/mega-evm/src/evm/limit.rs`
 
 **Features**:
+
 - **Calldata Storage Gas**: 10× multiplier on standard token and floor costs (see
   `constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS` and
   `constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_FLOOR_GAS`)
@@ -120,6 +127,7 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 **Change**: Dramatically increased contract size limits for MINI_REX spec.
 
 **Limits**:
+
 - `MAX_CONTRACT_SIZE`: 512 KB (vs standard 24 KB) - ~21x increase
 - `MAX_INITCODE_SIZE`: 536 KB (512 KB + 24 KB buffer) - ~11x increase
 - `CODEDEPOSIT_COST`: 10,000 gas per byte (vs 200) - 50x increase
@@ -129,15 +137,18 @@ The EVM version used for `Mini-Rex` hardfork of MegaETH.
 **Files**: `crates/mega-evm/src/evm/limit.rs`
 
 **Transaction Limits**:
+
 - **Compute Gas**: 1,000,000,000 gas maximum (separate from standard gas limit)
 - **Data Size**: 3.125 MB maximum (25% of 12.5 MB block limit)
 - **KV Updates**: 125,000 operations maximum (25% of 500K block limit)
 
 **Block Limits**:
+
 - **Block Data**: 12.5 MB maximum
 - **Block KV Updates**: 500,000 operations maximum
 
 **Tracking**:
+
 - **Compute Gas**: Cumulative gas consumed during EVM execution across all frames
 - **Data Size**: Frame-aware tracking for proper revert handling with discardable vs non-discardable categories
 - **KV Updates**: Sophisticated logic tracks net changes, not all operations
@@ -154,6 +165,7 @@ Features that are available regardless of EVM versions.
 **Purpose**: Tracks which block environment fields are accessed during execution to enable runtime conflict detection in parallel execution.
 
 **Tracked Fields**:
+
 - Block number (`NUMBER` opcode)
 - Timestamp (`TIMESTAMP` opcode)
 - Base fee (`BASEFEE` opcode)
@@ -166,6 +178,7 @@ Features that are available regardless of EVM versions.
 - Blob hash (`BLOBHASH` opcode)
 
 **Usage Example**:
+
 ```rust
 // Check which block environment fields were accessed
 let accesses = context.get_block_env_accesses();
@@ -176,6 +189,7 @@ context.reset_volatile_data_access();
 ```
 
 **Benefits**:
+
 - Enables selective block data fetching
 - Reduces unnecessary data access
 - Improves performance for contracts that don't use block data
@@ -188,11 +202,13 @@ context.reset_volatile_data_access();
 (balance/code reads, or when caller/recipient is the beneficiary).
 
 **Tracked Operations**:
+
 - Balance queries (`BALANCE` opcode)
 - Code access (`EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`)
 - Beneficiary as transaction caller or recipient
 
 **Usage Example**:
+
 ```rust
 // Check if beneficiary was accessed
 if context.volatile_data_tracker.borrow().has_accessed_beneficiary_balance() {
@@ -204,4 +220,5 @@ context.reset_volatile_data_access();
 ```
 
 **Benefits**:
+
 - Enables parallel execution optimization by identifying transactions that access the beneficiary, which can block other transactions and cause longer execution times

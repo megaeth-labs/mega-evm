@@ -1,0 +1,27 @@
+config:
+  # Start with all rules disabled, enable only GitBook-compatible ones.
+  # Most markdownlint rules produce false positives on GitBook custom blocks
+  # ({% tabs %}, {% stepper %}, {% hint %}, etc.) because the linter doesn't
+  # parse them. Only rules that work reliably with GitBook are enabled.
+  default: false
+
+  MD001: false  # disabled — GitBook {% step %} blocks require ### headings
+  MD003:        # heading style
+    style: atx
+  MD009: true   # trailing whitespace
+  MD010: true   # no hard tabs
+  MD012: true   # no multiple consecutive blank lines
+  MD025: true   # single H1 per file
+  MD034: true   # no bare URLs
+  MD047: true   # files end with newline
+
+globs:
+  - "docs/**/*.md"
+  - "*.md"
+
+ignores:
+  - ".sisyphus/"
+  - "node_modules/"
+  - "crates/"
+  - "target/"
+  - "bin/"

@@ -1,110 +1,158 @@
-# Oracle Contract
+---
+description: MegaETH Oracle system contract — address, storage layout, hint forwarding, and gas detention trigger.
+spec: Rex3
+---
 
-## Overview
+# Oracle
 
-The Oracle contract is the centralized storage backend for MegaEVM's [oracle services](../oracle-services/overview.md).
-It provides a simple key-value store where the sequencer writes off-chain data (timestamps, price feeds, etc.) via [system transactions](system-tx.md), and oracle service wrapper contracts read from it.
+This page specifies the Oracle system contract.
+It defines the address, interface, restricted write behavior, storage access semantics, and hint forwarding.
 
-{% hint style="success" %}
-**For contract developers**: You typically do not interact with the Oracle contract directly.
-Use the higher-level [oracle services](../oracle-services/overview.md) instead — they provide typed interfaces and dedicated wrapper contracts (e.g., [High-Precision Timestamp](../oracle-services/timestamp.md) at `0x6342...0002`).
-{% endhint %}
+## Motivation
 
-{% hint style="info" %}
-**Trust Assumption**: Oracle data is published by the sequencer.
-Using oracle services requires trusting the sequencer to provide accurate values.
-{% endhint %}
+MegaETH needs a canonical protocol-level storage backend for externally sourced data such as timestamps and other oracle-fed values.
+That storage must be readable by contracts, writable by protocol-controlled maintenance transactions, and stable across specs.
 
-## Contract Details
+## Specification
 
-**Address**: `0x6342000000000000000000000000000000000001`
+### Address
 
-**Source**: [`Oracle.sol`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/contracts/Oracle.sol)
+The Oracle system contract MUST exist at `ORACLE_CONTRACT_ADDRESS`.
 
-**Key Properties**:
-- **Simple storage model** — Direct access to storage slots via `uint256` keys
-- **Restricted writes** — Only `MEGA_SYSTEM_ADDRESS` can write oracle data
-- **Public reads** — Anyone can read oracle data
-- **Versioned bytecode** — Pre-[Rex2](../hardfork-spec.md#rex2) deploys Oracle v1.0.0, and Rex2+ deploys Oracle v1.1.0 with `sendHint`
+### Bytecode
 
-## Interface
+The Oracle constructor takes `MEGA_SYSTEM_ADDRESS` as an immutable parameter.
+A node MUST deploy the bytecode version corresponding to the active spec.
 
-### Public — Read Methods
+Source: [`Oracle.sol`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/contracts/Oracle.sol)
+
+| Version | Code Hash                                                            |
+| ------- | -------------------------------------------------------------------- |
+| `1.1.0` | `0x06df675a69e53ea2a3c948521e330b3801740fede324a1cef2044418f8e09242` |
+
+### Public Read Interface
+
+The Oracle contract MUST expose the following externally callable read methods:
 
 ```solidity
 interface IOracle {
-    /// @notice Reads a value from a specific storage slot
     function getSlot(uint256 slot) external view returns (bytes32 value);
-
-    /// @notice Reads values from multiple storage slots
-    function getSlots(uint256[] calldata slots)
-        external view returns (bytes32[] memory values);
+    function getSlots(uint256[] calldata slots) external view returns (bytes32[] memory values);
 }
 ```
 
-### Internal — Used by Oracle Services
+`getSlot` MUST return the storage value at the specified slot.
+`getSlots` MUST return the storage values at the specified slots in the same order as the input array.
 
-The following methods are used internally by [oracle service](../oracle-services/overview.md) wrapper contracts to communicate with the sequencer.
-They are not intended for direct use by application contracts.
+### Restricted Write Interface
 
-```solidity
-interface IOracle {
-    /// @notice Sends a hint to the sequencer's oracle backend.
-    /// @dev Available from Rex2 onward. Used by oracle service wrappers
-    /// to request data from the sequencer at runtime (e.g., requesting
-    /// a fresh timestamp before reading it). Does not mutate on-chain state.
-    function sendHint(bytes32 topic, bytes calldata data) external view;
-
-    /// @notice Executes multiple oracle calls in one transaction
-    function multiCall(bytes[] calldata data)
-        external returns (bytes[] memory results);
-}
-```
-
-### Sequencer-Only — Write Methods
-
-These methods can only be called by `MEGA_SYSTEM_ADDRESS` via [system transactions](system-tx.md).
-Calls from any other address will revert.
+The Oracle contract MUST expose the following write and log-emission methods:
 
 ```solidity
 interface IOracle {
-    /// @notice Writes a value to a specific storage slot
     function setSlot(uint256 slot, bytes32 value) external;
-
-    /// @notice Writes values to multiple storage slots
-    function setSlots(
-        uint256[] calldata slots,
-        bytes32[] calldata values
-    ) external;
-
-    /// @notice Emits an oracle log
+    function setSlots(uint256[] calldata slots, bytes32[] calldata values) external;
     function emitLog(bytes32 topic, bytes calldata data) external;
-
-    /// @notice Emits multiple oracle logs
     function emitLogs(bytes32 topic, bytes[] calldata dataVector) external;
 }
 ```
 
-## EVM-Level Behaviors
+The methods above MUST be callable only by `MEGA_SYSTEM_ADDRESS`.
+Calls from any other sender MUST revert with `NotSystemAddress()`.
 
-**Forced-cold SLOAD**: All SLOAD operations on the oracle contract use cold access gas cost (2,100 gas) regardless of EIP-2929 warm/cold tracking state.
-This ensures deterministic gas costs during replay.
+For `setSlots`, if the `slots` and `values` array lengths differ, the call MUST revert with `InvalidLength(uint256 slotsLength, uint256 valuesLength)`.
 
-**`sendHint` interception**: When an oracle service wrapper calls `sendHint`, the EVM intercepts the call and forwards the hint to the sequencer's oracle backend before the call frame executes.
-The sequencer uses this to prepare data (e.g., capture the current timestamp) so it is available when the transaction subsequently reads oracle storage.
-The call then proceeds to on-chain execution normally (the Solidity function body runs as a no-op `view` function).
+### Auxiliary Interface
 
-## Gas Detention Impact
+The Oracle contract MUST expose the following auxiliary methods:
 
-Oracle access triggers [gas detention](../glossary.md#gas-detention).
-An SLOAD from the oracle contract's storage caps remaining [compute gas](../glossary.md#compute-gas) at 20M.
-This means transactions that read oracle data have a limited compute gas budget after the read.
-Design your contracts accordingly — perform oracle reads as late as possible.
+```solidity
+interface IOracle {
+    function multiCall(bytes[] calldata data) external returns (bytes[] memory results);
+    function sendHint(bytes32 topic, bytes calldata data) external view;
+}
+```
 
-For the history of oracle detention triggers and cap values across specs, see the [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex3](../upgrades/rex3.md) upgrade pages.
+`multiCall` MUST execute each payload by `DELEGATECALL` into the Oracle contract and MUST return the results in order.
+If any delegated call fails, `multiCall` MUST revert and MUST bubble up the revert data if present.
 
-## Oracle Services
+`sendHint` MUST be externally callable and MUST be a no-op at the Solidity bytecode level.
 
-The sequencer operates high-level oracle services using the central storage.
-Each service is allocated a range of storage slots to avoid collision.
-See [Oracle Services](../oracle-services/overview.md) for available services, including the [High-Precision Timestamp](../oracle-services/timestamp.md).
+### Storage Access Semantics
+
+**Reads.**
+`getSlot` and `getSlots` read Oracle storage via `SLOAD`.
+The node MAY serve Oracle reads from an external data source that provides realtime, per-transaction values.
+When an `SLOAD` targets `ORACLE_CONTRACT_ADDRESS`, the node MUST first consult the external data source.
+If it provides a value for the requested slot, that value MUST be returned.
+Otherwise, the node MUST return the on-chain storage value.
+
+**Writes.**
+`setSlot` and `setSlots` write Oracle storage via `SSTORE`.
+These methods are restricted to `MEGA_SYSTEM_ADDRESS` (see [Restricted Write Interface](#restricted-write-interface)).
+
+**On-chain persistence.**
+When the external data source provides a value for a read, the sequencer MUST persist that value on-chain by inserting a [Mega System Transaction](system-tx.md) that calls `setSlot` or `setSlots`.
+This system transaction MUST be ordered before the user transaction that triggered the read, so that full nodes replaying the block observe the same storage state.
+
+### Hint Forwarding
+
+`sendHint` is the only function in Oracle system contract that participates in [call interception](interception.md).
+All other Oracle functions (`getSlot`, `getSlots`, `setSlot`, `setSlots`, `emitLog`, `emitLogs`, `multiCall`) execute via ordinary contract bytecode only.
+
+When a `CALL` or `STATICCALL` targets `ORACLE_CONTRACT_ADDRESS` and the input matches the `sendHint(bytes32,bytes)` selector, the node MUST forward the decoded `topic` and `data` to the external oracle backend as a side effect.
+The call MUST then fall through — the Oracle contract's deployed `sendHint` function body executes as ordinary bytecode.
+
+Because the Solidity implementation of `sendHint` is a no-op `view` function, the net observable behavior is the combination of:
+
+- hint forwarding to the oracle backend (side effect), and
+- normal bytecode execution of the no-op function body (which returns successfully with no output).
+
+Calls to `ORACLE_CONTRACT_ADDRESS` that do not match the `sendHint` selector MUST fall through without any side effect.
+
+If a transaction calls `sendHint` and subsequently reads an Oracle slot, the hint MUST be delivered to the oracle backend before the read is served.
+
+### Gas and Detention Semantics
+
+The following gas and detention rules MUST apply:
+
+- `SLOAD` against Oracle storage MUST use the cold access gas cost.
+- Oracle storage reads MUST participate in [gas detention](../evm/gas-detention.md).
+- `CALL` or `STATICCALL` to the Oracle contract address alone MUST NOT trigger oracle detention unless Oracle storage is actually read.
+- `DELEGATECALL` to the Oracle contract MUST NOT trigger oracle detention solely by targeting the Oracle address.
+
+### Versioning
+
+Pre-[Rex2](../upgrades/rex2.md), the deployed Oracle bytecode does not include `sendHint`.
+From [Rex2](../upgrades/rex2.md) onward, the stable Oracle bytecode includes `sendHint`.
+
+## Constants
+
+| Constant                  | Value                                        | Description                           |
+| ------------------------- | -------------------------------------------- | ------------------------------------- |
+| `ORACLE_CONTRACT_ADDRESS` | `0x6342000000000000000000000000000000000001` | Stable Oracle system-contract address |
+
+## Rationale
+
+**Why centralize oracle-backed data in one contract?**
+Oracle-backed protocol data needs a single canonical storage location so all contracts and all nodes observe the same values under the same addressing scheme.
+
+**Why restrict writes to `MEGA_SYSTEM_ADDRESS`?**
+Externally sourced oracle values are part of protocol-maintained state.
+Allowing arbitrary writes would destroy the meaning of oracle-backed data and make the values untrustworthy as protocol inputs.
+
+**Why use a per-transaction external data source instead of pre-populating all oracle data?**
+Traditional oracle designs require all data to be written on-chain before any transaction can read it, even if most transactions never access oracle data.
+The external data source enables a realtime lazy oracle: values are only fetched and persisted when a transaction actually reads them.
+This avoids unnecessary system transactions for data that no one consumes, reduces block overhead, and allows oracle data to be as fresh as the moment of access rather than the moment of block construction.
+The sequencer's frontrunning system transaction ensures that the lazily served value is still persisted on-chain for full nodes and verifiers that replay the block.
+
+**Why intercept `sendHint` during call interception?**
+Hint forwarding depends on external backend behavior that cannot be expressed by on-chain bytecode alone.
+The no-op Solidity body provides a stable interface, while the [call interception](interception.md) mechanism supplies the protocol-level side effect.
+
+## Spec History
+
+- [MiniRex](../upgrades/minirex.md) introduced the Oracle contract.
+- [Rex2](../upgrades/rex2.md) added the `sendHint` entry point to the deployed Oracle bytecode.
+- [Rex3](../upgrades/rex3.md) changed oracle detention to SLOAD-based triggering and raised the oracle detention cap to 20M.

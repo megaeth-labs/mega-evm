@@ -1,3 +1,7 @@
+---
+description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex4 with activation dates and behavioral deltas.
+---
+
 # Overview
 
 This section documents each MegaETH network upgrade, describing what changed, why, and what developers need to know.
@@ -15,7 +19,7 @@ This section documents each MegaETH network upgrade, describing what changed, wh
 {% endtab %}
 {% endtabs %}
 
-[Dual gas model](../evm/dual-gas-model.md), [multidimensional resource limits](../evm/resource-limits.md), [gas detention](../evm/gas-detention.md), 98/100 gas forwarding, SELFDESTRUCT disabled, system contracts ([Oracle](../system-contracts/oracle.md), [Timestamp](../oracle-services/timestamp.md))
+[Dual gas model](../evm/dual-gas-model.md), [multidimensional resource limits](../evm/resource-limits.md), [gas detention](../evm/gas-detention.md), 98/100 gas forwarding, SELFDESTRUCT disabled, system contracts ([Oracle](../system-contracts/oracle.md), [Timestamp](../system-contracts/high-precision-timestamp.md))
 
 ### MiniRex1
 

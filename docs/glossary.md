@@ -1,4 +1,33 @@
+---
+description: MegaETH glossary — definitions of protocol terms including EVM blocks, mini-blocks, compute gas, storage gas, and gas detention.
+spec: Rex3
+---
+
 # Glossary
+
+## EVM block
+
+A standard Ethereum-compatible block produced roughly every second.
+
+EVM blocks contain the same header fields and follow the same structure as blocks on other EVM chains, ensuring compatibility with existing tools, wallets, indexers, and applications.
+
+Every transaction appears in exactly one EVM block.
+Block-level EVM opcodes (`NUMBER`, `TIMESTAMP`, `COINBASE`, etc.) return values associated with the EVM block, not the mini-block.
+
+Often shortened to "block" when the context is unambiguous.
+
+## Mini-block
+
+A lightweight, high-frequency block produced roughly every 10 milliseconds.
+
+Mini-blocks are the native unit of sequencer preconfirmation in MegaETH.
+Transactions are packaged into mini-blocks as soon as they are executed, giving applications access to execution results with minimal latency via the Realtime API.
+
+Every transaction appears in exactly one mini-block and one EVM block.
+Transactions in a mini-block never span multiple EVM blocks.
+
+Mini-blocks contain a different, more compact set of metadata fields compared to EVM blocks.
+The ratio of mini-blocks to EVM blocks is roughly 100:1, though the exact number is not guaranteed.
 
 ## Compute gas
 
@@ -14,7 +43,7 @@ Additional gas charged for operations that impose persistent storage burden on n
 
 The other component of total gas cost.
 
-## Storage call stipend
+## Storage gas stipend
 
 Additional 23,000 gas granted to the callee of an internal `CALL` or `CALLCODE` that transfers value (value > 0).
 Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract](system-contracts/overview.md) interceptions do not qualify.
@@ -22,7 +51,7 @@ Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract]
 Introduced in Rex4 to compensate for the 10× storage gas multiplier on LOG opcodes, which causes LOG events to exceed the standard EVM `CALL_STIPEND` (2,300 gas).
 
 The callee's [compute gas](#compute-gas) limit is not increased — only storage gas operations can consume the extra gas.
-Unused storage call stipend is burned on return to prevent gas leakage.
+Unused storage gas stipend is burned on return to prevent gas leakage.
 This includes early termination from resource limit violations — the stipend is excluded from any gas rescued for the sender.
 
 See [Rex4 Network Upgrade](upgrades/rex4.md) for details.
@@ -118,7 +147,7 @@ Resource trackers (data size, KV updates, state growth) are call-frame-aware —
 
 ## Call-frame-local exceed
 
-*(Rex4, unstable)* — When a call frame exceeds its per-call-frame resource budget, the call frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
+_(Rex4, unstable)_ — When a call frame exceeds its per-call-frame resource budget, the call frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 
 The parent call frame can continue executing.
 
@@ -128,9 +157,9 @@ Per-call-frame resource budgets are introduced in Rex4.
 
 ## Spec (`MegaSpecId`)
 
-A set of MegaEVM behaviors: what the EVM does at a given stage.
+A set of MegaETH verifiable behaviors: the complete definition of what a correct node does at a given stage.
 
-Captures only execution-layer semantics.
+Captures the execution-layer semantics that determine node correctness.
 
 Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4`.
 

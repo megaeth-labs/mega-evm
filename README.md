@@ -10,14 +10,14 @@ This repository contains a customized version of the revm EVM implementation spe
 
 - **Base EVM**: [revm v27.1.0 (v83)](https://github.com/bluealloy/revm)
 - **Optimism EVM**: [op-revm v8.1.0 (v83)](https://github.com/bluealloy/op-revm)
-- **Alloy EVM**: [alloy-evm v0.15.0](https://github.com/alloy-rs/core)
+- **Alloy EVM**: [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy-evm)
 
 ## Terminology: Spec vs Hardfork
 
 This codebase distinguishes between two related concepts:
 
-- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`, `REX3`
-- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`
+- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`, `REX3`, `REX4`
+- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`
 
 Multiple hardforks can map to the same spec. For example, both `MiniRex` and `MiniRex2` hardforks use the `MINI_REX` spec.
 
@@ -75,6 +75,17 @@ For complete Rex2 specification, see the [Rex2 upgrade page](https://megaeth-lab
 - **Rex2 Baseline**: Inherits all Rex2 behavior
 
 For complete Rex3 specification, see the [Rex3 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex3.html).
+
+### REX4 Spec _(unstable)_
+
+- **Per-Call-Frame Resource Budgets**: All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
+- **Relative Gas Detention**: Effective detained limit is `current_usage + cap` instead of an absolute cap
+- **Storage Gas Stipend**: Value-transferring CALL/CALLCODE receives an additional 23,000 gas for storage gas operations
+- **MegaAccessControl System Contract**: Allows contracts to proactively disable volatile data access for a call subtree
+- **MegaLimitControl System Contract**: Allows querying effective remaining compute gas under detention and call frame limits
+- **Rex3 Baseline**: Inherits all Rex3 behavior
+
+For complete Rex4 specification, see the [Rex4 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex4.html).
 
 ## Quick Start
 
@@ -147,7 +158,7 @@ mega-evme replay 0xTxHash --rpc https://rpc.example.com
 ### Spec Selection
 
 Spec names are case-sensitive and match `MegaSpecId` strings: `Equivalence`, `MiniRex`, `Rex`,
-`Rex1`, `Rex2`, `Rex3`. Use `--spec` for `run`/`tx`, and `--override.spec` for `replay`.
+`Rex1`, `Rex2`, `Rex3`, `Rex4`. Use `--spec` for `run`/`tx`, and `--override.spec` for `replay`.
 
 ```bash
 # Run with a specific spec
@@ -158,13 +169,13 @@ mega-evme run 0x60016000526001601ff3 --spec Rex2
 
 The `tx` command supports multiple transaction types with type-specific options:
 
-| Type | Name     | Specific Options                                |
-| ---- | -------- | ----------------------------------------------- |
-| 0    | Legacy   | -                                               |
-| 1    | EIP-2930 | `--access ADDRESS:KEY1,KEY2,...`                |
-| 2    | EIP-1559 | `--priority-fee`, `--access`                    |
-| 4    | EIP-7702 | `--auth AUTHORITY:NONCE->DELEGATION`, `--access`|
-| 126  | Deposit  | `--source-hash`, `--mint`                       |
+| Type | Name     | Specific Options                                 |
+| ---- | -------- | ------------------------------------------------ |
+| 0    | Legacy   | -                                                |
+| 1    | EIP-2930 | `--access ADDRESS:KEY1,KEY2,...`                 |
+| 2    | EIP-1559 | `--priority-fee`, `--access`                     |
+| 4    | EIP-7702 | `--auth AUTHORITY:NONCE->DELEGATION`, `--access` |
+| 126  | Deposit  | `--source-hash`, `--mint`                        |
 
 For detailed documentation, see [mega-evme README](bin/mega-evme/README.md).
 
