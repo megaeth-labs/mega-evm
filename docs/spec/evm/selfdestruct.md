@@ -1,6 +1,6 @@
 ---
 description: SELFDESTRUCT opcode on MegaETH — EIP-6780 semantics, same-transaction destruction, and spec history from MiniRex to Rex2.
-spec: Rex3
+spec: Rex4
 ---
 
 # SELFDESTRUCT
@@ -31,18 +31,12 @@ If the executing contract was not created in the same transaction, `SELFDESTRUCT
 - transfer the remaining balance to the target address, and
 - preserve the contract's code and storage.
 
+`SELFDESTRUCT` targeting the [beneficiary](../glossary.md#beneficiary) MUST trigger beneficiary [gas detention](gas-detention.md).
+
 ### MiniRex Behavior
 
 For [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md), `SELFDESTRUCT` MUST be disabled.
 When disabled, executing `SELFDESTRUCT` MUST halt with `InvalidFEOpcode`.
-
-<details>
-<summary>Rex4 (unstable): Beneficiary-triggered volatile access</summary>
-
-In Rex4, `SELFDESTRUCT` targeting the [beneficiary](../glossary.md#beneficiary) MUST participate in volatile-data access handling.
-That behavior is unstable and is not part of the current stable semantics.
-
-</details>
 
 ## Constants
 
@@ -63,4 +57,4 @@ Adopting it restores compatibility while avoiding legacy full-destruction behavi
 
 - [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md) disable `SELFDESTRUCT`.
 - [Rex2](../upgrades/rex2.md) re-enables `SELFDESTRUCT` with [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics.
-- [Rex4](../upgrades/rex4.md) adds unstable beneficiary-related volatile-access behavior.
+- [Rex4](../upgrades/rex4.md) — added beneficiary-triggered volatile-access behavior for SELFDESTRUCT.

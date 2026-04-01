@@ -1,6 +1,6 @@
 ---
 description: MegaETH per-transaction and per-block resource limits — compute gas, data size, KV updates, and state growth ceilings with enforcement semantics.
-spec: Rex3
+spec: Rex4
 ---
 
 # Multidimensional Resource Limits
@@ -135,17 +135,14 @@ When constructing a block, a node or sequencer MUST process candidate transactio
 | Skipped  | Current block cannot admit the transaction without violating a block-level limit | No receipt   | Not included; may be reconsidered in a later block           |
 | Rejected | Transaction-level pre-execution limit exceeded                                   | No receipt   | Permanently invalid                                          |
 
-<details>
-<summary>Rex4 (unstable): Per-call-frame runtime budgets</summary>
+### Per-Call-Frame Runtime Budgets
 
-Rex4 adds per-[call-frame](../glossary.md#call-frame) budgets for compute gas, data size, KV updates, and state growth.
+Each [call frame](../glossary.md#call-frame) receives a bounded share of the remaining budget for compute gas, data size, KV updates, and state growth.
 Each inner call frame receives `remaining × FRAME_LIMIT_NUMERATOR / FRAME_LIMIT_DENOMINATOR` of its parent call frame's remaining budget.
 These budgets are system-enforced — the calling contract cannot directly control them.
 Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains under direct contract control.
 If a child call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 The parent call frame MAY continue execution.
-
-</details>
 
 ## Constants
 
@@ -158,8 +155,8 @@ The parent call frame MAY continue execution.
 | `BLOCK_KV_UPDATE_LIMIT`    | 500,000     | Maximum cumulative block KV updates                     |
 | `TX_STATE_GROWTH_LIMIT`    | 1,000       | Maximum state growth per transaction                    |
 | `BLOCK_STATE_GROWTH_LIMIT` | 1,000       | Maximum cumulative block state growth                   |
-| `FRAME_LIMIT_NUMERATOR`    | 98          | Numerator of per-call-frame budget forwarding in Rex4   |
-| `FRAME_LIMIT_DENOMINATOR`  | 100         | Denominator of per-call-frame budget forwarding in Rex4 |
+| `FRAME_LIMIT_NUMERATOR`    | 98          | Numerator of per-call-frame budget forwarding   |
+| `FRAME_LIMIT_DENOMINATOR`  | 100         | Denominator of per-call-frame budget forwarding |
 
 ## Rationale
 
@@ -185,4 +182,4 @@ The stable protocol therefore does not need a second independent block-level com
 - [MiniRex](../upgrades/minirex.md) introduced compute gas, data size, and KV update limits, with transaction-level data and KV limits set to 25% of the corresponding block limits.
 - [Rex](../upgrades/rex.md) changed the stable runtime transaction-level limits to `TX_COMPUTE_GAS_LIMIT = 200,000,000`, `TX_DATA_LIMIT = 13,107,200`, `TX_KV_UPDATE_LIMIT = 500,000`, and introduced state-growth limits.
 - [Rex3](../upgrades/rex3.md) retained the stable resource-limit set.
-- [Rex4](../upgrades/rex4.md) adds unstable per-call-frame runtime budgets.
+- [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets.

@@ -21,6 +21,8 @@
 - [Oracle](system-contracts/oracle.md)
 - [High-Precision Timestamp](system-contracts/high-precision-timestamp.md)
 - [Keyless Deployment](system-contracts/keyless-deploy.md)
+- [MegaAccessControl](system-contracts/mega-access-control.md)
+- [MegaLimitControl](system-contracts/mega-limit-control.md)
 - [Call Interception](system-contracts/interception.md)
 - [Mega System Transactions](system-contracts/system-tx.md)
 

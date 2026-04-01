@@ -22,7 +22,8 @@
 //! - **`REX2`**: Re-enables SELFDESTRUCT with EIP-6780 semantics
 //! - **`REX3`**: Increases oracle gas limit to 20M, moves oracle detention to SLOAD-based, tracks
 //!   keyless deploy compute gas
-//! - **`REX4`**: Unstable spec under active development
+//! - **`REX4`**: Per-call-frame resource budgets, relative gas detention, storage gas stipend,
+//!   MegaAccessControl and MegaLimitControl system contracts
 
 mod context;
 mod execution;

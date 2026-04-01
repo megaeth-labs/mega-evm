@@ -1,13 +1,11 @@
 ---
-description: Rex4 network upgrade (unstable) — per-call-frame resource budgets, relative gas detention, and new system contracts.
+description: Rex4 network upgrade — per-call-frame resource budgets, relative gas detention, storage gas stipend, and new system contracts.
 ---
 
 # Rex4 Network Upgrade
 
 This page is an informative summary of the Rex4 specification.
 For the full normative definition, see the Rex4 spec in the mega-evm repository.
-
-Rex4 is the current unstable specification and is subject to change before activation.
 
 ## Summary
 
@@ -18,7 +16,7 @@ Per-call-frame budgets give each call frame a bounded share of remaining resourc
 Rex4 also shifts [gas detention](../evm/gas-detention.md) from absolute caps to **relative caps**, so transactions that access [volatile data](../glossary.md#volatile-data) late in execution are no longer penalized for compute work done before the access.
 Two new [system contracts](../system-contracts/overview.md) — **MegaAccessControl** and **MegaLimitControl** — give contracts runtime control over volatile data access and the ability to query their effective remaining compute gas budget.
 
-Rex4 also introduces a **storage gas stipend** for value-transferring calls, so that contracts receiving ETH via `transfer()` or `send()` can emit events without running out of gas.
+Rex4 also introduces a **[storage gas stipend](../glossary.md#storage-gas-stipend)** for value-transferring calls, so that contracts receiving ETH via `transfer()` or `send()` can emit events without running out of gas.
 
 Finally, the [keyless deploy](../system-contracts/keyless-deploy.md) sandbox now inherits the parent transaction's external environment for dynamic gas pricing and [oracle](../system-contracts/oracle.md) behavior, improving accuracy for contracts deployed via Nick's Method.
 
