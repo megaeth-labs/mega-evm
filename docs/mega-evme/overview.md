@@ -12,11 +12,11 @@ cargo build --release -p mega-evme
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| [`run`](commands/run.md) | Execute arbitrary EVM bytecode directly |
-| [`tx`](commands/tx.md) | Run a transaction with full transaction context and optional RPC state forking |
-| [`replay`](commands/replay.md) | Replay an existing on-chain transaction from RPC |
+| Command                        | Description                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------ |
+| [`run`](commands/run.md)       | Execute arbitrary EVM bytecode directly                                        |
+| [`tx`](commands/tx.md)         | Run a transaction with full transaction context and optional RPC state forking |
+| [`replay`](commands/replay.md) | Replay an existing on-chain transaction from RPC                               |
 
 ## Quick Start
 
@@ -56,16 +56,16 @@ mega-evme replay 0xabc123... \
 
 These flags apply to all commands.
 
-| Flag | Default | Aliases | Description |
-|------|---------|---------|-------------|
-| `-v` | 0 | N/A | Increase log verbosity (`-v`=error, `-vv`=warn, `-vvv`=info, `-vvvv`=debug, `-vvvvv`=trace) |
-| `--log.file <PATH>` | stderr | `--log-file` | Write logs to a file instead of stderr |
-| `--log.no-color` | `false` | `--log-no-color` | Disable colored console output |
+| Flag                | Default | Aliases          | Description                                                                                 |
+| ------------------- | ------- | ---------------- | ------------------------------------------------------------------------------------------- |
+| `-v`                | 0       | N/A              | Increase log verbosity (`-v`=error, `-vv`=warn, `-vvv`=info, `-vvvv`=debug, `-vvvvv`=trace) |
+| `--log.file <PATH>` | stderr  | `--log-file`     | Write logs to a file instead of stderr                                                      |
+| `--log.no-color`    | `false` | `--log-no-color` | Disable colored console output                                                              |
 
-## Documentation Structure
+## Read more
 
+- **[Cookbook](cookbook.md)** — Real-world recipes and worked examples.
 - **[Commands](commands/run.md)** — Detailed reference for each subcommand.
 - **[Configuration](configuration/chain-and-spec.md)** — Shared options: spec selection, block environment, state management, SALT buckets.
 - **[Tracing](tracing/overview.md)** — Execution tracing with opcode, call, and pre-state tracers.
 - **[Transaction Types](transaction-types.md)** — Legacy, EIP-2930, EIP-1559, EIP-7702, and Deposit transactions.
-- **[Cookbook](cookbook.md)** — Real-world recipes and worked examples.
