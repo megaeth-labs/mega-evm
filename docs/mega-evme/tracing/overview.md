@@ -20,21 +20,21 @@ Use `--tracer` to pick a different tracer.
 
 ## Tracers
 
-| Tracer | `--tracer` value | Description |
-|--------|-----------------|-------------|
-| [Opcode](opcode-tracer.md) | `opcode` (default) | Step-by-step opcode execution log with gas, stack, memory, and storage |
-| [Call](call-tracer.md) | `call` | Nested call tree showing CALL/CREATE hierarchy, gas, and return data |
-| [Pre-State](prestate-tracer.md) | `pre-state` (alias: `prestate`) | Account state accessed during execution, with optional diff mode |
+| Tracer                          | `--tracer` value                | Description                                                            |
+| ------------------------------- | ------------------------------- | ---------------------------------------------------------------------- |
+| [Opcode](opcode-tracer.md)      | `opcode` (default)              | Step-by-step opcode execution log with gas, stack, memory, and storage |
+| [Call](call-tracer.md)          | `call`                          | Nested call tree showing CALL/CREATE hierarchy, gas, and return data   |
+| [Pre-State](prestate-tracer.md) | `pre-state` (alias: `prestate`) | Account state accessed during execution, with optional diff mode       |
 
 ## Common Options
 
 These flags apply to all tracers:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--trace` | `false` | Enable tracing |
-| `--trace.output <PATH>` | stdout | Write trace output to a file instead of the console |
-| `--tracer <TRACER>` | `opcode` | Select which tracer to use |
+| Flag                    | Default  | Description                                         |
+| ----------------------- | -------- | --------------------------------------------------- |
+| `--trace`               | `false`  | Enable tracing                                      |
+| `--trace.output <PATH>` | stdout   | Write trace output to a file instead of the console |
+| `--tracer <TRACER>`     | `opcode` | Select which tracer to use                          |
 
 ## Output
 

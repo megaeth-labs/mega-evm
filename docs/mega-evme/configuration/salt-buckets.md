@@ -12,11 +12,12 @@ The `--bucket-capacity` flag lets you configure bucket capacities for testing ho
 
 ## Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--bucket-capacity <ID:CAPACITY>` | empty | Set bucket capacity (repeatable) |
+| Flag                              | Default | Description                      |
+| --------------------------------- | ------- | -------------------------------- |
+| `--bucket-capacity <ID:CAPACITY>` | empty   | Set bucket capacity (repeatable) |
 
 Format: `bucket_id:capacity`, where:
+
 - `bucket_id` — 32-bit bucket identifier
 - `capacity` — current capacity in bytes
 

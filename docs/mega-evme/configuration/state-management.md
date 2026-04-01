@@ -68,10 +68,10 @@ The flag is repeatable and supports ether suffixes.
 
 **Faucet vs balance at a glance:**
 
-| Flag | Effect |
-|------|--------|
+| Flag                      | Effect                         |
+| ------------------------- | ------------------------------ |
 | `--faucet ADDRESS+=VALUE` | Adds VALUE to existing balance |
-| `--balance ADDRESS=VALUE` | Sets balance to exactly VALUE |
+| `--balance ADDRESS=VALUE` | Sets balance to exactly VALUE  |
 
 ### Storage Overrides
 
@@ -160,13 +160,13 @@ The output uses the same JSON format as prestate files, so you can feed it direc
 Each top-level key is a checksummed or lowercase hex address.
 The value is an account object with these fields:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `balance` | hex quantity | Account balance in wei |
-| `nonce` | hex quantity | Transaction nonce |
-| `code` | hex bytes | Deployed bytecode (`0x` for EOAs) |
-| `codeHash` | hex bytes | Keccak256 hash of `code` |
-| `storage` | object | Map of storage slot to value |
+| Field      | Type         | Description                       |
+| ---------- | ------------ | --------------------------------- |
+| `balance`  | hex quantity | Account balance in wei            |
+| `nonce`    | hex quantity | Transaction nonce                 |
+| `code`     | hex bytes    | Deployed bytecode (`0x` for EOAs) |
+| `codeHash` | hex bytes    | Keccak256 hash of `code`          |
+| `storage`  | object       | Map of storage slot to value      |
 
 Example:
 

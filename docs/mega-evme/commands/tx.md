@@ -39,11 +39,11 @@ The default sender is `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` and the defau
 By default, `tx` runs against local state — either empty or loaded from a `--prestate` file.
 Fork mode fetches account balances, contract code, and storage slots on demand from a remote RPC node, so you can call real deployed contracts without manually constructing their state.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--fork` | `false` | Enable state forking from RPC |
-| `--fork.rpc <URL>` | `http://localhost:8545` | RPC endpoint to fork from (env: `RPC_URL`) |
-| `--fork.block <NUMBER>` | latest | Pin the fork to a specific block number |
+| Flag                    | Default                 | Description                                |
+| ----------------------- | ----------------------- | ------------------------------------------ |
+| `--fork`                | `false`                 | Enable state forking from RPC              |
+| `--fork.rpc <URL>`      | `http://localhost:8545` | RPC endpoint to fork from (env: `RPC_URL`) |
+| `--fork.block <NUMBER>` | latest                  | Pin the fork to a specific block number    |
 
 When `--fork` is set, `mega-evme` connects to `--fork.rpc` and resolves any state reads that aren't covered by a local `--prestate` file against that node.
 `--fork.block` pins the fork to a specific block's post-state, which is useful for reproducing historical behavior or writing deterministic tests.
@@ -64,14 +64,14 @@ This lets you patch specific accounts or storage slots while still pulling every
 `tx` accepts several shared option groups.
 Each group has its own reference page with the full flag table.
 
-| Group | Description | Reference |
-|-------|-------------|-----------|
-| Transaction | Sender, receiver, value, gas, calldata, nonce, tx type | [Transaction Types](../transaction-types.md) |
-| State management | Prestate file, sender balance, faucet, storage overrides, state dump | [State Management](../configuration/state-management.md) |
-| Chain / spec | Spec version, chain ID | [Chain and Spec](../configuration/chain-and-spec.md) |
-| Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao | [Block Environment](../configuration/block-environment.md) |
-| SALT buckets | Per-bucket capacity overrides for dynamic gas pricing | [SALT Buckets](../configuration/salt-buckets.md) |
-| Tracing | Opcode, call, and pre-state tracers with output options | [Tracing Overview](../tracing/overview.md) |
+| Group             | Description                                                          | Reference                                                  |
+| ----------------- | -------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Transaction       | Sender, receiver, value, gas, calldata, nonce, tx type               | [Transaction Types](../transaction-types.md)               |
+| State management  | Prestate file, sender balance, faucet, storage overrides, state dump | [State Management](../configuration/state-management.md)   |
+| Chain / spec      | Spec version, chain ID                                               | [Chain and Spec](../configuration/chain-and-spec.md)       |
+| Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao    | [Block Environment](../configuration/block-environment.md) |
+| SALT buckets      | Per-bucket capacity overrides for dynamic gas pricing                | [SALT Buckets](../configuration/salt-buckets.md)           |
+| Tracing           | Opcode, call, and pre-state tracers with output options              | [Tracing Overview](../tracing/overview.md)                 |
 
 ## Examples
 

@@ -15,10 +15,10 @@ mega-evme run 0x... --trace --tracer call
 
 ## Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
+| Flag                         | Default | Description                                                |
+| ---------------------------- | ------- | ---------------------------------------------------------- |
 | `--trace.call.only-top-call` | `false` | Only trace the top-level call — omit nested internal calls |
-| `--trace.call.with-log` | `false` | Include LOG events in the call trace output |
+| `--trace.call.with-log`      | `false` | Include LOG events in the call trace output                |
 
 ## Output Format
 
@@ -28,28 +28,28 @@ The call tracer emits a Geth-compatible nested JSON structure.
 
 Each call node contains:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `type` | string | Call type: `CALL`, `STATICCALL`, `DELEGATECALL`, `CALLCODE`, `CREATE`, `CREATE2` |
-| `from` | address | Caller address |
-| `to` | address | Callee address |
-| `gas` | hex number | Gas provided to the call |
-| `gasUsed` | hex number | Gas consumed by the call |
-| `input` | hex bytes | Calldata |
-| `output` | hex bytes | Return data (present on success) |
-| `value` | hex number | ETH value transferred (if any) |
-| `error` | string | Revert reason (present on failure) |
-| `calls` | array | Nested child call nodes (recursive) |
-| `logs` | array | LOG events (only with `--trace.call.with-log`) |
+| Field     | Type       | Description                                                                      |
+| --------- | ---------- | -------------------------------------------------------------------------------- |
+| `type`    | string     | Call type: `CALL`, `STATICCALL`, `DELEGATECALL`, `CALLCODE`, `CREATE`, `CREATE2` |
+| `from`    | address    | Caller address                                                                   |
+| `to`      | address    | Callee address                                                                   |
+| `gas`     | hex number | Gas provided to the call                                                         |
+| `gasUsed` | hex number | Gas consumed by the call                                                         |
+| `input`   | hex bytes  | Calldata                                                                         |
+| `output`  | hex bytes  | Return data (present on success)                                                 |
+| `value`   | hex number | ETH value transferred (if any)                                                   |
+| `error`   | string     | Revert reason (present on failure)                                               |
+| `calls`   | array      | Nested child call nodes (recursive)                                              |
+| `logs`    | array      | LOG events (only with `--trace.call.with-log`)                                   |
 
 Each log entry (when `--trace.call.with-log` is set):
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `address` | address | Contract that emitted the log |
-| `topics` | array | Log topics as hex strings |
-| `data` | hex bytes | Log data |
-| `position` | hex number | Position in the transaction |
+| Field      | Type       | Description                   |
+| ---------- | ---------- | ----------------------------- |
+| `address`  | address    | Contract that emitted the log |
+| `topics`   | array      | Log topics as hex strings     |
+| `data`     | hex bytes  | Log data                      |
+| `position` | hex number | Position in the transaction   |
 
 ### Example Output
 

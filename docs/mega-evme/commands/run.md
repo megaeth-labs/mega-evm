@@ -18,9 +18,9 @@ Exactly one of these two inputs must be provided.
 
 ## Code Input
 
-| Argument | Description |
-|----------|-------------|
-| `CODE` | EVM bytecode as a `0x`-prefixed hex string (positional) |
+| Argument            | Description                                                     |
+| ------------------- | --------------------------------------------------------------- |
+| `CODE`              | EVM bytecode as a `0x`-prefixed hex string (positional)         |
 | `--codefile <PATH>` | Path to a file containing bytecode. Use `-` to read from stdin. |
 
 ## Execution Modes
@@ -47,22 +47,22 @@ In create mode, `--receiver` must not be set.
 `run` accepts several groups of shared options.
 Each group is documented on its own page.
 
-| Group | Flags | Reference |
-|-------|-------|-----------|
-| Transaction | `--create`, `--gas`, `--basefee`, `--priority-fee`, `--tx-type`, `--value`, `--sender`, `--receiver`, `--nonce`, `--input`, `--inputfile`, `--source-hash`, `--mint`, `--auth`, `--access` | [Transaction Types](../transaction-types.md) |
-| State management | `--prestate`, `--sender.balance`, `--dump`, `--dump.output` | [State Management](../configuration/state-management.md) |
-| Chain and spec | `--spec`, `--chain-id` | [Chain and Spec](../configuration/chain-and-spec.md) |
-| Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas` | [Block Environment](../configuration/block-environment.md) |
-| SALT buckets | `--bucket-capacity` | [SALT Buckets](../configuration/salt-buckets.md) |
-| Tracing | `--trace`, `--tracer`, `--trace.output`, and tracer-specific flags | [Tracing Overview](../tracing/overview.md) |
+| Group             | Flags                                                                                                                                                                                      | Reference                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| Transaction       | `--create`, `--gas`, `--basefee`, `--priority-fee`, `--tx-type`, `--value`, `--sender`, `--receiver`, `--nonce`, `--input`, `--inputfile`, `--source-hash`, `--mint`, `--auth`, `--access` | [Transaction Types](../transaction-types.md)               |
+| State management  | `--prestate`, `--sender.balance`, `--dump`, `--dump.output`                                                                                                                                | [State Management](../configuration/state-management.md)   |
+| Chain and spec    | `--spec`, `--chain-id`                                                                                                                                                                     | [Chain and Spec](../configuration/chain-and-spec.md)       |
+| Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas`                      | [Block Environment](../configuration/block-environment.md) |
+| SALT buckets      | `--bucket-capacity`                                                                                                                                                                        | [SALT Buckets](../configuration/salt-buckets.md)           |
+| Tracing           | `--trace`, `--tracer`, `--trace.output`, and tracer-specific flags                                                                                                                         | [Tracing Overview](../tracing/overview.md)                 |
 
 **Key defaults for `run`:**
 
-| Option | Default |
-|--------|---------|
-| `--spec` | `Rex4` |
-| `--gas` | `10000000` |
-| `--sender` | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
+| Option       | Default                                      |
+| ------------ | -------------------------------------------- |
+| `--spec`     | `Rex4`                                       |
+| `--gas`      | `10000000`                                   |
+| `--sender`   | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
 | `--receiver` | `0x0000000000000000000000000000000000000000` |
 
 ## Examples

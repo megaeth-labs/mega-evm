@@ -11,19 +11,19 @@ The transaction type determines which additional options are available and how t
 
 These options apply to all transaction types in the `run` and `tx` commands.
 
-| Flag | Default | Aliases | Description |
-|------|---------|---------|-------------|
-| `--tx-type <TYPE>` | `0` | `--type`, `--ty` | Transaction type number |
-| `--gas <AMOUNT>` | `10000000` | `--gas-limit` | Gas limit |
-| `--basefee <AMOUNT>` | `0` | `--gas-price`, `--price`, `--base-fee` | Gas price (Legacy) or max fee per gas (EIP-1559) |
-| `--priority-fee <AMOUNT>` | N/A | `--priorityfee`, `--tip` | EIP-1559 max priority fee per gas |
-| `--sender <ADDRESS>` | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` | `--from` | Transaction sender |
-| `--receiver <ADDRESS>` | `0x0000…0000` | `--to` | Transaction receiver |
-| `--nonce <NONCE>` | `0` | — | Transaction nonce |
-| `--create` | `false` | — | Execute in create mode (deploy contract). Requires explicit `true`. |
-| `--value <AMOUNT>` | `0` | — | ETH value in wei (supports `1ether`, `100gwei`, `1000wei` suffixes) |
-| `--input <HEX>` | N/A | `--data` | Transaction calldata as hex |
-| `--inputfile <PATH>` | N/A | `--datafile`, `--input-file`, `--data-file` | Calldata from file (`-` for stdin) |
+| Flag                      | Default                                      | Aliases                                     | Description                                                         |
+| ------------------------- | -------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------- |
+| `--tx-type <TYPE>`        | `0`                                          | `--type`, `--ty`                            | Transaction type number                                             |
+| `--gas <AMOUNT>`          | `10000000`                                   | `--gas-limit`                               | Gas limit                                                           |
+| `--basefee <AMOUNT>`      | `0`                                          | `--gas-price`, `--price`, `--base-fee`      | Gas price (Legacy) or max fee per gas (EIP-1559)                    |
+| `--priority-fee <AMOUNT>` | N/A                                          | `--priorityfee`, `--tip`                    | EIP-1559 max priority fee per gas                                   |
+| `--sender <ADDRESS>`      | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` | `--from`                                    | Transaction sender                                                  |
+| `--receiver <ADDRESS>`    | `0x0000…0000`                                | `--to`                                      | Transaction receiver                                                |
+| `--nonce <NONCE>`         | `0`                                          | —                                           | Transaction nonce                                                   |
+| `--create`                | `false`                                      | —                                           | Execute in create mode (deploy contract). Requires explicit `true`. |
+| `--value <AMOUNT>`        | `0`                                          | —                                           | ETH value in wei (supports `1ether`, `100gwei`, `1000wei` suffixes) |
+| `--input <HEX>`           | N/A                                          | `--data`                                    | Transaction calldata as hex                                         |
+| `--inputfile <PATH>`      | N/A                                          | `--datafile`, `--input-file`, `--data-file` | Calldata from file (`-` for stdin)                                  |
 
 ## Type 0 — Legacy
 
@@ -45,11 +45,12 @@ Pre-warming the access list reduces gas costs for those accesses from cold to wa
 
 ### Additional Options
 
-| Flag | Default | Aliases | Description |
-|------|---------|---------|-------------|
-| `--access <ENTRY>` | N/A | `--accesslist`, `--access-list` | Access list entry (repeatable) |
+| Flag               | Default | Aliases                         | Description                    |
+| ------------------ | ------- | ------------------------------- | ------------------------------ |
+| `--access <ENTRY>` | N/A     | `--accesslist`, `--access-list` | Access list entry (repeatable) |
 
 Access list entry format:
+
 - `ADDRESS` — pre-warm an address (no storage keys)
 - `ADDRESS:KEY1,KEY2,...` — pre-warm an address and specific storage keys (comma-separated)
 
@@ -82,9 +83,9 @@ Also supports access lists.
 
 ### Additional Options
 
-| Flag | Default | Aliases | Description |
-|------|---------|---------|-------------|
-| `--auth <AUTH>` | N/A | `--authorization` | Authorization tuple (repeatable) |
+| Flag            | Default | Aliases           | Description                      |
+| --------------- | ------- | ----------------- | -------------------------------- |
+| `--auth <AUTH>` | N/A     | `--authorization` | Authorization tuple (repeatable) |
 
 Authorization format: `AUTHORITY:NONCE->DELEGATION`
 
@@ -112,10 +113,10 @@ These are system-level transactions used by the Optimism bridge.
 
 ### Additional Options
 
-| Flag | Default | Aliases | Description |
-|------|---------|---------|-------------|
-| `--source-hash <HASH>` | N/A | `--sourcehash` | Source hash identifying the deposit origin (B256) |
-| `--mint <AMOUNT>` | N/A | — | Amount of ETH to mint to the sender (in wei) |
+| Flag                   | Default | Aliases        | Description                                       |
+| ---------------------- | ------- | -------------- | ------------------------------------------------- |
+| `--source-hash <HASH>` | N/A     | `--sourcehash` | Source hash identifying the deposit origin (B256) |
+| `--mint <AMOUNT>`      | N/A     | —              | Amount of ETH to mint to the sender (in wei)      |
 
 ```bash
 mega-evme tx --tx-type 126 \

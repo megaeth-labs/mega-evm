@@ -18,11 +18,11 @@ mega-evme run 0x60016000526001601ff3 --trace --tracer opcode
 These flags control what the opcode tracer captures.
 Disabling memory and stack capture significantly reduces trace size for large executions.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--trace.opcode.disable-memory` | `false` | Omit memory snapshots from each step |
-| `--trace.opcode.disable-stack` | `false` | Omit stack snapshots from each step |
-| `--trace.opcode.disable-storage` | `false` | Omit storage change records |
+| Flag                                | Default | Description                                                |
+| ----------------------------------- | ------- | ---------------------------------------------------------- |
+| `--trace.opcode.disable-memory`     | `false` | Omit memory snapshots from each step                       |
+| `--trace.opcode.disable-stack`      | `false` | Omit stack snapshots from each step                        |
+| `--trace.opcode.disable-storage`    | `false` | Omit storage change records                                |
 | `--trace.opcode.enable-return-data` | `false` | Include return data in each step (off by default for size) |
 
 ## Output Format
@@ -32,26 +32,26 @@ The top-level object wraps the trace:
 
 ### Schema
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `failed` | bool | Whether the transaction reverted |
-| `gas` | number | Total gas used |
+| Field         | Type       | Description                      |
+| ------------- | ---------- | -------------------------------- |
+| `failed`      | bool       | Whether the transaction reverted |
+| `gas`         | number     | Total gas used                   |
 | `returnValue` | hex string | Return data from the transaction |
-| `structLogs` | array | Array of per-opcode step objects |
+| `structLogs`  | array      | Array of per-opcode step objects |
 
 Each entry in `structLogs`:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `pc` | number | Program counter |
-| `op` | string | Opcode name (e.g., `PUSH1`, `SSTORE`) |
-| `gas` | number | Gas remaining before this step |
-| `gasCost` | number | Gas consumed by this step |
-| `depth` | number | Call depth |
-| `stack` | array | Stack contents as hex strings (unless disabled) |
-| `memory` | array | Memory contents as 32-byte hex chunks (unless disabled) |
-| `storage` | object | Storage changes as key-value hex pairs (unless disabled) |
-| `returnData` | hex string | Return data at this step (only if enabled) |
+| Field        | Type       | Description                                              |
+| ------------ | ---------- | -------------------------------------------------------- |
+| `pc`         | number     | Program counter                                          |
+| `op`         | string     | Opcode name (e.g., `PUSH1`, `SSTORE`)                    |
+| `gas`        | number     | Gas remaining before this step                           |
+| `gasCost`    | number     | Gas consumed by this step                                |
+| `depth`      | number     | Call depth                                               |
+| `stack`      | array      | Stack contents as hex strings (unless disabled)          |
+| `memory`     | array      | Memory contents as 32-byte hex chunks (unless disabled)  |
+| `storage`    | object     | Storage changes as key-value hex pairs (unless disabled) |
+| `returnData` | hex string | Return data at this step (only if enabled)               |
 
 ### Example Output
 
@@ -78,9 +78,7 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "gas": 9939997,
       "gasCost": 3,
       "depth": 1,
-      "stack": [
-        "0x1"
-      ],
+      "stack": ["0x1"],
       "memory": []
     },
     {
@@ -89,10 +87,7 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "gas": 9939994,
       "gasCost": 6,
       "depth": 1,
-      "stack": [
-        "0x1",
-        "0x0"
-      ],
+      "stack": ["0x1", "0x0"],
       "memory": []
     },
     {
@@ -112,9 +107,7 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "gas": 9939985,
       "gasCost": 3,
       "depth": 1,
-      "stack": [
-        "0x1"
-      ],
+      "stack": ["0x1"],
       "memory": [
         "0000000000000000000000000000000000000000000000000000000000000001"
       ]
@@ -125,10 +118,7 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer opcode` produces:
       "gas": 9939982,
       "gasCost": 0,
       "depth": 1,
-      "stack": [
-        "0x1",
-        "0x1f"
-      ],
+      "stack": ["0x1", "0x1f"],
       "memory": [
         "0000000000000000000000000000000000000000000000000000000000000001"
       ]

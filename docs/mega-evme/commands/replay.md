@@ -60,12 +60,12 @@ Override flags let you modify the transaction before re-executing it.
 The original on-chain transaction is unchanged; only the local replay is affected.
 This is useful for "what-if" testing: what happens with less gas, different calldata, or a different ETH value?
 
-| Flag | Aliases | Description |
-|------|---------|-------------|
-| `--override.gas-limit <GAS>` | `--override.gaslimit` | Replace the transaction's gas limit |
-| `--override.value <VALUE>` | | Replace the ETH value sent (supports `1ether`, `100gwei` suffixes) |
-| `--override.input <HEX>` | `--override.data` | Replace the calldata with a hex-encoded byte string |
-| `--override.input-file <FILE>` | `--override.data-file` | Replace the calldata with the contents of a file |
+| Flag                           | Aliases                | Description                                                        |
+| ------------------------------ | ---------------------- | ------------------------------------------------------------------ |
+| `--override.gas-limit <GAS>`   | `--override.gaslimit`  | Replace the transaction's gas limit                                |
+| `--override.value <VALUE>`     |                        | Replace the ETH value sent (supports `1ether`, `100gwei` suffixes) |
+| `--override.input <HEX>`       | `--override.data`      | Replace the calldata with a hex-encoded byte string                |
+| `--override.input-file <FILE>` | `--override.data-file` | Replace the calldata with the contents of a file                   |
 
 Note that `replay` does not accept `--chain`, block environment flags, or pre-state flags.
 All of that context comes from the RPC.

@@ -17,11 +17,11 @@ The tracer name accepts both `pre-state` and `prestate`.
 
 ## Options
 
-| Flag | Default | Aliases | Description |
-|------|---------|---------|-------------|
-| `--trace.prestate.diff-mode` | `false` | `--trace.pre-state.diff-mode` | Show state diff (before/after) instead of just the pre-state |
-| `--trace.prestate.disable-code` | `false` | `--trace.pre-state.disable-code` | Omit contract bytecode from the output |
-| `--trace.prestate.disable-storage` | `false` | `--trace.pre-state.disable-storage` | Omit storage slots from the output |
+| Flag                               | Default | Aliases                             | Description                                                  |
+| ---------------------------------- | ------- | ----------------------------------- | ------------------------------------------------------------ |
+| `--trace.prestate.diff-mode`       | `false` | `--trace.pre-state.diff-mode`       | Show state diff (before/after) instead of just the pre-state |
+| `--trace.prestate.disable-code`    | `false` | `--trace.pre-state.disable-code`    | Omit contract bytecode from the output                       |
+| `--trace.prestate.disable-storage` | `false` | `--trace.pre-state.disable-storage` | Omit storage slots from the output                           |
 
 ## Output Format
 
@@ -29,12 +29,12 @@ The tracer name accepts both `pre-state` and `prestate`.
 
 Each account entry in the output contains:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `balance` | hex number | Account balance in wei |
-| `nonce` | number | Account nonce (only in diff mode) |
-| `code` | hex bytes | Contract bytecode (omitted with `--trace.prestate.disable-code`) |
-| `storage` | object | Storage slots as hex key-value pairs (omitted with `--trace.prestate.disable-storage`) |
+| Field     | Type       | Description                                                                            |
+| --------- | ---------- | -------------------------------------------------------------------------------------- |
+| `balance` | hex number | Account balance in wei                                                                 |
+| `nonce`   | number     | Account nonce (only in diff mode)                                                      |
+| `code`    | hex bytes  | Contract bytecode (omitted with `--trace.prestate.disable-code`)                       |
+| `storage` | object     | Storage slots as hex key-value pairs (omitted with `--trace.prestate.disable-storage`) |
 
 In default mode, the output is a flat map of addresses to account state.
 In diff mode, the output has two top-level keys: `pre` and `post`, each containing a map of addresses.
@@ -96,6 +96,7 @@ Running `WETH.deposit()` with `--trace.prestate.diff-mode` shows how the deposit
 ```
 
 In this example:
+
 - The sender's balance decreased (paid ETH + gas), and nonce incremented to 1.
 - WETH's balance increased by the deposited amount, and a new storage slot was written (the sender's balance mapping).
 - The `code` field appears in `pre` but not `post` — it didn't change, so diff mode omits it from `post`.
