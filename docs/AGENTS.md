@@ -214,7 +214,7 @@ Every upgrade page MUST follow this structure:
 
 ```markdown
 ---
-spec: <SpecName>
+description: <SpecName> network upgrade — <one-line summary>.
 ---
 
 # <SpecName> Network Upgrade
