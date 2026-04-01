@@ -1,3 +1,7 @@
+---
+description: Select which MegaETH spec version and chain ID to use.
+---
+
 # Chain and Spec Selection
 
 These options control which MegaETH spec and chain ID the EVM uses during execution.

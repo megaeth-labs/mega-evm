@@ -1,3 +1,7 @@
+---
+description: Snapshot accessed account state before execution, with optional before/after diff mode.
+---
+
 # Pre-State Tracer
 
 The pre-state tracer captures the account state that was accessed during execution.

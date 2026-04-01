@@ -1,3 +1,7 @@
+---
+description: Configure block number, timestamp, coinbase, base fee, and other block-level fields.
+---
+
 # Block Environment
 
 These options configure the block context for EVM execution.

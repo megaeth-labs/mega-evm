@@ -1,3 +1,7 @@
+---
+description: Fetch and re-execute an on-chain transaction with optional overrides and tracing.
+---
+
 # replay
 
 Re-execute a historical transaction locally using state and block context fetched from an RPC endpoint.

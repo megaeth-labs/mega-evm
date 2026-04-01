@@ -1,3 +1,7 @@
+---
+description: Execute and debug EVM bytecode locally with MegaETH's gas model, tracing, and state forking.
+---
+
 # mega-evme
 
 A command-line tool for executing and debugging EVM bytecode on MegaETH specs.

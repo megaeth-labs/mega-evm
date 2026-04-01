@@ -1,3 +1,7 @@
+---
+description: Log every instruction with gas, stack, memory, and storage at each step.
+---
+
 # Opcode Tracer
 
 The opcode tracer records every EVM instruction executed, along with gas costs, stack state, memory, and storage changes.

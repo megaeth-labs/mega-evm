@@ -1,3 +1,7 @@
+---
+description: Control SALT bucket capacities to test dynamic storage gas pricing.
+---
+
 # SALT Bucket Configuration
 
 MegaETH uses SALT buckets to dynamically scale storage gas costs.

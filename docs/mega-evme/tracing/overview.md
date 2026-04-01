@@ -1,3 +1,7 @@
+---
+description: Record step-by-step EVM execution with opcode, call, and pre-state tracers.
+---
+
 # Execution Tracing
 
 `mega-evme` can record detailed execution traces during EVM runs.

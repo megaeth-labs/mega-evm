@@ -1,3 +1,7 @@
+---
+description: Execute a transaction against local or fork-from-RPC state.
+---
+
 # tx
 
 Run a transaction with full transaction context and optional RPC state forking.

@@ -1,3 +1,7 @@
+---
+description: Runnable recipes for debugging, gas analysis, state diffing, and more.
+---
+
 # Cookbook
 
 Worked examples for common `mega-evme` tasks.

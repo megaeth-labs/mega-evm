@@ -1,3 +1,7 @@
+---
+description: Load prestate, override balances and storage, fork from RPC, and dump post-execution state.
+---
+
 # State Management
 
 `mega-evme` lets you control the EVM's initial account state, override balances and storage, fork live chain state, and capture the post-execution state for inspection or reuse.

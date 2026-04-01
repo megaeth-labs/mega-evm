@@ -1,3 +1,7 @@
+---
+description: Run raw EVM bytecode in call or create mode with full environment control.
+---
+
 # run
 
 Execute arbitrary EVM bytecode in a controlled local environment.

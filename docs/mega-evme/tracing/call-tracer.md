@@ -1,3 +1,7 @@
+---
+description: Capture the nested CALL/CREATE tree with gas usage, return data, and log events.
+---
+
 # Call Tracer
 
 The call tracer records the nested tree of CALL, STATICCALL, DELEGATECALL, CALLCODE, and CREATE operations.

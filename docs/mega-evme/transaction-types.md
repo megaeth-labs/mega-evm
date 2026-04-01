@@ -1,3 +1,7 @@
+---
+description: Legacy, EIP-2930, EIP-1559, EIP-7702, and Deposit transaction options.
+---
+
 # Transaction Types
 
 `mega-evme` supports five transaction types via the `--tx-type` flag.
