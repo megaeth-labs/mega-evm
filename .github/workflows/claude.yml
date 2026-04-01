@@ -84,6 +84,12 @@ jobs:
 
             Review this pull request following the guidelines in CLAUDE.md and REVIEW.md.
 
+            ## Documentation scope exclusion
+
+            Do NOT check whether documentation under `docs/` needs updating based on the code changes.
+            A separate `doc-impact` job handles documentation impact analysis.
+            You may still review changes to doc files if they are part of the PR diff, but do not proactively suggest doc updates for code changes.
+
             ## Conversation awareness
 
             Before posting any feedback:
@@ -103,6 +109,67 @@ jobs:
 
             Use `gh pr comment` for top-level feedback (exactly one comment).
             Use `mcp__github_inline_comment__create_inline_comment` (with `confirmed: true`) to highlight specific code issues.
+
+  doc-impact:
+    if: |
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' ||
+       github.event.action == 'synchronize' ||
+       github.event.action == 'ready_for_review' ||
+       github.event.action == 'reopened')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Check for source code changes
+        id: filter
+        run: |
+          FILES=$(gh pr diff ${{ github.event.pull_request.number }} --name-only || true)
+          if echo "$FILES" | grep -qE '^crates/mega-evm/src/|^crates/system-contracts/'; then
+            echo "has_source_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_source_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.filter.outputs.has_source_changes == 'true'
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --allowedTools "Read,Glob,Grep,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(ls:*),Bash(tree:*)"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are a documentation impact checker for the MegaETH specification.
+            Your ONLY job is to determine if this PR's code changes require updates to docs/ or agent files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, REVIEW.md, .claude/skills/*/SKILL.md).
+
+            Follow the doc-impact-check skill instructions in .claude/skills/doc-impact-check/SKILL.md.
+
+            Key rules:
+            - Read the PR diff using `gh pr diff`.
+            - Only analyze behavioral code changes (skip tests, CI, refactoring).
+            - Map code changes to affected doc pages AND agent files using both mapping tables (spec docs and agent/skill files).
+            - Check if the PR already includes updates for the affected files.
+            - If updates are needed and missing, post exactly ONE comment via `gh pr comment`.
+            - If no updates are needed, or the PR already includes them, do NOT post any comment.
+            - Do NOT review code quality — the pr-review job handles that.
+
+            Before commenting, check existing PR comments using `gh pr view --comments`.
+            If you already posted a doc-impact comment on this PR:
+            - If the doc updates have been addressed, delete your previous comment using `gh api`.
+            - If there are still gaps but they changed, edit your existing comment.
+            - Do NOT post duplicate comments.
 
   label-check:
     if: |
