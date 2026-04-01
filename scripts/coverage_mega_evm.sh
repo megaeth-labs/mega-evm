@@ -23,6 +23,7 @@ cargo llvm-cov \
     --locked \
     --package mega-evm \
     --all-features \
+    --branch \
     --lib \
     --tests \
     --no-fail-fast \
@@ -30,18 +31,21 @@ cargo llvm-cov \
 
 cargo llvm-cov report \
     --package mega-evm \
+    --branch \
     --ignore-filename-regex "$IGNORE_FILENAME_REGEX" \
     --lcov \
     --output-path "$LCOV_PATH"
 
 cargo llvm-cov report \
     --package mega-evm \
+    --branch \
     --ignore-filename-regex "$IGNORE_FILENAME_REGEX" \
     --html \
     --output-dir "$COV_DIR"
 
 cargo llvm-cov report \
     --package mega-evm \
+    --branch \
     --ignore-filename-regex "$IGNORE_FILENAME_REGEX" > "$REPORT"
 
 echo
