@@ -35,6 +35,10 @@ Finally, the [keyless deploy](../system-contracts/keyless-deploy.md) sandbox now
 
 - The top-level call frame starts with the full transaction budget for each resource dimension.
 - Each inner call frame receives `remaining × 98 / 100` of its parent's remaining budget.
+- These per-call-frame budgets are system-enforced and derived automatically from the parent frame's remaining budget.
+  The calling contract cannot directly control them.
+- Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains under direct contract control.
+  The 98/100 forwarding ratio does not apply to total gas, which follows standard EVM semantics.
 - When a call frame exceeds its local budget, it reverts with [`MegaLimitExceeded(uint8 kind, uint64 limit)`](../glossary.md#call-frame-local-exceed) (does not halt the transaction).
 - The parent call frame can continue executing after a child call frame reverts due to a call-frame-local limit.
 - Transaction-level exceeds still halt the entire transaction with `OutOfGas`.
@@ -187,8 +191,9 @@ interface IMegaLimitControl {
 
 ## Developer Impact
 
-**Contract authors writing nested call patterns** should be aware that each inner call frame now receives at most 98% of the parent's remaining resource budget.
-If your contract makes deeply nested calls, the innermost call frames will have progressively smaller budgets.
+**Contract authors writing nested call patterns** should be aware that each inner call frame now receives at most 98% of the parent's remaining budget for compute gas, data size, KV updates, and state growth.
+These budgets are system-enforced and cannot be overridden by the calling contract — only total gas (via the gas parameter in CALL-like opcodes) remains under direct contract control.
+If your contract makes deeply nested calls, the innermost call frames will have progressively smaller resource budgets.
 Design your call depth and resource usage accordingly.
 
 **Contracts that catch reverts from inner calls** can now decode `MegaLimitExceeded(uint8 kind, uint64 limit)` from the revert data to determine whether a child call failed due to a call-frame-local resource limit.
