@@ -154,8 +154,8 @@ Detention preserves expressiveness while bounding the computation that may follo
 
 **Why a relative cap instead of an absolute cap?**
 The original MiniRex design used an absolute cap, which guaranteed a hard upper bound on total compute gas after volatile access.
-Its drawback was that late volatile access could cause immediate failure if substantial compute gas was already consumed — penalizing transactions for work done *before* touching volatile data.
-The relative model avoids this by guaranteeing a fixed budget of additional compute gas *after* the access, regardless of prior consumption.
+Its drawback was that late volatile access could cause immediate failure if substantial compute gas was already consumed — penalizing transactions for work done _before_ touching volatile data.
+The relative model avoids this by guaranteeing a fixed budget of additional compute gas _after_ the access, regardless of prior consumption.
 
 **Why make the most restrictive cap win?**
 A transaction that touches multiple volatile sources should be governed by the strongest applicable constraint.

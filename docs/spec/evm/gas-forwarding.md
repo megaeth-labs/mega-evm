@@ -64,11 +64,11 @@ The compute-gas limit of the child call frame MUST remain at the pre-stipend lev
 
 ## Constants
 
-| Constant                  | Value  | Description                                                                                             |
-| ------------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
-| `GAS_FORWARD_NUMERATOR`   | 98     | Numerator of the stable forwarding fraction                                                             |
-| `GAS_FORWARD_DENOMINATOR` | 100    | Denominator of the stable forwarding fraction                                                           |
-| `CALL_STIPEND`            | 2,300  | Standard EVM stipend preserved for value-transferring `CALL` and `CALLCODE`                             |
+| Constant                  | Value  | Description                                                                               |
+| ------------------------- | ------ | ----------------------------------------------------------------------------------------- |
+| `GAS_FORWARD_NUMERATOR`   | 98     | Numerator of the stable forwarding fraction                                               |
+| `GAS_FORWARD_DENOMINATOR` | 100    | Denominator of the stable forwarding fraction                                             |
+| `CALL_STIPEND`            | 2,300  | Standard EVM stipend preserved for value-transferring `CALL` and `CALLCODE`               |
 | `STORAGE_CALL_STIPEND`    | 23,000 | Additional stipend for storage-gas operations in value-transferring `CALL` and `CALLCODE` |
 
 ## Rationale

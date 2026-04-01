@@ -206,4 +206,5 @@ Allowing the counter to go negative during intermediate steps keeps the accounti
 ## Spec History
 
 This page describes the current accounting behavior.
+
 - [Rex4](../upgrades/rex4.md) — introduced per-call-frame runtime budgets for all four resource dimensions.

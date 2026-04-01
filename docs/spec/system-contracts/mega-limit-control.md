@@ -88,8 +88,8 @@ It decreases as execution proceeds.
 
 ## Constants
 
-| Constant                     | Value                                        | Description                        |
-| ---------------------------- | -------------------------------------------- | ---------------------------------- |
+| Constant                     | Value                                        | Description                       |
+| ---------------------------- | -------------------------------------------- | --------------------------------- |
 | `MEGA_LIMIT_CONTROL_ADDRESS` | `0x6342000000000000000000000000000000000005` | MegaLimitControl contract address |
 
 ## Rationale

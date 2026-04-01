@@ -111,8 +111,8 @@ No explicit cleanup is needed.
 
 ## Constants
 
-| Constant                      | Value                                        | Description                      |
-| ----------------------------- | -------------------------------------------- | -------------------------------- |
+| Constant                      | Value                                        | Description                        |
+| ----------------------------- | -------------------------------------------- | ---------------------------------- |
 | `MEGA_ACCESS_CONTROL_ADDRESS` | `0x6342000000000000000000000000000000000004` | MegaAccessControl contract address |
 
 ## Rationale

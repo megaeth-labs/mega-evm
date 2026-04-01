@@ -146,15 +146,15 @@ The parent call frame MAY continue execution.
 
 ## Constants
 
-| Constant                   | Value       | Description                                             |
-| -------------------------- | ----------- | ------------------------------------------------------- |
-| `TX_COMPUTE_GAS_LIMIT`     | 200,000,000 | Maximum compute gas per transaction                     |
-| `TX_DATA_LIMIT`            | 13,107,200  | Maximum data size per transaction                       |
-| `BLOCK_DATA_LIMIT`         | 13,107,200  | Maximum cumulative block data size                      |
-| `TX_KV_UPDATE_LIMIT`       | 500,000     | Maximum KV updates per transaction                      |
-| `BLOCK_KV_UPDATE_LIMIT`    | 500,000     | Maximum cumulative block KV updates                     |
-| `TX_STATE_GROWTH_LIMIT`    | 1,000       | Maximum state growth per transaction                    |
-| `BLOCK_STATE_GROWTH_LIMIT` | 1,000       | Maximum cumulative block state growth                   |
+| Constant                   | Value       | Description                                     |
+| -------------------------- | ----------- | ----------------------------------------------- |
+| `TX_COMPUTE_GAS_LIMIT`     | 200,000,000 | Maximum compute gas per transaction             |
+| `TX_DATA_LIMIT`            | 13,107,200  | Maximum data size per transaction               |
+| `BLOCK_DATA_LIMIT`         | 13,107,200  | Maximum cumulative block data size              |
+| `TX_KV_UPDATE_LIMIT`       | 500,000     | Maximum KV updates per transaction              |
+| `BLOCK_KV_UPDATE_LIMIT`    | 500,000     | Maximum cumulative block KV updates             |
+| `TX_STATE_GROWTH_LIMIT`    | 1,000       | Maximum state growth per transaction            |
+| `BLOCK_STATE_GROWTH_LIMIT` | 1,000       | Maximum cumulative block state growth           |
 | `FRAME_LIMIT_NUMERATOR`    | 98          | Numerator of per-call-frame budget forwarding   |
 | `FRAME_LIMIT_DENOMINATOR`  | 100         | Denominator of per-call-frame budget forwarding |
 

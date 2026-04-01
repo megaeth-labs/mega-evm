@@ -23,7 +23,7 @@
 //! - **`REX3`**: Increases oracle gas limit to 20M, moves oracle detention to SLOAD-based, tracks
 //!   keyless deploy compute gas
 //! - **`REX4`**: Per-call-frame resource budgets, relative gas detention, storage gas stipend,
-//!   MegaAccessControl and MegaLimitControl system contracts
+//!   `MegaAccessControl` and `MegaLimitControl` system contracts
 
 mod context;
 mod execution;

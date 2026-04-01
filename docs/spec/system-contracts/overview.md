@@ -62,8 +62,8 @@ Stable behavior for an already-activated spec MUST remain unchanged.
 | `ORACLE_CONTRACT_ADDRESS`          | `0x6342000000000000000000000000000000000001` | Stable Oracle system-contract address           |
 | `HIGH_PRECISION_TIMESTAMP_ADDRESS` | `0x6342000000000000000000000000000000000002` | Stable high-precision timestamp wrapper address |
 | `KEYLESS_DEPLOY_ADDRESS`           | `0x6342000000000000000000000000000000000003` | Stable KeylessDeploy system-contract address    |
-| `MEGA_ACCESS_CONTROL_ADDRESS`      | `0x6342000000000000000000000000000000000004` | MegaAccessControl address         |
-| `MEGA_LIMIT_CONTROL_ADDRESS`       | `0x6342000000000000000000000000000000000005` | MegaLimitControl address          |
+| `MEGA_ACCESS_CONTROL_ADDRESS`      | `0x6342000000000000000000000000000000000004` | MegaAccessControl address                       |
+| `MEGA_LIMIT_CONTROL_ADDRESS`       | `0x6342000000000000000000000000000000000005` | MegaLimitControl address                        |
 
 ## Spec History
 
