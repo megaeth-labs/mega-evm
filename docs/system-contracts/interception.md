@@ -60,9 +60,9 @@ By default, an intercepted call consumes zero gas from the forwarded gas limit.
 Each system contract MAY define additional gas consumption for its intercepted functions.
 
 <details>
-<summary>Rex4 (unstable): Storage-call stipend</summary>
+<summary>Rex4 (unstable): Storage gas stipend</summary>
 
-An intercepted call MUST NOT receive a storage-call stipend.
+An intercepted call MUST NOT receive a storage gas stipend.
 The stipend is only applicable on fall-through.
 
 </details>

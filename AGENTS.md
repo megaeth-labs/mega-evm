@@ -143,7 +143,7 @@ MegaETH's parallel EVM needs to minimize conflicts between concurrent transactio
 This forces transactions that touch volatile data to terminate quickly, reducing parallel execution conflicts without banning the access outright.
 Detained gas is effectively refunded — users only pay for actual computation performed.
 
-#### Storage Call Stipend (Rex4+)
+#### Storage Gas Stipend (Rex4+)
 
 MegaETH's 10× storage gas multiplier on LOG opcodes causes even `LOG1` to cost 4,500 gas, exceeding the EVM's `CALL_STIPEND` of 2,300.
 Rex4 introduces `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`.
@@ -153,7 +153,7 @@ Unused stipend is burned on return — the caller never recovers it.
 The stipend lifecycle is managed by `StorageCallStipendTracker` (`limit/storage_call_stipend.rs`), which maintains a per-frame stack aligned with the EVM call stack.
 The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for `cap_current_frame_limit`).
 
-The storage call stipend is subject to the general gas leakage pitfalls described below.
+The storage gas stipend is subject to the general gas leakage pitfalls described below.
 
 #### System Contracts
 

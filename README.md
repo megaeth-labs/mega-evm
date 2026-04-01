@@ -80,7 +80,7 @@ For complete Rex3 specification, see the [Rex3 upgrade page](https://megaeth-lab
 
 - **Per-Call-Frame Resource Budgets**: All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
 - **Relative Gas Detention**: Effective detained limit is `current_usage + cap` instead of an absolute cap
-- **Storage Call Stipend**: Value-transferring CALL/CALLCODE receives an additional 23,000 gas for storage gas operations
+- **Storage Gas Stipend**: Value-transferring CALL/CALLCODE receives an additional 23,000 gas for storage gas operations
 - **MegaAccessControl System Contract**: Allows contracts to proactively disable volatile data access for a call subtree
 - **MegaLimitControl System Contract**: Allows querying effective remaining compute gas under detention and call frame limits
 - **Rex3 Baseline**: Inherits all Rex3 behavior
