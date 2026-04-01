@@ -11,7 +11,7 @@ pub fn get_hardfork_config(chain_id: u64) -> MegaHardforkConfig {
             .with(MegaHardfork::Rex, ForkCondition::Timestamp(1764694618))
             .with(MegaHardfork::Rex1, ForkCondition::Timestamp(1766147599))
             .with(MegaHardfork::Rex2, ForkCondition::Timestamp(1770116400))
-            .with(MegaHardfork::Rex3, ForkCondition::Never)
+            .with(MegaHardfork::Rex3, ForkCondition::Timestamp(1771380000))
             .with(MegaHardfork::Rex4, ForkCondition::Never),
         // MegaETH mainnet
         4326 => MegaHardforkConfig::new()
@@ -21,7 +21,7 @@ pub fn get_hardfork_config(chain_id: u64) -> MegaHardforkConfig {
             .with(MegaHardfork::Rex, ForkCondition::Timestamp(1764851940))
             .with(MegaHardfork::Rex1, ForkCondition::Timestamp(1766282400))
             .with(MegaHardfork::Rex2, ForkCondition::Timestamp(1770246000))
-            .with(MegaHardfork::Rex3, ForkCondition::Never)
+            .with(MegaHardfork::Rex3, ForkCondition::Timestamp(1771639200))
             .with(MegaHardfork::Rex4, ForkCondition::Never),
         // Default: all hardforks enabled at genesis
         _ => MegaHardforkConfig::new()

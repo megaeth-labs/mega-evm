@@ -4,7 +4,7 @@ This file provides guidance to AI agents (e.g., claude code, codex, cursor, etc.
 
 ## Project Overview
 
-MegaETH EVM (mega-evm) — a specialized EVM implementation for MegaETH, built on **revm** and **op-revm** by customizing several hooks exposed by trait of revm.
+MegaEVM (mega-evm) — a specialized EVM implementation for MegaETH, built on **revm** and **op-revm** by customizing several hooks exposed by trait of revm.
 
 ## Build & Development Commands
 
@@ -52,7 +52,7 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX1` → `MINI_REX2` → `REX` → `REX1` → `REX2` → `REX3` → `REX4`
+Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4`
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
@@ -60,9 +60,10 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX1` → `MINI_REX2` → `R
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
   - _At present, `REX4` is the unstable spec._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
-  - Specifications of each spec can be found in `./specs`, which should always be maintained to be consistent with the implementation.
+  - Specifications of each spec can be found in the upgrade pages under `docs/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Multiple hardforks can map to one spec.
+  `MiniRex1` and `MiniRex2` are hardforks that reuse `EQUIVALENCE` and `MINI_REX` respectively.
   Defined in `crates/mega-evm/src/block/hardfork.rs`.
 - All specs use `OpSpecId::ISTHMUS` as the Optimism base layer.
   But this is subject to change in the future.
@@ -74,7 +75,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX1` → `MINI_REX2` → `R
 - **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement.
   This module defines how a block in MegaETH block should be executed.
 - **`limit/`** — Resource limit tracking: compute gas, data size, KV updates, state growth (each in its own module).
-  MegaETH introduces additional resource metering mechanism (documentation in `docs/RESOURCE_ACCOUNTING.md`) and this module implements their logic as utility structs to be used by mega-evm.
+  MegaETH introduces additional resource metering mechanism and this module implements their logic as utility structs to be used by mega-evm.
 - **`access/`** — Block env access tracking and volatile data detection for parallel execution.
   MegaETH incorporates parallel EVM, so it is essential to reduce the conflicts between transactions by restricting the access to some "hot" resources.
   This module collects the logic of tracking the access to such hot resources during transaction execution.
@@ -142,6 +143,18 @@ MegaETH's parallel EVM needs to minimize conflicts between concurrent transactio
 This forces transactions that touch volatile data to terminate quickly, reducing parallel execution conflicts without banning the access outright.
 Detained gas is effectively refunded — users only pay for actual computation performed.
 
+#### Storage Gas Stipend (Rex4+)
+
+MegaETH's 10× storage gas multiplier on LOG opcodes causes even `LOG1` to cost 4,500 gas, exceeding the EVM's `CALL_STIPEND` of 2,300.
+Rex4 introduces `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`.
+The stipend inflates the child's total gas but a per-frame compute gas cap keeps the extra gas usable only for storage-gas-heavy operations (LOG topic/data costs).
+Unused stipend is burned on return — the caller never recovers it.
+
+The stipend lifecycle is managed by `StorageCallStipendTracker` (`limit/storage_call_stipend.rs`), which maintains a per-frame stack aligned with the EVM call stack.
+The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for `cap_current_frame_limit`).
+
+The storage gas stipend is subject to the general gas leakage pitfalls described below.
+
 #### System Contracts
 
 MegaETH pre-deploys system contracts at well-known addresses (`0x634200...0001`, `0002`, `0003`, etc.).
@@ -175,6 +188,24 @@ mega-evm requires external context beyond revm's standard `BlockEnv`/`CfgEnv`, p
   Oracle reads in `sload` are **always forced cold** for deterministic replay.
   The `on_hint(from, topic, data)` callback enables synchronous oracle hints during execution.
 - An `EmptyExternalEnv` implementation disables both features (returns minimum bucket size, no oracle data) for testing or standalone use.
+
+### Gas Leakage Pitfalls
+
+Any mechanism that grants, inflates, or adjusts gas on a per-frame basis (e.g., `STORAGE_CALL_STIPEND`, and any future per-frame gas adjustment) must account for all frame termination paths.
+Failing to do so can cause system-granted gas to leak back to the parent call frame or the transaction sender.
+The following paths are common sources of leakage:
+
+1. **System contract interception** (`system/intercept.rs`): Interceptors short-circuit `frame_init` before `AdditionalLimit::before_frame_init` runs, producing a synthetic `FrameResult` without a real child EVM frame.
+   Any per-frame gas adjustment applied in `before_frame_init` is skipped on this path.
+   The `push_empty_frame()` call maintains stack alignment but does not apply adjustments.
+   Synthetic results must not assume any per-frame gas mechanism was applied.
+2. **Gas rescue on TX-level limit exceed** (`limit/limit.rs`): When a transaction-level resource limit is exceeded, `rescue_gas` captures remaining gas for sender refund.
+   If a frame's gas was inflated by a per-frame mechanism, the rescued amount must exclude the inflated portion — otherwise the sender recovers system-granted gas that should have been burned.
+3. **Frame return** (`limit/limit.rs`): `before_frame_return_result` is the final hook before gas is returned to the parent.
+   Any per-frame gas adjustment must be unwound here (e.g., burning unused granted gas).
+   The unwinding must apply identically on success and revert — conditional unwinding can leak gas on one path.
+
+When adding a new per-frame gas mechanism, verify that all three paths handle it correctly and add tests for each.
 
 ## Test Organization (`crates/mega-evm/tests/`)
 
@@ -264,6 +295,14 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Run `cargo fmt --all --check` before completion.
 - **Keep documentation up to date.**
   When making changes, always check whether related documentation needs updating.
-  This includes spec files in `specs/`, docs in `docs/`, and the `CLAUDE.md` itself (e.g., unstable spec marker, spec progression list, system contract table).
+  The primary documentation is in `docs/`.
+  Also update this `AGENTS.md` when relevant (e.g., unstable spec marker, spec progression list, system contract table).
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.
+
+## Documentation Conventions (`docs/`)
+
+The documentation is the public-facing specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
+It is framed as a protocol specification, not as documentation for a specific crate.
+
+All conventions for writing and editing the documentation (audience, content rules, upgrade page format, writing style) are defined in [`docs/AGENTS.md`](docs/AGENTS.md).

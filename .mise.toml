@@ -1,0 +1,24 @@
+[tools]
+lychee = "latest"
+"npm:markdownlint-cli2" = "latest"
+"npm:prettier" = "latest"
+
+[tasks.lint]
+description = "Run all doc checks (links, lint, format)"
+depends = ["check-links", "check-lint", "check-format"]
+
+[tasks.check-links]
+description = "Check internal links"
+run = "lychee 'docs/**/*.md'"
+
+[tasks.check-lint]
+description = "Lint Markdown structure"
+run = "markdownlint-cli2"
+
+[tasks.check-format]
+description = "Check formatting"
+run = "prettier --check 'docs/**/*.md' '*.md'"
+
+[tasks.fmt]
+description = "Auto-fix formatting"
+run = "prettier --write 'docs/**/*.md' '*.md'"

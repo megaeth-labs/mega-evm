@@ -487,7 +487,6 @@ Handles state serialization/deserialization:
 
 ## See Also
 
-- [MiniRex Specification](../../../../specs/MiniRex.md)
 - [Project Architecture](../../../../ARCH.md)
-- [Development Guide](../../../../DEV.md)
+- [Main README](../../../../README.md)
 - [Main README](../../../../README.md)

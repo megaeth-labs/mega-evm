@@ -114,6 +114,17 @@ impl ComputeGasTracker {
         used > self.detained_limit && self.detained_limit < self.frame_tracker.tx_limit()
     }
 
+    /// Caps the current (top) frame's compute gas budget.
+    ///
+    /// Used by `STORAGE_CALL_STIPEND`: the child's total gas (`gas_limit`) includes the stipend,
+    /// but compute gas must remain bounded at the original `forwarded_gas + CALL_STIPEND`.
+    /// This method tightens the per-frame compute gas limit to enforce that cap.
+    pub(crate) fn cap_current_frame_limit(&mut self, cap: u64) {
+        if let Some(frame) = self.frame_tracker.frame_mut() {
+            frame.limit = frame.limit.min(cap);
+        }
+    }
+
     /// Records compute gas as persistent usage in the current frame.
     /// If no frame exists (before `frame_init` or after last frame pop),
     /// records to the `tx_entry`.
