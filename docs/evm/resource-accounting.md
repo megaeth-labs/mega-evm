@@ -54,6 +54,8 @@ The sole stable exception is [compute gas](../glossary.md#compute-gas), which MU
 Rex4 adds per-call-frame budgets for all four dimensions.
 The top-level call frame starts with the full transaction budget.
 Each inner call frame receives `remaining × 98 / 100` of its parent call frame's remaining budget.
+These budgets are system-enforced — the calling contract cannot directly control them.
+Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains under direct contract control.
 If an inner call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 The parent call frame MAY continue execution.
 Compute gas consumed by reverted call frames MUST still count toward the transaction total.

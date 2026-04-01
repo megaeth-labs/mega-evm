@@ -140,6 +140,8 @@ When constructing a block, a node or sequencer MUST process candidate transactio
 
 Rex4 adds per-[call-frame](../glossary.md#call-frame) budgets for compute gas, data size, KV updates, and state growth.
 Each inner call frame receives `remaining × FRAME_LIMIT_NUMERATOR / FRAME_LIMIT_DENOMINATOR` of its parent call frame's remaining budget.
+These budgets are system-enforced — the calling contract cannot directly control them.
+Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains under direct contract control.
 If a child call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 The parent call frame MAY continue execution.
 
