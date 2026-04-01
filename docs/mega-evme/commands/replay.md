@@ -43,7 +43,7 @@ Hardcoded hardfork configs exist for:
 - **Chain 6343** — MegaETH testnet v2
 - **Chain 4326** — MegaETH mainnet
 
-For any other chain, `replay` defaults to `Rex4`.
+For any other chain, `replay` enables all hardforks at genesis (currently equivalent to `Rex4`).
 
 ### `--override.spec <SPEC>`
 
