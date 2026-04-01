@@ -76,7 +76,7 @@ For complete Rex2 specification, see the [Rex2 upgrade page](https://megaeth-lab
 
 For complete Rex3 specification, see the [Rex3 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex3.html).
 
-### REX4 Spec *(unstable)*
+### REX4 Spec _(unstable)_
 
 - **Per-Call-Frame Resource Budgets**: All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
 - **Relative Gas Detention**: Effective detained limit is `current_usage + cap` instead of an absolute cap
@@ -169,13 +169,13 @@ mega-evme run 0x60016000526001601ff3 --spec Rex2
 
 The `tx` command supports multiple transaction types with type-specific options:
 
-| Type | Name     | Specific Options                                |
-| ---- | -------- | ----------------------------------------------- |
-| 0    | Legacy   | -                                               |
-| 1    | EIP-2930 | `--access ADDRESS:KEY1,KEY2,...`                |
-| 2    | EIP-1559 | `--priority-fee`, `--access`                    |
-| 4    | EIP-7702 | `--auth AUTHORITY:NONCE->DELEGATION`, `--access`|
-| 126  | Deposit  | `--source-hash`, `--mint`                       |
+| Type | Name     | Specific Options                                 |
+| ---- | -------- | ------------------------------------------------ |
+| 0    | Legacy   | -                                                |
+| 1    | EIP-2930 | `--access ADDRESS:KEY1,KEY2,...`                 |
+| 2    | EIP-1559 | `--priority-fee`, `--access`                     |
+| 4    | EIP-7702 | `--auth AUTHORITY:NONCE->DELEGATION`, `--access` |
+| 126  | Deposit  | `--source-hash`, `--mint`                        |
 
 For detailed documentation, see [mega-evme README](bin/mega-evme/README.md).
 

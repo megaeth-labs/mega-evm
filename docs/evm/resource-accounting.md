@@ -99,28 +99,28 @@ A node MUST track data size as the total number of bytes of execution-related da
 
 The following contributions MUST be counted at transaction start and MUST NOT be reverted:
 
-| Data Type | Size |
-| --------- | ---- |
-| Base transaction data | `BASE_TRANSACTION_DATA_SIZE` |
-| Calldata | `tx.input().len()` |
-| Access list | Sum of encoded entry sizes |
-| EIP-7702 authorizations | `AUTHORIZATION_DATA_SIZE × authorization_count` |
-| Caller account update | `ACCOUNT_UPDATE_DATA_SIZE` |
+| Data Type                 | Size                                                |
+| ------------------------- | --------------------------------------------------- |
+| Base transaction data     | `BASE_TRANSACTION_DATA_SIZE`                        |
+| Calldata                  | `tx.input().len()`                                  |
+| Access list               | Sum of encoded entry sizes                          |
+| EIP-7702 authorizations   | `AUTHORIZATION_DATA_SIZE × authorization_count`     |
+| Caller account update     | `ACCOUNT_UPDATE_DATA_SIZE`                          |
 | Authority account updates | `ACCOUNT_UPDATE_DATA_SIZE × authority_update_count` |
 
 #### Discardable Data Size
 
 The following contributions MUST be tracked within call frames and MUST be discarded if the call frame reverts:
 
-| Data Type | Size | Trigger |
-| --------- | ---- | ------- |
-| Log topics | `LOG_TOPIC_DATA_SIZE × topic_count` | `LOG0`–`LOG4` |
-| Log data | `log_data.len()` | `LOG0`–`LOG4` |
-| SSTORE new write | `ACCOUNT_UPDATE_DATA_SIZE` | `original == present && original != new` |
-| SSTORE reset | `-ACCOUNT_UPDATE_DATA_SIZE` | `original != present && original == new` |
-| Account update (CALL with value) | `ACCOUNT_UPDATE_DATA_SIZE` | Balance change on CALL-like operation |
-| Account update (CREATE/CREATE2) | `ACCOUNT_UPDATE_DATA_SIZE` | Successful account creation path |
-| Deployed bytecode | `code.len()` | Successful `CREATE` or `CREATE2` |
+| Data Type                        | Size                                | Trigger                                  |
+| -------------------------------- | ----------------------------------- | ---------------------------------------- |
+| Log topics                       | `LOG_TOPIC_DATA_SIZE × topic_count` | `LOG0`–`LOG4`                            |
+| Log data                         | `log_data.len()`                    | `LOG0`–`LOG4`                            |
+| SSTORE new write                 | `ACCOUNT_UPDATE_DATA_SIZE`          | `original == present && original != new` |
+| SSTORE reset                     | `-ACCOUNT_UPDATE_DATA_SIZE`         | `original != present && original == new` |
+| Account update (CALL with value) | `ACCOUNT_UPDATE_DATA_SIZE`          | Balance change on CALL-like operation    |
+| Account update (CREATE/CREATE2)  | `ACCOUNT_UPDATE_DATA_SIZE`          | Successful account creation path         |
+| Deployed bytecode                | `code.len()`                        | Successful `CREATE` or `CREATE2`         |
 
 #### Account Update Deduplication
 
@@ -137,21 +137,21 @@ A node MUST track KV updates as the number of state-modifying key-value updates 
 
 The following contributions MUST be counted at transaction scope and MUST NOT be reverted:
 
-| Operation | Count |
-| --------- | ----- |
-| Transaction caller update | `1` |
+| Operation                  | Count                 |
+| -------------------------- | --------------------- |
+| Transaction caller update  | `1`                   |
 | EIP-7702 authority updates | `authorization_count` |
 
 #### Discardable KV Updates
 
 The following contributions MUST be tracked within call frames and MUST be discarded if the call frame reverts:
 
-| Operation | Count | Trigger |
-| --------- | ----- | ------- |
-| SSTORE new write | `+1` | `original == present && original != new` |
-| SSTORE reset | `-1` | `original != present && original == new` |
-| CREATE/CREATE2 | `1` or `2` | Created account plus caller update if caller not yet counted in the current call frame |
-| CALL with value | `1` or `2` | Callee update plus caller update if caller not yet counted in the current call frame |
+| Operation        | Count      | Trigger                                                                                |
+| ---------------- | ---------- | -------------------------------------------------------------------------------------- |
+| SSTORE new write | `+1`       | `original == present && original != new`                                               |
+| SSTORE reset     | `-1`       | `original != present && original == new`                                               |
+| CREATE/CREATE2   | `1` or `2` | Created account plus caller update if caller not yet counted in the current call frame |
+| CALL with value  | `1` or `2` | Callee update plus caller update if caller not yet counted in the current call frame   |
 
 #### Account Update Deduplication
 
@@ -168,12 +168,12 @@ A node MUST track state growth as the net increase in on-chain state caused by n
 
 For `SSTORE`, a node MUST apply the following state-growth accounting rules:
 
-| Original | Present | New | Growth |
-| -------- | ------- | --- | ------ |
-| `0` | `0` | non-`0` | `+1` |
-| `0` | non-`0` | `0` | `-1` |
-| `0` | non-`0` | non-`0` | `0` |
-| non-`0` | any | any | `0` |
+| Original | Present | New     | Growth |
+| -------- | ------- | ------- | ------ |
+| `0`      | `0`     | non-`0` | `+1`   |
+| `0`      | non-`0` | `0`     | `-1`   |
+| `0`      | non-`0` | non-`0` | `0`    |
+| non-`0`  | any     | any     | `0`    |
 
 The table above means:
 
@@ -189,12 +189,12 @@ The reported final state growth for limit enforcement MUST be clamped to a minim
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
-| `BASE_TRANSACTION_DATA_SIZE` | 110 | Fixed estimate of the RLP-encoded transaction envelope excluding calldata |
-| `AUTHORIZATION_DATA_SIZE` | 101 | Bytes counted per EIP-7702 authorization |
-| `ACCOUNT_UPDATE_DATA_SIZE` | 40 | Bytes counted for an account update or storage-write record in data-size tracking |
-| `LOG_TOPIC_DATA_SIZE` | 32 | Bytes counted per log topic in data-size tracking |
+| Constant                     | Value | Description                                                                       |
+| ---------------------------- | ----- | --------------------------------------------------------------------------------- |
+| `BASE_TRANSACTION_DATA_SIZE` | 110   | Fixed estimate of the RLP-encoded transaction envelope excluding calldata         |
+| `AUTHORIZATION_DATA_SIZE`    | 101   | Bytes counted per EIP-7702 authorization                                          |
+| `ACCOUNT_UPDATE_DATA_SIZE`   | 40    | Bytes counted for an account update or storage-write record in data-size tracking |
+| `LOG_TOPIC_DATA_SIZE`        | 32    | Bytes counted per log topic in data-size tracking                                 |
 
 ## Rationale
 

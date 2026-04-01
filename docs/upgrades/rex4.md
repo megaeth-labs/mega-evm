@@ -27,10 +27,12 @@ Finally, the [keyless deploy](../system-contracts/keyless-deploy.md) sandbox now
 ### Per-Call-Frame Resource Budgets
 
 #### Previous behavior
+
 - Data size, KV updates, compute gas, and state growth were constrained only by transaction-level limits.
 - An inner call could consume nearly the entire remaining budget.
 
 #### New behavior
+
 - The top-level call frame starts with the full transaction budget for each resource dimension.
 - Each inner call frame receives `remaining × 98 / 100` of its parent's remaining budget.
 - When a call frame exceeds its local budget, it reverts with [`MegaLimitExceeded(uint8 kind, uint64 limit)`](../glossary.md#call-frame-local-exceed) (does not halt the transaction).
@@ -40,22 +42,24 @@ Finally, the [keyless deploy](../system-contracts/keyless-deploy.md) sandbox now
 
 The `kind` discriminator identifies which resource was exceeded:
 
-| kind | Resource    |
-| ---- | ----------- |
-| 0    | Data size   |
-| 1    | KV updates  |
-| 2    | Compute gas |
-| 3    | State growth|
+| kind | Resource     |
+| ---- | ------------ |
+| 0    | Data size    |
+| 1    | KV updates   |
+| 2    | Compute gas  |
+| 3    | State growth |
 
 ### MegaAccessControl System Contract
 
 **Address**: `0x6342000000000000000000000000000000000004`
 
 #### Previous behavior
+
 - No runtime mechanism existed to proactively disable volatile data access within a call subtree.
 - Gas detention was purely reactive — it only applied after volatile data was accessed.
 
 #### New behavior
+
 - You can disable volatile data access for your call frame and all descendant calls.
 - While disabled, any volatile access (block environment reads, beneficiary-targeted account access including `SELFDESTRUCT` to the beneficiary, oracle storage reads) reverts immediately with `VolatileDataAccessDisabled(uint8 accessType)`.
 - Blocked volatile access does not update volatile-access tracking and does not tighten gas detention.
@@ -102,10 +106,12 @@ interface IMegaAccessControl {
 **Address**: `0x6342000000000000000000000000000000000005`
 
 #### Previous behavior
+
 - No dedicated system query returned the effective remaining compute gas.
 - Contracts had no way to determine their actual compute budget under detention and call frame limits.
 
 #### New behavior
+
 - You can query your effective remaining compute gas at any point during execution.
 - The returned value equals `min(frame_remaining, tx_detained_remaining)` at call time.
 - This is a snapshot — the value decreases as execution proceeds.
@@ -143,21 +149,23 @@ interface IMegaLimitControl {
 - Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract](../system-contracts/overview.md) interceptions do not receive the stipend.
 - The compute gas cap ensures the callee cannot perform state-modifying operations (SSTORE, CALL with value, CREATE) with the extra gas, preserving the reentrancy protection properties of the original `CALL_STIPEND`.
 
-| Event type | Compute gas | Storage gas | Total gas | Fits in 25,300? |
-| ---------- | ----------- | ----------- | --------- | --------------- |
-| LOG1 (1 topic, 0 bytes) | 750 | 3,750 | 4,500 | ✅ |
-| LOG2 (SafeReceived) | 1,125 | 7,500 | 8,625 | ✅ |
-| LOG3 (Transfer) | 1,500 | 11,250 | 12,750 | ✅ |
-| LOG4 + 32 bytes data | ~2,075 | 17,560 | ~19,635 | ✅ |
-| LOG4 + 64 bytes data | ~2,387 | 20,120 | ~22,507 | ✅ |
+| Event type              | Compute gas | Storage gas | Total gas | Fits in 25,300? |
+| ----------------------- | ----------- | ----------- | --------- | --------------- |
+| LOG1 (1 topic, 0 bytes) | 750         | 3,750       | 4,500     | ✅              |
+| LOG2 (SafeReceived)     | 1,125       | 7,500       | 8,625     | ✅              |
+| LOG3 (Transfer)         | 1,500       | 11,250      | 12,750    | ✅              |
+| LOG4 + 32 bytes data    | ~2,075      | 17,560      | ~19,635   | ✅              |
+| LOG4 + 64 bytes data    | ~2,387      | 20,120      | ~22,507   | ✅              |
 
 ### Relative Gas Detention Cap
 
 #### Previous behavior
+
 - Gas detention applied an absolute cap per volatile-access category.
 - If a transaction had already consumed more compute gas than the cap before accessing volatile data, execution halted immediately.
 
 #### New behavior
+
 - The effective [detained limit](../glossary.md#detained-limit) is `current_usage + cap` at the time of volatile access.
 - Execution continues up to `min(tx_compute_limit, effective_detained_limit)`.
 - Across multiple volatile accesses, the most restrictive effective limit applies.
@@ -166,10 +174,12 @@ interface IMegaLimitControl {
 ### Keyless Deploy Sandbox Environment Inheritance
 
 #### Previous behavior
+
 - The keyless deploy sandbox used fixed 1× pricing for all storage-related operations.
 - Oracle hints emitted during sandbox execution were not forwarded to the parent context.
 
 #### New behavior
+
 - The sandbox inherits the parent transaction's external environment for dynamic gas pricing (SALT bucket multipliers) and oracle behavior.
 - Oracle hints emitted during sandbox execution are forwarded to the parent context.
 - The sandbox maintains its own isolated cache to prevent pollution of the parent's state.

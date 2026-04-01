@@ -47,19 +47,19 @@ The dual gas model itself does not redefine opcode compute gas costs; it adds th
 [Storage gas](../glossary.md#storage-gas) is an additional charge for operations that impose persistent storage burden on nodes.
 A node MUST charge storage gas according to the following schedule:
 
-| Operation | Storage Gas Formula | Charging Trigger |
-| --------- | ------------------- | ---------------- |
-| **Transaction Intrinsic** | `INTRINSIC_STORAGE_GAS` (39,000 flat) | Charged before execution begins, alongside compute intrinsic gas |
-| **SSTORE (0 → non-0)** | `SSTORE_STORAGE_GAS_BASE × (multiplier − 1)` | Charged at the time of the SSTORE opcode when writing a non-zero value to a slot that was zero before this transaction |
-| **Account Creation** | `ACCOUNT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)` | Charged when a value transfer targets an empty account |
-| **Contract Creation** | `CONTRACT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)` | Charged at CREATE/CREATE2 execution or creation transaction, regardless of whether initcode succeeds or fails |
-| **Code Deposit** | `CODE_DEPOSIT_STORAGE_GAS × code_length` | Charged per byte when contract creation succeeds and bytecode is stored |
-| **LOG Topic** | `LOG_TOPIC_STORAGE_GAS × topic_count` | Charged at the LOG opcode |
-| **LOG Data** | `LOG_DATA_STORAGE_GAS × data_length` | Charged at the LOG opcode |
-| **Calldata (zero byte)** | `CALLDATA_ZERO_STORAGE_GAS × zero_byte_count` | Charged before execution begins, alongside intrinsic gas |
-| **Calldata (non-zero byte)** | `CALLDATA_NONZERO_STORAGE_GAS × nonzero_byte_count` | Charged before execution begins, alongside intrinsic gas |
-| **Calldata floor (zero byte)** | `CALLDATA_FLOOR_ZERO_STORAGE_GAS × zero_byte_count` | Post-execution floor check (see below) |
-| **Calldata floor (non-zero byte)** | `CALLDATA_FLOOR_NONZERO_STORAGE_GAS × nonzero_byte_count` | Post-execution floor check (see below) |
+| Operation                          | Storage Gas Formula                                       | Charging Trigger                                                                                                       |
+| ---------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Transaction Intrinsic**          | `INTRINSIC_STORAGE_GAS` (39,000 flat)                     | Charged before execution begins, alongside compute intrinsic gas                                                       |
+| **SSTORE (0 → non-0)**             | `SSTORE_STORAGE_GAS_BASE × (multiplier − 1)`              | Charged at the time of the SSTORE opcode when writing a non-zero value to a slot that was zero before this transaction |
+| **Account Creation**               | `ACCOUNT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)`    | Charged when a value transfer targets an empty account                                                                 |
+| **Contract Creation**              | `CONTRACT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)`   | Charged at CREATE/CREATE2 execution or creation transaction, regardless of whether initcode succeeds or fails          |
+| **Code Deposit**                   | `CODE_DEPOSIT_STORAGE_GAS × code_length`                  | Charged per byte when contract creation succeeds and bytecode is stored                                                |
+| **LOG Topic**                      | `LOG_TOPIC_STORAGE_GAS × topic_count`                     | Charged at the LOG opcode                                                                                              |
+| **LOG Data**                       | `LOG_DATA_STORAGE_GAS × data_length`                      | Charged at the LOG opcode                                                                                              |
+| **Calldata (zero byte)**           | `CALLDATA_ZERO_STORAGE_GAS × zero_byte_count`             | Charged before execution begins, alongside intrinsic gas                                                               |
+| **Calldata (non-zero byte)**       | `CALLDATA_NONZERO_STORAGE_GAS × nonzero_byte_count`       | Charged before execution begins, alongside intrinsic gas                                                               |
+| **Calldata floor (zero byte)**     | `CALLDATA_FLOOR_ZERO_STORAGE_GAS × zero_byte_count`       | Post-execution floor check (see below)                                                                                 |
+| **Calldata floor (non-zero byte)** | `CALLDATA_FLOOR_NONZERO_STORAGE_GAS × nonzero_byte_count` | Post-execution floor check (see below)                                                                                 |
 
 Contract creation MUST charge only `CONTRACT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)`.
 The account creation storage gas (`ACCOUNT_CREATION_STORAGE_GAS_BASE`) MUST NOT be charged on top of the contract creation cost.
@@ -177,35 +177,35 @@ The canonical design references are:
 
 All transactions MUST pay both compute gas and storage gas as intrinsic costs before execution begins:
 
-| Component | Cost |
-| --------- | ---- |
+| Component   | Cost                             |
+| ----------- | -------------------------------- |
 | Compute gas | `INTRINSIC_COMPUTE_GAS` (21,000) |
 | Storage gas | `INTRINSIC_STORAGE_GAS` (39,000) |
-| **Total** | **60,000** |
+| **Total**   | **60,000**                       |
 
 These costs are in addition to standard calldata gas (both compute and storage components).
 A transaction with `gas_limit < 60,000 + calldata_gas` MUST be rejected as invalid.
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
-| `INTRINSIC_COMPUTE_GAS` | 21,000 | Standard EVM intrinsic gas for all transactions |
-| `INTRINSIC_STORAGE_GAS` | 39,000 | Storage gas intrinsic for all transactions |
-| `SSTORE_STORAGE_GAS_BASE` | 20,000 | Base storage gas for SSTORE (0 → non-0) |
-| `ACCOUNT_CREATION_STORAGE_GAS_BASE` | 25,000 | Base storage gas for account creation |
-| `CONTRACT_CREATION_STORAGE_GAS_BASE` | 32,000 | Base storage gas for contract creation |
-| `CODE_DEPOSIT_STORAGE_GAS` | 10,000 | Storage gas per byte of deployed bytecode |
-| `LOG_TOPIC_STORAGE_GAS` | 3,750 | Storage gas per LOG topic |
-| `LOG_DATA_STORAGE_GAS` | 80 | Storage gas per byte of LOG data |
-| `CALLDATA_ZERO_STORAGE_GAS` | 40 | Storage gas per zero byte of calldata |
-| `CALLDATA_NONZERO_STORAGE_GAS` | 160 | Storage gas per non-zero byte of calldata |
-| `CALLDATA_FLOOR_ZERO_STORAGE_GAS` | 100 | Storage gas floor per zero byte of calldata |
-| `CALLDATA_FLOOR_NONZERO_STORAGE_GAS` | 400 | Storage gas floor per non-zero byte of calldata |
-| `STORAGE_GAS_MULTIPLIER` | 10 | Ratio of calldata/LOG storage gas to standard EVM costs |
-| [`MIN_BUCKET_SIZE`](../glossary.md#min_bucket_size) | 256 | Smallest [SALT bucket](../glossary.md#salt-bucket) capacity |
-| `NUM_META_BUCKETS` | 65,536 | Number of SALT buckets reserved for metadata |
-| `NUM_KV_BUCKETS` | 16,711,680 | Number of SALT buckets available for key-value state |
+| Constant                                            | Value      | Description                                                 |
+| --------------------------------------------------- | ---------- | ----------------------------------------------------------- |
+| `INTRINSIC_COMPUTE_GAS`                             | 21,000     | Standard EVM intrinsic gas for all transactions             |
+| `INTRINSIC_STORAGE_GAS`                             | 39,000     | Storage gas intrinsic for all transactions                  |
+| `SSTORE_STORAGE_GAS_BASE`                           | 20,000     | Base storage gas for SSTORE (0 → non-0)                     |
+| `ACCOUNT_CREATION_STORAGE_GAS_BASE`                 | 25,000     | Base storage gas for account creation                       |
+| `CONTRACT_CREATION_STORAGE_GAS_BASE`                | 32,000     | Base storage gas for contract creation                      |
+| `CODE_DEPOSIT_STORAGE_GAS`                          | 10,000     | Storage gas per byte of deployed bytecode                   |
+| `LOG_TOPIC_STORAGE_GAS`                             | 3,750      | Storage gas per LOG topic                                   |
+| `LOG_DATA_STORAGE_GAS`                              | 80         | Storage gas per byte of LOG data                            |
+| `CALLDATA_ZERO_STORAGE_GAS`                         | 40         | Storage gas per zero byte of calldata                       |
+| `CALLDATA_NONZERO_STORAGE_GAS`                      | 160        | Storage gas per non-zero byte of calldata                   |
+| `CALLDATA_FLOOR_ZERO_STORAGE_GAS`                   | 100        | Storage gas floor per zero byte of calldata                 |
+| `CALLDATA_FLOOR_NONZERO_STORAGE_GAS`                | 400        | Storage gas floor per non-zero byte of calldata             |
+| `STORAGE_GAS_MULTIPLIER`                            | 10         | Ratio of calldata/LOG storage gas to standard EVM costs     |
+| [`MIN_BUCKET_SIZE`](../glossary.md#min_bucket_size) | 256        | Smallest [SALT bucket](../glossary.md#salt-bucket) capacity |
+| `NUM_META_BUCKETS`                                  | 65,536     | Number of SALT buckets reserved for metadata                |
+| `NUM_KV_BUCKETS`                                    | 16,711,680 | Number of SALT buckets available for key-value state        |
 
 ## Rationale
 
@@ -228,6 +228,7 @@ The 39,000 flat intrinsic storage gas covers this per-transaction overhead.
 ## Spec History
 
 For the historical evolution of storage gas formulas and constants across specs:
+
 - [MiniRex](../upgrades/minirex.md) — original `base × multiplier` formula with 2,000,000 base cost
 - [Rex](../upgrades/rex.md) — revised to `base × (multiplier − 1)` with current base costs, added transaction intrinsic storage gas
-- [Rex4](../upgrades/rex4.md) *(unstable)* — storage gas stipend for value transfers
+- [Rex4](../upgrades/rex4.md) _(unstable)_ — storage gas stipend for value transfers

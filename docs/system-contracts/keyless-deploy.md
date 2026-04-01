@@ -27,8 +27,8 @@ A node MUST deploy the bytecode version corresponding to the active spec.
 
 Source: [`KeylessDeploy.sol`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/contracts/KeylessDeploy.sol)
 
-| Version | Code Hash | Since |
-| ------- | --------- | ----- |
+| Version | Code Hash                                                            | Since                       |
+| ------- | -------------------------------------------------------------------- | --------------------------- |
 | `1.0.0` | `0x55020d41649acf7a84add6e628b887f802218d9ac86f142ef0994da43ea5eeb6` | [Rex2](../upgrades/rex2.md) |
 
 ### Interception Scope
@@ -155,11 +155,11 @@ The stable execution errors are:
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
-| `KEYLESS_DEPLOY_ADDRESS` | `0x6342000000000000000000000000000000000003` | Stable KeylessDeploy system-contract address |
-| `KEYLESS_DEPLOY_OVERHEAD_GAS` | 100,000 | Fixed compute-gas overhead charged before sandbox execution |
-| `KEYLESS_DEPLOY_VERSION` | `1.0.0` | Stable deployed bytecode version |
+| Constant                      | Value                                        | Description                                                 |
+| ----------------------------- | -------------------------------------------- | ----------------------------------------------------------- |
+| `KEYLESS_DEPLOY_ADDRESS`      | `0x6342000000000000000000000000000000000003` | Stable KeylessDeploy system-contract address                |
+| `KEYLESS_DEPLOY_OVERHEAD_GAS` | 100,000                                      | Fixed compute-gas overhead charged before sandbox execution |
+| `KEYLESS_DEPLOY_VERSION`      | `1.0.0`                                      | Stable deployed bytecode version                            |
 
 ## Rationale
 

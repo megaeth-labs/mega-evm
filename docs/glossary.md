@@ -147,7 +147,7 @@ Resource trackers (data size, KV updates, state growth) are call-frame-aware —
 
 ## Call-frame-local exceed
 
-*(Rex4, unstable)* — When a call frame exceeds its per-call-frame resource budget, the call frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
+_(Rex4, unstable)_ — When a call frame exceeds its per-call-frame resource budget, the call frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 
 The parent call frame can continue executing.
 

@@ -18,9 +18,11 @@ Second, it introduces the **[KeylessDeploy](../system-contracts/keyless-deploy.m
 ### SELFDESTRUCT Re-Enabled (EIP-6780)
 
 #### Previous behavior
+
 - `SELFDESTRUCT` halts execution with `InvalidFEOpcode`.
 
 #### New behavior
+
 - `SELFDESTRUCT` is a valid opcode.
 - If the contract was created in the same transaction, `SELFDESTRUCT` removes the contract's code and storage and transfers the remaining balance to the target address.
 - If the contract was not created in the same transaction, `SELFDESTRUCT` only transfers the remaining balance to the target address — code and storage are preserved.
@@ -30,10 +32,12 @@ This is the standard EIP-6780 behavior already used across Ethereum post-Cancun.
 ### Oracle Bytecode Update
 
 #### Previous behavior
+
 - Oracle bytecode version `1.0.0` (code hash `0xe9b044afb735a0f569faeb248088b4f267578f60722f87d06ec3867b250a2c34`).
 - No `sendHint` function.
 
 #### New behavior
+
 - Oracle bytecode version `1.1.0` (code hash `0x06df675a69e53ea2a3c948521e330b3801740fede324a1cef2044418f8e09242`).
 - Adds the `sendHint(bytes32,bytes)` function to the deployed bytecode.
 - Introduces [call interception](../system-contracts/interception.md) for `sendHint` hint forwarding.
@@ -41,10 +45,12 @@ This is the standard EIP-6780 behavior already used across Ethereum post-Cancun.
 ### KeylessDeploy System Contract
 
 #### Previous behavior
+
 - No system-level support for keyless deployment with gas limit overrides.
 - Contracts that deploy via keyless transactions on Ethereum may run out of gas on MegaETH due to different gas pricing.
 
 #### New behavior
+
 - A system contract at `0x6342000000000000000000000000000000000003` provides keyless deployment.
 - The contract intercepts calls at depth 0 only (direct transaction calls).
 

@@ -40,12 +40,12 @@ For the current stable behavior as a single reference, see the [MegaEVM Overview
 
 ## Reference Implementation
 
-| Component        | Version                                                          |
-| ---------------- | ---------------------------------------------------------------- |
-| **MegaEVM**      | [mega-evm](https://github.com/megaeth-labs/mega-evm)            |
-| **Base EVM**     | [revm v27.1.0](https://github.com/bluealloy/revm)               |
-| **Optimism EVM** | [op-revm v8.1.0](https://github.com/bluealloy/op-revm)          |
-| **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy-evm)      |
+| Component        | Version                                                    |
+| ---------------- | ---------------------------------------------------------- |
+| **MegaEVM**      | [mega-evm](https://github.com/megaeth-labs/mega-evm)       |
+| **Base EVM**     | [revm v27.1.0](https://github.com/bluealloy/revm)          |
+| **Optimism EVM** | [op-revm v8.1.0](https://github.com/bluealloy/op-revm)     |
+| **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy-evm) |
 
 ## Spec Progression
 
@@ -68,7 +68,7 @@ Contracts deployed under a given spec will continue to behave identically, regar
 - **REX1** — Fix: compute gas limit reset between transactions.
 - **REX2** — SELFDESTRUCT re-enabled (EIP-6780), KeylessDeploy system contract.
 - **REX3** — Oracle gas cap raised to 20M, SLOAD-based oracle detention, keyless deploy compute gas tracking.
-- **REX4** *(unstable)* — Per-call-frame resource budgets, relative gas detention, MegaAccessControl and MegaLimitControl system contracts.
+- **REX4** _(unstable)_ — Per-call-frame resource budgets, relative gas detention, MegaAccessControl and MegaLimitControl system contracts.
 
 See [Hardforks and Specs](hardfork-spec.md) for full details.
 

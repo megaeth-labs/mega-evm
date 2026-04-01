@@ -17,10 +17,10 @@ MegaETH raises these limits to accommodate larger deployments, but the protocol 
 
 A node MUST enforce the following limits:
 
-| Limit | Value |
-| ----- | ----- |
+| Limit                          | Value               |
+| ------------------------------ | ------------------- |
 | Maximum deployed contract size | `MAX_CONTRACT_SIZE` |
-| Maximum initcode size | `MAX_INITCODE_SIZE` |
+| Maximum initcode size          | `MAX_INITCODE_SIZE` |
 
 If deployed runtime bytecode exceeds `MAX_CONTRACT_SIZE`, the node MUST reject the deployment.
 If initcode exceeds `MAX_INITCODE_SIZE`, the node MUST reject the creation transaction or creation opcode execution.
@@ -31,11 +31,11 @@ The initcode limit is defined as:
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
-| `MAX_CONTRACT_SIZE` | 524,288 bytes | Maximum size of deployed contract bytecode |
-| `ADDITIONAL_INITCODE_SIZE` | 24,576 bytes | Additional bytes allowed above the contract-size limit for initcode |
-| `MAX_INITCODE_SIZE` | 548,864 bytes | Maximum initcode size |
+| Constant                   | Value         | Description                                                         |
+| -------------------------- | ------------- | ------------------------------------------------------------------- |
+| `MAX_CONTRACT_SIZE`        | 524,288 bytes | Maximum size of deployed contract bytecode                          |
+| `ADDITIONAL_INITCODE_SIZE` | 24,576 bytes  | Additional bytes allowed above the contract-size limit for initcode |
+| `MAX_INITCODE_SIZE`        | 548,864 bytes | Maximum initcode size                                               |
 
 ## Rationale
 

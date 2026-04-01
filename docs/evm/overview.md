@@ -77,9 +77,9 @@ For the full stable semantics and earlier MiniRex disablement, see [SELFDESTRUCT
 
 ### Contract Limits
 
-| Limit | Value |
-| ----- | ----- |
-| Max contract size | 524,288 bytes (512 KB) |
+| Limit             | Value                          |
+| ----------------- | ------------------------------ |
+| Max contract size | 524,288 bytes (512 KB)         |
 | Max initcode size | 548,864 bytes (512 KB + 24 KB) |
 
 These enlarged limits were introduced in [MiniRex](../upgrades/minirex.md).
@@ -87,10 +87,10 @@ For the exact limits and rejection rules, see [Contract Limits](contract-limits.
 
 ### Precompiles
 
-| Precompile | Address | Stable MegaETH-Specific Behavior |
-| ---------- | ------- | --------------- |
-| KZG Point Evaluation | `0x0A` | 100,000 gas |
-| ModExp | `0x05` | [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) gas schedule |
+| Precompile           | Address | Stable MegaETH-Specific Behavior                                 |
+| -------------------- | ------- | ---------------------------------------------------------------- |
+| KZG Point Evaluation | `0x0A`  | 100,000 gas                                                      |
+| ModExp               | `0x05`  | [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) gas schedule |
 
 These stable overrides are part of the current behavior.
 For the full precompile specification, including the inherited baseline and MegaETH-specific differences, see [Precompiles](precompiles.md).
@@ -99,10 +99,10 @@ For the full precompile specification, including the inherited baseline and Mega
 
 MegaETH predeploys the following stable system contracts:
 
-| Contract | Address | Since | Purpose |
-| -------- | ------- | ----- | ------- |
-| [Oracle](../system-contracts/oracle.md) | `0x6342000000000000000000000000000000000001` | [MiniRex](../upgrades/minirex.md) | Off-chain data key-value storage |
-| [High-Precision Timestamp](../system-contracts/high-precision-timestamp.md) | `0x6342000000000000000000000000000000000002` | [MiniRex](../upgrades/minirex.md) | Sub-second timestamp oracle service |
-| [KeylessDeploy](../system-contracts/keyless-deploy.md) | `0x6342000000000000000000000000000000000003` | [Rex2](../upgrades/rex2.md) | Deterministic cross-chain deployment |
+| Contract                                                                    | Address                                      | Since                             | Purpose                              |
+| --------------------------------------------------------------------------- | -------------------------------------------- | --------------------------------- | ------------------------------------ |
+| [Oracle](../system-contracts/oracle.md)                                     | `0x6342000000000000000000000000000000000001` | [MiniRex](../upgrades/minirex.md) | Off-chain data key-value storage     |
+| [High-Precision Timestamp](../system-contracts/high-precision-timestamp.md) | `0x6342000000000000000000000000000000000002` | [MiniRex](../upgrades/minirex.md) | Sub-second timestamp oracle service  |
+| [KeylessDeploy](../system-contracts/keyless-deploy.md)                      | `0x6342000000000000000000000000000000000003` | [Rex2](../upgrades/rex2.md)       | Deterministic cross-chain deployment |
 
 For the full registry and behavioral semantics, see [System Contracts Overview](../system-contracts/overview.md).

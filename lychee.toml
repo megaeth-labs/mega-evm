@@ -24,4 +24,5 @@ exclude_path = [
   "crates/",
   "target/",
   "bin/",
+  "ARCH.md",
 ]

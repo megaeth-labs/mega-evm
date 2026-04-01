@@ -52,10 +52,10 @@ Admission policy — including which external actor is allowed to inject such tr
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
-| `MEGA_SYSTEM_ADDRESS` | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Special maintenance sender address |
-| `MEGA_SYSTEM_TX_WHITELIST` | `{ ORACLE_CONTRACT_ADDRESS }` | Stable whitelist of callable system-contract targets |
+| Constant                   | Value                                        | Description                                          |
+| -------------------------- | -------------------------------------------- | ---------------------------------------------------- |
+| `MEGA_SYSTEM_ADDRESS`      | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Special maintenance sender address                   |
+| `MEGA_SYSTEM_TX_WHITELIST` | `{ ORACLE_CONTRACT_ADDRESS }`                | Stable whitelist of callable system-contract targets |
 
 ## Rationale
 

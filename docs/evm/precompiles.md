@@ -18,10 +18,10 @@ The overrides on this page exist to reduce that denial-of-service risk by bringi
 
 A node MUST inherit the standard precompile set from the Optimism Isthmus / Ethereum Prague baseline except for the following MegaETH-specific overrides.
 
-| Precompile | Address | MegaETH-Specific Behavior |
-| ---------- | ------- | ------------------------- |
-| KZG Point Evaluation | `0x0A` | Fixed gas cost of `KZG_POINT_EVALUATION_GAS_COST` |
-| ModExp | `0x05` | Uses the Osaka / [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) pricing schedule |
+| Precompile           | Address | MegaETH-Specific Behavior                                                             |
+| -------------------- | ------- | ------------------------------------------------------------------------------------- |
+| KZG Point Evaluation | `0x0A`  | Fixed gas cost of `KZG_POINT_EVALUATION_GAS_COST`                                     |
+| ModExp               | `0x05`  | Uses the Osaka / [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) pricing schedule |
 
 For KZG Point Evaluation, if the supplied gas is less than `KZG_POINT_EVALUATION_GAS_COST`, the precompile MUST fail with `OutOfGas`.
 Otherwise the node MUST charge exactly `KZG_POINT_EVALUATION_GAS_COST` gas for the precompile.
@@ -32,8 +32,8 @@ All other precompiles MUST behave according to the inherited EVM baseline unless
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
+| Constant                        | Value   | Description                                            |
+| ------------------------------- | ------- | ------------------------------------------------------ |
 | `KZG_POINT_EVALUATION_GAS_COST` | 100,000 | Fixed gas cost for the KZG Point Evaluation precompile |
 
 ## Spec History

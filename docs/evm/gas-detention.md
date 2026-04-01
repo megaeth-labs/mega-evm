@@ -162,12 +162,12 @@ Across multiple volatile accesses, the node MUST keep the most restrictive resul
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
-| `BLOCK_ENV_DETENTION_CAP` | 20,000,000 | Absolute compute gas cap after block-environment access |
-| `BENEFICIARY_DETENTION_CAP` | 20,000,000 | Absolute compute gas cap after beneficiary access |
-| `ORACLE_DETENTION_CAP` | 20,000,000 | Absolute compute gas cap after oracle storage access |
-| `ORACLE_DETENTION_CAP_MINIREX` | 1,000,000 | Historical absolute compute gas cap after oracle access (superseded) |
+| Constant                       | Value      | Description                                                          |
+| ------------------------------ | ---------- | -------------------------------------------------------------------- |
+| `BLOCK_ENV_DETENTION_CAP`      | 20,000,000 | Absolute compute gas cap after block-environment access              |
+| `BENEFICIARY_DETENTION_CAP`    | 20,000,000 | Absolute compute gas cap after beneficiary access                    |
+| `ORACLE_DETENTION_CAP`         | 20,000,000 | Absolute compute gas cap after oracle storage access                 |
+| `ORACLE_DETENTION_CAP_MINIREX` | 1,000,000  | Historical absolute compute gas cap after oracle access (superseded) |
 
 ## Rationale
 
@@ -197,4 +197,4 @@ Gas detention semantics evolved across specs:
 - [Rex](../upgrades/rex.md) — made CALL-like opcode behavior consistent
 - [Rex1](../upgrades/rex1.md) — reset detained compute gas limit between transactions in the same block
 - [Rex3](../upgrades/rex3.md) — raised oracle cap to 20M and changed oracle detection from CALL-based to SLOAD-based
-- [Rex4](../upgrades/rex4.md) *(unstable)* — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior
+- [Rex4](../upgrades/rex4.md) _(unstable)_ — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior

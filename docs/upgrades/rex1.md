@@ -17,15 +17,18 @@ This caused unrelated transactions to fail unexpectedly.
 ### Compute Gas Limit Reset Between Transactions
 
 #### Previous behavior
+
 - The [detained](../glossary.md#detained-limit) compute gas limit persists across transactions within the same block.
 - A later transaction may inherit a lowered limit from an earlier transaction's volatile data access and halt with `ComputeGasLimitExceeded` even though it never accessed volatile data itself.
 
 For example:
+
 1. TX1 accesses the oracle contract — compute gas limit is lowered to 1M.
 2. TX2 is a normal transaction requiring more than 1M compute gas.
 3. TX2 fails with `ComputeGasLimitExceeded` despite never accessing volatile data — it inherited TX1's lowered limit.
 
 #### New behavior
+
 - The compute gas limit resets to the configured transaction compute gas limit at the start of each transaction.
 - The compute gas usage counter resets to zero at the start of each transaction.
 - Gas detention from volatile data access is scoped to the transaction that triggered it and does not affect subsequent transactions.

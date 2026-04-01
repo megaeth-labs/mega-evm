@@ -46,10 +46,10 @@ The `timestamp()` method MUST return the value stored at Oracle slot `TIMESTAMP_
 
 The timestamp service allocation within [Oracle](oracle.md) storage MUST be:
 
-| Slot Range | Meaning |
-| ---------- | ------- |
-| `0` | Current high-precision timestamp in microseconds |
-| `1`–`7` | Reserved for future use |
+| Slot Range | Meaning                                          |
+| ---------- | ------------------------------------------------ |
+| `0`        | Current high-precision timestamp in microseconds |
+| `1`–`7`    | Reserved for future use                          |
 
 ### Service Semantics
 
@@ -67,11 +67,11 @@ The timestamp service MUST satisfy the following guarantees:
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
-| `HIGH_PRECISION_TIMESTAMP_ADDRESS` | `0x6342000000000000000000000000000000000002` | Stable high-precision timestamp wrapper address |
-| `TIMESTAMP_BASE_SLOT` | `0` | Oracle storage base slot for the timestamp service |
-| `TIMESTAMP_MAX_SLOTS` | `8` | Number of Oracle slots reserved for the timestamp service |
+| Constant                           | Value                                        | Description                                               |
+| ---------------------------------- | -------------------------------------------- | --------------------------------------------------------- |
+| `HIGH_PRECISION_TIMESTAMP_ADDRESS` | `0x6342000000000000000000000000000000000002` | Stable high-precision timestamp wrapper address           |
+| `TIMESTAMP_BASE_SLOT`              | `0`                                          | Oracle storage base slot for the timestamp service        |
+| `TIMESTAMP_MAX_SLOTS`              | `8`                                          | Number of Oracle slots reserved for the timestamp service |
 
 ## Rationale
 

@@ -26,8 +26,8 @@ A node MUST deploy the bytecode version corresponding to the active spec.
 
 Source: [`Oracle.sol`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/contracts/Oracle.sol)
 
-| Version | Code Hash |
-| ------- | --------- |
+| Version | Code Hash                                                            |
+| ------- | -------------------------------------------------------------------- |
 | `1.1.0` | `0x06df675a69e53ea2a3c948521e330b3801740fede324a1cef2044418f8e09242` |
 
 ### Public Read Interface
@@ -128,8 +128,8 @@ From [Rex2](../upgrades/rex2.md) onward, the stable Oracle bytecode includes `se
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
+| Constant                  | Value                                        | Description                           |
+| ------------------------- | -------------------------------------------- | ------------------------------------- |
 | `ORACLE_CONTRACT_ADDRESS` | `0x6342000000000000000000000000000000000001` | Stable Oracle system-contract address |
 
 ## Rationale

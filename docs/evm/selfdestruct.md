@@ -46,8 +46,8 @@ That behavior is unstable and is not part of the current stable semantics.
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
+| Constant                     | Value             | Description                                                         |
+| ---------------------------- | ----------------- | ------------------------------------------------------------------- |
 | `SELFDESTRUCT_DISABLED_HALT` | `InvalidFEOpcode` | Halt reason when `SELFDESTRUCT` is disabled in MiniRex through Rex1 |
 
 ## Rationale

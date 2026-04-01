@@ -1,31 +1,22 @@
-name: Docs Lint
+name: Docs
 on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
 
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Check links
-        uses: lycheeverse/lychee-action@v2
-        with:
-          args: --no-progress 'docs/**/*.md'
-          fail: true
+      - uses: jdx/mise-action@v2
 
-      - name: Lint Markdown
-        run: npx markdownlint-cli2
+      - name: Lint
+        run: mise run lint

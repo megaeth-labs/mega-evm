@@ -45,15 +45,15 @@ For the relationship between total gas, compute gas, and storage gas, see [Dual 
 
 A node MUST enforce the following limits:
 
-| Resource | Phase | Transaction Limit | Block Limit |
-| -------- | ----- | ----------------- | ----------- |
-| [Gas Limit](https://ethereum.org/en/developers/docs/gas/#block-size) | Pre-execution | Sequencer-configured | `block.gasLimit` from block header |
-| Transaction Size | Pre-execution | Sequencer-configured | Sequencer-configured |
-| [DA Size](https://docs.optimism.io/stack/transactions/transaction-fees#the-l1-data-fee) | Pre-execution | Sequencer-configured | Sequencer-configured |
-| [Compute Gas](../glossary.md#compute-gas) | Runtime | `TX_COMPUTE_GAS_LIMIT` | No separate limit |
-| Data Size | Runtime | `TX_DATA_LIMIT` | `BLOCK_DATA_LIMIT` |
-| KV Updates | Runtime | `TX_KV_UPDATE_LIMIT` | `BLOCK_KV_UPDATE_LIMIT` |
-| State Growth | Runtime | `TX_STATE_GROWTH_LIMIT` | `BLOCK_STATE_GROWTH_LIMIT` |
+| Resource                                                                                | Phase         | Transaction Limit       | Block Limit                        |
+| --------------------------------------------------------------------------------------- | ------------- | ----------------------- | ---------------------------------- |
+| [Gas Limit](https://ethereum.org/en/developers/docs/gas/#block-size)                    | Pre-execution | Sequencer-configured    | `block.gasLimit` from block header |
+| Transaction Size                                                                        | Pre-execution | Sequencer-configured    | Sequencer-configured               |
+| [DA Size](https://docs.optimism.io/stack/transactions/transaction-fees#the-l1-data-fee) | Pre-execution | Sequencer-configured    | Sequencer-configured               |
+| [Compute Gas](../glossary.md#compute-gas)                                               | Runtime       | `TX_COMPUTE_GAS_LIMIT`  | No separate limit                  |
+| Data Size                                                                               | Runtime       | `TX_DATA_LIMIT`         | `BLOCK_DATA_LIMIT`                 |
+| KV Updates                                                                              | Runtime       | `TX_KV_UPDATE_LIMIT`    | `BLOCK_KV_UPDATE_LIMIT`            |
+| State Growth                                                                            | Runtime       | `TX_STATE_GROWTH_LIMIT` | `BLOCK_STATE_GROWTH_LIMIT`         |
 
 The absence of a separate block-level compute gas limit means that cumulative block compute gas is bounded only indirectly by the block gas limit.
 
@@ -128,12 +128,12 @@ When constructing a block, a node or sequencer MUST process candidate transactio
 
 ### Outcomes
 
-| Outcome | Cause | Receipt | Block Impact |
-| ------- | ----- | ------- | ------------ |
-| Success | Transaction completes within all applicable limits | `status = 1` | Counts toward all relevant block counters |
-| Failed | Runtime transaction-level limit exceeded | `status = 0` | Still included and counts toward all relevant block counters |
-| Skipped | Current block cannot admit the transaction without violating a block-level limit | No receipt | Not included; may be reconsidered in a later block |
-| Rejected | Transaction-level pre-execution limit exceeded | No receipt | Permanently invalid |
+| Outcome  | Cause                                                                            | Receipt      | Block Impact                                                 |
+| -------- | -------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------ |
+| Success  | Transaction completes within all applicable limits                               | `status = 1` | Counts toward all relevant block counters                    |
+| Failed   | Runtime transaction-level limit exceeded                                         | `status = 0` | Still included and counts toward all relevant block counters |
+| Skipped  | Current block cannot admit the transaction without violating a block-level limit | No receipt   | Not included; may be reconsidered in a later block           |
+| Rejected | Transaction-level pre-execution limit exceeded                                   | No receipt   | Permanently invalid                                          |
 
 <details>
 <summary>Rex4 (unstable): Per-call-frame runtime budgets</summary>
@@ -147,17 +147,17 @@ The parent call frame MAY continue execution.
 
 ## Constants
 
-| Constant | Value | Description |
-| -------- | ----- | ----------- |
-| `TX_COMPUTE_GAS_LIMIT` | 200,000,000 | Maximum compute gas per transaction |
-| `TX_DATA_LIMIT` | 13,107,200 | Maximum data size per transaction |
-| `BLOCK_DATA_LIMIT` | 13,107,200 | Maximum cumulative block data size |
-| `TX_KV_UPDATE_LIMIT` | 500,000 | Maximum KV updates per transaction |
-| `BLOCK_KV_UPDATE_LIMIT` | 500,000 | Maximum cumulative block KV updates |
-| `TX_STATE_GROWTH_LIMIT` | 1,000 | Maximum state growth per transaction |
-| `BLOCK_STATE_GROWTH_LIMIT` | 1,000 | Maximum cumulative block state growth |
-| `FRAME_LIMIT_NUMERATOR` | 98 | Numerator of per-call-frame budget forwarding in Rex4 |
-| `FRAME_LIMIT_DENOMINATOR` | 100 | Denominator of per-call-frame budget forwarding in Rex4 |
+| Constant                   | Value       | Description                                             |
+| -------------------------- | ----------- | ------------------------------------------------------- |
+| `TX_COMPUTE_GAS_LIMIT`     | 200,000,000 | Maximum compute gas per transaction                     |
+| `TX_DATA_LIMIT`            | 13,107,200  | Maximum data size per transaction                       |
+| `BLOCK_DATA_LIMIT`         | 13,107,200  | Maximum cumulative block data size                      |
+| `TX_KV_UPDATE_LIMIT`       | 500,000     | Maximum KV updates per transaction                      |
+| `BLOCK_KV_UPDATE_LIMIT`    | 500,000     | Maximum cumulative block KV updates                     |
+| `TX_STATE_GROWTH_LIMIT`    | 1,000       | Maximum state growth per transaction                    |
+| `BLOCK_STATE_GROWTH_LIMIT` | 1,000       | Maximum cumulative block state growth                   |
+| `FRAME_LIMIT_NUMERATOR`    | 98          | Numerator of per-call-frame budget forwarding in Rex4   |
+| `FRAME_LIMIT_DENOMINATOR`  | 100         | Denominator of per-call-frame budget forwarding in Rex4 |
 
 ## Rationale
 

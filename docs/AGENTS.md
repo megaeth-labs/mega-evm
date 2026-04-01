@@ -73,12 +73,13 @@ Example:
 - [Rex1](../upgrades/rex1.md) — Fixed detained compute-gas reset behavior.
 - [Rex2](../upgrades/rex2.md) — Added KeylessDeploy and enabled SELFDESTRUCT with EIP-6780 semantics.
 - [Rex3](../upgrades/rex3.md) — Revised oracle detention to use SLOAD-based triggering.
-- [Rex4](../upgrades/rex4.md) *(unstable)* — Introduces per-call-frame limits and relative detention.
+- [Rex4](../upgrades/rex4.md) _(unstable)_ — Introduces per-call-frame limits and relative detention.
 ```
 
 For **concept pages**, the Spec History section MAY summarize what changed at each spec if that helps explain the evolution of the behavior.
 
 Rules for the Spec History table:
+
 - Only list specs that changed behavior relevant to this page. Do not list specs that inherited behavior unchanged (unless noting "No changes" is clarifying).
 - The "Change" column is a short summary (one sentence). Detailed previous/new behavior belongs in the linked upgrade page.
 - The "Key values" column shows the concrete values introduced at that spec — constants, limits, formulas. Use "N/A" if the change is purely behavioral with no new numeric values.
@@ -172,7 +173,7 @@ Optional, if it helps orient readers.
 - Wrap unstable (not-yet-activated) spec content in `<details>` blocks with a clear label (e.g., "Rex4 (unstable): ...").
 - Unstable content MUST still use normative language within the `<details>` block.
 - **Glossary exception**: glossary entries for unstable-spec terms do not use `<details>` blocks.
-  Instead, mark them with inline text (e.g., "*(Rex4, unstable)*") at the start of the definition.
+  Instead, mark them with inline text (e.g., "_(Rex4, unstable)_") at the start of the definition.
 
 ## Motivation and Rationale Section Rules
 
@@ -222,6 +223,7 @@ description: <SpecName> network upgrade — <one-line summary>.
 This page is an informative summary of the <SpecName> specification.
 
 ## Summary
+
 2-4 paragraphs: what changed, what problem it solves, developer impact.
 
 ## What Changed
@@ -229,23 +231,29 @@ This page is an informative summary of the <SpecName> specification.
 ### <Change Name>
 
 #### Previous behavior
+
 - Precise description of behavior before this spec.
 - Include concrete values, formulas, or rules that were in effect.
 
 #### New behavior
+
 - Precise description of behavior introduced by this spec.
 - Include the new values, formulas, or rules.
 
 ### <Next Change Name>
+
 ...
 
 ## Developer Impact
+
 What contract authors, integrators, and tooling authors need to know.
 
 ## Safety and Compatibility
+
 Backward-compatibility boundaries, failure-mode differences.
 
 ## References
+
 Links to the implementation repo, related EIPs, or other specs.
 ```
 

@@ -22,21 +22,25 @@ A new **[state growth](../evm/resource-accounting.md#state-growth)** [resource d
 ### Transaction Intrinsic Storage Gas
 
 #### Previous behavior
+
 - Transaction intrinsic gas is 21,000 (compute gas only, no storage gas component).
 
 #### New behavior
+
 - Every transaction pays 39,000 additional storage gas on top of the standard 21,000 compute intrinsic gas.
 - Total intrinsic gas becomes 60,000 (21,000 compute + 39,000 storage).
 
 ### Storage Gas Economics
 
 #### Previous behavior
+
 - SSTORE (0→non-0): `2,000,000 × multiplier`
 - Account creation: `2,000,000 × multiplier`
 - Contract creation: `2,000,000 × multiplier`
 - At minimum bucket size ([multiplier](../glossary.md#multiplier) = 1), storage gas is still charged at the full base cost.
 
 #### New behavior
+
 - SSTORE (0→non-0): `20,000 × (multiplier − 1)`
 - Account creation: `25,000 × (multiplier − 1)`
 - Contract creation: `32,000 × (multiplier − 1)`
@@ -54,43 +58,47 @@ Storage writes in uncrowded regions are effectively free from the storage gas pe
 ### Consistent Behavior Among CALL-Like Opcodes
 
 #### Previous behavior
+
 - Only CALL enforces 98/100 gas forwarding.
 - Only CALL triggers oracle access detection.
 - CALLCODE, DELEGATECALL, and STATICCALL bypass both.
 
 #### New behavior
+
 - CALLCODE, DELEGATECALL, and STATICCALL all enforce the 98/100 gas forwarding cap.
 - STATICCALL triggers oracle access detection when targeting the [oracle contract](../system-contracts/oracle.md) (consistent with CALL).
 - CALLCODE and DELEGATECALL do not trigger oracle access detection — their `target_address` equals the caller's address, so they never constitute a direct oracle read.
 
-| Opcode         | 98/100 gas forwarding | Oracle access detection |
-| -------------- | --------------------- | ----------------------- |
-| CALL           | MiniRex+              | MiniRex+                |
-| STATICCALL     | Rex+                  | Rex+                    |
-| DELEGATECALL   | Rex+                  | Never                   |
-| CALLCODE       | Rex+                  | Never                   |
+| Opcode       | 98/100 gas forwarding | Oracle access detection |
+| ------------ | --------------------- | ----------------------- |
+| CALL         | MiniRex+              | MiniRex+                |
+| STATICCALL   | Rex+                  | Rex+                    |
+| DELEGATECALL | Rex+                  | Never                   |
+| CALLCODE     | Rex+                  | Never                   |
 
 ### Transaction and Block Limits
 
 #### Previous behavior
+
 - Data size: 3.125 MB per transaction, 12.5 MB per block.
 - KV updates: 125,000 per transaction, 500,000 per block.
 - Compute gas: 1B per transaction.
 - State growth: unlimited.
 
 #### New behavior
+
 - Data size: **12.5 MB** per transaction (4× increase, now equals block limit).
 - KV updates: **500,000** per transaction (4× increase, now equals block limit).
 - Compute gas: **200M** per transaction (5× decrease).
 - State growth: **1,000** per transaction and per block (new limit).
 
-| Limit          | Level       | MiniRex     | Rex          |
-| -------------- | ----------- | ----------- | ------------ |
-| Data size      | Transaction | 3.125 MB    | **12.5 MB**  |
-| KV updates     | Transaction | 125,000     | **500,000**  |
-| Compute gas    | Transaction | 1B          | **200M**     |
-| State growth   | Transaction | Unlimited   | **1,000**    |
-| State growth   | Block       | Unlimited   | **1,000**    |
+| Limit        | Level       | MiniRex   | Rex         |
+| ------------ | ----------- | --------- | ----------- |
+| Data size    | Transaction | 3.125 MB  | **12.5 MB** |
+| KV updates   | Transaction | 125,000   | **500,000** |
+| Compute gas  | Transaction | 1B        | **200M**    |
+| State growth | Transaction | Unlimited | **1,000**   |
+| State growth | Block       | Unlimited | **1,000**   |
 
 [State growth](../evm/resource-accounting.md#state-growth) counts net new entries: new storage slots (SSTORE 0→non-0) and new accounts (CREATE, CREATE2, or CALL with value to empty account).
 
