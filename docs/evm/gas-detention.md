@@ -166,8 +166,8 @@ Across multiple volatile accesses, the node MUST keep the most restrictive resul
 | -------- | ----- | ----------- |
 | `BLOCK_ENV_DETENTION_CAP` | 20,000,000 | Absolute compute gas cap after block-environment access |
 | `BENEFICIARY_DETENTION_CAP` | 20,000,000 | Absolute compute gas cap after beneficiary access |
-| `ORACLE_DETENTION_CAP` | 20,000,000 | Absolute compute gas cap after oracle storage access (Rex3+) |
-| `ORACLE_DETENTION_CAP_MINIREX` | 1,000,000 | Absolute compute gas cap after oracle access in MiniRex through Rex2 |
+| `ORACLE_DETENTION_CAP` | 20,000,000 | Absolute compute gas cap after oracle storage access |
+| `ORACLE_DETENTION_CAP_MINIREX` | 1,000,000 | Historical absolute compute gas cap after oracle access (superseded) |
 
 ## Rationale
 

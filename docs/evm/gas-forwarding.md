@@ -59,7 +59,7 @@ For [Rex](../upgrades/rex.md) and later stable specs, the 98/100 rule applies to
 <details>
 <summary>Rex4 (unstable): Storage gas stipend interaction</summary>
 
-For value-transferring `CALL` and `CALLCODE`, Rex4 adds `STORAGE_GAS_STIPEND` on top of the stable child-frame gas limit.
+For value-transferring `CALL` and `CALLCODE`, Rex4 adds `STORAGE_CALL_STIPEND` on top of the stable child-frame gas limit.
 The extra stipend MUST be usable only for storage-gas-heavy operations.
 The compute-gas limit of the child call frame MUST remain at the pre-stipend level.
 
@@ -72,7 +72,7 @@ The compute-gas limit of the child call frame MUST remain at the pre-stipend lev
 | `GAS_FORWARD_NUMERATOR` | 98 | Numerator of the stable forwarding fraction |
 | `GAS_FORWARD_DENOMINATOR` | 100 | Denominator of the stable forwarding fraction |
 | `CALL_STIPEND` | 2,300 | Standard EVM stipend preserved for value-transferring `CALL` and `CALLCODE` |
-| `STORAGE_GAS_STIPEND` | 23,000 | Additional unstable Rex4 stipend for storage-gas operations in value-transferring `CALL` and `CALLCODE` |
+| `STORAGE_CALL_STIPEND` | 23,000 | Additional unstable Rex4 stipend for storage-gas operations in value-transferring `CALL` and `CALLCODE` |
 
 ## Rationale
 

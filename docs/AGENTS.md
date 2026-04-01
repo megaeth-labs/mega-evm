@@ -13,6 +13,9 @@ Every spec page MUST include YAML frontmatter with a `spec` field — the latest
 This field is the single source of truth for which spec version the page reflects.
 When the latest stable spec changes, update this field and the page content together.
 
+**Exception**: Upgrade pages under `upgrades/` do not need a `spec` frontmatter field.
+Their spec association is conveyed by the page title and filename.
+
 Every spec page MUST follow this section order:
 
 ```
@@ -50,8 +53,9 @@ Links to upgrade pages showing how this behavior evolved across specs.
 
 **Sections may be omitted** when they genuinely don't apply (e.g., a glossary page has no Constants or Motivation).
 But for any page that defines behavioral rules, the full structure SHOULD be followed.
-Security Considerations SHOULD be included on any page that defines gas accounting, resource limits, state mutation, or economic rules.
+Security Considerations SHOULD be included on any page that defines gas accounting, resource limits, state mutation, or economic rules, but it is not required.
 It MAY be omitted for pages that are purely structural (e.g., glossary, overview indexes).
+Existing pages that omit the section do not need to be retroactively updated solely to add it.
 
 ### Spec History Format
 
@@ -113,9 +117,9 @@ Optional, if it helps orient readers.
 
 - **Normative and precise.** Use MUST, MUST NOT, SHALL, SHOULD, MAY per RFC 2119 when defining behavior. Every behavioral rule in the Specification section MUST use normative language.
 - **Exhaustive.** Cover every corner case. Readability may be sacrificed for completeness.
-- **No developer guidance.** Do not include "tips", "best practices", "how to use", or recommendations like "Use `eth_estimateGas`" or "Use transient storage". That belongs in `docs/dev/`.
-- **No user-facing language.** Do not address the reader as "you" in the Specification section. Do not explain "what this means for you". That belongs in `docs/user/` or `docs/dev/`.
-- **Self-contained.** The spec never links to user docs or developer docs. It may link to external references (EIPs, Ethereum Yellow Paper, OP Stack specs) and to other spec pages.
+- **No developer guidance.** Do not include "tips", "best practices", "how to use", or recommendations like "Use `eth_estimateGas`" or "Use transient storage". That belongs in developer documentation outside this spec.
+- **No user-facing language.** Do not address the reader as "you" in the Specification section. Do not explain "what this means for you". That belongs in user or developer documentation outside this spec.
+- **Self-contained.** The spec never links to external user docs or developer docs. It may link to external references (EIPs, Ethereum Yellow Paper, OP Stack specs) and to other spec pages.
 - **No implementation details.** Do not reference specific code patterns, function names, or implementation strategies (e.g., `spec.is_enabled(MINI_REX)`). Describe the required behavior, not how to implement it.
 
 ## Specification Section Rules
@@ -167,6 +171,8 @@ Optional, if it helps orient readers.
   The Rationale section MAY reference spec names when explaining historical design decisions.
 - Wrap unstable (not-yet-activated) spec content in `<details>` blocks with a clear label (e.g., "Rex4 (unstable): ...").
 - Unstable content MUST still use normative language within the `<details>` block.
+- **Glossary exception**: glossary entries for unstable-spec terms do not use `<details>` blocks.
+  Instead, mark them with inline text (e.g., "*(Rex4, unstable)*") at the start of the definition.
 
 ## Motivation and Rationale Section Rules
 
@@ -262,13 +268,13 @@ Links to the implementation repo, related EIPs, or other specs.
 
 ## What Does NOT Belong Here
 
-- Developer tips or best practices → `docs/dev/`
-- Code examples showing how to use a feature → `docs/dev/`
-- User-facing explanations → `docs/user/`
-- Integration configuration → `docs/dev/tooling.md`
-- "Why should I care about this?" framing → `docs/dev/`
-- Implementation-specific code patterns or API references → `docs/dev/`
-- Recommendations ("Use X instead of Y") → `docs/dev/`
+- Developer tips or best practices → developer documentation (outside this spec)
+- Code examples showing how to use a feature → developer documentation
+- User-facing explanations → user documentation (outside this spec)
+- Integration configuration → developer documentation
+- "Why should I care about this?" framing → developer documentation
+- Implementation-specific code patterns or API references → developer documentation
+- Recommendations ("Use X instead of Y") → developer documentation
 
 ## Source of Truth
 

@@ -85,7 +85,9 @@ All pre-Rex2 behavior is unchanged.
 The SELFDESTRUCT restoration uses the same [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics already implemented in the underlying revm.
 The "same transaction" check means only contracts created via CREATE or CREATE2 within the currently executing transaction are eligible for full destruction.
 
-KeylessDeploy sandbox state (deployed contract, nonce changes) is merged into main execution on success and discarded on failure.
+KeylessDeploy sandbox state is merged into main execution on both success and execution failure.
+On execution failure the sandbox itself has already reverted most state changes, so the merged state contains only the signer's nonce increment and balance deduction — not the failed deployment artifacts.
+Validation failures do not reach sandbox execution and therefore do not merge any state.
 
 ## References
 

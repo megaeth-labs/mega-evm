@@ -38,11 +38,6 @@ This specification targets teams implementing MegaETH-compatible execution clien
 Start with [Hardforks and Specs](hardfork-spec.md) to understand how behavior is versioned, then read each [Network Upgrade](upgrades/overview.md) page for the exact behavioral deltas introduced at each spec.
 For the current stable behavior as a single reference, see the [MegaEVM Overview](evm/overview.md).
 
-{% hint style="info" %}
-If you are building smart contracts or dApps on MegaETH, the [Developer Docs](../dev/overview.md) provide practical guidance with code examples.
-This specification is the normative reference that the developer docs summarize.
-{% endhint %}
-
 ## Reference Implementation
 
 | Component        | Version                                                          |
@@ -50,7 +45,7 @@ This specification is the normative reference that the developer docs summarize.
 | **MegaEVM**      | [mega-evm](https://github.com/megaeth-labs/mega-evm)            |
 | **Base EVM**     | [revm v27.1.0](https://github.com/bluealloy/revm)               |
 | **Optimism EVM** | [op-revm v8.1.0](https://github.com/bluealloy/op-revm)          |
-| **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/evm)            |
+| **Alloy EVM**    | [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy-evm)      |
 
 ## Spec Progression
 

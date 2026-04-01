@@ -86,11 +86,11 @@ The [data size](resource-accounting.md) tracked for LOG operations within a reve
 
 The 10× storage gas on LOG opcodes causes a simple `LOG1` to cost 4,500 gas (750 compute + 3,750 storage), exceeding the EVM's `CALL_STIPEND` of 2,300.
 
-Rex4 introduces an additional **storage gas stipend** of 23,000 gas for internal (`depth > 0`) value-transferring `CALL` and `CALLCODE` opcodes.
+Rex4 introduces an additional **[storage call stipend](../glossary.md#storage-gas-stipend)** of 23,000 gas for internal (`depth > 0`) value-transferring `CALL` and `CALLCODE` opcodes.
 `DELEGATECALL`, `STATICCALL`, top-level transaction calls, and [system contract](../system-contracts/overview.md) interceptions MUST NOT receive the stipend.
-The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_GAS_STIPEND (23,000)`.
+The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_CALL_STIPEND (23,000)`.
 The callee's [compute gas](../glossary.md#compute-gas) limit MUST remain at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by storage gas operations.
-On return, unused storage gas stipend MUST be burned — it MUST NOT be returned to the caller, regardless of whether the callee succeeded or reverted.
+On return, unused storage call stipend MUST be burned — it MUST NOT be returned to the caller, regardless of whether the callee succeeded or reverted.
 See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
 
 </details>

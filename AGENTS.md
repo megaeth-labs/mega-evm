@@ -305,4 +305,4 @@ When the agent is requested to implement a new feature or bug fix, it should con
 The documentation is the public-facing specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
 It is framed as a protocol specification, not as documentation for a specific crate.
 
-All conventions for writing and editing the documentation (audience, content rules, upgrade page format, writing style) are defined in [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).
+All conventions for writing and editing the documentation (audience, content rules, upgrade page format, writing style) are defined in [`docs/AGENTS.md`](docs/AGENTS.md).
