@@ -1,6 +1,6 @@
 ---
 description: MegaETH contract size limits — 512 KB max bytecode, 536 KB max initcode, inherited from MiniRex.
-spec: Rex3
+spec: Rex4
 ---
 
 # Contract Limits

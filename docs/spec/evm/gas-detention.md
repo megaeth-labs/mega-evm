@@ -1,6 +1,6 @@
 ---
 description: MegaETH gas detention specification — compute gas caps triggered by volatile data access (block environment, oracle SLOAD).
-spec: Rex3
+spec: Rex4
 ---
 
 # Gas Detention
@@ -29,14 +29,15 @@ A node MUST apply gas detention when a transaction accesses volatile data as def
 Gas detention affects only [compute gas](../glossary.md#compute-gas).
 It MUST NOT directly change storage gas accounting, [data size](resource-accounting.md#data-size), [KV updates](resource-accounting.md#kv-updates), or [state growth](resource-accounting.md#state-growth).
 
-Detention is an **absolute cap** on total compute gas used by the transaction.
-If a volatile access applies a detention cap `cap`, the transaction's effective compute gas limit becomes:
+Detention applies a **relative cap** on compute gas.
+When a volatile access applies a detention cap `cap`, the effective detained limit becomes:
 
 ```
-effective_compute_gas_limit = min(tx_compute_gas_limit, cap)
+effective_detained_limit = current_compute_gas_used + cap
+effective_compute_gas_limit = min(tx_compute_gas_limit, effective_detained_limit)
 ```
 
-If `compute_gas_used > effective_compute_gas_limit` at the moment detention is applied, the transaction MUST halt immediately with `VolatileDataAccessOutOfGas`.
+This means a transaction MAY always consume up to `cap` more compute gas after the volatile access, regardless of how much compute gas was consumed before the access.
 
 ### Volatile Data Categories
 
@@ -69,12 +70,7 @@ A node MUST apply beneficiary gas detention with cap `BENEFICIARY_DETENTION_CAP`
 - a transaction or call frame whose recipient is the beneficiary
 - beneficiary access performed through `DELEGATECALL`
 
-<details>
-<summary>Rex4 (unstable): Additional beneficiary trigger</summary>
-
-In Rex4, `SELFDESTRUCT` targeting the beneficiary MUST also trigger beneficiary gas detention.
-
-</details>
+`SELFDESTRUCT` targeting the beneficiary MUST also trigger beneficiary gas detention.
 
 #### Oracle Access
 
@@ -91,10 +87,11 @@ The following rules MUST apply:
 ### Cap Selection
 
 If multiple volatile-data categories are accessed during the same transaction, the node MUST apply the most restrictive effective cap.
-This means:
+Each volatile access produces its own effective detained limit (`current_compute_gas_used + cap` at the time of that access).
+The node MUST keep the minimum across all such limits:
 
 ```
-effective_compute_gas_limit = min(tx_compute_gas_limit, all_applied_detention_caps)
+effective_compute_gas_limit = min(tx_compute_gas_limit, all effective_detained_limits)
 ```
 
 Applying a later volatile access MUST NOT increase the effective detained limit.
@@ -104,10 +101,9 @@ Applying a later volatile access MUST NOT increase the effective detained limit.
 When a volatile-data trigger occurs, the node MUST perform the following steps in order:
 
 1. Identify the detention category and its cap.
-2. Update the transaction's effective compute gas limit to the minimum of the current effective limit and the detention cap.
-3. Compare the current `compute_gas_used` against the updated effective limit.
-4. If `compute_gas_used` already exceeds the updated effective limit, halt the transaction immediately with `OutOfGas`.
-5. Otherwise continue execution subject to the updated limit.
+2. Compute the effective detained limit as `current_compute_gas_used + cap`.
+3. Update the transaction's effective compute gas limit to the minimum of the current effective limit and the newly computed effective detained limit.
+4. Continue execution subject to the updated limit.
 
 After detention has been applied, any subsequent execution step that would cause `compute_gas_used` to exceed the effective detained limit MUST halt the transaction with `VolatileDataAccessOutOfGas`.
 
@@ -125,10 +121,6 @@ Gas detention state from one transaction MUST NOT carry over to subsequent trans
 
 ### Corner Cases
 
-#### Immediate Exceed on Access
-
-If a transaction has already consumed more compute gas than the detention cap at the moment volatile access occurs, the node MUST halt the transaction immediately with `VolatileDataAccessOutOfGas`.
-
 #### Repeated Access to Same Category
 
 Repeated access to the same volatile-data category within the same transaction MUST NOT relax the effective detained limit.
@@ -144,29 +136,13 @@ If a child call frame triggers detention, the reduced effective compute gas limi
 If volatile access occurs inside a call frame that later reverts, the compute gas already consumed remains consumed.
 The detained compute gas limit MUST remain in effect for the rest of the transaction.
 
-<details>
-<summary>Rex4 (unstable): Relative detention</summary>
-
-Rex4 replaces absolute detention caps with relative detention caps.
-When volatile access applies a detention cap `cap`, the effective detained limit becomes:
-
-```
-effective_detained_limit = current_compute_gas_used + cap
-effective_compute_gas_limit = min(tx_compute_gas_limit, effective_detained_limit)
-```
-
-This means a transaction MAY always consume up to `cap` more compute gas after the volatile access, regardless of how much compute gas was consumed before the access.
-Across multiple volatile accesses, the node MUST keep the most restrictive resulting effective limit.
-
-</details>
-
 ## Constants
 
 | Constant                       | Value      | Description                                                          |
 | ------------------------------ | ---------- | -------------------------------------------------------------------- |
-| `BLOCK_ENV_DETENTION_CAP`      | 20,000,000 | Absolute compute gas cap after block-environment access              |
-| `BENEFICIARY_DETENTION_CAP`    | 20,000,000 | Absolute compute gas cap after beneficiary access                    |
-| `ORACLE_DETENTION_CAP`         | 20,000,000 | Absolute compute gas cap after oracle storage access                 |
+| `BLOCK_ENV_DETENTION_CAP`      | 20,000,000 | Relative compute gas cap after block-environment access              |
+| `BENEFICIARY_DETENTION_CAP`    | 20,000,000 | Relative compute gas cap after beneficiary access                    |
+| `ORACLE_DETENTION_CAP`         | 20,000,000 | Relative compute gas cap after oracle storage access                 |
 | `ORACLE_DETENTION_CAP_MINIREX` | 1,000,000  | Historical absolute compute gas cap after oracle access (superseded) |
 
 ## Rationale
@@ -176,10 +152,10 @@ MegaETH must permit contracts to read shared inputs such as time, block metadata
 Outright banning such reads would make large classes of contracts non-viable.
 Detention preserves expressiveness while bounding the computation that may follow a conflict-prone read.
 
-**Why an absolute cap?**
-The absolute model is simple to enforce and guarantees a hard upper bound on computation after volatile access.
-Its main drawback is that late volatile access can cause immediate failure if substantial compute gas was already consumed.
-Rex4 changes this to a relative model to avoid penalizing late access.
+**Why a relative cap instead of an absolute cap?**
+The original MiniRex design used an absolute cap, which guaranteed a hard upper bound on total compute gas after volatile access.
+Its drawback was that late volatile access could cause immediate failure if substantial compute gas was already consumed — penalizing transactions for work done _before_ touching volatile data.
+The relative model avoids this by guaranteeing a fixed budget of additional compute gas _after_ the access, regardless of prior consumption.
 
 **Why make the most restrictive cap win?**
 A transaction that touches multiple volatile sources should be governed by the strongest applicable constraint.
@@ -197,4 +173,4 @@ Gas detention semantics evolved across specs:
 - [Rex](../upgrades/rex.md) — made CALL-like opcode behavior consistent
 - [Rex1](../upgrades/rex1.md) — reset detained compute gas limit between transactions in the same block
 - [Rex3](../upgrades/rex3.md) — raised oracle cap to 20M and changed oracle detection from CALL-based to SLOAD-based
-- [Rex4](../upgrades/rex4.md) _(unstable)_ — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior
+- [Rex4](../upgrades/rex4.md) — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior

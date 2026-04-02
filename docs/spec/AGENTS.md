@@ -73,7 +73,7 @@ Example:
 - [Rex1](../upgrades/rex1.md) — Fixed detained compute-gas reset behavior.
 - [Rex2](../upgrades/rex2.md) — Added KeylessDeploy and enabled SELFDESTRUCT with EIP-6780 semantics.
 - [Rex3](../upgrades/rex3.md) — Revised oracle detention to use SLOAD-based triggering.
-- [Rex4](../upgrades/rex4.md) _(unstable)_ — Introduces per-call-frame limits and relative detention.
+- [Rex4](../upgrades/rex4.md) — Introduces per-call-frame limits, relative detention, and storage gas stipend.
 ```
 
 For **concept pages**, the Spec History section MAY summarize what changed at each spec if that helps explain the evolution of the behavior.
@@ -170,10 +170,10 @@ Optional, if it helps orient readers.
   The `spec` frontmatter field declares which spec the page describes.
   Readers should be able to read the main content without encountering "as of Rex3" or "in Rex3" qualifiers.
   The Rationale section MAY reference spec names when explaining historical design decisions.
-- Wrap unstable (not-yet-activated) spec content in `<details>` blocks with a clear label (e.g., "Rex4 (unstable): ...").
+- Wrap unstable (not-yet-activated) spec content in `<details>` blocks with a clear label (e.g., "SpecName (unstable): ...").
 - Unstable content MUST still use normative language within the `<details>` block.
 - **Glossary exception**: glossary entries for unstable-spec terms do not use `<details>` blocks.
-  Instead, mark them with inline text (e.g., "_(Rex4, unstable)_") at the start of the definition.
+  Instead, mark them with inline text (e.g., "_(SpecName, unstable)_") at the start of the definition.
 
 ## Motivation and Rationale Section Rules
 
@@ -313,7 +313,7 @@ The old `mega-evm/docs` content is transitional and may be removed.
 
 - Use tables for structured data (gas costs, opcode lists, resource limits, constants).
 - Use unambiguous table values. Write "Unlimited", "No limit", or "N/A" — never use bare dashes ("—") which are ambiguous (not applicable? unknown? unlimited?).
-- Use `<details>` blocks for unstable (Rex4) features.
+- Use `<details>` blocks for unstable (not-yet-activated) features.
 - Use `{% hint style="info" %}` sparingly — only for non-normative notes that help implementers understand design intent. Never for developer tips.
 - Use `{% hint style="warning" %}` for unstable spec warnings.
 - Do NOT use `{% hint style="success" %}` in spec pages — it implies developer guidance.

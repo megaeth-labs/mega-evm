@@ -76,7 +76,7 @@ For complete Rex2 specification, see the [Rex2 upgrade page](https://megaeth-lab
 
 For complete Rex3 specification, see the [Rex3 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex3.html).
 
-### REX4 Spec _(unstable)_
+### REX4 Spec
 
 - **Per-Call-Frame Resource Budgets**: All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
 - **Relative Gas Detention**: Effective detained limit is `current_usage + cap` instead of an absolute cap

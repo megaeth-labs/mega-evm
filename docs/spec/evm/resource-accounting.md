@@ -1,6 +1,6 @@
 ---
 description: MegaETH resource accounting specification — counter semantics, revert behavior, and per-opcode metering for compute gas, data size, KV updates, and state growth.
-spec: Rex3
+spec: Rex4
 ---
 
 # Resource Accounting
@@ -47,20 +47,6 @@ Unless explicitly stated otherwise on this page, resource trackers MUST be [call
 - and usage created within a child call frame MUST be merged into the parent call frame if that child call frame succeeds.
 
 The sole stable exception is [compute gas](../glossary.md#compute-gas), which MUST accumulate globally and MUST NOT be reverted.
-
-<details>
-<summary>Rex4 (unstable): Per-call-frame limits</summary>
-
-Rex4 adds per-call-frame budgets for all four dimensions.
-The top-level call frame starts with the full transaction budget.
-Each inner call frame receives `remaining × 98 / 100` of its parent call frame's remaining budget.
-These budgets are system-enforced — the calling contract cannot directly control them.
-Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains under direct contract control.
-If an inner call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
-The parent call frame MAY continue execution.
-Compute gas consumed by reverted call frames MUST still count toward the transaction total.
-
-</details>
 
 ### Compute Gas
 
@@ -220,4 +206,5 @@ Allowing the counter to go negative during intermediate steps keeps the accounti
 ## Spec History
 
 This page describes the current accounting behavior.
-Per-call-frame runtime budgets are introduced only in [Rex4](../upgrades/rex4.md), and therefore remain unstable.
+
+- [Rex4](../upgrades/rex4.md) — introduced per-call-frame runtime budgets for all four resource dimensions.

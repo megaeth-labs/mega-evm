@@ -1,6 +1,6 @@
 ---
 description: MegaETH 98/100 gas forwarding rule — CALL, DELEGATECALL, STATICCALL, CALLCODE, and CREATE/CREATE2 forwarding semantics.
-spec: Rex3
+spec: Rex4
 ---
 
 # Gas Forwarding
@@ -56,23 +56,20 @@ For `DELEGATECALL`, `STATICCALL`, `CREATE`, and `CREATE2`, no call stipend appli
 For [MiniRex](../upgrades/minirex.md), the 98/100 rule applied only to `CALL`, `CREATE`, and `CREATE2`.
 For [Rex](../upgrades/rex.md) and later stable specs, the 98/100 rule applies to all CALL-like opcodes and both contract-creation opcodes.
 
-<details>
-<summary>Rex4 (unstable): Storage gas stipend interaction</summary>
+### [Storage Gas Stipend](../glossary.md#storage-gas-stipend) Interaction
 
-For value-transferring `CALL` and `CALLCODE`, Rex4 adds `STORAGE_CALL_STIPEND` on top of the stable child-frame gas limit.
+For value-transferring `CALL` and `CALLCODE`, `STORAGE_CALL_STIPEND` is added on top of the child-frame gas limit.
 The extra stipend MUST be usable only for storage-gas-heavy operations.
 The compute-gas limit of the child call frame MUST remain at the pre-stipend level.
 
-</details>
-
 ## Constants
 
-| Constant                  | Value  | Description                                                                                             |
-| ------------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
-| `GAS_FORWARD_NUMERATOR`   | 98     | Numerator of the stable forwarding fraction                                                             |
-| `GAS_FORWARD_DENOMINATOR` | 100    | Denominator of the stable forwarding fraction                                                           |
-| `CALL_STIPEND`            | 2,300  | Standard EVM stipend preserved for value-transferring `CALL` and `CALLCODE`                             |
-| `STORAGE_CALL_STIPEND`    | 23,000 | Additional unstable Rex4 stipend for storage-gas operations in value-transferring `CALL` and `CALLCODE` |
+| Constant                  | Value  | Description                                                                               |
+| ------------------------- | ------ | ----------------------------------------------------------------------------------------- |
+| `GAS_FORWARD_NUMERATOR`   | 98     | Numerator of the stable forwarding fraction                                               |
+| `GAS_FORWARD_DENOMINATOR` | 100    | Denominator of the stable forwarding fraction                                             |
+| `CALL_STIPEND`            | 2,300  | Standard EVM stipend preserved for value-transferring `CALL` and `CALLCODE`               |
+| `STORAGE_CALL_STIPEND`    | 23,000 | Additional stipend for storage-gas operations in value-transferring `CALL` and `CALLCODE` |
 
 ## Rationale
 
@@ -85,4 +82,4 @@ Retaining 2% instead of approximately 1.56% reduces residual gas more aggressive
 
 - [MiniRex](../upgrades/minirex.md) introduced the 98/100 rule for `CALL`, `CREATE`, and `CREATE2` only.
 - [Rex](../upgrades/rex.md) extended the rule to all CALL-like opcodes.
-- [Rex4](../upgrades/rex4.md) adds an unstable storage-gas stipend for value-transferring `CALL` and `CALLCODE`.
+- [Rex4](../upgrades/rex4.md) — added storage-gas stipend for value-transferring `CALL` and `CALLCODE`.
