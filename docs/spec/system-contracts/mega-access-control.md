@@ -102,7 +102,7 @@ If the restriction was set by an ancestor call frame (a parent at a shallower de
 
 ### `isVolatileDataAccessDisabled`
 
-When intercepted, the node MUST return `true` if volatile data access is disabled at the caller's call depth, and `false` otherwise.
+When intercepted, the node MUST return `true` if volatile data access is currently disabled for the caller's call frame (whether disabled by the caller or an ancestor call frame), and `false` otherwise.
 
 ### Lifetime
 
