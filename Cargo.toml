@@ -2,11 +2,12 @@
 [workspace]
 members = [
     "bin/mega-evme",
+    "bin/mega-t8n",
     "crates/mega-evm",
     "crates/state-test",
     "crates/system-contracts",
 ]
-default-members = ["crates/mega-evm", "crates/state-test", "bin/mega-evme"]
+default-members = ["crates/mega-evm", "bin/mega-evme"]
 exclude = []
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021

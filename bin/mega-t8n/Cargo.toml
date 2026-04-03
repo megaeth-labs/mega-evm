@@ -1,0 +1,32 @@
+[package]
+name = "mega-t8n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "MegaETH state transition (t8n) tool"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mega-t8n"
+path = "src/main.rs"
+
+[dependencies]
+# megaeth
+mega-evm = { workspace = true, features = ["default", "test-utils"] }
+state-test.workspace = true
+
+# alloy
+alloy-consensus = { workspace = true, features = ["serde"] }
+alloy-primitives.workspace = true
+alloy-serde = { workspace = true, features = ["default"] }
+
+# misc
+clap = { workspace = true, features = ["default"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

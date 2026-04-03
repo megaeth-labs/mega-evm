@@ -47,6 +47,7 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 | `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based) |
 | `state-test`            | `crates/state-test`       | Ethereum state test runner                                   |
 | `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)           |
+| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                       |
 
 ## Architecture
 

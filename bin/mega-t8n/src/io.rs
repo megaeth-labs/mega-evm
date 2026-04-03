@@ -2,7 +2,7 @@ use std::{fs, io::Read, path::PathBuf};
 
 use state_test::types::Env;
 
-use crate::t8n::{
+use crate::{
     Result, StateAlloc, StdinInput, T8nError, Transaction, TransitionInputs, TransitionResults,
 };
 
