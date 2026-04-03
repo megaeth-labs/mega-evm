@@ -22,9 +22,9 @@ macro_rules! as_array {
     }};
 }
 
-// The original salt crate uses zerocopy::transmute! (native endian). We use from_le_bytes
-// to match behavior on all current targets (x86_64, riscv64 — both little-endian) without
-// requiring the zerocopy dependency.
+// The original salt crate uses zerocopy::transmute! which is native-endian and produces
+// different hashes on big-endian targets (see https://github.com/megaeth-labs/salt/issues/127).
+// We use from_le_bytes to guarantee deterministic hashes on all platforms.
 #[inline(always)]
 fn u16_from_le_bytes(bytes: &[u8; 2]) -> u16 {
     u16::from_le_bytes(*bytes)
