@@ -264,6 +264,12 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Always test logic changes.**
   Any logic change or modification to mega-evm should be equipped with tests if there is no specific reason of not adding tests.
   The agent should always consider accompanying tests or suggest to add additional tests.
+- **Add benchmarks for performance-sensitive changes.**
+  Changes on the EVM execution hot path must be accompanied by benchmarks.
+  This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.
+- **Always run benchmarks locally before committing.**
+  New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
+  Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.

@@ -24,8 +24,11 @@ const SUBCALL_TARGET_A: Address = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const SUBCALL_TARGET_B: Address = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
 /// Specs to benchmark against.
-const SPEC_IDS: &[(&str, MegaSpecId)] =
-    &[("equivalence", MegaSpecId::EQUIVALENCE), ("mini_rex", MegaSpecId::MINI_REX)];
+const SPEC_IDS: &[(&str, MegaSpecId)] = &[
+    ("equivalence", MegaSpecId::EQUIVALENCE),
+    ("mini_rex", MegaSpecId::MINI_REX),
+    ("rex4", MegaSpecId::REX4),
+];
 
 //
 // ============================================================================
@@ -312,7 +315,7 @@ fn bench_transfer_multi(c: &mut Criterion) {
                         .caller(CALLER)
                         .call(*target)
                         .value(U256::from(1))
-                        .gas_limit(30_000)
+                        .gas_limit(100_000)
                         .build_fill();
                     let mut mega_tx = MegaTransaction::new(tx);
                     mega_tx.enveloped_tx = Some(Bytes::new());

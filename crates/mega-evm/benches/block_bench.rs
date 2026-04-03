@@ -138,7 +138,7 @@ fn bench_block_empty_txs(c: &mut Criterion) {
 
                 let block_ctx = MegaBlockExecutionCtx::new(
                     B256::ZERO,
-                    None,
+                    Some(B256::ZERO),
                     Bytes::new(),
                     BlockLimits::no_limits(),
                 );
@@ -188,7 +188,7 @@ fn bench_block_mixed_txs(c: &mut Criterion) {
 
                 let block_ctx = MegaBlockExecutionCtx::new(
                     B256::ZERO,
-                    None,
+                    Some(B256::ZERO),
                     Bytes::new(),
                     BlockLimits::no_limits(),
                 );
@@ -237,7 +237,7 @@ fn bench_block_deploy(c: &mut Criterion) {
 
             let block_ctx = MegaBlockExecutionCtx::new(
                 B256::ZERO,
-                None,
+                Some(B256::ZERO),
                 Bytes::new(),
                 BlockLimits::no_limits(),
             );
@@ -292,7 +292,7 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
 
                 let block_ctx = MegaBlockExecutionCtx::new(
                     B256::ZERO,
-                    None,
+                    Some(B256::ZERO),
                     Bytes::new(),
                     BlockLimits::no_limits(),
                 );
