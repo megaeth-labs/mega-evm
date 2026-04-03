@@ -1,4 +1,4 @@
-//! Transaction type definitions for the `mega-evme` tool.
+//! Transaction type definitions for the `mega-t8n` tool.
 
 use alloy_consensus::{Signed, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
 use alloy_primitives::{Signature, TxKind};

@@ -11,8 +11,6 @@ mod common;
 pub mod replay;
 /// Run module for executing arbitrary EVM bytecode
 pub mod run;
-/// T8N (state transition) module containing all transition-related functionality
-pub mod t8n;
 /// TX module for executing arbitrary transactions
 pub mod tx;
 

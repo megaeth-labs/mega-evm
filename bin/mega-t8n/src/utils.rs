@@ -6,7 +6,7 @@ use mega_evm::revm::{
 };
 use state_test::types::AccountInfo;
 
-use crate::t8n::{Result, StateAlloc, T8nError};
+use crate::{Result, StateAlloc, T8nError};
 
 /// Calculate state root from the final state
 pub fn calculate_state_root(state: &State<EmptyDB>) -> B256 {

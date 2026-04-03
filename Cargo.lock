@@ -2977,7 +2977,6 @@ dependencies = [
  "revm-inspectors",
  "serde",
  "serde_json",
- "state-test",
  "thiserror",
  "tokio",
  "tracing",
@@ -2993,6 +2992,21 @@ dependencies = [
  "semver 1.0.26",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mega-t8n"
+version = "1.5.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-serde",
+ "clap",
+ "mega-evm",
+ "serde",
+ "serde_json",
+ "state-test",
+ "thiserror",
 ]
 
 [[package]]
