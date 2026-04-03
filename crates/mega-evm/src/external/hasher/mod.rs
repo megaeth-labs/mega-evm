@@ -50,7 +50,7 @@ fn hash(bytes: &[u8]) -> u64 {
 /// Returns a bucket ID in the range `[NUM_META_BUCKETS, NUM_BUCKETS)`.
 /// The first `NUM_META_BUCKETS` buckets are reserved for metadata storage.
 #[inline(always)]
-pub fn bucket_id(key: &[u8]) -> BucketId {
+pub(crate) fn bucket_id(key: &[u8]) -> BucketId {
     (hash(key) % NUM_KV_BUCKETS as u64 + NUM_META_BUCKETS as u64) as BucketId
 }
 
@@ -67,7 +67,17 @@ mod tests {
 
     #[test]
     fn test_bucket_id_range() {
-        let test_keys: &[&[u8]] = &[b"", b"a", b"test", &[0u8; 32], &[255u8; 32], &[255u8; 1024]];
+        let test_keys: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"test",
+            &[0u8; 20],
+            &[255u8; 20],
+            &[0u8; 32],
+            &[0u8; 52],
+            &[255u8; 32],
+            &[255u8; 1024],
+        ];
 
         for key in test_keys {
             let id = bucket_id(key);
@@ -79,5 +89,22 @@ mod tests {
             );
             assert!(id < NUM_BUCKETS as BucketId, "bucket_id for {:?} is too large: {}", key, id);
         }
+    }
+
+    // Cross-verified against salt::state::hasher::bucket_id at salt v1.0.1.
+    #[test]
+    fn test_bucket_id_cross_check_with_ethereum_shaped_inputs() {
+        let addr: [u8; 20] = [
+            0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+            0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+        ];
+        assert_eq!(bucket_id(&addr), 12_196_828);
+
+        let mut slot_key = [0u8; 52];
+        slot_key[..20].copy_from_slice(&addr);
+        slot_key[51] = 1;
+        assert_eq!(bucket_id(&slot_key), 9_450_146);
+
+        assert_eq!(bucket_id(&[0u8; 20]), 12_666_336);
     }
 }

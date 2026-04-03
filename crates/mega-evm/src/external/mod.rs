@@ -21,7 +21,7 @@ use core::fmt::Debug;
 mod factory;
 mod gas;
 #[cfg(any(test, feature = "test-utils"))]
-pub mod hasher;
+pub(crate) mod hasher;
 mod oracle;
 mod salt;
 #[cfg(any(test, feature = "test-utils"))]

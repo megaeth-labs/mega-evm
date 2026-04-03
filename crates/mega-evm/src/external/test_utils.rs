@@ -29,7 +29,7 @@ pub struct RecordedHint {
 ///
 /// This struct provides mutable state for bucket capacities, oracle storage, and recorded hints,
 /// allowing tests to set up specific scenarios and verify hint mechanism behavior. Bucket IDs are
-/// calculated using the real SALT hashing logic from the `salt` crate.
+/// calculated using the inlined SALT hashing logic in [`crate::hasher`].
 ///
 /// # Example
 /// ```ignore
