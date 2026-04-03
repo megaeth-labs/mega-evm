@@ -371,28 +371,31 @@ pub struct AccountState {
 impl AccountState {
     /// Creates a new [`AccountState`] from [`Account`].
     ///
-    /// The `code_hash` is always computed from the actual code bytes to ensure
-    /// consistency. The `AccountInfo.code_hash` field may be stale when code was
-    /// set externally (e.g., via `set_account_code` in the `run` command).
+    /// When `AccountInfo.code` is `Some`, `code_hash` is recomputed from the actual
+    /// bytes (guards against stale hashes from direct `info.code` assignment).
+    /// When `code` is `None` (lazy-loaded, e.g. forked accounts whose bytecode hasn't
+    /// been fetched), the original `code_hash` is preserved so the account is not
+    /// silently downgraded to an EOA.
     pub fn from_account(account: Account) -> Self {
-        let code: Bytes = account
-            .info
-            .code
-            .as_ref()
-            .map(|c| c.original_byte_slice().to_vec())
-            .unwrap_or_default()
-            .into();
-        let code_hash = if code.is_empty() {
-            B256::from(alloy_primitives::KECCAK256_EMPTY)
-        } else {
-            alloy_primitives::keccak256(&code)
+        let (code, code_hash) = match &account.info.code {
+            Some(bytecode) => {
+                let bytes: Bytes = bytecode.original_byte_slice().to_vec().into();
+                let hash = if bytes.is_empty() {
+                    B256::from(alloy_primitives::KECCAK256_EMPTY)
+                } else {
+                    alloy_primitives::keccak256(&bytes)
+                };
+                (Some(bytes), hash)
+            }
+            // Code not materialized (lazy loading) — preserve original hash.
+            None => (None, account.info.code_hash),
         };
         let storage: BTreeMap<U256, U256> =
             account.storage.into_iter().map(|(slot, value)| (slot, value.present_value)).collect();
         Self {
             balance: Some(account.info.balance),
             nonce: Some(account.info.nonce),
-            code: Some(code),
+            code,
             code_hash: Some(code_hash),
             storage: Some(storage),
         }
@@ -523,7 +526,7 @@ where
     /// Set the code for an account.
     pub fn set_account_code(&mut self, address: Address, code: Bytecode) {
         self.code_map.insert(code.hash_slow(), code.clone());
-        self.prestate.entry(address).or_default().info.code = Some(code);
+        self.prestate.entry(address).or_default().info.set_code(code);
     }
 
     /// Set the storage for an account.
