@@ -53,4 +53,3 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "std",
 
 [dev-dependencies]
 rstest.workspace = true
-serde_json.workspace = true
