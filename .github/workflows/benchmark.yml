@@ -1,0 +1,233 @@
+name: Criterion Benchmark
+
+on:
+  schedule:
+    - cron: '0 2 * * 1' # Weekly Monday 2am UTC
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  benchmark:
+    name: Criterion performance check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    if: >-
+      github.event_name != 'issue_comment' || (
+        github.event.issue.pull_request &&
+        contains(github.event.comment.body, '/benchmark') &&
+        (github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR' ||
+         github.event.comment.author_association == 'OWNER')
+      )
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Checkout PR branch
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr checkout ${{ github.event.issue.number }}
+          git submodule update --init --recursive
+
+      - name: React to comment
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      # Run feature benchmarks (current branch)
+      - name: Run feature benchmarks
+        env:
+          BENCH_TARGETS: revm_bench mega_bench block_bench transact comp_cost ctt
+        run: |
+          : > feature_output.txt
+          for bench in $BENCH_TARGETS; do
+            cargo bench -p mega-evm --bench "$bench" -- --output-format bencher | tee -a feature_output.txt
+          done
+
+      # On /benchmark comment: also run baseline benchmarks for comparison
+      - name: Determine baseline commit
+        if: github.event_name == 'issue_comment'
+        id: baseline
+        run: |
+          echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          BASELINE=$(git merge-base HEAD origin/main)
+          echo "commit=$BASELINE" >> "$GITHUB_OUTPUT"
+          echo "Baseline commit: $BASELINE"
+
+      - name: Run baseline benchmarks
+        if: github.event_name == 'issue_comment'
+        env:
+          BENCH_TARGETS: revm_bench mega_bench block_bench transact comp_cost ctt
+        run: |
+          git checkout ${{ steps.baseline.outputs.commit }}
+          trap 'git checkout -' EXIT
+          git submodule update --init --recursive
+          AVAILABLE_BENCHES=$(python3 - <<'PY'
+          bench_names = []
+          in_bench = False
+
+          with open("crates/mega-evm/Cargo.toml", encoding="utf-8") as f:
+              for line in f:
+                  stripped = line.strip()
+                  if stripped == "[[bench]]":
+                      in_bench = True
+                      continue
+                  if stripped.startswith("[") and stripped != "[[bench]]":
+                      in_bench = False
+                  if in_bench and stripped.startswith("name = "):
+                      name = stripped.split("=", 1)[1].strip().strip('"')
+                      bench_names.append(name)
+                      in_bench = False
+
+          for name in bench_names:
+              print(name)
+          PY
+          )
+          : > baseline_output.txt
+          for bench in $BENCH_TARGETS; do
+            if printf '%s\n' "$AVAILABLE_BENCHES" | grep -qx "$bench"; then
+              cargo bench -p mega-evm --bench "$bench" -- --output-format bencher | tee -a baseline_output.txt
+            else
+              echo "Skipping baseline benchmark '$bench' (not present at baseline commit)"
+            fi
+          done
+
+      - name: Compare and comment on PR
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            function parseBencher(text) {
+              const results = {};
+              for (const line of text.split('\n')) {
+                // Format: "test name ... bench: 123 ns/iter (+/- 45)"
+                const match = line.match(/^test\s+(.+?)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns\/iter\s+\(\+\/- ([\d,]+)\)/);
+                if (match) {
+                  const name = match[1].trim();
+                  const ns = parseInt(match[2].replace(/,/g, ''));
+                  const variance = parseInt(match[3].replace(/,/g, ''));
+                  results[name] = { ns, variance };
+                }
+              }
+              return results;
+            }
+
+            const featureText = fs.readFileSync('feature_output.txt', 'utf8');
+            const feature = parseBencher(featureText);
+
+            if (!fs.existsSync('baseline_output.txt')) {
+              console.log('No baseline output found');
+              return;
+            }
+            const baselineText = fs.readFileSync('baseline_output.txt', 'utf8');
+            const baseline = parseBencher(baselineText);
+
+            const allNames = [...new Set([...Object.keys(baseline), ...Object.keys(feature)])].sort();
+            if (allNames.length === 0) {
+              console.log('No benchmark results to compare');
+              return;
+            }
+
+            let body = '## Criterion Benchmark Comparison\n\n';
+            const featureSha = '${{ steps.baseline.outputs.feature_sha }}';
+            body += `> Comparing [\`baseline\`](${context.payload.repository.html_url}/commit/${{ steps.baseline.outputs.commit }})`;
+            body += ` → [\`feature\`](${context.payload.repository.html_url}/commit/${featureSha})\n\n`;
+
+            let regressions = 0;
+            let warnings = 0;
+            let improvements = 0;
+            const comparisons = [];
+
+            for (const name of allNames) {
+              const b = baseline[name];
+              const f = feature[name];
+              if (!b || !f) continue;
+
+              const delta = ((f.ns - b.ns) / b.ns * 100);
+              let icon = ':white_check_mark:';
+              if (delta > 30) { icon = ':x:'; regressions++; }
+              else if (delta > 15) { icon = ':warning:'; warnings++; }
+              else if (delta < -10) { icon = ':rocket:'; improvements++; }
+
+              const bUs = (b.ns / 1000).toFixed(1);
+              const fUs = (f.ns / 1000).toFixed(1);
+              const sign = delta > 0 ? '+' : '';
+              comparisons.push({
+                delta,
+                row: `| ${name} | ${bUs} us | ${fUs} us | ${sign}${delta.toFixed(1)}% | ${icon} |`,
+              });
+            }
+
+            const rows = comparisons.map(({ row }) => row);
+
+            if (rows.length > 20) {
+              // Show only significant changes if too many
+              const significant = comparisons
+                .filter(({ delta }) => Math.abs(delta) > 5)
+                .map(({ row }) => row);
+              if (significant.length > 0 && significant.length < rows.length) {
+                body += `<details><summary>${rows.length} benchmarks total, ${significant.length} with >5% change</summary>\n\n`;
+                body += '| Benchmark | Baseline | Feature | Delta | |\n';
+                body += '|-----------|----------|---------|-------|-|\n';
+                body += rows.join('\n') + '\n';
+                body += '\n</details>\n\n';
+                body += '**Significant changes (>5%):**\n\n';
+                body += '| Benchmark | Baseline | Feature | Delta | |\n';
+                body += '|-----------|----------|---------|-------|-|\n';
+                body += significant.join('\n') + '\n';
+              } else {
+                body += '| Benchmark | Baseline | Feature | Delta | |\n';
+                body += '|-----------|----------|---------|-------|-|\n';
+                body += rows.join('\n') + '\n';
+              }
+            } else {
+              body += '| Benchmark | Baseline | Feature | Delta | |\n';
+              body += '|-----------|----------|---------|-------|-|\n';
+              body += rows.join('\n') + '\n';
+            }
+
+            body += `\n**${rows.length} benchmarks**: ${regressions} regressions, ${warnings} warnings, ${improvements} improvements\n`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-benchmark-results
+          path: |
+            feature_output.txt
+            baseline_output.txt
