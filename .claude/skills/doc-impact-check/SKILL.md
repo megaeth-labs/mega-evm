@@ -13,7 +13,7 @@ This skill runs in CI on pull requests that modify source code under `crates/meg
 It checks whether the code changes affect documented behavior and whether the PR already includes corresponding doc updates.
 
 The documentation in `docs/` is the formal MegaETH specification.
-Read `docs/AGENTS.md` for the writing rules and conventions.
+Read `docs/spec/AGENTS.md` for the writing rules and conventions.
 
 ## Code-to-Doc Mapping
 
@@ -21,18 +21,18 @@ Use this mapping to identify which doc pages are potentially affected by code ch
 
 | Code path | What changes here | Affected doc pages |
 |-----------|-------------------|--------------------|
-| `crates/mega-evm/src/constants.rs` | Gas limits, resource limits, detention caps, multipliers | `docs/evm/dual-gas-model.md`, `docs/evm/resource-limits.md`, `docs/evm/gas-detention.md`, `docs/evm/gas-forwarding.md`, `docs/evm/contract-limits.md` |
-| `crates/mega-evm/src/evm/spec.rs` | Spec definitions, spec progression | `docs/hardfork-spec.md`, `docs/upgrades/overview.md`, `docs/evm/overview.md` |
-| `crates/mega-evm/src/evm/instructions.rs` | Opcode behavior, compute gas wrapping, gas detention enforcement | `docs/evm/dual-gas-model.md`, `docs/evm/gas-detention.md` |
-| `crates/mega-evm/src/evm/host.rs` | Host hooks, volatile data access tracking | `docs/evm/gas-detention.md` |
-| `crates/mega-evm/src/evm/precompiles.rs` | Precompile behavior | `docs/evm/precompiles.md` |
-| `crates/mega-evm/src/block/` | Block execution, hardfork mapping, executor | `docs/hardfork-spec.md`, `docs/evm/overview.md` |
-| `crates/mega-evm/src/limit/` | Resource limit tracking (compute gas, data size, KV updates, state growth) | `docs/evm/resource-limits.md`, `docs/evm/resource-accounting.md` |
-| `crates/mega-evm/src/limit/storage_call_stipend.rs` | Storage gas stipend lifecycle | `docs/evm/gas-forwarding.md` |
-| `crates/mega-evm/src/access/` | Block env access tracking, volatile data detection | `docs/evm/gas-detention.md` |
-| `crates/mega-evm/src/system/` | System contract integration, call interception | `docs/system-contracts/*.md` |
-| `crates/mega-evm/src/external/` | SALT environment, oracle environment, dynamic gas cost | `docs/evm/dual-gas-model.md`, `docs/system-contracts/oracle.md` |
-| `crates/system-contracts/contracts/` | Solidity system contract sources | `docs/system-contracts/*.md` |
+| `crates/mega-evm/src/constants.rs` | Gas limits, resource limits, detention caps, multipliers | `docs/spec/evm/dual-gas-model.md`, `docs/spec/evm/resource-limits.md`, `docs/spec/evm/gas-detention.md`, `docs/spec/evm/gas-forwarding.md`, `docs/spec/evm/contract-limits.md` |
+| `crates/mega-evm/src/evm/spec.rs` | Spec definitions, spec progression | `docs/spec/hardfork-spec.md`, `docs/spec/upgrades/overview.md`, `docs/spec/evm/overview.md` |
+| `crates/mega-evm/src/evm/instructions.rs` | Opcode behavior, compute gas wrapping, gas detention enforcement | `docs/spec/evm/dual-gas-model.md`, `docs/spec/evm/gas-detention.md` |
+| `crates/mega-evm/src/evm/host.rs` | Host hooks, volatile data access tracking | `docs/spec/evm/gas-detention.md` |
+| `crates/mega-evm/src/evm/precompiles.rs` | Precompile behavior | `docs/spec/evm/precompiles.md` |
+| `crates/mega-evm/src/block/` | Block execution, hardfork mapping, executor | `docs/spec/hardfork-spec.md`, `docs/spec/evm/overview.md` |
+| `crates/mega-evm/src/limit/` | Resource limit tracking (compute gas, data size, KV updates, state growth) | `docs/spec/evm/resource-limits.md`, `docs/spec/evm/resource-accounting.md` |
+| `crates/mega-evm/src/limit/storage_call_stipend.rs` | Storage gas stipend lifecycle | `docs/spec/evm/gas-forwarding.md` |
+| `crates/mega-evm/src/access/` | Block env access tracking, volatile data detection | `docs/spec/evm/gas-detention.md` |
+| `crates/mega-evm/src/system/` | System contract integration, call interception | `docs/spec/system-contracts/*.md` |
+| `crates/mega-evm/src/external/` | SALT environment, oracle environment, dynamic gas cost | `docs/spec/evm/dual-gas-model.md`, `docs/spec/system-contracts/oracle.md` |
+| `crates/system-contracts/contracts/` | Solidity system contract sources | `docs/spec/system-contracts/*.md` |
 
 ### Agent and Skill Files
 
@@ -96,10 +96,10 @@ This PR modifies EVM behavior that is documented in `docs/` or referenced in age
 
 | Doc page | Reason |
 |----------|--------|
-| `docs/evm/dual-gas-model.md` | {what changed and why the page is affected} |
-| `docs/evm/resource-limits.md` | {what changed and why the page is affected} |
+| `docs/spec/evm/dual-gas-model.md` | {what changed and why the page is affected} |
+| `docs/spec/evm/resource-limits.md` | {what changed and why the page is affected} |
 
-{If the PR introduces a new spec}: A new upgrade page under `docs/upgrades/` is also needed.
+{If the PR introduces a new spec}: A new upgrade page under `docs/spec/upgrades/` is also needed.
 
 ### Agent / Skill Files
 
@@ -126,8 +126,8 @@ The PR review job handles general review.
   Do NOT flag refactorings, test additions, or internal restructuring.
 - Be specific about *what* in the docs needs updating.
   "This page may need updating" is not actionable.
-  "`COMPUTE_GAS_LIMIT` changed from 1,000,000,000 to 2,000,000,000 — update the Constants table in `docs/evm/resource-limits.md`" is actionable.
-- Respect the spec's backward compatibility rule: if the change introduces a new spec, note that a new upgrade page is needed under `docs/upgrades/`.
+  "`COMPUTE_GAS_LIMIT` changed from 1,000,000,000 to 2,000,000,000 — update the Constants table in `docs/spec/evm/resource-limits.md`" is actionable.
+- Respect the spec's backward compatibility rule: if the change introduces a new spec, note that a new upgrade page is needed under `docs/spec/upgrades/`.
 - Do NOT edit documentation yourself. This skill produces a comment, not edits.
 - Do NOT duplicate the work of the `pr-review` job. Focus exclusively on doc impact.
 - If uncertain whether a change is behavioral, err on the side of flagging it — a false positive is better than a missed doc gap.

@@ -54,17 +54,18 @@ When uncertain, include the PR as "Possibly doc-worthy" with a note on why it's 
 
 | Code path | Affected doc pages |
 |-----------|-------------------|
-| `crates/mega-evm/src/constants.rs` | `docs/evm/dual-gas-model.md`, `docs/evm/resource-limits.md`, `docs/evm/gas-detention.md`, `docs/evm/gas-forwarding.md`, `docs/evm/contract-limits.md` |
-| `crates/mega-evm/src/evm/spec.rs` | `docs/hardfork-spec.md`, `docs/upgrades/overview.md`, `docs/evm/overview.md` |
-| `crates/mega-evm/src/evm/instructions.rs` | `docs/evm/dual-gas-model.md`, `docs/evm/gas-detention.md` |
-| `crates/mega-evm/src/evm/host.rs` | `docs/evm/gas-detention.md` |
-| `crates/mega-evm/src/evm/precompiles.rs` | `docs/evm/precompiles.md` |
-| `crates/mega-evm/src/block/` | `docs/hardfork-spec.md`, `docs/evm/overview.md` |
-| `crates/mega-evm/src/limit/` | `docs/evm/resource-limits.md`, `docs/evm/resource-accounting.md` |
-| `crates/mega-evm/src/access/` | `docs/evm/gas-detention.md` |
-| `crates/mega-evm/src/system/` | `docs/system-contracts/*.md` |
-| `crates/mega-evm/src/external/` | `docs/evm/dual-gas-model.md`, `docs/system-contracts/oracle.md` |
-| `crates/system-contracts/contracts/` | `docs/system-contracts/*.md` |
+| `crates/mega-evm/src/constants.rs` | `docs/spec/evm/dual-gas-model.md`, `docs/spec/evm/resource-limits.md`, `docs/spec/evm/gas-detention.md`, `docs/spec/evm/gas-forwarding.md`, `docs/spec/evm/contract-limits.md` |
+| `crates/mega-evm/src/evm/spec.rs` | `docs/spec/hardfork-spec.md`, `docs/spec/upgrades/overview.md`, `docs/spec/evm/overview.md` |
+| `crates/mega-evm/src/evm/instructions.rs` | `docs/spec/evm/dual-gas-model.md`, `docs/spec/evm/gas-detention.md` |
+| `crates/mega-evm/src/evm/host.rs` | `docs/spec/evm/gas-detention.md` |
+| `crates/mega-evm/src/evm/precompiles.rs` | `docs/spec/evm/precompiles.md` |
+| `crates/mega-evm/src/block/` | `docs/spec/hardfork-spec.md`, `docs/spec/evm/overview.md` |
+| `crates/mega-evm/src/limit/` | `docs/spec/evm/resource-limits.md`, `docs/spec/evm/resource-accounting.md` |
+| `crates/mega-evm/src/limit/storage_call_stipend.rs` | `docs/spec/evm/gas-forwarding.md` |
+| `crates/mega-evm/src/access/` | `docs/spec/evm/gas-detention.md` |
+| `crates/mega-evm/src/system/` | `docs/spec/system-contracts/*.md` |
+| `crates/mega-evm/src/external/` | `docs/spec/evm/dual-gas-model.md`, `docs/spec/system-contracts/oracle.md` |
+| `crates/system-contracts/contracts/` | `docs/spec/system-contracts/*.md` |
 
 ### Agent and Skill Files
 
