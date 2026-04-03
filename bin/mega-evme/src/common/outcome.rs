@@ -363,20 +363,14 @@ mod tests {
     #[test]
     fn test_decode_revert_reason_error_string() {
         let encoded = Revert::from("insufficient balance").abi_encode();
-        assert_eq!(
-            decode_revert_reason(&encoded.into()),
-            "Error(\"insufficient balance\")"
-        );
+        assert_eq!(decode_revert_reason(&encoded.into()), "Error(\"insufficient balance\")");
     }
 
     #[test]
     fn test_decode_revert_reason_panic() {
         // Panic(0x01) = assert failure
         let encoded = Panic { code: alloy_primitives::U256::from(0x01) }.abi_encode();
-        assert_eq!(
-            decode_revert_reason(&encoded.into()),
-            "Panic: assertion failed"
-        );
+        assert_eq!(decode_revert_reason(&encoded.into()), "Panic: assertion failed");
     }
 
     #[test]
