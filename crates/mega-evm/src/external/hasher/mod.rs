@@ -130,4 +130,76 @@ mod tests {
 
         assert_eq!(bucket_id(&[0u8; 20]), 12_666_336);
     }
+
+    #[test]
+    fn test_hash_all_write_branches() {
+        // 0 bytes: read_small empty branch
+        let h0 = hash(b"");
+        // 1 byte: read_small single-byte branch
+        let h1 = hash(&[0x42]);
+        // 2 bytes: read_small 2-3 byte branch (read_u16)
+        let h2 = hash(&[0x01, 0x02]);
+        // 3 bytes: read_small 2-3 byte branch
+        let h3 = hash(&[0x01, 0x02, 0x03]);
+        // 4 bytes: read_small 4-8 byte branch (read_u32 + read_last_u32)
+        let h4 = hash(&[0x01, 0x02, 0x03, 0x04]);
+        // 7 bytes: read_small 4-8 byte branch
+        let h7 = hash(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+        // 8 bytes: read_small 4-8 byte branch (boundary)
+        let h8 = hash(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        // 9 bytes: medium path (read_u64 + read_last_u64)
+        let h9 = hash(&[0xaa; 9]);
+        // 16 bytes: medium path boundary
+        let h16 = hash(&[0xbb; 16]);
+        // 17 bytes: large path (read_last_u128 + read_u128 loop)
+        let h17 = hash(&[0xcc; 17]);
+        // 33 bytes: large path with multiple loop iterations
+        let h33 = hash(&[0xdd; 33]);
+        // 48 bytes: large path with exactly 3 × 16-byte blocks
+        let h48 = hash(&[0xee; 48]);
+
+        // All different lengths must produce different hashes.
+        let hashes = [h0, h1, h2, h3, h4, h7, h8, h9, h16, h17, h33, h48];
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "hash collision at indices {i} and {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_hasher_typed_write_methods() {
+        use core::hash::{BuildHasher, Hasher};
+
+        let state = fallback::RandomState::with_seeds(
+            HASHER_SEEDS[0],
+            HASHER_SEEDS[1],
+            HASHER_SEEDS[2],
+            HASHER_SEEDS[3],
+        );
+
+        let finish_with = |f: fn(&mut fallback::DeterministicHasher)| -> u64 {
+            let mut h = state.build_hasher();
+            f(&mut h);
+            h.finish()
+        };
+
+        let h_u8 = finish_with(|h| h.write_u8(0x42));
+        let h_u16 = finish_with(|h| h.write_u16(0x4200));
+        let h_u32 = finish_with(|h| h.write_u32(0x42000000));
+        let h_u64 = finish_with(|h| h.write_u64(0x42));
+        let h_u128 = finish_with(|h| h.write_u128(0x42));
+        let h_usize = finish_with(|h| h.write_usize(0x42));
+
+        // write_u64 and write_usize with the same value must be identical.
+        assert_eq!(h_u64, h_usize);
+
+        // All other typed writes produce distinct hashes.
+        let hashes = [h_u8, h_u16, h_u32, h_u128];
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "typed write collision at {i} and {j}");
+            }
+        }
+    }
 }
