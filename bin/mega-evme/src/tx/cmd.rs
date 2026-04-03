@@ -12,7 +12,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::common::{
     load_hex, op_receipt_to_tx_receipt, print_execution_summary, print_execution_trace,
-    print_receipt, DecodedRawTx, EvmeError, EvmeOutcome,
+    print_receipt, DecodedRawTx, EvmeError, EvmeOutcome, ExecutionSummary,
 };
 
 use super::Result;
@@ -34,6 +34,10 @@ pub struct Cmd {
     #[command(flatten)]
     pub prestate_args: crate::run::PreStateArgs,
 
+    /// RPC configuration (used when --fork is enabled)
+    #[command(flatten)]
+    pub rpc_args: crate::run::RpcArgs,
+
     /// Environment configuration
     #[command(flatten)]
     pub env_args: crate::run::EnvArgs,
@@ -45,6 +49,10 @@ pub struct Cmd {
     /// Trace configuration
     #[command(flatten)]
     pub trace_args: crate::run::TraceArgs,
+
+    /// Output format configuration
+    #[command(flatten)]
+    pub output_args: crate::run::OutputArgs,
 }
 
 impl Cmd {
@@ -80,8 +88,9 @@ impl Cmd {
         // Step 2: Setup initial state and environment
         let sender = tx.base.caller;
         info!("Setting up initial state");
-        let mut state =
-            self.prestate_args.create_initial_state::<op_alloy_network::Optimism>(&sender).await?;
+        let provider =
+            if self.prestate_args.fork { Some(self.rpc_args.build_provider()?) } else { None };
+        let mut state = self.prestate_args.create_initial_state(&sender, provider).await?;
         debug!(sender = %sender, "State initialized");
 
         state.deploy_system_contracts(spec);
@@ -145,9 +154,6 @@ impl Cmd {
         let contract_address = (is_create && op_receipt.is_success())
             .then(|| sender.create(outcome.pre_execution_nonce));
 
-        // Print human-readable summary
-        print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
-
         let receipt = op_receipt_to_tx_receipt(
             &op_receipt,
             self.env_args.block.block_number,
@@ -162,16 +168,29 @@ impl Cmd {
             0,
         );
 
-        print_receipt(&receipt);
+        if self.output_args.json {
+            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, contract_address);
+            summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
+            summary.receipt =
+                Some(serde_json::to_value(&receipt).expect("failed to serialize receipt"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&summary).expect("failed to serialize output")
+            );
+        } else {
+            // Human-readable summary
+            print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
 
-        print_execution_trace(
-            outcome.trace_data.as_deref(),
-            self.trace_args.trace_output_file.as_deref(),
-        )?;
+            print_receipt(&receipt);
 
-        // Dump state if requested
-        if self.dump_args.dump {
-            self.dump_args.dump_evm_state(&outcome.state)?;
+            print_execution_trace(
+                outcome.trace_data.as_deref(),
+                self.trace_args.trace_output_file.as_deref(),
+            )?;
+
+            if self.dump_args.dump {
+                self.dump_args.dump_evm_state(&outcome.state)?;
+            }
         }
 
         Ok(())

@@ -1,11 +1,12 @@
 //! State management for mega-evme with optional RPC forking support
 
-use std::{path::PathBuf, str::FromStr};
+use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use alloy_network::Network;
 use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
 use alloy_provider::{DynProvider, Provider};
 use clap::Parser;
+
 use mega_evm::revm::{
     database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
     primitives::HashMap,
@@ -28,10 +29,6 @@ pub struct PreStateArgs {
     /// block is used. Only used if `fork` is true.
     #[arg(long = "fork.block")]
     pub fork_block: Option<u64>,
-
-    /// RPC URL to use for the fork. Only used if `fork` is true.
-    #[arg(long = "fork.rpc", default_value = "http://localhost:8545", env = "RPC_URL")]
-    pub fork_rpc: String,
 
     /// JSON file with prestate (genesis) config. This overrides the state in the
     /// forked remote state (if applicable).
@@ -273,38 +270,19 @@ impl PreStateArgs {
         Ok(prestate)
     }
 
-    /// Create a new provider for the network if forking is enabled
-    pub fn create_provider<N>(&self) -> Result<Option<DynProvider<N>>>
-    where
-        N: alloy_network::Network + Sized,
-    {
-        if self.fork {
-            debug!(rpc_url = %self.fork_rpc, "Forking state from RPC");
-            let url = self.fork_rpc.parse().map_err(|e| {
-                EvmeError::Other(format!("Invalid RPC URL '{}': {}", self.fork_rpc, e))
-            })?;
-            let provider = alloy_provider::ProviderBuilder::new()
-                .disable_recommended_fillers()
-                .network::<N>()
-                .connect_http(url);
-            Ok(Some(DynProvider::new(provider)))
-        } else {
-            debug!("No forking state specified");
-            Ok(None)
-        }
-    }
-
-    /// Creates the initial state for execution. This provides a Evm database based on the prestate
+    /// Creates the initial state for execution. This provides an EVM database based on the prestate
     /// and remote forked chain.
+    ///
+    /// When `provider` is `Some`, a forked state is created using the provider at
+    /// `self.fork_block`. When `None`, a local empty state is created.
     pub async fn create_initial_state<N>(
         &self,
         sender: &Address,
+        provider: Option<DynProvider<N>>,
     ) -> Result<EvmeState<N, DynProvider<N>>>
     where
         N: alloy_network::Network,
     {
-        let provider = self.create_provider()?;
-
         // Load prestate
         let prestate = self.load_prestate(sender)?;
 
@@ -322,17 +300,6 @@ impl PreStateArgs {
     }
 }
 
-/// Dumps [`EvmState`] as JSON string.
-pub fn convert_evm_state_to_json(evm_state: &EvmState) -> Result<String> {
-    let account_states = evm_state
-        .iter()
-        .map(|(address, account)| (address, AccountState::from_account(account.clone())))
-        .collect::<HashMap<_, _>>();
-    let state_json = serde_json::to_string_pretty(&account_states)
-        .map_err(|e| EvmeError::ExecutionError(format!("Failed to serialize state: {}", e)))?;
-    Ok(state_json)
-}
-
 /// State dump configuration arguments
 #[derive(Parser, Debug, Clone)]
 #[command(next_help_heading = "State Dump Options")]
@@ -347,13 +314,13 @@ pub struct StateDumpArgs {
 }
 
 impl StateDumpArgs {
-    /// Serializes [`EvmState`] as JSON string.
+    /// Serializes [`EvmState`] as JSON string with deterministic key ordering.
     pub fn serialize_evm_state(&self, evm_state: &EvmState) -> Result<String> {
         trace!(evm_state = ?evm_state, "Serializing EVM state");
-        let account_states = evm_state
+        let account_states: BTreeMap<_, _> = evm_state
             .iter()
             .map(|(address, account)| (address, AccountState::from_account(account.clone())))
-            .collect::<HashMap<_, _>>();
+            .collect();
         let state_json = serde_json::to_string_pretty(&account_states)
             .map_err(|e| EvmeError::ExecutionError(format!("Failed to serialize state: {}", e)))?;
         Ok(state_json)
@@ -369,14 +336,12 @@ impl StateDumpArgs {
         println!("=== State Dump ===");
         if let Some(ref output_file) = self.dump_output_file {
             debug!(output_file = ?output_file, "Writing dumped state to file");
-            // Write state to file
             std::fs::write(output_file, state_json).map_err(|e| {
                 EvmeError::ExecutionError(format!("Failed to write state to file: {}", e))
             })?;
             println!("State dump written to: {}", output_file.display());
         } else {
             debug!("Printing dumped state to console");
-            // Print state to console
             println!("{}", state_json);
         }
 
@@ -399,20 +364,34 @@ pub struct AccountState {
     /// Code hash
     /// B256 already uses hex format with 0x prefix (always 32 bytes)
     pub code_hash: Option<B256>,
-    /// Storage slots (uses quantity format for keys and values)
-    pub storage: Option<HashMap<U256, U256>>,
+    /// Storage slots (sorted by key for deterministic output)
+    pub storage: Option<BTreeMap<U256, U256>>,
 }
 
 impl AccountState {
     /// Creates a new [`AccountState`] from [`Account`].
+    ///
+    /// The `code_hash` is always computed from the actual code bytes to ensure
+    /// consistency. The `AccountInfo.code_hash` field may be stale when code was
+    /// set externally (e.g., via `set_account_code` in the `run` command).
     pub fn from_account(account: Account) -> Self {
-        let AccountInfo { balance, nonce, code_hash, code } = account.info;
-        let code = code.map(|c| c.original_byte_slice().to_vec()).unwrap_or_default().into();
-        let storage =
+        let code: Bytes = account
+            .info
+            .code
+            .as_ref()
+            .map(|c| c.original_byte_slice().to_vec())
+            .unwrap_or_default()
+            .into();
+        let code_hash = if code.is_empty() {
+            B256::from(alloy_primitives::KECCAK256_EMPTY)
+        } else {
+            alloy_primitives::keccak256(&code)
+        };
+        let storage: BTreeMap<U256, U256> =
             account.storage.into_iter().map(|(slot, value)| (slot, value.present_value)).collect();
         Self {
-            balance: Some(balance),
-            nonce: Some(nonce),
+            balance: Some(account.info.balance),
+            nonce: Some(account.info.nonce),
             code: Some(code),
             code_hash: Some(code_hash),
             storage: Some(storage),
@@ -795,6 +774,7 @@ where
     ) -> std::result::Result<Bytecode, Self::Error> {
         // Check code_map first (for prestate accounts)
         if let Some(code) = self.code_map.get(&code_hash) {
+            trace!(code_hash = %code_hash, code = ?code, "Loaded code by hash from prestate");
             return Ok(code.clone());
         }
 
@@ -822,6 +802,7 @@ where
         // Check storage overrides first
         if let Some(account) = self.prestate.get(&address) {
             if let Some(slot) = account.storage.get(&index) {
+                trace!(address = %address, index = %index, slot = %slot.present_value, "Loaded storage from prestate");
                 return Ok(slot.present_value);
             }
         }
