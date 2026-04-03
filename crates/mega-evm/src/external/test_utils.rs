@@ -29,7 +29,7 @@ pub struct RecordedHint {
 ///
 /// This struct provides mutable state for bucket capacities, oracle storage, and recorded hints,
 /// allowing tests to set up specific scenarios and verify hint mechanism behavior. Bucket IDs are
-/// calculated using the real SALT hashing logic from the `salt` crate.
+/// calculated using the inlined SALT hashing logic in [`crate::hasher`].
 ///
 /// # Example
 /// ```ignore
@@ -161,9 +161,6 @@ const PLAIN_ACCOUNT_KEY_LEN: usize = Address::len_bytes();
 const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 
 /// SALT environment implementation using real bucket ID hashing.
-///
-/// Bucket IDs are calculated using the SALT hasher from the `salt` crate, which provides
-/// deterministic mapping of accounts and storage slots to buckets.
 impl<Error: Unpin + Display> SaltEnv for TestExternalEnvs<Error> {
     type Error = Error;
 
@@ -173,17 +170,15 @@ impl<Error: Unpin + Display> SaltEnv for TestExternalEnvs<Error> {
             .borrow()
             .get(&bucket_id)
             .copied()
-            .unwrap_or(salt::constant::MIN_BUCKET_SIZE as u64))
+            .unwrap_or(crate::MIN_BUCKET_SIZE as u64))
     }
 
-    /// Maps accounts to buckets by hashing the address.
     fn bucket_id_for_account(account: Address) -> BucketId {
-        salt::state::hasher::bucket_id(account.as_slice())
+        crate::hasher::bucket_id(account.as_slice())
     }
 
-    /// Maps storage slots to buckets by hashing the concatenation of address and slot key.
     fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
-        salt::state::hasher::bucket_id(
+        crate::hasher::bucket_id(
             address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
         )
     }

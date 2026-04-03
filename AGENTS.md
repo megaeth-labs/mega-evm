@@ -284,6 +284,11 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.
   Use `core::` for items like `fmt`, `cell`, `convert`.
+- **All execution logic must be deterministic and architecture-independent.**
+  Code that affects EVM execution results, gas computation, state transitions, or consensus-critical hashing must produce identical output regardless of target architecture, endianness, or pointer width.
+  Never use `mem::transmute`, native-endian byte conversions, or platform-dependent operations in consensus paths.
+  Use explicit little-endian (`from_le_bytes`/`to_le_bytes`) or big-endian conversions instead.
+  When vendoring external code, audit for hidden platform dependencies (e.g., `zerocopy::transmute!` is native-endian).
 - **`cargo sort` is enforced in CI.**
   Dependencies in `Cargo.toml` must follow the grouped-by-family convention with comment headers (`# alloy`, `# revm`, `# megaeth`, `# misc`) and be sorted alphabetically within each group.
 - **Use `default-features = false` for new workspace dependencies.**
