@@ -113,6 +113,35 @@ fn build_staticcall_contract(target: Address) -> Bytes {
         .build()
 }
 
+/// Builds a contract that DELEGATECALLs `target` with empty calldata.
+fn build_delegatecall_contract(target: Address) -> Bytes {
+    BytecodeBuilder::default()
+        .append(PUSH0) // retLength
+        .append(PUSH0) // retOffset
+        .append(PUSH0) // argsLength
+        .append(PUSH0) // argsOffset
+        .push_address(target)
+        .append(GAS)
+        .append(DELEGATECALL)
+        .append(STOP)
+        .build()
+}
+
+/// Builds a contract that CALLCODEs `target` with zero value and empty calldata.
+fn build_callcode_contract(target: Address) -> Bytes {
+    BytecodeBuilder::default()
+        .append(PUSH0) // retLength
+        .append(PUSH0) // retOffset
+        .append(PUSH0) // argsLength
+        .append(PUSH0) // argsOffset
+        .append(PUSH0) // value
+        .push_address(target)
+        .append(GAS)
+        .append(CALLCODE)
+        .append(STOP)
+        .build()
+}
+
 /// Self-delegation (A→A) via CALL causes unbounded recursion in `inspect_account_delegated`.
 ///
 /// The `wrap_call_with_storage_gas!` macro calls `inspect_account_delegated` on the CALL
@@ -166,6 +195,46 @@ fn test_self_delegation_via_staticcall() {
     let mut db = MemoryDatabase::default();
     db.set_account_balance(CALLER, U256::from(1_000_000_000u64));
     db.set_account_code(PARENT, build_staticcall_contract(SELF_DELEGATING));
+    db.set_account_balance(PARENT, U256::from(1_000_000_000u64));
+
+    set_eip7702_delegation(&mut db, SELF_DELEGATING, SELF_DELEGATING);
+    db.set_account_balance(SELF_DELEGATING, U256::from(1_000_000u64));
+
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
+
+    let result = transact(MegaSpecId::REX4, &mut db, tx);
+    assert!(result.is_ok(), "Should complete without stack overflow");
+}
+
+/// Two-address cycle (A→B→A) via DELEGATECALL exercises the same wrapped call path as CALL,
+/// but through the DELEGATECALL variant.
+#[test]
+fn test_two_address_cycle_via_delegatecall() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000u64));
+    db.set_account_code(PARENT, build_delegatecall_contract(CYCLE_A));
+    db.set_account_balance(PARENT, U256::from(1_000_000_000u64));
+
+    set_eip7702_delegation(&mut db, CYCLE_A, CYCLE_B);
+    set_eip7702_delegation(&mut db, CYCLE_B, CYCLE_A);
+    db.set_account_balance(CYCLE_A, U256::from(1_000_000u64));
+    db.set_account_balance(CYCLE_B, U256::from(1_000_000u64));
+
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
+
+    let result = transact(MegaSpecId::REX4, &mut db, tx);
+    assert!(result.is_ok(), "Should complete without stack overflow");
+}
+
+/// Self-delegation (A→A) via CALLCODE exercises the transfer-aware wrapped call path used by
+/// CALLCODE.
+#[test]
+fn test_self_delegation_via_callcode() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000u64));
+    db.set_account_code(PARENT, build_callcode_contract(SELF_DELEGATING));
     db.set_account_balance(PARENT, U256::from(1_000_000_000u64));
 
     set_eip7702_delegation(&mut db, SELF_DELEGATING, SELF_DELEGATING);
