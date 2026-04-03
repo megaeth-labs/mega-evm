@@ -1,6 +1,6 @@
 ---
 name: doc-readability
-description: Evaluates documentation readability, structure, and compliance with docs/AGENTS.md conventions. Use when reviewing doc quality, auditing formatting compliance, checking a page before publishing, or running a readability audit across the specification.
+description: Evaluates documentation readability, structure, and compliance with docs/spec/AGENTS.md conventions. Use when reviewing doc quality, auditing formatting compliance, checking a page before publishing, or running a readability audit across the specification.
 ---
 
 # Documentation Readability Evaluation
@@ -10,9 +10,9 @@ Evaluate readability and spec-layer compliance for: $ARGUMENTS
 Parse the arguments to determine scope.
 Accepted inputs:
 
-- A single page path (e.g., `docs/evm/dual-gas-model.md`) — evaluate that page.
-- A directory (e.g., `docs/evm/`) — evaluate all pages in that directory.
-- `all` — evaluate every page listed in `docs/SUMMARY.md`.
+- A single page path (e.g., `docs/spec/evm/dual-gas-model.md`) — evaluate that page.
+- A directory (e.g., `docs/spec/evm/`) — evaluate all pages in that directory.
+- `all` — evaluate every page listed in `docs/spec/SUMMARY.md`.
 
 Default (no arguments): evaluate all pages.
 
@@ -20,8 +20,8 @@ Default (no arguments): evaluate all pages.
 
 Before evaluating any page:
 
-1. Read `docs/AGENTS.md` — the authoritative writing rules for this specification.
-2. Read `docs/SUMMARY.md` — the full page inventory.
+1. Read `docs/spec/AGENTS.md` — the authoritative writing rules for this specification.
+2. Read `docs/spec/SUMMARY.md` — the full page inventory.
 
 ## Evaluation Checklist
 
@@ -30,11 +30,11 @@ Before evaluating any page:
 - [ ] **Frontmatter**: YAML frontmatter present with a `spec` field (concept pages) or `description` field (upgrade pages).
 - [ ] **Heading hierarchy**: Exactly one H1 (`#`). Sections use H2 (`##`), subsections H3 (`###`). No heading level skips.
 - [ ] **One sentence per line**: Each sentence on its own line for diff readability. Flag paragraphs where multiple sentences share a line.
-- [ ] **Page in SUMMARY.md**: The page appears in `docs/SUMMARY.md`. Flag orphaned pages.
+- [ ] **Page in SUMMARY.md**: The page appears in `docs/spec/SUMMARY.md`. Flag orphaned pages.
 
 ### 2. Page Structure Compliance
 
-Concept pages MUST follow this section order (per `docs/AGENTS.md`):
+Concept pages MUST follow this section order (per `docs/spec/AGENTS.md`):
 
 ```
 # Page Title
@@ -136,7 +136,7 @@ Categories with no findings still appear as "Pass" — do not silently omit them
 
 ## Rules
 
-- Evaluate against the `docs/AGENTS.md` rules as written. Do not invent additional style rules.
+- Evaluate against the `docs/spec/AGENTS.md` rules as written. Do not invent additional style rules.
 - When a page has zero findings, still count it as "Pass" in the summary.
 - Sort findings by severity (Blocker first), then by page.
 - Do NOT fix the issues yourself unless the user explicitly asks. This skill produces a report, not edits.
