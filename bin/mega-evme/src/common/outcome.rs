@@ -1,19 +1,21 @@
-//! Execution outcome for mega-evme commands
+//! Execution outcome and output formatting for mega-evme commands
 
 use std::{path::Path, time::Duration};
 
-use super::EvmeError;
+use super::{EvmeError, StateDumpArgs, TraceArgs};
 
 use alloy_consensus::{Eip658Value, Receipt};
 use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash, B256};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::{Panic, Revert, SolError};
+use clap::Parser;
 use mega_evm::{
     op_revm::OpHaltReason,
     revm::{context::result::ExecutionResult, state::EvmState},
     MegaHaltReason, MegaTxType,
 };
 use op_alloy_consensus::{OpDepositReceipt, OpReceiptEnvelope};
+use serde::Serialize;
 
 /// OP-stack transaction receipt type alias
 pub type OpTxReceipt = TransactionReceipt<OpReceiptEnvelope<alloy_rpc_types_eth::Log>>;
@@ -231,4 +233,149 @@ pub fn print_execution_trace(
     }
 
     Ok(())
+}
+
+/// Output format configuration
+#[derive(Parser, Debug, Clone, Default)]
+#[command(next_help_heading = "Output Options")]
+pub struct OutputArgs {
+    /// Output results as JSON instead of human-readable text
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Serializable execution summary for JSON output
+#[derive(Debug, Default, Serialize)]
+pub struct ExecutionSummary {
+    /// Whether the execution succeeded
+    pub success: bool,
+    /// Gas consumed by the execution
+    pub gas_used: u64,
+    /// Hex-encoded return data (present only on success with non-empty output)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Deployed contract address (present only for successful CREATE transactions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_address: Option<Address>,
+    /// Number of log entries emitted
+    pub logs_count: usize,
+    /// Decoded revert reason (present only on revert)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revert_reason: Option<String>,
+    /// Halt reason (present only on halt)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub halt_reason: Option<String>,
+    /// Execution trace (present only when --trace is enabled without --trace.output)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<serde_json::Value>,
+    /// Post-execution state dump (present only when --dump is enabled without --dump.output)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<serde_json::Value>,
+    /// Transaction receipt (present only for `tx` command)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<serde_json::Value>,
+}
+
+impl ExecutionSummary {
+    /// Fill trace and state dump fields from the execution outcome.
+    ///
+    /// When an output file is specified, data is written to that file.
+    /// Otherwise, data is inlined into the corresponding JSON field.
+    pub fn fill_trace_and_dump(
+        &mut self,
+        outcome: &EvmeOutcome,
+        trace_args: &TraceArgs,
+        dump_args: &StateDumpArgs,
+    ) -> Result<(), EvmeError> {
+        // Trace: inline or write to file
+        if let Some(trace) = outcome.trace_data.as_deref() {
+            if let Some(ref path) = trace_args.trace_output_file {
+                std::fs::write(path, trace).map_err(|e| {
+                    EvmeError::Other(format!("Failed to write trace to file: {}", e))
+                })?;
+            } else {
+                self.trace = Some(serde_json::from_str(trace).unwrap_or_else(|_| trace.into()));
+            }
+        }
+
+        // Dump: inline or write to file
+        if dump_args.dump {
+            let state_json = dump_args.serialize_evm_state(&outcome.state)?;
+            if let Some(ref path) = dump_args.dump_output_file {
+                std::fs::write(path, &state_json).map_err(|e| {
+                    EvmeError::Other(format!("Failed to write state dump to file: {}", e))
+                })?;
+            } else {
+                self.state =
+                    Some(serde_json::from_str(&state_json).unwrap_or_else(|_| state_json.into()));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create from an `ExecutionResult` and optional contract address.
+    pub fn from_result(
+        exec_result: &ExecutionResult<MegaHaltReason>,
+        contract_address: Option<Address>,
+    ) -> Self {
+        match exec_result {
+            ExecutionResult::Success { gas_used, logs, output, .. } => {
+                let output_data = output.data();
+                Self {
+                    success: true,
+                    gas_used: *gas_used,
+                    output: if output_data.is_empty() {
+                        None
+                    } else {
+                        Some(format!("0x{}", hex::encode(output_data)))
+                    },
+                    contract_address,
+                    logs_count: logs.len(),
+                    ..Default::default()
+                }
+            }
+            ExecutionResult::Revert { gas_used, output } => Self {
+                gas_used: *gas_used,
+                revert_reason: Some(decode_revert_reason(output)),
+                ..Default::default()
+            },
+            ExecutionResult::Halt { gas_used, reason } => Self {
+                gas_used: *gas_used,
+                halt_reason: Some(format!("{:?}", reason)),
+                ..Default::default()
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::Bytes;
+    use alloy_sol_types::SolError;
+
+    #[test]
+    fn test_decode_revert_reason_empty() {
+        assert_eq!(decode_revert_reason(&Bytes::new()), "(empty)");
+    }
+
+    #[test]
+    fn test_decode_revert_reason_error_string() {
+        let encoded = Revert::from("insufficient balance").abi_encode();
+        assert_eq!(decode_revert_reason(&encoded.into()), "Error(\"insufficient balance\")");
+    }
+
+    #[test]
+    fn test_decode_revert_reason_panic() {
+        // Panic(0x01) = assert failure
+        let encoded = Panic { code: alloy_primitives::U256::from(0x01) }.abi_encode();
+        assert_eq!(decode_revert_reason(&encoded.into()), "Panic: assertion failed");
+    }
+
+    #[test]
+    fn test_decode_revert_reason_raw_hex() {
+        let raw = Bytes::from(vec![0xde, 0xad]);
+        assert_eq!(decode_revert_reason(&raw), "0xdead");
+    }
 }
