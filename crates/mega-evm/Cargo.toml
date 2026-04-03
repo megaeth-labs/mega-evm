@@ -30,7 +30,6 @@ revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
 
 # megaeth
 mega-system-contracts = { workspace = true, default-features = false }
-salt = { workspace = true, features = [], optional = true }
 
 # misc
 auto_impl.workspace = true
@@ -47,14 +46,13 @@ hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
 rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors = { workspace = true, features = ["std"] }
-salt.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 
 [features]
 default = ["std", "revm/default", "op-revm/default"]
 std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
-test-utils = ["dep:salt"]
+test-utils = []
 
 [[bench]]
 name = "transact"
