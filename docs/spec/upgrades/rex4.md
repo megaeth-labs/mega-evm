@@ -1,5 +1,5 @@
 ---
-description: Rex4 network upgrade (unstable) — per-call-frame resource budgets, relative gas detention, and new system contracts.
+description: Rex4 network upgrade — per-call-frame resource budgets, relative gas detention, storage gas stipend, and new system contracts.
 ---
 
 # Rex4 Network Upgrade
@@ -7,20 +7,18 @@ description: Rex4 network upgrade (unstable) — per-call-frame resource budgets
 This page is an informative summary of the Rex4 specification.
 For the full normative definition, see the Rex4 spec in the mega-evm repository.
 
-Rex4 is the current unstable specification and is subject to change before activation.
-
 ## Summary
 
-Rex4 introduces **per-[call-frame](../spec/glossary.md#call-frame) resource budgets** across all four [resource dimensions](../spec/glossary.md#resource-dimension) ([compute gas](../spec/glossary.md#compute-gas), data size, KV updates, and state growth).
-Before Rex4, [resource limits](../spec/evm/resource-limits.md) only applied at the transaction level, which meant a single inner call could consume nearly the entire budget and leave parent or sibling calls unable to execute predictably.
+Rex4 introduces **per-[call-frame](../glossary.md#call-frame) resource budgets** across all four [resource dimensions](../glossary.md#resource-dimension) ([compute gas](../glossary.md#compute-gas), data size, KV updates, and state growth).
+Before Rex4, [resource limits](../evm/resource-limits.md) only applied at the transaction level, which meant a single inner call could consume nearly the entire budget and leave parent or sibling calls unable to execute predictably.
 Per-call-frame budgets give each call frame a bounded share of remaining resources, making nested execution more predictable for contract authors.
 
-Rex4 also shifts [gas detention](../spec/evm/gas-detention.md) from absolute caps to **relative caps**, so transactions that access [volatile data](../spec/glossary.md#volatile-data) late in execution are no longer penalized for compute work done before the access.
-Two new [system contracts](../spec/system-contracts/overview.md) — **MegaAccessControl** and **MegaLimitControl** — give contracts runtime control over volatile data access and the ability to query their effective remaining compute gas budget.
+Rex4 also shifts [gas detention](../evm/gas-detention.md) from absolute caps to **relative caps**, so transactions that access [volatile data](../glossary.md#volatile-data) late in execution are no longer penalized for compute work done before the access.
+Two new [system contracts](../system-contracts/overview.md) — **MegaAccessControl** and **MegaLimitControl** — give contracts runtime control over volatile data access and the ability to query their effective remaining compute gas budget.
 
-Rex4 also introduces a **storage gas stipend** for value-transferring calls, so that contracts receiving ETH via `transfer()` or `send()` can emit events without running out of gas.
+Rex4 also introduces a **[storage gas stipend](../glossary.md#storage-gas-stipend)** for value-transferring calls, so that contracts receiving ETH via `transfer()` or `send()` can emit events without running out of gas.
 
-Finally, the [keyless deploy](../spec/system-contracts/keyless-deploy.md) sandbox now inherits the parent transaction's external environment for dynamic gas pricing and [oracle](../spec/system-contracts/oracle.md) behavior, improving accuracy for contracts deployed via Nick's Method.
+Finally, the [keyless deploy](../system-contracts/keyless-deploy.md) sandbox now inherits the parent transaction's external environment for dynamic gas pricing and [oracle](../system-contracts/oracle.md) behavior, improving accuracy for contracts deployed via Nick's Method.
 
 ## What Changed
 
@@ -39,7 +37,7 @@ Finally, the [keyless deploy](../spec/system-contracts/keyless-deploy.md) sandbo
   The calling contract cannot directly control them.
 - Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains under direct contract control.
   The 98/100 forwarding ratio does not apply to total gas, which follows standard EVM semantics.
-- When a call frame exceeds its local budget, it reverts with [`MegaLimitExceeded(uint8 kind, uint64 limit)`](../spec/glossary.md#call-frame-local-exceed) (does not halt the transaction).
+- When a call frame exceeds its local budget, it reverts with [`MegaLimitExceeded(uint8 kind, uint64 limit)`](../glossary.md#call-frame-local-exceed) (does not halt the transaction).
 - The parent call frame can continue executing after a child call frame reverts due to a call-frame-local limit.
 - Transaction-level exceeds still halt the entire transaction with `OutOfGas`.
 - Compute gas consumed by reverted child frames still counts toward the transaction's total compute gas usage.
@@ -138,7 +136,7 @@ interface IMegaLimitControl {
 
 - The EVM's `CALL_STIPEND` (2,300 gas) was the only gas available to the callee when receiving ETH via `transfer()` or `send()`.
 - On standard Ethereum, 2,300 gas is sufficient for a simple LOG event (e.g., `LOG1` costs 750 gas).
-- On MegaETH, the 10× [storage gas](../spec/evm/dual-gas-model.md) multiplier on LOG opcodes causes even `LOG1` to cost 4,500 gas (750 compute + 3,750 storage), exceeding the stipend.
+- On MegaETH, the 10× [storage gas](../evm/dual-gas-model.md) multiplier on LOG opcodes causes even `LOG1` to cost 4,500 gas (750 compute + 3,750 storage), exceeding the stipend.
 - Any contract that emits an event in its `receive()` or `fallback()` function would revert when called via `transfer()` or `send()`.
 - Affected contracts include WETH9 (whose `withdraw()` uses `transfer()`), Gnosis Safe, and smart contract wallets that emit events on ETH receipt.
 
@@ -146,11 +144,11 @@ interface IMegaLimitControl {
 
 - When an internal `CALL` or `CALLCODE` transfers value (value > 0), the callee receives an additional **storage gas stipend** of 23,000 gas on top of the standard `CALL_STIPEND` (2,300).
 - The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_CALL_STIPEND (23,000)`.
-- The callee's [compute gas](../spec/glossary.md#compute-gas) limit remains at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by [storage gas](../spec/glossary.md#storage-gas) operations (the 10× LOG topic/data costs).
+- The callee's [compute gas](../glossary.md#compute-gas) limit remains at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by [storage gas](../glossary.md#storage-gas) operations (the 10× LOG topic/data costs).
 - On return, unused storage gas stipend is **burned** — it is never returned to the caller.
-  The burn-on-return rule extends to all frame termination paths, including early termination from [resource limit](../spec/evm/resource-accounting.md) violations.
+  The burn-on-return rule extends to all frame termination paths, including early termination from [resource limit](../evm/resource-accounting.md) violations.
   When a transaction-level resource limit is exceeded during a stipend-bearing frame, the rescued gas (refunded to the sender) excludes the stipend amount.
-- Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract](../spec/system-contracts/overview.md) interceptions do not receive the stipend.
+- Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract](../system-contracts/overview.md) interceptions do not receive the stipend.
 - The compute gas cap ensures the callee cannot perform state-modifying operations (SSTORE, CALL with value, CREATE) with the extra gas, preserving the reentrancy protection properties of the original `CALL_STIPEND`.
 
 | Event type              | Compute gas | Storage gas | Total gas | Fits in 25,300? |
@@ -170,7 +168,7 @@ interface IMegaLimitControl {
 
 #### New behavior
 
-- The effective [detained limit](../spec/glossary.md#detained-limit) is `current_usage + cap` at the time of volatile access.
+- The effective [detained limit](../glossary.md#detained-limit) is `current_usage + cap` at the time of volatile access.
 - Execution continues up to `min(tx_compute_limit, effective_detained_limit)`.
 - Across multiple volatile accesses, the most restrictive effective limit applies.
 - Transactions that access volatile data late in execution can still use the full cap amount of compute gas after the access.
@@ -237,6 +235,6 @@ This prevents contracts from exploiting value-transferring calls to generate fre
 ## References
 
 - [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
-- [Dual Gas Model](../spec/evm/dual-gas-model.md) — how compute gas and storage gas interact
-- [Resource Accounting](../spec/evm/resource-accounting.md) — how MegaETH tracks resource usage across all dimensions
-- [Gas Detention](../spec/evm/gas-detention.md) — background on the gas detention mechanism
+- [Dual Gas Model](../evm/dual-gas-model.md) — how compute gas and storage gas interact
+- [Resource Accounting](../evm/resource-accounting.md) — how MegaETH tracks resource usage across all dimensions
+- [Gas Detention](../evm/gas-detention.md) — background on the gas detention mechanism

@@ -58,9 +58,9 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _At present, `REX4` is the unstable spec._
+  - _At present, all specs are stable. There is no unstable spec._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
-  - Specifications of each spec can be found in the upgrade pages under `docs/upgrades/`.
+  - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Multiple hardforks can map to one spec.
   `MiniRex1` and `MiniRex2` are hardforks that reuse `EQUIVALENCE` and `MINI_REX` respectively.
@@ -296,13 +296,17 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Keep documentation up to date.**
   When making changes, always check whether related documentation needs updating.
   The primary documentation is in `docs/`.
+  The spec documentation is under `docs/spec/`, and the mega-evme documentation is under `docs/mega-evme/`.
   Also update this `AGENTS.md` when relevant (e.g., unstable spec marker, spec progression list, system contract table).
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.
 
 ## Documentation Conventions (`docs/`)
 
-The documentation is the public-facing specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
-It is framed as a protocol specification, not as documentation for a specific crate.
+The `docs/` directory is organized into two GitBook sections:
 
-All conventions for writing and editing the documentation (audience, content rules, upgrade page format, writing style) are defined in [`docs/AGENTS.md`](docs/AGENTS.md).
+- **`docs/spec/`** — The public-facing specification for the MegaETH blockchain's execution layer — covering MegaEVM, system contracts, oracle services, resource metering, and the upgrade history.
+  It is framed as a protocol specification, not as documentation for a specific crate.
+- **`docs/mega-evme/`** — Documentation for the `mega-evme` CLI tool.
+
+All conventions for writing and editing the spec documentation (audience, content rules, upgrade page format, writing style) are defined in [`docs/spec/AGENTS.md`](docs/spec/AGENTS.md).
