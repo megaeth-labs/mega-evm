@@ -549,12 +549,25 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// additional-limit path.
     pub(crate) fn on_new_tx(&mut self) {
         self.reset_volatile_data_access();
-        self.check_tx_beneficiary_access();
 
         // Apply the additional limits only when the `MINI_REX` spec is enabled.
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
             self.additional_limit.borrow_mut().reset();
             self.additional_limit.borrow_mut().before_tx_start(&self.inner.tx);
+        }
+
+        // Mark beneficiary access AFTER additional_limit.reset() so that the volatile
+        // tracker marking from check_tx_beneficiary_access can be synchronized into
+        // additional_limit below, rather than being cleared by the reset.
+        //
+        // Gated to REX4: pre-REX4 specs never had eager beneficiary detention at TX start.
+        // Changing pre-REX4 behavior would alter historical replay results.
+        self.check_tx_beneficiary_access();
+        if self.spec.is_enabled(MegaSpecId::REX4) {
+            let compute_gas_limit = self.volatile_data_tracker.borrow().get_compute_gas_limit();
+            if let Some(limit) = compute_gas_limit {
+                self.additional_limit.borrow_mut().set_compute_gas_limit(limit);
+            }
         }
     }
 }
