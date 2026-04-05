@@ -33,7 +33,10 @@ use super::LimitCheck;
 /// TX-level exceed is represented as `InstructionResult::OutOfGas`.
 /// Remaining gas is rescued and later refunded to the sender.
 /// - **Compute gas**: TX-level check is always active (`min(tx_limit, detained_limit)`).
-/// - **Data size / KV update / State growth**: TX-level check applies in pre-Rex4 specs.
+/// - **Data size / KV update**: TX-level fallthrough is active in all specs. In Rex4+ it catches
+///   intrinsic overflow (when the frame stack is empty) and serves as a safety net behind the
+///   per-frame check.
+/// - **State growth**: TX-level check applies in pre-Rex4 specs only (no intrinsic usage).
 ///
 /// ## Per-Frame Enforcement (Rex4+)
 ///
@@ -65,10 +68,9 @@ use super::LimitCheck;
 /// cap and burn-on-return to prevent gas leakage.
 #[derive(Debug)]
 pub struct AdditionalLimit {
-    /// A flag to indicate if the limit has been exceeded, set when the limit is exceeded. The
-    /// current size and count in neither `kv_update_counter` nor `data_size_tracker` is
-    /// reliable since when the limit is exceeded, the frames will be reverted and the data
-    /// size and count will be discarded.
+    /// A flag to indicate if the limit has been exceeded. Once set, the current usage values
+    /// in individual trackers may not be reliable because subsequent frames will be reverted
+    /// and their discardable usage will be dropped.
     pub has_exceeded_limit: LimitCheck,
 
     /// The total remaining gas after the limit exceeds.
@@ -342,13 +344,22 @@ impl AdditionalLimit {
     }
 
     /// Hook called when a new transaction starts.
-    /// Returns `false` if the limit has been exceeded.
-    pub(crate) fn before_tx_start(&mut self, tx: &MegaTransaction) -> bool {
+    ///
+    /// Records intrinsic resource usage (calldata size, access lists, caller account
+    /// update, etc.) and checks TX-level limits. If intrinsic usage already exceeds
+    /// a configured limit, sets `has_exceeded_limit` so that the subsequent
+    /// `check_pending_exceeded_limit()` or `before_frame_init()` call produces a
+    /// normal execution failure (Halt), keeping the failure on the standard
+    /// additional-limit path.
+    ///
+    /// Intrinsic overflow detection works through each tracker's own `check_limit()`,
+    /// which includes a TX-level fallthrough that catches `tx_usage > tx_limit` even
+    /// when the frame stack is empty (before the first frame is pushed).
+    pub(crate) fn before_tx_start(&mut self, tx: &MegaTransaction) {
         self.state_growth.before_tx_start(tx);
         self.data_size.before_tx_start(tx);
         self.kv_update.before_tx_start(tx);
-
-        !self.check_limit().exceeded_limit()
+        self.check_limit();
     }
 
     /// Hook called before a new execution frame is initialized. Returns `Some(FrameResult)` if the
@@ -395,6 +406,44 @@ impl AdditionalLimit {
         }
 
         Ok(None)
+    }
+
+    /// Checks whether a TX-level limit was already exceeded before the first frame starts
+    /// (e.g., intrinsic `DataSize` or `KVUpdate` overflow from `before_tx_start()`).
+    ///
+    /// Called from two sites that would otherwise skip `before_frame_init()`:
+    /// - `frame_init()` before system contract interceptor dispatch (REX4+).
+    /// - `inspect_frame_init()` before inspector early-return (REX4+).
+    ///
+    /// Without this check, a pending intrinsic overflow would never be converted into
+    /// a real failure and gas rescue would be missed.
+    ///
+    /// Returns `Some(FrameResult)` if a TX-level limit is already exceeded.
+    pub(crate) fn check_pending_exceeded_limit(
+        &mut self,
+        frame_input: &FrameInput,
+    ) -> Option<FrameResult> {
+        if !self.has_exceeded_limit.exceeded_limit() {
+            return None;
+        }
+
+        let (gas_limit, return_memory_offset) = match frame_input {
+            FrameInput::Call(inputs) => {
+                (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
+            }
+            FrameInput::Create(inputs) => (inputs.gas_limit, None),
+            FrameInput::Empty => unreachable!(),
+        };
+
+        let output = self.has_exceeded_limit.revert_data();
+        let result = create_exceeding_limit_frame_result(
+            self.exceeding_instruction_result(),
+            Gas::new(gas_limit),
+            return_memory_offset,
+            output,
+        );
+        self.try_rescue_gas(result.gas());
+        Some(result)
     }
 
     /// Hook called when a new execution frame is successfully initialized in `frame_init` and needs
@@ -545,8 +594,9 @@ impl AdditionalLimit {
                     }
                 }
             } else {
-                // Gas has already been rescued at the point where the limit was
-                // exceeded (before_frame_init, after_frame_init, or after_frame_run).
+                // Gas should already have been rescued at the point where the limit was
+                // exceeded (check_pending_exceeded_limit, before_frame_init,
+                // after_frame_init, or after_frame_run).
                 // Just mark the result as exceeding the limit.
                 mark_frame_result_as_exceeding_limit(
                     result,

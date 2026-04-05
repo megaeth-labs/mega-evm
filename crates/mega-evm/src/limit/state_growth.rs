@@ -107,7 +107,10 @@ impl StateGrowthTracker {
     }
 
     /// Pushes a new frame onto the tracker.
-    /// For Rex4+, uses the 98/100 budget-based limit derived from parent's remaining budget.
+    ///
+    /// For Rex4+, delegates to `FrameLimitTracker::push_frame()` which uses
+    /// `tx_entry.remaining()` for the top-level frame and parent's remaining × 98/100
+    /// for nested frames.
     /// For pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced
     /// (the TX-level check in `check_limit()` uses `net_usage()` instead).
     fn push_frame(&mut self) {

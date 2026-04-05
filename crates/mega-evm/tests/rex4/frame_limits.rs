@@ -159,10 +159,11 @@ fn tx_intrinsic_data_size() -> u64 {
 
 #[test]
 fn test_data_size_child_gets_98_percent_budget() {
-    // TX data limit large enough; set it so child (98% of remaining) can create n-1 slots.
-    // Child budget = TX_LIMIT * 98/100.  We use TX_LIMIT = n_sstore_data(100) so child budget
-    // = n_sstore_data(98).  Child writes 98 slots → succeeds.
-    let limit = n_sstore_data(100);
+    // TX data limit must account for intrinsic usage. The first frame budget is
+    // tx_limit - intrinsic; child budget = (tx_limit - intrinsic) * 98/100.
+    // With intrinsic + n_sstore_data(100), the first frame gets n_sstore_data(100),
+    // and child gets n_sstore_data(98). Child writes 98 slots → succeeds.
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let child_code = write_n_slots(BytecodeBuilder::default(), 98).stop().build();
     let parent_code =
         append_call(BytecodeBuilder::default(), CONTRACT, 50_000_000).append(POP).stop().build();
@@ -189,7 +190,7 @@ fn test_data_size_child_gets_98_percent_budget() {
 fn test_data_size_child_exceeds_budget_frame_local_revert() {
     // Child budget = n_sstore_data(98), child writes 99 slots → exceeds → frame-local Revert.
     // Parent succeeds, child's discardable data is dropped.
-    let limit = n_sstore_data(100);
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let child_code = write_n_slots(BytecodeBuilder::default(), 99).stop().build();
     let parent_code =
         append_call(BytecodeBuilder::default(), CONTRACT, 50_000_000).append(POP).stop().build();
@@ -209,7 +210,7 @@ fn test_data_size_child_exceeds_budget_frame_local_revert() {
 
 #[test]
 fn test_data_size_child_exceed_reverts_not_halts() {
-    let limit = n_sstore_data(100);
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let child_code = write_n_slots(BytecodeBuilder::default(), 99).stop().build();
     let parent_code =
         append_call(BytecodeBuilder::default(), CONTRACT, 50_000_000).append(POP).stop().build();
@@ -229,7 +230,7 @@ fn test_data_size_child_exceed_reverts_not_halts() {
 #[test]
 fn test_data_size_parent_budget_protected_after_child_revert() {
     // Child exceeds budget (data dropped), parent then writes own slots successfully.
-    let limit = n_sstore_data(100);
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let child_code = write_n_slots(BytecodeBuilder::default(), 99).stop().build();
     let parent_code = append_call(BytecodeBuilder::default(), CONTRACT, 50_000_000)
         .append(POP)
@@ -263,7 +264,7 @@ fn test_data_size_parent_budget_protected_after_child_revert() {
 #[test]
 fn test_data_size_revert_data_encodes_mega_limit_exceeded() {
     // kind=0 (DataSize), limit=frame_budget
-    let limit = n_sstore_data(100);
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let child_code = write_n_slots(BytecodeBuilder::default(), 99).stop().build();
     let parent_code =
         append_call_and_return_revert_data(BytecodeBuilder::default(), CONTRACT, 50_000_000)
@@ -285,8 +286,12 @@ fn test_data_size_revert_data_encodes_mega_limit_exceeded() {
 
     let decoded = MegaLimitExceeded::abi_decode(&output).expect("should decode MegaLimitExceeded");
     assert_eq!(decoded.kind, 0, "kind should be 0 (DataSize)");
-    // child budget = limit * 98/100
-    assert_eq!(decoded.limit, limit * 98 / 100, "limit should be child's per-frame budget");
+    // child budget = (limit - intrinsic) * 98/100 = n_sstore_data(100) * 98/100
+    assert_eq!(
+        decoded.limit,
+        n_sstore_data(100) * 98 / 100,
+        "limit should be child's per-frame budget"
+    );
 }
 
 #[test]
@@ -310,10 +315,10 @@ fn test_data_size_top_level_exceed_is_frame_local_revert() {
 
 #[test]
 fn test_data_size_child_budget_accounts_for_parent_usage() {
-    // TX data limit = 100 slots -> 4000 bytes.
-    // Parent writes 20 slots (800), remaining = 3200, child budget = 3136.
-    // Child writes 78 slots (3120) -> succeeds.
-    let limit = n_sstore_data(100);
+    // TX data limit = intrinsic + 100 slots.
+    // First frame budget = n_sstore_data(100). Parent writes 20 slots, remaining = 80 slots.
+    // Child budget = 80 * 98/100 = 78 slots. Child writes 78 slots → succeeds.
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let child_code = write_n_slots(BytecodeBuilder::default(), 78).stop().build();
     let parent_code = write_n_slots(BytecodeBuilder::default(), 20);
     let parent_code = append_call(parent_code, CONTRACT, 50_000_000).append(POP).stop().build();
@@ -337,10 +342,10 @@ fn test_data_size_child_budget_accounts_for_parent_usage() {
 
 #[test]
 fn test_data_size_child_exceeds_budget_after_parent_usage() {
-    // TX data limit = 100 slots -> 4000 bytes.
-    // Parent writes 20 slots (800), remaining = 3200, child budget = 3136.
-    // Child writes 79 slots (3160) -> exceeds and reverts.
-    let limit = n_sstore_data(100);
+    // TX data limit = intrinsic + 100 slots.
+    // First frame budget = n_sstore_data(100). Parent writes 20 slots, remaining = 80 slots.
+    // Child budget = 80 * 98/100 = 78 slots. Child writes 79 → exceeds and reverts.
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let child_code = write_n_slots(BytecodeBuilder::default(), 79).stop().build();
     let parent_code = write_n_slots(BytecodeBuilder::default(), 20);
     let parent_code = append_call(parent_code, CONTRACT, 50_000_000).append(POP).stop().build();
@@ -364,11 +369,11 @@ fn test_data_size_child_exceeds_budget_after_parent_usage() {
 
 #[test]
 fn test_data_size_grandchild_budget_progressive_reduction() {
-    // TX limit = 4000.
-    // Child budget = 3920.
-    // Grandchild budget = floor(3920 * 98 / 100) = 3841.
-    // Grandchild writes 96 slots (3840) -> succeeds.
-    let limit = n_sstore_data(100);
+    // TX limit = intrinsic + n_sstore_data(100).
+    // First frame = n_sstore_data(100). Child = 100*98/100 = 98 slots.
+    // Grandchild = 98*98/100 = 96 slots.
+    // Grandchild writes 96 slots → succeeds.
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let grandchild_code = write_n_slots(BytecodeBuilder::default(), 96).stop().build();
     let child_code =
         append_call(BytecodeBuilder::default(), CONTRACT2, 50_000_000).append(POP).stop().build();
@@ -391,11 +396,10 @@ fn test_data_size_grandchild_budget_progressive_reduction() {
 
 #[test]
 fn test_data_size_grandchild_exceeds_progressive_budget() {
-    // TX limit = 4000.
-    // Child budget = 3920.
-    // Grandchild budget = floor(3920 * 98 / 100) = 3841.
-    // Grandchild writes 97 slots (3880) -> exceeds and reverts.
-    let limit = n_sstore_data(100);
+    // TX limit = intrinsic + n_sstore_data(100).
+    // First frame = n_sstore_data(100). Child = 98 slots. Grandchild = 96 slots.
+    // Grandchild writes 97 slots → exceeds and reverts.
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let grandchild_code = write_n_slots(BytecodeBuilder::default(), 97).stop().build();
     let child_code =
         append_call(BytecodeBuilder::default(), CONTRACT2, 50_000_000).append(POP).stop().build();
@@ -419,7 +423,7 @@ fn test_data_size_grandchild_exceeds_progressive_budget() {
 #[test]
 fn test_data_size_child_exceed_followed_by_sibling_success() {
     // Child A exceeds and reverts, Child B should still get fresh budget and succeed.
-    let limit = n_sstore_data(100);
+    let limit = tx_intrinsic_data_size() + n_sstore_data(100);
     let child_a_code = write_n_slots(BytecodeBuilder::default(), 99).stop().build();
     let child_b_code = write_n_slots(BytecodeBuilder::default(), 98).stop().build();
     let parent_code = append_call(BytecodeBuilder::default(), CONTRACT, 50_000_000)
@@ -500,7 +504,9 @@ fn test_data_size_rex3_tx_exceed_halts() {
 
 #[test]
 fn test_kv_update_child_gets_98_percent_budget() {
-    // TX KV limit = 100; child budget = 98. Child writes 98 slots (98 KV ops) → succeeds.
+    // TX KV limit = 101 (1 intrinsic + 100 execution budget).
+    // First frame budget = 100. Child budget = 100 * 98/100 = 98.
+    // Child writes 98 slots → succeeds.
     let child_code = write_n_slots(BytecodeBuilder::default(), 98).stop().build();
     let parent_code =
         append_call(BytecodeBuilder::default(), CONTRACT, 50_000_000).append(POP).stop().build();
@@ -512,7 +518,7 @@ fn test_kv_update_child_gets_98_percent_budget() {
 
     let tx = default_tx_builder(CALLEE).build_fill();
     let (result, _, kv_updates) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 100, tx).unwrap();
+        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 101, tx).unwrap();
 
     assert!(result.result.is_success());
     // 1 (caller nonce from before_tx_start) + 98 sstores
@@ -521,8 +527,8 @@ fn test_kv_update_child_gets_98_percent_budget() {
 
 #[test]
 fn test_kv_update_child_exceeds_budget_frame_local_revert() {
+    // TX KV limit = 101 (1 intrinsic + 100 execution budget).
     // Child budget = 98. Child writes 99 slots → exceeds → Revert. Parent succeeds.
-    // Child's discardable KV ops are dropped.
     let child_code = write_n_slots(BytecodeBuilder::default(), 99).stop().build();
     let parent_code =
         append_call(BytecodeBuilder::default(), CONTRACT, 50_000_000).append(POP).stop().build();
@@ -534,7 +540,7 @@ fn test_kv_update_child_exceeds_budget_frame_local_revert() {
 
     let tx = default_tx_builder(CALLEE).build_fill();
     let (result, _, kv_updates) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 100, tx).unwrap();
+        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 101, tx).unwrap();
 
     assert!(result.result.is_success(), "Parent should succeed after child frame-local revert");
     // Only the persistent caller nonce update remains; child's discardable ops dropped.
@@ -544,7 +550,7 @@ fn test_kv_update_child_exceeds_budget_frame_local_revert() {
 #[test]
 fn test_kv_update_revert_data_encodes_mega_limit_exceeded() {
     // kind=1 (KVUpdate), limit=child's frame budget
-    let kv_limit = 100_u64;
+    let kv_limit = 101_u64;
     let child_code = write_n_slots(BytecodeBuilder::default(), 99).stop().build();
     let parent_code =
         append_call_and_return_revert_data(BytecodeBuilder::default(), CONTRACT, 50_000_000)
@@ -567,7 +573,12 @@ fn test_kv_update_revert_data_encodes_mega_limit_exceeded() {
 
     let decoded = MegaLimitExceeded::abi_decode(&output).expect("should decode MegaLimitExceeded");
     assert_eq!(decoded.kind, 1, "kind should be 1 (KVUpdate)");
-    assert_eq!(decoded.limit, kv_limit * 98 / 100, "limit should be child's per-frame budget");
+    // child budget = (kv_limit - 1 intrinsic) * 98/100 = 100 * 98/100 = 98
+    assert_eq!(
+        decoded.limit,
+        (kv_limit - 1) * 98 / 100,
+        "limit should be child's per-frame budget"
+    );
 }
 
 #[test]
@@ -590,9 +601,9 @@ fn test_kv_update_top_level_exceed_is_frame_local_revert() {
 
 #[test]
 fn test_kv_update_child_budget_accounts_for_parent_usage() {
-    // TX KV limit = 100.
-    // Parent writes 20 slots, remaining = 80, child budget = 78.
-    // Child writes 78 -> succeeds.
+    // TX KV limit = 101 (1 intrinsic + 100 execution budget).
+    // First frame = 100. Parent writes 20, remaining = 80. Child budget = 78.
+    // Child writes 78 → succeeds.
     let child_code = write_n_slots(BytecodeBuilder::default(), 78).stop().build();
     let parent_code = write_n_slots(BytecodeBuilder::default(), 20);
     let parent_code = append_call(parent_code, CONTRACT, 50_000_000).append(POP).stop().build();
@@ -604,7 +615,7 @@ fn test_kv_update_child_budget_accounts_for_parent_usage() {
 
     let tx = default_tx_builder(CALLEE).build_fill();
     let (result, _, kv_updates) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 100, tx).unwrap();
+        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 101, tx).unwrap();
 
     assert!(result.result.is_success());
     assert_eq!(kv_updates, 1 + 20 + 78);
@@ -612,9 +623,9 @@ fn test_kv_update_child_budget_accounts_for_parent_usage() {
 
 #[test]
 fn test_kv_update_child_exceeds_budget_after_parent_usage() {
-    // TX KV limit = 100.
-    // Parent writes 20 slots, remaining = 80, child budget = 78.
-    // Child writes 79 -> exceeds and reverts.
+    // TX KV limit = 101 (1 intrinsic + 100 execution budget).
+    // First frame = 100. Parent writes 20, remaining = 80. Child budget = 78.
+    // Child writes 79 → exceeds and reverts.
     let child_code = write_n_slots(BytecodeBuilder::default(), 79).stop().build();
     let parent_code = write_n_slots(BytecodeBuilder::default(), 20);
     let parent_code = append_call(parent_code, CONTRACT, 50_000_000).append(POP).stop().build();
@@ -626,7 +637,7 @@ fn test_kv_update_child_exceeds_budget_after_parent_usage() {
 
     let tx = default_tx_builder(CALLEE).build_fill();
     let (result, _, kv_updates) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 100, tx).unwrap();
+        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 101, tx).unwrap();
 
     assert!(result.result.is_success());
     assert_eq!(kv_updates, 1 + 20);
@@ -634,10 +645,9 @@ fn test_kv_update_child_exceeds_budget_after_parent_usage() {
 
 #[test]
 fn test_kv_update_grandchild_budget_progressive_reduction() {
-    // TX limit = 100.
-    // Child budget = 98.
-    // Grandchild budget = floor(98 * 98 / 100) = 96.
-    // Grandchild writes 96 -> succeeds.
+    // TX limit = 101 (1 intrinsic + 100 execution).
+    // First frame = 100. Child = 98. Grandchild = 96.
+    // Grandchild writes 96 → succeeds.
     let grandchild_code = write_n_slots(BytecodeBuilder::default(), 96).stop().build();
     let child_code =
         append_call(BytecodeBuilder::default(), CONTRACT2, 50_000_000).append(POP).stop().build();
@@ -652,7 +662,7 @@ fn test_kv_update_grandchild_budget_progressive_reduction() {
 
     let tx = default_tx_builder(CALLEE).build_fill();
     let (result, _, kv_updates) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 100, tx).unwrap();
+        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 101, tx).unwrap();
 
     assert!(result.result.is_success());
     assert_eq!(kv_updates, 1 + 96);
@@ -660,10 +670,9 @@ fn test_kv_update_grandchild_budget_progressive_reduction() {
 
 #[test]
 fn test_kv_update_grandchild_exceeds_progressive_budget() {
-    // TX limit = 100.
-    // Child budget = 98.
-    // Grandchild budget = floor(98 * 98 / 100) = 96.
-    // Grandchild writes 97 -> exceeds and reverts.
+    // TX limit = 101 (1 intrinsic + 100 execution).
+    // First frame = 100. Child = 98. Grandchild = 96.
+    // Grandchild writes 97 → exceeds and reverts.
     let grandchild_code = write_n_slots(BytecodeBuilder::default(), 97).stop().build();
     let child_code =
         append_call(BytecodeBuilder::default(), CONTRACT2, 50_000_000).append(POP).stop().build();
@@ -678,7 +687,7 @@ fn test_kv_update_grandchild_exceeds_progressive_budget() {
 
     let tx = default_tx_builder(CALLEE).build_fill();
     let (result, _, kv_updates) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 100, tx).unwrap();
+        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 101, tx).unwrap();
 
     assert!(result.result.is_success());
     assert_eq!(kv_updates, 1);
@@ -711,7 +720,7 @@ fn test_kv_update_child_exceed_followed_by_sibling_success() {
 
     let tx = default_tx_builder(CALLEE).build_fill();
     let (result, _, kv_updates) =
-        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 100, tx).unwrap();
+        transact_data_kv(MegaSpecId::REX4, &mut db, u64::MAX, 101, tx).unwrap();
 
     assert!(result.result.is_success());
     assert_eq!(kv_updates, 1 + 98);

@@ -542,6 +542,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// This method is called when starting a new transaction and resets
     /// block environment access tracking and additional limits.
+    ///
+    /// If intrinsic resource usage exceeds a configured limit, `before_tx_start()`
+    /// sets `has_exceeded_limit` so that the subsequent `check_pending_exceeded_limit()`
+    /// or `before_frame_init()` call produces a normal execution failure on the standard
+    /// additional-limit path.
     pub(crate) fn on_new_tx(&mut self) {
         self.reset_volatile_data_access();
         self.check_tx_beneficiary_access();
