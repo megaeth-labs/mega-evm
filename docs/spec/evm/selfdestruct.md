@@ -58,3 +58,4 @@ Adopting it restores compatibility while avoiding legacy full-destruction behavi
 - [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md) disable `SELFDESTRUCT`.
 - [Rex2](../upgrades/rex2.md) re-enables `SELFDESTRUCT` with [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics.
 - [Rex4](../upgrades/rex4.md) — added beneficiary-triggered volatile-access behavior for SELFDESTRUCT.
+- [Rex4](../upgrades/rex4.md) — added [state growth](resource-accounting.md#selfdestruct-refund-rex4) refund for same-transaction-created accounts destroyed by `SELFDESTRUCT`.

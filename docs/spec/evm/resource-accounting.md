@@ -170,6 +170,20 @@ The table above means:
 - rewriting a slot already counted within the transaction MUST NOT change state growth further,
 - and slots that were already non-zero at transaction start MUST NOT contribute to state growth.
 
+#### SELFDESTRUCT Refund (Rex4+)
+
+When a contract that was created in the same transaction executes `SELFDESTRUCT` ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics), the node MUST apply a state-growth refund:
+
+- `-1` for the account itself (reversing the `+1` from `CREATE`/`CREATE2`).
+- `-1` for each storage slot whose original value was zero and current value is non-zero (reversing each `+1` from `SSTORE`).
+
+This refund MUST only be applied on the **first** effective destruction.
+If the same account is the target of `SELFDESTRUCT` more than once in the same transaction, subsequent destructions MUST NOT produce additional refunds.
+
+This refund MUST NOT be applied when `SELFDESTRUCT` targets a pre-existing account (one not created in the current transaction), because pre-existing accounts do not have their code and storage removed under EIP-6780.
+
+The refund is frame-aware: if the call frame that performed the `SELFDESTRUCT` reverts, the refund MUST be discarded together with the destruction effect.
+
 #### Negative Intermediate Values
 
 The state-growth counter MAY become negative during execution.
