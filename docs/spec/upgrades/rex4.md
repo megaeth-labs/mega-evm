@@ -187,7 +187,7 @@ interface IMegaLimitControl {
 - Repeated `SELFDESTRUCT` on the same account does not produce additional refunds.
 - Pre-existing accounts (not created in the current transaction) are unaffected — `SELFDESTRUCT` on them does not produce a state growth refund, because EIP-6780 does not remove their code and storage.
 
-See [SELFDESTRUCT Refund](../evm/resource-accounting.md#selfdestruct-refund-rex4) for the full specification.
+See [SELFDESTRUCT — State Growth Refund](../evm/selfdestruct.md#state-growth-refund) for the full specification.
 
 ### Intrinsic Resource Limit Enforcement
 
