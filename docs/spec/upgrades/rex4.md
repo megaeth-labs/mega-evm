@@ -173,6 +173,34 @@ interface IMegaLimitControl {
 - Across multiple volatile accesses, the most restrictive effective limit applies.
 - Transactions that access volatile data late in execution can still use the full cap amount of compute gas after the access.
 
+### SELFDESTRUCT State Growth Refund
+
+#### Previous behavior
+
+- `SELFDESTRUCT` on a same-transaction-created account (EIP-6780) removed the account and its storage, but the [state growth](../evm/resource-accounting.md#state-growth) tracker still counted the account and its new storage slots as positive growth.
+- This meant ephemeral create-and-destroy patterns consumed state growth budget unnecessarily.
+
+#### New behavior
+
+- When a same-transaction-created account is destroyed by `SELFDESTRUCT`, the state growth tracker records a refund of `-1` for the account and `-1` for each new storage slot.
+- The refund is frame-aware: if the call frame reverts, both the destruction and the refund are discarded.
+- Repeated `SELFDESTRUCT` on the same account does not produce additional refunds.
+- Pre-existing accounts (not created in the current transaction) are unaffected — `SELFDESTRUCT` on them does not produce a state growth refund, because EIP-6780 does not remove their code and storage.
+
+See [SELFDESTRUCT — State Growth Refund](../evm/selfdestruct.md#state-growth-refund) for the full specification.
+
+### Intrinsic Resource Limit Enforcement
+
+#### Previous behavior
+
+- Per-transaction intrinsic resource usage (calldata size, caller account update) was recorded before the first call frame, but [per-frame limit checks](../evm/resource-limits.md) could not detect overflow when no frame existed yet.
+- If a transaction's intrinsic data size or KV update count already exceeded the configured limit, the overflow could go undetected on certain execution paths (system contract interceptions, inspector early returns).
+
+#### New behavior
+
+- Each resource tracker's limit check includes a TX-level fallthrough that catches intrinsic overflow even when no frame is on the stack.
+- A dedicated pre-frame check materializes any pending overflow before system contract interceptors or inspector callbacks can bypass the normal limit enforcement path.
+
 ### Keyless Deploy Sandbox Environment Inheritance
 
 #### Previous behavior

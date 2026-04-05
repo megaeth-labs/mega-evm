@@ -52,11 +52,19 @@ impl ComputeGasTracker {
     }
 
     /// Pushes a new frame onto the tracker.
-    /// In Rex4+, uses the 98/100 budget-based limit derived from parent's remaining budget.
-    /// In pre-Rex4, pushes with `u64::MAX` since TX-level enforcement only.
+    ///
+    /// - **Rex4+ top-level**: budget = full TX limit (not `remaining()`). Intrinsic compute gas is
+    ///   tracked in `tx_entry` and caught by the TX-global fallthrough in `check_limit()`. This
+    ///   overrides the generic `max_forward_limit()` which uses `tx_entry.remaining()`.
+    /// - **Rex4+ nested**: budget = parent's remaining × 98/100 (generic behavior).
+    /// - **Pre-Rex4**: `u64::MAX` (TX-level enforcement only).
     fn push_frame(&mut self) {
         if self.rex4_enabled {
-            self.frame_tracker.push_frame(());
+            if self.frame_tracker.has_active_frame() {
+                self.frame_tracker.push_frame(());
+            } else {
+                self.frame_tracker.push_frame_with_limit(self.frame_tracker.tx_limit(), ());
+            }
         } else {
             self.frame_tracker.push_frame_with_limit(u64::MAX, ());
         }

@@ -107,7 +107,10 @@ impl StateGrowthTracker {
     }
 
     /// Pushes a new frame onto the tracker.
-    /// For Rex4+, uses the 98/100 budget-based limit derived from parent's remaining budget.
+    ///
+    /// For Rex4+, delegates to `FrameLimitTracker::push_frame()` which uses
+    /// `tx_entry.remaining()` for the top-level frame and parent's remaining × 98/100
+    /// for nested frames.
     /// For pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced
     /// (the TX-level check in `check_limit()` uses `net_usage()` instead).
     fn push_frame(&mut self) {
@@ -280,5 +283,14 @@ impl TxRuntimeLimit for StateGrowthTracker {
     fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
         assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
         self.frame_tracker.pop_frame(result.instruction_result().is_ok());
+    }
+
+    /// Hook called after a SELFDESTRUCT on a same-TX-created account (REX4+).
+    ///
+    /// Records a refund for the account and its new storage slots that were
+    /// previously counted as state growth. This is frame-aware: if the frame reverts,
+    /// both the SELFDESTRUCT and the refund are discarded together.
+    fn after_selfdestruct(&mut self, refund: u64) {
+        self.record_refund(refund);
     }
 }
