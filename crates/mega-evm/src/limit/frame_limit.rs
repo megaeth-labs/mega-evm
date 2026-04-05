@@ -243,4 +243,6 @@ pub(crate) trait TxRuntimeLimit {
     ) {
     }
     fn after_log(&mut self, _num_topics: u64, _data_size: u64) {}
+    #[inline]
+    fn after_selfdestruct(&mut self, _refund: u64) {}
 }

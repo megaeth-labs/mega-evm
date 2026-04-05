@@ -629,6 +629,14 @@ impl AdditionalLimit {
 
         !self.check_limit().exceeded_limit()
     }
+
+    /// Hook called after a SELFDESTRUCT on a same-TX-created account (REX4+).
+    ///
+    /// Records state growth refund for the destroyed account and its new storage slots.
+    /// The caller is responsible for computing the total refund before calling this.
+    pub(crate) fn on_selfdestruct(&mut self, refund: u64) {
+        self.state_growth.after_selfdestruct(refund);
+    }
 }
 
 /// Creates a `FrameResult` indicating that the limit is exceeded.

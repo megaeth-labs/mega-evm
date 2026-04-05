@@ -284,4 +284,13 @@ impl TxRuntimeLimit for StateGrowthTracker {
         assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
         self.frame_tracker.pop_frame(result.instruction_result().is_ok());
     }
+
+    /// Hook called after a SELFDESTRUCT on a same-TX-created account (REX4+).
+    ///
+    /// Records a refund for the account and its new storage slots that were
+    /// previously counted as state growth. This is frame-aware: if the frame reverts,
+    /// both the SELFDESTRUCT and the refund are discarded together.
+    fn after_selfdestruct(&mut self, refund: u64) {
+        self.record_refund(refund);
+    }
 }

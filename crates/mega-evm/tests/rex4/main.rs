@@ -10,4 +10,5 @@ mod gas_detention;
 mod intrinsic_limit_bypass;
 mod keyless_deploy;
 mod limit_control;
+mod selfdestruct_state_growth;
 mod storage_call_stipend;

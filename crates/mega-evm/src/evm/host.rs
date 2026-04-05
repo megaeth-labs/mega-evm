@@ -103,7 +103,50 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         if self.spec.is_enabled(MegaSpecId::REX4) {
             self.check_and_mark_beneficiary_balance_access(&target);
         }
-        self.inner.selfdestruct(address, target)
+
+        // Rex4+: Before inner selfdestruct mutates account status, inspect the account
+        // to compute state growth refund for same-TX-created accounts (EIP-6780).
+        // Uses non-delegating inspect_account to ensure we enumerate storage on the
+        // actual selfdestructed address, not a delegation target.
+        let selfdestruct_refund = if self.spec.is_enabled(MegaSpecId::REX4) {
+            let journal = &mut self.inner.journaled_state;
+            // inspect_account may fail if DB errors; treat as no refund.
+            inspect_account(journal, address).ok().and_then(|account| {
+                // Only refund if the account was created in this transaction (EIP-6780:
+                // only same-TX-created accounts are actually destroyed by SELFDESTRUCT).
+                // Use CreatedLocal flag which matches revm's is_created_locally() check.
+                if !account.status.contains(revm::state::AccountStatus::CreatedLocal) {
+                    return None;
+                }
+                // Count new storage slots: original was zero, current is non-zero.
+                let slot_count = account
+                    .storage
+                    .values()
+                    .filter(|slot| {
+                        slot.original_value().is_zero() && !slot.present_value().is_zero()
+                    })
+                    .count() as u64;
+                // +1 for the account itself (counted in before_frame_init) + slot count.
+                Some(1 + slot_count)
+            })
+        } else {
+            None
+        };
+
+        let result = self.inner.selfdestruct(address, target);
+
+        // Record state growth refund only on the first effective destruction.
+        // Repeated SELFDESTRUCT on the same account still returns a result but with
+        // `previously_destroyed == true` — refunding again would double-count.
+        if let Some(refund) = selfdestruct_refund {
+            if let Some(ref state_load) = result {
+                if !state_load.data.previously_destroyed {
+                    self.additional_limit.borrow_mut().on_selfdestruct(refund);
+                }
+            }
+        }
+
+        result
     }
 
     fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
