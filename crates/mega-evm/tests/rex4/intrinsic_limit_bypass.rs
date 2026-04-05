@@ -445,3 +445,39 @@ fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
         "Expected >99M gas remaining from rescue, got {gas_remaining}"
     );
 }
+
+// ============================================================================
+// TEST 10: Intrinsic-only DataSize overflow + contract creation TX
+// ============================================================================
+
+/// When a contract creation TX has intrinsic data size exceeding the limit,
+/// the TX must fail. This exercises the `FrameInput::Create` branch of
+/// `check_pending_exceeded_limit()`.
+#[test]
+fn test_intrinsic_data_size_overflow_contract_creation() {
+    let limit = 100; // Less than intrinsic data size (~150)
+
+    // Simple init code that just STOPs.
+    let init_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .create()
+        .data(init_code)
+        .gas_limit(100_000_000)
+        .build_fill();
+
+    let (result, _, _) = transact_data_kv(&mut db, limit, u64::MAX, tx).unwrap();
+
+    assert!(
+        result.result.is_halt(),
+        "Intrinsic DataSize overflow on CREATE TX should halt, got {:?}",
+        result.result
+    );
+    assert!(matches!(
+        result.result,
+        ExecutionResult::Halt { reason: MegaHaltReason::DataLimitExceeded { .. }, .. }
+    ));
+}

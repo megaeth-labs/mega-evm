@@ -19,12 +19,13 @@
 //! | CALLCODE to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 4 |
 //! | TX sender = beneficiary | `on_new_tx` eager | `check_tx_beneficiary_access` + sync (REX4) | test 5, 5b |
 //! | TX recipient = beneficiary | `on_new_tx` eager | `check_tx_beneficiary_access` + sync (REX4) | test 6, 6b |
-//! | SELFBALANCE in beneficiary | `host.balance()` | `volatile_data_ext::selfbalance` | test 7 (integration), 8 (address sensitivity) |
+//! | SELFBALANCE in beneficiary | `host.balance()` | `volatile_data_ext::selfbalance` | test 7 (integration), 9 (address sensitivity) |
 //! | BALANCE(beneficiary) | `host.balance()` | `wrap_op_detain_gas_conditional!` | (covered in `block_env_gas_limit.rs`) |
-//! | CALL to non-beneficiary | — | no trigger | test 9 (negative) |
-//! | SELFBALANCE in non-beneficiary | — | no trigger | test 8 (negative) |
+//! | CALL to non-beneficiary | — | no trigger | test 8 (negative) |
+//! | SELFBALANCE in non-beneficiary | — | no trigger | test 9 (negative) |
 //! | Child reverts after CALL to beneficiary | `load_account_delegated` | detention persists | test 1b |
 //! | disableVolatileDataAccess + CALL beneficiary | — | CALL blocked by `wrap_call_volatile_check` | (covered in `access_control.rs`) |
+//! | disableVolatileDataAccess + SELFBALANCE beneficiary | — | revert before exec | test 10 |
 
 use std::convert::Infallible;
 
@@ -32,8 +33,9 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IMegaLimitControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, LIMIT_CONTROL_ADDRESS,
+    EvmTxRuntimeLimits, IMegaAccessControl, IMegaLimitControl, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, ACCESS_CONTROL_ADDRESS,
+    LIMIT_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -380,6 +382,39 @@ fn test_caller_is_beneficiary_eager_detention() {
 }
 
 // ============================================================================
+// TEST 5b: Caller is beneficiary — pre-REX4 no eager detention
+// ============================================================================
+
+/// Pre-REX4 specs never had eager beneficiary detention at TX start.
+/// Same scenario as test 5 but with REX3: `detained_limit` should remain at TX limit.
+#[test]
+fn test_caller_is_beneficiary_pre_rex4_no_eager_detention() {
+    // Simple code: just STOP. We check detained_limit, not remainingComputeGas
+    // (MegaLimitControl interception is REX4-only).
+    let callee_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(BENEFICIARY, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(BENEFICIARY)
+        .call(CALLEE)
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    let (result, detained_limit) =
+        transact_with_spec(MegaSpecId::REX3, &mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx)
+            .unwrap();
+
+    assert!(result.result.is_success());
+    assert_eq!(
+        detained_limit, 200_000_000,
+        "Pre-REX4 caller=beneficiary: detained limit should remain at TX limit (no eager detention)"
+    );
+}
+
+// ============================================================================
 // TEST 6: Recipient is beneficiary — eager detention from TX start
 // ============================================================================
 
@@ -412,6 +447,37 @@ fn test_recipient_is_beneficiary_eager_detention() {
     assert!(
         detained_limit < 200_000_000,
         "Recipient=beneficiary: detained limit should be active, got {detained_limit}"
+    );
+}
+
+// ============================================================================
+// TEST 6b: Recipient is beneficiary — pre-REX4 no eager detention
+// ============================================================================
+
+/// Pre-REX4 specs never had eager beneficiary detention at TX start.
+/// Same scenario as test 6 but with REX3: `detained_limit` should remain at TX limit.
+#[test]
+fn test_recipient_is_beneficiary_pre_rex4_no_eager_detention() {
+    let beneficiary_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(BENEFICIARY, beneficiary_code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(BENEFICIARY)
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    let (result, detained_limit) =
+        transact_with_spec(MegaSpecId::REX3, &mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx)
+            .unwrap();
+
+    assert!(result.result.is_success());
+    assert_eq!(
+        detained_limit, 200_000_000,
+        "Pre-REX4 recipient=beneficiary: detained limit should remain at TX limit (no eager detention)"
     );
 }
 
@@ -541,65 +607,58 @@ fn test_selfbalance_in_non_beneficiary_no_detention() {
 }
 
 // ============================================================================
-// TEST 5b: Caller is beneficiary — pre-REX4 no eager detention
+// TEST 10: disableVolatileDataAccess + SELFBALANCE at beneficiary reverts
 // ============================================================================
 
-/// Pre-REX4 specs never had eager beneficiary detention at TX start.
-/// Same scenario as test 5 but with REX3: `detained_limit` should remain at TX limit.
+/// When volatile data access is disabled, SELFBALANCE at the beneficiary address
+/// must revert. This tests the revert branch of `volatile_data_ext::selfbalance`.
+///
+/// Approach: TX sends to BENEFICIARY directly (so code runs at beneficiary address).
+/// The beneficiary code disables volatile access, then executes SELFBALANCE.
+/// SELFBALANCE should revert the frame because the wrapper detects target == beneficiary
+/// with volatile access disabled.
 #[test]
-fn test_caller_is_beneficiary_pre_rex4_no_eager_detention() {
-    // Simple code: just STOP. We check detained_limit, not remainingComputeGas
-    // (MegaLimitControl interception is REX4-only).
-    let callee_code = BytecodeBuilder::default().stop().build();
+fn test_selfbalance_at_beneficiary_reverts_when_volatile_disabled() {
+    let disable_selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
 
-    let mut db = MemoryDatabase::default()
-        .account_balance(BENEFICIARY, U256::from(1_000_000))
-        .account_code(CALLEE, callee_code);
-
-    let tx = TxEnvBuilder::default()
-        .caller(BENEFICIARY)
-        .call(CALLEE)
-        .gas_limit(1_000_000_000)
-        .build_fill();
-
-    let (result, detained_limit) =
-        transact_with_spec(MegaSpecId::REX3, &mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx)
-            .unwrap();
-
-    assert!(result.result.is_success());
-    assert_eq!(
-        detained_limit, 200_000_000,
-        "Pre-REX4 caller=beneficiary: detained limit should remain at TX limit (no eager detention)"
-    );
-}
-
-// ============================================================================
-// TEST 6b: Recipient is beneficiary — pre-REX4 no eager detention
-// ============================================================================
-
-/// Pre-REX4 specs never had eager beneficiary detention at TX start.
-/// Same scenario as test 6 but with REX3: `detained_limit` should remain at TX limit.
-#[test]
-fn test_recipient_is_beneficiary_pre_rex4_no_eager_detention() {
-    let beneficiary_code = BytecodeBuilder::default().stop().build();
+    // Beneficiary code:
+    // 1. disableVolatileDataAccess()
+    // 2. SELFBALANCE (should revert because volatile access is disabled)
+    // 3. STOP (unreachable if SELFBALANCE reverts the frame)
+    let beneficiary_code = BytecodeBuilder::default()
+        .mstore(0x0, disable_selector)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(ACCESS_CONTROL_ADDRESS)
+        .push_number(100_000_u64)
+        .append(CALL)
+        .append(POP)
+        // SELFBALANCE — should revert the frame
+        .append(SELFBALANCE)
+        .append(POP)
+        .stop()
+        .build();
 
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000))
         .account_code(BENEFICIARY, beneficiary_code);
 
+    // TX directly to BENEFICIARY so code executes at beneficiary address.
     let tx = TxEnvBuilder::default()
         .caller(CALLER)
         .call(BENEFICIARY)
         .gas_limit(1_000_000_000)
         .build_fill();
 
-    let (result, detained_limit) =
-        transact_with_spec(MegaSpecId::REX3, &mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx)
-            .unwrap();
+    let (result, _) = transact(&mut db, BENEFICIARY, 200_000_000, DETENTION_CAP, tx).unwrap();
 
-    assert!(result.result.is_success());
-    assert_eq!(
-        detained_limit, 200_000_000,
-        "Pre-REX4 recipient=beneficiary: detained limit should remain at TX limit (no eager detention)"
+    // The frame should revert because SELFBALANCE at beneficiary is blocked.
+    assert!(
+        matches!(result.result, revm::context::result::ExecutionResult::Revert { .. }),
+        "SELFBALANCE at beneficiary with volatile access disabled should revert, got {:?}",
+        result.result
     );
 }
