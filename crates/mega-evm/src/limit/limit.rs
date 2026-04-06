@@ -384,25 +384,7 @@ impl AdditionalLimit {
         self.storage_call_stipend.before_frame_init(frame_init, &mut self.compute_gas);
 
         if self.check_limit().exceeded_limit() {
-            // if the limit is exceeded, create an error frame result and return it directly
-            let (gas_limit, return_memory_offset) = match &frame_init.frame_input {
-                FrameInput::Create(inputs) => (inputs.gas_limit, None),
-                FrameInput::Call(inputs) => {
-                    (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
-                }
-                FrameInput::Empty => unreachable!(),
-            };
-            let output = self.has_exceeded_limit.revert_data();
-            let result = create_exceeding_limit_frame_result(
-                self.exceeding_instruction_result(),
-                Gas::new(gas_limit),
-                return_memory_offset,
-                output,
-            );
-            // `rescue_gas` excludes the active STORAGE_CALL_STIPEND automatically,
-            // so the sender never recovers system-granted gas.
-            self.try_rescue_gas(result.gas());
-            return Ok(Some(result));
+            return Ok(self.create_exceeded_limit_result(&frame_init.frame_input));
         }
 
         Ok(None)
@@ -426,7 +408,14 @@ impl AdditionalLimit {
         if !self.has_exceeded_limit.exceeded_limit() {
             return None;
         }
+        self.create_exceeded_limit_result(frame_input)
+    }
 
+    /// Creates a `FrameResult` for an exceeded limit and rescues remaining gas.
+    ///
+    /// Shared by `before_frame_init` (limit exceeded after pushing sub-tracker frames)
+    /// and `check_pending_exceeded_limit` (intrinsic overflow before frame push).
+    fn create_exceeded_limit_result(&mut self, frame_input: &FrameInput) -> Option<FrameResult> {
         let (gas_limit, return_memory_offset) = match frame_input {
             FrameInput::Call(inputs) => {
                 (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
@@ -434,7 +423,6 @@ impl AdditionalLimit {
             FrameInput::Create(inputs) => (inputs.gas_limit, None),
             FrameInput::Empty => unreachable!(),
         };
-
         let output = self.has_exceeded_limit.revert_data();
         let result = create_exceeding_limit_frame_result(
             self.exceeding_instruction_result(),
