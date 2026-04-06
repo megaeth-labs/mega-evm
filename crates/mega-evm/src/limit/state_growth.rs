@@ -160,27 +160,32 @@ impl TxRuntimeLimit for StateGrowthTracker {
 
     /// Returns whether the state growth limit has been exceeded.
     ///
-    /// For Rex4+, the check is frame-local: each inner call has its own budget derived
-    /// from the parent's remaining budget (98/100 ratio).
-    /// For pre-Rex4, the check is TX-level: total net growth across all frames is compared
-    /// against the TX limit.
+    /// For Rex4+, checks the per-frame budget first, then falls through to a TX-level check.
+    /// The TX-level fallthrough is a defense-in-depth safety net (state growth currently has
+    /// no intrinsic usage in `tx_entry`, so the fallthrough is a no-op today).
+    /// For pre-Rex4, checks total net growth across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
         if self.spec.is_enabled(MegaSpecId::REX4) {
-            self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::StateGrowth)
-        } else {
-            // Pre-Rex4: check total growth across all frames against the TX-level limit.
-            let used = self.tx_usage();
-            let limit = self.frame_tracker.tx_limit();
-            if used > limit {
-                super::LimitCheck::ExceedsLimit {
-                    kind: super::LimitKind::StateGrowth,
-                    limit,
-                    used,
-                    frame_local: false,
-                }
-            } else {
-                super::LimitCheck::WithinLimit
+            let frame_check =
+                self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::StateGrowth);
+            if frame_check.exceeded_limit() {
+                return frame_check;
             }
+            // TX-level fallthrough: defense-in-depth safety net.
+            // State growth currently has no intrinsic usage in tx_entry, so this
+            // should not exceed during normal execution.
+        }
+        let used = self.tx_usage();
+        let limit = self.frame_tracker.tx_limit();
+        if used > limit {
+            super::LimitCheck::ExceedsLimit {
+                kind: super::LimitKind::StateGrowth,
+                limit,
+                used,
+                frame_local: false,
+            }
+        } else {
+            super::LimitCheck::WithinLimit
         }
     }
 
