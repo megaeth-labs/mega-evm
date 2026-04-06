@@ -572,6 +572,7 @@ where
         let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
         let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
+        let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
         let additional_limit = self.ctx().additional_limit.clone();
 
         // Check if this is a call to the oracle contract and mark it as accessed.
@@ -611,19 +612,20 @@ where
             }
         }
 
-        // REX4+: Check for pending TX-level limit exceeded (e.g., intrinsic DataSize/KVUpdate
-        // overflow from before_tx_start). This must run before interceptor dispatch because
-        // interceptors return synthetic results that skip before_frame_init(), which would
-        // otherwise convert the pending exceeded limit into a real failure.
+        // REX4+: If a TX-level limit is already exceeded (e.g., intrinsic DataSize/KVUpdate
+        // overflow from before_tx_start), abort before interceptor dispatch. Interceptors
+        // return synthetic results that skip before_frame_init(), which would otherwise
+        // catch the exceeded limit.
         //
         // Gated to REX4 only: pre-REX4 specs use TX-global check_limit() which catches
         // intrinsic overflow during execution. Changing pre-REX4 behavior would break replay.
-        if self.ctx().spec.is_enabled(MegaSpecId::REX4) {
-            // Separate borrow scope: the RefMut from check_pending_exceeded_limit
-            // must be dropped before push_empty_frame borrows again.
-            let pending =
-                additional_limit.borrow_mut().check_pending_exceeded_limit(&frame_init.frame_input);
-            if let Some(frame_result) = pending {
+        if is_rex4_enabled {
+            // Separate borrow scope: the RefMut must be dropped before push_empty_frame
+            // borrows again.
+            let exceeded = additional_limit
+                .borrow_mut()
+                .frame_result_if_exceeding_limit(&frame_init.frame_input);
+            if let Some(frame_result) = exceeded {
                 additional_limit.borrow_mut().push_empty_frame();
                 return Ok(FrameInitResult::Result(frame_result));
             }
@@ -797,17 +799,17 @@ where
         // Check if inspector wants to skip this call/create
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
             // Inspector intercepted — `frame_init()` is skipped entirely, so neither
-            // `check_pending_exceeded_limit` nor `before_frame_init` would run.
+            // `frame_result_if_exceeding_limit` nor `before_frame_init` would run.
             //
-            // REX4+: check for pending TX-level limit exceeded (e.g., intrinsic
-            // overflow) to ensure correct gas rescue before inspector callbacks.
+            // REX4+: if a TX-level limit is already exceeded (e.g., intrinsic
+            // overflow), abort to ensure correct gas rescue before inspector callbacks.
             // Gated to REX4 to avoid changing stable spec behavior.
             if ctx.spec.is_enabled(MegaSpecId::REX4) {
-                let pending = ctx
+                let exceeded = ctx
                     .additional_limit
                     .borrow_mut()
-                    .check_pending_exceeded_limit(&frame_init.frame_input);
-                if let Some(mut frame_result) = pending {
+                    .frame_result_if_exceeding_limit(&frame_init.frame_input);
+                if let Some(mut frame_result) = exceeded {
                     ctx.additional_limit.borrow_mut().push_empty_frame();
                     frame_end(ctx, inspector, &frame_init.frame_input, &mut frame_result);
                     return Ok(ItemOrResult::Result(frame_result));

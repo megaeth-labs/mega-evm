@@ -544,7 +544,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// block environment access tracking and additional limits.
     ///
     /// If intrinsic resource usage exceeds a configured limit, `before_tx_start()`
-    /// sets `has_exceeded_limit` so that the subsequent `check_pending_exceeded_limit()`
+    /// sets `has_exceeded_limit` so that the subsequent `frame_result_if_exceeding_limit()`
     /// or `before_frame_init()` call produces a normal execution failure on the standard
     /// additional-limit path.
     pub(crate) fn on_new_tx(&mut self) {

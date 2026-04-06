@@ -348,7 +348,7 @@ impl AdditionalLimit {
     /// Records intrinsic resource usage (calldata size, access lists, caller account
     /// update, etc.) and checks TX-level limits. If intrinsic usage already exceeds
     /// a configured limit, sets `has_exceeded_limit` so that the subsequent
-    /// `check_pending_exceeded_limit()` or `before_frame_init()` call produces a
+    /// `frame_result_if_exceeding_limit()` or `before_frame_init()` call produces a
     /// normal execution failure (Halt), keeping the failure on the standard
     /// additional-limit path.
     ///
@@ -397,11 +397,11 @@ impl AdditionalLimit {
     /// - `frame_init()` before system contract interceptor dispatch (REX4+).
     /// - `inspect_frame_init()` before inspector early-return (REX4+).
     ///
-    /// Without this check, a pending intrinsic overflow would never be converted into
-    /// a real failure and gas rescue would be missed.
+    /// Without this check, an intrinsic overflow would never be converted into a real
+    /// failure and gas rescue would be missed.
     ///
     /// Returns `Some(FrameResult)` if a TX-level limit is already exceeded.
-    pub(crate) fn check_pending_exceeded_limit(
+    pub(crate) fn frame_result_if_exceeding_limit(
         &mut self,
         frame_input: &FrameInput,
     ) -> Option<FrameResult> {
@@ -414,7 +414,7 @@ impl AdditionalLimit {
     /// Creates a `FrameResult` for an exceeded limit and rescues remaining gas.
     ///
     /// Shared by `before_frame_init` (limit exceeded after pushing sub-tracker frames)
-    /// and `check_pending_exceeded_limit` (intrinsic overflow before frame push).
+    /// and `frame_result_if_exceeding_limit` (intrinsic overflow before frame push).
     fn create_exceeded_limit_result(&mut self, frame_input: &FrameInput) -> Option<FrameResult> {
         let (gas_limit, return_memory_offset) = match frame_input {
             FrameInput::Call(inputs) => {
@@ -583,7 +583,7 @@ impl AdditionalLimit {
                 }
             } else {
                 // Gas should already have been rescued at the point where the limit was
-                // exceeded (check_pending_exceeded_limit, before_frame_init,
+                // exceeded (frame_result_if_exceeding_limit, before_frame_init,
                 // after_frame_init, or after_frame_run).
                 // Just mark the result as exceeding the limit.
                 mark_frame_result_as_exceeding_limit(
