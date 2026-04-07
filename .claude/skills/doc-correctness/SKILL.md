@@ -10,10 +10,10 @@ Verify factual claims in the documentation against implementation source: $ARGUM
 Parse the arguments to determine scope.
 Accepted inputs:
 
-- A single page path (e.g., `docs/evm/dual-gas-model.md`) — verify claims on that page.
-- A directory (e.g., `docs/evm/`) — verify all pages in that directory.
+- A single page path (e.g., `docs/spec/evm/dual-gas-model.md`) — verify claims on that page.
+- A directory (e.g., `docs/spec/evm/`) — verify all pages in that directory.
 - A claim family (e.g., `gas`, `system-contracts`, `upgrades`, `agent-files`) — verify all claims of that type across all pages.
-- `all` — verify every page listed in `docs/SUMMARY.md` plus all agent files (`AGENTS.md`, `CLAUDE.md`, `docs/AGENTS.md`, `REVIEW.md`, `.claude/skills/*/SKILL.md`).
+- `all` — verify every page listed in `docs/spec/SUMMARY.md` plus all agent files (`AGENTS.md`, `CLAUDE.md`, `docs/spec/AGENTS.md`, `REVIEW.md`, `.claude/skills/*/SKILL.md`).
 
 Default (no arguments): verify all pages.
 
@@ -29,11 +29,11 @@ Every verifiable claim in the docs falls into one of these families.
 | Detention | Gas detention caps, volatile data categories, detention trigger conditions | `crates/mega-evm/src/constants.rs`, `crates/mega-evm/src/access/`, `crates/mega-evm/src/evm/host.rs` |
 | Upgrades | Spec progression, per-upgrade behavioral deltas, activation order, backward compatibility | `crates/mega-evm/src/evm/spec.rs`, `crates/mega-evm/src/block/hardfork.rs` |
 | Precompiles | Precompile addresses, behavior, gas costs | `crates/mega-evm/src/evm/precompiles.rs` |
-| Agent Files | Spec progression lists, system contract tables, source layout descriptions, code path references, unstable spec markers in `AGENTS.md`, `CLAUDE.md`, `docs/AGENTS.md`, `REVIEW.md`, and `.claude/skills/*/SKILL.md` | Same sources as the claim's primary family (spec progression → `spec.rs`, system contracts → `constants.rs` + `crates/system-contracts/`, source layout → actual directory structure) |
+| Agent Files | Spec progression lists, system contract tables, source layout descriptions, code path references, unstable spec markers in `AGENTS.md`, `CLAUDE.md`, `docs/spec/AGENTS.md`, `REVIEW.md`, and `.claude/skills/*/SKILL.md` | Same sources as the claim's primary family (spec progression → `spec.rs`, system contracts → `constants.rs` + `crates/system-contracts/`, source layout → actual directory structure) |
 
 ### Agent File Verification
 
-Agent instruction files (`AGENTS.md`, `CLAUDE.md`, `docs/AGENTS.md`, `REVIEW.md`, `.claude/skills/*/SKILL.md`) contain code-related claims that can go stale.
+Agent instruction files (`AGENTS.md`, `CLAUDE.md`, `docs/spec/AGENTS.md`, `REVIEW.md`, `.claude/skills/*/SKILL.md`) contain code-related claims that can go stale.
 Treat them as additional pages to audit.
 Key claims to verify:
 

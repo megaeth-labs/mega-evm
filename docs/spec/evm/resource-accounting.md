@@ -170,6 +170,11 @@ The table above means:
 - rewriting a slot already counted within the transaction MUST NOT change state growth further,
 - and slots that were already non-zero at transaction start MUST NOT contribute to state growth.
 
+#### SELFDESTRUCT Refund
+
+When a same-transaction-created contract is destroyed by `SELFDESTRUCT`, the node MUST apply a state-growth refund.
+See [SELFDESTRUCT — State Growth Refund](selfdestruct.md#state-growth-refund) for the full specification.
+
 #### Negative Intermediate Values
 
 The state-growth counter MAY become negative during execution.

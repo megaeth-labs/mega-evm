@@ -71,7 +71,10 @@ impl DataSizeTracker {
     }
 
     /// Pushes a new frame onto the tracker.
-    /// In Rex4+, uses the 98/100 budget-based limit derived from parent's remaining budget.
+    ///
+    /// In Rex4+, delegates to `FrameLimitTracker::push_frame()` which uses
+    /// `tx_entry.remaining()` for the top-level frame (accounts for intrinsic usage)
+    /// and parent's remaining × 98/100 for nested frames.
     /// In pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced.
     fn push_frame(&mut self, info: CallFrameInfo) {
         if self.rex4_enabled {
@@ -120,15 +123,28 @@ impl TxRuntimeLimit for DataSizeTracker {
 
     /// Returns whether the data size limit has been exceeded.
     ///
-    /// In Rex4+, checks the current frame's per-frame budget (`frame_local`: true on exceed).
+    /// In Rex4+, checks the per-frame budget first, then falls through to a TX-level check.
+    /// The TX-level fallthrough catches intrinsic overflow when no frame exists yet
+    /// (intrinsic usage is recorded in `tx_entry` before the first frame is pushed).
     /// In pre-Rex4, checks total data size across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
         if self.rex4_enabled {
-            return self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::DataSize);
+            let frame_check =
+                self.frame_tracker.exceeds_current_frame_limit(super::LimitKind::DataSize);
+            if frame_check.exceeded_limit() {
+                return frame_check;
+            }
+            // TX-level fallthrough: defense-in-depth safety net.
+            // In Rex4+ during execution, per-frame budgets are derived from remaining TX
+            // budget, so this should only exceed when no frame exists (intrinsic overflow).
         }
         let used = self.tx_usage();
         let limit = self.frame_tracker.tx_limit();
         if used > limit {
+            debug_assert!(
+                !self.rex4_enabled || !self.frame_tracker.has_active_frame(),
+                "DataSize TX-level exceeded with active frame — budget invariant violated"
+            );
             super::LimitCheck::ExceedsLimit {
                 kind: super::LimitKind::DataSize,
                 limit,

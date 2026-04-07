@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evme"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "mega-system-contracts"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -4592,7 +4592,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "state-test"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",

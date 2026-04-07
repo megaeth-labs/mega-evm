@@ -1,4 +1,4 @@
-// Derived from AHash v0.8.12 - see mod.rs module doc for full attribution
+// Derived from AHash v0.8.12 - see NOTICE.md for full attribution
 
 use super::convert::ReadFromSlice;
 

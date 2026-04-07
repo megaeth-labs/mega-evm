@@ -152,8 +152,8 @@ pub mod rex {
     pub const CONTRACT_CREATION_STORAGE_GAS_BASE: u64 = 32_000;
 
     /// The maximum compute gas limit for a single transaction for the `REX` spec.
-    /// Transactions exceeding this limit halt with `ComputeGasLimitExceeded`, preserving remaining
-    /// gas.
+    /// Transactions exceeding this limit fail on the compute-gas limit path.
+    /// The exact surface result depends on the current spec's top-level/frame-local semantics.
     pub const TX_COMPUTE_GAS_LIMIT: u64 = 200_000_000;
 
     /// The maximum data size limit for a single transaction for the `REX` spec.

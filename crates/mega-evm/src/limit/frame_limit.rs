@@ -89,11 +89,11 @@ impl<I> FrameLimitTracker<I> {
         self.frame_stack.clear();
     }
 
-    /// Returns the remaining compute gas of the current frame.
+    /// Returns the remaining budget of the current frame.
     ///
     /// If the frame stack is non-empty, returns the top frame's remaining budget.
     /// If the frame stack is empty (before the first frame is pushed), returns
-    /// the TX-level remaining which accounts for pre-frame usage (e.g. intrinsic compute gas).
+    /// the TX-level remaining which accounts for pre-frame usage (e.g. intrinsic charges).
     pub(crate) fn current_frame_remaining(&self) -> u64 {
         match self.frame_stack.last() {
             Some(entry) => entry.remaining(),
@@ -102,7 +102,13 @@ impl<I> FrameLimitTracker<I> {
     }
 
     /// Returns the maximum limit that can be forwarded to the next frame.
-    /// This is a utility function to help calculate the limit for the next frame.
+    ///
+    /// - **Nested frame**: parent's remaining × 98/100.
+    /// - **Top-level frame** (empty stack): `tx_entry.remaining()`, which accounts for pre-frame
+    ///   intrinsic usage (e.g., calldata size, access lists) already charged into `tx_entry`.
+    ///
+    /// Individual trackers that need a different top-level budget should use
+    /// `push_frame_with_limit()` instead of `push_frame()`.
     fn max_forward_limit(&self) -> u64 {
         match self.frame_stack.last() {
             Some(entry) => {
@@ -111,7 +117,7 @@ impl<I> FrameLimitTracker<I> {
                 let denominator = u128::from(constants::rex4::FRAME_LIMIT_DENOMINATOR);
                 ((remaining * numerator) / denominator) as u64
             }
-            None => self.tx_entry.limit,
+            None => self.tx_entry.remaining(),
         }
     }
 
@@ -175,8 +181,10 @@ impl<I> FrameLimitTracker<I> {
         !self.frame_stack.is_empty()
     }
 
-    /// Pushes a new frame with a custom limit, bypassing the 98/100 calculation.
-    /// Used by pre-Rex4 specs where per-frame limits are not enforced.
+    /// Pushes a new frame with a custom limit, bypassing `max_forward_limit()`.
+    ///
+    /// Used by pre-Rex4 specs (`u64::MAX`, per-frame limits not enforced) and by any tracker that
+    /// intentionally wants to bypass the default `max_forward_limit()` behavior.
     pub(crate) fn push_frame_with_limit(&mut self, limit: u64, info: I) {
         self.frame_stack.push(FrameLimitEntry::new(limit, info));
     }
@@ -234,4 +242,6 @@ pub(crate) trait TxRuntimeLimit {
     ) {
     }
     fn after_log(&mut self, _num_topics: u64, _data_size: u64) {}
+    #[inline]
+    fn after_selfdestruct(&mut self, _refund: u64) {}
 }

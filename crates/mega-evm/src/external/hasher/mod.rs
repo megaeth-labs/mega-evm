@@ -1,36 +1,13 @@
 //! Deterministic hashing for mapping keys to SALT buckets.
 //!
 //! This module provides the [`bucket_id`] function which maps plain keys (account addresses,
-//! storage slot keys) to SALT bucket IDs.
-//!
-//! # Why vendored instead of using the `ahash` crate
-//!
-//! Although `ahash 0.8.12` is already in our dependency tree (via `revm → ark-ec`), we cannot
-//! use it directly.
-//! The `ahash` crate selects its hashing algorithm at compile time based on CPU features:
-//! AES-NI on supported targets, folded-multiply fallback otherwise.
-//! The same seeds produce **different hashes** depending on which algorithm is selected.
-//! Consensus requires identical hashes across all platforms, so we vendor the fallback
-//! folded-multiply algorithm explicitly, matching what the `salt` crate does internally.
+//! storage slot keys) to SALT bucket IDs. The hash algorithm is a vendored subset of `AHash`
+//! v0.8.12's deterministic fallback, ensuring identical results across all platforms.
 //!
 //! # Attribution
 //!
-//! Source: [ahash v0.8.12](https://github.com/tkaitchuck/aHash)
-//! License: Apache License 2.0
-//! Copyright: Copyright (c) 2019 Tom Kaitchuck
-//!
-//! Files derived from `AHash`:
-//! - `convert.rs` — extracted from `src/convert.rs`
-//! - `fallback.rs` — derived from `src/fallback_hash.rs` and related modules
-//!
-//! Modifications:
-//! 1. Always uses the fallback "folded multiply" algorithm instead of platform-specific AES-NI
-//! 2. Uses predetermined seeds rather than random generation
-//! 3. Ensures identical hash values across all platforms and architectures
-//! 4. Reorganized into separate modules
-//!
-//! The original `AHash` crate is licensed under the Apache License 2.0:
-//! <https://www.apache.org/licenses/LICENSE-2.0>
+//! The hashing implementation is derived from [AHash v0.8.12](https://github.com/tkaitchuck/aHash)
+//! under Apache License 2.0. See [`NOTICE.md`](./NOTICE.md) for full attribution.
 
 mod convert;
 mod fallback;
