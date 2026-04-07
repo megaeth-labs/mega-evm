@@ -4,6 +4,8 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
 use clap::{Args, Parser};
+use std::convert::Infallible;
+
 use mega_evm::{
     alloy_evm::Database,
     revm::{
@@ -12,6 +14,11 @@ use mega_evm::{
     },
     MegaContext, MegaSpecId, TestExternalEnvs,
 };
+
+use crate::hasher::AHashBucketHasher;
+
+/// External environment type for mega-evme using the real AHash-based SALT bucket hasher.
+pub type EvmeExternalEnvs = TestExternalEnvs<Infallible, AHashBucketHasher>;
 use tracing::{debug, trace};
 
 use super::{EvmeError, Result};
@@ -127,16 +134,16 @@ pub struct ExtEnvArgs {
 }
 
 impl ExtEnvArgs {
-    /// Creates [`TestExternalEnvs`].
-    pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
-        let mut external_envs = TestExternalEnvs::new();
+    /// Creates [`EvmeExternalEnvs`].
+    pub fn create_external_envs(&self) -> Result<EvmeExternalEnvs> {
+        let mut external_envs = EvmeExternalEnvs::new();
 
         // Parse and configure bucket capacities
         for bucket_capacity_str in &self.bucket_capacity {
             let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
             external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
         }
-        debug!(external_envs = ?external_envs, "Evm TestExternalEnvs created");
+        debug!(external_envs = ?external_envs, "Evm EvmeExternalEnvs created");
 
         Ok(external_envs)
     }
@@ -174,8 +181,8 @@ impl EnvArgs {
         self.block.create_block_env()
     }
 
-    /// Creates [`TestExternalEnvs`].
-    pub fn create_external_envs(&self) -> Result<TestExternalEnvs> {
+    /// Creates [`EvmeExternalEnvs`].
+    pub fn create_external_envs(&self) -> Result<EvmeExternalEnvs> {
         self.ext.create_external_envs()
     }
 
@@ -183,7 +190,7 @@ impl EnvArgs {
     pub fn create_evm_context<DB: Database>(
         &self,
         db: DB,
-    ) -> Result<MegaContext<DB, TestExternalEnvs>> {
+    ) -> Result<MegaContext<DB, EvmeExternalEnvs>> {
         let cfg = self.create_cfg_env()?;
         let block = self.create_block_env()?;
         let external_envs = self.create_external_envs()?;
