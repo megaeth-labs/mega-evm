@@ -33,6 +33,20 @@ If the executing contract was not created in the same transaction, `SELFDESTRUCT
 
 `SELFDESTRUCT` targeting the [beneficiary](../glossary.md#beneficiary) MUST trigger beneficiary [gas detention](gas-detention.md).
 
+### State Growth Refund
+
+When a contract that was created in the same transaction executes `SELFDESTRUCT` ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics), the node MUST apply a [state growth](resource-accounting.md#state-growth) refund:
+
+- `-1` for the account itself (reversing the `+1` from `CREATE`/`CREATE2`).
+- `-1` for each storage slot whose original value was zero and current value is non-zero (reversing each `+1` from `SSTORE`).
+
+This refund MUST only be applied on the **first** effective destruction.
+If the same account is the target of `SELFDESTRUCT` more than once in the same transaction, subsequent destructions MUST NOT produce additional refunds.
+
+This refund MUST NOT be applied when `SELFDESTRUCT` targets a pre-existing account (one not created in the current transaction), because pre-existing accounts do not have their code and storage removed under EIP-6780.
+
+The refund is frame-aware: if the call frame that performed the `SELFDESTRUCT` reverts, the refund MUST be discarded together with the destruction effect.
+
 ### MiniRex Behavior
 
 For [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md), `SELFDESTRUCT` MUST be disabled.
@@ -57,4 +71,4 @@ Adopting it restores compatibility while avoiding legacy full-destruction behavi
 
 - [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md) disable `SELFDESTRUCT`.
 - [Rex2](../upgrades/rex2.md) re-enables `SELFDESTRUCT` with [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics.
-- [Rex4](../upgrades/rex4.md) — added beneficiary-triggered volatile-access behavior for SELFDESTRUCT.
+- [Rex4](../upgrades/rex4.md) — added beneficiary-triggered volatile-access behavior for SELFDESTRUCT, and [state growth refund](#state-growth-refund) for same-transaction-created accounts destroyed by `SELFDESTRUCT`.

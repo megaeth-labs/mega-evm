@@ -291,6 +291,7 @@ mod rex4 {
     /// - CALLCODE: `volatile_data_ext::call_code` → `forward_gas_ext` → `storage_gas_ext` →
     ///   `compute_gas_ext`
     /// - SELFDESTRUCT: `volatile_data_ext::selfdestruct` → `compute_gas_ext::selfdestruct`
+    /// - SELFBALANCE: `volatile_data_ext::selfbalance` → `compute_gas_ext::selfbalance`
     ///
     /// The `volatile_data_ext` wrapper checks if the target address is the beneficiary and
     /// volatile data access is disabled — if so, reverts before executing.
@@ -312,6 +313,10 @@ mod rex4 {
 
         // Rex4: SELFDESTRUCT checks for beneficiary volatile access.
         table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct;
+
+        // Rex4: SELFBALANCE checks for beneficiary volatile access (when the executing
+        // contract is the beneficiary, SELFBALANCE triggers gas detention).
+        table[SELFBALANCE as usize] = volatile_data_ext::selfbalance;
 
         table
     }
@@ -893,6 +898,31 @@ pub mod volatile_data_ext {
     wrap_op_detain_gas_conditional!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
     wrap_op_detain_gas_conditional!(selfdestruct, "SELFDESTRUCT", compute_gas_ext::selfdestruct);
 
+    /// `SELFBALANCE` opcode with compute gas limit enforcement on volatile data access.
+    ///
+    /// SELFBALANCE is conditionally volatile when the current contract is the beneficiary.
+    /// Unlike the other beneficiary-conditional opcodes (BALANCE, EXTCODESIZE, etc.),
+    /// the target comes from `interpreter.input.target_address()` (the executing contract),
+    /// not from a stack operand, so `wrap_op_detain_gas_conditional` cannot be reused.
+    #[inline]
+    pub fn selfbalance<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let target = context.interpreter.input.target_address();
+        let beneficiary = context.host.beneficiary_address();
+        if target == beneficiary && context.host.volatile_access_disabled() {
+            context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                InstructionResult::Revert,
+                volatile_data_access_disabled_revert_data(VolatileDataAccessType::Beneficiary),
+                context.interpreter.gas,
+            ));
+            return;
+        }
+
+        run_inner_instruction_or_abort!(compute_gas_ext::selfbalance, context);
+        apply_compute_gas_limit!(context);
+    }
+
     /// `SLOAD` opcode with compute gas limit enforcement on volatile data access.
     ///
     /// SLOAD is conditionally volatile when targeting the oracle contract.
@@ -960,9 +990,22 @@ pub mod volatile_data_ext {
                 }
             }
 
-            // Delegate to the existing forward_gas_ext handler (includes storage gas,
-            // compute gas, and 98/100 gas forwarding rule).
-            $inner_fn(context);
+            // Delegate to the existing forward_gas_ext handler via reborrow so that
+            // `context` remains usable for `apply_compute_gas_limit!` afterward.
+            {
+                let ctx = InstructionContext::<'_, H, WIRE> {
+                    interpreter: &mut *context.interpreter,
+                    host: &mut *context.host,
+                };
+                $inner_fn(ctx);
+            }
+
+            // Propagate the detained compute gas limit if the CALL triggered beneficiary
+            // access (via `host.load_account_delegated()` inside the CALL handler).
+            // `apply_compute_gas_limit!` only touches the tracker and `AdditionalLimit`,
+            // not interpreter state, so it is safe in any interpreter state (including
+            // `NewFrame` after a successful CALL).
+            apply_compute_gas_limit!(context);
         }
     };
     }
