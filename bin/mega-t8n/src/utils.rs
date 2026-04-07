@@ -9,17 +9,17 @@ use state_test::types::AccountInfo;
 use crate::{Result, StateAlloc, T8nError};
 
 /// Calculate state root from the final state
-pub fn calculate_state_root(state: &State<EmptyDB>) -> B256 {
+pub(crate) fn calculate_state_root(state: &State<EmptyDB>) -> B256 {
     state_test::utils::state_merkle_trie_root(state.cache.trie_account())
 }
 
 /// Calculate logs root from all transaction logs
-pub fn calculate_logs_root(logs: &[Log]) -> B256 {
+pub(crate) fn calculate_logs_root(logs: &[Log]) -> B256 {
     state_test::utils::log_rlp_hash(logs)
 }
 
 /// Calculate bloom filter from all transaction logs
-pub fn calculate_logs_bloom(logs: &[Log]) -> Bloom {
+pub(crate) fn calculate_logs_bloom(logs: &[Log]) -> Bloom {
     let mut bloom = Bloom::default();
     for log in logs {
         bloom.accrue_log(log);
@@ -28,7 +28,7 @@ pub fn calculate_logs_bloom(logs: &[Log]) -> Bloom {
 }
 
 /// Extract post-state allocation from EVM state
-pub fn extract_post_state_alloc_from_state(state: &State<EmptyDB>) -> StateAlloc {
+pub(crate) fn extract_post_state_alloc_from_state(state: &State<EmptyDB>) -> StateAlloc {
     let mut post_alloc = HashMap::new();
 
     // Extract all accounts from the state
@@ -55,7 +55,7 @@ pub fn extract_post_state_alloc_from_state(state: &State<EmptyDB>) -> StateAlloc
 }
 
 /// Recover address from secret key
-pub fn recover_address_from_secret_key(secret_key: &B256) -> Result<Address> {
+pub(crate) fn recover_address_from_secret_key(secret_key: &B256) -> Result<Address> {
     // Use the same recovery function as in state_test::utils
     state_test::utils::recover_address(secret_key.as_slice()).ok_or_else(|| {
         T8nError::InvalidTransaction(format!(

@@ -1,8 +1,8 @@
 mod transaction;
-pub use transaction::*;
+pub(crate) use transaction::*;
 
 mod receipt;
-pub use receipt::*;
+pub(crate) use receipt::*;
 
 use std::collections::HashMap;
 
@@ -11,7 +11,7 @@ use state_test::types::{AccountInfo, Env};
 
 /// Input data for state transition
 #[derive(Debug)]
-pub struct TransitionInputs {
+pub(crate) struct TransitionInputs {
     /// Pre-state allocation of accounts
     pub alloc: StateAlloc,
     /// Block environment configuration
@@ -23,7 +23,7 @@ pub struct TransitionInputs {
 /// Results from state transition (internal)
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TransitionResults {
+pub(crate) struct TransitionResults {
     /// Final state root hash
     pub state_root: B256,
     /// Transaction trie root hash
@@ -55,7 +55,7 @@ pub struct TransitionResults {
 
 /// T8N tool output format expected by execution-spec-tests
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct T8nOutput {
+pub(crate) struct T8nOutput {
     /// Post-state allocation
     pub alloc: StateAlloc,
     /// Transition results
@@ -64,7 +64,7 @@ pub struct T8nOutput {
 
 /// Information about a rejected transaction
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RejectedTx {
+pub(crate) struct RejectedTx {
     /// Index of the rejected transaction
     #[serde(with = "alloy_serde::quantity")]
     pub index: u64,
@@ -73,11 +73,11 @@ pub struct RejectedTx {
 }
 
 /// Prestate account allocation (address -> account info mapping)
-pub type StateAlloc = HashMap<Address, AccountInfo>;
+pub(crate) type StateAlloc = HashMap<Address, AccountInfo>;
 
 /// Combined stdin input format
 #[derive(Debug, serde::Deserialize)]
-pub struct StdinInput {
+pub(crate) struct StdinInput {
     /// Pre-state allocation of accounts
     pub alloc: StateAlloc,
     /// Block environment configuration

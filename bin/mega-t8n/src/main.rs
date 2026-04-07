@@ -11,11 +11,11 @@ mod io;
 mod types;
 mod utils;
 
-pub use cmd::*;
-pub use error::*;
-pub use io::*;
-pub use types::*;
-pub use utils::*;
+use cmd::*;
+use error::*;
+use io::*;
+use types::*;
+use utils::*;
 
 fn main() {
     let cmd = Cmd::parse();
