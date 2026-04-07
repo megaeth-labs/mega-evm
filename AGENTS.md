@@ -209,7 +209,7 @@ When adding a new per-frame gas mechanism, verify that all three paths handle it
 
 ## Test Organization (`crates/mega-evm/tests/`)
 
-Tests are organized by spec: `equivalence/`, `mini_rex/` (11 modules), `rex/`, `rex2/`, and `block_executor/`.
+Tests are organized by spec: `equivalence/`, `mini_rex/` (12 modules), `rex/`, `rex2/`, `rex3/`, `rex4/`, and `block_executor/`.
 Each module tests specific features of that spec.
 
 ## Version Control

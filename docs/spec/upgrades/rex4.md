@@ -62,7 +62,7 @@ The `kind` discriminator identifies which resource was exceeded:
 
 #### New behavior
 
-- You can disable volatile data access for your call frame and all descendant calls.
+- Contracts can disable volatile data access for the current call frame and all descendant calls.
 - While disabled, any volatile access (block environment reads, beneficiary-targeted account access including `SELFDESTRUCT` to the beneficiary, oracle storage reads) reverts immediately with `VolatileDataAccessDisabled(uint8 accessType)`.
 - Blocked volatile access does not update volatile-access tracking and does not tighten gas detention.
 - A descendant call frame cannot re-enable access disabled by an ancestor — attempting to do so reverts with `DisabledByParent()`.
@@ -114,7 +114,7 @@ interface IMegaAccessControl {
 
 #### New behavior
 
-- You can query your effective remaining compute gas at any point during execution.
+- Contracts can query their effective remaining compute gas at any point during execution.
 - The returned value equals `min(frame_remaining, tx_detained_remaining)` at call time.
 - This is a snapshot — the value decreases as execution proceeds.
 - Calls with non-zero value transfer revert with `NonZeroTransfer()`.
