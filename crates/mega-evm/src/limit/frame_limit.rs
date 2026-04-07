@@ -107,8 +107,8 @@ impl<I> FrameLimitTracker<I> {
     /// - **Top-level frame** (empty stack): `tx_entry.remaining()`, which accounts for pre-frame
     ///   intrinsic usage (e.g., calldata size, access lists) already charged into `tx_entry`.
     ///
-    /// Individual trackers that need a different top-level budget (e.g., `ComputeGasTracker`
-    /// uses the full TX limit) should use `push_frame_with_limit()` instead of `push_frame()`.
+    /// Individual trackers that need a different top-level budget should use
+    /// `push_frame_with_limit()` instead of `push_frame()`.
     fn max_forward_limit(&self) -> u64 {
         match self.frame_stack.last() {
             Some(entry) => {
@@ -183,9 +183,8 @@ impl<I> FrameLimitTracker<I> {
 
     /// Pushes a new frame with a custom limit, bypassing `max_forward_limit()`.
     ///
-    /// Used by pre-Rex4 specs (`u64::MAX`, per-frame limits not enforced) and by
-    /// `ComputeGasTracker` for the Rex4+ top-level frame (full TX limit instead of
-    /// `tx_entry.remaining()`).
+    /// Used by pre-Rex4 specs (`u64::MAX`, per-frame limits not enforced) and by any tracker that
+    /// intentionally wants to bypass the default `max_forward_limit()` behavior.
     pub(crate) fn push_frame_with_limit(&mut self, limit: u64, info: I) {
         self.frame_stack.push(FrameLimitEntry::new(limit, info));
     }
