@@ -43,7 +43,31 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - name: Check write permission
+        id: permission
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const event = context.eventName;
+            let username;
+            if (event === 'issue_comment' || event === 'pull_request_review_comment') {
+              username = context.payload.comment.user.login;
+            } else if (event === 'pull_request_review') {
+              username = context.payload.review.user.login;
+            }
+            if (!username) return false;
+            const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username,
+            });
+            const hasWrite = ['admin', 'write'].includes(data.permission);
+            console.log(`User ${username} has permission: ${data.permission} (write access: ${hasWrite})`);
+            return hasWrite;
+          result-encoding: string
+
       - uses: anthropics/claude-code-action@v1
+        if: steps.permission.outputs.result == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           additional_permissions: |
