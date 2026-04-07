@@ -694,9 +694,8 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
 
     let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
 
-    let mut context = MegaContext::new(&mut db, MegaSpecId::REX4)
-        .with_block(block)
-        .with_tx_runtime_limits(
+    let mut context =
+        MegaContext::new(&mut db, MegaSpecId::REX4).with_block(block).with_tx_runtime_limits(
             EvmTxRuntimeLimits::no_limits()
                 .with_tx_compute_gas_limit(200_000_000)
                 .with_block_env_access_compute_gas_limit(DETENTION_CAP)
@@ -781,9 +780,8 @@ fn test_detention_does_not_interfere_with_data_size_limit() {
 
     let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
 
-    let mut context = MegaContext::new(&mut db, MegaSpecId::REX4)
-        .with_block(block)
-        .with_tx_runtime_limits(
+    let mut context =
+        MegaContext::new(&mut db, MegaSpecId::REX4).with_block(block).with_tx_runtime_limits(
             EvmTxRuntimeLimits::no_limits()
                 .with_tx_compute_gas_limit(200_000_000)
                 .with_block_env_access_compute_gas_limit(DETENTION_CAP)
