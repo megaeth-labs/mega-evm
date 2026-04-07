@@ -670,7 +670,7 @@ fn test_selfbalance_at_beneficiary_reverts_when_volatile_disabled() {
 // ============================================================================
 
 /// Cross-concern test: when both gas detention (via beneficiary sender) and
-/// intrinsic DataSize overflow are active, the TX must still fail with the
+/// intrinsic `DataSize` overflow are active, the TX must still fail with the
 /// correct halt reason (`DataLimitExceeded`), not succeed or produce a
 /// gas rescue that incorrectly reflects the detained cap.
 #[test]

@@ -491,8 +491,8 @@ fn test_intrinsic_data_size_overflow_contract_creation() {
 // TEST 11: Calldata-inflated intrinsic DataSize overflow
 // ============================================================================
 
-/// A transaction with a large calldata whose intrinsic data size (BASE_TX_SIZE +
-/// calldata.len() + ACCOUNT_INFO_WRITE_SIZE) exceeds the configured limit.
+/// A transaction with a large calldata whose intrinsic data size (`BASE_TX_SIZE` +
+/// `calldata.len()` + `ACCOUNT_INFO_WRITE_SIZE`) exceeds the configured limit.
 /// This exercises the `tx.input().len()` path in `DataSizeTracker::before_tx_start`.
 #[test]
 fn test_calldata_inflated_intrinsic_data_size_overflow() {

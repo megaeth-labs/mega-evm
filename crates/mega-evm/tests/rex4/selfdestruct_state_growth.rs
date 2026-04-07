@@ -473,7 +473,7 @@ fn test_selfdestruct_mixed_set_and_cleared_slots() {
 // TEST 12: SELFDESTRUCT refund makes boundary difference
 // ============================================================================
 
-/// Set state_growth_limit = 2. Create a contract with 2 SSTOREs (growth = 3:
+/// Set `state_growth_limit` = 2. Create a contract with 2 SSTOREs (growth = 3:
 /// 1 account + 2 slots), then SELFDESTRUCT it (growth = 0 after refund -3).
 /// Then write 2 new SSTOREs on the callee (growth = 2). Without refunds,
 /// the total growth would be 5 (exceeding limit=2). With refunds, the
