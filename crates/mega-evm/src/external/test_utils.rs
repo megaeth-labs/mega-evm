@@ -228,9 +228,7 @@ const PLAIN_ACCOUNT_KEY_LEN: usize = Address::len_bytes();
 const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 
 /// SALT environment implementation with configurable bucket ID hashing.
-impl<Error: Unpin + Display, Hasher: BucketHasher> SaltEnv
-    for TestExternalEnvs<Error, Hasher>
-{
+impl<Error: Unpin + Display, Hasher: BucketHasher> SaltEnv for TestExternalEnvs<Error, Hasher> {
     type Error = Error;
 
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
@@ -253,9 +251,7 @@ impl<Error: Unpin + Display, Hasher: BucketHasher> SaltEnv
     }
 }
 
-impl<Error: Unpin + Display, Hasher: BucketHasher> OracleEnv
-    for TestExternalEnvs<Error, Hasher>
-{
+impl<Error: Unpin + Display, Hasher: BucketHasher> OracleEnv for TestExternalEnvs<Error, Hasher> {
     fn get_oracle_storage(&self, slot: U256) -> Option<U256> {
         self.oracle_storage.borrow().get(&slot).copied()
     }
