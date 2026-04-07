@@ -7,6 +7,7 @@ use clap::Parser;
 
 mod cmd;
 mod common;
+mod hasher;
 /// Replay module for fetching and executing transactions from RPC
 pub mod replay;
 /// Run module for executing arbitrary EVM bytecode

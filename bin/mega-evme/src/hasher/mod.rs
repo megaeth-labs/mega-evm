@@ -1,8 +1,9 @@
 //! Deterministic hashing for mapping keys to SALT buckets.
 //!
-//! This module provides the [`bucket_id`] function which maps plain keys (account addresses,
-//! storage slot keys) to SALT bucket IDs. The hash algorithm is a vendored subset of `AHash`
-//! v0.8.12's deterministic fallback, ensuring identical results across all platforms.
+//! This module provides the [`AHashBucketHasher`] which implements [`BucketHasher`] using
+//! a vendored subset of `AHash` v0.8.12's deterministic fallback algorithm.
+//! This ensures identical bucket ID results across all platforms, matching the production
+//! `salt` crate's behavior.
 //!
 //! # Attribution
 //!
@@ -13,8 +14,8 @@ mod convert;
 mod fallback;
 
 use self::fallback::RandomState;
-use super::BucketId;
 use core::hash::{BuildHasher, Hasher};
+use mega_evm::{BucketHasher, BucketId, MIN_BUCKET_SIZE};
 
 /// Width of each trie level in bits (256-ary trie).
 const TRIE_WIDTH_BITS: usize = 8;
@@ -26,7 +27,7 @@ const MAIN_TRIE_LEVELS: usize = 4;
 const NUM_BUCKETS: usize = 1 << ((MAIN_TRIE_LEVELS - 1) * TRIE_WIDTH_BITS);
 
 /// Number of metadata buckets reserved at the start: 65,536.
-const NUM_META_BUCKETS: usize = NUM_BUCKETS / super::MIN_BUCKET_SIZE;
+const NUM_META_BUCKETS: usize = NUM_BUCKETS / MIN_BUCKET_SIZE;
 
 /// Number of key-value data buckets: 16,711,680.
 const NUM_KV_BUCKETS: usize = NUM_BUCKETS - NUM_META_BUCKETS;
@@ -50,8 +51,21 @@ fn hash(bytes: &[u8]) -> u64 {
 /// Returns a bucket ID in the range `[NUM_META_BUCKETS, NUM_BUCKETS)`.
 /// The first `NUM_META_BUCKETS` buckets are reserved for metadata storage.
 #[inline(always)]
-pub(crate) fn bucket_id(key: &[u8]) -> BucketId {
+fn bucket_id(key: &[u8]) -> BucketId {
     (hash(key) % NUM_KV_BUCKETS as u64 + NUM_META_BUCKETS as u64) as BucketId
+}
+
+/// AHash-based bucket hasher matching the production `salt` crate's deterministic algorithm.
+///
+/// This hasher uses the vendored `AHash` v0.8.12 fallback (folded-multiply) with fixed seeds
+/// to produce bucket IDs identical to the `salt` crate on all platforms.
+#[derive(Debug, Clone, Copy)]
+pub struct AHashBucketHasher;
+
+impl BucketHasher for AHashBucketHasher {
+    fn bucket_id(key: &[u8]) -> BucketId {
+        bucket_id(key)
+    }
 }
 
 #[cfg(test)]
@@ -106,5 +120,62 @@ mod tests {
         assert_eq!(bucket_id(&slot_key), 9_450_146);
 
         assert_eq!(bucket_id(&[0u8; 20]), 12_666_336);
+    }
+
+    #[test]
+    fn test_hash_all_write_branches() {
+        let h0 = hash(b"");
+        let h1 = hash(&[0x42]);
+        let h2 = hash(&[0x01, 0x02]);
+        let h3 = hash(&[0x01, 0x02, 0x03]);
+        let h4 = hash(&[0x01, 0x02, 0x03, 0x04]);
+        let h7 = hash(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+        let h8 = hash(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        let h9 = hash(&[0xaa; 9]);
+        let h16 = hash(&[0xbb; 16]);
+        let h17 = hash(&[0xcc; 17]);
+        let h33 = hash(&[0xdd; 33]);
+        let h48 = hash(&[0xee; 48]);
+
+        let hashes = [h0, h1, h2, h3, h4, h7, h8, h9, h16, h17, h33, h48];
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "hash collision at indices {i} and {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_hasher_typed_write_methods() {
+        use core::hash::{BuildHasher, Hasher};
+
+        let state = fallback::RandomState::with_seeds(
+            HASHER_SEEDS[0],
+            HASHER_SEEDS[1],
+            HASHER_SEEDS[2],
+            HASHER_SEEDS[3],
+        );
+
+        let finish_with = |f: fn(&mut fallback::DeterministicHasher)| -> u64 {
+            let mut h = state.build_hasher();
+            f(&mut h);
+            h.finish()
+        };
+
+        let h_u8 = finish_with(|h| h.write_u8(0x42));
+        let h_u16 = finish_with(|h| h.write_u16(0x4200));
+        let h_u32 = finish_with(|h| h.write_u32(0x42000000));
+        let h_u64 = finish_with(|h| h.write_u64(0x42));
+        let h_u128 = finish_with(|h| h.write_u128(0x42));
+        let h_usize = finish_with(|h| h.write_usize(0x42));
+
+        assert_eq!(h_u64, h_usize);
+
+        let hashes = [h_u8, h_u16, h_u32, h_u128];
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "typed write collision at {i} and {j}");
+            }
+        }
     }
 }

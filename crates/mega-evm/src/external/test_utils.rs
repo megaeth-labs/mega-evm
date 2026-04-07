@@ -1,18 +1,65 @@
-//! Test utilities for external environment implementations.
+//! In-memory external environment implementations.
 //!
-//! Provides [`TestExternalEnvs`], a configurable mock implementation of SALT and Oracle
-//! environments for use in tests. Unlike [`EmptyExternalEnv`](crate::EmptyExternalEnv),
+//! Provides [`TestExternalEnvs`], a configurable in-memory implementation of SALT and Oracle
+//! environments backed by `HashMap`s.
+//! Unlike [`EmptyExternalEnv`](crate::EmptyExternalEnv) which returns hardcoded defaults,
 //! this implementation allows setting specific bucket capacities and oracle storage values.
+//!
+//! # Use Cases
+//!
+//! - **Unit and integration tests**: Configure bucket capacities and oracle storage to exercise
+//!   specific gas pricing and oracle access paths without a real database.
+//! - **CLI tools** (e.g., `mega-evme`): Simulate EVM execution with user-specified bucket
+//!   capacities and oracle state, useful for offline transaction analysis and debugging.
+//! - **Standalone EVM runners**: Any context where a full node database is unavailable but
+//!   controllable external environment state is needed.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::{cell::RefCell, convert::Infallible, fmt::Display};
+use core::{
+    cell::RefCell,
+    convert::Infallible,
+    fmt::{Debug, Display},
+};
 use std::{rc::Rc, vec::Vec};
 
 use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
 use revm::primitives::HashMap;
 
 use crate::{BucketId, ExternalEnvFactory, ExternalEnvTypes, ExternalEnvs, OracleEnv, SaltEnv};
+
+/// Strategy trait for computing bucket IDs from raw key bytes.
+///
+/// Implementations determine how account addresses and storage slot keys are mapped to
+/// SALT bucket IDs. The trait only requires a single static method, making it zero-cost
+/// to parameterize [`TestExternalEnvs`] over different hashing strategies.
+pub trait BucketHasher: Debug + Clone + Unpin + 'static {
+    /// Computes a bucket ID from the given key bytes.
+    fn bucket_id(key: &[u8]) -> BucketId;
+}
+
+/// Simple deterministic hasher for tests.
+///
+/// Uses FNV-1a to produce consistent bucket IDs. This is NOT the real SALT hash algorithm;
+/// tests only need consistency (same input produces same output), not compatibility with
+/// the production SALT trie.
+#[derive(Debug, Clone, Copy)]
+pub struct SimpleBucketHasher;
+
+impl BucketHasher for SimpleBucketHasher {
+    fn bucket_id(key: &[u8]) -> BucketId {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for &byte in key {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        // Map to valid bucket range [NUM_META_BUCKETS, NUM_BUCKETS)
+        const NUM_BUCKETS: u64 = 1 << 24; // 16,777,216
+        const NUM_META_BUCKETS: u64 = NUM_BUCKETS / 256; // 65,536
+        const NUM_KV_BUCKETS: u64 = NUM_BUCKETS - NUM_META_BUCKETS;
+        (hash % NUM_KV_BUCKETS + NUM_META_BUCKETS) as BucketId
+    }
+}
 
 /// A recorded oracle hint from `on_hint` calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,11 +72,21 @@ pub struct RecordedHint {
     pub data: Bytes,
 }
 
-/// Configurable external environment implementation for testing.
+/// In-memory external environment implementation backed by `HashMap`s.
 ///
-/// This struct provides mutable state for bucket capacities, oracle storage, and recorded hints,
-/// allowing tests to set up specific scenarios and verify hint mechanism behavior. Bucket IDs are
-/// calculated using the inlined SALT hashing logic in [`crate::hasher`].
+/// Provides configurable SALT bucket capacities, oracle storage values, and oracle hint
+/// recording, all stored in memory.
+/// Suitable for unit tests, integration tests, CLI tools, and any standalone EVM execution
+/// context where a real node database is unavailable.
+///
+/// # Bucket Hashing
+///
+/// The `Hasher` type parameter controls how account addresses and storage slot keys are
+/// mapped to bucket IDs.
+/// The default [`SimpleBucketHasher`] uses FNV-1a — sufficient for tests where only
+/// consistency matters, not production compatibility.
+/// For production-compatible bucket IDs (matching the `salt` crate), supply a hasher that
+/// implements the real SALT hashing algorithm.
 ///
 /// # Example
 /// ```ignore
@@ -38,9 +95,9 @@ pub struct RecordedHint {
 ///     .with_oracle_storage(U256::ZERO, U256::from(42));  // Set oracle slot 0 to 42
 /// ```
 #[derive(derive_more::Debug, Clone)]
-pub struct TestExternalEnvs<Error = Infallible> {
+pub struct TestExternalEnvs<Error = Infallible, Hasher = SimpleBucketHasher> {
     #[debug(ignore)]
-    _phantom: core::marker::PhantomData<Error>,
+    _phantom: core::marker::PhantomData<(Error, Hasher)>,
     /// Oracle contract storage values. Maps storage slot keys to their values.
     oracle_storage: Rc<RefCell<HashMap<U256, U256>>>,
     /// Bucket capacities. Maps bucket IDs to their capacity values.
@@ -56,20 +113,26 @@ impl Default for TestExternalEnvs {
     }
 }
 
-impl From<TestExternalEnvs> for ExternalEnvs<TestExternalEnvs> {
-    fn from(value: TestExternalEnvs) -> Self {
+impl<H: BucketHasher> From<TestExternalEnvs<Infallible, H>>
+    for ExternalEnvs<TestExternalEnvs<Infallible, H>>
+{
+    fn from(value: TestExternalEnvs<Infallible, H>) -> Self {
         Self { salt_env: value.clone(), oracle_env: value }
     }
 }
 
-impl<'a> From<&'a TestExternalEnvs> for ExternalEnvs<&'a TestExternalEnvs> {
-    fn from(value: &'a TestExternalEnvs) -> Self {
+impl<'a, H: BucketHasher> From<&'a TestExternalEnvs<Infallible, H>>
+    for ExternalEnvs<&'a TestExternalEnvs<Infallible, H>>
+{
+    fn from(value: &'a TestExternalEnvs<Infallible, H>) -> Self {
         ExternalEnvs { salt_env: value.clone(), oracle_env: value.clone() }
     }
 }
 
-impl<Error: Unpin + Clone + Display + 'static> TestExternalEnvs<Error> {
-    /// Creates a new test environment with empty bucket capacity and oracle storage.
+impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
+    TestExternalEnvs<Error, Hasher>
+{
+    /// Creates a new environment with empty bucket capacity and oracle storage.
     pub fn new() -> Self {
         Self {
             _phantom: core::marker::PhantomData,
@@ -139,7 +202,9 @@ impl<Error: Unpin + Clone + Display + 'static> TestExternalEnvs<Error> {
     }
 }
 
-impl<Error: Unpin + Clone + Display> ExternalEnvFactory for TestExternalEnvs<Error> {
+impl<Error: Unpin + Clone + Display, Hasher: BucketHasher> ExternalEnvFactory
+    for TestExternalEnvs<Error, Hasher>
+{
     type EnvTypes = Self;
 
     fn external_envs(&self, _block: BlockNumber) -> ExternalEnvs<Self::EnvTypes> {
@@ -147,7 +212,9 @@ impl<Error: Unpin + Clone + Display> ExternalEnvFactory for TestExternalEnvs<Err
     }
 }
 
-impl<Error: Unpin + Display> ExternalEnvTypes for TestExternalEnvs<Error> {
+impl<Error: Unpin + Display, Hasher: BucketHasher> ExternalEnvTypes
+    for TestExternalEnvs<Error, Hasher>
+{
     type SaltEnv = Self;
 
     type OracleEnv = Self;
@@ -160,8 +227,8 @@ const PLAIN_ACCOUNT_KEY_LEN: usize = Address::len_bytes();
 /// Length of a combined address+slot key (52 bytes = 20 + 32).
 const PLAIN_STORAGE_KEY_LEN: usize = PLAIN_ACCOUNT_KEY_LEN + SLOT_KEY_LEN;
 
-/// SALT environment implementation using real bucket ID hashing.
-impl<Error: Unpin + Display> SaltEnv for TestExternalEnvs<Error> {
+/// SALT environment implementation with configurable bucket ID hashing.
+impl<Error: Unpin + Display, Hasher: BucketHasher> SaltEnv for TestExternalEnvs<Error, Hasher> {
     type Error = Error;
 
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
@@ -174,17 +241,17 @@ impl<Error: Unpin + Display> SaltEnv for TestExternalEnvs<Error> {
     }
 
     fn bucket_id_for_account(account: Address) -> BucketId {
-        crate::hasher::bucket_id(account.as_slice())
+        Hasher::bucket_id(account.as_slice())
     }
 
     fn bucket_id_for_slot(address: Address, key: U256) -> BucketId {
-        crate::hasher::bucket_id(
+        Hasher::bucket_id(
             address.concat_const::<SLOT_KEY_LEN, PLAIN_STORAGE_KEY_LEN>(key.into()).as_slice(),
         )
     }
 }
 
-impl<Error: Unpin + Display> OracleEnv for TestExternalEnvs<Error> {
+impl<Error: Unpin + Display, Hasher: BucketHasher> OracleEnv for TestExternalEnvs<Error, Hasher> {
     fn get_oracle_storage(&self, slot: U256) -> Option<U256> {
         self.oracle_storage.borrow().get(&slot).copied()
     }

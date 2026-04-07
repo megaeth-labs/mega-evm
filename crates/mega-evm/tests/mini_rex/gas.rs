@@ -937,7 +937,7 @@ fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
     let new_account = address!("9000000000000000000000000000000000000009");
     let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(new_account);
     let multiplier = 10u64;
-    let external_envs = TestExternalEnvs::new()
+    let external_envs = TestExternalEnvs::<Infallible>::new()
         .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * multiplier);
 
     // MiniRex account creation storage gas: 2,000,000 × 10 = 20,000,000
@@ -985,7 +985,7 @@ fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
     let created_address = CALLER.create(0);
     let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(created_address);
     let multiplier = 10u64;
-    let external_envs = TestExternalEnvs::new()
+    let external_envs = TestExternalEnvs::<Infallible>::new()
         .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * multiplier);
 
     // MiniRex contract creation storage gas: 2,000,000 × 10 = 20,000,000
