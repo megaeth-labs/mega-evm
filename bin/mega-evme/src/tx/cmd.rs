@@ -88,9 +88,7 @@ impl Cmd {
         // Step 2: Setup initial state and environment
         let sender = tx.base.caller;
         info!("Setting up initial state");
-        let provider =
-            if self.prestate_args.fork { Some(self.rpc_args.build_provider()?) } else { None };
-        let mut state = self.prestate_args.create_initial_state(&sender, provider).await?;
+        let mut state = self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
         debug!(sender = %sender, "State initialized");
 
         state.deploy_system_contracts(spec);

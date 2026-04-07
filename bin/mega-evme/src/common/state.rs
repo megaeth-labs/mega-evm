@@ -4,8 +4,9 @@ use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use alloy_network::Network;
 use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
-use alloy_provider::{DynProvider, Provider};
+use alloy_provider::Provider;
 use clap::Parser;
+use op_alloy_network::Optimism;
 
 use mega_evm::revm::{
     database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
@@ -273,25 +274,24 @@ impl PreStateArgs {
     /// Creates the initial state for execution. This provides an EVM database based on the prestate
     /// and remote forked chain.
     ///
-    /// When `provider` is `Some`, a forked state is created using the provider at
-    /// `self.fork_block`. When `None`, a local empty state is created.
-    pub async fn create_initial_state<N>(
+    /// When `self.fork` is true, a forked state is created at `self.fork_block` using the RPC
+    /// endpoint configured in `rpc_args`. Otherwise, a local empty state is created and
+    /// `rpc_args` is ignored.
+    pub async fn create_initial_state(
         &self,
         sender: &Address,
-        provider: Option<DynProvider<N>>,
-    ) -> Result<EvmeState<N, DynProvider<N>>>
-    where
-        N: alloy_network::Network,
-    {
+        rpc_args: &super::RpcArgs,
+    ) -> Result<EvmeState<Optimism, super::OpProvider>> {
         // Load prestate
         let prestate = self.load_prestate(sender)?;
 
         // Parse block hashes
         let block_hashes = self.parse_block_hashes()?;
 
-        // Create the appropriate state based on whether provider is provided
-        if let Some(provider) = provider {
+        // Create the appropriate state based on whether forking is enabled
+        if self.fork {
             debug!("Creating forked state");
+            let provider = rpc_args.build_provider()?;
             EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await
         } else {
             debug!("Creating local state");
