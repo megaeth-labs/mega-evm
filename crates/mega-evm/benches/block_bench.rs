@@ -68,13 +68,26 @@ fn create_deploy_tx(
 
 /// Hardfork config activating all hardforks from genesis.
 fn all_hardforks_config() -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex1, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex2, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex3, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
+    MegaHardforkConfig::default().with_all_activated()
+}
+
+/// Hardfork config that activates only hardforks up to the given spec.
+fn hardfork_config_for_spec(spec: MegaSpecId) -> MegaHardforkConfig {
+    let mut config = MegaHardforkConfig::default();
+    let hardforks_for_spec: &[(MegaHardfork, MegaSpecId)] = &[
+        (MegaHardfork::MiniRex, MegaSpecId::MINI_REX),
+        (MegaHardfork::Rex, MegaSpecId::REX),
+        (MegaHardfork::Rex1, MegaSpecId::REX1),
+        (MegaHardfork::Rex2, MegaSpecId::REX2),
+        (MegaHardfork::Rex3, MegaSpecId::REX3),
+        (MegaHardfork::Rex4, MegaSpecId::REX4),
+    ];
+    for &(hardfork, hardfork_spec) in hardforks_for_spec {
+        if hardfork_spec <= spec {
+            config = config.with(hardfork, ForkCondition::Timestamp(0));
+        }
+    }
+    config
 }
 
 /// Create block EVM environment.
@@ -263,10 +276,8 @@ fn bench_block_deploy(c: &mut Criterion) {
 
 /// Benchmark spec comparison for block execution.
 ///
-/// NOTE: All specs run with `all_hardforks_config()`, so even `EQUIVALENCE` and `MINI_REX`
-/// deploy Rex4 system contracts during `pre_execution_changes`. This is intentional —
-/// the benchmark isolates EVM execution behavior differences across specs, not system
-/// contract deployment overhead.
+/// Each spec runs with a hardfork config that only activates hardforks up to that spec,
+/// so system contract deployment matches what would happen on a real chain at that spec.
 fn bench_block_spec_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("block_executor_spec_comparison");
     group.sample_size(10);
@@ -299,7 +310,7 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
                 let mut executor = MegaBlockExecutor::new(
                     evm,
                     block_ctx,
-                    all_hardforks_config(),
+                    hardfork_config_for_spec(spec),
                     OpAlloyReceiptBuilder::default(),
                 );
                 executor
