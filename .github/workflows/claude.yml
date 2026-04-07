@@ -133,7 +133,7 @@ jobs:
         id: filter
         run: |
           FILES=$(gh pr diff ${{ github.event.pull_request.number }} --name-only || true)
-          if echo "$FILES" | grep -qE '^crates/mega-evm/src/|^crates/system-contracts/'; then
+          if echo "$FILES" | grep -qE '^crates/mega-evm/src/|^crates/system-contracts/|^bin/mega-evme/src/'; then
             echo "has_source_changes=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_source_changes=false" >> "$GITHUB_OUTPUT"
@@ -152,7 +152,7 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
 
             You are a documentation impact checker for the MegaETH specification.
-            Your ONLY job is to determine if this PR's code changes require updates to docs/ or agent files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, REVIEW.md, .claude/skills/*/SKILL.md).
+            Your ONLY job is to determine if this PR's code changes require updates to docs/ or agent files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, bin/mega-evme/AGENTS.md, REVIEW.md, .claude/skills/*/SKILL.md).
 
             Follow the doc-impact-check skill instructions in .claude/skills/doc-impact-check/SKILL.md.
 

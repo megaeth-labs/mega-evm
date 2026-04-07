@@ -33,7 +33,7 @@ jobs:
             FRESHNESS_WINDOW: ${{ github.event.inputs.freshness_window || '14d' }}
 
             You are a documentation auditor for the MegaETH specification.
-            Your scope includes docs/ AND agent instruction files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, REVIEW.md, .claude/skills/*/SKILL.md).
+            Your scope includes docs/ (both docs/spec/ and docs/mega-evme/) AND agent instruction files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, bin/mega-evme/AGENTS.md, REVIEW.md, .claude/skills/*/SKILL.md).
             Agent files contain code paths, spec progressions, system contract tables, and other references that can go stale.
             Run all three audit dimensions and file a single GitHub issue with findings.
 
@@ -54,14 +54,14 @@ jobs:
             ## Step 3: Run correctness check
 
             Follow the doc-correctness skill in .claude/skills/doc-correctness/SKILL.md.
-            Scope: all pages in docs/SUMMARY.md PLUS all agent files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, REVIEW.md, .claude/skills/*/SKILL.md).
+            Scope: all pages in docs/spec/SUMMARY.md and docs/mega-evme/SUMMARY.md PLUS all agent files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, bin/mega-evme/AGENTS.md, REVIEW.md, .claude/skills/*/SKILL.md).
             For agent files, verify code-related claims: spec progression lists, system contract tables, source layout descriptions, code path references, unstable spec markers, code-to-doc mapping tables in skills.
             Produce the Correctness section of the report.
 
             ## Step 4: Run readability check
 
             Follow the doc-readability skill in .claude/skills/doc-readability/SKILL.md.
-            Scope: all pages in docs/SUMMARY.md (agent files are excluded from readability checks — they follow their own conventions).
+            Scope: all pages in docs/spec/SUMMARY.md and docs/mega-evme/SUMMARY.md (agent files are excluded from readability checks — they follow their own conventions).
             Produce the Readability section of the report.
 
             ## Step 5: File or update issue

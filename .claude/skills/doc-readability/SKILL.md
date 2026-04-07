@@ -12,7 +12,7 @@ Accepted inputs:
 
 - A single page path (e.g., `docs/spec/evm/dual-gas-model.md`) — evaluate that page.
 - A directory (e.g., `docs/spec/evm/`) — evaluate all pages in that directory.
-- `all` — evaluate every page listed in `docs/spec/SUMMARY.md`.
+- `all` — evaluate every page listed in `docs/spec/SUMMARY.md` and `docs/mega-evme/SUMMARY.md`.
 
 Default (no arguments): evaluate all pages.
 
@@ -21,7 +21,12 @@ Default (no arguments): evaluate all pages.
 Before evaluating any page:
 
 1. Read `docs/spec/AGENTS.md` — the authoritative writing rules for this specification.
-2. Read `docs/spec/SUMMARY.md` — the full page inventory.
+2. Read `docs/spec/SUMMARY.md` — the spec page inventory.
+3. Read `docs/mega-evme/SUMMARY.md` — the mega-evme page inventory.
+
+**Note**: Pages under `docs/mega-evme/` follow reference-doc conventions, not spec-page conventions.
+They may omit frontmatter `spec` fields, Specification/Constants sections, and normative RFC 2119 language.
+Apply Structural Lint, Cross-Linking, and Formatting checks as normal, but adapt Page Structure Compliance and Normative Language checks to reference-doc expectations.
 
 ## Evaluation Checklist
 
