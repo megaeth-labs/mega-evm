@@ -102,13 +102,9 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 [Oracle](../system-contracts/oracle.md) gas cap raised to 20M, SLOAD-based oracle detention, keyless deploy compute gas tracking
 
-## Upcoming (Unstable)
-
 ### [Rex4](rex4.md)
 
-Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, MegaAccessControl, MegaLimitControl, sandbox environment inheritance.
-
-Rex4 is the current unstable specification and is subject to change before activation.
+Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, [storage gas stipend](../glossary.md#storage-gas-stipend), MegaAccessControl, MegaLimitControl, sandbox environment inheritance.
 
 ## How to Read These Pages
 

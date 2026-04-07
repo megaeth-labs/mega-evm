@@ -58,7 +58,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _At present, `REX4` is the unstable spec._
+  - _At present, all specs are stable. There is no unstable spec._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
   - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
@@ -264,6 +264,12 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Always test logic changes.**
   Any logic change or modification to mega-evm should be equipped with tests if there is no specific reason of not adding tests.
   The agent should always consider accompanying tests or suggest to add additional tests.
+- **Add benchmarks for performance-sensitive changes.**
+  Changes on the EVM execution hot path must be accompanied by benchmarks.
+  This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.
+- **Always run benchmarks locally before committing.**
+  New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
+  Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
@@ -284,6 +290,11 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.
   Use `core::` for items like `fmt`, `cell`, `convert`.
+- **All execution logic must be deterministic and architecture-independent.**
+  Code that affects EVM execution results, gas computation, state transitions, or consensus-critical hashing must produce identical output regardless of target architecture, endianness, or pointer width.
+  Never use `mem::transmute`, native-endian byte conversions, or platform-dependent operations in consensus paths.
+  Use explicit little-endian (`from_le_bytes`/`to_le_bytes`) or big-endian conversions instead.
+  When vendoring external code, audit for hidden platform dependencies (e.g., `zerocopy::transmute!` is native-endian).
 - **`cargo sort` is enforced in CI.**
   Dependencies in `Cargo.toml` must follow the grouped-by-family convention with comment headers (`# alloy`, `# revm`, `# megaeth`, `# misc`) and be sorted alphabetically within each group.
 - **Use `default-features = false` for new workspace dependencies.**

@@ -1,6 +1,6 @@
 ---
 description: Mega system transactions — sender/recipient identification rules, whitelisted contracts, and execution bypass semantics.
-spec: Rex3
+spec: Rex4
 ---
 
 # Mega System Transactions

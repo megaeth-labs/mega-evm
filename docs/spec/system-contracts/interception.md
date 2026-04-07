@@ -1,6 +1,6 @@
 ---
 description: Generic call-interception mechanism for MegaETH system contracts — frame-init hook, selector matching, intercepted vs. fall-through semantics, gas treatment, and call-scheme rules.
-spec: Rex3
+spec: Rex4
 ---
 
 # Call Interception
@@ -59,13 +59,8 @@ These costs are not refunded.
 By default, an intercepted call consumes zero gas from the forwarded gas limit.
 Each system contract MAY define additional gas consumption for its intercepted functions.
 
-<details>
-<summary>Rex4 (unstable): Storage gas stipend</summary>
-
-An intercepted call MUST NOT receive a storage gas stipend.
+An intercepted call MUST NOT receive a [storage gas stipend](../glossary.md#storage-gas-stipend).
 The stipend is only applicable on fall-through.
-
-</details>
 
 ## Spec History
 

@@ -1,13 +1,11 @@
 ---
-description: Rex4 network upgrade (unstable) — per-call-frame resource budgets, relative gas detention, and new system contracts.
+description: Rex4 network upgrade — per-call-frame resource budgets, relative gas detention, storage gas stipend, and new system contracts.
 ---
 
 # Rex4 Network Upgrade
 
 This page is an informative summary of the Rex4 specification.
 For the full normative definition, see the Rex4 spec in the mega-evm repository.
-
-Rex4 is the current unstable specification and is subject to change before activation.
 
 ## Summary
 
@@ -18,7 +16,7 @@ Per-call-frame budgets give each call frame a bounded share of remaining resourc
 Rex4 also shifts [gas detention](../evm/gas-detention.md) from absolute caps to **relative caps**, so transactions that access [volatile data](../glossary.md#volatile-data) late in execution are no longer penalized for compute work done before the access.
 Two new [system contracts](../system-contracts/overview.md) — **MegaAccessControl** and **MegaLimitControl** — give contracts runtime control over volatile data access and the ability to query their effective remaining compute gas budget.
 
-Rex4 also introduces a **storage gas stipend** for value-transferring calls, so that contracts receiving ETH via `transfer()` or `send()` can emit events without running out of gas.
+Rex4 also introduces a **[storage gas stipend](../glossary.md#storage-gas-stipend)** for value-transferring calls, so that contracts receiving ETH via `transfer()` or `send()` can emit events without running out of gas.
 
 Finally, the [keyless deploy](../system-contracts/keyless-deploy.md) sandbox now inherits the parent transaction's external environment for dynamic gas pricing and [oracle](../system-contracts/oracle.md) behavior, improving accuracy for contracts deployed via Nick's Method.
 
@@ -174,6 +172,34 @@ interface IMegaLimitControl {
 - Execution continues up to `min(tx_compute_limit, effective_detained_limit)`.
 - Across multiple volatile accesses, the most restrictive effective limit applies.
 - Transactions that access volatile data late in execution can still use the full cap amount of compute gas after the access.
+
+### SELFDESTRUCT State Growth Refund
+
+#### Previous behavior
+
+- `SELFDESTRUCT` on a same-transaction-created account (EIP-6780) removed the account and its storage, but the [state growth](../evm/resource-accounting.md#state-growth) tracker still counted the account and its new storage slots as positive growth.
+- This meant ephemeral create-and-destroy patterns consumed state growth budget unnecessarily.
+
+#### New behavior
+
+- When a same-transaction-created account is destroyed by `SELFDESTRUCT`, the state growth tracker records a refund of `-1` for the account and `-1` for each new storage slot.
+- The refund is frame-aware: if the call frame reverts, both the destruction and the refund are discarded.
+- Repeated `SELFDESTRUCT` on the same account does not produce additional refunds.
+- Pre-existing accounts (not created in the current transaction) are unaffected — `SELFDESTRUCT` on them does not produce a state growth refund, because EIP-6780 does not remove their code and storage.
+
+See [SELFDESTRUCT — State Growth Refund](../evm/selfdestruct.md#state-growth-refund) for the full specification.
+
+### Intrinsic Resource Limit Enforcement
+
+#### Previous behavior
+
+- Per-transaction intrinsic resource usage (calldata size, caller account update) was recorded before the first call frame, but [per-frame limit checks](../evm/resource-limits.md) could not detect overflow when no frame existed yet.
+- If a transaction's intrinsic data size or KV update count already exceeded the configured limit, the overflow could go undetected on certain execution paths (system contract interceptions, inspector early returns).
+
+#### New behavior
+
+- Each resource tracker's limit check includes a TX-level fallthrough that catches intrinsic overflow even when no frame is on the stack.
+- A dedicated pre-frame check materializes any pending overflow before system contract interceptors or inspector callbacks can bypass the normal limit enforcement path.
 
 ### Keyless Deploy Sandbox Environment Inheritance
 

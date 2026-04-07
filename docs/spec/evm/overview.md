@@ -1,6 +1,6 @@
 ---
 description: MegaEVM specification index — dual gas model, resource limits, gas detention, system contracts, and per-spec behavioral history.
-spec: Rex3
+spec: Rex4
 ---
 
 # MegaEVM Overview
@@ -14,12 +14,6 @@ This page describes the current MegaEVM behavior.
 For full per-upgrade behavioral deltas, see [Network Upgrades](../upgrades/overview.md).
 
 ## Specifications
-
-### Rex4 (unstable)
-
-Rex4 features are unstable and are not yet part of the current stable behavior.
-Where relevant, unstable Rex4 behavior is described in expandable sections on concept pages.
-See [Rex4 Network Upgrade](../upgrades/rex4.md) for the full unstable spec.
 
 ### Inheritance Boundary
 
@@ -53,7 +47,7 @@ MegaETH restricts post-access computation after a transaction reads [volatile da
 This includes block-environment data, beneficiary-related access, and oracle-backed data.
 
 The purpose of gas detention is to bound the amount of compute gas that may follow access to shared, conflict-prone inputs.
-For the detention categories, cap semantics, halt conditions, and stable-versus-unstable behavior, see [Gas Detention](gas-detention.md).
+For the detention categories, cap semantics, and halt conditions, see [Gas Detention](gas-detention.md).
 
 ### Execution Semantics Overrides
 

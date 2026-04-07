@@ -11,17 +11,18 @@
 //! 1. REX4: Volatile access after heavy compute succeeds (relative cap allows more gas)
 //! 2. REX4: Post-access cap is still enforced (can't use unlimited gas after access)
 //! 3. REX4: Pre-access usage is not counted against the cap
-//! 4. REX4: TX compute gas limit still wins when detention is not more restrictive
+//! 4. REX4: ordinary compute-budget enforcement still wins when detention is not more restrictive
 //! 5. REX4: Multiple volatile accesses — first access anchors the cap
 //! 6. Pre-REX4: Absolute cap behavior is preserved (backward compatibility)
 
 use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
+    MegaTransaction, MegaTransactionError,
 };
 use revm::{
     bytecode::opcode::*,
@@ -185,10 +186,10 @@ fn test_rex4_pre_access_usage_not_counted_against_cap() {
 
 /// REX4: If `usage_at_access + cap` is greater than or equal to the TX compute gas limit,
 /// detention is not the binding constraint.
-/// Exceeding the TX compute gas limit should report `ComputeGasLimitExceeded`, not
-/// `VolatileDataAccessOutOfGas`.
+/// Exceeding the ordinary compute budget should therefore resolve as a normal compute-limit
+/// failure, not `VolatileDataAccessOutOfGas`.
 #[test]
-fn test_rex4_non_binding_detention_reports_compute_gas_limit() {
+fn test_rex4_non_binding_detention_reports_normal_compute_limit() {
     // Burn 10M compute gas, access TIMESTAMP, then burn 16M more.
     // Relative detention computes ~10M + 20M = ~30M, but the TX limit is only 25M, so the
     // effective detained limit is clamped to 25M and detention is not more restrictive.
@@ -207,14 +208,16 @@ fn test_rex4_non_binding_detention_reports_compute_gas_limit() {
         transact_with_spec(MegaSpecId::REX4, &mut db, tx_compute_gas_limit, BLOCK_ENV_CAP, tx)
             .unwrap();
 
-    let (limit, actual) = match &result.result {
-        ExecutionResult::Halt {
-            reason: MegaHaltReason::ComputeGasLimitExceeded { limit, actual },
-            ..
-        } => (*limit, *actual),
+    let limit = match &result.result {
+        ExecutionResult::Revert { output, .. } => {
+            let decoded =
+                MegaLimitExceeded::abi_decode(output).expect("should decode MegaLimitExceeded");
+            assert_eq!(decoded.kind, 2, "kind should be 2 (ComputeGas)");
+            decoded.limit
+        }
         _ => {
             panic!(
-                "Expected ComputeGasLimitExceeded when detention is clamped by TX limit, got {:?}",
+                "Expected normal compute-limit revert when detention is clamped by TX limit, got {:?}",
                 result.result
             )
         }
@@ -224,8 +227,14 @@ fn test_rex4_non_binding_detention_reports_compute_gas_limit() {
         detained_limit, tx_compute_gas_limit,
         "Detained limit should be clamped to the TX compute gas limit when detention is not binding"
     );
-    assert_eq!(limit, tx_compute_gas_limit);
-    assert!(actual > limit, "Actual compute gas should exceed the TX limit");
+    assert!(
+        limit < tx_compute_gas_limit,
+        "Per-frame root budget should be smaller than the TX limit after intrinsic charges"
+    );
+    assert!(
+        !is_volatile_data_access_oog(&result.result),
+        "Should resolve as normal compute-limit failure, not volatile-data OOG"
+    );
 }
 
 /// REX4: Multiple volatile accesses — first access anchors the cap.

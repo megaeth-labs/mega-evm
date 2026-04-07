@@ -1,6 +1,6 @@
 ---
 description: MegaETH hardfork and spec versioning — how behavioral changes are versioned, activated, and tracked across network upgrades.
-spec: Rex3
+spec: Rex4
 ---
 
 # Hardforks and Specs
@@ -25,12 +25,13 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 (unstable)
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4
 ```
 
 Each newer spec includes all previous behaviors.
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
-The latest spec (currently REX4) may be marked **unstable**, meaning its semantics can still change before network activation.
+All specs are currently stable.
+The latest spec may be marked **unstable** when a new spec is under development, meaning its semantics can still change before network activation.
 
 ### Backward Compatibility
 
@@ -100,15 +101,11 @@ _See [Rex2 Network Upgrade](upgrades/rex2.md) for full details._
 
 _See [Rex3 Network Upgrade](upgrades/rex3.md) for full details._
 
-### REX4 (unstable)
-
-{% hint style="warning" %}
-Rex4 is the current unstable specification and is subject to change before activation.
-{% endhint %}
+### REX4
 
 - **Per-[call-frame](glossary.md#call-frame) resource budgets** — All four [resource dimensions](glossary.md#resource-dimension) (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
 - **Relative [gas detention](evm/gas-detention.md) cap** — Effective [detained limit](glossary.md#detained-limit) is `current_usage + cap` instead of an absolute cap
-- **Storage gas stipend** — Value-transferring CALL/CALLCODE receives an additional 23,000 gas for [storage gas](glossary.md#storage-gas) operations, fixing LOG events in `receive()` under the [dual gas model](evm/dual-gas-model.md)
+- **[Storage gas stipend](glossary.md#storage-gas-stipend)** — Value-transferring CALL/CALLCODE receives an additional 23,000 gas for [storage gas](glossary.md#storage-gas) operations, fixing LOG events in `receive()` under the [dual gas model](evm/dual-gas-model.md)
 - **MegaAccessControl system contract** — Allows contracts to proactively disable [volatile data](glossary.md#volatile-data) access for a call subtree
 - **MegaLimitControl system contract** — Allows querying effective remaining compute gas under detention and call frame limits
 - **[Keyless deploy](system-contracts/keyless-deploy.md) sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior

@@ -1,6 +1,6 @@
 ---
 description: MegaETH glossary — definitions of protocol terms including EVM blocks, mini-blocks, compute gas, storage gas, and gas detention.
-spec: Rex3
+spec: Rex4
 ---
 
 # Glossary
@@ -118,8 +118,8 @@ The effective compute gas cap imposed by [gas detention](evm/gas-detention.md).
 
 An absolute cap on total compute gas for the transaction; if the transaction has already consumed more gas than the cap when the volatile access occurs, execution halts immediately.
 
-> **Rex4 (unstable)**: Changes this to a relative cap — `current_usage + cap` at the time of volatile access.
-> See the [Rex4 upgrade page](upgrades/rex4.md) for details.
+In Rex4 and later, this is a relative cap — `current_usage + cap` at the time of volatile access.
+See the [Rex4 upgrade page](upgrades/rex4.md) for details.
 
 ## Beneficiary
 
@@ -147,7 +147,7 @@ Resource trackers (data size, KV updates, state growth) are call-frame-aware —
 
 ## Call-frame-local exceed
 
-_(Rex4, unstable)_ — When a call frame exceeds its per-call-frame resource budget, the call frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
+When a call frame exceeds its per-call-frame resource budget, the call frame **reverts** with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 
 The parent call frame can continue executing.
 

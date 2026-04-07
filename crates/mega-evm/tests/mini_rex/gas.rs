@@ -7,7 +7,7 @@ use mega_evm::{
     constants::{self, mini_rex::SSTORE_SET_STORAGE_GAS},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, SaltEnv, TestExternalEnvs,
+    MegaTransactionError, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2, GAS, LOG0, PUSH0},
@@ -16,7 +16,6 @@ use revm::{
     primitives::Address,
     Inspector,
 };
-use salt::constant::MIN_BUCKET_SIZE;
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const CALLEE: Address = address!("1000000000000000000000000000000000000001");
@@ -938,8 +937,8 @@ fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
     let new_account = address!("9000000000000000000000000000000000000009");
     let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(new_account);
     let multiplier = 10u64;
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+    let external_envs = TestExternalEnvs::<Infallible>::new()
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * multiplier);
 
     // MiniRex account creation storage gas: 2,000,000 × 10 = 20,000,000
     // Intrinsic: 21,000
@@ -986,8 +985,8 @@ fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
     let created_address = CALLER.create(0);
     let bucket_id = TestExternalEnvs::<Infallible>::bucket_id_for_account(created_address);
     let multiplier = 10u64;
-    let external_envs = TestExternalEnvs::new()
-        .with_bucket_capacity(bucket_id, salt::constant::MIN_BUCKET_SIZE as u64 * multiplier);
+    let external_envs = TestExternalEnvs::<Infallible>::new()
+        .with_bucket_capacity(bucket_id, MIN_BUCKET_SIZE as u64 * multiplier);
 
     // MiniRex contract creation storage gas: 2,000,000 × 10 = 20,000,000
     // Base intrinsic for CREATE: 21,000 + 32,000 (CREATE base) = 53,000

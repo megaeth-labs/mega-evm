@@ -1,6 +1,6 @@
 ---
 description: MegaETH dual gas model specification — compute gas, storage gas, SALT bucket multiplier, and per-operation storage gas schedule.
-spec: Rex3
+spec: Rex4
 ---
 
 # Dual Gas Model
@@ -81,19 +81,16 @@ Standard EVM gas refunds for SSTORE (e.g., the `SSTORE_CLEARS_SCHEDULE` refund) 
 Storage gas charged within a reverted [call frame](../glossary.md#call-frame) MUST be consumed and not refunded, consistent with standard EVM gas semantics.
 The [data size](resource-accounting.md) tracked for LOG operations within a reverted call frame MUST be rolled back, since the logs themselves are discarded.
 
-<details>
-<summary>Rex4 (unstable): Storage gas stipend for value transfers</summary>
+### Storage Gas Stipend for Value Transfers
 
 The 10× storage gas on LOG opcodes causes a simple `LOG1` to cost 4,500 gas (750 compute + 3,750 storage), exceeding the EVM's `CALL_STIPEND` of 2,300.
 
-Rex4 introduces an additional **[storage gas stipend](../glossary.md#storage-gas-stipend)** of 23,000 gas for internal (`depth > 0`) value-transferring `CALL` and `CALLCODE` opcodes.
+An additional **[storage gas stipend](../glossary.md#storage-gas-stipend)** of 23,000 gas is granted for internal (`depth > 0`) value-transferring `CALL` and `CALLCODE` opcodes.
 `DELEGATECALL`, `STATICCALL`, top-level transaction calls, and [system contract](../system-contracts/overview.md) interceptions MUST NOT receive the stipend.
 The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_CALL_STIPEND (23,000)`.
 The callee's [compute gas](../glossary.md#compute-gas) limit MUST remain at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by storage gas operations.
 On return, unused storage gas stipend MUST be burned — it MUST NOT be returned to the caller, regardless of whether the callee succeeded or reverted.
 See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
-
-</details>
 
 ### Dynamic SALT Multiplier
 
@@ -231,4 +228,4 @@ For the historical evolution of storage gas formulas and constants across specs:
 
 - [MiniRex](../upgrades/minirex.md) — original `base × multiplier` formula with 2,000,000 base cost
 - [Rex](../upgrades/rex.md) — revised to `base × (multiplier − 1)` with current base costs, added transaction intrinsic storage gas
-- [Rex4](../upgrades/rex4.md) _(unstable)_ — storage gas stipend for value transfers
+- [Rex4](../upgrades/rex4.md) — storage gas stipend for value transfers
