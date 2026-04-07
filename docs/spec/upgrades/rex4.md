@@ -114,7 +114,7 @@ interface IMegaAccessControl {
 
 #### New behavior
 
-- You can query your effective remaining compute gas at any point during execution.
+- Contracts can query their effective remaining compute gas at any point during execution.
 - The returned value equals `min(frame_remaining, tx_detained_remaining)` at call time.
 - This is a snapshot — the value decreases as execution proceeds.
 - Calls with non-zero value transfer revert with `NonZeroTransfer()`.
