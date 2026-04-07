@@ -774,10 +774,9 @@ fn test_kv_update_rex3_tx_exceed_halts() {
 // ============================================================================
 //
 // Note:
-// We intentionally do not add a `test_compute_gas_top_level_exceed_is_frame_local_revert`.
-// For compute gas, usage is always persistent and top-level exceed is observed by the TX-level
-// check, so the expected result is `Halt` (covered by `test_compute_gas_rex4_tx_exceed_halts`),
-// not frame-local `Revert`.
+// Unlike `DataSize` / `KVUpdate`, reverted compute gas remains persistent.
+// But in Rex4 the top-level compute frame still uses the remaining TX budget after intrinsic
+// charges, so top-level compute-budget exhaustion is also surfaced as frame-local `Revert`.
 
 /// Burns approximately `target_gas` of compute gas via repeated PUSH1/POP sequences.
 /// Each PUSH1+POP pair costs 3+2=5 gas.
@@ -937,21 +936,20 @@ fn test_compute_gas_sibling_frames_independent() {
 }
 
 #[test]
-fn test_compute_gas_rex4_tx_exceed_halts() {
-    // Symmetric top-level case for compute gas:
-    // top-level exceed is expected to halt (not frame-local revert).
-    let code = BytecodeBuilder::default().stop().build();
+fn test_compute_gas_top_level_exceed_is_frame_local_revert() {
+    // Top-level frame exceeds its own remaining compute budget in Rex4: should Revert, not Halt.
+    // Burn more than the first-frame budget after intrinsic compute gas is deducted.
+    let tx_limit = 2_000_000_u64;
+    let code = burn_gas_code(tx_limit);
 
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000))
         .account_code(CALLEE, code);
 
     let tx = default_tx_builder(CALLEE).build_fill();
-    let (result, _) = transact_compute(MegaSpecId::REX4, &mut db, 1, tx).unwrap();
+    let (result, compute_gas) = transact_compute(MegaSpecId::REX4, &mut db, tx_limit, tx).unwrap();
 
-    assert!(result.result.is_halt(), "REX4 should halt on TX-level compute exceed");
-    assert!(matches!(
-        result.result,
-        ExecutionResult::Halt { reason: MegaHaltReason::ComputeGasLimitExceeded { .. }, .. }
-    ));
+    assert!(matches!(result.result, ExecutionResult::Revert { .. }));
+    assert!(!result.result.is_halt());
+    assert!(compute_gas > tx_limit, "Persistent compute gas should still exceed the TX limit");
 }
