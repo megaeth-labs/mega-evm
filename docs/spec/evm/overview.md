@@ -98,5 +98,7 @@ MegaETH predeploys the following stable system contracts:
 | [Oracle](../system-contracts/oracle.md)                                     | `0x6342000000000000000000000000000000000001` | [MiniRex](../upgrades/minirex.md) | Off-chain data key-value storage     |
 | [High-Precision Timestamp](../system-contracts/high-precision-timestamp.md) | `0x6342000000000000000000000000000000000002` | [MiniRex](../upgrades/minirex.md) | Sub-second timestamp oracle service  |
 | [KeylessDeploy](../system-contracts/keyless-deploy.md)                      | `0x6342000000000000000000000000000000000003` | [Rex2](../upgrades/rex2.md)       | Deterministic cross-chain deployment |
+| [MegaAccessControl](../system-contracts/mega-access-control.md)             | `0x6342000000000000000000000000000000000004` | [Rex4](../upgrades/rex4.md)       | Volatile-data access control         |
+| [MegaLimitControl](../system-contracts/mega-limit-control.md)               | `0x6342000000000000000000000000000000000005` | [Rex4](../upgrades/rex4.md)       | Query remaining compute-gas budget   |
 
 For the full registry and behavioral semantics, see [System Contracts Overview](../system-contracts/overview.md).
