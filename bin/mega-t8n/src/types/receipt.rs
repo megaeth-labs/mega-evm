@@ -3,7 +3,7 @@ use mega_evm::revm::primitives::{alloy_primitives::Bloom, Address, Bytes, B256};
 /// Transaction log entry
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TransactionLog {
+pub(crate) struct TransactionLog {
     /// Address that generated this log
     pub address: Address,
     /// Indexed topics of the log
@@ -30,7 +30,7 @@ pub struct TransactionLog {
 /// Receipt delegation entry for EIP-7702 set-code transactions
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReceiptDelegation {
+pub(crate) struct ReceiptDelegation {
     /// Address that delegated code execution
     #[serde(rename = "from")]
     pub from_address: Address,
@@ -44,7 +44,7 @@ pub struct ReceiptDelegation {
 /// Transaction receipt containing execution results
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TransactionReceipt {
+pub(crate) struct TransactionReceipt {
     /// Hash of the transaction
     pub transaction_hash: B256,
     /// Gas used by this transaction

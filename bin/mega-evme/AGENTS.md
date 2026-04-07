@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## OVERVIEW
-CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `t8n`) with optional forking, tracing, and state dump workflows.
+CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`) with optional forking, tracing, and state dump workflows.
 
 ## STRUCTURE
 - `src/main.rs`: CLI bootstrap and panic hook.
@@ -10,7 +10,6 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `t8n`) with opt
 - `src/run/`: bytecode execution command.
 - `src/tx/`: full transaction execution command with raw-tx override support.
 - `src/replay/`: RPC-backed historical transaction replay through block executor.
-- `src/t8n/`: state transition tooling and IO helpers.
 
 ## KEY PATTERNS
 - Shared argument groups are flattened from `run` argument structs into sibling commands.
