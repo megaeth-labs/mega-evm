@@ -10,4 +10,4 @@ pub use cmd::Cmd;
 pub use hardforks::*;
 
 // Re-export EvmeError and Result from common module
-pub use crate::common::{EvmeError as ReplayError, Result};
+pub use crate::common::{EvmeError as ReplayError, Result, RpcArgs};

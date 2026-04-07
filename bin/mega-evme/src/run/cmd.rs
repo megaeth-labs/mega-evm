@@ -5,7 +5,9 @@ use mega_evm::revm::{context::result::ExecutionResult, state::Bytecode, Database
 use tracing::{debug, info, trace, warn};
 
 use super::{load_hex, Result, RunError};
-use crate::common::{print_execution_summary, print_execution_trace, EvmeOutcome};
+use crate::common::{
+    print_execution_summary, print_execution_trace, EvmeOutcome, ExecutionSummary,
+};
 
 // Re-export TracerType from common module
 pub use crate::common::TracerType;
@@ -30,6 +32,10 @@ pub struct Cmd {
     #[command(flatten)]
     pub prestate_args: super::PreStateArgs,
 
+    /// RPC configuration (used when --fork is enabled)
+    #[command(flatten)]
+    pub rpc_args: super::RpcArgs,
+
     /// Environment configuration
     #[command(flatten)]
     pub env_args: super::EnvArgs,
@@ -41,6 +47,10 @@ pub struct Cmd {
     /// Trace configuration
     #[command(flatten)]
     pub trace_args: super::TraceArgs,
+
+    /// Output format configuration
+    #[command(flatten)]
+    pub output_args: super::OutputArgs,
 }
 
 impl Cmd {
@@ -58,8 +68,7 @@ impl Cmd {
         // Step 2: Setup initial state and environment
         info!("Setting up initial state");
         let sender = self.tx_args.sender();
-        let mut state =
-            self.prestate_args.create_initial_state::<op_alloy_network::Optimism>(&sender).await?;
+        let mut state = self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
         debug!(sender = %sender, "State initialized");
 
         // Deploy system contracts based on spec
@@ -135,17 +144,25 @@ impl Cmd {
         let contract_address = (self.tx_args.create() && outcome.exec_result.is_success())
             .then(|| self.tx_args.sender().create(outcome.pre_execution_nonce));
 
-        // Print human-readable summary
-        print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
+        if self.output_args.json {
+            let mut summary = ExecutionSummary::from_result(&outcome.exec_result, contract_address);
+            summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&summary).expect("failed to serialize output")
+            );
+        } else {
+            // Human-readable summary
+            print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
 
-        print_execution_trace(
-            outcome.trace_data.as_deref(),
-            self.trace_args.trace_output_file.as_deref(),
-        )?;
+            print_execution_trace(
+                outcome.trace_data.as_deref(),
+                self.trace_args.trace_output_file.as_deref(),
+            )?;
 
-        // Dump state if requested
-        if self.dump_args.dump {
-            self.dump_args.dump_evm_state(&outcome.state)?;
+            if self.dump_args.dump {
+                self.dump_args.dump_evm_state(&outcome.state)?;
+            }
         }
 
         Ok(())

@@ -2,7 +2,7 @@ use std::{str::FromStr, time::Instant};
 
 use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_primitives::{B256, U256};
-use alloy_provider::{Provider, ProviderBuilder};
+use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use clap::Parser;
 use mega_evm::{
@@ -39,9 +39,9 @@ pub struct Cmd {
     #[arg(value_name = "TX_HASH")]
     pub tx_hash: B256,
 
-    /// RPC URL to fetch transaction from
-    #[arg(long = "rpc", visible_aliases = ["rpc-url"], env = "RPC_URL", default_value = "http://localhost:8545")]
-    pub rpc: String,
+    /// RPC configuration
+    #[command(flatten)]
+    pub rpc_args: super::RpcArgs,
 
     /// External environment configuration (bucket capacities)
     #[command(flatten)]
@@ -79,13 +79,8 @@ impl Cmd {
     /// Execute the replay command
     pub async fn run(&self) -> Result<()> {
         // Step 0: Build up rpc provider
-        info!(rpc = %self.rpc, "Connecting to RPC");
-        let provider = ProviderBuilder::new()
-            .disable_recommended_fillers()
-            .network::<op_alloy_network::Optimism>()
-            .connect_http(self.rpc.parse().map_err(|e| {
-                ReplayError::RpcError(format!("Invalid RPC URL '{}': {}", self.rpc, e))
-            })?);
+        info!(rpc = %self.rpc_args.rpc_url, "Connecting to RPC");
+        let provider = self.rpc_args.build_provider()?;
 
         // Step 1: fetch transaction
         info!(tx_hash = %self.tx_hash, "Fetching transaction");
