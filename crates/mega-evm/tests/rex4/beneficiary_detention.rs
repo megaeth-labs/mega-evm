@@ -26,6 +26,8 @@
 //! | Child reverts after CALL to beneficiary | `load_account_delegated` | detention persists | test 1b |
 //! | disableVolatileDataAccess + CALL beneficiary | — | CALL blocked by `wrap_call_volatile_check` | (covered in `access_control.rs`) |
 //! | disableVolatileDataAccess + SELFBALANCE beneficiary | — | revert before exec | test 10 |
+//! | Detention + intrinsic DataSize overflow | `on_new_tx` eager | halt with DataLimitExceeded | test 11 |
+//! | Detention + execution data limit | `wrap_call_volatile_check` | data limit independent of detention | test 12 |
 
 use std::convert::Infallible;
 
@@ -659,6 +661,147 @@ fn test_selfbalance_at_beneficiary_reverts_when_volatile_disabled() {
     assert!(
         matches!(result.result, revm::context::result::ExecutionResult::Revert { .. }),
         "SELFBALANCE at beneficiary with volatile access disabled should revert, got {:?}",
+        result.result
+    );
+}
+
+// ============================================================================
+// TEST 11: Detention + intrinsic DataSize overflow interaction
+// ============================================================================
+
+/// Cross-concern test: when both gas detention (via beneficiary sender) and
+/// intrinsic DataSize overflow are active, the TX must still fail with the
+/// correct halt reason (`DataLimitExceeded`), not succeed or produce a
+/// gas rescue that incorrectly reflects the detained cap.
+#[test]
+fn test_detention_plus_intrinsic_data_size_overflow() {
+    // Set data size limit to something too small for even intrinsic data.
+    // Also configure beneficiary detention by making CALLER == BENEFICIARY.
+    let data_limit = 100_u64; // Less than BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE (~150)
+
+    let callee_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(BENEFICIARY, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    // TX sender = BENEFICIARY → triggers eager detention in on_new_tx.
+    let tx = TxEnvBuilder::default()
+        .caller(BENEFICIARY)
+        .call(CALLEE)
+        .gas_limit(1_000_000_000)
+        .build_fill();
+
+    let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX4)
+        .with_block(block)
+        .with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_compute_gas_limit(200_000_000)
+                .with_block_env_access_compute_gas_limit(DETENTION_CAP)
+                .with_tx_data_size_limit(data_limit),
+        );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+
+    // Must halt with DataLimitExceeded despite detention being active.
+    assert!(
+        result.result.is_halt(),
+        "Detention + intrinsic DataSize overflow should halt, got {:?}",
+        result.result
+    );
+    assert!(
+        matches!(
+            result.result,
+            revm::context::result::ExecutionResult::Halt {
+                reason: MegaHaltReason::DataLimitExceeded { .. },
+                ..
+            }
+        ),
+        "Should halt with DataLimitExceeded, got {:?}",
+        result.result
+    );
+
+    // Gas rescue should have returned most gas since no execution happened.
+    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    assert!(
+        gas_remaining > 900_000_000,
+        "Expected >900M gas remaining from rescue (not inflated by detention), got {gas_remaining}"
+    );
+}
+
+// ============================================================================
+// TEST 12: Detention + execution data limit — detained compute gas does not
+//          interfere with data size enforcement
+// ============================================================================
+
+/// When detention caps compute gas, data size enforcement must still function
+/// independently. This tests that a TX under the detained compute gas cap
+/// can still fail on data size limits.
+#[test]
+fn test_detention_does_not_interfere_with_data_size_limit() {
+    // Set up: beneficiary detention active, compute gas limit generous,
+    // but data size limit tight. Callee CALLs beneficiary to trigger detention,
+    // then writes SSTOREs that exceed data limit.
+    let data_limit = 200_u64; // ~intrinsic(150) + 1 SSTORE(40) = 190, fits 1, not 2.
+
+    // Callee: CALL beneficiary (triggers detention), then do SSTOREs that exceed data limit.
+    let callee_code = BytecodeBuilder::default()
+        // CALL beneficiary to trigger detention
+        .push_number(0_u64)
+        .push_number(0_u64)
+        .push_number(0_u64)
+        .push_number(0_u64)
+        .push_number(0_u64)
+        .push_address(BENEFICIARY)
+        .push_number(10_000_u64)
+        .append(CALL)
+        .append(POP)
+        // Now do SSTOREs that exceed data limit
+        .sstore(U256::from(0), U256::from(1))
+        .sstore(U256::from(1), U256::from(2))
+        .stop()
+        .build();
+
+    let beneficiary_code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code)
+        .account_code(BENEFICIARY, beneficiary_code);
+
+    let tx = default_tx(CALLEE);
+
+    let block = revm::context::BlockEnv { beneficiary: BENEFICIARY, ..Default::default() };
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX4)
+        .with_block(block)
+        .with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_compute_gas_limit(200_000_000)
+                .with_block_env_access_compute_gas_limit(DETENTION_CAP)
+                .with_tx_data_size_limit(data_limit),
+        );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+
+    // Detained compute gas cap is active, but the TX should fail on data size.
+    assert!(
+        !result.result.is_success(),
+        "Detention active but data size exceeded should not succeed, got {:?}",
         result.result
     );
 }

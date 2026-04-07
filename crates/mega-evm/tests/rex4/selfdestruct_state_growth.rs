@@ -391,7 +391,154 @@ fn test_pre_rex4_selfdestruct_overcounting_preserved() {
 }
 
 // ============================================================================
-// TEST 10: Repeated SELFDESTRUCT must not double-refund
+// TEST 10: SSTORE-then-clear before SELFDESTRUCT — cleared slots not counted
+// ============================================================================
+
+/// A same-TX-created contract writes a storage slot and then clears it (back to zero)
+/// before SELFDESTRUCT. The refund logic filters on
+/// `original_value().is_zero() && !present_value().is_zero()`, so cleared slots
+/// must NOT be counted in the refund. Only the account itself is refunded.
+#[test]
+fn test_sstore_then_clear_before_selfdestruct_zero_growth() {
+    // Init code: SSTORE(0, 42), SSTORE(1, 99), SSTORE(0, 0), then SELFDESTRUCT.
+    // Slot 0 is set then cleared → present_value = 0, should not be refunded.
+    // Slot 1 remains non-zero → should be refunded.
+    // Net: CREATE +1 (account), slot 1 +1, SELFDESTRUCT refunds -1 (account) -1 (slot 1) = 0.
+    let init_code = BytecodeBuilder::default()
+        .sstore(U256::from(0), U256::from(42)) // set slot 0
+        .sstore(U256::from(1), U256::from(99)) // set slot 1
+        .sstore(U256::from(0), U256::ZERO) // clear slot 0
+        .push_address(CALLER)
+        .append(SELFDESTRUCT)
+        .build_vec();
+
+    let callee_code =
+        create_with_init(BytecodeBuilder::default(), &init_code).append(POP).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    let tx = default_tx(CALLEE);
+    let (result, state_growth) = transact(MegaSpecId::REX4, &mut db, 100, tx).unwrap();
+
+    assert!(result.result.is_success());
+    assert_eq!(
+        state_growth, 0,
+        "SSTORE-then-clear slot should not be counted in refund; net growth should be 0"
+    );
+}
+
+// ============================================================================
+// TEST 11: SELFDESTRUCT with mixed set-and-cleared slots
+// ============================================================================
+
+/// A same-TX-created contract writes 3 slots: 2 remain non-zero, 1 is cleared.
+/// The refund should only count the 2 remaining slots plus the account itself.
+#[test]
+fn test_selfdestruct_mixed_set_and_cleared_slots() {
+    // Init code: SSTORE(0, 1), SSTORE(1, 2), SSTORE(2, 3), SSTORE(1, 0), SELFDESTRUCT.
+    // Slot 0: non-zero → refunded.
+    // Slot 1: set then cleared → NOT refunded.
+    // Slot 2: non-zero → refunded.
+    // Net: CREATE +1 (account), slot 0 +1, slot 1 +1 (then cleared, -1 from tracker),
+    //       slot 2 +1, SELFDESTRUCT refunds -1 (account) -2 (slots 0 and 2) = 0.
+    let init_code = BytecodeBuilder::default()
+        .sstore(U256::from(0), U256::from(1))
+        .sstore(U256::from(1), U256::from(2))
+        .sstore(U256::from(2), U256::from(3))
+        .sstore(U256::from(1), U256::ZERO) // clear slot 1
+        .push_address(CALLER)
+        .append(SELFDESTRUCT)
+        .build_vec();
+
+    let callee_code =
+        create_with_init(BytecodeBuilder::default(), &init_code).append(POP).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    let tx = default_tx(CALLEE);
+    let (result, state_growth) = transact(MegaSpecId::REX4, &mut db, 100, tx).unwrap();
+
+    assert!(result.result.is_success());
+    assert_eq!(
+        state_growth, 0,
+        "Cleared slot should not be counted in refund; net growth should be 0"
+    );
+}
+
+// ============================================================================
+// TEST 12: SELFDESTRUCT refund makes boundary difference
+// ============================================================================
+
+/// Set state_growth_limit = 2. Create a contract with 2 SSTOREs (growth = 3:
+/// 1 account + 2 slots), then SELFDESTRUCT it (growth = 0 after refund -3).
+/// Then write 2 new SSTOREs on the callee (growth = 2). Without refunds,
+/// the total growth would be 5 (exceeding limit=2). With refunds, the
+/// SELFDESTRUCT clears the first 3, leaving only the callee's 2 SSTOREs.
+#[test]
+fn test_selfdestruct_refund_enables_reuse_at_boundary() {
+    let init_code_sd = init_code_sstore_selfdestruct(2);
+
+    // CALLEE: CREATE (2 SSTOREs + SELFDESTRUCT), POP, then write 2 SSTOREs on callee itself.
+    let callee_code = create_with_init(BytecodeBuilder::default(), &init_code_sd)
+        .append(POP)
+        .sstore(U256::from(100), U256::from(1))
+        .sstore(U256::from(101), U256::from(2))
+        .stop()
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    let tx = default_tx(CALLEE);
+    let (result, state_growth) = transact(MegaSpecId::REX4, &mut db, 2, tx).unwrap();
+
+    assert!(
+        result.result.is_success(),
+        "SELFDESTRUCT refunds should free up budget for callee's SSTOREs"
+    );
+    assert_eq!(
+        state_growth, 2,
+        "Net growth should be 2 (callee's 2 new SSTOREs; created contract refunded)"
+    );
+}
+
+// ============================================================================
+// TEST 13: SELFDESTRUCT to self
+// ============================================================================
+
+/// A same-TX-created contract selfdestructs to its own address. The refund should
+/// still work correctly since the `address` parameter (the selfdestructing account)
+/// is the one inspected, regardless of `target`.
+#[test]
+fn test_selfdestruct_to_self_zero_growth() {
+    // Init code: PUSH20(self_address)... but we can't know the address at build time.
+    // Instead, use ADDRESS opcode to push the current contract's address, then SELFDESTRUCT.
+    let init_code = BytecodeBuilder::default()
+        .append(ADDRESS) // push own address
+        .append(SELFDESTRUCT)
+        .build_vec();
+
+    let callee_code =
+        create_with_init(BytecodeBuilder::default(), &init_code).append(POP).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, callee_code);
+
+    let tx = default_tx(CALLEE);
+    let (result, state_growth) = transact(MegaSpecId::REX4, &mut db, 100, tx).unwrap();
+
+    assert!(result.result.is_success());
+    assert_eq!(state_growth, 0, "SELFDESTRUCT to self should produce zero net growth");
+}
+
+// ============================================================================
+// TEST 14: Repeated SELFDESTRUCT must not double-refund
 // ============================================================================
 
 /// A same-TX-created contract is selfdestructed twice in the same transaction.

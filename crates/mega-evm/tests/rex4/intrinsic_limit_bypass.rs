@@ -90,6 +90,11 @@ fn tx_intrinsic_data_size() -> u64 {
     BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE
 }
 
+/// Intrinsic data size of a transaction with `n` bytes of calldata.
+fn tx_intrinsic_data_size_with_calldata(n: u64) -> u64 {
+    BASE_TX_SIZE + n + ACCOUNT_INFO_WRITE_SIZE
+}
+
 // ============================================================================
 // TEST 1: Intrinsic + execution overflow (DataSize)
 // ============================================================================
@@ -480,4 +485,118 @@ fn test_intrinsic_data_size_overflow_contract_creation() {
         result.result,
         ExecutionResult::Halt { reason: MegaHaltReason::DataLimitExceeded { .. }, .. }
     ));
+}
+
+// ============================================================================
+// TEST 11: Calldata-inflated intrinsic DataSize overflow
+// ============================================================================
+
+/// A transaction with a large calldata whose intrinsic data size (BASE_TX_SIZE +
+/// calldata.len() + ACCOUNT_INFO_WRITE_SIZE) exceeds the configured limit.
+/// This exercises the `tx.input().len()` path in `DataSizeTracker::before_tx_start`.
+#[test]
+fn test_calldata_inflated_intrinsic_data_size_overflow() {
+    // 500 bytes of calldata. Intrinsic = 110 + 500 + 40 = 650.
+    // Set limit to 600 → intrinsic alone exceeds.
+    let calldata = vec![0xAB; 500];
+    let intrinsic = tx_intrinsic_data_size_with_calldata(500);
+    assert!(intrinsic > 600, "sanity: intrinsic({intrinsic}) should exceed 600");
+    let limit = 600;
+
+    let code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CALLEE)
+        .gas_limit(100_000_000)
+        .data(Bytes::from(calldata))
+        .build_fill();
+
+    let (result, _, _) = transact_data_kv(&mut db, limit, u64::MAX, tx).unwrap();
+
+    assert!(
+        result.result.is_halt(),
+        "Calldata-inflated intrinsic DataSize overflow should halt, got {:?}",
+        result.result
+    );
+    assert!(matches!(
+        result.result,
+        ExecutionResult::Halt { reason: MegaHaltReason::DataLimitExceeded { .. }, .. }
+    ));
+}
+
+// ============================================================================
+// TEST 12: Calldata-inflated intrinsic — within limit succeeds
+// ============================================================================
+
+/// Positive test: same large calldata but limit is sufficient. Verifies that
+/// calldata is correctly accounted in the intrinsic without false overflow.
+#[test]
+fn test_calldata_inflated_intrinsic_within_limit_succeeds() {
+    let calldata = vec![0xAB; 500];
+    let intrinsic = tx_intrinsic_data_size_with_calldata(500);
+    // Set limit to exactly intrinsic — should succeed (no execution data generated).
+    let limit = intrinsic;
+
+    let code = BytecodeBuilder::default().stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CALLEE)
+        .gas_limit(100_000_000)
+        .data(Bytes::from(calldata))
+        .build_fill();
+
+    let (result, data_size, _) = transact_data_kv(&mut db, limit, u64::MAX, tx).unwrap();
+
+    assert!(
+        result.result.is_success(),
+        "Calldata-inflated intrinsic within limit should succeed, got {:?}",
+        result.result
+    );
+    assert_eq!(data_size, intrinsic, "Total data should equal intrinsic with calldata");
+}
+
+// ============================================================================
+// TEST 13: Calldata-inflated intrinsic + execution overflow
+// ============================================================================
+
+/// A transaction with large calldata whose intrinsic is within the limit, but
+/// additional execution data pushes total usage over the limit.
+#[test]
+fn test_calldata_inflated_intrinsic_plus_execution_overflow() {
+    let calldata = vec![0xAB; 200];
+    let intrinsic = tx_intrinsic_data_size_with_calldata(200);
+    // Allow room for exactly 1 SSTORE after intrinsic.
+    let limit = intrinsic + STORAGE_SLOT_WRITE_SIZE;
+
+    // Callee writes 2 SSTOREs → exceeds.
+    let code = write_n_slots(BytecodeBuilder::default(), 2).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CALLEE, code);
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CALLEE)
+        .gas_limit(100_000_000)
+        .data(Bytes::from(calldata))
+        .build_fill();
+
+    let (result, data_size, _) = transact_data_kv(&mut db, limit, u64::MAX, tx).unwrap();
+
+    assert!(
+        !result.result.is_success(),
+        "Calldata-inflated intrinsic + execution data exceeding limit should not succeed, \
+         data_size_used={data_size}, limit={limit}"
+    );
 }
