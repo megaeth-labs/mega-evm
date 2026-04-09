@@ -199,8 +199,6 @@ fn generate_rust_constants(
 }
 
 /// Verifies that the pre-generated Rust constants in `src/generated/` match what would be
-/// generated from the current artifact JSON files.
-/// Verifies that the pre-generated Rust constants in `src/generated/` match what would be
 /// generated from the current artifact JSON files. If they are out of sync, writes the updated
 /// content and panics to prompt the developer to commit the change.
 fn verify_generated_constants(
