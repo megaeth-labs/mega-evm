@@ -32,22 +32,22 @@ jobs:
           fi
 
       - name: Publish mega-system-contracts
-        run: cargo publish -p mega-system-contracts
+        run: cargo publish -p mega-system-contracts --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index update
-        run: sleep 30
+        run: sleep 90
 
       - name: Publish mega-evm
-        run: cargo publish -p mega-evm
+        run: cargo publish -p mega-evm --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index update
-        run: sleep 30
+        run: sleep 90
 
       - name: Publish mega-evme
-        run: cargo publish -p mega-evme
+        run: cargo publish -p mega-evme --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
