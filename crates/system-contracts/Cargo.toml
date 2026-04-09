@@ -8,6 +8,7 @@ description = "System contracts for the MegaETH EVM"
 homepage.workspace = true
 repository.workspace = true
 exclude = [
+    "artifacts/",
     "contracts/*.sol",
     "lib/",
     "scripts/",
