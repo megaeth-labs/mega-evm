@@ -42,14 +42,14 @@ Fork mode fetches account balances, contract code, and storage slots on demand f
 | Flag                    | Default                 | Description                                |
 | ----------------------- | ----------------------- | ------------------------------------------ |
 | `--fork`                | `false`                 | Enable state forking from RPC              |
-| `--fork.rpc <URL>`      | `http://localhost:8545` | RPC endpoint to fork from (env: `RPC_URL`) |
+| `--rpc <URL>`           | `http://localhost:8545` | RPC endpoint to fork from (env: `RPC_URL`) |
 | `--fork.block <NUMBER>` | latest                  | Pin the fork to a specific block number    |
 
-When `--fork` is set, `mega-evme` connects to `--fork.rpc` and resolves any state reads that aren't covered by a local `--prestate` file against that node.
+When `--fork` is set, `mega-evme` connects to `--rpc` and resolves any state reads that aren't covered by a local `--prestate` file against that node.
 `--fork.block` pins the fork to a specific block's post-state, which is useful for reproducing historical behavior or writing deterministic tests.
 Without `--fork.block`, the fork uses the latest block at the time of execution.
 
-You can set the RPC URL via the `RPC_URL` environment variable instead of passing `--fork.rpc` every time:
+You can set the RPC URL via the `RPC_URL` environment variable instead of passing `--rpc` every time:
 
 ```bash
 export RPC_URL=https://mainnet.megaeth.com/rpc
@@ -72,6 +72,26 @@ Each group has its own reference page with the full flag table.
 | Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao    | [Block Environment](../configuration/block-environment.md) |
 | SALT buckets      | Per-bucket capacity overrides for dynamic gas pricing                | [SALT Buckets](../configuration/salt-buckets.md)           |
 | Tracing           | Opcode, call, and pre-state tracers with output options              | [Tracing Overview](../tracing/overview.md)                 |
+| Output            | JSON output mode                                                     | See [JSON output](#json-output) below                      |
+
+## JSON Output
+
+Pass `--json` to emit a single `ExecutionSummary` JSON object to stdout instead of the human-readable banner.
+No banners or diagnostic text are printed in JSON mode — stdout contains exactly one JSON object.
+
+The output includes the same fields as [`run --json`](run.md#json-output), plus one additional field:
+
+| Field     | Type             | Description                                                                 |
+| --------- | ---------------- | --------------------------------------------------------------------------- |
+| `receipt` | `object \| null` | Full transaction receipt with status, logs, gas usage, and contract address |
+
+```bash
+mega-evme tx --fork --rpc https://mainnet.megaeth.com/rpc \
+  --sender.balance 1ether \
+  --receiver 0x4200000000000000000000000000000000000006 \
+  --input 0x06fdde03 \
+  --json
+```
 
 ## Examples
 
@@ -90,7 +110,7 @@ mega-evme tx \
 # Call WETH.balanceOf against live mainnet state
 mega-evme tx \
   --fork \
-  --fork.rpc https://mainnet.megaeth.com/rpc \
+  --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0x70a08231000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266
@@ -103,7 +123,7 @@ Pinning to a block number makes the execution fully deterministic regardless of 
 ```bash
 mega-evme tx \
   --fork \
-  --fork.rpc https://mainnet.megaeth.com/rpc \
+  --rpc https://mainnet.megaeth.com/rpc \
   --fork.block 21000000 \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
@@ -126,7 +146,7 @@ Fork live state but override a specific storage slot before execution — useful
 # Override WETH slot 0 (total supply) and call totalSupply() to verify
 mega-evme tx \
   --fork \
-  --fork.rpc https://mainnet.megaeth.com/rpc \
+  --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --storage "0x4200000000000000000000000000000000000006:0x0=0x0000000000000000000000000000000000000000000000056bc75e2d63100000" \
   --receiver 0x4200000000000000000000000000000000000006 \
@@ -171,7 +191,8 @@ Transaction Options:
 State Options:
       --fork                             Fork state from remote RPC
       --fork.block <FORK_BLOCK>          Block to fork from (default: latest)
-      --fork.rpc <FORK_RPC>              RPC URL [env: RPC_URL=] [default: http://localhost:8545]
+      --rpc <RPC_URL>                    RPC URL [env: RPC_URL=] [default: http://localhost:8545]
+                                         [aliases: --rpc-url] [compat alias: --fork.rpc]
       --prestate <PRESTATE>              JSON prestate file [aliases: --pre-state]
       --block-hash <BLOCK_HASHES>        BLOCKHASH overrides (repeatable) [aliases: --blockhash]
       --sender.balance <SENDER_BALANCE>  Sender balance (supports suffixes) [aliases: --from.balance]
@@ -199,6 +220,9 @@ External Environment Options:
 State Dump Options:
       --dump                           Dump state after the run
       --dump.output <DUMP_OUTPUT_FILE> Output file for state dump
+
+Output Options:
+      --json                           Output results as JSON instead of human-readable text
 
 Trace Options:
       --trace                                    Enable tracing
