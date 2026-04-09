@@ -1,12 +1,16 @@
 //! Build script that validates system contract bytecode.
 //!
-//! When Foundry (`forge`) is available (i.e., building from the repository), this script:
-//! 1. Compiles the Solidity contracts using Foundry
-//! 2. Validates that the compiled bytecode matches `*-latest.json`
+//! When building from the repository (detected by the presence of `scripts/`):
+//! 1. Foundry (`forge`) is **required** — the build will fail if it is not installed.
+//! 2. Compiles the Solidity contracts using Foundry and validates that the compiled bytecode
+//!    matches `*-latest.json`.
 //!
-//! Regardless of Foundry availability, this script:
+//! When building from a published crate (`scripts/` is excluded from the package):
+//! - Foundry is not required.
+//!
+//! In both cases:
 //! 3. Regenerates Rust constants from the artifact JSON files and verifies they match the
-//!    pre-generated files in `src/generated/`
+//!    pre-generated files in `src/generated/`.
 //!
 //! The pre-generated Rust constants in `src/generated/` are always used directly by `lib.rs`.
 
@@ -272,21 +276,39 @@ fn main() {
 
     let artifacts_dir = crate_dir.join("artifacts");
 
-    // Phase 1: Forge validation (only when building from repo with Foundry installed).
-    let has_scripts = crate_dir.join("scripts").exists();
-    let has_forge = Command::new("forge")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    // Detect whether we are building from the repository (scripts/ directory present) or from a
+    // published crate (scripts/ excluded by Cargo.toml `exclude`).
+    let is_repo_build = crate_dir.join("scripts").exists();
 
-    if has_scripts && has_forge {
+    // Phase 1: Forge validation — required when building from the repository.
+    if is_repo_build {
+        let forge_available = Command::new("forge")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        match forge_available {
+            Ok(status) if status.success() => {}
+            _ => {
+                panic!(
+                    r#"
+ERROR: `forge` command not found
+
+Foundry is required to build system-contracts from the repository.
+Install it from: https://getfoundry.sh
+
+Quick install:
+  curl -L https://foundry.paradigm.xyz | bash
+  foundryup
+"#
+                );
+            }
+        }
+
         for config in &contracts {
             validate_contract_bytecode(crate_dir, config);
         }
-    } else if has_scripts {
-        println!("cargo::warning=Foundry not found, skipping system contract bytecode validation");
     }
 
     // Phase 2: Verify pre-generated constants match artifacts (always runs if artifacts exist).
