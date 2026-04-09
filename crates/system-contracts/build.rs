@@ -98,9 +98,9 @@ fn validate_versioned_artifacts(artifacts_dir: &Path, prefix: &str) {
         let filename = path.file_name().unwrap().to_str().unwrap();
 
         // Skip non-versioned files and *-latest.json aliases.
-        if !filename.starts_with(prefix)
-            || !filename.ends_with(".json")
-            || filename.contains("-latest")
+        if !filename.starts_with(prefix) ||
+            !filename.ends_with(".json") ||
+            filename.contains("-latest")
         {
             continue;
         }
