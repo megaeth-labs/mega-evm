@@ -78,9 +78,10 @@ pub(super) struct ReplayOutcome {
 impl Cmd {
     /// Execute the replay command
     pub async fn run(&self) -> Result<()> {
-        // Step 0: Build up rpc provider
+        // Step 0: Build up rpc provider and its clean-exit cache store.
         info!(rpc = %self.rpc_args.rpc_url, "Connecting to RPC");
-        let provider = self.rpc_args.build_provider()?;
+        let crate::common::BuildProviderOutput { provider, cache_store, chain_id: chain_id_hint } =
+            self.rpc_args.build_provider().await?;
 
         // Step 1: fetch transaction
         info!(tx_hash = %self.tx_hash, "Fetching transaction");
@@ -120,11 +121,18 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {}", e)))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
 
-        // Step 3: Obtain chain ID and spec
-        let chain_id = provider
-            .get_chain_id()
-            .await
-            .map_err(|e| ReplayError::RpcError(format!("Failed to get chain ID: {}", e)))?;
+        // Step 3: Obtain chain ID and spec. Prefer the hint resolved by
+        // `build_provider` (from `--rpc.chain-id` override or the cache-path
+        // fetch) so that (a) the override is authoritative end-to-end, not
+        // just for cache-file naming, and (b) we don't re-fetch on every
+        // replay run when chain id was already known.
+        let chain_id = match chain_id_hint {
+            Some(id) => id,
+            None => provider
+                .get_chain_id()
+                .await
+                .map_err(|e| ReplayError::RpcError(format!("Failed to get chain ID: {}", e)))?,
+        };
         let hardforks = get_hardfork_config(chain_id);
         let spec = hardforks.spec_id(block.header.timestamp());
         let chain_args = ChainArgs { chain_id, spec: spec.to_string() };
@@ -174,6 +182,9 @@ impl Cmd {
         // Step 8: Output results
         trace!("Writing output results");
         self.output_results(&result)?;
+
+        // Step 9: Persist the RPC cache (clean-exit only).
+        cache_store.persist();
 
         Ok(())
     }

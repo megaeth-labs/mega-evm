@@ -68,7 +68,8 @@ impl Cmd {
         // Step 2: Setup initial state and environment
         info!("Setting up initial state");
         let sender = self.tx_args.sender();
-        let mut state = self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
+        let (mut state, cache_store) =
+            self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
         debug!(sender = %sender, "State initialized");
 
         // Deploy system contracts based on spec
@@ -134,6 +135,9 @@ impl Cmd {
         // Step 4: Output results (including state dump if requested)
         trace!("Writing output results");
         self.output_results(&outcome)?;
+
+        // Step 5: Persist the RPC cache (clean-exit only).
+        cache_store.persist();
 
         Ok(())
     }

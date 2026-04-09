@@ -1,0 +1,595 @@
+//! Integration tests for the public RPC provider API, cache store, and
+//! retry layer.
+//!
+//! Covers: CLI parsing of all `--rpc.*` flags, `build_provider` shape across
+//! cache configurations, on-disk cache round-trip via the test-utils
+//! `cache()` accessor, chain-id resolution (override vs. RPC vs. failure),
+//! `--rpc.clear-cache` behaviour, and the retry policy on both branches of
+//! its coverage (HTTP 429/503 via wiremock; transport failures via a closed
+//! local port). Tests for the private helpers `temp_path_for` and
+//! `resolve_cache_path` stay inline in `src/common/provider.rs`.
+
+use std::path::PathBuf;
+
+use alloy_primitives::B256;
+use alloy_provider::Provider;
+use clap::Parser;
+use mega_evme::common::{BuildProviderOutput, EvmeError, RpcArgs};
+use tempfile::tempdir;
+
+mod common;
+use common::{test_rpc_args, test_rpc_args_cached, MockRpcServer};
+
+// ─── CLI parsing ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_rpc_args_parses_all_new_flags() {
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "https://example.test/rpc",
+        "--rpc.cache-size",
+        "256",
+        "--rpc.cache-dir",
+        "/tmp/example-cache",
+        "--rpc.no-cache-file",
+        "--rpc.chain-id",
+        "4326",
+        "--rpc.clear-cache",
+        "--rpc.max-retries",
+        "7",
+        "--rpc.backoff-ms",
+        "250",
+        "--rpc.rate-limit",
+        "1234",
+    ]);
+    assert_eq!(args.rpc_url, "https://example.test/rpc");
+    assert_eq!(args.cache_size, 256);
+    assert_eq!(args.cache_dir, Some(PathBuf::from("/tmp/example-cache")));
+    assert!(args.no_cache_file);
+    assert_eq!(args.chain_id, Some(4326));
+    assert!(args.clear_cache);
+    assert_eq!(args.max_retries, 7);
+    assert_eq!(args.backoff_ms, 250);
+    assert_eq!(args.compute_units_per_sec, 1234);
+}
+
+/// `--rpc.cache-dir ""` (and whitespace-only) must be rejected at parse
+/// time. The alternative — silently landing in `PathBuf::from("")` and
+/// writing the cache to CWD — is a footgun since the same command run
+/// from different directories would produce different files.
+#[test]
+fn test_rpc_args_rejects_empty_cache_dir() {
+    for empty in ["", "   ", "\t"] {
+        let err = RpcArgs::try_parse_from([
+            "mega-evme",
+            "--rpc",
+            "http://localhost:8545",
+            "--rpc.cache-dir",
+            empty,
+        ])
+        .expect_err("empty cache-dir must be rejected");
+        assert!(
+            err.to_string().contains("cache-dir must not be empty"),
+            "error must explain the problem for input {empty:?}, got: {err}",
+        );
+    }
+}
+
+/// Pin the default values so that any future change to a `default_value_t` in
+/// `RpcArgs` shows up as a clean test failure rather than as silent behavior
+/// drift in the retry / cache layers.
+#[test]
+fn test_rpc_args_default_values() {
+    let args = RpcArgs::parse_from(["mega-evme"]);
+    assert_eq!(args.rpc_url, "http://localhost:8545");
+    assert_eq!(args.cache_size, 10_000);
+    assert_eq!(args.cache_dir, None);
+    assert!(!args.no_cache_file);
+    assert_eq!(args.chain_id, None);
+    assert!(!args.clear_cache);
+    assert_eq!(args.max_retries, 5);
+    assert_eq!(args.backoff_ms, 1_000);
+    assert_eq!(args.compute_units_per_sec, 660);
+}
+
+// ─── build_provider shape variants ───────────────────────────────────────────
+
+/// `--rpc.cache-size 0` takes the fast path: no cache layer, no chain-id
+/// fetch, noop store. We don't even need to mock `eth_chainId`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_without_cache() {
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "http://localhost:8545",
+        "--rpc.cache-size",
+        "0",
+    ]);
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("build_provider");
+    assert!(cache_store.is_noop(), "cache_size == 0 must produce a no-op store");
+    cache_store.persist();
+}
+
+/// `--rpc.no-cache-file` keeps the in-memory cache layer active but skips
+/// both the `eth_chainId` fetch and on-disk persistence.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_no_cache_file_skips_persistence() {
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "http://localhost:8545",
+        "--rpc.cache-size",
+        "100",
+        "--rpc.no-cache-file",
+    ]);
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("build_provider");
+    assert!(cache_store.is_noop(), "--rpc.no-cache-file must produce a no-op store");
+    cache_store.persist();
+}
+
+/// With an explicit `--rpc.chain-id` override the cache file is named after
+/// that id, inside the `--rpc.cache-dir` passed in — no network traffic at
+/// all during `build_provider`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_with_cache_and_chain_id_override() {
+    let dir = tempdir().expect("tempdir");
+    // 4326 = MegaETH mainnet.
+    let args = test_rpc_args_cached("http://localhost:8545", dir.path(), 4326, None);
+
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("build_provider");
+    assert!(!cache_store.is_noop(), "cache_size > 0 + cache_dir must produce a real store");
+    assert_eq!(cache_store.cache_path(), Some(dir.path().join("rpc-cache-4326.json").as_path()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_invalid_url() {
+    let args = RpcArgs::parse_from(["mega-evme", "--rpc", "not a url", "--rpc.cache-size", "0"]);
+    let err = args.build_provider().await.expect_err("build_provider should fail");
+    match err {
+        EvmeError::RpcError(msg) => {
+            assert!(msg.contains("not a url"), "error must echo the original input, got: {msg}");
+        }
+        other => panic!("expected EvmeError::RpcError, got {other:?}"),
+    }
+}
+
+// ─── Chain-id resolution ─────────────────────────────────────────────────────
+
+/// With no `--rpc.chain-id` override, `build_provider` must call `eth_chainId`
+/// against the endpoint, name the cache file after the returned value, and
+/// propagate the same id via the hint so downstream code (e.g. `replay`'s
+/// hardfork selection) does not re-fetch.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_fetches_chain_id_from_rpc() {
+    let server = MockRpcServer::start().await;
+    // 0x10e6 = 4326 = MegaETH mainnet.
+    server.respond_jsonrpc_result("0x10e6", 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.cache-size",
+        "256",
+        "--rpc.cache-dir",
+        dir.path().to_str().unwrap(),
+    ]);
+
+    let BuildProviderOutput { cache_store, chain_id, .. } =
+        args.build_provider().await.expect("build_provider");
+    assert_eq!(
+        cache_store.cache_path(),
+        Some(dir.path().join("rpc-cache-4326.json").as_path()),
+        "cache file must be named after the fetched chain id",
+    );
+    assert_eq!(
+        chain_id,
+        Some(4326),
+        "hint must carry the fetched chain id so replay can skip a second fetch",
+    );
+    assert!(
+        server.received_request_count().await >= 1,
+        "build_provider must reach the mock to fetch eth_chainId",
+    );
+}
+
+/// With a `--rpc.chain-id` override the fetch is skipped entirely and the
+/// override is propagated back via the hint. An empty mock server must
+/// receive zero requests during `build_provider`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_chain_id_override_skips_eth_chainid() {
+    let server = MockRpcServer::start().await; // no mocks mounted
+    let dir = tempdir().expect("tempdir");
+    let args = test_rpc_args_cached(&server.uri(), dir.path(), 4326, None);
+
+    let BuildProviderOutput { chain_id, .. } = args.build_provider().await.expect("build_provider");
+    assert_eq!(chain_id, Some(4326), "hint must echo the user-provided override");
+    assert_eq!(
+        server.received_request_count().await,
+        0,
+        "chain-id override must bypass eth_chainId entirely",
+    );
+}
+
+/// Fast path (`--rpc.cache-size 0`) with no override: the hint is `None` so
+/// downstream code knows it needs to resolve the chain id itself. No network
+/// call is issued by `build_provider`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_hint_is_none_when_cache_disabled_and_no_override() {
+    let server = MockRpcServer::start().await; // no mocks mounted
+    let args = test_rpc_args(&server.uri(), None);
+
+    let BuildProviderOutput { chain_id, .. } = args.build_provider().await.expect("build_provider");
+    assert_eq!(chain_id, None, "no override + no cache means no hint");
+    assert_eq!(
+        server.received_request_count().await,
+        0,
+        "cache-size 0 must skip the eth_chainId fetch",
+    );
+}
+
+/// Fast path with an override: the hint is propagated without any network
+/// call. Combined with replay's "fall back to `get_chain_id` only when the
+/// hint is `None`" branch, this lets users run `replay` fully offline against
+/// an existing cache.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_hint_honours_override_even_in_fast_path() {
+    let server = MockRpcServer::start().await; // no mocks mounted
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.cache-size",
+        "0",
+        "--rpc.chain-id",
+        "4326",
+    ]);
+
+    let BuildProviderOutput { cache_store, chain_id, .. } =
+        args.build_provider().await.expect("build_provider");
+    assert!(cache_store.is_noop(), "cache-size 0 still means no-op store");
+    assert_eq!(chain_id, Some(4326), "override must propagate through the fast path too");
+    assert_eq!(
+        server.received_request_count().await,
+        0,
+        "fast path must not touch the network even when an override is set",
+    );
+}
+
+/// The `eth_chainId` call goes through the retry layer. A permanent 500
+/// (non-retryable) must surface as an `EvmeError::RpcError` hard error.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_chain_id_rpc_failure_is_hard_error() {
+    let server = MockRpcServer::start().await;
+    server.respond_status_always(500).await;
+
+    let dir = tempdir().expect("tempdir");
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.cache-size",
+        "256",
+        "--rpc.cache-dir",
+        dir.path().to_str().unwrap(),
+        "--rpc.max-retries",
+        "0",
+    ]);
+
+    let err = args.build_provider().await.expect_err("build_provider should hard-error");
+    match err {
+        EvmeError::RpcError(msg) => {
+            assert!(
+                msg.contains("Failed to fetch chain ID"),
+                "error must name the chain-id fetch, got: {msg}",
+            );
+        }
+        other => panic!("expected EvmeError::RpcError, got {other:?}"),
+    }
+}
+
+// ─── Cache file round-trip ───────────────────────────────────────────────────
+
+/// Seed an entry through the cache, persist, build a fresh session against
+/// the same directory + chain id, and confirm the entry comes back via the
+/// load path.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_atomic_save_round_trip() {
+    let dir = tempdir().expect("tempdir");
+    // 4326 = MegaETH mainnet.
+    let args = test_rpc_args_cached("http://localhost:8545", dir.path(), 4326, None);
+
+    let key = B256::repeat_byte(0xAB);
+    let value = r#"{"seeded":"value"}"#.to_string();
+
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("build_provider #1");
+    cache_store.cache().expect("real store").put(key, value.clone()).expect("seed put");
+    cache_store.persist();
+
+    let cache_file = dir.path().join("rpc-cache-4326.json");
+    assert!(cache_file.exists(), "save must produce the target file");
+
+    // Atomic save uses a temp file in the same parent dir; nothing should remain.
+    let stale_temps: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("read_dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".mega-evme-tmp."))
+        .collect();
+    assert!(stale_temps.is_empty(), "no temp files left after a successful save");
+
+    let BuildProviderOutput { cache_store: reloaded, .. } =
+        args.build_provider().await.expect("build_provider #2");
+    let got = reloaded.cache().expect("real store").get(&key).expect("entry must reload");
+    assert_eq!(got, value);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_load_from_missing_file() {
+    let dir = tempdir().expect("tempdir");
+    let args = test_rpc_args_cached("http://localhost:8545", dir.path(), 42, None);
+
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("build_provider");
+    // File doesn't exist — store is real (load was skipped) and cache is empty.
+    assert!(!cache_store.is_noop());
+    assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_load_from_corrupt_file() {
+    let dir = tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("rpc-cache-42.json"), b"not json").expect("write corrupt file");
+
+    let args = test_rpc_args_cached("http://localhost:8545", dir.path(), 42, None);
+
+    let BuildProviderOutput { cache_store, .. } =
+        args.build_provider().await.expect("build_provider");
+    // Corrupt content is discarded; cache is empty but usable.
+    assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
+}
+
+/// `--rpc.clear-cache` must remove the file before load so the new session
+/// starts empty even when a previous file existed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_clear_cache_deletes_file_before_load() {
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("rpc-cache-99.json");
+
+    // Phase 1: populate and persist to disk.
+    let seed_args = test_rpc_args_cached("http://localhost:8545", dir.path(), 99, None);
+    let key = B256::repeat_byte(0xCC);
+    let BuildProviderOutput { cache_store: store, .. } =
+        seed_args.build_provider().await.expect("seed build_provider");
+    store.cache().expect("real store").put(key, r#"{"v":1}"#.to_string()).expect("seed put");
+    store.persist();
+    assert!(cache_file.exists(), "seed must produce the cache file");
+
+    // Phase 2: same (dir, chain_id) with --rpc.clear-cache.
+    let clear_args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "http://localhost:8545",
+        "--rpc.cache-size",
+        "256",
+        "--rpc.cache-dir",
+        dir.path().to_str().unwrap(),
+        "--rpc.chain-id",
+        "99",
+        "--rpc.clear-cache",
+    ]);
+    let BuildProviderOutput { cache_store: store, .. } =
+        clear_args.build_provider().await.expect("cleared build_provider");
+    assert!(
+        store.cache().expect("real store").get(&key).is_none(),
+        "clear-cache must wipe previously-seeded entries",
+    );
+    assert!(
+        !cache_file.exists(),
+        "clear-cache must delete the file (it is only recreated on persist)",
+    );
+}
+
+/// `--rpc.clear-cache` must hard-error when the file exists but cannot be
+/// unlinked, rather than warn-and-continue. Silent fallback would reload
+/// exactly the content the user asked to wipe, defeating the recovery path.
+///
+/// POSIX-only: we trigger the failure by revoking write permission on the
+/// parent directory, so `unlink` returns EACCES/EPERM. The file itself stays
+/// readable, so without the hard error the next `load_cache` call would
+/// happily pick it back up.
+#[tokio::test(flavor = "multi_thread")]
+#[cfg(unix)]
+async fn test_build_provider_clear_cache_hard_errors_on_unlink_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().expect("tempdir");
+    let chain_id: u64 = 88;
+    // Seed a "polluted" cache file the user would want to wipe.
+    let cache_file = dir.path().join(format!("rpc-cache-{chain_id}.json"));
+    std::fs::write(&cache_file, r#"{"polluted":"content"}"#).expect("write seed");
+
+    // Revoke write permission on the parent dir so `remove_file` fails.
+    // Read/execute stays on so the file is still visible to `path.exists()`
+    // and `load_cache`, which is exactly the silent-fallback scenario.
+    let orig_perms = std::fs::metadata(dir.path()).expect("metadata").permissions();
+    let mut ro_perms = orig_perms.clone();
+    ro_perms.set_mode(0o555);
+    std::fs::set_permissions(dir.path(), ro_perms).expect("chmod ro");
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "http://localhost:8545",
+        "--rpc.cache-size",
+        "256",
+        "--rpc.cache-dir",
+        dir.path().to_str().unwrap(),
+        "--rpc.chain-id",
+        &chain_id.to_string(),
+        "--rpc.clear-cache",
+    ]);
+
+    let result = args.build_provider().await;
+
+    // Restore permissions before asserting, so tempdir's Drop can clean up
+    // regardless of whether the assertion below passes.
+    std::fs::set_permissions(dir.path(), orig_perms).expect("chmod restore");
+
+    let err = result.expect_err("clear-cache must hard-error on unlink failure");
+    match err {
+        EvmeError::RpcError(msg) => {
+            assert!(
+                msg.contains("Failed to clear RPC cache"),
+                "error must name the failed operation, got: {msg}",
+            );
+        }
+        other => panic!("expected EvmeError::RpcError, got {other:?}"),
+    }
+    assert!(cache_file.exists(), "the cache file should still be on disk — unlink failed");
+}
+
+/// `build_provider` auto-creates the cache directory under `--rpc.cache-dir`
+/// when it doesn't exist yet. This is the default-path scenario where the
+/// user has never run mega-evme before.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_build_provider_auto_creates_cache_dir() {
+    let root = tempdir().expect("tempdir");
+    let fresh_dir = root.path().join("brand").join("new").join("dir");
+    assert!(!fresh_dir.exists(), "precondition: dir must not exist yet");
+
+    // 4326 = MegaETH mainnet.
+    let args = test_rpc_args_cached("http://localhost:8545", &fresh_dir, 4326, None);
+    let BuildProviderOutput { cache_store: store, .. } =
+        args.build_provider().await.expect("build_provider");
+    assert!(fresh_dir.exists(), "build_provider must create the cache directory");
+    store.persist();
+    assert!(
+        fresh_dir.join("rpc-cache-4326.json").exists(),
+        "persist must write the per-chain file",
+    );
+}
+
+// ─── Retry layer behavior tests ──────────────────────────────────────────────
+
+/// Server fails 503 twice then succeeds; `max-retries=3` must reach success.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_retry_layer_retries_on_503_then_succeeds() {
+    let server = MockRpcServer::start().await;
+    server.respond_status_n_times(503, 2, 1).await;
+    // 0x10e6 = 4326 = MegaETH mainnet.
+    server.respond_jsonrpc_result("0x10e6", 2).await;
+
+    let BuildProviderOutput { provider, .. } =
+        test_rpc_args(&server.uri(), Some(3)).build_provider().await.expect("build_provider");
+    let chain_id = provider.get_chain_id().await.expect("must succeed after 2 retries");
+    assert_eq!(chain_id, 4326);
+
+    assert_eq!(server.received_request_count().await, 3, "1 initial + 2 retries before success");
+}
+
+/// `max-retries=0` must surface the first 503 immediately, with no retries.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_retry_layer_max_retries_zero_fails_fast() {
+    let server = MockRpcServer::start().await;
+    server.respond_status_always(503).await;
+
+    let BuildProviderOutput { provider, .. } =
+        test_rpc_args(&server.uri(), Some(0)).build_provider().await.expect("build_provider");
+    let result = provider.get_chain_id().await;
+    assert!(result.is_err(), "max-retries=0 must surface the 503, not retry it");
+
+    assert_eq!(server.received_request_count().await, 1, "no retries");
+}
+
+/// Pins the runtime behavior of the production default `--rpc.max-retries`:
+/// a permanent 503 must give up after exactly `1 + default_max_retries` attempts.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_retry_layer_uses_default_max_retries() {
+    let server = MockRpcServer::start().await;
+    server.respond_status_always(503).await;
+
+    // Pass `None` to keep the production default.
+    let args = test_rpc_args(&server.uri(), None);
+    assert_eq!(args.max_retries, 5, "guard against the default drifting underneath this test");
+
+    let BuildProviderOutput { provider, .. } = args.build_provider().await.expect("build_provider");
+    let result = provider.get_chain_id().await;
+    assert!(result.is_err(), "all attempts return 503");
+
+    assert_eq!(
+        server.received_request_count().await,
+        6,
+        "default max-retries=5 → 1 initial + 5 retries",
+    );
+}
+
+/// `max-retries=2` against a permanent 503: must give up after exactly 3 attempts.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_retry_layer_max_retries_exhausted() {
+    let server = MockRpcServer::start().await;
+    server.respond_status_always(503).await;
+
+    let BuildProviderOutput { provider, .. } =
+        test_rpc_args(&server.uri(), Some(2)).build_provider().await.expect("build_provider");
+    let result = provider.get_chain_id().await;
+    assert!(result.is_err(), "all attempts return 503");
+
+    assert_eq!(server.received_request_count().await, 3, "1 initial + 2 retries");
+}
+
+/// HTTP 500 arrives as `HttpError` and is not in either the default or the
+/// extended retryable set; even a generous retry budget must produce exactly
+/// one attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_retry_layer_does_not_retry_non_retryable_status() {
+    let server = MockRpcServer::start().await;
+    server.respond_status_always(500).await;
+
+    let BuildProviderOutput { provider, .. } =
+        test_rpc_args(&server.uri(), Some(5)).build_provider().await.expect("build_provider");
+    let result = provider.get_chain_id().await;
+    assert!(result.is_err(), "500 must surface as an error");
+
+    assert_eq!(
+        server.received_request_count().await,
+        1,
+        "500 is not retryable, so exactly 1 attempt",
+    );
+}
+
+/// Transport-level errors (connection refused, DNS failure, TLS handshake)
+/// arrive as `TransportErrorKind::Custom`, which the extended policy treats
+/// as retryable. We probe by binding a TCP listener and immediately dropping
+/// it so the port is definitely closed, then assert the request fails with
+/// the wrapped "Max retries exceeded" error that only appears when retry was
+/// actually attempted.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_retry_layer_retries_on_unreachable_endpoint() {
+    let closed_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        port
+    };
+    let unreachable_url = format!("http://127.0.0.1:{}", closed_port);
+
+    let BuildProviderOutput { provider, .. } =
+        test_rpc_args(&unreachable_url, Some(3)).build_provider().await.expect("build_provider");
+    let result = provider.get_chain_id().await;
+    let err = result.expect_err("unreachable endpoint must surface as an error");
+    let err_str = err.to_string();
+
+    // alloy prepends "Max retries exceeded" only when the policy judged the
+    // error retryable and the counter was exhausted — so the prefix's presence
+    // is proof that retry was attempted.
+    assert!(
+        err_str.contains("Max retries exceeded"),
+        "expected retry to be attempted, but got raw error: {err_str}",
+    );
+}

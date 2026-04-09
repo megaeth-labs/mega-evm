@@ -16,7 +16,7 @@ use mega_evm::revm::{
 };
 use tracing::{debug, info, trace};
 
-use super::{EvmeError, Result};
+use super::{EvmeError, Result, RpcCacheStore};
 
 /// Pre-execution state configuration arguments
 #[derive(Parser, Debug, Clone)]
@@ -271,31 +271,33 @@ impl PreStateArgs {
         Ok(prestate)
     }
 
-    /// Creates the initial state for execution. This provides an EVM database based on the prestate
-    /// and remote forked chain.
+    /// Build the initial execution state and the clean-exit RPC cache store.
     ///
-    /// When `self.fork` is true, a forked state is created at `self.fork_block` using the RPC
-    /// endpoint configured in `rpc_args`. Otherwise, a local empty state is created and
-    /// `rpc_args` is ignored.
+    /// Fork mode (`self.fork == true`) builds a forked state at `self.fork_block` via
+    /// `rpc_args.build_provider()` and returns the caller-owned [`RpcCacheStore`] for
+    /// persist-on-exit. Non-fork mode builds an empty local state, ignores `rpc_args`,
+    /// and returns a no-op store. Either way the call site persists unconditionally.
     pub async fn create_initial_state(
         &self,
         sender: &Address,
         rpc_args: &super::RpcArgs,
-    ) -> Result<EvmeState<Optimism, super::OpProvider>> {
-        // Load prestate
+    ) -> Result<(EvmeState<Optimism, super::OpProvider>, RpcCacheStore)> {
         let prestate = self.load_prestate(sender)?;
-
-        // Parse block hashes
         let block_hashes = self.parse_block_hashes()?;
 
-        // Create the appropriate state based on whether forking is enabled
         if self.fork {
             debug!("Creating forked state");
-            let provider = rpc_args.build_provider()?;
-            EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await
+            // `run --fork` and `tx --fork` use `--chain-id` (ChainArgs) for transaction
+            // construction and hardfork selection, not the RPC-resolved chain id. The
+            // hint from `build_provider` is therefore dropped via `..`.
+            let super::BuildProviderOutput { provider, cache_store, .. } =
+                rpc_args.build_provider().await?;
+            let state =
+                EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await?;
+            Ok((state, cache_store))
         } else {
             debug!("Creating local state");
-            Ok(EvmeState::new_empty(prestate, block_hashes))
+            Ok((EvmeState::new_empty(prestate, block_hashes), RpcCacheStore::noop()))
         }
     }
 }
