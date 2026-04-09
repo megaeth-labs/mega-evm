@@ -125,7 +125,7 @@ fn build_callcode_transfer_contract(to: Address) -> Bytes {
         .build()
 }
 
-/// Builds bytecode for a contract that does CALL(gas=forwarded_gas, to, value=1 wei, ...).
+/// Builds bytecode for a contract that does `CALL(gas=forwarded_gas`, to, value=1 wei, ...).
 /// This is used when the child needs more compute gas than a plain transfer stipend provides.
 fn build_value_call_contract(to: Address, forwarded_gas: u64) -> Bytes {
     BytecodeBuilder::default()
