@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "System contracts for the MegaETH EVM"
+homepage.workspace = true
+repository.workspace = true
+exclude = ["contracts/*.sol", "lib/", "scripts/", "test/", "foundry.toml", "foundry.lock", "remappings.txt"]
 
 [build-dependencies]
 alloy-primitives = { workspace = true, features = ["serde"] }
