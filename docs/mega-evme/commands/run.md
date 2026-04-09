@@ -73,16 +73,16 @@ No banners or diagnostic text are printed in JSON mode — stdout contains exact
 
 The object includes these fields:
 
-| Field              | Type             | Description                                                              |
-| ------------------ | ---------------- | ------------------------------------------------------------------------ |
-| `success`          | `bool`           | Whether execution succeeded                                              |
-| `gas_used`         | `number`         | Gas consumed                                                             |
-| `output`           | `string \| null` | Hex-encoded return data (present only on success with non-empty output)  |
-| `contract_address` | `string \| null` | Deployed address (present only for successful `--create` transactions)   |
-| `logs_count`       | `number`         | Number of log entries emitted                                            |
-| `revert_reason`    | `string \| null` | Decoded revert reason (present only on revert)                           |
-| `halt_reason`      | `string \| null` | Halt reason (present only on halt)                                       |
-| `trace`            | `object \| null` | Execution trace (when `--trace` is enabled without `--trace.output`)     |
+| Field              | Type             | Description                                                                  |
+| ------------------ | ---------------- | ---------------------------------------------------------------------------- |
+| `success`          | `bool`           | Whether execution succeeded                                                  |
+| `gas_used`         | `number`         | Gas consumed                                                                 |
+| `output`           | `string \| null` | Hex-encoded return data (present only on success with non-empty output)      |
+| `contract_address` | `string \| null` | Deployed address (present only for successful `--create` transactions)       |
+| `logs_count`       | `number`         | Number of log entries emitted                                                |
+| `revert_reason`    | `string \| null` | Decoded revert reason (present only on revert)                               |
+| `halt_reason`      | `string \| null` | Halt reason (present only on halt)                                           |
+| `trace`            | `object \| null` | Execution trace (when `--trace` is enabled without `--trace.output`)         |
 | `state`            | `object \| null` | Post-execution state dump (when `--dump` is enabled without `--dump.output`) |
 
 When `--trace` or `--dump` is used with an output file (`--trace.output`, `--dump.output`), data is written to that file and the corresponding JSON field is omitted.

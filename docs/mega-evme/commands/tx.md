@@ -81,8 +81,8 @@ No banners or diagnostic text are printed in JSON mode — stdout contains exact
 
 The output includes the same fields as [`run --json`](run.md#json-output), plus one additional field:
 
-| Field     | Type             | Description                          |
-| --------- | ---------------- | ------------------------------------ |
+| Field     | Type             | Description                                                                 |
+| --------- | ---------------- | --------------------------------------------------------------------------- |
 | `receipt` | `object \| null` | Full transaction receipt with status, logs, gas usage, and contract address |
 
 ```bash
