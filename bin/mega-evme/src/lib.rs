@@ -36,7 +36,9 @@ pub fn set_thread_panic_hook() {
     };
     let orig_hook = take_hook();
     set_hook(Box::new(move |panic_info| {
-        println!("Custom backtrace: {}", Backtrace::capture());
+        // Raw stderr rather than `tracing`: the subscriber may not be
+        // installed yet when a panic fires during CLI startup.
+        eprintln!("Custom backtrace: {}", Backtrace::capture());
         orig_hook(panic_info);
         exit(1);
     }));
