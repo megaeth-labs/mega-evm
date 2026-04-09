@@ -88,18 +88,19 @@ impl Cmd {
         // Step 2: Setup initial state and environment
         let sender = tx.base.caller;
         info!("Setting up initial state");
-        let mut state = self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
+        let mut session = self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
         debug!(sender = %sender, "State initialized");
 
-        state.deploy_system_contracts(spec);
+        session.state_mut().deploy_system_contracts(spec);
         debug!(spec = ?spec, "System contracts deployed");
 
-        let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
+        let pre_execution_nonce =
+            session.state_mut().basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Step 3: Execute transaction
         info!("Executing transaction");
-        let evm_context = self.env_args.create_evm_context(&mut state)?;
+        let evm_context = self.env_args.create_evm_context(session.state_mut())?;
         let start = Instant::now();
         let (exec_result, evm_state, trace_data) =
             self.trace_args.execute_transaction(evm_context, tx.clone())?;
@@ -129,6 +130,9 @@ impl Cmd {
         // Step 4: Output results (including state dump if requested)
         trace!("Writing output results");
         self.output_results(&outcome, &tx)?;
+
+        // Step 5: Finalize the RPC session (clean-exit only).
+        session.finalize();
 
         Ok(())
     }

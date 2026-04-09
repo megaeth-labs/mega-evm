@@ -16,7 +16,7 @@ use mega_evm::revm::{
 };
 use tracing::{debug, info, trace};
 
-use super::{EvmeError, Result};
+use super::{EvmeError, Result, RpcFinalizer};
 
 /// Pre-execution state configuration arguments
 #[derive(Parser, Debug, Clone)]
@@ -271,32 +271,84 @@ impl PreStateArgs {
         Ok(prestate)
     }
 
-    /// Creates the initial state for execution. This provides an EVM database based on the prestate
-    /// and remote forked chain.
+    /// Build the initial execution state and return it as an [`InitialStateSession`].
     ///
-    /// When `self.fork` is true, a forked state is created at `self.fork_block` using the RPC
-    /// endpoint configured in `rpc_args`. Otherwise, a local empty state is created and
-    /// `rpc_args` is ignored.
+    /// Fork mode (`self.fork == true`) builds a forked state at `self.fork_block`
+    /// using `rpc_args` and wires in a real RPC finalizer (or a no-op finalizer if
+    /// no cache file is configured). Non-fork mode builds an empty local state,
+    /// ignores `rpc_args`, and wires in a no-op finalizer. Either way the call
+    /// site finalizes unconditionally.
     pub async fn create_initial_state(
         &self,
         sender: &Address,
         rpc_args: &super::RpcArgs,
-    ) -> Result<EvmeState<Optimism, super::OpProvider>> {
-        // Load prestate
+    ) -> Result<InitialStateSession<Optimism, super::OpProvider>> {
         let prestate = self.load_prestate(sender)?;
-
-        // Parse block hashes
         let block_hashes = self.parse_block_hashes()?;
 
-        // Create the appropriate state based on whether forking is enabled
         if self.fork {
             debug!("Creating forked state");
-            let provider = rpc_args.build_provider()?;
-            EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await
+            // Move the provider into the forked state, keep the finalizer
+            // half for the returned session.
+            let (provider, finalizer) = rpc_args.build_session()?.into_parts();
+            let state =
+                EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await?;
+            Ok(InitialStateSession { state, finalizer })
         } else {
             debug!("Creating local state");
-            Ok(EvmeState::new_empty(prestate, block_hashes))
+            Ok(InitialStateSession {
+                state: EvmeState::new_empty(prestate, block_hashes),
+                finalizer: RpcFinalizer::noop(),
+            })
         }
+    }
+}
+
+/// Owns the initial execution state and the cache finalization for a run
+/// that constructs an [`EvmeState`] (today: `run`, `tx`). The fork vs.
+/// non-fork branching lives inside [`PreStateArgs::create_initial_state`];
+/// this type's call sites never have to care which one happened.
+///
+/// Persistence is clean-exit-only for the same reason as [`RpcFinalizer`]:
+/// call `finalize()` explicitly on the success path.
+#[derive(Debug)]
+pub struct InitialStateSession<N, P>
+where
+    N: Network,
+    P: Provider<N>,
+{
+    state: EvmeState<N, P>,
+    finalizer: RpcFinalizer,
+}
+
+impl<N, P> InitialStateSession<N, P>
+where
+    N: Network,
+    P: Provider<N>,
+{
+    /// Borrow the underlying execution state.
+    pub fn state(&self) -> &EvmeState<N, P> {
+        &self.state
+    }
+
+    /// Mutably borrow the underlying execution state. The mutable borrow must
+    /// end before `finalize(self)`.
+    pub fn state_mut(&mut self) -> &mut EvmeState<N, P> {
+        &mut self.state
+    }
+
+    /// Test-only: true if this session is the no-op variant (non-fork run,
+    /// or fork run with no `--rpc.cache-file`). See [`RpcFinalizer::is_noop`]
+    /// for why production code must not branch on this.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn is_noop(&self) -> bool {
+        self.finalizer.is_noop()
+    }
+
+    /// Clean-exit session finalization. **Consumes the session.** No-op if
+    /// this session has nothing to finalize. See [`RpcFinalizer::finalize`].
+    pub fn finalize(self) {
+        self.finalizer.finalize();
     }
 }
 

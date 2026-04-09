@@ -68,15 +68,16 @@ impl Cmd {
         // Step 2: Setup initial state and environment
         info!("Setting up initial state");
         let sender = self.tx_args.sender();
-        let mut state = self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
+        let mut session = self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
         debug!(sender = %sender, "State initialized");
 
         // Deploy system contracts based on spec
         let spec = self.env_args.spec_id()?;
-        state.deploy_system_contracts(spec);
+        session.state_mut().deploy_system_contracts(spec);
         debug!(spec = ?spec, "System contracts deployed");
 
-        let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
+        let pre_execution_nonce =
+            session.state_mut().basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Run-specific: If not in create mode, set the code at the receiver address
@@ -84,7 +85,7 @@ impl Cmd {
             let bytecode = Bytecode::new_raw_checked(code.clone())
                 .unwrap_or_else(|_| Bytecode::new_legacy(code.clone()));
             debug!(receiver = %self.tx_args.receiver(), "Setting code at receiver address");
-            state.set_account_code(self.tx_args.receiver(), bytecode);
+            session.state_mut().set_account_code(self.tx_args.receiver(), bytecode);
         }
 
         // Step 3: Execute bytecode
@@ -104,7 +105,7 @@ impl Cmd {
         }
 
         // Create EVM context and execute transaction
-        let evm_context = self.env_args.create_evm_context(&mut state)?;
+        let evm_context = self.env_args.create_evm_context(session.state_mut())?;
         let start = Instant::now();
         let (exec_result, evm_state, trace_data) =
             self.trace_args.execute_transaction(evm_context, tx)?;
@@ -134,6 +135,9 @@ impl Cmd {
         // Step 4: Output results (including state dump if requested)
         trace!("Writing output results");
         self.output_results(&outcome)?;
+
+        // Step 5: Finalize the RPC session (clean-exit only).
+        session.finalize();
 
         Ok(())
     }

@@ -78,9 +78,10 @@ pub(super) struct ReplayOutcome {
 impl Cmd {
     /// Execute the replay command
     pub async fn run(&self) -> Result<()> {
-        // Step 0: Build up rpc provider
+        // Step 0: Build up rpc session
         info!(rpc = %self.rpc_args.rpc_url, "Connecting to RPC");
-        let provider = self.rpc_args.build_provider()?;
+        let session = self.rpc_args.build_session()?;
+        let provider = session.provider();
 
         // Step 1: fetch transaction
         info!(tx_hash = %self.tx_hash, "Fetching transaction");
@@ -165,7 +166,7 @@ impl Cmd {
                 &parent_block,
                 &block,
                 evm_env,
-                &provider,
+                provider,
                 preceding_transactions,
                 &target_tx,
             )
@@ -174,6 +175,9 @@ impl Cmd {
         // Step 8: Output results
         trace!("Writing output results");
         self.output_results(&result)?;
+
+        // Step 9: Finalize the RPC session (clean-exit only).
+        session.finalize();
 
         Ok(())
     }
