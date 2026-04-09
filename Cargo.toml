@@ -14,7 +14,7 @@ exclude = []
 # https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
 resolver = "2"
 [workspace.package]
-version = "1.5.1"
+version = "1.5.2"
 edition = "2021"
 rust-version = "1.86"
 license = "MIT OR Apache-2.0"
@@ -121,9 +121,9 @@ too_long_first_doc_paragraph = "allow"
 
 [workspace.dependencies]
 # megaeth
-mega-evm = { path = "./crates/mega-evm", version = "1.5.1", default-features = false }
-mega-system-contracts = { path = "./crates/system-contracts", version = "1.5.1", default-features = false }
-state-test = { path = "./crates/state-test", version = "1.5.1" }
+mega-evm = { path = "./crates/mega-evm", version = "1.5.2", default-features = false }
+mega-system-contracts = { path = "./crates/system-contracts", version = "1.5.2", default-features = false }
+state-test = { path = "./crates/state-test", version = "1.5.2" }
 
 # revm
 op-revm = { version = "8.1.0", default-features = false }
