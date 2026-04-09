@@ -128,10 +128,20 @@ The `mega-evme` binary provides a command-line interface for executing and debug
 
 ### Installation
 
+Install from crates.io:
+
+```bash
+cargo install mega-evme --locked
+```
+
+Or build from source:
+
 ```bash
 cargo build --release -p mega-evme
 # Binary will be at ./target/release/mega-evme
 ```
+
+The `--locked` flag ensures the exact tested dependency versions are used.
 
 ### Commands
 
