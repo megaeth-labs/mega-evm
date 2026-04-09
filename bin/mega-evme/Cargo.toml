@@ -12,10 +12,6 @@ default-run = "mega-evme"
 [lints]
 workspace = true
 
-[lib]
-name = "mega_evme"
-path = "src/lib.rs"
-
 [[bin]]
 name = "mega-evme"
 path = "src/main.rs"
@@ -63,3 +59,7 @@ wiremock.workspace = true
 
 [features]
 test-utils = []
+
+[lib]
+name = "mega_evme"
+path = "src/lib.rs"
