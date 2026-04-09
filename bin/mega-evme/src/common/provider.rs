@@ -38,7 +38,7 @@ use alloy_provider::{
 };
 use alloy_rpc_client::ClientBuilder;
 use clap::Parser;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 use super::{EvmeError, Result};
 
@@ -154,7 +154,7 @@ impl RpcArgs {
             (DynProvider::new(provider), RpcFinalizer::noop())
         };
 
-        debug!(
+        info!(
             rpc_url = %self.rpc_url,
             cache_size = self.cache_size,
             max_retries = self.max_retries,
@@ -246,7 +246,7 @@ impl RpcFinalizer {
     pub fn finalize(self) {
         let Some(inner) = self.inner else { return };
         match save_cache_atomic(&inner.cache, &inner.cache_file) {
-            Ok(()) => debug!(path = %inner.cache_file.display(), "Persisted RPC cache"),
+            Ok(()) => info!(path = %inner.cache_file.display(), "Persisted RPC cache"),
             Err(err) => warn!(
                 path = %inner.cache_file.display(),
                 error = %err,
