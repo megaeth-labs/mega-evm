@@ -1,27 +1,29 @@
-//! RPC provider factory and session lifetime owners for mega-evme.
+//! RPC provider factory and on-disk cache store for mega-evme.
 //!
-//! # Type hierarchy
+//! # What this module owns
 //!
-//! - [`RpcArgs`] — clap-parsed CLI arguments. Pure CLI-layer data.
-//! - [`RpcFinalizer`] — owns the clean-exit cache persistence responsibility, including the
-//!   "nothing to persist" case as a private internal state.
-//! - [`RpcSession`] — owns the provider and the finalizer for a run that constructs the provider
-//!   directly (today: `replay`).
-//! - `InitialStateSession` (defined in `state.rs`) — owns the [`EvmeState`] and the finalizer for a
-//!   run that constructs initial execution state (today: `run`, `tx`).
+//! - [`RpcArgs`] — clap-parsed CLI arguments. Pure data.
+//! - [`RpcCacheStore`] — owns the clean-exit cache persistence responsibility. Has a private no-op
+//!   state for the "nothing to persist" case (non-fork run, `--rpc.cache-size 0`, or
+//!   `--rpc.no-cache-file`).
+//! - [`RpcArgs::build_provider`] — async factory: resolves chain identity, loads the on-disk cache
+//!   if any, and returns a [`BuildProviderOutput`] for the call site to persist on clean exit.
 //!
-//! [`EvmeState`]: super::EvmeState
+//! # Chain isolation
 //!
-//! # Boundary contracts
+//! Each chain gets its own cache file: `{cache_dir}/rpc-cache-{chain_id}.json`. `chain_id` is
+//! resolved via `--rpc.chain-id` if set, otherwise fetched from the endpoint with `eth_chainId`
+//! once inside [`RpcArgs::build_provider`]. The per-chain filename makes cross-chain contamination
+//! impossible by construction: a cache populated from mainnet physically cannot be loaded during
+//! a testnet run, because they resolve to different files.
 //!
-//! - **Workload scope**: this factory targets historical / forked / debugging workloads. The
-//!   commands it serves (`replay`, `run --fork`, `tx --fork`) only issue read RPCs.
-//! - **Cache file reuse**: the alloy `CacheLayer` keys requests by `keccak256(block_id + method +
-//!   params)` and does NOT include endpoint or chain identity. Cache files must not be reused
-//!   across different RPC endpoints or different chains. The tool does not detect violations.
-//! - **Retry idempotency**: the configured retry policy may retry rate-limit responses and selected
-//!   transport failures regardless of method semantics. Reusing this factory for mutation RPCs
-//!   (e.g. `eth_sendRawTransaction`) would risk duplicate side effects and is not supported.
+//! # Workload scope
+//!
+//! This factory targets historical / forked / debugging workloads (`replay`, `run --fork`,
+//! `tx --fork`) that only issue read RPCs. The configured retry policy may retry rate-limit
+//! responses and selected transport failures regardless of method semantics. Reusing this
+//! factory for mutation RPCs (`eth_sendRawTransaction`) would risk duplicate side effects
+//! and is not supported.
 
 use std::{
     fmt,
@@ -34,9 +36,9 @@ use alloy_provider::{
         layers::{RateLimitRetryPolicy, RetryBackoffLayer},
         RpcError, TransportError, TransportErrorKind,
     },
-    DynProvider, ProviderBuilder,
+    DynProvider, Provider, ProviderBuilder,
 };
-use alloy_rpc_client::ClientBuilder;
+use alloy_rpc_client::{ClientBuilder, RpcClient};
 use clap::Parser;
 use tracing::{info, warn};
 
@@ -44,6 +46,28 @@ use super::{EvmeError, Result};
 
 /// OP-stack provider type used throughout mega-evme.
 pub type OpProvider = DynProvider<op_alloy_network::Optimism>;
+
+/// Return value of [`RpcArgs::build_provider`].
+#[derive(Debug)]
+pub struct BuildProviderOutput {
+    /// Configured OP-stack provider. Already wrapped with the retry layer and (unless
+    /// the cache is disabled) the in-memory cache layer.
+    pub provider: OpProvider,
+    /// Clean-exit cache persistence handle. Call [`RpcCacheStore::persist`] on the
+    /// success path; no-op when the cache is disabled.
+    pub cache_store: RpcCacheStore,
+    /// Resolved chain id, when known.
+    ///
+    /// `Some` when either `--rpc.chain-id` was set by the user, or disk persistence is
+    /// enabled (in which case `build_provider` resolved it via `eth_chainId` to name
+    /// the cache file). `None` when neither condition holds — downstream code that
+    /// needs the chain id (e.g. `replay`'s hardfork selection) must fetch it itself.
+    ///
+    /// Propagating this value has two purposes: (1) honour `--rpc.chain-id` as an
+    /// authoritative override end-to-end, not just for cache-file naming, and (2)
+    /// avoid a second `eth_chainId` round-trip when `build_provider` already resolved it.
+    pub chain_id: Option<u64>,
+}
 
 /// Configuration for building an RPC provider.
 #[derive(Parser, Debug, Clone)]
@@ -64,13 +88,34 @@ pub struct RpcArgs {
     #[arg(long = "rpc.cache-size", default_value_t = 10_000)]
     pub cache_size: u32,
 
-    /// Path to a file used to persist the RPC cache between runs (best-effort).
+    /// Directory for per-chain RPC cache files.
     ///
-    /// Cache files are bound by user contract to one specific (endpoint, chain) pair.
-    /// Reusing the same file across different endpoints or chains will silently return
-    /// responses for the wrong chain. The tool does not detect violations.
-    #[arg(long = "rpc.cache-file")]
-    pub cache_file: Option<PathBuf>,
+    /// Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`. Different chains
+    /// cannot share a file, so cross-chain contamination is impossible by construction.
+    ///
+    /// Defaults to the platform cache directory (`$XDG_CACHE_HOME/mega-evme/rpc` on
+    /// Linux, `~/Library/Caches/mega-evme/rpc` on macOS). Pass `--rpc.no-cache-file`
+    /// to disable on-disk persistence entirely.
+    #[arg(long = "rpc.cache-dir", value_parser = parse_non_empty_path)]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Disable on-disk cache persistence. The in-memory LRU cache still applies — use
+    /// `--rpc.cache-size 0` to disable that too.
+    #[arg(long = "rpc.no-cache-file")]
+    pub no_cache_file: bool,
+
+    /// Chain ID override. When set, `mega-evme` skips the `eth_chainId` call at startup
+    /// and uses this value both to locate the per-chain cache file and to feed downstream
+    /// chain-dependent logic (e.g. `replay`'s hardfork and spec selection). Use for fully
+    /// offline replay against an existing cache, or to keep tests hermetic.
+    #[arg(id = "rpc_chain_id", long = "rpc.chain-id")]
+    pub chain_id: Option<u64>,
+
+    /// Delete the current chain's cache file before loading it. Recovery path for a
+    /// polluted or corrupt cache file. If the unlink itself fails (e.g. insufficient
+    /// permissions), `mega-evme` aborts rather than silently reloading the stale file.
+    #[arg(long = "rpc.clear-cache")]
+    pub clear_cache: bool,
 
     /// Maximum number of times the transport layer will retry a failing RPC request.
     /// Retries trigger on HTTP 429 / 503, JSON-RPC rate-limit error responses, and
@@ -90,25 +135,155 @@ pub struct RpcArgs {
 }
 
 impl RpcArgs {
-    /// Build an [`RpcSession`] from this CLI configuration.
+    /// Build the RPC provider, its clean-exit cache store, and a resolved chain-id hint,
+    /// bundled into a [`BuildProviderOutput`] record.
     ///
-    /// The session owns an [`OpProvider`] (configured with the optional retry
-    /// and cache layers) and an [`RpcFinalizer`]. The finalizer is a real one
-    /// when `--rpc.cache-size > 0` and `--rpc.cache-file` is set; otherwise it
-    /// is a no-op. Callers do not need to distinguish the two cases.
-    pub fn build_session(&self) -> Result<RpcSession> {
-        let url = self.rpc_url.parse().map_err(|e| {
+    /// See [`BuildProviderOutput::chain_id`] for the hint's semantics — it is `Some` when
+    /// the user passed `--rpc.chain-id` or when disk persistence forced us to resolve
+    /// `eth_chainId` to compute the cache file path, and `None` otherwise.
+    ///
+    /// Fast path (`--rpc.cache-size 0`): no cache layer, no network call for the chain id,
+    /// returns a no-op [`RpcCacheStore`] with the user's override (possibly `None`).
+    ///
+    /// Otherwise: installs an in-memory cache layer. If on-disk persistence is enabled
+    /// (`--rpc.no-cache-file` not set), resolves `chain_id` — via `--rpc.chain-id` if
+    /// set, otherwise via an `eth_chainId` call against the endpoint — and computes the
+    /// cache file path as `{cache_dir}/rpc-cache-{chain_id}.json`.
+    ///
+    /// # Error surface
+    ///
+    /// Hard errors (returned as [`EvmeError::RpcError`]):
+    /// - invalid `--rpc` URL;
+    /// - `eth_chainId` resolution failure (when disk cache is enabled and no override);
+    /// - default cache directory unavailable (only when `--rpc.cache-dir` is not set);
+    /// - `--rpc.clear-cache` unlink failure — this path is intentionally strict because silently
+    ///   falling back to `load_cache` would reload exactly the content the user asked to wipe.
+    ///
+    /// Warn-and-continue (best-effort paths):
+    /// - `create_dir_all` on the cache directory (if it fails, the later `persist()` will also fail
+    ///   and log its own warning);
+    /// - `load_cache` on a corrupt or unreadable file — the in-memory cache starts empty.
+    pub async fn build_provider(&self) -> Result<BuildProviderOutput> {
+        let url: reqwest::Url = self.rpc_url.parse().map_err(|e| {
             EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", self.rpc_url, e))
         })?;
 
-        // 1. RpcClient with optional transport-level retry.
-        //
-        // Default `RateLimitRetryPolicy` covers HTTP 429 / 503 and JSON-RPC
-        // rate-limit error responses. We extend it with `TransportErrorKind::Custom`
-        // so connection refused / DNS / TLS failures are also retried. Any error
-        // judged retryable still bails out after `max_retries` attempts with a
-        // wrapped "Max retries exceeded" error.
-        let client = if self.max_retries > 0 {
+        // 1. Fast path: cache fully disabled.
+        if self.cache_size == 0 {
+            let provider = build_bare_op_provider(self.build_retry_client(url));
+            info!(
+                rpc_url = %self.rpc_url,
+                max_retries = self.max_retries,
+                backoff_ms = self.backoff_ms,
+                "Built RPC provider (cache disabled)",
+            );
+            // Propagate the user's override (if any) without touching the network.
+            return Ok(BuildProviderOutput {
+                provider,
+                cache_store: RpcCacheStore::noop(),
+                chain_id: self.chain_id,
+            });
+        }
+
+        // 2. Cache enabled. Resolve the chain id exactly once, with two branches:
+        //    - disk persistence on: we *must* have a chain id for the file name, so fetch
+        //      `eth_chainId` unless the user provided an override;
+        //    - disk persistence off: we only care about the chain id if the user gave us an
+        //      override, because there is no file name to compute.
+        let chain_id_hint: Option<u64> = if self.no_cache_file {
+            self.chain_id
+        } else {
+            Some(self.resolve_chain_id(url.clone()).await?)
+        };
+
+        // 3. Cache enabled. Resolve the on-disk cache path (or `None` if disk persistence is
+        //    disabled — the in-memory layer still applies).
+        let cache_path = if self.no_cache_file {
+            None
+        } else {
+            // `chain_id_hint` is guaranteed `Some` in this branch because we just resolved it.
+            let chain_id =
+                chain_id_hint.expect("chain id resolved above when disk persistence is enabled");
+            Some(resolve_cache_path(self.cache_dir.as_deref(), chain_id)?)
+        };
+
+        // 4. Build the cache layer and (optionally) the disk store.
+        let cache_layer = CacheLayer::new(self.cache_size);
+        let cache = cache_layer.cache();
+        let cache_store = match cache_path {
+            Some(path) => {
+                if self.clear_cache {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => info!(path = %path.display(), "Cleared existing RPC cache"),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            // Hard error rather than warn-and-continue:
+                            // `--rpc.clear-cache` is the user's explicit
+                            // recovery path, and if the unlink silently
+                            // failed the `load_cache` call below would
+                            // reload exactly the content the user asked
+                            // to wipe.
+                            return Err(EvmeError::RpcError(format!(
+                                "Failed to clear RPC cache at {}: {}",
+                                path.display(),
+                                e
+                            )));
+                        }
+                    }
+                }
+                if let Some(parent) = path.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        warn!(
+                            path = %parent.display(),
+                            error = %e,
+                            "Failed to create cache directory; persist may fail",
+                        );
+                    }
+                }
+                if path.exists() {
+                    if let Err(err) = cache.load_cache(path.clone()) {
+                        warn!(
+                            path = %path.display(),
+                            error = %err,
+                            "Failed to load RPC cache; starting empty",
+                        );
+                    }
+                }
+                RpcCacheStore::new(cache, path)
+            }
+            None => RpcCacheStore::noop(),
+        };
+
+        // 5. Build the cached provider. The same retry policy wraps both the throwaway chain-id
+        //    client (if used) and this one.
+        let client = self.build_retry_client(url);
+        let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .layer(cache_layer)
+            .network::<op_alloy_network::Optimism>()
+            .connect_client(client);
+
+        info!(
+            rpc_url = %self.rpc_url,
+            cache_size = self.cache_size,
+            max_retries = self.max_retries,
+            backoff_ms = self.backoff_ms,
+            "Built RPC provider",
+        );
+
+        Ok(BuildProviderOutput {
+            provider: DynProvider::new(provider),
+            cache_store,
+            chain_id: chain_id_hint,
+        })
+    }
+
+    /// Build an `RpcClient` wired with the configured retry layer (or a bare client
+    /// when `max_retries == 0`). Used both for the cached provider and, when
+    /// `--rpc.chain-id` is not set, for the throwaway provider that fetches
+    /// `eth_chainId` inside [`Self::resolve_chain_id`].
+    fn build_retry_client(&self, url: reqwest::Url) -> RpcClient {
+        if self.max_retries > 0 {
             let policy = RateLimitRetryPolicy::default().or(|err: &TransportError| {
                 matches!(err, RpcError::Transport(TransportErrorKind::Custom(_)))
             });
@@ -121,83 +296,109 @@ impl RpcArgs {
             ClientBuilder::default().layer(retry).http(url)
         } else {
             ClientBuilder::default().http(url)
-        };
+        }
+    }
 
-        // 2. Provider with optional provider-level cache, plus a matching finalizer.
-        let (provider, finalizer) = if self.cache_size > 0 {
-            let cache_layer = CacheLayer::new(self.cache_size);
-            let cache = cache_layer.cache();
-            let finalizer = if let Some(path) = &self.cache_file {
-                if let Err(err) = cache.load_cache(path.clone()) {
-                    warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "Failed to load RPC cache; starting empty",
-                    );
-                }
-                RpcFinalizer::new(cache, path.clone())
-            } else {
-                // Cache layer is active in-memory but no file → nothing to persist.
-                RpcFinalizer::noop()
-            };
-            let provider = ProviderBuilder::new()
-                .disable_recommended_fillers()
-                .layer(cache_layer)
-                .network::<op_alloy_network::Optimism>()
-                .connect_client(client);
-            (DynProvider::new(provider), finalizer)
-        } else {
-            let provider = ProviderBuilder::new()
-                .disable_recommended_fillers()
-                .network::<op_alloy_network::Optimism>()
-                .connect_client(client);
-            (DynProvider::new(provider), RpcFinalizer::noop())
-        };
-
-        info!(
-            rpc_url = %self.rpc_url,
-            cache_size = self.cache_size,
-            max_retries = self.max_retries,
-            backoff_ms = self.backoff_ms,
-            "Built RPC session",
-        );
-
-        Ok(RpcSession { provider, finalizer })
+    /// Resolve the chain ID. Prefers the `--rpc.chain-id` override; otherwise
+    /// issues `eth_chainId` against a throwaway cache-less provider using the
+    /// configured retry policy. Hard error on transport / RPC failure.
+    async fn resolve_chain_id(&self, url: reqwest::Url) -> Result<u64> {
+        if let Some(id) = self.chain_id {
+            return Ok(id);
+        }
+        let bare = build_bare_op_provider(self.build_retry_client(url));
+        bare.get_chain_id().await.map_err(|e| {
+            EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {}", self.rpc_url, e))
+        })
     }
 }
 
-/// Clean-exit session finalization handle.
+/// `clap` value parser for `--rpc.cache-dir` that rejects empty and
+/// whitespace-only arguments at parse time.
 ///
-/// A `RpcFinalizer` may internally have nothing to finalize — non-fork run,
-/// `--rpc.cache-size 0`, or no `--rpc.cache-file`. In those cases `finalize()`
-/// is a no-op. Callers do not and must not distinguish the two cases; the whole
-/// point of this type is a single uniform finalization entry point.
+/// Without this check, `--rpc.cache-dir ""` would pass clap, land in
+/// [`resolve_cache_path`] as `PathBuf::from("")`, and silently write the
+/// per-chain file to the process's current working directory — a surprising
+/// footgun, since the same command run from different cwds would produce
+/// different cache files with no visible indication.
+fn parse_non_empty_path(s: &str) -> std::result::Result<PathBuf, String> {
+    if s.trim().is_empty() {
+        Err("cache-dir must not be empty; omit the flag to use the default".to_string())
+    } else {
+        Ok(PathBuf::from(s))
+    }
+}
+
+/// Build a cache-less [`OpProvider`] from an already-configured `RpcClient`.
+///
+/// Used by the cache-disabled fast path and by the throwaway chain-id fetch.
+/// The cache-enabled path builds its provider inline because the cache layer
+/// has to be inserted into the `ProviderBuilder` chain before the client is
+/// attached.
+fn build_bare_op_provider(client: RpcClient) -> OpProvider {
+    DynProvider::new(
+        ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .network::<op_alloy_network::Optimism>()
+            .connect_client(client),
+    )
+}
+
+/// Resolve the absolute cache file path for `chain_id`.
+///
+/// If the user passed `--rpc.cache-dir` we use it verbatim. Otherwise we fall back to
+/// the platform cache directory (via `dirs::cache_dir()`): `$XDG_CACHE_HOME/mega-evme/rpc`
+/// on Linux, `~/Library/Caches/mega-evme/rpc` on macOS, `%LOCALAPPDATA%\mega-evme\rpc` on
+/// Windows. If the platform has no cache directory we error out and ask the user to
+/// either pass `--rpc.cache-dir` or `--rpc.no-cache-file`.
+fn resolve_cache_path(user_cache_dir: Option<&Path>, chain_id: u64) -> Result<PathBuf> {
+    let dir = match user_cache_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => dirs::cache_dir()
+            .ok_or_else(|| {
+                EvmeError::RpcError(
+                    "Could not determine default cache directory; pass --rpc.cache-dir \
+                     or --rpc.no-cache-file"
+                        .to_string(),
+                )
+            })?
+            .join("mega-evme")
+            .join("rpc"),
+    };
+    Ok(dir.join(format!("rpc-cache-{chain_id}.json")))
+}
+
+/// Clean-exit cache persistence handle.
+///
+/// An `RpcCacheStore` may internally have nothing to persist — non-fork run,
+/// `--rpc.cache-size 0`, or `--rpc.no-cache-file`. In any of those cases
+/// `persist()` is a no-op. Callers do not and must not branch on whether
+/// a given store is real or no-op; the whole point of this type is a single
+/// uniform persistence entry point.
 ///
 /// # Why not `Drop`
 ///
-/// Persistence is **clean-exit-only**: callers invoke `finalize()` explicitly
-/// on the success path. `Drop` also runs on panic and error unwind, so a
-/// `Drop`-based implementation would silently persist partial-run state. That
-/// is a correctness violation, not a style choice — do not "simplify" this
-/// type into a `Drop` impl.
-pub struct RpcFinalizer {
-    /// `Some` when there is a cache to persist on clean exit; `None` is the
-    /// no-op state.
-    inner: Option<RpcFinalizerInner>,
+/// Persistence is **clean-exit-only**: callers invoke `persist()` explicitly on the
+/// success path. `Drop` also runs on panic and error unwind, so a `Drop`-based
+/// implementation would silently persist partial-run state. That is a correctness
+/// violation, not a style choice — do not "simplify" this type into a `Drop` impl.
+pub struct RpcCacheStore {
+    /// `Some` when there is a cache to persist on clean exit; `None` is the no-op state.
+    inner: Option<RpcCacheStoreInner>,
 }
 
-struct RpcFinalizerInner {
+struct RpcCacheStoreInner {
     cache: SharedCache,
-    cache_file: PathBuf,
+    cache_path: PathBuf,
 }
 
-impl RpcFinalizer {
-    /// Construct a finalizer backed by a real cache and target file.
-    pub(crate) fn new(cache: SharedCache, cache_file: PathBuf) -> Self {
-        Self { inner: Some(RpcFinalizerInner { cache, cache_file }) }
+impl RpcCacheStore {
+    /// Construct a store backed by a real cache and target file.
+    pub(crate) fn new(cache: SharedCache, cache_path: PathBuf) -> Self {
+        Self { inner: Some(RpcCacheStoreInner { cache, cache_path }) }
     }
 
-    /// Construct a no-op finalizer.
+    /// Construct a no-op store.
     pub(crate) fn noop() -> Self {
         Self { inner: None }
     }
@@ -207,48 +408,47 @@ impl RpcFinalizer {
     // The three accessors below are gated on `cfg(any(test, feature =
     // "test-utils"))` because they leak internal state that the owner type
     // is otherwise designed to hide. Production code must not branch on any
-    // of them — call `finalize()` instead, which is a no-op when there is
+    // of them — call `persist()` instead, which is a no-op when there is
     // nothing to persist. Tests need them to assert wiring and to seed
     // cache entries without going through a real (or mock) RPC round-trip.
 
-    /// True if this finalizer is the no-op variant (nothing to persist).
+    /// True if this store is the no-op variant (nothing to persist).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn is_noop(&self) -> bool {
         self.inner.is_none()
     }
 
-    /// Returns the underlying [`SharedCache`], or `None` for a no-op finalizer.
+    /// Returns the underlying [`SharedCache`], or `None` for a no-op store.
     ///
     /// `SharedCache` is `Arc`-backed with interior mutability, so any caller
     /// holding the returned `&SharedCache` can keep mutating the cache after
-    /// `finalize()` — silently subverting the consume-on-finalize contract.
+    /// `persist()` — silently subverting the consume-on-persist contract.
     /// That is exactly why this API is unavailable in production builds.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn cache(&self) -> Option<&SharedCache> {
         self.inner.as_ref().map(|inner| &inner.cache)
     }
 
-    /// Returns the configured cache file path, or `None` for a no-op finalizer.
+    /// Returns the resolved cache file path, or `None` for a no-op store.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn cache_file(&self) -> Option<&Path> {
-        self.inner.as_ref().map(|inner| inner.cache_file.as_path())
+    pub fn cache_path(&self) -> Option<&Path> {
+        self.inner.as_ref().map(|inner| inner.cache_path.as_path())
     }
 
-    /// Clean-exit session finalization. **Consumes the finalizer**, which
-    /// type-level-enforces "finalize once, then stop" — see `Why not Drop`
-    /// on this type for the correctness reason behind the consuming signature.
+    /// Persist the RPC cache to its resolved path atomically. **Consumes the store**,
+    /// which type-level-enforces "persist once, then stop" — see `Why not Drop` on this
+    /// type for the correctness reason behind the consuming signature.
     ///
-    /// Today this atomically persists the RPC cache to its configured path.
-    /// Safe to call on any `RpcFinalizer`, including a no-op one. Persistence
-    /// is strictly best-effort: I/O failures are warn-logged and swallowed so
-    /// a save failure cannot turn a successful run into a non-zero exit.
-    /// Callers invoke this **without** `?` on the clean-exit path.
-    pub fn finalize(self) {
+    /// Safe to call on any `RpcCacheStore`, including a no-op one. Persistence is strictly
+    /// best-effort: I/O failures are warn-logged and swallowed so a save failure cannot
+    /// turn a successful run into a non-zero exit. Callers invoke this **without** `?` on
+    /// the clean-exit path.
+    pub fn persist(self) {
         let Some(inner) = self.inner else { return };
-        match save_cache_atomic(&inner.cache, &inner.cache_file) {
-            Ok(()) => info!(path = %inner.cache_file.display(), "Persisted RPC cache"),
+        match save_cache_atomic(&inner.cache, &inner.cache_path) {
+            Ok(()) => info!(path = %inner.cache_path.display(), "Persisted RPC cache"),
             Err(err) => warn!(
-                path = %inner.cache_file.display(),
+                path = %inner.cache_path.display(),
                 error = %err,
                 "Failed to save RPC cache (continuing)",
             ),
@@ -258,61 +458,15 @@ impl RpcFinalizer {
 
 // Manual `Debug` because `SharedCache` does not implement `Debug` and the only
 // debugging detail worth showing is the cache file path anyway.
-impl fmt::Debug for RpcFinalizer {
+impl fmt::Debug for RpcCacheStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.inner {
             Some(inner) => f
-                .debug_struct("RpcFinalizer")
-                .field("cache_file", &inner.cache_file)
+                .debug_struct("RpcCacheStore")
+                .field("cache_path", &inner.cache_path)
                 .finish_non_exhaustive(),
-            None => f.debug_struct("RpcFinalizer").field("inner", &Option::<()>::None).finish(),
+            None => f.debug_struct("RpcCacheStore").field("inner", &Option::<()>::None).finish(),
         }
-    }
-}
-
-/// Owns the provider and cache finalization for a run that constructs its
-/// provider directly (today: `replay`).
-///
-/// Persistence is clean-exit-only for the same reason as [`RpcFinalizer`]:
-/// call `finalize()` explicitly on the success path.
-#[derive(Debug)]
-pub struct RpcSession {
-    provider: OpProvider,
-    finalizer: RpcFinalizer,
-}
-
-impl RpcSession {
-    /// Borrow the underlying provider for short-lived use.
-    ///
-    /// [`OpProvider`] is `Arc`-backed, so call sites that need an owned copy
-    /// (e.g. to hand to `EvmeState::new_forked`) can `.clone()` the borrow
-    /// cheaply.
-    pub fn provider(&self) -> &OpProvider {
-        &self.provider
-    }
-
-    /// Split the session into `(provider, finalizer)`.
-    ///
-    /// Use this when the provider must be moved into a long-lived owner such
-    /// as `EvmeState::new_forked` while the caller still needs to finalize the
-    /// cache later via the detached finalizer. This is the bridge between
-    /// [`RpcSession`] and [`InitialStateSession`](super::InitialStateSession).
-    pub fn into_parts(self) -> (OpProvider, RpcFinalizer) {
-        (self.provider, self.finalizer)
-    }
-
-    /// Test-only: true if this session is the no-op variant. See
-    /// [`RpcFinalizer::is_noop`] for why production code must not branch on
-    /// this.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn is_noop(&self) -> bool {
-        self.finalizer.is_noop()
-    }
-
-    /// Clean-exit session finalization. **Consumes the session.** No-op if
-    /// this session has nothing to finalize. See [`RpcFinalizer::finalize`].
-    pub fn finalize(self) {
-        self.finalizer.finalize();
     }
 }
 
@@ -378,9 +532,9 @@ fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> 
 
 #[cfg(test)]
 mod tests {
-    //! Inline tests for the **private** [`temp_path_for`] helper. Public-API
-    //! tests for `RpcSession` / `RpcFinalizer` / `RpcArgs` live in
-    //! `bin/mega-evme/tests/provider.rs`.
+    //! Inline tests for the **private** [`temp_path_for`] helper and
+    //! [`resolve_cache_path`]. Public-API tests for `RpcArgs::build_provider`
+    //! and `RpcCacheStore` live in `bin/mega-evme/tests/provider.rs`.
 
     use std::path::PathBuf;
 
@@ -439,5 +593,27 @@ mod tests {
         let target = PathBuf::from("/");
         let err = temp_path_for(&target).expect_err("root path has no file name");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// Explicit `--rpc.cache-dir` is used verbatim; the file is `<chain_id>.json` inside it.
+    #[test]
+    fn test_resolve_cache_path_with_explicit_dir() {
+        let dir = PathBuf::from("/some/user/dir");
+        // 4326 = MegaETH mainnet.
+        let path = resolve_cache_path(Some(&dir), 4326).expect("resolve");
+        assert_eq!(path, PathBuf::from("/some/user/dir/rpc-cache-4326.json"));
+    }
+
+    /// No explicit dir falls back to `dirs::cache_dir()` on platforms that have one.
+    /// The path ends in `mega-evme/rpc/rpc-cache-<chain_id>.json`.
+    #[test]
+    fn test_resolve_cache_path_default_is_under_platform_cache() {
+        let Some(expected_root) = dirs::cache_dir() else {
+            // Skip on exotic platforms where no cache directory is available.
+            return;
+        };
+        let path = resolve_cache_path(None, 11_155_420).expect("resolve");
+        let expected = expected_root.join("mega-evme").join("rpc").join("rpc-cache-11155420.json");
+        assert_eq!(path, expected);
     }
 }

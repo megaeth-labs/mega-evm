@@ -72,12 +72,11 @@ impl MockRpcServer {
     }
 }
 
-/// Build [`RpcArgs`] for a test pointed at `url`.
+/// Build [`RpcArgs`] for a test pointed at `url` with the on-disk cache disabled.
 ///
-/// Defaults: cache disabled (`--rpc.cache-size 0`), 1ms backoff (so retry
-/// tests don't sleep noticeably), production rate limit. Pass `Some(n)` to
-/// override `--rpc.max-retries`; pass `None` to leave it at its production
-/// default.
+/// Defaults: `--rpc.cache-size 0` (no cache layer at all, so no `eth_chainId`
+/// fetch is needed), 1ms backoff, production rate limit. Pass `Some(n)` to
+/// override `--rpc.max-retries`; `None` keeps the production default.
 pub(crate) fn test_rpc_args(url: &str, max_retries: Option<u32>) -> RpcArgs {
     let mut argv: Vec<String> = vec![
         "mega-evme".into(),
@@ -85,6 +84,40 @@ pub(crate) fn test_rpc_args(url: &str, max_retries: Option<u32>) -> RpcArgs {
         url.into(),
         "--rpc.cache-size".into(),
         "0".into(),
+        "--rpc.backoff-ms".into(),
+        "1".into(),
+        "--rpc.rate-limit".into(),
+        "660".into(),
+    ];
+    if let Some(n) = max_retries {
+        argv.push("--rpc.max-retries".into());
+        argv.push(n.to_string());
+    }
+    RpcArgs::parse_from(argv)
+}
+
+/// Build [`RpcArgs`] for a test that exercises the on-disk cache path.
+///
+/// Sets `--rpc.cache-size 256`, an explicit `--rpc.cache-dir`, and pins
+/// `--rpc.chain-id` so `build_provider` skips the `eth_chainId` RPC call
+/// entirely — tests that care about the chain-id resolution path should
+/// build [`RpcArgs`] by hand instead of going through this helper.
+pub(crate) fn test_rpc_args_cached(
+    url: &str,
+    cache_dir: &std::path::Path,
+    chain_id: u64,
+    max_retries: Option<u32>,
+) -> RpcArgs {
+    let mut argv: Vec<String> = vec![
+        "mega-evme".into(),
+        "--rpc".into(),
+        url.into(),
+        "--rpc.cache-size".into(),
+        "256".into(),
+        "--rpc.cache-dir".into(),
+        cache_dir.to_str().expect("cache_dir utf-8").to_string(),
+        "--rpc.chain-id".into(),
+        chain_id.to_string(),
         "--rpc.backoff-ms".into(),
         "1".into(),
         "--rpc.rate-limit".into(),

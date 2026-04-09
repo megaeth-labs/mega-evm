@@ -16,7 +16,7 @@ use mega_evm::revm::{
 };
 use tracing::{debug, info, trace};
 
-use super::{EvmeError, Result, RpcFinalizer};
+use super::{EvmeError, Result, RpcCacheStore};
 
 /// Pre-execution state configuration arguments
 #[derive(Parser, Debug, Clone)]
@@ -271,84 +271,34 @@ impl PreStateArgs {
         Ok(prestate)
     }
 
-    /// Build the initial execution state and return it as an [`InitialStateSession`].
+    /// Build the initial execution state and the clean-exit RPC cache store.
     ///
-    /// Fork mode (`self.fork == true`) builds a forked state at `self.fork_block`
-    /// using `rpc_args` and wires in a real RPC finalizer (or a no-op finalizer if
-    /// no cache file is configured). Non-fork mode builds an empty local state,
-    /// ignores `rpc_args`, and wires in a no-op finalizer. Either way the call
-    /// site finalizes unconditionally.
+    /// Fork mode (`self.fork == true`) builds a forked state at `self.fork_block` via
+    /// `rpc_args.build_provider()` and returns the caller-owned [`RpcCacheStore`] for
+    /// persist-on-exit. Non-fork mode builds an empty local state, ignores `rpc_args`,
+    /// and returns a no-op store. Either way the call site persists unconditionally.
     pub async fn create_initial_state(
         &self,
         sender: &Address,
         rpc_args: &super::RpcArgs,
-    ) -> Result<InitialStateSession<Optimism, super::OpProvider>> {
+    ) -> Result<(EvmeState<Optimism, super::OpProvider>, RpcCacheStore)> {
         let prestate = self.load_prestate(sender)?;
         let block_hashes = self.parse_block_hashes()?;
 
         if self.fork {
             debug!("Creating forked state");
-            // Move the provider into the forked state, keep the finalizer
-            // half for the returned session.
-            let (provider, finalizer) = rpc_args.build_session()?.into_parts();
+            // `run --fork` and `tx --fork` use `--chain-id` (ChainArgs) for transaction
+            // construction and hardfork selection, not the RPC-resolved chain id. The
+            // hint from `build_provider` is therefore dropped via `..`.
+            let super::BuildProviderOutput { provider, cache_store, .. } =
+                rpc_args.build_provider().await?;
             let state =
                 EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await?;
-            Ok(InitialStateSession { state, finalizer })
+            Ok((state, cache_store))
         } else {
             debug!("Creating local state");
-            Ok(InitialStateSession {
-                state: EvmeState::new_empty(prestate, block_hashes),
-                finalizer: RpcFinalizer::noop(),
-            })
+            Ok((EvmeState::new_empty(prestate, block_hashes), RpcCacheStore::noop()))
         }
-    }
-}
-
-/// Owns the initial execution state and the cache finalization for a run
-/// that constructs an [`EvmeState`] (today: `run`, `tx`). The fork vs.
-/// non-fork branching lives inside [`PreStateArgs::create_initial_state`];
-/// this type's call sites never have to care which one happened.
-///
-/// Persistence is clean-exit-only for the same reason as [`RpcFinalizer`]:
-/// call `finalize()` explicitly on the success path.
-#[derive(Debug)]
-pub struct InitialStateSession<N, P>
-where
-    N: Network,
-    P: Provider<N>,
-{
-    state: EvmeState<N, P>,
-    finalizer: RpcFinalizer,
-}
-
-impl<N, P> InitialStateSession<N, P>
-where
-    N: Network,
-    P: Provider<N>,
-{
-    /// Borrow the underlying execution state.
-    pub fn state(&self) -> &EvmeState<N, P> {
-        &self.state
-    }
-
-    /// Mutably borrow the underlying execution state. The mutable borrow must
-    /// end before `finalize(self)`.
-    pub fn state_mut(&mut self) -> &mut EvmeState<N, P> {
-        &mut self.state
-    }
-
-    /// Test-only: true if this session is the no-op variant (non-fork run,
-    /// or fork run with no `--rpc.cache-file`). See [`RpcFinalizer::is_noop`]
-    /// for why production code must not branch on this.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn is_noop(&self) -> bool {
-        self.finalizer.is_noop()
-    }
-
-    /// Clean-exit session finalization. **Consumes the session.** No-op if
-    /// this session has nothing to finalize. See [`RpcFinalizer::finalize`].
-    pub fn finalize(self) {
-        self.finalizer.finalize();
     }
 }
 
