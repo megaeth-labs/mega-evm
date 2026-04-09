@@ -55,6 +55,7 @@ Each group is documented on its own page.
 | Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas`                      | [Block Environment](../configuration/block-environment.md) |
 | SALT buckets      | `--bucket-capacity`                                                                                                                                                                        | [SALT Buckets](../configuration/salt-buckets.md)           |
 | Tracing           | `--trace`, `--tracer`, `--trace.output`, and tracer-specific flags                                                                                                                         | [Tracing Overview](../tracing/overview.md)                 |
+| Output            | `--json`                                                                                                                                                                                   | See [JSON output](#json-output) below                      |
 
 **Key defaults for `run`:**
 
@@ -64,6 +65,32 @@ Each group is documented on its own page.
 | `--gas`      | `10000000`                                   |
 | `--sender`   | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
 | `--receiver` | `0x0000000000000000000000000000000000000000` |
+
+## JSON Output
+
+Pass `--json` to emit a single `ExecutionSummary` JSON object to stdout instead of the human-readable banner.
+No banners or diagnostic text are printed in JSON mode — stdout contains exactly one JSON object.
+
+The object includes these fields:
+
+| Field              | Type             | Description                                                              |
+| ------------------ | ---------------- | ------------------------------------------------------------------------ |
+| `success`          | `bool`           | Whether execution succeeded                                              |
+| `gas_used`         | `number`         | Gas consumed                                                             |
+| `output`           | `string \| null` | Hex-encoded return data (present only on success with non-empty output)  |
+| `contract_address` | `string \| null` | Deployed address (present only for successful `--create` transactions)   |
+| `logs_count`       | `number`         | Number of log entries emitted                                            |
+| `revert_reason`    | `string \| null` | Decoded revert reason (present only on revert)                           |
+| `halt_reason`      | `string \| null` | Halt reason (present only on halt)                                       |
+| `trace`            | `object \| null` | Execution trace (when `--trace` is enabled without `--trace.output`)     |
+| `state`            | `object \| null` | Post-execution state dump (when `--dump` is enabled without `--dump.output`) |
+
+When `--trace` or `--dump` is used with an output file (`--trace.output`, `--dump.output`), data is written to that file and the corresponding JSON field is omitted.
+When no output file is specified, the data is inlined into the JSON object.
+
+```bash
+mega-evme run 0x60016000526001601ff3 --json
+```
 
 ## Examples
 
@@ -238,8 +265,10 @@ State Options:
       --fork.block <FORK_BLOCK>
           Block number of the state (post-block state) to fork from
 
-      --fork.rpc <FORK_RPC>
-          RPC URL to use for the fork [env: RPC_URL=] [default: http://localhost:8545]
+      --rpc <RPC_URL>
+          RPC URL [env: RPC_URL=] [default: http://localhost:8545]
+
+          [aliases: --rpc-url] [compat alias: --fork.rpc]
 
       --prestate <PRESTATE>
           JSON file with prestate (genesis) config
@@ -289,6 +318,9 @@ External Environment Options:
 State Dump Options:
       --dump                           Dump state after the run
       --dump.output <DUMP_OUTPUT_FILE> Output file for state dump
+
+Output Options:
+      --json                           Output results as JSON instead of human-readable text
 
 Trace Options:
       --trace                                    Enable tracing

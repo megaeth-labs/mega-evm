@@ -124,12 +124,12 @@ mega-evme run --fork ...
 ```
 
 By default it connects to `http://localhost:8545`.
-Override the endpoint with `--fork.rpc` (or the `RPC_URL` environment variable) and pin a specific block with `--fork.block`:
+Override the endpoint with `--rpc` (or the `RPC_URL` environment variable) and pin a specific block with `--fork.block`:
 
 ```bash
 mega-evme run \
   --fork \
-  --fork.rpc https://mainnet.megaeth.com/rpc \
+  --rpc https://mainnet.megaeth.com/rpc \
   --fork.block 21000000 \
   --sender.balance 1ether \
   ...

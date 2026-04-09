@@ -123,7 +123,7 @@ Full call tree:
 ```bash
 # Trace a WETH.balanceOf call against live mainnet state
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0x70a08231000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266 \
@@ -145,7 +145,7 @@ Include log events:
 ```bash
 # WETH.deposit() emits a Transfer event — use --with-log to capture it
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0xd0e30db0 \
