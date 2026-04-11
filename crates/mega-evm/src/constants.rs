@@ -130,6 +130,9 @@ pub mod rex4 {
     pub const STORAGE_CALL_STIPEND: u64 = 23_000;
 }
 
+/// Constants for the `REX5` spec.
+pub mod rex5 {}
+
 /// Constants for the `REX` spec.
 pub mod rex {
     /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.

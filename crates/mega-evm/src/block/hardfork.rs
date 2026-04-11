@@ -30,6 +30,8 @@ hardfork! {
         Rex3,
         /// The eighth hardfork (fourth patch to Rex).
         Rex4,
+        /// The ninth hardfork (fifth patch to Rex).
+        Rex5,
     }
 }
 
@@ -48,6 +50,7 @@ impl MegaHardfork {
             Self::Rex2 => MegaSpecId::REX2,
             Self::Rex3 => MegaSpecId::REX3,
             Self::Rex4 => MegaSpecId::REX4,
+            Self::Rex5 => MegaSpecId::REX5,
         }
     }
 }
@@ -80,7 +83,9 @@ pub trait MegaHardforks: OpHardforks {
     /// Gets the latest `MegaHardfork` that is active at the given timestamp. If no `MegaHardfork`
     /// is active at the given timestamp, returns `None`.
     fn hardfork(&self, timestamp: u64) -> Option<MegaHardfork> {
-        if self.is_rex_4_active_at_timestamp(timestamp) {
+        if self.is_rex_5_active_at_timestamp(timestamp) {
+            Some(MegaHardfork::Rex5)
+        } else if self.is_rex_4_active_at_timestamp(timestamp) {
             Some(MegaHardfork::Rex4)
         } else if self.is_rex_3_active_at_timestamp(timestamp) {
             Some(MegaHardfork::Rex3)
@@ -104,7 +109,9 @@ pub trait MegaHardforks: OpHardforks {
     /// Gets the expected `MegaSpecId` for a block with the given timestamp.
     fn spec_id(&self, timestamp: BlockTimestamp) -> MegaSpecId {
         // Newer hardforks should be checked first
-        if self.is_rex_4_active_at_timestamp(timestamp) {
+        if self.is_rex_5_active_at_timestamp(timestamp) {
+            MegaSpecId::REX5
+        } else if self.is_rex_4_active_at_timestamp(timestamp) {
             MegaSpecId::REX4
         } else if self.is_rex_3_active_at_timestamp(timestamp) {
             MegaSpecId::REX3
@@ -163,6 +170,11 @@ pub trait MegaHardforks: OpHardforks {
     /// Returns `true` if [`MegaHardfork::Rex4`] is active at given block timestamp.
     fn is_rex_4_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.mega_fork_activation(MegaHardfork::Rex4).active_at_timestamp(timestamp)
+    }
+
+    /// Returns `true` if [`MegaHardfork::Rex5`] is active at given block timestamp.
+    fn is_rex_5_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.mega_fork_activation(MegaHardfork::Rex5).active_at_timestamp(timestamp)
     }
 }
 
@@ -241,6 +253,7 @@ impl MegaHardforkConfig {
         self.insert(MegaHardfork::Rex2, ForkCondition::Timestamp(0));
         self.insert(MegaHardfork::Rex3, ForkCondition::Timestamp(0));
         self.insert(MegaHardfork::Rex4, ForkCondition::Timestamp(0));
+        self.insert(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
         self
     }
 
@@ -320,6 +333,7 @@ mod tests {
             (MegaHardfork::Rex2, MegaSpecId::REX2),
             (MegaHardfork::Rex3, MegaSpecId::REX3),
             (MegaHardfork::Rex4, MegaSpecId::REX4),
+            (MegaHardfork::Rex5, MegaSpecId::REX5),
         ];
 
         for (hardfork, expected_spec) in cases {
@@ -382,6 +396,7 @@ mod tests {
             MegaHardfork::Rex2,
             MegaHardfork::Rex3,
             MegaHardfork::Rex4,
+            MegaHardfork::Rex5,
         ] {
             assert_eq!(config.mega_fork_activation(hardfork), ForkCondition::Timestamp(0));
         }
@@ -397,7 +412,8 @@ mod tests {
             .with(MegaHardfork::Rex1, ForkCondition::Timestamp(50))
             .with(MegaHardfork::Rex2, ForkCondition::Timestamp(60))
             .with(MegaHardfork::Rex3, ForkCondition::Timestamp(70))
-            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(80));
+            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(80))
+            .with(MegaHardfork::Rex5, ForkCondition::Timestamp(90));
 
         let expected = [
             (0, None, MegaSpecId::EQUIVALENCE),
@@ -409,6 +425,7 @@ mod tests {
             (65, Some(MegaHardfork::Rex2), MegaSpecId::REX2),
             (75, Some(MegaHardfork::Rex3), MegaSpecId::REX3),
             (85, Some(MegaHardfork::Rex4), MegaSpecId::REX4),
+            (95, Some(MegaHardfork::Rex5), MegaSpecId::REX5),
         ];
 
         for (timestamp, expected_hardfork, expected_spec) in expected {
@@ -432,13 +449,16 @@ mod tests {
     fn test_spec_id_with_gaps_in_hardfork_configuration() {
         let config = MegaHardforkConfig::default()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
-            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(20));
+            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(20))
+            .with(MegaHardfork::Rex5, ForkCondition::Timestamp(30));
 
         assert_eq!(config.spec_id(5), MegaSpecId::EQUIVALENCE);
         assert_eq!(config.spec_id(15), MegaSpecId::MINI_REX);
         assert_eq!(config.spec_id(25), MegaSpecId::REX4);
+        assert_eq!(config.spec_id(35), MegaSpecId::REX5);
         assert_eq!(config.hardfork(15), Some(MegaHardfork::MiniRex));
         assert_eq!(config.hardfork(25), Some(MegaHardfork::Rex4));
+        assert_eq!(config.hardfork(35), Some(MegaHardfork::Rex5));
     }
 
     #[test]
@@ -446,10 +466,11 @@ mod tests {
         let config = MegaHardforkConfig::default()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(10))
             .with(MegaHardfork::Rex2, ForkCondition::Timestamp(10))
-            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(10));
+            .with(MegaHardfork::Rex4, ForkCondition::Timestamp(10))
+            .with(MegaHardfork::Rex5, ForkCondition::Timestamp(10));
 
         assert_eq!(config.hardfork(9), None);
-        assert_eq!(config.hardfork(10), Some(MegaHardfork::Rex4));
-        assert_eq!(config.spec_id(10), MegaSpecId::REX4);
+        assert_eq!(config.hardfork(10), Some(MegaHardfork::Rex5));
+        assert_eq!(config.spec_id(10), MegaSpecId::REX5);
     }
 }
