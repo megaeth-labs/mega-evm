@@ -15,11 +15,11 @@ Out of scope: CLI tool usability, documentation errors, test-only code, and non-
 
 ## Supported Versions
 
-| Version | Supported |
-| --- | --- |
-| `main` branch | Yes |
-| Latest stable spec (`REX4`) | Yes |
-| Older specs | No |
+| Version                     | Supported |
+| --------------------------- | --------- |
+| `main` branch               | Yes       |
+| Latest stable spec (`REX4`) | Yes       |
+| Older specs                 | No        |
 
 ## Reporting a Vulnerability
 
@@ -38,12 +38,12 @@ Please include:
 
 ## Response Timeline
 
-| Stage | Timeframe |
-| --- | --- |
-| Acknowledgement | Within 48 hours |
-| Initial triage and severity assessment | Within 1 week |
-| Fix development and internal review | Within 30 days (critical issues prioritized) |
-| Coordinated public disclosure | Within 90 days of report, or upon fix release |
+| Stage                                  | Timeframe                                     |
+| -------------------------------------- | --------------------------------------------- |
+| Acknowledgement                        | Within 48 hours                               |
+| Initial triage and severity assessment | Within 1 week                                 |
+| Fix development and internal review    | Within 30 days (critical issues prioritized)  |
+| Coordinated public disclosure          | Within 90 days of report, or upon fix release |
 
 We may request an extension of the disclosure deadline for complex issues.
 Reporters will be kept informed throughout the process.
