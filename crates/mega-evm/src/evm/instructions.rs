@@ -182,6 +182,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
+            MegaSpecId::REX5 => EthInstructions::new(rex5::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
         };
         Self { spec, inner: instruction_table }
     }
@@ -319,6 +323,23 @@ mod rex4 {
         table[SELFBALANCE as usize] = volatile_data_ext::selfbalance;
 
         table
+    }
+}
+
+mod rex5 {
+    use super::*;
+
+    /// Returns the instruction table for the `REX5` spec.
+    ///
+    /// Changes from Rex4: none yet.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        rex4::instruction_table::<WIRE, H>()
     }
 }
 
