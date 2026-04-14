@@ -1,35 +1,24 @@
 //! RPC provider factory and on-disk cache store for mega-evme.
 //!
-//! # What this module owns
+//! Three provider builders for different use cases:
 //!
-//! - [`RpcArgs`] — clap-parsed CLI arguments. Pure data.
-//! - [`RpcCacheStore`] — owns the clean-exit cache persistence responsibility. Has a private no-op
-//!   state for the "nothing to persist" case (non-fork run, `--rpc.cache-size 0`, or
-//!   `--rpc.no-cache-file`).
-//! - [`RpcArgs::build_provider`] — async factory: resolves chain identity, loads the on-disk cache
-//!   if any, and returns a [`BuildProviderOutput`] for the call site to persist on clean exit.
+//! - [`RpcArgs::build_provider`] — standard RPC with optional `--rpc.cache-dir` persistence.
+//! - [`RpcArgs::build_replay_provider`] — offline replay from a `--rpc.cache-file` envelope.
+//! - [`RpcArgs::build_capture_provider`] — RPC with transport-level caching to `--rpc.cache-file`.
 //!
-//! # Chain isolation
-//!
-//! Each chain gets its own cache file: `{cache_dir}/rpc-cache-{chain_id}.json`. `chain_id` is
-//! resolved via `--rpc.chain-id` if set, otherwise fetched from the endpoint with `eth_chainId`
-//! once inside [`RpcArgs::build_provider`]. The per-chain filename makes cross-chain contamination
-//! impossible by construction: a cache populated from mainnet physically cannot be loaded during
-//! a testnet run, because they resolve to different files.
-//!
-//! # Workload scope
-//!
-//! This factory targets historical / forked / debugging workloads (`replay`, `run --fork`,
-//! `tx --fork`) that only issue read RPCs. The configured retry policy may retry rate-limit
-//! responses and selected transport failures regardless of method semantics. Reusing this
-//! factory for mutation RPCs (`eth_sendRawTransaction`) would risk duplicate side effects
-//! and is not supported.
+//! The `--rpc.cache-dir` path uses alloy's provider-level `CacheLayer` (caches ~8 methods).
+//! The `--rpc.cache-file` paths use a transport-level `CachingTransport` / `ReplayTransport`
+//! that captures all JSON-RPC request/response pairs.
 
 use std::{
-    fmt,
+    collections::HashMap,
+    fmt, fs,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 
+use alloy_json_rpc::{RequestPacket, ResponsePacket};
+use alloy_primitives::{keccak256, B256};
 use alloy_provider::{
     layers::{CacheLayer, SharedCache},
     transport::{
@@ -39,7 +28,9 @@ use alloy_provider::{
     DynProvider, Provider, ProviderBuilder,
 };
 use alloy_rpc_client::{ClientBuilder, RpcClient};
+use alloy_transport::TransportFut;
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::{EvmeError, Result};
@@ -47,7 +38,7 @@ use super::{EvmeError, Result};
 /// OP-stack provider type used throughout mega-evme.
 pub type OpProvider = DynProvider<op_alloy_network::Optimism>;
 
-/// Return value of [`RpcArgs::build_provider`].
+/// Return value of the `RpcArgs::build_*_provider` methods.
 #[derive(Debug)]
 pub struct BuildProviderOutput {
     /// Configured OP-stack provider. Already wrapped with the retry layer and (unless
@@ -56,36 +47,40 @@ pub struct BuildProviderOutput {
     /// Clean-exit cache persistence handle. Call [`RpcCacheStore::persist`] on the
     /// success path; no-op when the cache is disabled.
     pub cache_store: RpcCacheStore,
-    /// Resolved chain id, when known.
-    ///
-    /// `Some` when either `--rpc.chain-id` was set by the user, or disk persistence is
-    /// enabled (in which case `build_provider` resolved it via `eth_chainId` to name
-    /// the cache file). `None` when neither condition holds — downstream code that
-    /// needs the chain id (e.g. `replay`'s hardfork selection) must fetch it itself.
-    ///
-    /// Propagating this value has two purposes: (1) honour `--rpc.chain-id` as an
-    /// authoritative override end-to-end, not just for cache-file naming, and (2)
-    /// avoid a second `eth_chainId` round-trip when `build_provider` already resolved it.
-    pub chain_id: Option<u64>,
+    /// Chain id resolved during provider construction. Always populated —
+    /// comes from `eth_chainId` (standard/capture) or the envelope (replay).
+    pub chain_id: u64,
+    /// External environment snapshot from the envelope (replay and capture refresh).
+    pub external_env: Option<ExternalEnvSnapshot>,
 }
 
 /// Configuration for building an RPC provider.
 #[derive(Parser, Debug, Clone)]
 #[command(next_help_heading = "RPC Options")]
 pub struct RpcArgs {
-    /// RPC URL
+    /// RPC URL. Required for networked operation (replay, run --fork, tx --fork).
     #[arg(
         long = "rpc",
         visible_aliases = ["rpc-url"],
         alias = "fork.rpc",
-        env = "RPC_URL",
-        default_value = "http://localhost:8545"
     )]
-    pub rpc_url: String,
+    pub rpc_url: Option<String>,
+
+    /// Single-file RPC cache and fixture.
+    /// Combined with --rpc: load if present, fetch missing entries, persist on clean exit.
+    /// Without --rpc: read-only replay; any RPC miss is a hard error; file is never written.
+    /// Cannot be used with --rpc.cache-dir, --rpc.clear-cache,
+    /// --rpc.no-cache-file, or --rpc.cache-size.
+    #[arg(
+        long = "rpc.cache-file",
+        value_parser = parse_non_empty_path,
+        conflicts_with_all = ["cache_dir", "clear_cache", "no_cache_file", "cache_size"],
+    )]
+    pub cache_file: Option<PathBuf>,
 
     /// Maximum number of items to keep in the in-memory RPC LRU cache.
     /// Set to 0 to disable the cache layer entirely.
-    #[arg(long = "rpc.cache-size", default_value_t = 10_000)]
+    #[arg(id = "cache_size", long = "rpc.cache-size", default_value_t = 10_000)]
     pub cache_size: u32,
 
     /// Directory for per-chain RPC cache files.
@@ -103,13 +98,6 @@ pub struct RpcArgs {
     /// `--rpc.cache-size 0` to disable that too.
     #[arg(long = "rpc.no-cache-file")]
     pub no_cache_file: bool,
-
-    /// Chain ID override. When set, `mega-evme` skips the `eth_chainId` call at startup
-    /// and uses this value both to locate the per-chain cache file and to feed downstream
-    /// chain-dependent logic (e.g. `replay`'s hardfork and spec selection). Use for fully
-    /// offline replay against an existing cache, or to keep tests hermetic.
-    #[arg(id = "rpc_chain_id", long = "rpc.chain-id")]
-    pub chain_id: Option<u64>,
 
     /// Delete the current chain's cache file before loading it. Recovery path for a
     /// polluted or corrupt cache file. If the unlink itself fails (e.g. insufficient
@@ -135,75 +123,44 @@ pub struct RpcArgs {
 }
 
 impl RpcArgs {
-    /// Build the RPC provider, its clean-exit cache store, and a resolved chain-id hint,
-    /// bundled into a [`BuildProviderOutput`] record.
+    /// Build an RPC provider using `--rpc <URL>` with the standard `--rpc.cache-dir` path.
     ///
-    /// See [`BuildProviderOutput::chain_id`] for the hint's semantics — it is `Some` when
-    /// the user passed `--rpc.chain-id` or when disk persistence forced us to resolve
-    /// `eth_chainId` to compute the cache file path, and `None` otherwise.
-    ///
-    /// Fast path (`--rpc.cache-size 0`): no cache layer, no network call for the chain id,
-    /// returns a no-op [`RpcCacheStore`] with the user's override (possibly `None`).
-    ///
-    /// Otherwise: installs an in-memory cache layer. If on-disk persistence is enabled
-    /// (`--rpc.no-cache-file` not set), resolves `chain_id` — via `--rpc.chain-id` if
-    /// set, otherwise via an `eth_chainId` call against the endpoint — and computes the
-    /// cache file path as `{cache_dir}/rpc-cache-{chain_id}.json`.
-    ///
-    /// # Error surface
-    ///
-    /// Hard errors (returned as [`EvmeError::RpcError`]):
-    /// - invalid `--rpc` URL;
-    /// - `eth_chainId` resolution failure (when disk cache is enabled and no override);
-    /// - default cache directory unavailable (only when `--rpc.cache-dir` is not set);
-    /// - `--rpc.clear-cache` unlink failure — this path is intentionally strict because silently
-    ///   falling back to `load_cache` would reload exactly the content the user asked to wipe.
-    ///
-    /// Warn-and-continue (best-effort paths):
-    /// - `create_dir_all` on the cache directory (if it fails, the later `persist()` will also fail
-    ///   and log its own warning);
-    /// - `load_cache` on a corrupt or unreadable file — the in-memory cache starts empty.
+    /// Used by `replay` (online), `run --fork`, and `tx --fork`. Requires `rpc_url` to
+    /// be `Some` — callers validate this before calling. For offline replay and capture
+    /// mode, use [`Self::build_replay_provider`] and [`Self::build_capture_provider`].
     pub async fn build_provider(&self) -> Result<BuildProviderOutput> {
-        let url: reqwest::Url = self.rpc_url.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", self.rpc_url, e))
+        let rpc_url_str = self.rpc_url.as_deref().ok_or_else(|| {
+            EvmeError::InvalidInput("No RPC URL provided. Pass '--rpc <URL>'.".to_string())
         })?;
 
-        // 1. Fast path: cache fully disabled.
+        let url: reqwest::Url = rpc_url_str.parse().map_err(|e| {
+            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
+        })?;
+
+        // 1. Resolve chain id (always needed by downstream consumers).
+        let chain_id = self.resolve_chain_id(url.clone()).await?;
+
+        // 2. Fast path: cache fully disabled.
         if self.cache_size == 0 {
             let provider = build_bare_op_provider(self.build_retry_client(url));
             info!(
-                rpc_url = %self.rpc_url,
+                rpc_url = %rpc_url_str,
                 max_retries = self.max_retries,
                 backoff_ms = self.backoff_ms,
                 "Built RPC provider (cache disabled)",
             );
-            // Propagate the user's override (if any) without touching the network.
             return Ok(BuildProviderOutput {
                 provider,
                 cache_store: RpcCacheStore::noop(),
-                chain_id: self.chain_id,
+                chain_id,
+                external_env: None,
             });
         }
 
-        // 2. Cache enabled. Resolve the chain id exactly once, with two branches:
-        //    - disk persistence on: we *must* have a chain id for the file name, so fetch
-        //      `eth_chainId` unless the user provided an override;
-        //    - disk persistence off: we only care about the chain id if the user gave us an
-        //      override, because there is no file name to compute.
-        let chain_id_hint: Option<u64> = if self.no_cache_file {
-            self.chain_id
-        } else {
-            Some(self.resolve_chain_id(url.clone()).await?)
-        };
-
-        // 3. Cache enabled. Resolve the on-disk cache path (or `None` if disk persistence is
-        //    disabled — the in-memory layer still applies).
+        // 3. Resolve on-disk cache path (None when disk persistence is disabled).
         let cache_path = if self.no_cache_file {
             None
         } else {
-            // `chain_id_hint` is guaranteed `Some` in this branch because we just resolved it.
-            let chain_id =
-                chain_id_hint.expect("chain id resolved above when disk persistence is enabled");
             Some(resolve_cache_path(self.cache_dir.as_deref(), chain_id)?)
         };
 
@@ -213,26 +170,19 @@ impl RpcArgs {
         let cache_store = match cache_path {
             Some(path) => {
                 if self.clear_cache {
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => info!(path = %path.display(), "Cleared existing RPC cache"),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => {
-                            // Hard error rather than warn-and-continue:
-                            // `--rpc.clear-cache` is the user's explicit
-                            // recovery path, and if the unlink silently
-                            // failed the `load_cache` call below would
-                            // reload exactly the content the user asked
-                            // to wipe.
+                    if let Err(e) = fs::remove_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
                             return Err(EvmeError::RpcError(format!(
-                                "Failed to clear RPC cache at {}: {}",
+                                "Failed to clear RPC cache at {}: {e}",
                                 path.display(),
-                                e
                             )));
                         }
+                    } else {
+                        info!(path = %path.display(), "Cleared existing RPC cache");
                     }
                 }
                 if let Some(parent) = path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
+                    if let Err(e) = fs::create_dir_all(parent) {
                         warn!(
                             path = %parent.display(),
                             error = %e,
@@ -254,8 +204,7 @@ impl RpcArgs {
             None => RpcCacheStore::noop(),
         };
 
-        // 5. Build the cached provider. The same retry policy wraps both the throwaway chain-id
-        //    client (if used) and this one.
+        // 5. Build the cached provider.
         let client = self.build_retry_client(url);
         let provider = ProviderBuilder::new()
             .disable_recommended_fillers()
@@ -264,7 +213,7 @@ impl RpcArgs {
             .connect_client(client);
 
         info!(
-            rpc_url = %self.rpc_url,
+            rpc_url = %rpc_url_str,
             cache_size = self.cache_size,
             max_retries = self.max_retries,
             backoff_ms = self.backoff_ms,
@@ -274,15 +223,128 @@ impl RpcArgs {
         Ok(BuildProviderOutput {
             provider: DynProvider::new(provider),
             cache_store,
-            chain_id: chain_id_hint,
+            chain_id,
+            external_env: None,
         })
     }
 
-    /// Build an `RpcClient` wired with the configured retry layer (or a bare client
-    /// when `max_retries == 0`). Used both for the cached provider and, when
-    /// `--rpc.chain-id` is not set, for the throwaway provider that fetches
-    /// `eth_chainId` inside [`Self::resolve_chain_id`].
+    /// Build the provider in replay mode (`--rpc.cache-file` without `--rpc`).
+    ///
+    /// Loads the envelope's transport-level cache and builds the provider over
+    /// [`ReplayTransport`], which serves cached responses directly and returns
+    /// a descriptive error on cache miss. No `CacheLayer` is used — all caching
+    /// is at the transport level so every RPC method is covered.
+    pub async fn build_replay_provider(&self) -> Result<BuildProviderOutput> {
+        let path = self.cache_file.as_ref().expect("replay mode requires --rpc.cache-file");
+
+        let envelope = load_envelope(path)?;
+        let chain_id = envelope.chain_id;
+
+        // Load the transport-level cache from the envelope.
+        let transport_cache = TransportCache::from_value(&envelope.cache)?;
+
+        // Build provider over ReplayTransport — serves from cache, BackendGone on miss.
+        let replay_client = ClientBuilder::default()
+            .transport(ReplayTransport::new(path.clone(), transport_cache), true);
+        let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .network::<op_alloy_network::Optimism>()
+            .connect_client(replay_client);
+
+        info!(
+            path = %path.display(),
+            chain_id,
+            "Built RPC provider (replay from cache file)",
+        );
+
+        Ok(BuildProviderOutput {
+            provider: DynProvider::new(provider),
+            cache_store: RpcCacheStore::noop(),
+            chain_id,
+            external_env: envelope.external_env,
+        })
+    }
+
+    /// Build the provider in capture mode (`--rpc.cache-file` + `--rpc`).
+    ///
+    /// If the cache file already exists, its entries are loaded into the transport-
+    /// level cache. Missing entries are fetched via the HTTP transport (with retry),
+    /// cached in-memory, and persisted as an envelope on clean exit. No `CacheLayer`
+    /// is used — all caching is at the transport level so every RPC method is covered.
+    pub async fn build_capture_provider(&self) -> Result<BuildProviderOutput> {
+        let path = self.cache_file.as_ref().expect("capture mode requires --rpc.cache-file");
+        let rpc_url_str = self.rpc_url.as_ref().expect("capture mode requires --rpc");
+
+        let url: reqwest::Url = rpc_url_str.parse().map_err(|e| {
+            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
+        })?;
+
+        // Load existing envelope if the file exists.
+        let existing_envelope = if path.exists() { Some(load_envelope(path)?) } else { None };
+
+        // Start with an empty transport cache so the eth_chainId call below
+        // always hits the real endpoint — if we seeded from the existing
+        // envelope first, a stale eth_chainId entry would short-circuit the
+        // cross-chain validation.
+        let transport_cache = TransportCache::new();
+        let http = alloy_transport_http::Http::new(url.clone());
+        let caching = CachingTransport::new(http, transport_cache.clone());
+        let client = self.build_client(caching, &url);
+        let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .network::<op_alloy_network::Optimism>()
+            .connect_client(client);
+
+        // Resolve chain_id through the caching provider (hits network, response captured).
+        let chain_id = provider.get_chain_id().await.map_err(|e| {
+            EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {e}", rpc_url_str))
+        })?;
+
+        // Validate chain_id match, then merge existing entries into the cache.
+        if let Some(ref env) = existing_envelope {
+            if env.chain_id != chain_id {
+                return Err(EvmeError::RpcError(format!(
+                    "Chain ID mismatch: cache file {} contains chain {} but endpoint returned {}",
+                    path.display(),
+                    env.chain_id,
+                    chain_id,
+                )));
+            }
+            transport_cache.merge(&env.cache)?;
+        }
+
+        info!(
+            rpc_url = %rpc_url_str,
+            path = %path.display(),
+            chain_id,
+            "Built RPC provider (capture to cache file)",
+        );
+
+        let prev_external_env = existing_envelope.and_then(|e| e.external_env);
+
+        Ok(BuildProviderOutput {
+            provider: DynProvider::new(provider),
+            cache_store: RpcCacheStore::new_envelope(transport_cache, path.clone(), chain_id),
+            chain_id,
+            external_env: prev_external_env,
+        })
+    }
+
+    /// Build an `RpcClient` over HTTP, wired with the configured retry layer.
     fn build_retry_client(&self, url: reqwest::Url) -> RpcClient {
+        self.build_client(alloy_transport_http::Http::new(url.clone()), &url)
+    }
+
+    /// Build an `RpcClient` over an arbitrary transport, wired with the configured
+    /// retry layer (or bare when `max_retries == 0`). `url` is used only to detect
+    /// whether the endpoint is local.
+    fn build_client<T: alloy_transport::IntoBoxTransport>(
+        &self,
+        transport: T,
+        url: &reqwest::Url,
+    ) -> RpcClient {
+        let is_local =
+            url.host_str().is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
         if self.max_retries > 0 {
             let policy = RateLimitRetryPolicy::default().or(|err: &TransportError| {
                 matches!(err, RpcError::Transport(TransportErrorKind::Custom(_)))
@@ -293,22 +355,19 @@ impl RpcArgs {
                 self.compute_units_per_sec,
                 policy,
             );
-            ClientBuilder::default().layer(retry).http(url)
+            ClientBuilder::default().layer(retry).transport(transport, is_local)
         } else {
-            ClientBuilder::default().http(url)
+            ClientBuilder::default().transport(transport, is_local)
         }
     }
 
-    /// Resolve the chain ID. Prefers the `--rpc.chain-id` override; otherwise
-    /// issues `eth_chainId` against a throwaway cache-less provider using the
-    /// configured retry policy. Hard error on transport / RPC failure.
+    /// Resolve the chain ID by issuing `eth_chainId` against a throwaway
+    /// cache-less provider using the configured retry policy.
     async fn resolve_chain_id(&self, url: reqwest::Url) -> Result<u64> {
-        if let Some(id) = self.chain_id {
-            return Ok(id);
-        }
+        let url_str = url.as_str().to_string();
         let bare = build_bare_op_provider(self.build_retry_client(url));
         bare.get_chain_id().await.map_err(|e| {
-            EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {}", self.rpc_url, e))
+            EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {}", url_str, e))
         })
     }
 }
@@ -387,15 +446,23 @@ pub struct RpcCacheStore {
     inner: Option<RpcCacheStoreInner>,
 }
 
-struct RpcCacheStoreInner {
-    cache: SharedCache,
-    cache_path: PathBuf,
+/// Discriminated inner state of [`RpcCacheStore`].
+enum RpcCacheStoreInner {
+    /// Legacy per-chain raw alloy cache (`--rpc.cache-dir`).
+    Raw { cache: SharedCache, path: PathBuf },
+    /// Transport-level envelope cache (`--rpc.cache-file`).
+    Envelope { cache: TransportCache, path: PathBuf, chain_id: u64 },
 }
 
 impl RpcCacheStore {
-    /// Construct a store backed by a real cache and target file.
+    /// Construct a store backed by a raw (per-chain) alloy cache file.
     pub(crate) fn new(cache: SharedCache, cache_path: PathBuf) -> Self {
-        Self { inner: Some(RpcCacheStoreInner { cache, cache_path }) }
+        Self { inner: Some(RpcCacheStoreInner::Raw { cache, path: cache_path }) }
+    }
+
+    /// Construct a store backed by a transport-level envelope cache file.
+    pub(crate) fn new_envelope(cache: TransportCache, path: PathBuf, chain_id: u64) -> Self {
+        Self { inner: Some(RpcCacheStoreInner::Envelope { cache, path, chain_id }) }
     }
 
     /// Construct a no-op store.
@@ -403,8 +470,6 @@ impl RpcCacheStore {
         Self { inner: None }
     }
 
-    // ─── Test-only accessors ─────────────────────────────────────────────
-    //
     // The three accessors below are gated on `cfg(any(test, feature =
     // "test-utils"))` because they leak internal state that the owner type
     // is otherwise designed to hide. Production code must not branch on any
@@ -418,182 +483,390 @@ impl RpcCacheStore {
         self.inner.is_none()
     }
 
-    /// Returns the underlying [`SharedCache`], or `None` for a no-op store.
-    ///
-    /// `SharedCache` is `Arc`-backed with interior mutability, so any caller
-    /// holding the returned `&SharedCache` can keep mutating the cache after
-    /// `persist()` — silently subverting the consume-on-persist contract.
-    /// That is exactly why this API is unavailable in production builds.
+    /// Returns the underlying [`SharedCache`] (raw path only), or `None`.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn cache(&self) -> Option<&SharedCache> {
-        self.inner.as_ref().map(|inner| &inner.cache)
+        match &self.inner {
+            Some(RpcCacheStoreInner::Raw { cache, .. }) => Some(cache),
+            _ => None,
+        }
     }
 
     /// Returns the resolved cache file path, or `None` for a no-op store.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn cache_path(&self) -> Option<&Path> {
-        self.inner.as_ref().map(|inner| inner.cache_path.as_path())
+        match &self.inner {
+            Some(
+                RpcCacheStoreInner::Raw { path, .. } | RpcCacheStoreInner::Envelope { path, .. },
+            ) => Some(path.as_path()),
+            None => None,
+        }
     }
 
-    /// Persist the RPC cache to its resolved path atomically. **Consumes the store**,
-    /// which type-level-enforces "persist once, then stop" — see `Why not Drop` on this
-    /// type for the correctness reason behind the consuming signature.
+    /// Persist the cache to disk atomically. **Consumes the store** to enforce
+    /// "persist once, then stop" — see `Why not Drop` on this type.
     ///
-    /// Safe to call on any `RpcCacheStore`, including a no-op one. Persistence is strictly
-    /// best-effort: I/O failures are warn-logged and swallowed so a save failure cannot
-    /// turn a successful run into a non-zero exit. Callers invoke this **without** `?` on
-    /// the clean-exit path.
-    pub fn persist(self) {
-        let Some(inner) = self.inner else { return };
-        match save_cache_atomic(&inner.cache, &inner.cache_path) {
-            Ok(()) => info!(path = %inner.cache_path.display(), "Persisted RPC cache"),
-            Err(err) => warn!(
-                path = %inner.cache_path.display(),
-                error = %err,
-                "Failed to save RPC cache (continuing)",
-            ),
+    /// `external_env` is written into the envelope for `--rpc.cache-file` stores;
+    /// ignored for raw (`--rpc.cache-dir`) and no-op stores.
+    ///
+    /// - **Raw**: best-effort — failures are warn-logged and swallowed.
+    /// - **Envelope**: hard error — the fixture is the primary output of capture mode.
+    /// - **No-op**: returns `Ok(())`.
+    pub fn persist(self, external_env: Option<&ExternalEnvSnapshot>) -> Result<()> {
+        let Some(inner) = self.inner else { return Ok(()) };
+        match inner {
+            RpcCacheStoreInner::Raw { cache, path } => {
+                match save_cache_atomic(&cache, &path) {
+                    Ok(()) => info!(path = %path.display(), "Persisted RPC cache"),
+                    Err(err) => warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "Failed to save RPC cache (continuing)",
+                    ),
+                }
+                Ok(())
+            }
+            RpcCacheStoreInner::Envelope { cache, path, chain_id } => {
+                let entry_count = cache.len();
+                save_envelope(&cache, chain_id, external_env, &path)?;
+                info!(
+                    path = %path.display(),
+                    entries = entry_count,
+                    "Persisted RPC cache envelope",
+                );
+                Ok(())
+            }
         }
     }
 }
 
-// Manual `Debug` because `SharedCache` does not implement `Debug` and the only
-// debugging detail worth showing is the cache file path anyway.
+// Manual `Debug` because `SharedCache` does not implement `Debug`.
 impl fmt::Debug for RpcCacheStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.inner {
-            Some(inner) => f
-                .debug_struct("RpcCacheStore")
-                .field("cache_path", &inner.cache_path)
-                .finish_non_exhaustive(),
+            Some(
+                RpcCacheStoreInner::Raw { path, .. } | RpcCacheStoreInner::Envelope { path, .. },
+            ) => f.debug_struct("RpcCacheStore").field("path", path).finish_non_exhaustive(),
             None => f.debug_struct("RpcCacheStore").field("inner", &Option::<()>::None).finish(),
         }
     }
 }
 
-/// Compute the temporary file path used by [`save_cache_atomic`] for `target`.
-///
-/// The result is in the same directory as `target` (so that the subsequent
-/// `rename` is atomic on POSIX), is never byte-equal to `target`, and carries
-/// a per-call uniqueness suffix (`pid`.`unix_nanos`.`atomic_counter`) so two
-/// calls — even back-to-back on coarse clocks, even in concurrent processes —
-/// never collide.
-///
-/// Returns an error if `target` has no file name component (e.g. a bare root).
-fn temp_path_for(target: &Path) -> std::io::Result<PathBuf> {
-    use std::{
-        ffi::OsString,
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+/// Atomically persist `cache` to `target` via a temp file + rename.
+fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> {
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    let tmp_path = tmp.path().to_path_buf();
 
-    let file_name = target.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "cache file path has no file name")
-    })?;
+    // alloy's save_cache takes a PathBuf, not a Write.
+    cache.save_cache(tmp_path).map_err(|e| std::io::Error::other(format!("{e}")))?;
 
-    let pid = std::process::id();
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-
-    // Strictly-increasing counter for per-call uniqueness when back-to-back
-    // calls land on the same nanosecond on coarse clocks.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let mut temp_name = OsString::from(".");
-    temp_name.push(file_name);
-    temp_name.push(format!(".mega-evme-tmp.{pid}.{nanos}.{counter}"));
-
-    Ok(target.with_file_name(temp_name))
+    // Atomic rename. persist() consumes the NamedTempFile without deleting it.
+    tmp.persist(target).map_err(|e| e.error)?;
+    Ok(())
 }
 
-/// Atomically persist `cache` to `target`.
-///
-/// Success: `target` holds a complete snapshot in the upstream serialization
-/// format. Failure: `target` is unmodified and the temp file is removed.
-/// Temp-cleanup errors are silently ignored because the caller is already on
-/// the best-effort path and the original error is the load-bearing one.
-fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> {
-    let tmp = temp_path_for(target)?;
+/// On-disk format for `--rpc.cache-file`. Contains a transport-level cache
+/// dump, chain ID, and optional external environment snapshot.
+#[derive(Debug, Serialize, Deserialize)]
+struct CacheFileEnvelope {
+    /// Schema version (currently always 1, reserved for future format changes).
+    version: u32,
+    /// Chain ID at the time of capture.
+    chain_id: u64,
+    /// Transport-level cache entries: `[{key, value}, ...]`.
+    cache: serde_json::Value,
+    /// External environment inputs not derivable from RPC (e.g., SALT bucket capacities).
+    #[serde(default)]
+    external_env: Option<ExternalEnvSnapshot>,
+}
 
-    // 1. Serialize into the temp file.
-    if let Err(e) = cache.save_cache(tmp.clone()) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(std::io::Error::other(format!("{e}")));
+/// Snapshot of mega-evm external environment inputs not derivable from RPC.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExternalEnvSnapshot {
+    /// SALT bucket capacity pairs `(bucket_id, capacity)`.
+    #[serde(default)]
+    pub bucket_capacities: Vec<(u32, u64)>,
+}
+
+/// Read a cache-file envelope from `path`.
+fn load_envelope(path: &Path) -> Result<CacheFileEnvelope> {
+    let content = fs::read_to_string(path).map_err(|e| {
+        EvmeError::RpcError(format!("Failed to read RPC cache file {}: {e}", path.display()))
+    })?;
+    let envelope: CacheFileEnvelope = serde_json::from_str(&content).map_err(|e| {
+        EvmeError::RpcError(format!("Failed to parse RPC cache file {}: {e}", path.display()))
+    })?;
+    Ok(envelope)
+}
+
+/// Serialize a [`TransportCache`] into an envelope and atomically write it to `path`.
+fn save_envelope(
+    cache: &TransportCache,
+    chain_id: u64,
+    external_env: Option<&ExternalEnvSnapshot>,
+    path: &Path,
+) -> Result<()> {
+    let envelope = CacheFileEnvelope {
+        version: 1,
+        chain_id,
+        cache: cache.to_value(),
+        external_env: external_env.cloned(),
+    };
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = fs::create_dir_all(dir) {
+        warn!(path = %dir.display(), error = %e, "Failed to create cache file directory");
     }
 
-    // 2. Atomic rename onto the target. Same parent dir = same filesystem, which is what makes
-    //    `rename` atomic on POSIX.
-    if let Err(e) = std::fs::rename(&tmp, target) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    let serialized = serde_json::to_string_pretty(&envelope).map_err(|e| {
+        EvmeError::RpcError(format!("Failed to serialize envelope for {}: {e}", path.display()))
+    })?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
+        EvmeError::RpcError(format!("Failed to create temp file in {}: {e}", dir.display()))
+    })?;
+    std::io::Write::write_all(&mut tmp, serialized.as_bytes())
+        .map_err(|e| EvmeError::RpcError(format!("Failed to write envelope: {e}")))?;
+    tmp.persist(path).map_err(|e| {
+        EvmeError::RpcError(format!("Failed to persist envelope to {}: {e}", path.display()))
+    })?;
 
     Ok(())
 }
 
+/// A single entry in the transport-level cache.
+#[derive(Debug, Serialize, Deserialize)]
+struct TransportCacheEntry {
+    key: B256,
+    value: String,
+}
+
+/// Transport-level RPC cache. Captures **all** JSON-RPC request/response
+/// pairs, keyed by `keccak256(method + params)`.
+///
+/// Unlike alloy's provider-level `CacheLayer` (which only caches a subset
+/// of methods it explicitly overrides), this captures every RPC call that
+/// passes through the transport — making it suitable for building complete
+/// offline replay fixtures.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TransportCache {
+    entries: Arc<RwLock<HashMap<B256, String>>>,
+}
+
+impl TransportCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, key: &B256) -> Option<String> {
+        self.entries.read().expect("cache lock poisoned").get(key).cloned()
+    }
+
+    fn put(&self, key: B256, value: String) {
+        self.entries.write().expect("cache lock poisoned").insert(key, value);
+    }
+
+    fn len(&self) -> usize {
+        self.entries.read().expect("cache lock poisoned").len()
+    }
+
+    /// Merge entries from a serialized cache value. Existing entries are NOT
+    /// overwritten — this preserves fresh responses (e.g. `eth_chainId`)
+    /// that were fetched before the merge.
+    fn merge(&self, value: &serde_json::Value) -> Result<()> {
+        let entries: Vec<TransportCacheEntry> =
+            serde_json::from_value(value.clone()).map_err(|e| {
+                EvmeError::RpcError(format!("Failed to parse transport cache entries: {e}"))
+            })?;
+        let mut map = self.entries.write().expect("cache lock poisoned");
+        for entry in entries {
+            map.entry(entry.key).or_insert(entry.value);
+        }
+        Ok(())
+    }
+
+    /// Serve a cached response if the key is present. Deserializes the cached
+    /// JSON, fixes up the response ID, and returns a ready future. Returns
+    /// `None` on cache miss.
+    fn try_serve(
+        &self,
+        key: &B256,
+        request_id: alloy_json_rpc::Id,
+    ) -> Option<TransportFut<'static>> {
+        let cached = self.get(key)?;
+        Some(Box::pin(async move {
+            let mut resp: alloy_json_rpc::Response =
+                serde_json::from_str(&cached).map_err(TransportErrorKind::custom)?;
+            resp.id = request_id;
+            Ok(ResponsePacket::Single(resp))
+        }))
+    }
+
+    /// Serialize all entries to a JSON value for the envelope.
+    /// Sorted by key for deterministic output (avoids noisy diffs on committed fixtures).
+    fn to_value(&self) -> serde_json::Value {
+        let mut entries: Vec<TransportCacheEntry> = self
+            .entries
+            .read()
+            .expect("cache lock poisoned")
+            .iter()
+            .map(|(k, v)| TransportCacheEntry { key: *k, value: v.clone() })
+            .collect();
+        entries.sort_by_key(|e| e.key);
+        serde_json::to_value(entries).expect("TransportCacheEntry is always serializable")
+    }
+
+    /// Deserialize from the envelope's `cache` field.
+    fn from_value(value: &serde_json::Value) -> Result<Self> {
+        let entries: Vec<TransportCacheEntry> =
+            serde_json::from_value(value.clone()).map_err(|e| {
+                EvmeError::RpcError(format!("Failed to parse transport cache entries: {e}"))
+            })?;
+        let cache = Self::new();
+        {
+            let mut map = cache.entries.write().expect("cache lock poisoned");
+            for entry in entries {
+                map.insert(entry.key, entry.value);
+            }
+        }
+        Ok(cache)
+    }
+}
+
+/// Compute a deterministic cache key from an RPC method and params.
+/// The request ID is deliberately excluded so the same logical request
+/// produces the same key across runs.
+fn transport_cache_key(method: &str, params: Option<&serde_json::value::RawValue>) -> B256 {
+    let params_str = params.map_or("null", |p| p.get());
+    keccak256(format!("{method}{params_str}"))
+}
+
+/// Transport wrapper that records all JSON-RPC responses into a
+/// [`TransportCache`]. Used in capture mode: cache hits are served locally,
+/// misses are forwarded to the inner transport and the response is cached.
+#[derive(Debug, Clone)]
+struct CachingTransport<T> {
+    inner: T,
+    cache: TransportCache,
+}
+
+impl<T> CachingTransport<T> {
+    fn new(inner: T, cache: TransportCache) -> Self {
+        Self { inner, cache }
+    }
+}
+
+impl<T> tower::Service<RequestPacket> for CachingTransport<T>
+where
+    T: tower::Service<
+            RequestPacket,
+            Response = ResponsePacket,
+            Error = TransportError,
+            Future = TransportFut<'static>,
+        > + Send
+        + Sync
+        + Clone
+        + 'static,
+{
+    type Response = ResponsePacket;
+    type Error = TransportError;
+    type Future = TransportFut<'static>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: RequestPacket) -> Self::Future {
+        if let RequestPacket::Single(ref r) = req {
+            let key = transport_cache_key(r.method(), r.params());
+
+            if let Some(fut) = self.cache.try_serve(&key, r.id().clone()) {
+                return fut;
+            }
+
+            // Cache miss: forward to inner, cache successful responses.
+            let cache = self.cache.clone();
+            let fut = self.inner.call(req);
+            return Box::pin(async move {
+                let response = fut.await?;
+                if let ResponsePacket::Single(ref resp) = response {
+                    if let Ok(serialized) = serde_json::to_string(resp) {
+                        cache.put(key, serialized);
+                    }
+                }
+                Ok(response)
+            });
+        }
+
+        // Batch: forward without caching. alloy's default provider never batches,
+        // so uncached batch responses won't cause offline replay failures in practice.
+        self.inner.call(req)
+    }
+}
+
+/// A transport that serves RPC responses from a [`TransportCache`] and
+/// returns `BackendGone` on cache miss. Used for offline replay — no
+/// network I/O, no retry layer.
+#[derive(Debug, Clone)]
+struct ReplayTransport {
+    cache_file_path: PathBuf,
+    cache: TransportCache,
+}
+
+impl ReplayTransport {
+    fn new(cache_file_path: PathBuf, cache: TransportCache) -> Self {
+        Self { cache_file_path, cache }
+    }
+}
+
+impl tower::Service<RequestPacket> for ReplayTransport {
+    type Response = ResponsePacket;
+    type Error = TransportError;
+    type Future = TransportFut<'static>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: RequestPacket) -> Self::Future {
+        if let RequestPacket::Single(ref r) = req {
+            let key = transport_cache_key(r.method(), r.params());
+
+            if let Some(fut) = self.cache.try_serve(&key, r.id().clone()) {
+                return fut;
+            }
+
+            // Cache miss: build a descriptive error so the user knows which RPC
+            // response is missing and how to refresh the fixture.
+            let path = self.cache_file_path.display().to_string();
+            let method = r.method().to_string();
+            let params = r.params().map_or_else(|| "null".to_string(), |p| p.get().to_string());
+            let msg = format!(
+                "cache miss in offline replay file '{path}': method={method}, params={params}\n\
+                 hint: re-capture with `mega-evme replay <tx> --rpc <URL> --rpc.cache-file {path}`"
+            );
+            // Custom error so the message propagates. Safe: retry layer is never
+            // installed on the replay path.
+            return Box::pin(async move { Err(TransportErrorKind::custom_str(&msg)) });
+        }
+
+        // Batch miss: BackendGone (not Custom, avoids retry).
+        Box::pin(async { Err(TransportErrorKind::backend_gone()) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    //! Inline tests for the **private** [`temp_path_for`] helper and
-    //! [`resolve_cache_path`]. Public-API tests for `RpcArgs::build_provider`
-    //! and `RpcCacheStore` live in `bin/mega-evme/tests/provider.rs`.
-
     use std::path::PathBuf;
 
     use super::*;
-
-    /// A target whose own filename happens to look like a mega-evme temp file
-    /// must still get a strictly different temp path.
-    #[test]
-    fn test_temp_path_self_collision_freedom() {
-        let target = PathBuf::from("/tmp/.foo.cache.mega-evme-tmp.1.2.3");
-        let tmp = temp_path_for(&target).expect("temp_path_for");
-        assert_ne!(tmp, target, "temp path must not equal target path");
-    }
-
-    /// Two distinct targets that share only their stem must produce distinct
-    /// temp paths.
-    #[test]
-    fn test_temp_path_stem_collision_freedom() {
-        let target_a = PathBuf::from("/tmp/foo.cache");
-        let target_b = PathBuf::from("/tmp/foo.json");
-        let tmp_a = temp_path_for(&target_a).expect("temp_path_for");
-        let tmp_b = temp_path_for(&target_b).expect("temp_path_for");
-        assert_ne!(tmp_a, tmp_b, "distinct targets must get distinct temp paths");
-        let name_a = tmp_a.file_name().unwrap().to_string_lossy().into_owned();
-        let name_b = tmp_b.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name_a.contains("foo.cache"), "temp name should embed full target file name");
-        assert!(name_b.contains("foo.json"), "temp name should embed full target file name");
-    }
-
-    /// Two consecutive calls with the same target must produce distinct temp
-    /// paths (per-call uniqueness via the atomic counter).
-    #[test]
-    fn test_temp_path_per_call_uniqueness() {
-        let target = PathBuf::from("/tmp/foo.cache");
-        let tmp1 = temp_path_for(&target).expect("temp_path_for #1");
-        let tmp2 = temp_path_for(&target).expect("temp_path_for #2");
-        assert_ne!(tmp1, tmp2, "consecutive calls must produce distinct temp paths");
-    }
-
-    /// The temp file must live in the target's parent dir — required for
-    /// `rename` to be atomic on POSIX.
-    #[test]
-    fn test_temp_path_same_directory() {
-        let target = PathBuf::from("/some/nested/dir/cache.json");
-        let tmp = temp_path_for(&target).expect("temp_path_for");
-        assert_eq!(
-            tmp.parent(),
-            target.parent(),
-            "temp file must share the target's parent directory"
-        );
-    }
-
-    /// A target with no file name component (e.g. a bare root) must error.
-    #[test]
-    fn test_temp_path_no_file_name_errors() {
-        let target = PathBuf::from("/");
-        let err = temp_path_for(&target).expect_err("root path has no file name");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    }
 
     /// Explicit `--rpc.cache-dir` is used verbatim; the file is `<chain_id>.json` inside it.
     #[test]
@@ -615,5 +888,130 @@ mod tests {
         let path = resolve_cache_path(None, 11_155_420).expect("resolve");
         let expected = expected_root.join("mega-evme").join("rpc").join("rpc-cache-11155420.json");
         assert_eq!(path, expected);
+    }
+
+    // ─── Envelope I/O tests ─────────────────────────────────────────────
+
+    /// Save a cache as an envelope, load it back, and verify the round-trip
+    /// preserves version, `chain_id`, cache payload, and `external_env`.
+    #[test]
+    fn test_envelope_roundtrip_preserves_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test-cache.json");
+
+        let cache = TransportCache::new();
+        cache.put(
+            keccak256("eth_blockNumber"),
+            r#"{"id":0,"jsonrpc":"2.0","result":"0x1"}"#.to_string(),
+        );
+
+        let ext = ExternalEnvSnapshot { bucket_capacities: vec![(1, 100), (2, 200)] };
+        save_envelope(&cache, 4326, Some(&ext), &path).expect("save_envelope");
+
+        let envelope = load_envelope(&path).expect("load_envelope");
+        assert_eq!(envelope.version, 1);
+        assert_eq!(envelope.chain_id, 4326);
+        assert!(envelope.cache.is_array(), "cache should be a JSON array");
+
+        // Verify the cache entry survived the round-trip.
+        let loaded = TransportCache::from_value(&envelope.cache).expect("from_value");
+        assert!(loaded.get(&keccak256("eth_blockNumber")).is_some());
+
+        let env = envelope.external_env.expect("external_env should round-trip");
+        assert_eq!(env.bucket_capacities, vec![(1, 100), (2, 200)]);
+    }
+
+    /// `load_envelope` must reject envelopes missing required fields.
+    #[test]
+    fn test_envelope_rejects_missing_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Missing chain_id.
+        let p1 = dir.path().join("no-chain.json");
+        fs::write(&p1, r#"{"version":1,"cache":{}}"#).unwrap();
+        let err = load_envelope(&p1).expect_err("missing chain_id");
+        let msg = format!("{err}");
+        assert!(msg.contains("parse"), "error should mention parse: {msg}");
+
+        // Missing cache.
+        let p2 = dir.path().join("no-cache.json");
+        fs::write(&p2, r#"{"version":1,"chain_id":1}"#).unwrap();
+        let err = load_envelope(&p2).expect_err("missing cache");
+        let msg = format!("{err}");
+        assert!(msg.contains("parse"), "error should mention parse: {msg}");
+
+        // Missing version.
+        let p3 = dir.path().join("no-version.json");
+        fs::write(&p3, r#"{"chain_id":1,"cache":{}}"#).unwrap();
+        let err = load_envelope(&p3).expect_err("missing version");
+        let msg = format!("{err}");
+        assert!(msg.contains("parse"), "error should mention parse: {msg}");
+    }
+
+    // ─── Flag parsing tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_cache_file_and_rpc_both_set() {
+        let args = RpcArgs::parse_from([
+            "mega-evme",
+            "--rpc",
+            "http://localhost:8545",
+            "--rpc.cache-file",
+            "foo.json",
+        ]);
+        assert!(args.rpc_url.is_some());
+        assert!(args.cache_file.is_some());
+    }
+
+    #[test]
+    fn test_cache_file_only() {
+        let args = RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", "foo.json"]);
+        assert!(args.rpc_url.is_none());
+        assert!(args.cache_file.is_some());
+    }
+
+    #[test]
+    fn test_rpc_only() {
+        let args = RpcArgs::parse_from(["mega-evme", "--rpc", "http://localhost:8545"]);
+        assert!(args.rpc_url.is_some());
+        assert!(args.cache_file.is_none());
+    }
+
+    #[test]
+    fn test_no_rpc_no_cache_file() {
+        let args = RpcArgs::parse_from(["mega-evme"]);
+        assert!(args.rpc_url.is_none());
+        assert!(args.cache_file.is_none());
+    }
+
+    // ─── ReplayTransport tests ──────────────────────────────────────────
+
+    /// The replay transport is always ready.
+    /// Single-request cache misses return a descriptive Custom error (safe because
+    /// the retry layer is never installed on the replay path).
+    /// Batch misses return `BackendGone`.
+    #[tokio::test]
+    async fn test_replay_transport_cache_miss() {
+        use tower::Service;
+
+        let mut transport =
+            ReplayTransport::new(PathBuf::from("/tmp/test.cache.json"), TransportCache::new());
+
+        // poll_ready should be Ready(Ok(())).
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        assert!(transport.poll_ready(&mut cx).is_ready());
+
+        // Single request: cache miss should include method and fixture path.
+        let req =
+            alloy_json_rpc::Request::new("eth_blockNumber", alloy_json_rpc::Id::Number(1), ())
+                .serialize()
+                .expect("serialize request");
+        let result = transport.call(RequestPacket::Single(req)).await;
+        assert!(result.is_err(), "cache miss must error");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("cache miss"), "error should say 'cache miss': {msg}");
+        assert!(msg.contains("eth_blockNumber"), "error should include method: {msg}");
+        assert!(msg.contains("test.cache.json"), "error should include fixture path: {msg}");
     }
 }

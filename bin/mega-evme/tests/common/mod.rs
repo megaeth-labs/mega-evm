@@ -10,7 +10,7 @@
 
 use clap::Parser;
 use mega_evme::common::RpcArgs;
-use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
 /// A mock JSON-RPC server tuned for mega-evme integration tests.
 ///
@@ -34,7 +34,7 @@ impl MockRpcServer {
     /// Mount a mock that responds with `status` for the next `n` POSTs at
     /// `priority`. Higher-priority mocks consume requests first.
     pub(crate) async fn respond_status_n_times(&self, status: u16, n: u64, priority: u8) {
-        Mock::given(method("POST"))
+        Mock::given(matchers::method("POST"))
             .respond_with(ResponseTemplate::new(status))
             .up_to_n_times(n)
             .with_priority(priority)
@@ -44,7 +44,7 @@ impl MockRpcServer {
 
     /// Mount an unbounded mock that always responds with `status`.
     pub(crate) async fn respond_status_always(&self, status: u16) {
-        Mock::given(method("POST"))
+        Mock::given(matchers::method("POST"))
             .respond_with(ResponseTemplate::new(status))
             .mount(&self.server)
             .await;
@@ -59,7 +59,24 @@ impl MockRpcServer {
             "id": 0,
             "result": hex_result,
         });
-        Mock::given(method("POST"))
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount a mock that returns `eth_chainId` with the given chain id.
+    pub(crate) async fn respond_eth_chain_id(&self, chain_id: u64, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": format!("0x{:x}", chain_id),
+        });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(serde_json::json!({
+                "method": "eth_chainId"
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .with_priority(priority)
             .mount(&self.server)
@@ -98,14 +115,13 @@ pub(crate) fn test_rpc_args(url: &str, max_retries: Option<u32>) -> RpcArgs {
 
 /// Build [`RpcArgs`] for a test that exercises the on-disk cache path.
 ///
-/// Sets `--rpc.cache-size 256`, an explicit `--rpc.cache-dir`, and pins
-/// `--rpc.chain-id` so `build_provider` skips the `eth_chainId` RPC call
-/// entirely — tests that care about the chain-id resolution path should
-/// build [`RpcArgs`] by hand instead of going through this helper.
+/// Sets `--rpc.cache-size 256` and an explicit `--rpc.cache-dir`. The caller
+/// must mount a mock `eth_chainId` response on the server so that
+/// `build_provider`'s `resolve_chain_id` call succeeds — use
+/// [`MockRpcServer::respond_eth_chain_id`] for this.
 pub(crate) fn test_rpc_args_cached(
     url: &str,
     cache_dir: &std::path::Path,
-    chain_id: u64,
     max_retries: Option<u32>,
 ) -> RpcArgs {
     let mut argv: Vec<String> = vec![
@@ -116,8 +132,6 @@ pub(crate) fn test_rpc_args_cached(
         "256".into(),
         "--rpc.cache-dir".into(),
         cache_dir.to_str().expect("cache_dir utf-8").to_string(),
-        "--rpc.chain-id".into(),
-        chain_id.to_string(),
         "--rpc.backoff-ms".into(),
         "1".into(),
         "--rpc.rate-limit".into(),
