@@ -32,7 +32,7 @@ impl MockRpcServer {
     }
 
     /// Mount a mock that responds with `status` for the next `n` POSTs at
-    /// `priority`. Higher-priority mocks consume requests first.
+    /// `priority` (lower number = higher priority, checked first).
     pub(crate) async fn respond_status_n_times(&self, status: u16, n: u64, priority: u8) {
         Mock::given(matchers::method("POST"))
             .respond_with(ResponseTemplate::new(status))
@@ -52,7 +52,8 @@ impl MockRpcServer {
 
     /// Mount an unbounded mock that always returns a successful JSON-RPC
     /// response with the given hex `result`. Use a higher `priority` number
-    /// than any companion failure mocks so this serves as the fallthrough.
+    /// (= lower precedence) than companion failure mocks so this serves as
+    /// the fallthrough.
     pub(crate) async fn respond_jsonrpc_result(&self, hex_result: &str, priority: u8) {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -91,8 +92,9 @@ impl MockRpcServer {
 
 /// Build [`RpcArgs`] for a test pointed at `url` with the on-disk cache disabled.
 ///
-/// Defaults: `--rpc.cache-size 0` (no cache layer at all, so no `eth_chainId`
-/// fetch is needed), 1ms backoff, production rate limit. Pass `Some(n)` to
+/// Defaults: `--rpc.cache-size 0` (no cache layer, no disk persistence),
+/// 1ms backoff, production rate limit. `build_provider` still calls
+/// `eth_chainId`, so the caller must mount a mock for it. Pass `Some(n)` to
 /// override `--rpc.max-retries`; `None` keeps the production default.
 pub(crate) fn test_rpc_args(url: &str, max_retries: Option<u32>) -> RpcArgs {
     let mut argv: Vec<String> = vec![

@@ -615,9 +615,9 @@ fn save_envelope(
     };
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    if let Err(e) = fs::create_dir_all(dir) {
-        warn!(path = %dir.display(), error = %e, "Failed to create cache file directory");
-    }
+    fs::create_dir_all(dir).map_err(|e| {
+        EvmeError::RpcError(format!("Failed to create cache file directory {}: {e}", dir.display()))
+    })?;
 
     let serialized = serde_json::to_string_pretty(&envelope).map_err(|e| {
         EvmeError::RpcError(format!("Failed to serialize envelope for {}: {e}", path.display()))
@@ -739,7 +739,7 @@ impl TransportCache {
 /// produces the same key across runs.
 fn transport_cache_key(method: &str, params: Option<&serde_json::value::RawValue>) -> B256 {
     let params_str = params.map_or("null", |p| p.get());
-    keccak256(format!("{method}{params_str}"))
+    keccak256(format!("{method}\x00{params_str}"))
 }
 
 /// Transport wrapper that records all JSON-RPC responses into a

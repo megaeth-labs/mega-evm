@@ -112,29 +112,28 @@ impl Cmd {
 
     /// Select the right provider based on `--rpc` and `--rpc.cache-file` flags.
     async fn resolve_provider(&self) -> Result<ProviderContext> {
-        let BuildProviderOutput { provider, cache_store, chain_id, external_env } =
-            match (&self.rpc_args.rpc_url, &self.rpc_args.cache_file) {
-                (Some(_), Some(_)) => self.rpc_args.build_capture_provider().await?,
-                (None, Some(_)) => {
-                    if !self.ext_args.bucket_capacity.is_empty() {
-                        return Err(ReplayError::Other(
-                            "'--bucket-capacity' cannot be used in offline replay mode \
-                             (bucket capacities come from the fixture envelope)"
-                                .to_string(),
-                        ));
-                    }
-                    self.rpc_args.build_replay_provider().await?
-                }
-                (Some(_), None) => self.rpc_args.build_provider().await?,
-                (None, None) => {
+        let (output, is_replay_mode) = match (&self.rpc_args.rpc_url, &self.rpc_args.cache_file) {
+            (Some(_), Some(_)) => (self.rpc_args.build_capture_provider().await?, false),
+            (None, Some(_)) => {
+                if !self.ext_args.bucket_capacity.is_empty() {
                     return Err(ReplayError::Other(
+                        "'--bucket-capacity' cannot be used in offline replay mode \
+                             (bucket capacities come from the fixture envelope)"
+                            .to_string(),
+                    ));
+                }
+                (self.rpc_args.build_replay_provider().await?, true)
+            }
+            (Some(_), None) => (self.rpc_args.build_provider().await?, false),
+            (None, None) => {
+                return Err(ReplayError::Other(
                     "'mega-evme replay' requires either '--rpc <URL>' or '--rpc.cache-file <PATH>'"
                         .to_string(),
                 ));
-                }
-            };
+            }
+        };
 
-        let is_replay_mode = self.rpc_args.rpc_url.is_none() && self.rpc_args.cache_file.is_some();
+        let BuildProviderOutput { provider, cache_store, chain_id, external_env } = output;
         Ok(ProviderContext { provider, cache_store, external_env, chain_id, is_replay_mode })
     }
 

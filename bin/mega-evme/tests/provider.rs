@@ -454,8 +454,14 @@ async fn test_retry_layer_max_retries_zero_fails_fast() {
 
     let BuildProviderOutput { provider, .. } =
         test_rpc_args(&server.uri(), Some(0)).build_provider().await.expect("build_provider");
+    let baseline = server.received_request_count().await;
     let result = provider.get_block_number().await;
     assert!(result.is_err(), "max-retries=0 must surface the 503, not retry it");
+    assert_eq!(
+        server.received_request_count().await - baseline,
+        1,
+        "max-retries=0 → exactly 1 attempt, no retries",
+    );
 }
 
 /// Pins the runtime behavior of the production default `--rpc.max-retries`:
@@ -470,8 +476,14 @@ async fn test_retry_layer_uses_default_max_retries() {
     assert_eq!(args.max_retries, 5, "guard against the default drifting underneath this test");
 
     let BuildProviderOutput { provider, .. } = args.build_provider().await.expect("build_provider");
+    let baseline = server.received_request_count().await;
     let result = provider.get_block_number().await;
     assert!(result.is_err(), "all attempts return 503");
+    assert_eq!(
+        server.received_request_count().await - baseline,
+        6,
+        "default max-retries=5 → 1 initial + 5 retries",
+    );
 }
 
 /// `max-retries=2` against a permanent 503: must give up after exactly 3 attempts.
@@ -483,8 +495,14 @@ async fn test_retry_layer_max_retries_exhausted() {
 
     let BuildProviderOutput { provider, .. } =
         test_rpc_args(&server.uri(), Some(2)).build_provider().await.expect("build_provider");
+    let baseline = server.received_request_count().await;
     let result = provider.get_block_number().await;
     assert!(result.is_err(), "all attempts return 503");
+    assert_eq!(
+        server.received_request_count().await - baseline,
+        3,
+        "max-retries=2 → 1 initial + 2 retries",
+    );
 }
 
 /// HTTP 500 is not retryable; even a generous retry budget must fail immediately.
@@ -496,8 +514,14 @@ async fn test_retry_layer_does_not_retry_non_retryable_status() {
 
     let BuildProviderOutput { provider, .. } =
         test_rpc_args(&server.uri(), Some(5)).build_provider().await.expect("build_provider");
+    let baseline = server.received_request_count().await;
     let result = provider.get_block_number().await;
     assert!(result.is_err(), "500 must surface as an error");
+    assert_eq!(
+        server.received_request_count().await - baseline,
+        1,
+        "500 is not retryable → exactly 1 attempt",
+    );
 }
 
 /// Transport-level errors (connection refused) are retryable. An unreachable
@@ -526,16 +550,12 @@ async fn test_retry_layer_retries_on_unreachable_endpoint() {
 
 // ─── Contract regression guards (cache-file modes) ──────────────────────────
 
-/// Protects: mode selection ignores `RPC_URL` shell environment.
-/// Even with `RPC_URL` set, parsing without `--rpc` must yield `rpc_url = None`.
+/// The `env = "RPC_URL"` attribute was removed from `--rpc`, so parsing
+/// without `--rpc` must yield `rpc_url = None` regardless of environment.
 #[test]
 fn test_rpc_url_env_does_not_enable_capture_mode() {
-    // SAFETY: test-only; no concurrent threads reading RPC_URL.
-    unsafe { std::env::set_var("RPC_URL", "http://should.not.be.used") };
     let args = RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", "foo.json"]);
-    assert!(args.rpc_url.is_none(), "RPC_URL env must NOT populate --rpc; got {:?}", args.rpc_url,);
-    // SAFETY: test-only cleanup.
-    unsafe { std::env::remove_var("RPC_URL") };
+    assert!(args.rpc_url.is_none(), "parsing without --rpc must yield rpc_url = None");
 }
 
 /// Protects: replay path bypasses retry layer. Cache miss must return in <100ms.

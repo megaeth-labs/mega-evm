@@ -1,26 +1,28 @@
 {
-  "description": "Smoke test: offline replay from committed cache-file fixture (MegaETH mainnet deposit tx)",
+  "description": "Smoke test: offline replay from committed cache-file fixture (MegaETH deposit tx)",
   "args": [
-    "replay", "0x885198b306786136f093fcf5a0d090fb3db15c6053eee4e516e12f874961130d",
-    "--rpc.cache-file", "{fixtures}/replay_offline_smoke.cache.json"
+    "replay",
+    "0xf0ac58ac093e718e12fb9d00bb79c28c335343f79d8cb4ab804a5e1b6c5c4adf",
+    "--rpc.cache-file",
+    "{fixtures}/replay_offline_smoke.cache.json"
   ],
   "expected": {
     "success": true,
-    "gas_used": 101592,
+    "gas_used": 109332,
     "logs_count": 0,
     "receipt": {
       "type": "0x7e",
       "status": "0x1",
-      "cumulativeGasUsed": "0x18cd8",
+      "cumulativeGasUsed": "0x1ab14",
       "logs": [],
-      "depositNonce": "0xc66ccf",
+      "depositNonce": "0xfaa6f6",
       "depositReceiptVersion": "0x1",
       "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-      "transactionHash": "0x885198b306786136f093fcf5a0d090fb3db15c6053eee4e516e12f874961130d",
+      "transactionHash": "0xf0ac58ac093e718e12fb9d00bb79c28c335343f79d8cb4ab804a5e1b6c5c4adf",
       "transactionIndex": "0x0",
-      "blockHash": "0x5cbd9a7366256fcc864560fc4a8955643623bc4567d50f6a19afa0a966fa500f",
-      "blockNumber": "0xc66cd0",
-      "gasUsed": "0x18cd8",
+      "blockHash": "0x96f5cff1b76c8bf415d4d0e5b4a91c92210d2c4c4faa1fed5167bb8cc32f2efc",
+      "blockNumber": "0xfaa6f7",
+      "gasUsed": "0x1ab14",
       "effectiveGasPrice": "0x0",
       "from": "0xdeaddeaddeaddeaddeaddeaddeaddeaddead0001",
       "to": "0x4200000000000000000000000000000000000015",
