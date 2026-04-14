@@ -91,16 +91,16 @@ fn test_rpc_args_default_values() {
 
 // ─── build_provider shape variants ───────────────────────────────────────────
 
-/// `--rpc.cache-size 0` takes the fast path: no cache layer, no chain-id
-/// fetch, noop store. We don't even need to mock `eth_chainId`.
+/// `--rpc.cache-size 0`: noop store, but `chain_id` is still resolved.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_without_cache() {
     let server = MockRpcServer::start().await;
     server.respond_eth_chain_id(4326, 1).await;
     let args = RpcArgs::parse_from(["mega-evme", "--rpc", &server.uri(), "--rpc.cache-size", "0"]);
-    let BuildProviderOutput { cache_store, .. } =
+    let BuildProviderOutput { cache_store, chain_id, .. } =
         args.build_provider().await.expect("build_provider");
     assert!(cache_store.is_noop(), "cache_size == 0 must produce a no-op store");
+    assert_eq!(chain_id, 4326, "chain_id must be resolved even when cache is disabled");
     cache_store.persist(None).expect("persist");
 }
 
@@ -189,18 +189,6 @@ async fn test_build_provider_fetches_chain_id_from_rpc() {
     );
 }
 
-/// Fast path (`--rpc.cache-size 0`): chain id is still resolved via
-/// `eth_chainId` even though no disk cache is used.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_resolves_chain_id_even_when_cache_disabled() {
-    let server = MockRpcServer::start().await;
-    server.respond_eth_chain_id(4326, 1).await;
-    let args = test_rpc_args(&server.uri(), None);
-
-    let BuildProviderOutput { chain_id, .. } = args.build_provider().await.expect("build_provider");
-    assert_eq!(chain_id, 4326);
-}
-
 /// The `eth_chainId` call goes through the retry layer. A permanent 500
 /// (non-retryable) must surface as an `EvmeError::RpcError` hard error.
 #[tokio::test(flavor = "multi_thread")]
@@ -271,34 +259,26 @@ async fn test_atomic_save_round_trip() {
     assert_eq!(got, value);
 }
 
+/// Missing or corrupt cache file: `build_provider` starts with an empty cache
+/// rather than failing.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_load_from_missing_file() {
+async fn test_build_provider_tolerates_missing_or_corrupt_cache_file() {
     let server = MockRpcServer::start().await;
     server.respond_eth_chain_id(42, 1).await;
 
     let dir = tempdir().expect("tempdir");
     let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
 
+    // Missing file — load skipped.
     let BuildProviderOutput { cache_store, .. } =
-        args.build_provider().await.expect("build_provider");
-    // File doesn't exist — store is real (load was skipped) and cache is empty.
+        args.build_provider().await.expect("missing file");
     assert!(!cache_store.is_noop());
     assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
-}
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_load_from_corrupt_file() {
-    let server = MockRpcServer::start().await;
-    server.respond_eth_chain_id(42, 1).await;
-
-    let dir = tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("rpc-cache-42.json"), b"not json").expect("write corrupt file");
-
-    let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
-
+    // Corrupt file — load fails, cache starts empty.
+    std::fs::write(dir.path().join("rpc-cache-42.json"), b"not json").expect("write corrupt");
     let BuildProviderOutput { cache_store, .. } =
-        args.build_provider().await.expect("build_provider");
-    // Corrupt content is discarded; cache is empty but usable.
+        args.build_provider().await.expect("corrupt file");
     assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
 }
 
@@ -707,66 +687,25 @@ async fn test_capture_replay_round_trip() {
 
 // ─── --rpc.cache-file clap mutex tests ───────────────────────────────────────
 
+/// `--rpc.cache-file` is mutually exclusive with all other cache flags.
 #[test]
-fn test_cache_file_mutex_with_cache_dir() {
-    let err = RpcArgs::try_parse_from([
-        "mega-evme",
-        "--rpc.cache-file",
-        "/tmp/fixture.json",
-        "--rpc.cache-dir",
-        "/tmp/cache",
-    ])
-    .expect_err("--rpc.cache-file conflicts with --rpc.cache-dir");
-    assert!(
-        err.to_string().contains("cannot be used with"),
-        "error must explain the conflict, got: {err}",
-    );
-}
-
-#[test]
-fn test_cache_file_mutex_with_clear_cache() {
-    let err = RpcArgs::try_parse_from([
-        "mega-evme",
-        "--rpc.cache-file",
-        "/tmp/fixture.json",
-        "--rpc.clear-cache",
-    ])
-    .expect_err("--rpc.cache-file conflicts with --rpc.clear-cache");
-    assert!(
-        err.to_string().contains("cannot be used with"),
-        "error must explain the conflict, got: {err}",
-    );
-}
-
-#[test]
-fn test_cache_file_mutex_with_no_cache_file() {
-    let err = RpcArgs::try_parse_from([
-        "mega-evme",
-        "--rpc.cache-file",
-        "/tmp/fixture.json",
-        "--rpc.no-cache-file",
-    ])
-    .expect_err("--rpc.cache-file conflicts with --rpc.no-cache-file");
-    assert!(
-        err.to_string().contains("cannot be used with"),
-        "error must explain the conflict, got: {err}",
-    );
-}
-
-#[test]
-fn test_cache_file_mutex_with_cache_size() {
-    let err = RpcArgs::try_parse_from([
-        "mega-evme",
-        "--rpc.cache-file",
-        "/tmp/fixture.json",
-        "--rpc.cache-size",
-        "256",
-    ])
-    .expect_err("--rpc.cache-file conflicts with --rpc.cache-size");
-    assert!(
-        err.to_string().contains("cannot be used with"),
-        "error must explain the conflict, got: {err}",
-    );
+fn test_cache_file_mutex_with_other_cache_flags() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["--rpc.cache-dir", "/tmp/cache"], "--rpc.cache-dir"),
+        (&["--rpc.clear-cache"], "--rpc.clear-cache"),
+        (&["--rpc.no-cache-file"], "--rpc.no-cache-file"),
+        (&["--rpc.cache-size", "256"], "--rpc.cache-size"),
+    ];
+    for (extra_flags, label) in cases {
+        let mut argv = vec!["mega-evme", "--rpc.cache-file", "/tmp/fixture.json"];
+        argv.extend_from_slice(extra_flags);
+        let err = RpcArgs::try_parse_from(argv)
+            .expect_err(&format!("--rpc.cache-file should conflict with {label}"));
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "{label}: error must explain the conflict, got: {err}",
+        );
+    }
 }
 
 // ─── Caller-side validation tests ────────────────────────────────────────────
@@ -778,14 +717,4 @@ async fn test_build_provider_requires_rpc() {
     let err = args.build_provider().await.expect_err("should fail without --rpc");
     let msg = format!("{err}");
     assert!(msg.contains("No RPC URL"), "got: {msg}");
-}
-
-/// `build_replay_provider` requires `--rpc.cache-file` to be set.
-#[test]
-fn test_replay_mode_requires_cache_file_flag() {
-    let args = RpcArgs::parse_from(["mega-evme"]);
-    assert!(
-        args.cache_file.is_none(),
-        "without --rpc.cache-file, callers should not call build_replay_provider"
-    );
 }

@@ -566,6 +566,9 @@ fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> 
     Ok(())
 }
 
+/// Envelope version accepted by this build.
+const ENVELOPE_VERSION: u32 = 1;
+
 /// On-disk format for `--rpc.cache-file`. Contains a transport-level cache
 /// dump, chain ID, and optional external environment snapshot.
 #[derive(Debug, Serialize, Deserialize)]
@@ -597,6 +600,13 @@ fn load_envelope(path: &Path) -> Result<CacheFileEnvelope> {
     let envelope: CacheFileEnvelope = serde_json::from_str(&content).map_err(|e| {
         EvmeError::RpcError(format!("Failed to parse RPC cache file {}: {e}", path.display()))
     })?;
+    if envelope.version != ENVELOPE_VERSION {
+        return Err(EvmeError::RpcError(format!(
+            "Unsupported cache file version {} in '{}'; expected {ENVELOPE_VERSION}",
+            envelope.version,
+            path.display(),
+        )));
+    }
     Ok(envelope)
 }
 
@@ -608,7 +618,7 @@ fn save_envelope(
     path: &Path,
 ) -> Result<()> {
     let envelope = CacheFileEnvelope {
-        version: 1,
+        version: ENVELOPE_VERSION,
         chain_id,
         cache: cache.to_value(),
         external_env: external_env.cloned(),
@@ -921,6 +931,18 @@ mod tests {
         assert_eq!(env.bucket_capacities, vec![(1, 100), (2, 200)]);
     }
 
+    /// An envelope with an unrecognized version must be rejected so that a
+    /// future format change doesn't silently produce wrong results.
+    #[test]
+    fn test_envelope_rejects_unknown_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("v2.json");
+        fs::write(&p, r#"{"version":2,"chain_id":1,"cache":[]}"#).unwrap();
+        let err = load_envelope(&p).expect_err("version 2 should be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("Unsupported"), "error should mention Unsupported: {msg}");
+    }
+
     /// `load_envelope` must reject envelopes missing required fields.
     #[test]
     fn test_envelope_rejects_missing_fields() {
@@ -946,42 +968,6 @@ mod tests {
         let err = load_envelope(&p3).expect_err("missing version");
         let msg = format!("{err}");
         assert!(msg.contains("parse"), "error should mention parse: {msg}");
-    }
-
-    // ─── Flag parsing tests ──────────────────────────────────────────────
-
-    #[test]
-    fn test_cache_file_and_rpc_both_set() {
-        let args = RpcArgs::parse_from([
-            "mega-evme",
-            "--rpc",
-            "http://localhost:8545",
-            "--rpc.cache-file",
-            "foo.json",
-        ]);
-        assert!(args.rpc_url.is_some());
-        assert!(args.cache_file.is_some());
-    }
-
-    #[test]
-    fn test_cache_file_only() {
-        let args = RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", "foo.json"]);
-        assert!(args.rpc_url.is_none());
-        assert!(args.cache_file.is_some());
-    }
-
-    #[test]
-    fn test_rpc_only() {
-        let args = RpcArgs::parse_from(["mega-evme", "--rpc", "http://localhost:8545"]);
-        assert!(args.rpc_url.is_some());
-        assert!(args.cache_file.is_none());
-    }
-
-    #[test]
-    fn test_no_rpc_no_cache_file() {
-        let args = RpcArgs::parse_from(["mega-evme"]);
-        assert!(args.rpc_url.is_none());
-        assert!(args.cache_file.is_none());
     }
 
     // ─── ReplayTransport tests ──────────────────────────────────────────
