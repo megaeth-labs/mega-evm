@@ -219,25 +219,25 @@ See [SELFDESTRUCT — State Growth Refund](../evm/selfdestruct.md#state-growth-r
 
 **Contract authors writing nested call patterns** should be aware that each inner call frame now receives at most 98% of the parent's remaining budget for compute gas, data size, KV updates, and state growth.
 These budgets are system-enforced and cannot be overridden by the calling contract — only total gas (via the gas parameter in CALL-like opcodes) remains under direct contract control.
-If your contract makes deeply nested calls, the innermost call frames will have progressively smaller resource budgets.
-Design your call depth and resource usage accordingly.
+Contracts that make deeply nested calls will see progressively smaller resource budgets in the innermost call frames.
+Call depth and resource usage should be planned accordingly.
 
 **Contracts that catch reverts from inner calls** can now decode `MegaLimitExceeded(uint8 kind, uint64 limit)` from the revert data to determine whether a child call failed due to a call-frame-local resource limit.
-You can use this to implement fallback logic or graceful degradation.
+This can be used to implement fallback logic or graceful degradation.
 
 **Contracts that want to avoid gas detention** can use `MegaAccessControl.disableVolatileDataAccess()` at the start of a call to guarantee that no descendant will trigger detention.
-Any accidental volatile access in the subtree will revert immediately rather than silently tightening your gas budget.
+Any accidental volatile access in the subtree will revert immediately rather than silently tightening the gas budget.
 This is useful for library contracts or aggregators that call untrusted code.
 
 **Contracts that need to know their effective compute budget** can call `MegaLimitControl.remainingComputeGas()` to get a runtime snapshot.
-This accounts for both call-frame-level budgets and detention, giving you a single reliable number for gas-aware logic.
+This accounts for both call-frame-level budgets and detention, providing a single reliable number for gas-aware logic.
 
 **Contracts receiving ETH via `transfer()` or `send()`** can now safely emit events in their `receive()` or `fallback()` functions.
 The storage gas stipend provides enough gas for LOG operations with the 10× storage gas multiplier.
 No changes are needed to existing contracts — this fix is transparent to both senders and receivers.
 
 **Deployers using keyless deployment** will see more accurate gas costs in Rex4 because the sandbox now uses the same dynamic pricing as the parent transaction.
-If you previously needed extra gas headroom for keyless deploys, you may be able to reduce your `gasLimitOverride`.
+Contracts that previously needed extra gas headroom for keyless deploys may be able to reduce their `gasLimitOverride`.
 
 ## Safety and Compatibility
 

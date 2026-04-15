@@ -61,15 +61,15 @@ Finally, the keyless deploy sandbox overhead (100K gas) is now properly tracked 
 ## Developer Impact
 
 **Contracts that read oracle data can now perform more computation.**
-The oracle access cap increased from 1M to 20M, giving you 20× more post-access compute budget.
-If you previously hit `VolatileDataAccessOutOfGas` after oracle reads, this upgrade should resolve the issue.
+The oracle access cap increased from 1M to 20M, providing 20× more post-access compute budget.
+Contracts that previously hit `VolatileDataAccessOutOfGas` after oracle reads should no longer encounter this issue.
 
 **Simply calling the oracle no longer triggers detention.**
 Only actual SLOAD reads from oracle storage activate the cap.
-If your contract calls the oracle contract for hint operations or other non-storage-reading functionality, you will no longer be penalized.
+Contracts that call the oracle contract for hint operations or other non-storage-reading functionality are no longer penalized.
 
 **The gas detention cap is still absolute in Rex3.**
-If your transaction has consumed more than 20M compute gas before an oracle SLOAD, execution will halt immediately.
+Transactions that have consumed more than 20M compute gas before an oracle SLOAD will halt immediately.
 Rex4 changes this to a relative cap — see the [Rex4 upgrade page](rex4.md).
 
 ## Safety and Compatibility

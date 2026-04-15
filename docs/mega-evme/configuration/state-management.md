@@ -201,6 +201,61 @@ All numeric values use Ethereum quantity encoding:
 - `balance` is in wei.
 - Storage keys and values are 32-byte hex strings (zero-padded to 64 hex characters).
 
+## RPC Cache and Retry
+
+When using fork mode, `mega-evme` caches RPC responses to avoid redundant network calls and supports configurable retry behavior for resilience against transient failures.
+
+### Per-Chain Cache Files
+
+Each chain gets its own cache file named `rpc-cache-{chain_id}.json` inside the cache directory.
+The per-chain filename makes cross-chain contamination impossible by construction: a cache populated from mainnet physically cannot be loaded during a testnet run.
+
+The default cache directory is the platform cache directory:
+
+- **Linux**: `$XDG_CACHE_HOME/mega-evme/rpc`
+- **macOS**: `~/Library/Caches/mega-evme/rpc`
+
+### Cache Flags
+
+| Flag                         | Type       | Default                   | Description                                                                                                                          |
+| ---------------------------- | ---------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `--rpc.cache-size <N>`       | `u32`      | `10000`                   | Maximum number of items in the in-memory RPC LRU cache. Set to `0` to disable the cache layer entirely.                              |
+| `--rpc.cache-dir <PATH>`     | path       | Platform cache dir        | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`.                        |
+| `--rpc.no-cache-file`        | flag       | `false`                   | Disable on-disk cache persistence. The in-memory LRU cache still applies — use `--rpc.cache-size 0` to disable that too.             |
+| `--rpc.chain-id <ID>`        | `u64`      | auto-detected             | Chain ID override. Skips the `eth_chainId` RPC call at startup and uses this value to locate the per-chain cache file.               |
+| `--rpc.clear-cache`          | flag       | `false`                   | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                              |
+
+### Retry Flags
+
+| Flag                         | Type       | Default                   | Description                                                                                                                          |
+| ---------------------------- | ---------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `--rpc.max-retries <N>`      | `u32`      | `5`                       | Maximum retry attempts for failing RPC requests. Retries on HTTP 429/503, rate-limit errors, and transport failures. `0` to disable. |
+| `--rpc.backoff-ms <MS>`      | `u64`      | `1000`                    | Fixed sleep duration in milliseconds between retry attempts (no exponential backoff).                                                |
+| `--rpc.rate-limit <CU/s>`   | `u64`      | `660`                     | Compute units per second budget for the retry layer's rate-limit accounting.                                                         |
+
+### Examples
+
+Replay a transaction with a local cache directory and explicit chain ID (fully offline if the cache is warm):
+
+```bash
+mega-evme replay \
+  --rpc.chain-id 4326 \
+  --rpc.cache-dir ./my-cache \
+  0xabc123...
+```
+
+Disable on-disk caching but keep the in-memory LRU:
+
+```bash
+mega-evme tx --fork --rpc.no-cache-file ...
+```
+
+Clear a corrupt cache before replaying:
+
+```bash
+mega-evme replay --rpc.clear-cache 0xabc123...
+```
+
 ## Round-Trip Example
 
 Dump state after a first run, tweak it, then replay with the modified state:

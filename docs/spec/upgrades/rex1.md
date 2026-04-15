@@ -35,7 +35,7 @@ For example:
 
 ## Developer Impact
 
-**If you experienced unexpected `ComputeGasLimitExceeded` failures**, this fix resolves the issue.
+**Unexpected `ComputeGasLimitExceeded` failures from cross-transaction detention leakage are resolved.**
 Transactions no longer inherit gas detention state from earlier transactions in the same block.
 
 No other behavior changes — Rex1 inherits all Rex semantics.

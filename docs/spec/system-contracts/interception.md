@@ -62,6 +62,28 @@ Each system contract MAY define additional gas consumption for its intercepted f
 An intercepted call MUST NOT receive a [storage gas stipend](../glossary.md#storage-gas-stipend).
 The stipend is only applicable on fall-through.
 
+## Rationale
+
+**Why intercept at frame initialization rather than call dispatch?**
+Interception fires after the call opcode has executed and gas forwarding has been applied, but before a child frame is created.
+This ensures that opcode-level gas accounting (including the gas forwarding cap and new-account storage-gas charges) is already settled.
+Intercepting earlier (at opcode decode) would require reimplementing gas accounting inside each interceptor; intercepting later (inside the child frame) would require creating and then discarding a frame, wasting resources.
+
+**Why exclude DELEGATECALL and CALLCODE?**
+DELEGATECALL and CALLCODE execute the target's code in the caller's context — `msg.sender`, `msg.value`, and storage all belong to the caller, not the target.
+Intercepting these call schemes would mean the interceptor runs with the caller's identity and state, which is inconsistent with the system contract's intended semantics.
+Excluding them keeps interception limited to schemes where the system contract's address is both the target and the execution context.
+
+## Security Considerations
+
+**Unknown selectors MUST fall through to on-chain bytecode.**
+If an interceptor silently consumed calls with unrecognized selectors, it could mask contract bugs or produce unexpected silent success.
+The fall-through requirement ensures that unrecognized calls execute the system contract's deployed bytecode, which reverts with a stable custom error (e.g., `NotIntercepted()`).
+
+**Intercepted calls MUST NOT receive a storage gas stipend.**
+The stipend is designed for value-transferring calls that create a real child frame.
+Granting a stipend to an intercepted call — which produces a synthetic result without a child frame — could allow the caller to recover system-granted gas that should have been burned on return.
+
 ## Spec History
 
 - [Rex2](../upgrades/rex2.md) introduced the call-interception mechanism.

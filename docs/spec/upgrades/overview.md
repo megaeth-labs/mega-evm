@@ -112,6 +112,6 @@ Each upgrade page follows a consistent structure:
 
 - **Summary** — What changed and why
 - **What Changed** — Previous vs new behavior for each change
-- **Developer Impact** — What you need to care about
+- **Developer Impact** — What contract authors and integrators need to know
 - **Safety and Compatibility** — Backward-compatibility boundaries and failure-mode differences
 - **References** — Links to the normative spec and related documentation
