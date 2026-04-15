@@ -64,16 +64,16 @@ This lets you patch specific accounts or storage slots while still pulling every
 `tx` accepts several shared option groups.
 Each group has its own reference page with the full flag table.
 
-| Group             | Description                                                          | Reference                                                  |
-| ----------------- | -------------------------------------------------------------------- | ---------------------------------------------------------- |
-| Transaction       | Sender, receiver, value, gas, calldata, nonce, tx type               | [Transaction Types](../transaction-types.md)               |
-| State management  | Prestate file, sender balance, faucet, storage overrides, state dump | [State Management](../configuration/state-management.md)   |
-| Chain / spec      | Spec version, chain ID                                               | [Chain and Spec](../configuration/chain-and-spec.md)       |
-| Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao    | [Block Environment](../configuration/block-environment.md) |
-| SALT buckets      | Per-bucket capacity overrides for dynamic gas pricing                | [SALT Buckets](../configuration/salt-buckets.md)           |
+| Group             | Description                                                          | Reference                                                                       |
+| ----------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Transaction       | Sender, receiver, value, gas, calldata, nonce, tx type               | [Transaction Types](../transaction-types.md)                                    |
+| State management  | Prestate file, sender balance, faucet, storage overrides, state dump | [State Management](../configuration/state-management.md)                        |
+| Chain / spec      | Spec version, chain ID                                               | [Chain and Spec](../configuration/chain-and-spec.md)                            |
+| Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao    | [Block Environment](../configuration/block-environment.md)                      |
+| SALT buckets      | Per-bucket capacity overrides for dynamic gas pricing                | [SALT Buckets](../configuration/salt-buckets.md)                                |
 | RPC cache / retry | Cache size, cache dir, chain-id override, retry and rate-limit       | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
-| Tracing           | Opcode, call, and pre-state tracers with output options              | [Tracing Overview](../tracing/overview.md)                 |
-| Output            | JSON output mode                                                     | See [JSON output](#json-output) below                      |
+| Tracing           | Opcode, call, and pre-state tracers with output options              | [Tracing Overview](../tracing/overview.md)                                      |
+| Output            | JSON output mode                                                     | See [JSON output](#json-output) below                                           |
 
 ## JSON Output
 

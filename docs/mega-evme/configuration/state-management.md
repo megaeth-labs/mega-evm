@@ -217,21 +217,21 @@ The default cache directory is the platform cache directory:
 
 ### Cache Flags
 
-| Flag                         | Type       | Default                   | Description                                                                                                                          |
-| ---------------------------- | ---------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `--rpc.cache-size <N>`       | `u32`      | `10000`                   | Maximum number of items in the in-memory RPC LRU cache. Set to `0` to disable the cache layer entirely.                              |
-| `--rpc.cache-dir <PATH>`     | path       | Platform cache dir        | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`.                        |
-| `--rpc.no-cache-file`        | flag       | `false`                   | Disable on-disk cache persistence. The in-memory LRU cache still applies — use `--rpc.cache-size 0` to disable that too.             |
-| `--rpc.chain-id <ID>`        | `u64`      | auto-detected             | Chain ID override. Skips the `eth_chainId` RPC call at startup and uses this value to locate the per-chain cache file.               |
-| `--rpc.clear-cache`          | flag       | `false`                   | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                              |
+| Flag                     | Type  | Default            | Description                                                                                                              |
+| ------------------------ | ----- | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `--rpc.cache-size <N>`   | `u32` | `10000`            | Maximum number of items in the in-memory RPC LRU cache. Set to `0` to disable the cache layer entirely.                  |
+| `--rpc.cache-dir <PATH>` | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`.            |
+| `--rpc.no-cache-file`    | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies — use `--rpc.cache-size 0` to disable that too. |
+| `--rpc.chain-id <ID>`    | `u64` | auto-detected      | Chain ID override. Skips the `eth_chainId` RPC call at startup and uses this value to locate the per-chain cache file.   |
+| `--rpc.clear-cache`      | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                  |
 
 ### Retry Flags
 
-| Flag                         | Type       | Default                   | Description                                                                                                                          |
-| ---------------------------- | ---------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `--rpc.max-retries <N>`      | `u32`      | `5`                       | Maximum retry attempts for failing RPC requests. Retries on HTTP 429/503, rate-limit errors, and transport failures. `0` to disable. |
-| `--rpc.backoff-ms <MS>`      | `u64`      | `1000`                    | Fixed sleep duration in milliseconds between retry attempts (no exponential backoff).                                                |
-| `--rpc.rate-limit <CU/s>`   | `u64`      | `660`                     | Compute units per second budget for the retry layer's rate-limit accounting.                                                         |
+| Flag                      | Type  | Default | Description                                                                                                                          |
+| ------------------------- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `--rpc.max-retries <N>`   | `u32` | `5`     | Maximum retry attempts for failing RPC requests. Retries on HTTP 429/503, rate-limit errors, and transport failures. `0` to disable. |
+| `--rpc.backoff-ms <MS>`   | `u64` | `1000`  | Fixed sleep duration in milliseconds between retry attempts (no exponential backoff).                                                |
+| `--rpc.rate-limit <CU/s>` | `u64` | `660`   | Compute units per second budget for the retry layer's rate-limit accounting.                                                         |
 
 ### Examples
 
