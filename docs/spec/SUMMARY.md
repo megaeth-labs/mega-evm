@@ -35,6 +35,7 @@
 - [Rex2](upgrades/rex2.md)
 - [Rex3](upgrades/rex3.md)
 - [Rex4](upgrades/rex4.md)
+- [Rex5](upgrades/rex5.md)
 
 ## Reference
 

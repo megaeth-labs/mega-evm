@@ -145,7 +145,13 @@ If a child call frame exceeds its local budget, it MUST revert with `MegaLimitEx
 The parent call frame MAY continue execution.
 
 The top-level call frame's budget MUST equal the transaction limit minus any intrinsic resource usage already recorded before the first frame begins.
-Intrinsic resource usage includes calldata data-size contributions, access-list entries, authorization-list entries, and the caller account update.
+Each resource dimension deducts only the intrinsic items relevant to it:
+
+- **Data size** — base transaction data (110 bytes), calldata byte length, access-list entry sizes, EIP-7702 authorization records, and the caller account update.
+- **KV updates** — EIP-7702 authority account updates and the caller account update.
+- **State growth** — no intrinsic deduction.
+- **Compute gas** — standard EVM transaction intrinsic gas (not enumerated here; see EIP-2028 and related specs).
+
 This deduction ensures that intrinsic costs reduce the budget available to the first call frame, preventing transactions from front-loading intrinsic usage to escape per-frame limits.
 
 ## Constants

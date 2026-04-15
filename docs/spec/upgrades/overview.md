@@ -106,6 +106,10 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, [storage gas stipend](../glossary.md#storage-gas-stipend), MegaAccessControl, MegaLimitControl, sandbox environment inheritance.
 
+### [Rex5](rex5.md) _(unstable)_
+
+No behavioral changes defined yet.
+
 ## How to Read These Pages
 
 Each upgrade page follows a consistent structure:

@@ -1,6 +1,6 @@
 ---
 description: MegaETH hardfork and spec versioning — how behavioral changes are versioned, activated, and tracked across network upgrades.
-spec: Rex4
+spec: Rex5
 ---
 
 # Hardforks and Specs
@@ -25,13 +25,13 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5
 ```
 
 Each newer spec includes all previous behaviors.
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
-All specs are currently stable.
-The latest spec may be marked **unstable** when a new spec is under development, meaning its semantics can still change before network activation.
+REX5 is currently **unstable** — its semantics can still change before network activation.
+All other specs are stable (frozen).
 
 ### Backward Compatibility
 
@@ -111,3 +111,13 @@ _See [Rex3 Network Upgrade](upgrades/rex3.md) for full details._
 - **[Keyless deploy](system-contracts/keyless-deploy.md) sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior
 
 _See [Rex4 Network Upgrade](upgrades/rex4.md) for full details._
+
+### REX5
+
+> **Unstable** — This spec is under active development.
+> Its semantics may change before network activation.
+
+No behavioral changes have been defined yet.
+This spec serves as the placeholder for the next upgrade cycle.
+
+_See [Rex5 Network Upgrade](upgrades/rex5.md) for the latest status._
