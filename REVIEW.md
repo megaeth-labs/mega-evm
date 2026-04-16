@@ -40,13 +40,21 @@ Beyond defect detection, code review serves as **knowledge transfer** — spread
 Focus human attention in this order.
 Automate everything below the line.
 
-1. **Data structures** — Are the core data structures right? Bad code around good data structures is fixable; good code around bad data structures is doomed
-2. **Design** — Is the overall approach right? Does it belong in this crate/module? Can special cases be eliminated through better design rather than more conditionals?
-3. **Correctness** — Does the code do what the author intended? Are there edge cases, off-by-ones, or consensus-critical mistakes?
-4. **Complexity** — Can a future developer understand and modify this easily? Could it be simpler? Can the number of concepts be cut in half?
-5. **Breakage** — What existing functions could be impacted? Which downstream consumers (mega-reth, test-client) will break?
+1. **Data structures** — Are the core data structures right?
+   Bad code around good data structures is fixable; good code around bad data structures is doomed.
+2. **Design** — Is the overall approach right?
+   Does it belong in this crate/module?
+   Can special cases be eliminated through better design rather than more conditionals?
+3. **Correctness** — Does the code do what the author intended?
+   Are there edge cases, off-by-ones, or consensus-critical mistakes?
+4. **Complexity** — Can a future developer understand and modify this easily?
+   Could it be simpler?
+   Can the number of concepts be cut in half?
+5. **Breakage** — What existing functions could be impacted?
+   Which downstream consumers (mega-reth, test-client) will break?
 6. **Tests** — Are they correct, meaningful, and covering the important cases?
-7. **Naming and comments** — Are names clear? Do comments explain _why_, not _what_?
+7. **Naming and comments** — Are names clear?
+   Do comments explain _why_, not _what_?
 8. ~~Style~~ — Defer to `cargo fmt` and `cargo clippy`.
    Never spend human review time on formatting.
 
