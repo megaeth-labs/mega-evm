@@ -17,6 +17,18 @@ Rex5 is the next upgrade cycle after Rex4.
 No behavioral changes have been defined yet.
 This page will be updated as the spec is developed.
 
+## What Changed
+
+_To be defined._
+
+## Developer Impact
+
+_To be defined._
+
+## Safety and Compatibility
+
+_To be defined._
+
 ## References
 
 - [mega-evm repository](https://github.com/megaeth-labs/mega-evm)

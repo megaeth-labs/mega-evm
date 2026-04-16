@@ -192,4 +192,4 @@ The stable protocol therefore does not need a second independent block-level com
 - [MiniRex](../upgrades/minirex.md) introduced compute gas, data size, and KV update limits, with transaction-level data and KV limits set to 25% of the corresponding block limits.
 - [Rex](../upgrades/rex.md) changed the stable runtime transaction-level limits to `TX_COMPUTE_GAS_LIMIT = 200,000,000`, `TX_DATA_LIMIT = 13,107,200`, `TX_KV_UPDATE_LIMIT = 500,000`, and introduced state-growth limits.
 - [Rex3](../upgrades/rex3.md) retained the stable resource-limit set.
-- [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource usage is now deducted from the top-level frame budget before child frames receive forwarded budgets.
+- [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource costs (always deducted before execution) are now reflected in the top-level frame budget before it is forwarded to child frames.
