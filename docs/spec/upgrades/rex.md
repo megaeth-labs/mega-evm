@@ -104,22 +104,22 @@ Storage writes in uncrowded regions are effectively free from the storage gas pe
 
 ## Developer Impact
 
-**Your transaction gas cost structure has changed.**
+**Transaction gas cost structure has changed.**
 Every transaction now pays a minimum of 60,000 gas (21,000 compute + 39,000 storage) before any execution.
-If your application sends many small transactions, factor in the increased base cost.
+Applications that send many small transactions should factor in the increased base cost.
 
 **Storage gas is much cheaper for fresh state.**
-If your contracts write to uncrowded storage regions, you'll see significantly lower storage gas costs compared to MiniRex.
+Contracts that write to uncrowded storage regions will see significantly lower storage gas costs compared to MiniRex.
 The `base × (multiplier − 1)` formula means fresh storage (multiplier = 1) is free.
 
 **The compute gas limit dropped from 1B to 200M.**
 Contracts that previously relied on the higher limit may need to optimize their compute usage or split operations across multiple transactions.
 
 **State growth is now capped at 1,000 per transaction.**
-If your contract creates many new accounts or storage slots in a single transaction, ensure it stays within this limit.
+Contracts that create many new accounts or storage slots in a single transaction must stay within this limit.
 
 **All CALL-like opcodes now behave consistently.**
-If your contracts used DELEGATECALL or STATICCALL expecting 63/64 gas forwarding or expecting to avoid oracle detection, they now follow the same 98/100 and oracle detection rules as CALL.
+Contracts that used DELEGATECALL or STATICCALL expecting 63/64 gas forwarding or expecting to avoid oracle detection should be aware that these opcodes now follow the same 98/100 and oracle detection rules as CALL.
 
 ## Safety and Compatibility
 

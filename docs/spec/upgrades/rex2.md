@@ -73,15 +73,15 @@ interface IKeylessDeploy {
 ## Developer Impact
 
 **SELFDESTRUCT is available again.**
-If your contracts previously needed workarounds for the disabled opcode, you can now use `SELFDESTRUCT` with EIP-6780 semantics.
-Note that only contracts created in the same transaction can be fully destroyed — pre-existing contracts will only have their balance transferred.
+Contracts that previously needed workarounds for the disabled opcode can now use `SELFDESTRUCT` with EIP-6780 semantics.
+Only contracts created in the same transaction can be fully destroyed — pre-existing contracts will only have their balance transferred.
 
-**You can deploy contracts via Nick's Method on MegaETH.**
-Use the KeylessDeploy system contract to execute pre-signed keyless deployment transactions with an adjusted gas limit.
-The `gasLimitOverride` parameter lets you account for MegaETH's different gas costs without changing the signed transaction (which would change the deployment address).
+**Contracts can be deployed via Nick's Method on MegaETH.**
+The KeylessDeploy system contract executes pre-signed keyless deployment transactions with an adjusted gas limit.
+The `gasLimitOverride` parameter accounts for MegaETH's different gas costs without changing the signed transaction (which would change the deployment address).
 
 **KeylessDeploy only works at depth 0.**
-You cannot call KeylessDeploy from within another contract — it must be the direct transaction target.
+Calling KeylessDeploy from within another contract is not intercepted — it must be the direct transaction target.
 This prevents wrap-and-revert attacks.
 
 ## Safety and Compatibility

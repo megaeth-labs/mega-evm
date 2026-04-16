@@ -67,6 +67,18 @@ Giving them distinct execution treatment makes that behavior explicit.
 Whitelisted target contracts must be able to distinguish protocol-maintenance calls from ordinary user calls.
 Preserving the caller identity provides that signal without introducing a separate call context type.
 
+## Security Considerations
+
+**The no-fee/no-nonce exemption MUST apply exclusively to addresses in `MEGA_SYSTEM_TX_WHITELIST`.**
+If the whitelist check were absent or misconfigured, any legacy transaction from `MEGA_SYSTEM_ADDRESS` could bypass gas fees and nonce validation for arbitrary targets, enabling cost-free state manipulation across the entire chain.
+
+**Adding an address to `MEGA_SYSTEM_TX_WHITELIST` is a consensus-critical change.**
+Any modification to the stable whitelist changes which transactions receive privileged processing.
+Such changes MUST be gated by a spec upgrade to ensure all nodes agree on the new whitelist contents at the same activation point.
+
+**CREATE transactions from `MEGA_SYSTEM_ADDRESS` MUST NOT receive privileged processing.**
+Allowing fee-exempt contract creation would let the system address deploy arbitrary code at no cost, which is outside the intended maintenance scope.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced Mega System Transactions and the `MEGA_SYSTEM_ADDRESS` mechanism.
