@@ -83,7 +83,6 @@ The fall-through requirement ensures that unrecognized calls execute the system 
 **Intercepted calls do not receive a storage gas stipend.**
 The stipend is designed for value-transferring calls that create a real child frame.
 Intercepted calls produce a synthetic result without a child frame, so the stipend mechanism does not apply to them.
-Any leftover stipend gas is burned on frame return rather than returned to the parent; this is a deliberate design choice, not a security constraint.
 
 ## Spec History
 
