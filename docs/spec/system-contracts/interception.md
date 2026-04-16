@@ -80,9 +80,10 @@ Excluding them keeps interception limited to schemes where the system contract's
 If an interceptor silently consumed calls with unrecognized selectors, it could mask contract bugs or produce unexpected silent success.
 The fall-through requirement ensures that unrecognized calls execute the system contract's deployed bytecode, which reverts with a stable custom error (e.g., `NotIntercepted()`).
 
-**Intercepted calls MUST NOT receive a storage gas stipend.**
+**Intercepted calls do not receive a storage gas stipend.**
 The stipend is designed for value-transferring calls that create a real child frame.
-Granting a stipend to an intercepted call — which produces a synthetic result without a child frame — could allow the caller to recover system-granted gas that should have been burned on return.
+Intercepted calls produce a synthetic result without a child frame, so the stipend mechanism does not apply to them.
+Any leftover stipend gas is burned on frame return rather than returned to the parent; this is a deliberate design choice, not a security constraint.
 
 ## Spec History
 
