@@ -47,7 +47,8 @@ Automate everything below the line.
 5. **Breakage** — What existing functions could be impacted? Which downstream consumers (mega-reth, test-client) will break?
 6. **Tests** — Are they correct, meaningful, and covering the important cases?
 7. **Naming and comments** — Are names clear? Do comments explain _why_, not _what_?
-8. ~~Style~~ — Defer to `cargo fmt` and `cargo clippy`. Never spend human review time on formatting.
+8. ~~Style~~ — Defer to `cargo fmt` and `cargo clippy`.
+   Never spend human review time on formatting.
 
 ## What to look for
 
@@ -137,7 +138,8 @@ When logging or tracing is present:
 - **Critique the code, not the person**: say "this code does X" not "you did X wrong"
 - **Explain why**: link to docs or prior incidents, not just "change this to that"
 - **One comment per issue, in the most relevant location**: do not repeat the same point in multiple places
-- **Be concise**: one line problem, one line fix. No preambles or "looks good overall" filler
+- **Be concise**: one line problem, one line fix.
+  No preambles or "looks good overall" filler.
 
 ### When to approve
 
@@ -179,4 +181,5 @@ When logging or tracing is present:
 - **Rubber stamping** — approving without reading the diff
 - **Nitpick avalanche** — leaving many minor comments without distinguishing severity
 - **Gatekeeping** — blocking merges over stylistic preferences or hypothetical future concerns
-- **Manufacturing feedback** — if the PR is clean, a single "LGTM" is sufficient. Do not comment just to have something to say
+- **Manufacturing feedback** — if the PR is clean, a single "LGTM" is sufficient.
+  Do not comment just to have something to say.
