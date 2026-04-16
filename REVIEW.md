@@ -40,7 +40,7 @@ Automate everything below the line.
 4. **Complexity** — Can a future developer understand and modify this easily? Could it be simpler? Can the number of concepts be cut in half?
 5. **Breakage** — What existing functions could be impacted? Which downstream consumers (mega-reth, test-client) will break?
 6. **Tests** — Are they correct, meaningful, and covering the important cases?
-7. **Naming and comments** — Are names clear? Do comments explain *why*, not *what*?
+7. **Naming and comments** — Are names clear? Do comments explain _why_, not _what_?
 8. ~~Style~~ — Defer to `cargo fmt` and `cargo clippy`. Never spend human review time on formatting.
 
 ## What to look for
@@ -89,12 +89,14 @@ When logging or tracing is present:
 ### Tests
 
 **Structure:**
+
 - Test names must use the `test_` prefix and state the key object being tested — the function, struct, or behavior under test must be obvious from the name
 - Enforce determinism: no `sleep`-based assertions, no wall-clock dependence, no flaky tests
 - Cover corner cases — each reachable branch should have a test
 - If a change affects cross-component behavior that cannot be covered by unit tests, suggest e2e tests in the review comment (these may live in the test-client repo)
 
 **Assertion quality:**
+
 - Assert the exact expected value, not just `is_ok()` or `is_some()`. Use `assert_eq!` / `assert_ne!` over `assert!` for better failure diagnostics
 - For error paths, assert the specific error variant: `assert!(matches!(result, Err(MyError::Specific(..))))`, not just `is_err()`
 - Use `#[should_panic(expected = "specific message")]` rather than bare `#[should_panic]`
@@ -102,12 +104,14 @@ When logging or tracing is present:
 - Assert absence of unintended changes too — if a function returns a struct, assert fields that should NOT change as well
 
 **Test oracle:**
+
 - When exact output is hard to specify, assert invariants: round-trip (encode/decode), idempotency, monotonicity
 - Use a simplified reference implementation as oracle when available — compare the optimized version's output against it
 - For stateful systems (resource limit trackers, gas stipend lifecycle), assert state-machine invariants after each transition, not just at the end
 - Mentally ask "what mutation to the code would this test NOT catch?" — if the answer is "many", the assertion is too weak
 
 **Rust-specific:**
+
 - Derive or implement `Debug` and `PartialEq` on types under test so assertion failures produce readable diffs
 - Ban bare `unwrap()` as the only "check" and tests with no assertions — these prove nothing
 
