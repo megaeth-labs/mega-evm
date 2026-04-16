@@ -79,6 +79,8 @@ See the linked pages for full details.
   See [SALT Buckets](../configuration/salt-buckets.md).
 - **State dump** — Dump or load pre/post-state snapshots.
   See [State Management](../configuration/state-management.md).
+- **RPC cache / retry** — Cache size, cache directory, chain-id override, retry and rate-limit settings.
+  See [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry).
 - **Tracing** — Emit execution traces (call traces, opcode traces, gas profiles, etc.).
   See [Tracing Overview](../tracing/overview.md).
 
