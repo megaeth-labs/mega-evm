@@ -72,7 +72,7 @@ Automate everything below the line.
 This is the single most important correctness concern in mega-evm.
 
 - **Existing stable specs must never change behavior.**
-  All specs in `MegaSpecId` are currently stable (frozen).
+  Check `CLAUDE.md` for which spec is currently unstable — all others are frozen.
   New EVM behavior, gas cost changes, or opcode modifications must introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
 - System contract changes (Solidity sources or Rust integration) require a new spec
 - Modified constants must be gated per-spec — verify that old spec paths still use the old values
