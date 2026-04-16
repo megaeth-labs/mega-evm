@@ -18,15 +18,21 @@ Beyond defect detection, code review serves as **knowledge transfer** — spread
 - If an implementation needs more than 3 levels of indentation, it needs restructuring
 - Functions should be short, do one thing, and do it well
 - Good programmers worry about data structures and relationships, not just the code around them
-- Use the type system to express semantics — prefer newtypes over primitive aliases. Make invalid states unrepresentable
-- Prefer existing types and structs over inventing new ones. Only introduce a new type when existing ones carry wrong semantics
+- Use the type system to express semantics — prefer newtypes over primitive aliases.
+  Make invalid states unrepresentable.
+- Prefer existing types and structs over inventing new ones.
+  Only introduce a new type when existing ones carry wrong semantics.
 - For common logic and data structures, prefer well-maintained crates over hand-rolling — even if they are not yet in our dependencies — as long as the dependency does not add disproportionate complexity
-- When code implicitly embodies a known pattern, make it explicit. Named patterns are easier to review because the reader already has the mental model. But only when it simplifies; don't force-fit
+- When code implicitly embodies a known pattern, make it explicit.
+  Named patterns are easier to review because the reader already has the mental model.
+  But only when it simplifies; don't force-fit.
 
 ### Pragmatism
 
-- Solve real problems, not hypothetical threats. Reject "theoretically perfect" but practically complex designs
-- Does this problem truly occur in production? Does the solution's complexity match the severity?
+- Solve real problems, not hypothetical threats.
+  Reject "theoretically perfect" but practically complex designs.
+- Does this problem truly occur in production?
+  Does the solution's complexity match the severity?
 - Backward compatibility matters — changes that break existing spec behavior are bugs, regardless of theoretical correctness
 
 ### Review priorities
@@ -58,24 +64,30 @@ Automate everything below the line.
 - Changes to consensus-critical code (opcode behavior, gas computation, state transitions, resource limits) require extra scrutiny
 - All execution logic must be **deterministic and architecture-independent** — no `mem::transmute`, no native-endian byte conversions, no platform-dependent operations in consensus paths
 - `unsafe` blocks must have a `// SAFETY:` comment explaining why the invariant holds
-- Results and errors must always be checked. If intentionally ignored, an inline comment must explain why
+- Results and errors must always be checked.
+  If intentionally ignored, an inline comment must explain why.
 
 ### Spec backward compatibility
 
 This is the single most important correctness concern in mega-evm.
 
-- **Existing stable specs must never change behavior.** All specs in `MegaSpecId` are currently stable (frozen). New EVM behavior, gas cost changes, or opcode modifications must introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`
+- **Existing stable specs must never change behavior.**
+  All specs in `MegaSpecId` are currently stable (frozen).
+  New EVM behavior, gas cost changes, or opcode modifications must introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
 - System contract changes (Solidity sources or Rust integration) require a new spec
 - Modified constants must be gated per-spec — verify that old spec paths still use the old values
-- If a PR claims to "fix" behavior for an existing spec, scrutinize whether this changes consensus. A true bug fix in an existing spec is rare and must be justified
+- If a PR claims to "fix" behavior for an existing spec, scrutinize whether this changes consensus.
+  A true bug fix in an existing spec is rare and must be justified.
 
 ### Design and architecture
 
 - Respect revm's design patterns — mega-evm customizes revm through its trait hooks, not by replacing its abstractions
 - Changes to public APIs or traits must have a clear reason documented in an inline comment or the PR description
-- `no_std` compatibility must be maintained in the `mega-evm` crate — no direct `std::` usage. Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;`
+- `no_std` compatibility must be maintained in the `mega-evm` crate — no direct `std::` usage.
+  Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;`.
 - New workspace dependencies should use `default-features = false` — features are opted-in explicitly
-- Per-frame gas mechanisms (stipends, adjustments) must handle all frame termination paths: system contract interception, gas rescue on limit exceed, and frame return. Missing any path causes gas leakage
+- Per-frame gas mechanisms (stipends, adjustments) must handle all frame termination paths: system contract interception, gas rescue on limit exceed, and frame return.
+  Missing any path causes gas leakage.
 
 ### Observability
 
@@ -97,10 +109,12 @@ When logging or tracing is present:
 
 **Assertion quality:**
 
-- Assert the exact expected value, not just `is_ok()` or `is_some()`. Use `assert_eq!` / `assert_ne!` over `assert!` for better failure diagnostics
+- Assert the exact expected value, not just `is_ok()` or `is_some()`.
+  Use `assert_eq!` / `assert_ne!` over `assert!` for better failure diagnostics.
 - For error paths, assert the specific error variant: `assert!(matches!(result, Err(MyError::Specific(..))))`, not just `is_err()`
 - Use `#[should_panic(expected = "specific message")]` rather than bare `#[should_panic]`
-- Test both the output AND relevant side effects (state mutations, gas consumption, resource limit tracking). A test that only checks the return value may miss silent corruption
+- Test both the output AND relevant side effects (state mutations, gas consumption, resource limit tracking).
+  A test that only checks the return value may miss silent corruption.
 - Assert absence of unintended changes too — if a function returns a struct, assert fields that should NOT change as well
 
 **Test oracle:**
@@ -119,7 +133,7 @@ When logging or tracing is present:
 
 ### Giving feedback
 
-- **Label severity**: prefix optional suggestions with `nit:` so the author knows what blocks approval vs what is advisory
+- **Label severity**: prefix optional suggestions with `nit:` so the author knows what blocks approval vs what is advisory.
 - **Critique the code, not the person**: say "this code does X" not "you did X wrong"
 - **Explain why**: link to docs or prior incidents, not just "change this to that"
 - **One comment per issue, in the most relevant location**: do not repeat the same point in multiple places
@@ -132,7 +146,8 @@ When logging or tracing is present:
 - No correctness or safety issues
 - Test coverage is adequate for the risk level
 - It is OK to approve with nits — the author can address them before merging
-- **Approve when the PR improves code health**, even if you'd write it differently. Do not let "perfect" block "better"
+- **Approve when the PR improves code health**, even if you'd write it differently.
+  Do not let "perfect" block "better".
 
 ### Handling previous comments
 
