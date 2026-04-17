@@ -1,9 +1,9 @@
 {
-  "description": "Smoke test: offline replay from committed cache-file fixture (MegaETH deposit tx)",
+  "description": "Smoke test: offline replay from committed fixture-file envelope (MegaETH deposit tx)",
   "args": [
     "replay",
     "0xf0ac58ac093e718e12fb9d00bb79c28c335343f79d8cb4ab804a5e1b6c5c4adf",
-    "--rpc.cache-file",
+    "--rpc.replay-file",
     "{fixtures}/replay_offline_smoke.cache.json"
   ],
   "expected": {

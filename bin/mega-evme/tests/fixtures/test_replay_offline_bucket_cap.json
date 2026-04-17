@@ -3,7 +3,7 @@
   "args": [
     "replay",
     "0x346c9ecd95ea9502e62534b68d8797f592d5f20bf7ed2d7b88f6ca7970e46919",
-    "--rpc.cache-file",
+    "--rpc.replay-file",
     "{fixtures}/replay_offline_bucket_cap.cache.json"
   ],
   "expected": {

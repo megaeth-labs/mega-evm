@@ -67,7 +67,7 @@ fn test_rpc_args_rejects_empty_cache_dir() {
         ])
         .expect_err("empty cache-dir must be rejected");
         assert!(
-            err.to_string().contains("cache-dir must not be empty"),
+            err.to_string().contains("path must not be empty"),
             "error must explain the problem for input {empty:?}, got: {err}",
         );
     }
@@ -101,7 +101,7 @@ async fn test_build_provider_without_cache() {
         args.build_provider().await.expect("build_provider");
     assert!(cache_store.is_noop(), "cache_size == 0 must produce a no-op store");
     assert_eq!(chain_id, 4326, "chain_id must be resolved even when cache is disabled");
-    cache_store.persist(None).expect("persist");
+    cache_store.persist().expect("persist");
 }
 
 /// `--rpc.no-cache-file` keeps the in-memory cache layer active but skips
@@ -121,7 +121,7 @@ async fn test_build_provider_no_cache_file_skips_persistence() {
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("build_provider");
     assert!(cache_store.is_noop(), "--rpc.no-cache-file must produce a no-op store");
-    cache_store.persist(None).expect("persist");
+    cache_store.persist().expect("persist");
 }
 
 /// With the on-disk cache enabled, `build_provider` fetches the chain id from
@@ -240,7 +240,7 @@ async fn test_atomic_save_round_trip() {
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("build_provider #1");
     cache_store.cache().expect("real store").put(key, value.clone()).expect("seed put");
-    cache_store.persist(None).expect("persist");
+    cache_store.persist().expect("persist");
 
     let cache_file = dir.path().join("rpc-cache-4326.json");
     assert!(cache_file.exists(), "save must produce the target file");
@@ -298,7 +298,7 @@ async fn test_build_provider_clear_cache_deletes_file_before_load() {
     let BuildProviderOutput { cache_store: store, .. } =
         seed_args.build_provider().await.expect("seed build_provider");
     store.cache().expect("real store").put(key, r#"{"v":1}"#.to_string()).expect("seed put");
-    store.persist(None).expect("persist");
+    store.persist().expect("persist");
     assert!(cache_file.exists(), "seed must produce the cache file");
 
     // Phase 2: same dir with --rpc.clear-cache.
@@ -401,7 +401,7 @@ async fn test_build_provider_auto_creates_cache_dir() {
     let BuildProviderOutput { cache_store: store, .. } =
         args.build_provider().await.expect("build_provider");
     assert!(fresh_dir.exists(), "build_provider must create the cache directory");
-    store.persist(None).expect("persist");
+    store.persist().expect("persist");
     assert!(
         fresh_dir.join("rpc-cache-4326.json").exists(),
         "persist must write the per-chain file",
@@ -528,13 +528,13 @@ async fn test_retry_layer_retries_on_unreachable_endpoint() {
     );
 }
 
-// ─── Contract regression guards (cache-file modes) ──────────────────────────
+// ─── Contract regression guards (fixture-file modes) ───────────────────────
 
 /// The `env = "RPC_URL"` attribute was removed from `--rpc`, so parsing
 /// without `--rpc` must yield `rpc_url = None` regardless of environment.
 #[test]
 fn test_rpc_url_env_does_not_enable_capture_mode() {
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", "foo.json"]);
+    let args = RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", "foo.json"]);
     assert!(args.rpc_url.is_none(), "parsing without --rpc must yield rpc_url = None");
 }
 
@@ -552,7 +552,8 @@ async fn test_replay_mode_cache_miss_fails_immediately() {
     });
     std::fs::write(&cache_file, serde_json::to_string(&content).unwrap()).unwrap();
 
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", cache_file.to_str().unwrap()]);
+    let args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
     let output = args.build_replay_provider().await.expect("build_provider");
 
     // Issue a request that will miss the empty cache and hit ReplayTransport.
@@ -561,13 +562,16 @@ async fn test_replay_mode_cache_miss_fails_immediately() {
     let elapsed = start.elapsed();
 
     assert!(result.is_err(), "cache miss must error");
+    // 1s threshold: generous enough for cold CI runners under parallel load,
+    // still far below the 5s retry floor so a failure here still means the
+    // replay path accidentally went through the retry layer.
     assert!(
-        elapsed < std::time::Duration::from_millis(100),
-        "cache miss took {elapsed:?}, expected <100ms (retry would take 5s+)"
+        elapsed < std::time::Duration::from_secs(1),
+        "cache miss took {elapsed:?}, expected well under the 5s retry interval",
     );
 }
 
-/// Without `--rpc`, `--rpc.cache-file` with a valid envelope enters replay mode.
+/// Without `--rpc`, `--rpc.fixture-file` with a valid envelope enters replay mode.
 /// `chain_id` is loaded from the envelope and the store is noop (read-only).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cache_file_mode_replay_loads_envelope() {
@@ -580,8 +584,9 @@ async fn test_cache_file_mode_replay_loads_envelope() {
     });
     std::fs::write(&cache_file, serde_json::to_string(&content).unwrap()).unwrap();
 
-    // --rpc.cache-file without --rpc => replay mode
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", cache_file.to_str().unwrap()]);
+    // --rpc.replay-file without --rpc => replay mode
+    let args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
     let output = args.build_replay_provider().await.expect("replay mode should succeed");
 
     // In replay mode, chain_id comes from envelope
@@ -590,12 +595,14 @@ async fn test_cache_file_mode_replay_loads_envelope() {
     assert!(output.cache_store.is_noop(), "replay mode should produce noop store");
 }
 
-/// No `--rpc.cache-file` and no `--rpc` means neither replay nor capture.
+/// No `--rpc.capture-file`, no `--rpc.replay-file`, and no `--rpc` means
+/// neither replay nor capture.
 #[test]
 fn test_cache_file_mode_not_used_without_flag() {
     let args = RpcArgs::parse_from(["mega-evme"]);
     assert!(args.rpc_url.is_none());
-    assert!(args.cache_file.is_none());
+    assert!(args.capture_file.is_none());
+    assert!(args.replay_file.is_none());
 }
 
 /// Verify the envelope file is not modified after replay-mode usage.
@@ -612,11 +619,12 @@ async fn test_replay_mode_read_only() {
 
     let mtime_before = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
 
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", cache_file.to_str().unwrap()]);
+    let args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
     let output = args.build_replay_provider().await.expect("build_provider");
 
     // Persist (should be noop in replay mode)
-    output.cache_store.persist(None).expect("persist");
+    output.cache_store.persist().expect("persist");
 
     let mtime_after = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
     assert_eq!(mtime_before, mtime_after, "replay mode must not modify the file");
@@ -638,7 +646,8 @@ async fn test_replay_mode_uses_envelope_external_env() {
     });
     std::fs::write(&cache_file, serde_json::to_string(&content).unwrap()).unwrap();
 
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", cache_file.to_str().unwrap()]);
+    let args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
     let output = args.build_replay_provider().await.expect("build_provider");
 
     // Verify external_env is returned from envelope
@@ -665,18 +674,18 @@ async fn test_capture_replay_round_trip() {
         "mega-evme",
         "--rpc",
         &server.uri(),
-        "--rpc.cache-file",
+        "--rpc.capture-file",
         cache_file.to_str().unwrap(),
     ]);
     let output = capture_args.build_capture_provider().await.expect("capture build");
     let block = output.provider.get_block_number().await.expect("capture get_block_number");
     assert_eq!(block, 0x42);
-    output.cache_store.persist(None).expect("capture persist");
+    output.cache_store.persist().expect("capture persist");
     assert!(cache_file.exists(), "capture must write the envelope file");
 
     // Phase 2: replay — no mock server, pure offline.
     let replay_args =
-        RpcArgs::parse_from(["mega-evme", "--rpc.cache-file", cache_file.to_str().unwrap()]);
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
     let output = replay_args.build_replay_provider().await.expect("replay build");
     assert_eq!(output.chain_id, 4326, "chain_id must come from envelope");
 
@@ -685,27 +694,192 @@ async fn test_capture_replay_round_trip() {
     assert_eq!(block, 0x42, "replay must serve the cached response");
 }
 
-// ─── --rpc.cache-file clap mutex tests ───────────────────────────────────────
+/// Transient JSON-RPC error bodies (e.g. `-32000 rate limit` returned with
+/// HTTP 200) must not be persisted into the envelope. If they were, every
+/// subsequent offline replay would bake in the same transient failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_does_not_cache_jsonrpc_error_response() {
+    let server = MockRpcServer::start().await;
+    // eth_chainId must succeed so build_capture_provider can complete.
+    server.respond_eth_chain_id(4326, 1).await;
+    // Any other call resolves to a JSON-RPC error body at HTTP 200.
+    server.respond_jsonrpc_error(-32000, "rate limit", 2).await;
 
-/// `--rpc.cache-file` is mutually exclusive with all other cache flags.
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("err.cache.json");
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.capture-file",
+        cache_file.to_str().unwrap(),
+    ]);
+    let output = args.build_capture_provider().await.expect("capture build");
+
+    // The error bubbles up as a provider error; we just need the transport to
+    // have observed the response.
+    let _ = output.provider.get_block_number().await;
+    output.cache_store.persist().expect("persist should still succeed");
+
+    // Inspect the raw envelope: the cache array must hold only the successful
+    // eth_chainId entry, not the failing call.
+    let raw = std::fs::read_to_string(&cache_file).expect("read envelope");
+    let envelope: serde_json::Value = serde_json::from_str(&raw).expect("parse envelope");
+    let entries = envelope["cache"].as_array().expect("cache is a JSON array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "only eth_chainId should be cached; error responses must be skipped. entries = {entries:#?}",
+    );
+    let cached: serde_json::Value =
+        serde_json::from_str(entries[0]["value"].as_str().expect("value is a JSON string"))
+            .expect("cached response is valid JSON");
+    assert!(cached.get("result").is_some(), "cached entry must be a success response");
+    assert!(cached.get("error").is_none(), "cached entry must not be an error response");
+}
+
+/// Cross-chain contamination guard: an existing envelope claiming chain X
+/// combined with an endpoint returning chain Y must hard-error, not silently
+/// mix responses from two chains.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_chain_id_mismatch_is_hard_error() {
+    let server = MockRpcServer::start().await;
+    // Endpoint reports chain 4326 (MegaETH mainnet).
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("mismatch.cache.json");
+
+    // Pre-seed an envelope that claims chain 1 (Ethereum mainnet).
+    let seed = serde_json::json!({
+        "version": 1,
+        "chain_id": 1,
+        "cache": [],
+    });
+    std::fs::write(&fixture, serde_json::to_string(&seed).unwrap()).unwrap();
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.capture-file",
+        fixture.to_str().unwrap(),
+    ]);
+    let err = args.build_capture_provider().await.expect_err("chain id mismatch must hard-error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("Chain ID mismatch") && msg.contains('1') && msg.contains("4326"),
+        "error must name both chain ids, got: {msg}",
+    );
+}
+
+/// Freshness guard: the empty-seed-then-resolve ordering in
+/// `build_capture_provider` means a stale `eth_chainId` entry in a pre-seeded
+/// envelope must not short-circuit cross-chain validation. A seeded envelope
+/// claiming chain 999 with a cached `eth_chainId=0x3e7` must still fail if the
+/// live endpoint returns a different chain id.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_fresh_eth_chain_id_wins_over_stale_cache() {
+    let server = MockRpcServer::start().await;
+    // Live endpoint reports chain 4326.
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("stale.cache.json");
+
+    // Build an envelope claiming chain 999 with a matching cached eth_chainId
+    // response. If build_capture_provider seeded the transport cache first and
+    // resolved chain_id from it, the validation would be trivially satisfied.
+    let stale_resp = r#"{"jsonrpc":"2.0","id":0,"result":"0x3e7"}"#;
+    let key = alloy_primitives::keccak256("eth_chainId\x00null");
+    let seed = serde_json::json!({
+        "version": 1,
+        "chain_id": 999,
+        "cache": [
+            { "key": format!("{key:?}"), "value": stale_resp }
+        ],
+    });
+    std::fs::write(&fixture, serde_json::to_string(&seed).unwrap()).unwrap();
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.capture-file",
+        fixture.to_str().unwrap(),
+    ]);
+    let err = args
+        .build_capture_provider()
+        .await
+        .expect_err("fresh eth_chainId must win over stale cache entry");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("Chain ID mismatch") && msg.contains("999") && msg.contains("4326"),
+        "error must reflect fresh chain-id mismatch, got: {msg}",
+    );
+}
+
+// ─── --rpc.capture-file / --rpc.replay-file clap mutex tests ────────────────
+
+/// `--rpc.capture-file` is mutually exclusive with `--rpc.replay-file` and all
+/// other cache flags. Since capture requires `--rpc`, every argv includes it.
 #[test]
-fn test_cache_file_mutex_with_other_cache_flags() {
+fn test_capture_file_mutex_with_other_cache_flags() {
     let cases: &[(&[&str], &str)] = &[
+        (&["--rpc.replay-file", "/tmp/replay.json"], "--rpc.replay-file"),
         (&["--rpc.cache-dir", "/tmp/cache"], "--rpc.cache-dir"),
         (&["--rpc.clear-cache"], "--rpc.clear-cache"),
         (&["--rpc.no-cache-file"], "--rpc.no-cache-file"),
         (&["--rpc.cache-size", "256"], "--rpc.cache-size"),
     ];
     for (extra_flags, label) in cases {
-        let mut argv = vec!["mega-evme", "--rpc.cache-file", "/tmp/fixture.json"];
+        let mut argv =
+            vec!["mega-evme", "--rpc", "http://x", "--rpc.capture-file", "/tmp/fixture.json"];
         argv.extend_from_slice(extra_flags);
         let err = RpcArgs::try_parse_from(argv)
-            .expect_err(&format!("--rpc.cache-file should conflict with {label}"));
+            .expect_err(&format!("--rpc.capture-file should conflict with {label}"));
         assert!(
             err.to_string().contains("cannot be used with"),
             "{label}: error must explain the conflict, got: {err}",
         );
     }
+}
+
+/// `--rpc.replay-file` is mutually exclusive with `--rpc`, `--rpc.capture-file`,
+/// and all other cache flags.
+#[test]
+fn test_replay_file_mutex_with_rpc_and_cache_flags() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["--rpc", "http://x"], "--rpc"),
+        (&["--rpc.capture-file", "/tmp/cap.json"], "--rpc.capture-file"),
+        (&["--rpc.cache-dir", "/tmp/cache"], "--rpc.cache-dir"),
+        (&["--rpc.clear-cache"], "--rpc.clear-cache"),
+        (&["--rpc.no-cache-file"], "--rpc.no-cache-file"),
+        (&["--rpc.cache-size", "256"], "--rpc.cache-size"),
+    ];
+    for (extra_flags, label) in cases {
+        let mut argv = vec!["mega-evme", "--rpc.replay-file", "/tmp/replay.json"];
+        argv.extend_from_slice(extra_flags);
+        let err = RpcArgs::try_parse_from(argv)
+            .expect_err(&format!("--rpc.replay-file should conflict with {label}"));
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "{label}: error must explain the conflict, got: {err}",
+        );
+    }
+}
+
+/// `--rpc.capture-file` requires `--rpc`. Parsing without `--rpc` must fail.
+#[test]
+fn test_capture_file_requires_rpc() {
+    let err = RpcArgs::try_parse_from(["mega-evme", "--rpc.capture-file", "/tmp/cap.json"])
+        .expect_err("--rpc.capture-file without --rpc must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("required") || msg.contains("following"),
+        "error must mention the requirement, got: {msg}",
+    );
 }
 
 // ─── Caller-side validation tests ────────────────────────────────────────────

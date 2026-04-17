@@ -132,7 +132,7 @@ impl Cmd {
         self.output_results(&outcome, &tx)?;
 
         // Step 5: Persist the RPC cache (clean-exit only).
-        cache_store.persist(None)?;
+        cache_store.persist()?;
 
         Ok(())
     }

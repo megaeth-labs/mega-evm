@@ -67,6 +67,23 @@ impl MockRpcServer {
             .await;
     }
 
+    /// Mount an unbounded mock that always returns a JSON-RPC error body (HTTP
+    /// 200 + `"error": {...}`). Models transient endpoint failures that surface
+    /// through the JSON-RPC envelope rather than an HTTP status, e.g.
+    /// `-32000 rate limit`.
+    pub(crate) async fn respond_jsonrpc_error(&self, code: i32, message: &str, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": { "code": code, "message": message },
+        });
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
     /// Mount a mock that returns `eth_chainId` with the given chain id.
     pub(crate) async fn respond_eth_chain_id(&self, chain_id: u64, priority: u8) {
         let body = serde_json::json!({

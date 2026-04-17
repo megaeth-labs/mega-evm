@@ -45,6 +45,10 @@ pub enum EvmeError {
     #[error("RPC error: {0}")]
     RpcError(String),
 
+    /// Fixture envelope error
+    #[error("Fixture error: {0}")]
+    FixtureError(String),
+
     /// Unsupported transaction type
     #[error("Unsupported transaction type: {0}")]
     UnsupportedTxType(u8),

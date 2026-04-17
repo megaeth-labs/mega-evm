@@ -35,7 +35,7 @@ async fn test_create_initial_state_non_fork_store_is_noop() {
         prestate_args.create_initial_state(&sender, &rpc_args).await.expect("create_initial_state");
 
     assert!(cache_store.is_noop(), "non-fork must wire a no-op cache store");
-    cache_store.persist(None).expect("persist");
+    cache_store.persist().expect("persist");
     assert!(
         !dir.path().join("rpc-cache-4326.json").exists(),
         "non-fork persist must not produce any cache file",
@@ -66,7 +66,7 @@ async fn test_create_initial_state_fork_store_persists_cache() {
         prestate_args.create_initial_state(&sender, &rpc_args).await.expect("create_initial_state");
 
     assert!(!cache_store.is_noop(), "fork + cache_dir must wire a real store");
-    cache_store.persist(None).expect("persist");
+    cache_store.persist().expect("persist");
     assert!(
         dir.path().join("rpc-cache-4326.json").exists(),
         "fork persist must write the cache file",
@@ -119,7 +119,7 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
             .await
             .expect("create_initial_state phase 1");
         let value = state.storage_ref(oracle, slot).expect("storage_ref phase 1");
-        cache_store.persist(None).expect("persist");
+        cache_store.persist().expect("persist");
 
         assert!(
             server.received_request_count().await > 0,
@@ -222,7 +222,7 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
         "MegaETH Oracle must be a contract account, not an EOA",
     );
 
-    cache_store.persist(None).expect("persist");
+    cache_store.persist().expect("persist");
 
     // MegaETH mainnet chain id is 4326, so the cache filename is fixed.
     let cache_file = dir.path().join("rpc-cache-4326.json");
@@ -284,7 +284,7 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
             .expect("create_initial_state phase 1");
         let value =
             state.storage_ref(oracle, slot).expect("storage_ref phase 1 — real RPC must succeed");
-        cache_store.persist(None).expect("persist");
+        cache_store.persist().expect("persist");
         value
     };
 

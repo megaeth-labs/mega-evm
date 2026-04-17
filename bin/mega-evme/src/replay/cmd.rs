@@ -17,7 +17,7 @@ use mega_evm::{
     BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
     MegaEvmFactory, MegaHardforks, MegaSpecId,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 
 use op_alloy_rpc_types::Transaction;
 
@@ -69,13 +69,13 @@ pub struct Cmd {
     pub output_args: run::OutputArgs,
 }
 
-/// Resolved provider and associated metadata from `--rpc` / `--rpc.cache-file` flags.
+/// Resolved provider and associated metadata from `--rpc` / `--rpc.capture-file` /
+/// `--rpc.replay-file` flags.
 struct ProviderContext {
     provider: crate::common::OpProvider,
     cache_store: RpcCacheStore,
     external_env: Option<ExternalEnvSnapshot>,
     chain_id: u64,
-    is_replay_mode: bool,
 }
 
 /// Replay-specific execution outcome
@@ -101,40 +101,49 @@ struct ReplayContext {
 impl Cmd {
     /// Replay a historical transaction.
     pub async fn run(&self) -> Result<()> {
-        let pctx = self.resolve_provider().await?;
+        let mut pctx = self.resolve_provider().await?;
         let rctx = self.fetch_replay_context(&pctx.provider, pctx.chain_id).await?;
         let (external_envs, env_snapshot) = self.resolve_external_envs(&pctx)?;
         let result = self.execute(&pctx.provider, &rctx, external_envs).await?;
         self.output_results(&result)?;
-        pctx.cache_store.persist(env_snapshot.as_ref())?;
+        // Hand the effective external-env snapshot to the store before the final
+        // persist; no-op unless this is a fixture-capture store.
+        if let Some(snapshot) = env_snapshot {
+            pctx.cache_store.set_external_env(snapshot);
+        }
+        pctx.cache_store.persist()?;
         Ok(())
     }
 
-    /// Select the right provider based on `--rpc` and `--rpc.cache-file` flags.
+    /// Select the right provider based on `--rpc`, `--rpc.capture-file`, and
+    /// `--rpc.replay-file` flags.
     async fn resolve_provider(&self) -> Result<ProviderContext> {
-        let (output, is_replay_mode) = match (&self.rpc_args.rpc_url, &self.rpc_args.cache_file) {
-            (Some(_), Some(_)) => (self.rpc_args.build_capture_provider().await?, false),
-            (None, Some(_)) => {
-                if !self.ext_args.bucket_capacity.is_empty() {
-                    return Err(ReplayError::Other(
-                        "'--bucket-capacity' cannot be used in offline replay mode \
-                             (bucket capacities come from the fixture envelope)"
-                            .to_string(),
-                    ));
-                }
-                (self.rpc_args.build_replay_provider().await?, true)
-            }
-            (Some(_), None) => (self.rpc_args.build_provider().await?, false),
-            (None, None) => {
+        let output = if let Some(path) = &self.rpc_args.capture_file {
+            info!(path = %path.display(), "Provider mode: capture to cache file");
+            self.rpc_args.build_capture_provider().await?
+        } else if let Some(path) = &self.rpc_args.replay_file {
+            if !self.ext_args.bucket_capacity.is_empty() {
                 return Err(ReplayError::Other(
-                    "'mega-evme replay' requires either '--rpc <URL>' or '--rpc.cache-file <PATH>'"
+                    "'--bucket-capacity' cannot be used in offline replay mode \
+                         (bucket capacities come from the fixture envelope)"
                         .to_string(),
                 ));
             }
+            info!(path = %path.display(), "Provider mode: offline replay from cache file");
+            self.rpc_args.build_replay_provider().await?
+        } else if let Some(rpc) = &self.rpc_args.rpc_url {
+            info!(rpc = %rpc, "Provider mode: online RPC");
+            self.rpc_args.build_provider().await?
+        } else {
+            return Err(ReplayError::Other(
+                "'mega-evme replay' requires '--rpc <URL>', '--rpc.capture-file <PATH>', \
+                 or '--rpc.replay-file <PATH>'"
+                    .to_string(),
+            ));
         };
 
         let BuildProviderOutput { provider, cache_store, chain_id, external_env } = output;
-        Ok(ProviderContext { provider, cache_store, external_env, chain_id, is_replay_mode })
+        Ok(ProviderContext { provider, cache_store, external_env, chain_id })
     }
 
     /// Fetch the transaction, its block, and preceding transaction hashes from the provider.
@@ -142,11 +151,13 @@ impl Cmd {
     where
         P: Provider<op_alloy_network::Optimism>,
     {
+        info!(tx_hash = %self.tx_hash, "Fetching transaction");
         let target_tx = provider
             .get_transaction_by_hash(self.tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
             .ok_or_else(|| ReplayError::TransactionNotFound(self.tx_hash))?;
+        debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
             (n - 1, n, false)
@@ -157,6 +168,12 @@ impl Cmd {
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?;
             (latest, latest, true)
         };
+        debug!(
+            state_base_block = state_base_block,
+            block = block_number,
+            is_pending,
+            "Block numbers determined",
+        );
 
         let parent_block = provider
             .get_block_by_number(state_base_block.into())
@@ -179,6 +196,8 @@ impl Cmd {
             }
         }
 
+        debug!(chain_id, preceding_count = preceding_tx_hashes.len(), "Replay context ready");
+
         Ok(ReplayContext { target_tx, parent_block, block, chain_id, preceding_tx_hashes })
     }
 
@@ -190,9 +209,13 @@ impl Cmd {
         &self,
         pctx: &ProviderContext,
     ) -> Result<(EvmeExternalEnvs, Option<ExternalEnvSnapshot>)> {
-        if pctx.is_replay_mode {
+        if self.rpc_args.replay_file.is_some() {
             let mut envs = EvmeExternalEnvs::new();
             if let Some(snapshot) = &pctx.external_env {
+                debug!(
+                    bucket_count = snapshot.bucket_capacities.len(),
+                    "Using bucket capacities from replay envelope",
+                );
                 for &(bucket_id, capacity) in &snapshot.bucket_capacities {
                     envs = envs.with_bucket_capacity(bucket_id, capacity);
                 }
@@ -223,11 +246,16 @@ impl Cmd {
         for &(id, cap) in &effective {
             envs = envs.with_bucket_capacity(id, cap);
         }
+        debug!(
+            bucket_count = effective.len(),
+            from_cli = !self.ext_args.bucket_capacity.is_empty(),
+            "Resolved bucket capacities for online/capture mode",
+        );
 
         // Build the envelope snapshot only in capture mode.
         let snapshot = self
             .rpc_args
-            .cache_file
+            .capture_file
             .is_some()
             .then_some(ExternalEnvSnapshot { bucket_capacities: effective });
 
@@ -247,7 +275,9 @@ impl Cmd {
         let hardforks = get_hardfork_config(ctx.chain_id);
         let spec = hardforks.spec_id(ctx.block.header.timestamp());
         let chain_args = ChainArgs { chain_id: ctx.chain_id, spec: spec.to_string() };
+        debug!(chain_id = ctx.chain_id, spec = %spec, "Chain configuration");
 
+        info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
         let mut database = EvmeState::new_forked(
             provider.clone(),
             Some(ctx.parent_block.header.number()),
@@ -257,6 +287,7 @@ impl Cmd {
         .await?;
 
         let block_env = block_env_from_header(&ctx.block);
+        trace!(?block_env, "Block environment built");
         let mut evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
 
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
@@ -274,6 +305,7 @@ impl Cmd {
         );
 
         if let Some(spec_override) = &self.spec_override {
+            info!(spec_override = %spec_override, "Overriding EVM spec");
             let spec = MegaSpecId::from_str(spec_override)
                 .map_err(|e| ReplayError::Other(format!("Invalid spec: {e:?}")))?;
             evm_env.cfg_env.spec = spec;
@@ -303,7 +335,9 @@ impl Cmd {
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
 
         // Execute preceding transactions
+        info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
         for tx_hash in &ctx.preceding_tx_hashes {
+            debug!(tx_hash = %tx_hash, "Executing preceding transaction");
             let tx = provider
                 .get_transaction_by_hash(*tx_hash)
                 .await
@@ -312,12 +346,17 @@ impl Cmd {
             let outcome = block_executor
                 .run_transaction(tx.as_recovered())
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+            trace!(tx_hash = %tx_hash, ?outcome, "Preceding transaction executed");
             block_executor
                 .commit_transaction_outcome(outcome)
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
         }
 
         // Execute target transaction
+        info!("Executing target transaction");
+        if self.tx_override_args.has_overrides() {
+            info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
+        }
         let wrapped_tx = self.tx_override_args.wrap(ctx.target_tx.as_recovered())?;
         let pre_execution_nonce = block_executor
             .evm()
@@ -330,6 +369,7 @@ impl Cmd {
         let outcome = block_executor
             .run_transaction(wrapped_tx)
             .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+        trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
 
@@ -365,6 +405,7 @@ impl Cmd {
         let (db, _) = evm.finish();
         db.merge_transitions(BundleRetention::Reverts);
         let receipt_envelope = block_result.receipts.last().unwrap().clone();
+        trace!(?receipt_envelope, "Receipt envelope obtained");
 
         let from = ctx.target_tx.inner.inner.signer();
         let to = ctx.target_tx.inner.inner.to();
@@ -399,6 +440,7 @@ impl Cmd {
 
     /// Print execution results as JSON (`--json`) or human-readable text.
     fn output_results(&self, result: &ReplayOutcome) -> Result<()> {
+        trace!("Writing output results");
         if self.output_args.json {
             let mut summary = ExecutionSummary::from_result(
                 &result.outcome.exec_result,

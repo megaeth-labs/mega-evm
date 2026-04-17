@@ -290,9 +290,11 @@ impl PreStateArgs {
             if rpc_args.rpc_url.is_none() {
                 return Err(EvmeError::InvalidInput("'--fork' requires '--rpc <URL>'".to_string()));
             }
-            if rpc_args.cache_file.is_some() {
+            if rpc_args.capture_file.is_some() || rpc_args.replay_file.is_some() {
                 return Err(EvmeError::InvalidInput(
-                    "'--rpc.cache-file' is not supported with '--fork' in this version".to_string(),
+                    "'--rpc.capture-file' and '--rpc.replay-file' are not supported with '--fork' \
+                     in this version"
+                        .to_string(),
                 ));
             }
             let super::BuildProviderOutput { provider, cache_store, .. } =
