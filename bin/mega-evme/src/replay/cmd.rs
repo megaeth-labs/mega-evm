@@ -10,8 +10,8 @@ use mega_evm::{
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
         context::{result::ExecutionResult, BlockEnv, ContextTr},
-        context_interface::block::BlobExcessGasAndPrice,
         database::{states::bundle_state::BundleRetention, StateBuilder},
+        primitives::eip4844,
         DatabaseRef,
     },
     BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
@@ -286,7 +286,7 @@ impl Cmd {
         )
         .await?;
 
-        let block_env = block_env_from_header(&ctx.block);
+        let block_env = retrieve_block_env(&ctx.block)?;
         trace!(?block_env, "Block environment built");
         let mut evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
 
@@ -472,9 +472,13 @@ impl Cmd {
     }
 }
 
-/// Build a [`BlockEnv`] from a block header.
-fn block_env_from_header(block: &Block<Transaction>) -> BlockEnv {
-    BlockEnv {
+/// Build a [`BlockEnv`] from the RPC block header.
+///
+/// Reads `excess_blob_gas` directly from the header rather than using a
+/// hardcoded default, so blob-fee-sensitive opcodes (e.g. `BLOBBASEFEE`)
+/// match on-chain semantics during replay.
+fn retrieve_block_env(block: &Block<Transaction>) -> Result<BlockEnv> {
+    let mut block_env = BlockEnv {
         number: U256::from(block.number()),
         beneficiary: block.header.beneficiary(),
         timestamp: U256::from(block.header.timestamp()),
@@ -482,9 +486,72 @@ fn block_env_from_header(block: &Block<Transaction>) -> BlockEnv {
         basefee: block.header.base_fee_per_gas().unwrap_or_default(),
         difficulty: block.header.difficulty(),
         prevrandao: block.header.mix_hash(),
-        blob_excess_gas_and_price: Some(BlobExcessGasAndPrice {
-            excess_blob_gas: 0,
-            blob_gasprice: 1,
-        }),
+        blob_excess_gas_and_price: None,
+    };
+
+    let excess_blob_gas = block.header.excess_blob_gas().ok_or_else(|| {
+        ReplayError::Other(format!(
+            "block header missing excess_blob_gas (block {})",
+            block.number()
+        ))
+    })?;
+    block_env.set_blob_excess_gas_and_price(
+        excess_blob_gas,
+        eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+    );
+
+    trace!(block_env = ?block_env, "Block environment retrieved");
+    Ok(block_env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Header as ConsensusHeader;
+    use alloy_rpc_types_eth::Header as RpcHeader;
+    use mega_evm::revm::context_interface::block::BlobExcessGasAndPrice;
+
+    fn make_block(excess_blob_gas: Option<u64>) -> Block<Transaction> {
+        let inner = ConsensusHeader { excess_blob_gas, ..Default::default() };
+        Block::empty(RpcHeader::new(inner))
+    }
+
+    #[test]
+    fn test_retrieve_block_env_sets_blob_fee_from_header() {
+        let excess_blob_gas: u64 = 786_432;
+        let block = make_block(Some(excess_blob_gas));
+
+        let env = retrieve_block_env(&block).expect("should build block env");
+
+        let expected = BlobExcessGasAndPrice::new(
+            excess_blob_gas,
+            eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+        );
+        assert_eq!(env.blob_excess_gas_and_price, Some(expected));
+    }
+
+    #[test]
+    fn test_retrieve_block_env_zero_excess_blob_gas_yields_min_price() {
+        let block = make_block(Some(0));
+
+        let env = retrieve_block_env(&block).expect("should build block env");
+
+        let blob = env.blob_excess_gas_and_price.expect("blob fields populated");
+        assert_eq!(blob.excess_blob_gas, 0);
+        assert_eq!(blob.blob_gasprice, u128::from(eip4844::MIN_BLOB_GASPRICE));
+    }
+
+    #[test]
+    fn test_retrieve_block_env_missing_excess_blob_gas_errors() {
+        let block = make_block(None);
+
+        let err = retrieve_block_env(&block).expect_err("should reject pre-Cancun header");
+        match err {
+            ReplayError::Other(msg) => assert!(
+                msg.contains("excess_blob_gas"),
+                "error should mention missing field, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 }
