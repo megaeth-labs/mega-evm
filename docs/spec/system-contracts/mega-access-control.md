@@ -81,6 +81,12 @@ They fall through to the on-chain bytecode, which reverts with `NotIntercepted()
 
 Unknown selectors MUST NOT be intercepted and MUST fall through to the on-chain bytecode.
 
+### Execution-Local Policy State
+
+The restriction controlled by `disableVolatileDataAccess` and `enableVolatileDataAccess` MUST be treated as execution-local policy state rather than persistent chain state.
+Successful interception of those selectors MUST update that execution-local policy state identically for `CALL` and `STATICCALL`.
+Those updates MUST NOT write account storage, emit logs, or transfer value.
+
 ### Value Transfer Policy
 
 All intercepted functions MUST reject calls with non-zero value transfer.
@@ -89,6 +95,7 @@ If the call carries a non-zero transferred value, the node MUST revert with `Non
 ### `disableVolatileDataAccess`
 
 When intercepted, the node MUST disable volatile data access for the caller's [call frame](../glossary.md#call-frame) and all descendant call frames.
+The rule above MUST apply identically when the selector is reached through `CALL` or `STATICCALL`.
 
 While disabled, any volatile data access — block environment reads, beneficiary-targeted account access (including `SELFDESTRUCT` to the beneficiary), and [oracle](oracle.md) storage reads — MUST revert immediately with `VolatileDataAccessDisabled(VolatileDataAccessType accessType)`.
 
@@ -97,6 +104,7 @@ Blocked volatile access MUST NOT update volatile-access tracking and MUST NOT ti
 ### `enableVolatileDataAccess`
 
 When intercepted, the node MUST re-enable volatile data access for the caller's call frame and descendant call frames if and only if the restriction was set at the caller's depth or was not active.
+The rule above MUST apply identically when the selector is reached through `CALL` or `STATICCALL`.
 
 If the restriction was set by an ancestor call frame (a parent at a shallower depth), the node MUST revert with `DisabledByParent()`.
 
@@ -130,6 +138,11 @@ Reverting makes the restriction visible and forces the caller to handle it expli
 Allowing untrusted child code to re-enable access would defeat the purpose.
 The calling contract disables access precisely because it does not trust inner calls to behave correctly with volatile data.
 The parent-override rule preserves the caller's intent.
+
+**Why allow `disableVolatileDataAccess()` and `enableVolatileDataAccess()` under `STATICCALL`?**
+These functions change execution-local policy state only.
+Allowing the same interception semantics under `STATICCALL` lets read-only frames defend themselves against descendant volatile accesses and restore their own policy when the disable was set at the same depth.
+Treating these selectors as forbidden mutable side effects under `STATICCALL` would make that defense unavailable to `view` entrypoints.
 
 ## Spec History
 
