@@ -159,6 +159,13 @@ fn transact_apply_pending_sequencer_change<Halt>(
         }
     };
 
+    if !res.result.is_success() {
+        return Err(BlockValidationError::BlockHashContractCall {
+            message: "SequencerRegistry applyPendingChange() reverted or halted".into(),
+        }
+        .into());
+    }
+
     Ok(Some(res.state))
 }
 
@@ -215,7 +222,7 @@ pub fn resolve_system_address<DB: Database>(
 mod tests {
     use super::*;
     use alloy_primitives::{keccak256, B256};
-    use revm::{database::InMemoryDB, state::AccountInfo};
+    use revm::{context::BlockEnv, database::InMemoryDB, state::AccountInfo};
 
     use crate::{MegaHardfork, MegaHardforkConfig, MegaSpecId};
     use alloy_hardforks::ForkCondition;
@@ -415,6 +422,48 @@ mod tests {
         let account = evm_state.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
         assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
         assert!(account.is_created());
+    }
+
+    #[test]
+    fn test_transact_apply_pending_sequencer_change_if_due_errors_on_revert() {
+        let mut db = InMemoryDB::default();
+        let reverting_code = Bytecode::new_raw(alloy_primitives::Bytes::from_static(&[
+            0x60, 0x00, 0x60, 0x00, 0xfd,
+        ]));
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: reverting_code.hash_slow(),
+                code: Some(reverting_code),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            SLOT_PENDING_SEQUENCER,
+            address!("0x1111111111111111111111111111111111111111").into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(SEQUENCER_REGISTRY_ADDRESS, SLOT_ACTIVATION_BLOCK, U256::from(7))
+            .unwrap();
+
+        let mut state = State::builder().with_database(&mut db).build();
+        let mut ctx = crate::MegaContext::new(&mut state, MegaSpecId::REX5).with_block(BlockEnv {
+            number: U256::from(7),
+            timestamp: U256::from(1),
+            ..Default::default()
+        });
+        ctx.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        let mut evm = crate::MegaEvm::new(ctx);
+        let hardforks =
+            MegaHardforkConfig::default().with(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
+
+        let result = transact_apply_pending_sequencer_change_if_due(&hardforks, &mut evm);
+
+        assert!(result.is_err(), "reverted applyPendingChange() should surface as an error");
     }
 
     #[test]
