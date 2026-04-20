@@ -75,6 +75,7 @@ fn all_hardforks_config() -> MegaHardforkConfig {
         .with(MegaHardfork::Rex2, ForkCondition::Timestamp(0))
         .with(MegaHardfork::Rex3, ForkCondition::Timestamp(0))
         .with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
+        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
 }
 
 /// Create block EVM environment.
@@ -276,6 +277,7 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
         ("equivalence", MegaSpecId::EQUIVALENCE),
         ("mini_rex", MegaSpecId::MINI_REX),
         ("rex4", MegaSpecId::REX4),
+        ("rex5", MegaSpecId::REX5),
     ];
 
     for &(spec_name, spec) in specs {
@@ -320,11 +322,85 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark pre-block overhead for REX5 (SequencerRegistry deploy + is_rotation_due +
+/// resolve_system_address). Measures the no-rotation common path.
+fn bench_rex5_pre_block(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rex5_pre_block");
+    group.sample_size(10);
+
+    let contract_code = empty_contract();
+    let spec = MegaSpecId::REX5;
+
+    // Bootstrap block: deploys SequencerRegistry + Oracle v2.0.0
+    group.bench_function("bootstrap", |b| {
+        b.iter(|| {
+            let mut db = MemoryDatabase::default();
+            db.set_account_code(CONTRACT, contract_code.clone());
+            db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+            let mut state = State::builder().with_database(&mut db).build();
+            let external_envs = TestExternalEnvs::<Infallible>::new();
+            let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+            let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+
+            let block_ctx = MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                Some(B256::ZERO),
+                Bytes::new(),
+                BlockLimits::no_limits(),
+            );
+            let mut executor = MegaBlockExecutor::new(
+                evm,
+                block_ctx,
+                all_hardforks_config(),
+                OpAlloyReceiptBuilder::default(),
+            );
+            executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
+            black_box(());
+        })
+    });
+
+    // Steady-state block: SequencerRegistry already deployed, no pending rotation.
+    // Pre-deploy via MemoryDatabase so the benchmark measures the no-rotation common path.
+    group.bench_function("no_rotation", |b| {
+        use mega_evm::{SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE};
+
+        let mut db = MemoryDatabase::default();
+        db.set_account_code(CONTRACT, contract_code.clone());
+        db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+        db.set_account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE);
+
+        b.iter(|| {
+            let mut state = State::builder().with_database(&mut db).build();
+            let external_envs = TestExternalEnvs::<Infallible>::new();
+            let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+            let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+            let block_ctx = MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                Some(B256::ZERO),
+                Bytes::new(),
+                BlockLimits::no_limits(),
+            );
+            let mut executor = MegaBlockExecutor::new(
+                evm,
+                block_ctx,
+                all_hardforks_config(),
+                OpAlloyReceiptBuilder::default(),
+            );
+            executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
+            black_box(());
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_block_empty_txs,
     bench_block_mixed_txs,
     bench_block_deploy,
     bench_block_spec_comparison,
+    bench_rex5_pre_block,
 );
 criterion_main!(benches);

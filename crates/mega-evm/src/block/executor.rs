@@ -26,7 +26,7 @@ use revm::{
 };
 
 use crate::{
-    block::eips, resolve_system_address, transact_apply_pending_sequencer_change,
+    block::eips, resolve_system_address, transact_apply_pending_sequencer_change_if_due,
     transact_deploy_access_control_contract, transact_deploy_high_precision_timestamp_oracle,
     transact_deploy_keyless_deploy_contract, transact_deploy_limit_control_contract,
     transact_deploy_oracle_contract, transact_deploy_sequencer_registry, BlockLimiter,
@@ -285,14 +285,9 @@ where
         }
 
         // Rex5 hardfork: apply pending sequencer rotation if due.
-        let block_number = self.evm.block().number.to::<u64>();
-        let rotation_due = crate::is_rotation_due(self.evm.db_mut(), block_number)?;
-        let result_and_state = if rotation_due {
-            transact_apply_pending_sequencer_change(&self.hardforks, &mut self.evm)?
-        } else {
-            None
-        };
-        if let Some(ExecResultAndState { state, .. }) = result_and_state {
+        let result_and_state =
+            transact_apply_pending_sequencer_change_if_due(&self.hardforks, &mut self.evm)?;
+        if let Some(state) = result_and_state {
             outcomes
                 .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
         }

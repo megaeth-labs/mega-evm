@@ -17,7 +17,6 @@ use alloy_evm::{
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use revm::{
-    context_interface::result::ResultAndState,
     database::State,
     state::{Account, Bytecode, EvmState},
     Database as RevmDatabase,
@@ -92,6 +91,30 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     Ok(Some(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, revm_acc)])))
 }
 
+/// Executes the pre-block `applyPendingChange()` system call on the `SequencerRegistry`
+/// if a pending rotation is due on a REX5-active block.
+///
+/// This avoids an EVM system call on every block by first checking committed storage.
+/// Follows the EIP-2935 / EIP-4788 pre-block system call pattern.
+pub fn transact_apply_pending_sequencer_change_if_due<'a, DB, Halt>(
+    hardforks: &impl MegaHardforks,
+    evm: &mut impl alloy_evm::Evm<DB = &'a mut State<DB>, HaltReason = Halt>,
+) -> Result<Option<EvmState>, BlockExecutionError>
+where
+    DB: Database + 'a,
+{
+    if !hardforks.is_rex_5_active_at_timestamp(evm.block().timestamp.saturating_to()) {
+        return Ok(None);
+    }
+
+    let block_number = evm.block().number.to::<u64>();
+    if !is_rotation_due(evm.db_mut(), block_number)? {
+        return Ok(None);
+    }
+
+    transact_apply_pending_sequencer_change(evm)
+}
+
 /// Checks whether a pending sequencer rotation is due by reading committed storage.
 ///
 /// Returns `true` only when the account exists, `_pendingSequencer != 0`,
@@ -118,16 +141,9 @@ pub(crate) fn is_rotation_due<DB: Database>(
 }
 
 /// Executes the pre-block `applyPendingChange()` system call on the `SequencerRegistry`.
-///
-/// Caller should gate this with [`is_rotation_due`] to avoid an EVM call on every block.
-/// Follows the EIP-2935 / EIP-4788 pre-block system call pattern.
-pub fn transact_apply_pending_sequencer_change<Halt>(
-    hardforks: &impl MegaHardforks,
+fn transact_apply_pending_sequencer_change<Halt>(
     evm: &mut impl alloy_evm::Evm<HaltReason = Halt>,
-) -> Result<Option<ResultAndState<Halt>>, BlockExecutionError> {
-    if !hardforks.is_rex_5_active_at_timestamp(evm.block().timestamp.saturating_to()) {
-        return Ok(None);
-    }
+) -> Result<Option<EvmState>, BlockExecutionError> {
 
     let calldata = ISequencerRegistry::applyPendingChangeCall {}.abi_encode();
     let res = match evm.transact_system_call(
@@ -144,7 +160,7 @@ pub fn transact_apply_pending_sequencer_change<Halt>(
         }
     };
 
-    Ok(Some(res))
+    Ok(Some(res.state))
 }
 
 /// Resolves the current system address from the `SequencerRegistry` committed state.
