@@ -165,6 +165,18 @@ Allowing a less restrictive later trigger to relax an earlier cap would make det
 The purpose of detention is to bound the remainder of execution after volatile access.
 If the cap were scoped only to the triggering call frame, contracts could evade the limit by returning to a parent frame and continuing computation there.
 
+## Security Considerations
+
+If a node does not apply gas detention after volatile data access, a transaction that reads a shared input (block-environment field, beneficiary account, oracle storage) can continue computing arbitrarily.
+This increases parallel execution conflicts and degrades throughput when many such transactions appear in the same block.
+
+If the node does not apply the most restrictive cap when multiple volatile-data categories are accessed, a transaction can exploit trigger ordering — accessing a less-capping volatile source after a more-capping one — to relax its effective detained limit beyond the intended bound.
+
+If detention is scoped to the triggering call frame rather than the entire transaction, contracts can evade the limit by returning to a parent frame and continuing computation there.
+
+If the detained gas is consumed rather than refunded, the transaction sender is charged for gas that was not executed.
+The spec preserves the invariant that detention limits execution but does not itself generate additional gas charges beyond compute gas actually consumed.
+
 ## Spec History
 
 Gas detention semantics evolved across specs:

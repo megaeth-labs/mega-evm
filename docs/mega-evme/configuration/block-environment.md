@@ -12,12 +12,12 @@ The `replay` command fetches block environment from the RPC automatically.
 
 | Flag                          | Default       | Aliases                            | Description                          |
 | ----------------------------- | ------------- | ---------------------------------- | ------------------------------------ |
-| `--block.number <NUM>`        | `1`           | —                                  | Block number                         |
+| `--block.number <NUM>`        | `1`           | None                               | Block number                         |
 | `--block.coinbase <ADDR>`     | `0x0…0`       | `--block.beneficiary`              | Block coinbase / beneficiary address |
-| `--block.timestamp <TS>`      | `1`           | —                                  | Block timestamp (Unix seconds)       |
+| `--block.timestamp <TS>`      | `1`           | None                               | Block timestamp (Unix seconds)       |
 | `--block.gaslimit <GAS>`      | `10000000000` | `--block.gas-limit`, `--block.gas` | Block gas limit                      |
 | `--block.basefee <FEE>`       | `0`           | `--block.base-fee`                 | EIP-1559 base fee                    |
-| `--block.difficulty <DIFF>`   | `0`           | —                                  | Block difficulty                     |
+| `--block.difficulty <DIFF>`   | `0`           | None                               | Block difficulty                     |
 | `--block.prevrandao <HASH>`   | `0x0…0`       | `--block.random`                   | Previous randao value (post-merge)   |
 | `--block.blobexcessgas <GAS>` | `0`           | `--block.blob-excess-gas`          | EIP-4844 blob excess gas             |
 

@@ -67,6 +67,17 @@ MegaETH initially disabled `SELFDESTRUCT` to avoid inheriting destructive accoun
 EIP-6780 is the post-Cancun Ethereum behavior and provides a widely understood baseline.
 Adopting it restores compatibility while avoiding legacy full-destruction behavior for long-lived contracts.
 
+## Security Considerations
+
+If a node applies full-destruction semantics instead of EIP-6780 semantics (i.e., removes code and storage for contracts not created in the same transaction), it irreversibly destroys deployed contract state.
+Contract users relying on the permanence guarantee for long-lived contracts would observe unrecoverable loss of code and storage.
+
+If the state-growth refund for same-transaction-created contracts is not applied on `SELFDESTRUCT`, the node overcounts net state growth.
+Transactions that create and immediately destroy contracts may be incorrectly failed for exceeding the state growth limit when their net state impact is zero.
+
+If the first-destruction-only rule is not enforced (i.e., each `SELFDESTRUCT` targeting the same account applies a refund), the state-growth counter can be decremented beyond the actual net reduction in on-chain state.
+This allows a transaction to artificially reduce its reported state growth and bypass the state growth limit.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md) disable `SELFDESTRUCT`.

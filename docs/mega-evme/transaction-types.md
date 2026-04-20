@@ -19,9 +19,9 @@ These options apply to all transaction types in the `run` and `tx` commands.
 | `--priority-fee <AMOUNT>` | N/A                                          | `--priorityfee`, `--tip`                    | EIP-1559 max priority fee per gas                                   |
 | `--sender <ADDRESS>`      | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` | `--from`                                    | Transaction sender                                                  |
 | `--receiver <ADDRESS>`    | `0x0000…0000`                                | `--to`                                      | Transaction receiver                                                |
-| `--nonce <NONCE>`         | `0`                                          | —                                           | Transaction nonce                                                   |
-| `--create`                | `false`                                      | —                                           | Execute in create mode (deploy contract). Requires explicit `true`. |
-| `--value <AMOUNT>`        | `0`                                          | —                                           | ETH value in wei (supports `1ether`, `100gwei`, `1000wei` suffixes) |
+| `--nonce <NONCE>`         | `0`                                          | None                                        | Transaction nonce                                                   |
+| `--create`                | `false`                                      | None                                        | Execute in create mode (deploy contract). Requires explicit `true`. |
+| `--value <AMOUNT>`        | `0`                                          | None                                        | ETH value in wei (supports `1ether`, `100gwei`, `1000wei` suffixes) |
 | `--input <HEX>`           | N/A                                          | `--data`                                    | Transaction calldata as hex                                         |
 | `--inputfile <PATH>`      | N/A                                          | `--datafile`, `--input-file`, `--data-file` | Calldata from file (`-` for stdin)                                  |
 
@@ -116,7 +116,7 @@ These are system-level transactions used by the Optimism bridge.
 | Flag                   | Default | Aliases        | Description                                       |
 | ---------------------- | ------- | -------------- | ------------------------------------------------- |
 | `--source-hash <HASH>` | N/A     | `--sourcehash` | Source hash identifying the deposit origin (B256) |
-| `--mint <AMOUNT>`      | N/A     | —              | Amount of ETH to mint to the sender (in wei)      |
+| `--mint <AMOUNT>`      | N/A     | None           | Amount of ETH to mint to the sender (in wei)      |
 
 ```bash
 mega-evme tx --tx-type 126 \

@@ -78,6 +78,14 @@ The inherited 63/64 rule was designed to mitigate call-depth attacks by ensuring
 MegaETH is intended to support block gas limits up to 10 billion gas, which makes the inherited 63/64 reduction insufficient to suppress that attack pattern at deep call depth.
 Retaining 2% instead of approximately 1.56% reduces residual gas more aggressively and restores the protective intent of gas-based call-depth mitigation under MegaETH's higher gas regime.
 
+## Security Considerations
+
+If a node applies the standard 63/64 forwarding rule instead of the MegaETH 98/100 rule, at block gas limits up to 10 billion gas, deeply nested calls retain enough residual gas at each level to reintroduce call-depth attack patterns.
+An attacker can construct a deep call chain that reserves a large total gas budget across many frames, exhausting sequencer resources in a way that the 63/64 rule was intended to prevent.
+
+If the storage gas stipend is returned to the caller rather than burned, the system-granted storage stipend leaks back into the caller's gas budget.
+This allows a contract to recover gas that the protocol intended to burn on return, effectively subsidizing the caller's subsequent compute gas consumption.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced the 98/100 rule for `CALL`, `CREATE`, and `CREATE2` only.

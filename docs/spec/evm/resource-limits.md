@@ -187,6 +187,17 @@ Allowing the first over-limit transaction to be included maximizes block utiliza
 Cumulative block compute gas is already indirectly constrained by the block gas limit.
 The stable protocol therefore does not need a second independent block-level compute gas ceiling.
 
+## Security Considerations
+
+If a node excludes a runtime-limited transaction from the block rather than including it as failed (`status = 0`), the sender avoids paying for resources consumed.
+This makes repeated expensive transactions effectively free, enabling resource-exhaustion attacks.
+
+If the block-level runtime limit skip rule is not enforced, a block's cumulative resource usage can grow without bound, imposing excessive storage, computation, or networking load on nodes that process the block.
+
+If the per-call-frame budget is computed with an incorrect forwarding fraction (wrong `FRAME_LIMIT_NUMERATOR` or `FRAME_LIMIT_DENOMINATOR`), deeply nested calls can consume a larger share of remaining resource budgets than intended, reintroducing call-depth resource exhaustion.
+
+If intrinsic resource usage is not deducted before the top-level frame budget is set, the first call frame inherits the full transaction limit without accounting for fixed overhead (calldata, transaction fields, EIP-7702 authorizations), allowing transactions to exceed the intended effective budget.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced compute gas, data size, and KV update limits, with transaction-level data and KV limits set to 25% of the corresponding block limits.

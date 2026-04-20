@@ -222,6 +222,21 @@ The `STORAGE_GAS_MULTIPLIER` of 10 was chosen to reflect the long-term storage a
 Every transaction imposes a baseline storage cost on nodes regardless of its execution: the transaction itself must be stored, the receipt must be persisted, and account state (nonce, balance) must be updated.
 The 39,000 flat intrinsic storage gas covers this per-transaction overhead.
 
+## Security Considerations
+
+If a node fails to charge storage gas on any operation in the storage gas schedule (SSTORE, account creation, contract creation, code deposit, LOG topics and data, calldata), an attacker can expand on-chain state or emit large logs at compute-gas cost only.
+At MegaETH's low base fee of 0.001 gwei, this produces effectively free state bloat.
+
+If the dynamic SALT multiplier is applied incorrectly (for example, always using `multiplier = 1`), storage gas charges are suppressed regardless of actual state density.
+This eliminates the economic signal that discourages crowding of hot state regions.
+
+If the calldata floor check is omitted or applied with incorrect constants, the effective storage cost for calldata-heavy transactions falls below the intended floor, enabling cheap bulk-calldata posting.
+
+If storage gas charged within a reverted call frame is refunded (violating the non-refundable rule), an attacker can exploit a write-and-revert pattern to partially recover storage gas costs, undermining the per-operation pricing model.
+
+If the storage gas stipend is returned to the caller rather than burned, system-granted gas leaks back into the transaction budget.
+This allows a contract to recover from a mechanism designed to be one-directional, and the caller effectively recovers value that the protocol intended to burn.
+
 ## Spec History
 
 For the historical evolution of storage gas formulas and constants across specs:

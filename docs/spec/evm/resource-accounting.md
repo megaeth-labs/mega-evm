@@ -208,6 +208,17 @@ Deduplication prevents artificial inflation of data-size and KV-update counts fr
 During execution, a transaction may first create new state and later remove it.
 Allowing the counter to go negative during intermediate steps keeps the accounting locally composable across nested call frames, while clamping the final reported value prevents negative net state growth from being treated as a meaningful resource credit.
 
+## Security Considerations
+
+If a node treats compute gas as call-frame-aware (i.e., reverts compute gas consumption when a child frame reverts), an attacker can execute arbitrarily expensive subcalls and then revert them to avoid accumulating compute gas.
+This allows repeated high-cost execution at the cost of a single transaction.
+
+If data-size, KV-update, or state-growth counters are not discarded on child-frame revert, tracked values overcount resource consumption for transactions that revert inner frames, producing false limit violations for legitimate transactions.
+
+If account-update deduplication within a call frame is not enforced, repeated modifications to the same account within a single frame inflate data-size and KV-update counts artificially, pushing a transaction over its resource limit incorrectly.
+
+If the state-growth counter is not adjusted correctly for `SELFDESTRUCT` (see [SELFDESTRUCT — State Growth Refund](selfdestruct.md#state-growth-refund)), transactions that create and immediately destroy accounts accumulate incorrect net state growth and may fail within the state growth limit when they should succeed.
+
 ## Spec History
 
 This page describes the current accounting behavior.

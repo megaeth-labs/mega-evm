@@ -36,6 +36,12 @@ All other precompiles MUST behave according to the inherited EVM baseline unless
 | ------------------------------- | ------- | ------------------------------------------------------ |
 | `KZG_POINT_EVALUATION_GAS_COST` | 100,000 | Fixed gas cost for the KZG Point Evaluation precompile |
 
+## Security Considerations
+
+If a node does not apply the `KZG_POINT_EVALUATION_GAS_COST` override and instead inherits an underpriced schedule, an attacker can pack many KZG Point Evaluation calls into a single transaction or block and impose disproportionate computation on the sequencer at low gas cost.
+
+If a node does not apply the Osaka / EIP-7883 pricing schedule for ModExp and instead uses the inherited underpriced schedule, the same denial-of-service pattern applies: computationally expensive modular exponentiation can be invoked cheaply, enabling a block to be filled with calls whose actual cost far exceeds their gas price.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced the stable KZG Point Evaluation and ModExp overrides.

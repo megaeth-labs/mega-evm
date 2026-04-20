@@ -12,7 +12,7 @@ The `replay` command auto-detects the spec from the chain ID and block timestamp
 
 | Flag              | Default | Aliases     | Description         |
 | ----------------- | ------- | ----------- | ------------------- |
-| `--spec <SPEC>`   | `Rex4`  | —           | MegaETH spec to use |
+| `--spec <SPEC>`   | `Rex4`  | None        | MegaETH spec to use |
 | `--chain-id <ID>` | `6342`  | `--chainid` | Chain ID            |
 
 ## Available Specs
