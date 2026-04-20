@@ -86,7 +86,7 @@ interface IOracle {
 }
 ```
 
-The methods above MUST be callable only by `MEGA_SYSTEM_ADDRESS`.
+The methods above MUST be callable only by `SYSTEM_ADDRESS`.
 Calls from any other sender MUST revert with `NotSystemAddress()`.
 
 For `setSlots`, if the `slots` and `values` array lengths differ, the call MUST revert with `InvalidLength(uint256 slotsLength, uint256 valuesLength)`.
@@ -118,7 +118,7 @@ Otherwise, the node MUST return the on-chain storage value.
 
 **Writes.**
 `setSlot` and `setSlots` write Oracle storage via `SSTORE`.
-These methods are restricted to `MEGA_SYSTEM_ADDRESS` (see [Restricted Write Interface](#restricted-write-interface)).
+These methods are restricted to `SYSTEM_ADDRESS` (see [Restricted Write Interface](#restricted-write-interface)).
 
 **On-chain persistence.**
 When the external data source provides a value for a read, the sequencer MUST persist that value on-chain by inserting a [Mega System Transaction](system-tx.md) that calls `setSlot` or `setSlots`.
@@ -166,7 +166,7 @@ From [Rex2](../upgrades/rex2.md) onward, the stable Oracle bytecode includes `se
 **Why centralize oracle-backed data in one contract?**
 Oracle-backed protocol data needs a single canonical storage location so all contracts and all nodes observe the same values under the same addressing scheme.
 
-**Why restrict writes to `MEGA_SYSTEM_ADDRESS`?**
+**Why restrict writes to `SYSTEM_ADDRESS`?**
 Externally sourced oracle values are part of protocol-maintained state.
 Allowing arbitrary writes would destroy the meaning of oracle-backed data and make the values untrustworthy as protocol inputs.
 

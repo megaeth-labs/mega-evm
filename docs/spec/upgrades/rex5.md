@@ -13,7 +13,7 @@ For the full normative definition, see the Rex5 spec in the mega-evm repository.
 
 ## Summary
 
-Rex5 introduces the `SequencerRegistry` system contract and dynamic system address resolution.
+Rex5 introduces the `SequencerRegistry` system contract and per-block `SYSTEM_ADDRESS` resolution.
 It also upgrades the Oracle contract to v2.0.0 to read its authority from the registry.
 
 ## What Changed
@@ -34,13 +34,13 @@ Key methods:
 The contract uses a constant-bootstrap pattern: initial sequencer and admin are compile-time constants in the bytecode.
 No storage is written during deployment.
 
-### 2. Dynamic System Address
+### 2. Dynamic `SYSTEM_ADDRESS`
 
-The system address used for system transaction identification and Oracle gas detention exemption is no longer a hardcoded constant.
+The `SYSTEM_ADDRESS` used for system transaction identification and Oracle gas detention exemption is no longer a hardcoded constant.
 It is resolved per block from `SequencerRegistry._currentSequencer` after all pre-block changes are committed.
 
-On fresh deploy (zero storage), the resolved address equals the bytecode constant `INITIAL_SEQUENCER`.
-After a sequencer rotation, the resolved address reflects the new sequencer.
+On fresh deploy (zero storage), `SYSTEM_ADDRESS` equals the bytecode constant `INITIAL_SEQUENCER`.
+After a sequencer rotation, `SYSTEM_ADDRESS` reflects the new sequencer.
 
 ### 3. Oracle v2.0.0
 

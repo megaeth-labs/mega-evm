@@ -120,7 +120,7 @@ mega-evm deploys system contracts by replacing deployed bytecode without running
 Compile-time constants avoid the need for deploy-time storage initialization, keeping the deployment pattern consistent with all other system contracts.
 
 **Why a pre-block system call for rotation?**
-Applying rotation as a regular transaction would change `_currentSequencer` mid-block, breaking block-stability of the system address.
+Applying rotation as a regular transaction would change `_currentSequencer` mid-block, breaking block-stability of `SYSTEM_ADDRESS`.
 A pre-block system call ensures the rotation is applied before any user transaction executes.
 
 **Why is the system call gated by a Rust pre-check?**
