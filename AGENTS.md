@@ -168,6 +168,7 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 | Keyless Deploy           | `...0003`      | Deterministic contract deployment via Nick's Method |
 | MegaAccessControl        | `...0004`      | Access control (disableVolatileDataAccess)          |
 | MegaLimitControl         | `...0005`      | Limit query/control (currently remainingComputeGas) |
+| SequencerRegistry        | `...0006`      | Sequencer address registry and rotation history     |
 
 Key design aspects:
 

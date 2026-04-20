@@ -60,3 +60,18 @@ pub mod limit_control {
 
     alloy_sol_types::sol!("contracts/interfaces/IMegaLimitControl.sol");
 }
+
+/// `SequencerRegistry` contract bytecode and interface.
+///
+/// Bytecode constants are pre-generated from the versioned artifacts in the `artifacts/`
+/// directory.
+/// Interface bindings are generated from the Solidity source.
+#[allow(missing_docs)]
+pub mod sequencer_registry {
+    include!("generated/sequencer_registry_artifacts.rs");
+
+    alloy_sol_types::sol!(
+        #[sol(all_derives)]
+        "contracts/interfaces/ISequencerRegistry.sol"
+    );
+}

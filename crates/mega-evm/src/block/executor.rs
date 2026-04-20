@@ -26,9 +26,10 @@ use revm::{
 };
 
 use crate::{
-    block::eips, transact_deploy_access_control_contract,
-    transact_deploy_high_precision_timestamp_oracle, transact_deploy_keyless_deploy_contract,
-    transact_deploy_limit_control_contract, transact_deploy_oracle_contract, BlockLimiter,
+    block::eips, resolve_system_address, transact_apply_pending_sequencer_change,
+    transact_deploy_access_control_contract, transact_deploy_high_precision_timestamp_oracle,
+    transact_deploy_keyless_deploy_contract, transact_deploy_limit_control_contract,
+    transact_deploy_oracle_contract, transact_deploy_sequencer_registry, BlockLimiter,
     BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
     MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
 };
@@ -271,10 +272,35 @@ where
                 .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
         }
 
+        // Rex5 hardfork: SequencerRegistry contract (constant bootstrap — no storage writes)
+        let result_and_state = transact_deploy_sequencer_registry(
+            &self.hardforks,
+            self.evm.block().timestamp.saturating_to(),
+            self.evm.db_mut(),
+        )
+        .map_err(BlockExecutionError::other)?;
+        if let Some(state) = result_and_state {
+            outcomes
+                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
+        }
+
+        // Rex5 hardfork: apply pending sequencer rotation if due.
+        let block_number = self.evm.block().number.to::<u64>();
+        let rotation_due = crate::is_rotation_due(self.evm.db_mut(), block_number)?;
+        let result_and_state = if rotation_due {
+            transact_apply_pending_sequencer_change(&self.hardforks, &mut self.evm)?
+        } else {
+            None
+        };
+        if let Some(ExecResultAndState { state, .. }) = result_and_state {
+            outcomes
+                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
+        }
+
         Ok(outcomes)
     }
 
-    /// Make pre-execution changes on the state. Note that the execution result is not
+    /// Make post-execution changes on the state. Note that the execution result is not
     /// committed to the block executor's inner state.
     pub fn post_execution_changes(
         &mut self,
@@ -519,6 +545,12 @@ where
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         let outcomes = self.pre_execution_changes()?;
         self.commit_system_call_outcomes(outcomes)?;
+
+        // After all pre-block outcomes are committed, resolve the system address for this block.
+        // This reads _currentSequencer from the now-committed SequencerRegistry storage.
+        let spec = self.evm.ctx().mega_spec();
+        let system_address = resolve_system_address(spec, self.evm.db_mut())?;
+        self.evm.ctx_mut().set_system_address(system_address);
 
         Ok(())
     }

@@ -2,21 +2,20 @@
 pragma solidity ^0.8.0;
 
 import {Script} from "forge-std/Script.sol";
-import {Oracle} from "../contracts/Oracle.sol";
+import {SequencerRegistry} from "../contracts/SequencerRegistry.sol";
 
-/// @title SaveOracleBytecode
-/// @notice Script to deploy Oracle contract and save its deployed bytecode to a file.
-/// @dev v2.0.0 has no constructor parameters — the SequencerRegistry address is a constant.
-contract SaveOracleBytecode is Script {
+/// @title SaveSequencerRegistryBytecode
+/// @notice Script to deploy SequencerRegistry contract and save deployed bytecode to a file
+contract SaveSequencerRegistryBytecode is Script {
     function run() public {
         vm.startBroadcast();
 
-        Oracle oracle = new Oracle();
+        SequencerRegistry contractImpl = new SequencerRegistry();
 
         vm.stopBroadcast();
 
-        bytes memory deployedBytecode = address(oracle).code;
-        string memory version = oracle.version();
+        bytes memory deployedBytecode = address(contractImpl).code;
+        string memory version = contractImpl.version();
         bytes32 codeHash = keccak256(deployedBytecode);
         string memory bytecodeHex = vm.toString(deployedBytecode);
 
@@ -36,6 +35,6 @@ contract SaveOracleBytecode is Script {
             '"\n',
             "}"
         );
-        vm.writeFile("artifacts/Oracle.json", json);
+        vm.writeFile("artifacts/SequencerRegistry.json", json);
     }
 }
