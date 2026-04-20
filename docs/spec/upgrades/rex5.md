@@ -24,6 +24,7 @@ A new system contract at `0x6342000000000000000000000000000000000006`.
 It records the current sequencer, pending rotations, and rotation history.
 
 Key methods:
+
 - `currentSequencer()` — returns the current sequencer (constant fallback on fresh deploy).
 - `sequencerAt(blockNumber)` — returns the sequencer active at a given block.
 - `scheduleNextSequencerChange(newSequencer, activationBlock)` — admin schedules a rotation.

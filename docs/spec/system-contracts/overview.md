@@ -25,13 +25,13 @@ Both [precompiles](../evm/precompiles.md) and system contracts reside at fixed a
 
 A node MUST recognize the following contracts as system contracts:
 
-| Contract                                                | Address                            | Since                             | Purpose                              |
-| ------------------------------------------------------- | ---------------------------------- | --------------------------------- | ------------------------------------ |
-| [Oracle](oracle.md)                                     | `ORACLE_CONTRACT_ADDRESS`          | [MiniRex](../upgrades/minirex.md) | Off-chain data key-value storage     |
-| [High-Precision Timestamp](high-precision-timestamp.md) | `HIGH_PRECISION_TIMESTAMP_ADDRESS` | [MiniRex](../upgrades/minirex.md) | Sub-second timestamp oracle service  |
-| [KeylessDeploy](keyless-deploy.md)                      | `KEYLESS_DEPLOY_ADDRESS`           | [Rex2](../upgrades/rex2.md)       | Deterministic cross-chain deployment |
-| [MegaAccessControl](mega-access-control.md)             | `MEGA_ACCESS_CONTROL_ADDRESS`      | [Rex4](../upgrades/rex4.md)       | Volatile-data access control         |
-| [MegaLimitControl](mega-limit-control.md)               | `MEGA_LIMIT_CONTROL_ADDRESS`       | [Rex4](../upgrades/rex4.md)       | Query remaining compute-gas budget   |
+| Contract                                                | Address                            | Since                             | Purpose                                |
+| ------------------------------------------------------- | ---------------------------------- | --------------------------------- | -------------------------------------- |
+| [Oracle](oracle.md)                                     | `ORACLE_CONTRACT_ADDRESS`          | [MiniRex](../upgrades/minirex.md) | Off-chain data key-value storage       |
+| [High-Precision Timestamp](high-precision-timestamp.md) | `HIGH_PRECISION_TIMESTAMP_ADDRESS` | [MiniRex](../upgrades/minirex.md) | Sub-second timestamp oracle service    |
+| [KeylessDeploy](keyless-deploy.md)                      | `KEYLESS_DEPLOY_ADDRESS`           | [Rex2](../upgrades/rex2.md)       | Deterministic cross-chain deployment   |
+| [MegaAccessControl](mega-access-control.md)             | `MEGA_ACCESS_CONTROL_ADDRESS`      | [Rex4](../upgrades/rex4.md)       | Volatile-data access control           |
+| [MegaLimitControl](mega-limit-control.md)               | `MEGA_LIMIT_CONTROL_ADDRESS`       | [Rex4](../upgrades/rex4.md)       | Query remaining compute-gas budget     |
 | [SequencerRegistry](sequencer-registry.md)              | `SEQUENCER_REGISTRY_ADDRESS`       | [Rex5](../upgrades/rex5.md)       | Sequencer address and rotation history |
 
 ### Deployment Semantics

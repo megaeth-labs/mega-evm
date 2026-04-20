@@ -322,8 +322,8 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark pre-block overhead for REX5 (SequencerRegistry deploy + is_rotation_due +
-/// resolve_system_address). Measures the no-rotation common path.
+/// Benchmark pre-block overhead for REX5 (`SequencerRegistry` deploy + `is_rotation_due` +
+/// `resolve_system_address`). Measures the no-rotation common path.
 fn bench_rex5_pre_block(c: &mut Criterion) {
     let mut group = c.benchmark_group("rex5_pre_block");
     group.sample_size(10);

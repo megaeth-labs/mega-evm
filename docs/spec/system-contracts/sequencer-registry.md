@@ -89,6 +89,7 @@ It is called by the execution layer as a pre-block system call (same pattern as 
 It is only invoked when a Rust-side pre-check confirms a rotation is due.
 
 When pending and due:
+
 1. Writes `_pendingSequencer` to `_currentSequencer`.
 2. Appends a `RotationRecord` to the history array.
 3. Clears `_pendingSequencer` and `_activationBlock`.
@@ -106,11 +107,11 @@ All methods are non-payable.
 
 ## Constants
 
-| Name | Value | Description |
-|------|-------|-------------|
-| `SEQUENCER_REGISTRY_ADDRESS` | `0x6342000000000000000000000000000000000006` | Contract address |
-| `REX5_INITIAL_SEQUENCER` | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Initial sequencer (compile-time constant) |
-| `REX5_REGISTRY_ADMIN` | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Initial admin (compile-time constant) |
+| Name                         | Value                                        | Description                               |
+| ---------------------------- | -------------------------------------------- | ----------------------------------------- |
+| `SEQUENCER_REGISTRY_ADDRESS` | `0x6342000000000000000000000000000000000006` | Contract address                          |
+| `REX5_INITIAL_SEQUENCER`     | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Initial sequencer (compile-time constant) |
+| `REX5_REGISTRY_ADMIN`        | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Initial admin (compile-time constant)     |
 
 ## Rationale
 

@@ -144,7 +144,6 @@ pub(crate) fn is_rotation_due<DB: Database>(
 fn transact_apply_pending_sequencer_change<Halt>(
     evm: &mut impl alloy_evm::Evm<HaltReason = Halt>,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
-
     let calldata = ISequencerRegistry::applyPendingChangeCall {}.abi_encode();
     let res = match evm.transact_system_call(
         alloy_eips::eip4788::SYSTEM_ADDRESS,
