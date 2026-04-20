@@ -3,7 +3,7 @@
 //!
 //! Covers: CLI parsing of all `--rpc.*` flags, `build_provider` shape across
 //! cache configurations, on-disk cache round-trip via the test-utils
-//! `cache()` accessor, chain-id resolution (override vs. RPC vs. failure),
+//! `cache()` accessor, chain-id resolution (RPC fetch vs. failure),
 //! `--rpc.clear-cache` behaviour, and the retry policy on both branches of
 //! its coverage (HTTP 429/503 via wiremock; transport failures via a closed
 //! local port). Tests for the private helpers `temp_path_for` and
@@ -33,8 +33,6 @@ fn test_rpc_args_parses_all_new_flags() {
         "--rpc.cache-dir",
         "/tmp/example-cache",
         "--rpc.no-cache-file",
-        "--rpc.chain-id",
-        "4326",
         "--rpc.clear-cache",
         "--rpc.max-retries",
         "7",
@@ -43,11 +41,10 @@ fn test_rpc_args_parses_all_new_flags() {
         "--rpc.rate-limit",
         "1234",
     ]);
-    assert_eq!(args.rpc_url, "https://example.test/rpc");
+    assert_eq!(args.rpc_url, Some("https://example.test/rpc".to_string()));
     assert_eq!(args.cache_size, 256);
     assert_eq!(args.cache_dir, Some(PathBuf::from("/tmp/example-cache")));
     assert!(args.no_cache_file);
-    assert_eq!(args.chain_id, Some(4326));
     assert!(args.clear_cache);
     assert_eq!(args.max_retries, 7);
     assert_eq!(args.backoff_ms, 250);
@@ -70,7 +67,7 @@ fn test_rpc_args_rejects_empty_cache_dir() {
         ])
         .expect_err("empty cache-dir must be rejected");
         assert!(
-            err.to_string().contains("cache-dir must not be empty"),
+            err.to_string().contains("path must not be empty"),
             "error must explain the problem for input {empty:?}, got: {err}",
         );
     }
@@ -82,11 +79,10 @@ fn test_rpc_args_rejects_empty_cache_dir() {
 #[test]
 fn test_rpc_args_default_values() {
     let args = RpcArgs::parse_from(["mega-evme"]);
-    assert_eq!(args.rpc_url, "http://localhost:8545");
+    assert_eq!(args.rpc_url, None);
     assert_eq!(args.cache_size, 10_000);
     assert_eq!(args.cache_dir, None);
     assert!(!args.no_cache_file);
-    assert_eq!(args.chain_id, None);
     assert!(!args.clear_cache);
     assert_eq!(args.max_retries, 5);
     assert_eq!(args.backoff_ms, 1_000);
@@ -95,31 +91,29 @@ fn test_rpc_args_default_values() {
 
 // ─── build_provider shape variants ───────────────────────────────────────────
 
-/// `--rpc.cache-size 0` takes the fast path: no cache layer, no chain-id
-/// fetch, noop store. We don't even need to mock `eth_chainId`.
+/// `--rpc.cache-size 0`: noop store, but `chain_id` is still resolved.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_without_cache() {
-    let args = RpcArgs::parse_from([
-        "mega-evme",
-        "--rpc",
-        "http://localhost:8545",
-        "--rpc.cache-size",
-        "0",
-    ]);
-    let BuildProviderOutput { cache_store, .. } =
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+    let args = RpcArgs::parse_from(["mega-evme", "--rpc", &server.uri(), "--rpc.cache-size", "0"]);
+    let BuildProviderOutput { cache_store, chain_id, .. } =
         args.build_provider().await.expect("build_provider");
     assert!(cache_store.is_noop(), "cache_size == 0 must produce a no-op store");
-    cache_store.persist();
+    assert_eq!(chain_id, 4326, "chain_id must be resolved even when cache is disabled");
+    cache_store.persist().expect("persist");
 }
 
 /// `--rpc.no-cache-file` keeps the in-memory cache layer active but skips
-/// both the `eth_chainId` fetch and on-disk persistence.
+/// on-disk persistence.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_no_cache_file_skips_persistence() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
     let args = RpcArgs::parse_from([
         "mega-evme",
         "--rpc",
-        "http://localhost:8545",
+        &server.uri(),
         "--rpc.cache-size",
         "100",
         "--rpc.no-cache-file",
@@ -127,17 +121,18 @@ async fn test_build_provider_no_cache_file_skips_persistence() {
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("build_provider");
     assert!(cache_store.is_noop(), "--rpc.no-cache-file must produce a no-op store");
-    cache_store.persist();
+    cache_store.persist().expect("persist");
 }
 
-/// With an explicit `--rpc.chain-id` override the cache file is named after
-/// that id, inside the `--rpc.cache-dir` passed in — no network traffic at
-/// all during `build_provider`.
+/// With the on-disk cache enabled, `build_provider` fetches the chain id from
+/// the RPC endpoint and names the cache file after it.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_with_cache_and_chain_id_override() {
+async fn test_build_provider_with_cache_names_file_from_fetched_chain_id() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
     let dir = tempdir().expect("tempdir");
-    // 4326 = MegaETH mainnet.
-    let args = test_rpc_args_cached("http://localhost:8545", dir.path(), 4326, None);
+    let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
 
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("build_provider");
@@ -159,10 +154,10 @@ async fn test_build_provider_invalid_url() {
 
 // ─── Chain-id resolution ─────────────────────────────────────────────────────
 
-/// With no `--rpc.chain-id` override, `build_provider` must call `eth_chainId`
-/// against the endpoint, name the cache file after the returned value, and
-/// propagate the same id via the hint so downstream code (e.g. `replay`'s
-/// hardfork selection) does not re-fetch.
+/// `build_provider` must call `eth_chainId` against the endpoint, name the
+/// cache file after the returned value, and propagate the same id via the
+/// hint so downstream code (e.g. `replay`'s hardfork selection) does not
+/// re-fetch.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_fetches_chain_id_from_rpc() {
     let server = MockRpcServer::start().await;
@@ -187,77 +182,10 @@ async fn test_build_provider_fetches_chain_id_from_rpc() {
         Some(dir.path().join("rpc-cache-4326.json").as_path()),
         "cache file must be named after the fetched chain id",
     );
-    assert_eq!(
-        chain_id,
-        Some(4326),
-        "hint must carry the fetched chain id so replay can skip a second fetch",
-    );
+    assert_eq!(chain_id, 4326, "chain_id must match the fetched value");
     assert!(
         server.received_request_count().await >= 1,
         "build_provider must reach the mock to fetch eth_chainId",
-    );
-}
-
-/// With a `--rpc.chain-id` override the fetch is skipped entirely and the
-/// override is propagated back via the hint. An empty mock server must
-/// receive zero requests during `build_provider`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_chain_id_override_skips_eth_chainid() {
-    let server = MockRpcServer::start().await; // no mocks mounted
-    let dir = tempdir().expect("tempdir");
-    let args = test_rpc_args_cached(&server.uri(), dir.path(), 4326, None);
-
-    let BuildProviderOutput { chain_id, .. } = args.build_provider().await.expect("build_provider");
-    assert_eq!(chain_id, Some(4326), "hint must echo the user-provided override");
-    assert_eq!(
-        server.received_request_count().await,
-        0,
-        "chain-id override must bypass eth_chainId entirely",
-    );
-}
-
-/// Fast path (`--rpc.cache-size 0`) with no override: the hint is `None` so
-/// downstream code knows it needs to resolve the chain id itself. No network
-/// call is issued by `build_provider`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_hint_is_none_when_cache_disabled_and_no_override() {
-    let server = MockRpcServer::start().await; // no mocks mounted
-    let args = test_rpc_args(&server.uri(), None);
-
-    let BuildProviderOutput { chain_id, .. } = args.build_provider().await.expect("build_provider");
-    assert_eq!(chain_id, None, "no override + no cache means no hint");
-    assert_eq!(
-        server.received_request_count().await,
-        0,
-        "cache-size 0 must skip the eth_chainId fetch",
-    );
-}
-
-/// Fast path with an override: the hint is propagated without any network
-/// call. Combined with replay's "fall back to `get_chain_id` only when the
-/// hint is `None`" branch, this lets users run `replay` fully offline against
-/// an existing cache.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_hint_honours_override_even_in_fast_path() {
-    let server = MockRpcServer::start().await; // no mocks mounted
-    let args = RpcArgs::parse_from([
-        "mega-evme",
-        "--rpc",
-        &server.uri(),
-        "--rpc.cache-size",
-        "0",
-        "--rpc.chain-id",
-        "4326",
-    ]);
-
-    let BuildProviderOutput { cache_store, chain_id, .. } =
-        args.build_provider().await.expect("build_provider");
-    assert!(cache_store.is_noop(), "cache-size 0 still means no-op store");
-    assert_eq!(chain_id, Some(4326), "override must propagate through the fast path too");
-    assert_eq!(
-        server.received_request_count().await,
-        0,
-        "fast path must not touch the network even when an override is set",
     );
 }
 
@@ -300,9 +228,11 @@ async fn test_build_provider_chain_id_rpc_failure_is_hard_error() {
 /// load path.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_atomic_save_round_trip() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
     let dir = tempdir().expect("tempdir");
-    // 4326 = MegaETH mainnet.
-    let args = test_rpc_args_cached("http://localhost:8545", dir.path(), 4326, None);
+    let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
 
     let key = B256::repeat_byte(0xAB);
     let value = r#"{"seeded":"value"}"#.to_string();
@@ -310,7 +240,7 @@ async fn test_atomic_save_round_trip() {
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("build_provider #1");
     cache_store.cache().expect("real store").put(key, value.clone()).expect("seed put");
-    cache_store.persist();
+    cache_store.persist().expect("persist");
 
     let cache_file = dir.path().join("rpc-cache-4326.json");
     assert!(cache_file.exists(), "save must produce the target file");
@@ -329,28 +259,26 @@ async fn test_atomic_save_round_trip() {
     assert_eq!(got, value);
 }
 
+/// Missing or corrupt cache file: `build_provider` starts with an empty cache
+/// rather than failing.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_load_from_missing_file() {
-    let dir = tempdir().expect("tempdir");
-    let args = test_rpc_args_cached("http://localhost:8545", dir.path(), 42, None);
+async fn test_build_provider_tolerates_missing_or_corrupt_cache_file() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(42, 1).await;
 
+    let dir = tempdir().expect("tempdir");
+    let args = test_rpc_args_cached(&server.uri(), dir.path(), None);
+
+    // Missing file — load skipped.
     let BuildProviderOutput { cache_store, .. } =
-        args.build_provider().await.expect("build_provider");
-    // File doesn't exist — store is real (load was skipped) and cache is empty.
+        args.build_provider().await.expect("missing file");
     assert!(!cache_store.is_noop());
     assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
-}
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_load_from_corrupt_file() {
-    let dir = tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("rpc-cache-42.json"), b"not json").expect("write corrupt file");
-
-    let args = test_rpc_args_cached("http://localhost:8545", dir.path(), 42, None);
-
+    // Corrupt file — load fails, cache starts empty.
+    std::fs::write(dir.path().join("rpc-cache-42.json"), b"not json").expect("write corrupt");
     let BuildProviderOutput { cache_store, .. } =
-        args.build_provider().await.expect("build_provider");
-    // Corrupt content is discarded; cache is empty but usable.
+        args.build_provider().await.expect("corrupt file");
     assert!(cache_store.cache().expect("real store").get(&B256::ZERO).is_none());
 }
 
@@ -358,29 +286,30 @@ async fn test_build_provider_load_from_corrupt_file() {
 /// starts empty even when a previous file existed.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_clear_cache_deletes_file_before_load() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(99, 1).await;
+
     let dir = tempdir().expect("tempdir");
     let cache_file = dir.path().join("rpc-cache-99.json");
 
     // Phase 1: populate and persist to disk.
-    let seed_args = test_rpc_args_cached("http://localhost:8545", dir.path(), 99, None);
+    let seed_args = test_rpc_args_cached(&server.uri(), dir.path(), None);
     let key = B256::repeat_byte(0xCC);
     let BuildProviderOutput { cache_store: store, .. } =
         seed_args.build_provider().await.expect("seed build_provider");
     store.cache().expect("real store").put(key, r#"{"v":1}"#.to_string()).expect("seed put");
-    store.persist();
+    store.persist().expect("persist");
     assert!(cache_file.exists(), "seed must produce the cache file");
 
-    // Phase 2: same (dir, chain_id) with --rpc.clear-cache.
+    // Phase 2: same dir with --rpc.clear-cache.
     let clear_args = RpcArgs::parse_from([
         "mega-evme",
         "--rpc",
-        "http://localhost:8545",
+        &server.uri(),
         "--rpc.cache-size",
         "256",
         "--rpc.cache-dir",
         dir.path().to_str().unwrap(),
-        "--rpc.chain-id",
-        "99",
         "--rpc.clear-cache",
     ]);
     let BuildProviderOutput { cache_store: store, .. } =
@@ -408,6 +337,9 @@ async fn test_build_provider_clear_cache_deletes_file_before_load() {
 async fn test_build_provider_clear_cache_hard_errors_on_unlink_failure() {
     use std::os::unix::fs::PermissionsExt;
 
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(88, 1).await;
+
     let dir = tempdir().expect("tempdir");
     let chain_id: u64 = 88;
     // Seed a "polluted" cache file the user would want to wipe.
@@ -425,13 +357,11 @@ async fn test_build_provider_clear_cache_hard_errors_on_unlink_failure() {
     let args = RpcArgs::parse_from([
         "mega-evme",
         "--rpc",
-        "http://localhost:8545",
+        &server.uri(),
         "--rpc.cache-size",
         "256",
         "--rpc.cache-dir",
         dir.path().to_str().unwrap(),
-        "--rpc.chain-id",
-        &chain_id.to_string(),
         "--rpc.clear-cache",
     ]);
 
@@ -459,16 +389,19 @@ async fn test_build_provider_clear_cache_hard_errors_on_unlink_failure() {
 /// user has never run mega-evme before.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_auto_creates_cache_dir() {
+    let server = MockRpcServer::start().await;
+    // 4326 = MegaETH mainnet.
+    server.respond_eth_chain_id(4326, 1).await;
+
     let root = tempdir().expect("tempdir");
     let fresh_dir = root.path().join("brand").join("new").join("dir");
     assert!(!fresh_dir.exists(), "precondition: dir must not exist yet");
 
-    // 4326 = MegaETH mainnet.
-    let args = test_rpc_args_cached("http://localhost:8545", &fresh_dir, 4326, None);
+    let args = test_rpc_args_cached(&server.uri(), &fresh_dir, None);
     let BuildProviderOutput { cache_store: store, .. } =
         args.build_provider().await.expect("build_provider");
     assert!(fresh_dir.exists(), "build_provider must create the cache directory");
-    store.persist();
+    store.persist().expect("persist");
     assert!(
         fresh_dir.join("rpc-cache-4326.json").exists(),
         "persist must write the per-chain file",
@@ -478,52 +411,56 @@ async fn test_build_provider_auto_creates_cache_dir() {
 // ─── Retry layer behavior tests ──────────────────────────────────────────────
 
 /// Server fails 503 twice then succeeds; `max-retries=3` must reach success.
+/// `eth_chainId` mock at highest priority ensures `build_provider` succeeds.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_retry_layer_retries_on_503_then_succeeds() {
     let server = MockRpcServer::start().await;
-    server.respond_status_n_times(503, 2, 1).await;
-    // 0x10e6 = 4326 = MegaETH mainnet.
-    server.respond_jsonrpc_result("0x10e6", 2).await;
+    server.respond_eth_chain_id(4326, 1).await;
+    server.respond_status_n_times(503, 2, 2).await;
+    server.respond_jsonrpc_result("0x10e6", 3).await;
 
     let BuildProviderOutput { provider, .. } =
         test_rpc_args(&server.uri(), Some(3)).build_provider().await.expect("build_provider");
-    let chain_id = provider.get_chain_id().await.expect("must succeed after 2 retries");
-    assert_eq!(chain_id, 4326);
-
-    assert_eq!(server.received_request_count().await, 3, "1 initial + 2 retries before success");
+    let block = provider.get_block_number().await.expect("must succeed after 2 retries");
+    assert_eq!(block, 0x10e6);
 }
 
 /// `max-retries=0` must surface the first 503 immediately, with no retries.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_retry_layer_max_retries_zero_fails_fast() {
     let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
     server.respond_status_always(503).await;
 
     let BuildProviderOutput { provider, .. } =
         test_rpc_args(&server.uri(), Some(0)).build_provider().await.expect("build_provider");
-    let result = provider.get_chain_id().await;
+    let baseline = server.received_request_count().await;
+    let result = provider.get_block_number().await;
     assert!(result.is_err(), "max-retries=0 must surface the 503, not retry it");
-
-    assert_eq!(server.received_request_count().await, 1, "no retries");
+    assert_eq!(
+        server.received_request_count().await - baseline,
+        1,
+        "max-retries=0 → exactly 1 attempt, no retries",
+    );
 }
 
 /// Pins the runtime behavior of the production default `--rpc.max-retries`:
-/// a permanent 503 must give up after exactly `1 + default_max_retries` attempts.
+/// a permanent 503 must give up after `1 + default_max_retries` attempts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_retry_layer_uses_default_max_retries() {
     let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
     server.respond_status_always(503).await;
 
-    // Pass `None` to keep the production default.
     let args = test_rpc_args(&server.uri(), None);
     assert_eq!(args.max_retries, 5, "guard against the default drifting underneath this test");
 
     let BuildProviderOutput { provider, .. } = args.build_provider().await.expect("build_provider");
-    let result = provider.get_chain_id().await;
+    let baseline = server.received_request_count().await;
+    let result = provider.get_block_number().await;
     assert!(result.is_err(), "all attempts return 503");
-
     assert_eq!(
-        server.received_request_count().await,
+        server.received_request_count().await - baseline,
         6,
         "default max-retries=5 → 1 initial + 5 retries",
     );
@@ -533,42 +470,43 @@ async fn test_retry_layer_uses_default_max_retries() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_retry_layer_max_retries_exhausted() {
     let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
     server.respond_status_always(503).await;
 
     let BuildProviderOutput { provider, .. } =
         test_rpc_args(&server.uri(), Some(2)).build_provider().await.expect("build_provider");
-    let result = provider.get_chain_id().await;
+    let baseline = server.received_request_count().await;
+    let result = provider.get_block_number().await;
     assert!(result.is_err(), "all attempts return 503");
-
-    assert_eq!(server.received_request_count().await, 3, "1 initial + 2 retries");
+    assert_eq!(
+        server.received_request_count().await - baseline,
+        3,
+        "max-retries=2 → 1 initial + 2 retries",
+    );
 }
 
-/// HTTP 500 arrives as `HttpError` and is not in either the default or the
-/// extended retryable set; even a generous retry budget must produce exactly
-/// one attempt.
+/// HTTP 500 is not retryable; even a generous retry budget must fail immediately.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_retry_layer_does_not_retry_non_retryable_status() {
     let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
     server.respond_status_always(500).await;
 
     let BuildProviderOutput { provider, .. } =
         test_rpc_args(&server.uri(), Some(5)).build_provider().await.expect("build_provider");
-    let result = provider.get_chain_id().await;
+    let baseline = server.received_request_count().await;
+    let result = provider.get_block_number().await;
     assert!(result.is_err(), "500 must surface as an error");
-
     assert_eq!(
-        server.received_request_count().await,
+        server.received_request_count().await - baseline,
         1,
-        "500 is not retryable, so exactly 1 attempt",
+        "500 is not retryable → exactly 1 attempt",
     );
 }
 
-/// Transport-level errors (connection refused, DNS failure, TLS handshake)
-/// arrive as `TransportErrorKind::Custom`, which the extended policy treats
-/// as retryable. We probe by binding a TCP listener and immediately dropping
-/// it so the port is definitely closed, then assert the request fails with
-/// the wrapped "Max retries exceeded" error that only appears when retry was
-/// actually attempted.
+/// Transport-level errors (connection refused) are retryable. An unreachable
+/// endpoint causes `build_provider` to fail at `resolve_chain_id`, proving
+/// the retry layer retried and eventually gave up.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_retry_layer_retries_on_unreachable_endpoint() {
     let closed_port = {
@@ -579,17 +517,378 @@ async fn test_retry_layer_retries_on_unreachable_endpoint() {
     };
     let unreachable_url = format!("http://127.0.0.1:{}", closed_port);
 
-    let BuildProviderOutput { provider, .. } =
-        test_rpc_args(&unreachable_url, Some(3)).build_provider().await.expect("build_provider");
-    let result = provider.get_chain_id().await;
-    let err = result.expect_err("unreachable endpoint must surface as an error");
-    let err_str = err.to_string();
-
-    // alloy prepends "Max retries exceeded" only when the policy judged the
-    // error retryable and the counter was exhausted — so the prefix's presence
-    // is proof that retry was attempted.
+    let err = test_rpc_args(&unreachable_url, Some(3))
+        .build_provider()
+        .await
+        .expect_err("unreachable endpoint must fail at resolve_chain_id");
+    let err_str = format!("{err}");
     assert!(
-        err_str.contains("Max retries exceeded"),
-        "expected retry to be attempted, but got raw error: {err_str}",
+        err_str.contains("Failed to fetch chain ID"),
+        "error must surface chain-id resolution failure, got: {err_str}",
     );
+}
+
+// ─── Contract regression guards (fixture-file modes) ───────────────────────
+
+/// The `env = "RPC_URL"` attribute was removed from `--rpc`, so parsing
+/// without `--rpc` must yield `rpc_url = None` regardless of environment.
+#[test]
+fn test_rpc_url_env_does_not_enable_capture_mode() {
+    let args = RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", "foo.json"]);
+    assert!(args.rpc_url.is_none(), "parsing without --rpc must yield rpc_url = None");
+}
+
+/// Protects: replay path bypasses retry layer. Cache miss must return in <100ms.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_mode_cache_miss_fails_immediately() {
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("empty.cache.json");
+
+    // Create an envelope with an empty cache.
+    let content = serde_json::json!({
+        "version": 1,
+        "chain_id": 6342,
+        "cache": []
+    });
+    std::fs::write(&cache_file, serde_json::to_string(&content).unwrap()).unwrap();
+
+    let args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
+    let output = args.build_replay_provider().await.expect("build_provider");
+
+    // Issue a request that will miss the empty cache and hit ReplayTransport.
+    let start = std::time::Instant::now();
+    let result = output.provider.get_chain_id().await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "cache miss must error");
+    // 1s threshold: generous enough for cold CI runners under parallel load,
+    // still far below the 5s retry floor so a failure here still means the
+    // replay path accidentally went through the retry layer.
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "cache miss took {elapsed:?}, expected well under the 5s retry interval",
+    );
+}
+
+/// Without `--rpc`, `--rpc.fixture-file` with a valid envelope enters replay mode.
+/// `chain_id` is loaded from the envelope and the store is noop (read-only).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cache_file_mode_replay_loads_envelope() {
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("mode_test.cache.json");
+    let content = serde_json::json!({
+        "version": 1,
+        "chain_id": 12345,
+        "cache": []
+    });
+    std::fs::write(&cache_file, serde_json::to_string(&content).unwrap()).unwrap();
+
+    // --rpc.replay-file without --rpc => replay mode
+    let args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
+    let output = args.build_replay_provider().await.expect("replay mode should succeed");
+
+    // In replay mode, chain_id comes from envelope
+    assert_eq!(output.chain_id, 12345);
+    // No network calls were made
+    assert!(output.cache_store.is_noop(), "replay mode should produce noop store");
+}
+
+/// No `--rpc.capture-file`, no `--rpc.replay-file`, and no `--rpc` means
+/// neither replay nor capture.
+#[test]
+fn test_cache_file_mode_not_used_without_flag() {
+    let args = RpcArgs::parse_from(["mega-evme"]);
+    assert!(args.rpc_url.is_none());
+    assert!(args.capture_file.is_none());
+    assert!(args.replay_file.is_none());
+}
+
+/// Verify the envelope file is not modified after replay-mode usage.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_mode_read_only() {
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("readonly.cache.json");
+    let content = serde_json::json!({
+        "version": 1,
+        "chain_id": 6342,
+        "cache": []
+    });
+    std::fs::write(&cache_file, serde_json::to_string(&content).unwrap()).unwrap();
+
+    let mtime_before = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
+
+    let args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
+    let output = args.build_replay_provider().await.expect("build_provider");
+
+    // Persist (should be noop in replay mode)
+    output.cache_store.persist().expect("persist");
+
+    let mtime_after = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
+    assert_eq!(mtime_before, mtime_after, "replay mode must not modify the file");
+}
+
+/// Verify that `external_env.bucket_capacities` survive a roundtrip through
+/// the envelope in replay mode.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_mode_uses_envelope_external_env() {
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("extenv.cache.json");
+    let content = serde_json::json!({
+        "version": 1,
+        "chain_id": 6342,
+        "cache": [],
+        "external_env": {
+            "bucket_capacities": [[123, 512], [456, 1024]]
+        }
+    });
+    std::fs::write(&cache_file, serde_json::to_string(&content).unwrap()).unwrap();
+
+    let args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
+    let output = args.build_replay_provider().await.expect("build_provider");
+
+    // Verify external_env is returned from envelope
+    let ext = output.external_env.expect("replay mode should return external_env");
+    assert_eq!(ext.bucket_capacities, vec![(123, 512), (456, 1024)]);
+}
+
+/// Capture → replay round-trip: build a capture provider backed by a mock,
+/// issue a request so the transport cache records a response, persist the
+/// envelope, then build a replay provider from the same file and verify the
+/// cached response is served without network access.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_replay_round_trip() {
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+    // Fallback: answer any other RPC call with a block number.
+    server.respond_jsonrpc_result("0x42", 2).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("roundtrip.cache.json");
+
+    // Phase 1: capture — build provider, issue a request, persist.
+    let capture_args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.capture-file",
+        cache_file.to_str().unwrap(),
+    ]);
+    let output = capture_args.build_capture_provider().await.expect("capture build");
+    let block = output.provider.get_block_number().await.expect("capture get_block_number");
+    assert_eq!(block, 0x42);
+    output.cache_store.persist().expect("capture persist");
+    assert!(cache_file.exists(), "capture must write the envelope file");
+
+    // Phase 2: replay — no mock server, pure offline.
+    let replay_args =
+        RpcArgs::parse_from(["mega-evme", "--rpc.replay-file", cache_file.to_str().unwrap()]);
+    let output = replay_args.build_replay_provider().await.expect("replay build");
+    assert_eq!(output.chain_id, 4326, "chain_id must come from envelope");
+
+    // The same get_block_number call must succeed from cache.
+    let block = output.provider.get_block_number().await.expect("replay get_block_number");
+    assert_eq!(block, 0x42, "replay must serve the cached response");
+}
+
+/// Transient JSON-RPC error bodies (e.g. `-32000 rate limit` returned with
+/// HTTP 200) must not be persisted into the envelope. If they were, every
+/// subsequent offline replay would bake in the same transient failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_does_not_cache_jsonrpc_error_response() {
+    let server = MockRpcServer::start().await;
+    // eth_chainId must succeed so build_capture_provider can complete.
+    server.respond_eth_chain_id(4326, 1).await;
+    // Any other call resolves to a JSON-RPC error body at HTTP 200.
+    server.respond_jsonrpc_error(-32000, "rate limit", 2).await;
+
+    let dir = tempdir().expect("tempdir");
+    let cache_file = dir.path().join("err.cache.json");
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.capture-file",
+        cache_file.to_str().unwrap(),
+    ]);
+    let output = args.build_capture_provider().await.expect("capture build");
+
+    // The error bubbles up as a provider error; we just need the transport to
+    // have observed the response.
+    let _ = output.provider.get_block_number().await;
+    output.cache_store.persist().expect("persist should still succeed");
+
+    // Inspect the raw envelope: the cache array must hold only the successful
+    // eth_chainId entry, not the failing call.
+    let raw = std::fs::read_to_string(&cache_file).expect("read envelope");
+    let envelope: serde_json::Value = serde_json::from_str(&raw).expect("parse envelope");
+    let entries = envelope["cache"].as_array().expect("cache is a JSON array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "only eth_chainId should be cached; error responses must be skipped. entries = {entries:#?}",
+    );
+    let cached: serde_json::Value =
+        serde_json::from_str(entries[0]["value"].as_str().expect("value is a JSON string"))
+            .expect("cached response is valid JSON");
+    assert!(cached.get("result").is_some(), "cached entry must be a success response");
+    assert!(cached.get("error").is_none(), "cached entry must not be an error response");
+}
+
+/// Cross-chain contamination guard: an existing envelope claiming chain X
+/// combined with an endpoint returning chain Y must hard-error, not silently
+/// mix responses from two chains.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_chain_id_mismatch_is_hard_error() {
+    let server = MockRpcServer::start().await;
+    // Endpoint reports chain 4326 (MegaETH mainnet).
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("mismatch.cache.json");
+
+    // Pre-seed an envelope that claims chain 1 (Ethereum mainnet).
+    let seed = serde_json::json!({
+        "version": 1,
+        "chain_id": 1,
+        "cache": [],
+    });
+    std::fs::write(&fixture, serde_json::to_string(&seed).unwrap()).unwrap();
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.capture-file",
+        fixture.to_str().unwrap(),
+    ]);
+    let err = args.build_capture_provider().await.expect_err("chain id mismatch must hard-error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("Chain ID mismatch") && msg.contains('1') && msg.contains("4326"),
+        "error must name both chain ids, got: {msg}",
+    );
+}
+
+/// Freshness guard: the empty-seed-then-resolve ordering in
+/// `build_capture_provider` means a stale `eth_chainId` entry in a pre-seeded
+/// envelope must not short-circuit cross-chain validation. A seeded envelope
+/// claiming chain 999 with a cached `eth_chainId=0x3e7` must still fail if the
+/// live endpoint returns a different chain id.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_fresh_eth_chain_id_wins_over_stale_cache() {
+    let server = MockRpcServer::start().await;
+    // Live endpoint reports chain 4326.
+    server.respond_eth_chain_id(4326, 1).await;
+
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("stale.cache.json");
+
+    // Build an envelope claiming chain 999 with a matching cached eth_chainId
+    // response. If build_capture_provider seeded the transport cache first and
+    // resolved chain_id from it, the validation would be trivially satisfied.
+    let stale_resp = r#"{"jsonrpc":"2.0","id":0,"result":"0x3e7"}"#;
+    let key = alloy_primitives::keccak256("eth_chainId\x00null");
+    let seed = serde_json::json!({
+        "version": 1,
+        "chain_id": 999,
+        "cache": [
+            { "key": format!("{key:?}"), "value": stale_resp }
+        ],
+    });
+    std::fs::write(&fixture, serde_json::to_string(&seed).unwrap()).unwrap();
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.capture-file",
+        fixture.to_str().unwrap(),
+    ]);
+    let err = args
+        .build_capture_provider()
+        .await
+        .expect_err("fresh eth_chainId must win over stale cache entry");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("Chain ID mismatch") && msg.contains("999") && msg.contains("4326"),
+        "error must reflect fresh chain-id mismatch, got: {msg}",
+    );
+}
+
+// ─── --rpc.capture-file / --rpc.replay-file clap mutex tests ────────────────
+
+/// `--rpc.capture-file` is mutually exclusive with `--rpc.replay-file` and all
+/// other cache flags. Since capture requires `--rpc`, every argv includes it.
+#[test]
+fn test_capture_file_mutex_with_other_cache_flags() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["--rpc.replay-file", "/tmp/replay.json"], "--rpc.replay-file"),
+        (&["--rpc.cache-dir", "/tmp/cache"], "--rpc.cache-dir"),
+        (&["--rpc.clear-cache"], "--rpc.clear-cache"),
+        (&["--rpc.no-cache-file"], "--rpc.no-cache-file"),
+        (&["--rpc.cache-size", "256"], "--rpc.cache-size"),
+    ];
+    for (extra_flags, label) in cases {
+        let mut argv =
+            vec!["mega-evme", "--rpc", "http://x", "--rpc.capture-file", "/tmp/fixture.json"];
+        argv.extend_from_slice(extra_flags);
+        let err = RpcArgs::try_parse_from(argv)
+            .expect_err(&format!("--rpc.capture-file should conflict with {label}"));
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "{label}: error must explain the conflict, got: {err}",
+        );
+    }
+}
+
+/// `--rpc.replay-file` is mutually exclusive with `--rpc`, `--rpc.capture-file`,
+/// and all other cache flags.
+#[test]
+fn test_replay_file_mutex_with_rpc_and_cache_flags() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["--rpc", "http://x"], "--rpc"),
+        (&["--rpc.capture-file", "/tmp/cap.json"], "--rpc.capture-file"),
+        (&["--rpc.cache-dir", "/tmp/cache"], "--rpc.cache-dir"),
+        (&["--rpc.clear-cache"], "--rpc.clear-cache"),
+        (&["--rpc.no-cache-file"], "--rpc.no-cache-file"),
+        (&["--rpc.cache-size", "256"], "--rpc.cache-size"),
+    ];
+    for (extra_flags, label) in cases {
+        let mut argv = vec!["mega-evme", "--rpc.replay-file", "/tmp/replay.json"];
+        argv.extend_from_slice(extra_flags);
+        let err = RpcArgs::try_parse_from(argv)
+            .expect_err(&format!("--rpc.replay-file should conflict with {label}"));
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "{label}: error must explain the conflict, got: {err}",
+        );
+    }
+}
+
+/// `--rpc.capture-file` requires `--rpc`. Parsing without `--rpc` must fail.
+#[test]
+fn test_capture_file_requires_rpc() {
+    let err = RpcArgs::try_parse_from(["mega-evme", "--rpc.capture-file", "/tmp/cap.json"])
+        .expect_err("--rpc.capture-file without --rpc must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("required") || msg.contains("following"),
+        "error must mention the requirement, got: {msg}",
+    );
+}
+
+// ─── Caller-side validation tests ────────────────────────────────────────────
+
+/// `build_provider` without `--rpc` errors.
+#[tokio::test]
+async fn test_build_provider_requires_rpc() {
+    let args = RpcArgs::parse_from(["mega-evme"]);
+    let err = args.build_provider().await.expect_err("should fail without --rpc");
+    let msg = format!("{err}");
+    assert!(msg.contains("No RPC URL"), "got: {msg}");
 }

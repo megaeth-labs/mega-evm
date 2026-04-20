@@ -287,9 +287,16 @@ impl PreStateArgs {
 
         if self.fork {
             debug!("Creating forked state");
-            // `run --fork` and `tx --fork` use `--chain-id` (ChainArgs) for transaction
-            // construction and hardfork selection, not the RPC-resolved chain id. The
-            // hint from `build_provider` is therefore dropped via `..`.
+            if rpc_args.rpc_url.is_none() {
+                return Err(EvmeError::InvalidInput("'--fork' requires '--rpc <URL>'".to_string()));
+            }
+            if rpc_args.capture_file.is_some() || rpc_args.replay_file.is_some() {
+                return Err(EvmeError::InvalidInput(
+                    "'--rpc.capture-file' and '--rpc.replay-file' are not supported with '--fork' \
+                     in this version"
+                        .to_string(),
+                ));
+            }
             let super::BuildProviderOutput { provider, cache_store, .. } =
                 rpc_args.build_provider().await?;
             let state =

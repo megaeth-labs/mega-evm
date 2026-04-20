@@ -28,14 +28,14 @@ async fn test_create_initial_state_non_fork_store_is_noop() {
 
     let prestate_args = PreStateArgs::parse_from(["mega-evme"]);
     // 4326 = MegaETH mainnet.
-    let rpc_args = test_rpc_args_cached("http://localhost:8545", dir.path(), 4326, None);
+    let rpc_args = test_rpc_args_cached("http://localhost:8545", dir.path(), None);
     let sender = Address::ZERO;
 
     let (_state, cache_store) =
         prestate_args.create_initial_state(&sender, &rpc_args).await.expect("create_initial_state");
 
     assert!(cache_store.is_noop(), "non-fork must wire a no-op cache store");
-    cache_store.persist();
+    cache_store.persist().expect("persist");
     assert!(
         !dir.path().join("rpc-cache-4326.json").exists(),
         "non-fork persist must not produce any cache file",
@@ -43,8 +43,9 @@ async fn test_create_initial_state_non_fork_store_is_noop() {
 }
 
 /// Fork mode with `--fork.block N` constructs the state without hitting the
-/// network, but still wires a real store that writes the configured file on
-/// `persist()`. The `--rpc.chain-id` override keeps the whole flow hermetic.
+/// network for storage queries, but still wires a real store that writes the
+/// configured file on `persist()`. A mock server supplies `eth_chainId` so
+/// the chain-id resolution succeeds without a live node.
 ///
 /// Uses the multi-thread runtime because `WrapDatabaseAsync::new()` requires a
 /// blocking-capable tokio handle even though no RPC call is actually issued.
@@ -52,17 +53,20 @@ async fn test_create_initial_state_non_fork_store_is_noop() {
 async fn test_create_initial_state_fork_store_persists_cache() {
     let dir = tempdir().expect("tempdir");
 
+    let server = MockRpcServer::start().await;
+    server.respond_eth_chain_id(4326, 1).await;
+
     let prestate_args =
         PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", "1000000"]);
     // 4326 = MegaETH mainnet.
-    let rpc_args = test_rpc_args_cached("http://localhost:8545", dir.path(), 4326, None);
+    let rpc_args = test_rpc_args_cached(&server.uri(), dir.path(), None);
     let sender = Address::ZERO;
 
     let (_state, cache_store) =
         prestate_args.create_initial_state(&sender, &rpc_args).await.expect("create_initial_state");
 
     assert!(!cache_store.is_noop(), "fork + cache_dir must wire a real store");
-    cache_store.persist();
+    cache_store.persist().expect("persist");
     assert!(
         dir.path().join("rpc-cache-4326.json").exists(),
         "fork persist must write the cache file",
@@ -70,13 +74,13 @@ async fn test_create_initial_state_fork_store_persists_cache() {
 }
 
 /// End-to-end cache reload across two fresh session builds, with cache hit
-/// proven by observing zero outbound requests in phase 2.
+/// proven by observing minimal outbound requests in phase 2.
 ///
 /// Phase 1 mock returns a real `eth_getStorageAt` response, the value is
-/// persisted via `persist()`. Phase 2 uses a *separate* empty mock against
-/// the same cache directory and asserts it received zero requests — the
-/// storage query must be served entirely from the loaded file. Both phases
-/// use `--rpc.chain-id` to skip the `eth_chainId` fetch.
+/// persisted via `persist()`. Phase 2 uses a *separate* mock against the
+/// same cache directory and asserts it received only the `eth_chainId`
+/// request — the storage query must be served entirely from the loaded
+/// file.
 ///
 /// This is the deterministic, default-CI counterpart of the `#[ignore]`d
 /// real-RPC cache hit test below.
@@ -102,11 +106,12 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
     // ── Phase 1: mock returns the storage value, populate cache, persist. ──
     let phase1_value = {
         let server = MockRpcServer::start().await;
-        server.respond_jsonrpc_result(storage_hex, 1).await;
+        server.respond_eth_chain_id(chain_id, 1).await;
+        server.respond_jsonrpc_result(storage_hex, 2).await;
 
         let prestate_args =
             PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", &block_number_str]);
-        let rpc_args = test_rpc_args_cached(&server.uri(), dir.path(), chain_id, None);
+        let rpc_args = test_rpc_args_cached(&server.uri(), dir.path(), None);
         let sender = Address::ZERO;
 
         let (state, cache_store) = prestate_args
@@ -114,7 +119,7 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
             .await
             .expect("create_initial_state phase 1");
         let value = state.storage_ref(oracle, slot).expect("storage_ref phase 1");
-        cache_store.persist();
+        cache_store.persist().expect("persist");
 
         assert!(
             server.received_request_count().await > 0,
@@ -130,16 +135,17 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
         "phase 1 persist must produce the cache file",
     );
 
-    // ── Phase 2: empty mock, same cache directory. ────────────────────────
+    // ── Phase 2: only eth_chainId mock, same cache directory. ──────────────
     let phase2_value = {
-        // No mock mounted: any outbound request would be answered by
-        // wiremock's default 404 handler, which `storage_ref` would then
-        // surface as an error. The zero-request assertion below catches that.
+        // Only `eth_chainId` is mounted: any other outbound request would be
+        // answered by wiremock's default 404 handler, which `storage_ref`
+        // would then surface as an error.
         let server = MockRpcServer::start().await;
+        server.respond_eth_chain_id(chain_id, 1).await;
 
         let prestate_args =
             PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", &block_number_str]);
-        let rpc_args = test_rpc_args_cached(&server.uri(), dir.path(), chain_id, None);
+        let rpc_args = test_rpc_args_cached(&server.uri(), dir.path(), None);
         let sender = Address::ZERO;
 
         let (state, _cache_store) = prestate_args
@@ -150,8 +156,8 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
 
         assert_eq!(
             server.received_request_count().await,
-            0,
-            "cache hit: storage_ref must not reach the mock at all",
+            1,
+            "cache hit: only the eth_chainId request must reach the mock",
         );
 
         value
@@ -164,8 +170,7 @@ async fn test_storage_cache_hit_round_trip_via_mock() {
 
 /// End-to-end fork smoke test: build a fork session against `MegaETH` mainnet,
 /// query the `MegaETH` Oracle system contract via `basic_ref`, persist, and
-/// verify the cache file was written with content. This test exercises the
-/// real `eth_chainId` fetch path (no `--rpc.chain-id` override).
+/// verify the cache file was written with content.
 ///
 /// Defaults to `https://mainnet.megaeth.com/rpc`. Override via the
 /// `MEGA_EVME_TEST_RPC_URL` environment variable. Run with:
@@ -191,7 +196,6 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
 
     let prestate_args =
         PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", &block_number_str]);
-    // No --rpc.chain-id: exercise the real eth_chainId resolution path.
     let rpc_args = RpcArgs::parse_from([
         "mega-evme",
         "--rpc",
@@ -218,7 +222,7 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
         "MegaETH Oracle must be a contract account, not an EOA",
     );
 
-    cache_store.persist();
+    cache_store.persist().expect("persist");
 
     // MegaETH mainnet chain id is 4326, so the cache filename is fixed.
     let cache_file = dir.path().join("rpc-cache-4326.json");
@@ -229,9 +233,10 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
 
 /// Real-RPC twin of `test_storage_cache_hit_round_trip_via_mock`. Phase 1
 /// queries a `MegaETH` Oracle storage slot against a public mainnet endpoint
-/// and persists; phase 2 rebuilds against a definitely-closed local port
-/// and relies on the alloy cache to serve the same slot without touching
-/// the network. Useful as a manual smoke test for the full live stack.
+/// and persists; phase 2 rebuilds against the same RPC URL (needed for the
+/// `eth_chainId` resolution) and relies on the alloy cache to serve the
+/// same slot without an additional `eth_getStorageAt` round-trip.
+/// Useful as a manual smoke test for the full live stack.
 ///
 /// Probes through `storage_ref` rather than `basic_ref` because alloy's
 /// `CacheLayer` (at the pinned version) only intercepts `eth_getStorageAt` /
@@ -239,9 +244,7 @@ async fn test_create_initial_state_fork_real_rpc_smoke() {
 /// and `eth_getTransactionCount` too, neither of which is cached.
 ///
 /// Defaults to `https://mainnet.megaeth.com/rpc`. Override via the
-/// `MEGA_EVME_TEST_RPC_URL` environment variable. Phase 2 passes
-/// `--rpc.chain-id 4326` so the `eth_chainId` call doesn't attempt to
-/// reach the closed port.
+/// `MEGA_EVME_TEST_RPC_URL` environment variable.
 ///
 /// ```text
 /// cargo test -p mega-evme test_create_initial_state_fork_real_rpc_storage_cache_hit -- --ignored
@@ -256,16 +259,6 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
     let rpc_url = std::env::var("MEGA_EVME_TEST_RPC_URL")
         .unwrap_or_else(|_| "https://mainnet.megaeth.com/rpc".to_string());
 
-    // Definitely-closed local port: bind to port 0, capture the OS-assigned
-    // port, drop the listener. Connection attempts to it now ECONNREFUSED.
-    let closed_port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-        let port = listener.local_addr().expect("local_addr").port();
-        drop(listener);
-        port
-    };
-    let unreachable_url = format!("http://127.0.0.1:{}", closed_port);
-
     // MegaETH Oracle system contract — predeployed from genesis.
     let oracle =
         Address::from_str("0x6342000000000000000000000000000000000001").expect("address parse");
@@ -275,7 +268,6 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
     let phase1_value = {
         let prestate_args =
             PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", &block_number_str]);
-        // No --rpc.chain-id: exercise the real eth_chainId resolution path.
         let rpc_args = RpcArgs::parse_from([
             "mega-evme",
             "--rpc",
@@ -292,7 +284,7 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
             .expect("create_initial_state phase 1");
         let value =
             state.storage_ref(oracle, slot).expect("storage_ref phase 1 — real RPC must succeed");
-        cache_store.persist();
+        cache_store.persist().expect("persist");
         value
     };
 
@@ -301,25 +293,21 @@ async fn test_create_initial_state_fork_real_rpc_storage_cache_hit() {
     let metadata = std::fs::metadata(&cache_file).expect("metadata");
     assert!(metadata.len() > 0, "cache file must be non-empty after phase 1");
 
-    // ── Phase 2: unreachable URL + same cache dir + explicit chain-id. ──
+    // ── Phase 2: same RPC URL + same cache dir, storage served from cache. ──
     let phase2_value = {
         let prestate_args =
             PreStateArgs::parse_from(["mega-evme", "--fork", "--fork.block", &block_number_str]);
-        // `--rpc.chain-id 4326` bypasses the eth_chainId call that would
-        // otherwise hit the unreachable URL before we get to the cached
-        // storage query.
+        // Uses the same live RPC URL so the `eth_chainId` resolution
+        // succeeds. The storage query itself must be served from the
+        // persisted cache without an additional network round-trip.
         let rpc_args = RpcArgs::parse_from([
             "mega-evme",
             "--rpc",
-            &unreachable_url,
+            &rpc_url,
             "--rpc.cache-size",
             "256",
             "--rpc.cache-dir",
             dir.path().to_str().unwrap(),
-            "--rpc.chain-id",
-            "4326",
-            "--rpc.max-retries",
-            "0",
         ]);
         let sender = Address::ZERO;
         let (state, _cache_store) = prestate_args

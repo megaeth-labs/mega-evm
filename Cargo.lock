@@ -2846,6 +2846,7 @@ version = "1.5.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-json-rpc",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
@@ -2854,6 +2855,7 @@ dependencies = [
  "alloy-rpc-types-trace",
  "alloy-serde",
  "alloy-sol-types",
+ "alloy-transport",
  "alloy-transport-http",
  "clap",
  "dirs",
@@ -2870,6 +2872,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber 0.3.20",
  "wiremock",
