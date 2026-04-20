@@ -114,7 +114,7 @@ where
         }
         assert!(
             hardforks.is_regolith_active_at_timestamp(block_timestamp),
-            "mega-evm assumes Regolith hardfork is not active"
+            "mega-evm assumes Regolith hardfork is always active"
         );
         assert!(
             hardforks.is_canyon_active_at_timestamp(block_timestamp),
