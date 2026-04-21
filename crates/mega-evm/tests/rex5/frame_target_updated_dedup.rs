@@ -281,3 +281,61 @@ fn test_rex4_reverted_child_drops_discardable_charges() {
     assert_eq!(kv_updates, 1);
     assert_eq!(data_size, intrinsic_data_size());
 }
+
+// ============================================================================
+// Reverted first child followed by a successful second child (revert-then-retry)
+// ============================================================================
+
+/// CALLEE first CALLs CONTRACT with value (reverts), then CALLs CONTRACT2 with value (succeeds).
+/// Under Rex5, the parent (CALLEE) account update should be charged exactly once — from the
+/// second (successful) call, not zero times. Without the flag-reset-on-revert fix, Rex5 would
+/// set target_updated on the first call, see it still set on the second, and charge 0 times.
+fn revert_then_succeed_code() -> Bytes {
+    let mut builder = BytecodeBuilder::default();
+    builder = append_value_call(builder, CONTRACT).append(POP); // CONTRACT reverts
+    builder = append_value_call(builder, CONTRACT2).append(POP); // CONTRACT2 succeeds
+    builder.append(STOP).build()
+}
+
+#[test]
+fn test_rex5_reverted_first_child_flag_reset_allows_second_charge() {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_balance(CALLEE, U256::from(10_000_000))
+        .account_code(CALLEE, revert_then_succeed_code())
+        .account_code(CONTRACT, Bytes::from_static(&[INVALID])); // CONTRACT2 has no code → EOA
+
+    let (res, data_size, kv_updates) =
+        transact(MegaSpecId::REX5, &mut db, default_tx(CALLEE)).unwrap();
+    assert!(res.result.is_success());
+
+    // KV updates: 1 (caller nonce) + 1 (CALLEE parent, charged on successful 2nd call)
+    //           + 1 (CONTRACT2) = 3.
+    // The first call's charges (CALLEE + CONTRACT) are dropped on revert, and the
+    // target_updated flag is reset, so the second call correctly re-charges CALLEE.
+    assert_eq!(
+        kv_updates, 3,
+        "Rex5 must charge CALLEE once after revert-then-retry (not undercount to 0)"
+    );
+    assert_eq!(data_size, intrinsic_data_size() + 2 * ACCOUNT_INFO_WRITE_SIZE);
+}
+
+#[test]
+fn test_rex4_reverted_first_child_flag_not_set() {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_balance(CALLEE, U256::from(10_000_000))
+        .account_code(CALLEE, revert_then_succeed_code())
+        .account_code(CONTRACT, Bytes::from_static(&[INVALID]));
+
+    let (res, _data_size, kv_updates) =
+        transact(MegaSpecId::REX4, &mut db, default_tx(CALLEE)).unwrap();
+    assert!(res.result.is_success());
+
+    // Pre-Rex5: flag is never set, so both calls charge the parent independently.
+    // KV updates: 1 (caller nonce) + 1 (CALLEE from 1st call, dropped on revert)
+    //           + 1 (CALLEE from 2nd call) + 1 (CONTRACT2) = 3.
+    // Note: the first call's CALLEE charge is dropped on revert, so Rex4 also gives 3 here.
+    // The overcounting in Rex4 manifests when BOTH calls succeed (tested separately above).
+    assert_eq!(kv_updates, 3);
+}

@@ -196,7 +196,11 @@ impl TxRuntimeLimit for DataSizeTracker {
     /// the frame stack aligned with the EVM's call stack.
     #[inline]
     fn push_empty_frame(&mut self) {
-        self.push_frame(CallFrameInfo { target_address: None, target_updated: false });
+        self.push_frame(CallFrameInfo {
+            target_address: None,
+            target_updated: false,
+            charged_parent_update: false,
+        });
     }
 
     /// Hook called before a new execution frame is initialized.
@@ -232,10 +236,13 @@ impl TxRuntimeLimit for DataSizeTracker {
                         }
                         _ => false,
                     };
-                // Push new frame
+                // Push new frame; record whether we set the parent's flag so
+                // before_frame_return_result can undo it on revert.
+                let charged_parent_update = self.rex5_enabled && parent_needs_update;
                 self.push_frame(CallFrameInfo {
                     target_address: Some(call_inputs.target_address),
                     target_updated: has_transfer,
+                    charged_parent_update,
                 });
                 if has_transfer {
                     if parent_needs_update {
@@ -258,8 +265,14 @@ impl TxRuntimeLimit for DataSizeTracker {
                     }
                     _ => false,
                 };
-                // Push new frame (address unknown until after init)
-                self.push_frame(CallFrameInfo { target_address: None, target_updated: true });
+                // Push new frame (address unknown until after init); record whether we set the
+                // parent's flag so before_frame_return_result can undo it on revert.
+                let charged_parent_update = self.rex5_enabled && parent_needs_update;
+                self.push_frame(CallFrameInfo {
+                    target_address: None,
+                    target_updated: true,
+                    charged_parent_update,
+                });
                 if parent_needs_update {
                     // Parent's account info update goes to child's discardable,
                     // matching the old tracker's behavior.
@@ -308,9 +321,23 @@ impl TxRuntimeLimit for DataSizeTracker {
     /// Pops the current frame from the tracker:
     /// - **On success**: merges the frame's data into the parent frame.
     /// - **On revert/failure**: discards the frame's discardable data.
+    ///
+    /// Rex5+: if the reverting child had set the parent's `target_updated` flag, the flag
+    /// is reset so the next successful call from the same parent still charges the parent
+    /// account (avoiding undercounting after a revert-then-retry pattern).
     fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
         assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
-        self.frame_tracker.pop_frame(result.instruction_result().is_ok());
+        let is_success = result.instruction_result().is_ok();
+        let child = self.frame_tracker.pop_frame(is_success);
+        if !is_success {
+            if let Some(child_entry) = child {
+                if child_entry.info.charged_parent_update {
+                    if let Some(parent) = self.frame_tracker.frame_mut() {
+                        parent.info.target_updated = false;
+                    }
+                }
+            }
+        }
     }
 
     /// Hook called when a storage slot is written via `SSTORE`.
