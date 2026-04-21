@@ -289,7 +289,7 @@ fn test_rex4_reverted_child_drops_discardable_charges() {
 /// CALLEE first CALLs CONTRACT with value (reverts), then CALLs CONTRACT2 with value (succeeds).
 /// Under Rex5, the parent (CALLEE) account update should be charged exactly once — from the
 /// second (successful) call, not zero times. Without the flag-reset-on-revert fix, Rex5 would
-/// set target_updated on the first call, see it still set on the second, and charge 0 times.
+/// set `target_updated` on the first call, see it still set on the second, and charge 0 times.
 fn revert_then_succeed_code() -> Bytes {
     let mut builder = BytecodeBuilder::default();
     builder = append_value_call(builder, CONTRACT).append(POP); // CONTRACT reverts
