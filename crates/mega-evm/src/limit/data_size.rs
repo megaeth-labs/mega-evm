@@ -332,9 +332,13 @@ impl TxRuntimeLimit for DataSizeTracker {
         if !is_success {
             if let Some(child_entry) = child {
                 if child_entry.info.charged_parent_update {
-                    if let Some(parent) = self.frame_tracker.frame_mut() {
-                        parent.info.target_updated = false;
-                    }
+                    // charged_parent_update=true implies a parent frame exists
+                    // (the flag is only set when frame_mut() returned Some).
+                    self.frame_tracker
+                        .frame_mut()
+                        .expect("parent frame must exist when charged_parent_update is true")
+                        .info
+                        .target_updated = false;
                 }
             }
         }
