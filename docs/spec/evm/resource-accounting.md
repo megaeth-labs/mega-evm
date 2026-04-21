@@ -208,6 +208,10 @@ Deduplication prevents artificial inflation of data-size and KV-update counts fr
 During execution, a transaction may first create new state and later remove it.
 Allowing the counter to go negative during intermediate steps keeps the accounting locally composable across nested call frames, while clamping the final reported value prevents negative net state growth from being treated as a meaningful resource credit.
 
+## Security Considerations
+
+**If compute gas were made revertible** (scoped to call frames like data size and KV updates), an attacker could execute and revert expensive subcalls repeatedly within a single transaction, consuming negligible apparent compute gas while imposing real execution cost on nodes.
+
 ## Spec History
 
 This page describes the current accounting behavior.

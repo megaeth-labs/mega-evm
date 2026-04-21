@@ -67,6 +67,10 @@ MegaETH initially disabled `SELFDESTRUCT` to avoid inheriting destructive accoun
 EIP-6780 is the post-Cancun Ethereum behavior and provides a widely understood baseline.
 Adopting it restores compatibility while avoiding legacy full-destruction behavior for long-lived contracts.
 
+## Security Considerations
+
+**If `SELFDESTRUCT` targeting the [beneficiary](../glossary.md#beneficiary) does not trigger gas detention**, contracts can use it to access beneficiary balance without being detained, creating an unmitigated conflict hotspot for parallel execution.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md) disable `SELFDESTRUCT`.

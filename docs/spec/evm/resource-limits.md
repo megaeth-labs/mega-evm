@@ -187,6 +187,11 @@ Allowing the first over-limit transaction to be included maximizes block utiliza
 Cumulative block compute gas is already indirectly constrained by the block gas limit.
 The stable protocol therefore does not need a second independent block-level compute gas ceiling.
 
+## Security Considerations
+
+**If a transaction that exceeds a runtime limit is excluded from the block rather than included as failed**, an attacker can force the sequencer to execute expensive but failing transactions at no cost — the sender never pays because the transaction is dropped.
+Including failed transactions ensures the sender always pays for consumed resources.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced compute gas, data size, and KV update limits, with transaction-level data and KV limits set to 25% of the corresponding block limits.
