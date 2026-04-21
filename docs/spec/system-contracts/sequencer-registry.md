@@ -29,7 +29,7 @@ Version 1.0.0
 
 Since: [Rex5](../upgrades/rex5.md)
 
-Code hash: `0xf69e9b1e2a861739574e185db833edd2643b2ae800bf39928c290c11b94a12ca`
+Code hash: `0x1ab52fdc824e7014abade0233ffb0017234c8ffd4075a51ca600f5a8fc5e7a47`
 
 The contract uses a constant-bootstrap pattern.
 `INITIAL_SEQUENCER` and `INITIAL_ADMIN` are compile-time constants in the bytecode.
@@ -56,6 +56,7 @@ error FutureBlock();
 error NotAdmin();
 error ZeroAddress();
 error InvalidActivationBlock();
+error ActivationBlockTooLarge();
 ```
 
 Events:

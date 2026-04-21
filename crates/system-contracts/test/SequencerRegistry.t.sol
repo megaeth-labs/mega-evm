@@ -131,6 +131,14 @@ contract SequencerRegistryTest is Test {
         registry.scheduleNextSequencerChange(newSequencer, 50);
     }
 
+    function test_schedule_revertsActivationBlockTooLarge() public {
+        uint256 tooLarge = uint256(type(uint96).max) + 1;
+
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.ActivationBlockTooLarge.selector);
+        registry.scheduleNextSequencerChange(newSequencer, tooLarge);
+    }
+
     function test_schedule_overwritePending() public {
         uint256 futureBlock1 = block.number + 100;
         uint256 futureBlock2 = block.number + 200;

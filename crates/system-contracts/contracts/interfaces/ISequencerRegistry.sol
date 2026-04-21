@@ -19,6 +19,9 @@ interface ISequencerRegistry {
     /// @notice Thrown when activationBlock is not strictly greater than block.number.
     error InvalidActivationBlock();
 
+    /// @notice Thrown when activationBlock exceeds uint96.
+    error ActivationBlockTooLarge();
+
     /// @notice Emitted when a sequencer rotation is scheduled.
     /// @param oldSequencer The current sequencer at the time of scheduling.
     /// @param newSequencer The new sequencer that will take effect at activationBlock.
