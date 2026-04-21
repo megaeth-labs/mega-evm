@@ -59,6 +59,7 @@ pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAG
 #[derive(Debug, Clone)]
 pub(crate) struct DataSizeTracker {
     rex4_enabled: bool,
+    rex5_enabled: bool,
     frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
@@ -66,6 +67,7 @@ impl DataSizeTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
+            rex5_enabled: spec.is_enabled(MegaSpecId::REX5),
             frame_tracker: FrameLimitTracker::new(tx_limit),
         }
     }
@@ -214,12 +216,19 @@ impl TxRuntimeLimit for DataSizeTracker {
             FrameInput::Call(call_inputs) => {
                 let has_transfer = call_inputs.transfers_value();
                 // Check if parent's account info needs updating BEFORE pushing the child frame.
-                // Note: we do NOT set parent's target_updated to true — matching the old tracker,
-                // which never mutates it after frame creation.
+                // In Rex5+, the parent's `target_updated` flag is set to true after charging
+                // so repeated value-transferring calls from the same frame don't double-charge
+                // the caller account. Pre-Rex5 keeps the old behavior (flag never set),
+                // preserving backward compatibility for stable specs.
                 let parent_needs_update = has_transfer &&
                     self.frame_tracker
                         .frame_mut()
                         .is_some_and(|entry| !entry.info.target_updated);
+                if self.rex5_enabled && parent_needs_update {
+                    if let Some(entry) = self.frame_tracker.frame_mut() {
+                        entry.info.target_updated = true;
+                    }
+                }
                 // Push new frame
                 self.push_frame(CallFrameInfo {
                     target_address: Some(call_inputs.target_address),
@@ -236,8 +245,14 @@ impl TxRuntimeLimit for DataSizeTracker {
             }
             FrameInput::Create(_) => {
                 // Check if parent's account info needs updating BEFORE pushing the child frame.
+                // See the Call arm for the Rex5+ deduplication rationale.
                 let parent_needs_update =
                     self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
+                if self.rex5_enabled && parent_needs_update {
+                    if let Some(entry) = self.frame_tracker.frame_mut() {
+                        entry.info.target_updated = true;
+                    }
+                }
                 // Push new frame (address unknown until after init)
                 self.push_frame(CallFrameInfo { target_address: None, target_updated: true });
                 if parent_needs_update {
