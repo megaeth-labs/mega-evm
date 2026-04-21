@@ -141,14 +141,9 @@ See the linked pages for full details.
 ## Examples
 
 In all examples below, replace `0xabc123...` with a real transaction hash from MegaETH mainnet.
+Every `replay` invocation requires one of `--rpc <URL>`, `--rpc.capture-file <PATH>`, or `--rpc.replay-file <PATH>`.
 
-**Basic replay**
-
-```bash
-mega-evme replay 0xabc123...
-```
-
-**Replay against a custom RPC**
+**Replay against a live RPC**
 
 ```bash
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc 0xabc123...
@@ -157,25 +152,25 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc 0xabc123...
 **Replay with call tracing**
 
 ```bash
-mega-evme replay --trace --tracer call 0xabc123...
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --trace --tracer call 0xabc123...
 ```
 
 **Replay with a tighter gas limit**
 
 ```bash
-mega-evme replay --override.gas-limit 50000 0xabc123...
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.gas-limit 50000 0xabc123...
 ```
 
 **Replay with different calldata**
 
 ```bash
-mega-evme replay --override.input 0xdeadbeef 0xabc123...
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.input 0xdeadbeef 0xabc123...
 ```
 
 **Replay under a specific spec**
 
 ```bash
-mega-evme replay --override.spec Rex2 0xabc123...
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.spec Rex2 0xabc123...
 ```
 
 ## See Also
