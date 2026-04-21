@@ -1,6 +1,6 @@
 ---
 description: MegaETH resource accounting specification — counter semantics, revert behavior, and per-opcode metering for compute gas, data size, KV updates, and state growth.
-spec: Rex4
+spec: Rex5
 ---
 
 # Resource Accounting
@@ -217,3 +217,4 @@ Allowing the counter to go negative during intermediate steps keeps the accounti
 This page describes the current accounting behavior.
 
 - [Rex4](../upgrades/rex4.md) — introduced per-call-frame runtime budgets for all four resource dimensions.
+- [Rex5](../upgrades/rex5.md) — corrected caller-account update deduplication: pre-Rex5, the caller's `ACCOUNT_UPDATE_DATA_SIZE` (data size) and KV-update count were re-charged on every value-transferring sub-call or create from the same parent frame because the `target_updated` flag was never set after the first charge; Rex5 marks the flag after the first charge so subsequent operations from the same parent frame do not re-count the caller account.

@@ -220,15 +220,18 @@ impl TxRuntimeLimit for DataSizeTracker {
                 // so repeated value-transferring calls from the same frame don't double-charge
                 // the caller account. Pre-Rex5 keeps the old behavior (flag never set),
                 // preserving backward compatibility for stable specs.
+                // The check and mutation share a single frame_mut() borrow to avoid a redundant
+                // second call whose None branch would be unreachable.
                 let parent_needs_update = has_transfer &&
-                    self.frame_tracker
-                        .frame_mut()
-                        .is_some_and(|entry| !entry.info.target_updated);
-                if self.rex5_enabled && parent_needs_update {
-                    if let Some(entry) = self.frame_tracker.frame_mut() {
-                        entry.info.target_updated = true;
-                    }
-                }
+                    match self.frame_tracker.frame_mut() {
+                        Some(entry) if !entry.info.target_updated => {
+                            if self.rex5_enabled {
+                                entry.info.target_updated = true;
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
                 // Push new frame
                 self.push_frame(CallFrameInfo {
                     target_address: Some(call_inputs.target_address),
@@ -246,13 +249,15 @@ impl TxRuntimeLimit for DataSizeTracker {
             FrameInput::Create(_) => {
                 // Check if parent's account info needs updating BEFORE pushing the child frame.
                 // See the Call arm for the Rex5+ deduplication rationale.
-                let parent_needs_update =
-                    self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
-                if self.rex5_enabled && parent_needs_update {
-                    if let Some(entry) = self.frame_tracker.frame_mut() {
-                        entry.info.target_updated = true;
+                let parent_needs_update = match self.frame_tracker.frame_mut() {
+                    Some(entry) if !entry.info.target_updated => {
+                        if self.rex5_enabled {
+                            entry.info.target_updated = true;
+                        }
+                        true
                     }
-                }
+                    _ => false,
+                };
                 // Push new frame (address unknown until after init)
                 self.push_frame(CallFrameInfo { target_address: None, target_updated: true });
                 if parent_needs_update {
