@@ -4,7 +4,9 @@ description: Fetch and re-execute an on-chain transaction with optional override
 
 # replay
 
-Re-execute a historical transaction locally using state and block context fetched from an RPC endpoint.
+Re-execute a historical transaction locally using an RPC endpoint or a previously captured fixture file.
+In online mode, `mega-evme` fetches the transaction, block environment, and pre-state from the RPC and re-executes locally.
+In offline mode (`--rpc.replay-file`), all data is served from a local fixture captured by an earlier run — no network access is required.
 
 ## Usage
 
@@ -18,17 +20,16 @@ mega-evme replay [OPTIONS] <TX_HASH>
 
 The transaction hash to replay (32-byte hex, required).
 
-`mega-evme` fetches the transaction, its block environment, and the relevant pre-state from the RPC, then re-executes it locally.
+`mega-evme` re-executes the transaction locally using state and block context sourced from either an RPC endpoint or a local fixture file.
 This gives you a fully reproducible execution without needing a local archive node.
 
 ### `--rpc <URL>`
 
 Aliases: `--rpc-url`
-Environment variable: `RPC_URL`
-Default: `http://localhost:8545`
 
 The RPC endpoint to fetch the transaction and state from.
 Any standard Ethereum JSON-RPC provider works here.
+Required for online replay and capture mode; omit when using `--rpc.replay-file`.
 
 ```
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc <TX_HASH>
@@ -39,7 +40,7 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc <TX_HASH>
 `mega-evme replay` supports a transport-level JSON-RPC fixture mechanism that records every request/response pair to a single file and serves them back on later runs without touching the network.
 It is useful for pinning a reproducible replay (e.g. for regression tests, debugging sessions, or offline review) and for running `replay` in environments that cannot reach the RPC endpoint.
 
-Unlike the generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry), which is keyed on a small allow-list of cacheable methods and stored per chain under the platform cache directory, the cache file covers **every** JSON-RPC call issued during the replay and lives at a user-chosen path.
+Unlike the generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry), which is keyed on a small allow-list of cacheable methods and stored per chain under the platform cache directory, the cache file covers every single (non-batch) JSON-RPC call issued during the replay and lives at a user-chosen path.
 
 The mechanism has two modes, selected by two mutually exclusive flags.
 
@@ -47,7 +48,7 @@ The mechanism has two modes, selected by two mutually exclusive flags.
 
 Capture mode. Requires `--rpc`.
 
-On the first run, every JSON-RPC request and response issued while serving the replay is appended to `<PATH>`.
+On the first run, every JSON-RPC request and response issued while serving the replay is captured in memory and the complete envelope is written to `<PATH>` atomically on clean exit.
 On subsequent runs the existing file is loaded, its entries are merged into the in-memory transport cache, and only missing requests are fetched from the RPC endpoint.
 The updated set of entries is persisted back to the same file on clean exit.
 
@@ -175,81 +176,6 @@ mega-evme replay --override.input 0xdeadbeef 0xabc123...
 
 ```bash
 mega-evme replay --override.spec Rex2 0xabc123...
-```
-
-## Full Help Output
-
-```
-Replay a transaction from RPC
-
-Usage: mega-evme replay [OPTIONS] <TX_HASH>
-
-Arguments:
-  <TX_HASH>
-          Transaction hash to replay
-
-Options:
-      --rpc <RPC>
-          RPC URL to fetch transaction from
-          [env: RPC_URL=] [default: http://localhost:8545] [aliases: --rpc-url]
-
-      --rpc.capture-file <PATH>
-          Capture JSON-RPC responses to a single file for later offline replay.
-          Requires `--rpc`. If the file already exists, its entries are loaded
-          and merged; missing entries are fetched via the RPC endpoint and
-          persisted on clean exit. Mutually exclusive with --rpc.replay-file,
-          --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, and
-          --rpc.cache-size.
-
-      --rpc.replay-file <PATH>
-          Replay from a previously captured JSON-RPC fixture file (offline).
-          Cannot be used with `--rpc`. Any RPC miss is a hard error; the file
-          is never written. Mutually exclusive with --rpc.capture-file,
-          --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, and
-          --rpc.cache-size.
-
-  -v...
-          Increase logging verbosity
-
-      --log.file <LOG_FILE>
-          Log file path [aliases: --log-file]
-
-      --log.no-color
-          Disable colorful console logging [aliases: --log-no-color]
-
-  -h, --help
-          Print help
-
-External Environment Options:
-      --bucket-capacity <BUCKET_ID:CAPACITY>
-          Bucket capacity configuration (repeatable)
-
-State Dump Options:
-      --dump                           Dump state after the run
-      --dump.output <DUMP_OUTPUT_FILE> Output file for state dump
-
-Trace Options:
-      --trace                                    Enable tracing
-      --trace.output <TRACE_OUTPUT_FILE>         Output file for trace data
-      --tracer <TRACER>                          Tracer: opcode, call, pre-state [default: opcode]
-      --trace.opcode.disable-memory              Disable memory capture
-      --trace.opcode.disable-stack               Disable stack capture
-      --trace.opcode.disable-storage             Disable storage capture
-      --trace.opcode.enable-return-data          Enable return data capture
-      --trace.call.only-top-call                 Only trace top-level call
-      --trace.call.with-log                      Include logs in call trace
-      --trace.prestate.diff-mode                 Show state diff
-      --trace.prestate.disable-code              Disable code in prestate output
-      --trace.prestate.disable-storage           Disable storage in prestate output
-
-      --override.spec <SPEC>
-          Override the spec (default: auto-detect from chain ID and block timestamp)
-
-Transaction Override Options:
-      --override.gas-limit <GAS>       Override gas limit [aliases: --override.gaslimit]
-      --override.value <VALUE>         Override value (supports ether/gwei/wei suffixes)
-      --override.input <HEX>           Override input data [aliases: --override.data]
-      --override.input-file <FILE>     Override input from file [aliases: --override.data-file]
 ```
 
 ## See Also
