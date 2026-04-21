@@ -222,6 +222,13 @@ The `STORAGE_GAS_MULTIPLIER` of 10 was chosen to reflect the long-term storage a
 Every transaction imposes a baseline storage cost on nodes regardless of its execution: the transaction itself must be stored, the receipt must be persisted, and account state (nonce, balance) must be updated.
 The 39,000 flat intrinsic storage gas covers this per-transaction overhead.
 
+## Security Considerations
+
+**If storage gas is omitted or undercharged**, MegaETH's 0.001 gwei base fee makes every SSTORE, contract deployment, and LOG call negligible in cost.
+A single transaction could write thousands of storage slots or emit megabytes of log data for nearly zero fee — the exact attack the dual gas model exists to prevent.
+
+**If unused `STORAGE_CALL_STIPEND` is returned to the caller rather than burned**, system-granted gas leaks back to the caller, who can redirect it to non-storage operations — undermining the compute-gas cap designed to keep the stipend storage-only.
+
 ## Spec History
 
 For the historical evolution of storage gas formulas and constants across specs:

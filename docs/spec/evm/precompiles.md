@@ -36,6 +36,10 @@ All other precompiles MUST behave according to the inherited EVM baseline unless
 | ------------------------------- | ------- | ------------------------------------------------------ |
 | `KZG_POINT_EVALUATION_GAS_COST` | 100,000 | Fixed gas cost for the KZG Point Evaluation precompile |
 
+## Security Considerations
+
+This page has no security considerations.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced the stable KZG Point Evaluation and ModExp overrides.

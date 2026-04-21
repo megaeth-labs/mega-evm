@@ -43,6 +43,10 @@ The initcode limit is defined as:
 MegaETH allows substantially larger contracts than standard Ethereum.
 The enlarged limits support deployment patterns that would otherwise exceed Ethereum's contract-size constraints.
 
+## Security Considerations
+
+This page has no security considerations.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced the enlarged contract and initcode limits.
