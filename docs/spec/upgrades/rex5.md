@@ -21,7 +21,7 @@ It corrects a resource-accounting bug where the caller-account update was overco
 ### Caller-Account Update Deduplication (Data Size and KV Updates)
 
 **Previous behavior (Rex4 and earlier):**
-When a call frame performed a value-transferring `CALL` / `CALLCODE` or a `CREATE` / `CREATE2`, the implementation charged the *caller* account update to the child frame's discardable budget.
+When a call frame performed a value-transferring `CALL` / `CALLCODE` or a `CREATE` / `CREATE2`, the implementation charged the _caller_ account update to the child frame's discardable budget.
 However, the parent frame's `target_updated` flag was never marked after the first charge.
 As a result, every subsequent value-transferring sub-call or create from the same parent frame re-charged the caller account, overcounting both data-size bytes and KV-update counts for the caller.
 
