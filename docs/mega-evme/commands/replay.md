@@ -34,6 +34,57 @@ Any standard Ethereum JSON-RPC provider works here.
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc <TX_HASH>
 ```
 
+## RPC Cache File
+
+`mega-evme replay` supports a transport-level JSON-RPC fixture mechanism that records every request/response pair to a single file and serves them back on later runs without touching the network.
+It is useful for pinning a reproducible replay (e.g. for regression tests, debugging sessions, or offline review) and for running `replay` in environments that cannot reach the RPC endpoint.
+
+Unlike the generic [RPC Cache](../configuration/state-management.md#rpc-cache-and-retry), which is keyed on a small allow-list of cacheable methods and stored per chain under the platform cache directory, the cache file covers **every** JSON-RPC call issued during the replay and lives at a user-chosen path.
+
+The mechanism has two modes, selected by two mutually exclusive flags.
+
+### `--rpc.capture-file <PATH>`
+
+Capture mode. Requires `--rpc`.
+
+On the first run, every JSON-RPC request and response issued while serving the replay is appended to `<PATH>`.
+On subsequent runs the existing file is loaded, its entries are merged into the in-memory transport cache, and only missing requests are fetched from the RPC endpoint.
+The updated set of entries is persisted back to the same file on clean exit.
+
+The file also embeds an external-environment snapshot — currently the set of `--bucket-capacity` values in effect — so the captured fixture is self-contained.
+If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them.
+
+`--rpc.capture-file` is mutually exclusive with `--rpc.replay-file`, `--rpc.cache-dir`, `--rpc.clear-cache`, `--rpc.no-cache-file`, and `--rpc.cache-size`.
+
+### `--rpc.replay-file <PATH>`
+
+Replay mode. Requires neither `--rpc` nor network access.
+
+The envelope at `<PATH>` is loaded and serves as the only source of JSON-RPC responses.
+Any request that is not present in the fixture aborts the run with a hard error — there is no fall-through to a live RPC endpoint.
+
+Bucket-capacity data is read from the fixture envelope, so `--bucket-capacity` is neither required nor accepted with `--rpc.replay-file`.
+Passing `--bucket-capacity` together with `--rpc.replay-file` is rejected; to regenerate a fixture with new capacities, re-run in capture mode.
+
+`--rpc.replay-file` is mutually exclusive with `--rpc`, `--rpc.capture-file`, `--rpc.cache-dir`, `--rpc.clear-cache`, `--rpc.no-cache-file`, and `--rpc.cache-size`.
+
+### Examples
+
+Capture a transaction's RPC traffic to a fixture file (first run hits the endpoint, later runs with the same flag reuse and top up the file):
+
+```bash
+mega-evme replay \
+  --rpc https://mainnet.megaeth.com/rpc \
+  --rpc.capture-file ./fixtures/tx.json \
+  0xabc123...
+```
+
+Replay the captured transaction fully offline:
+
+```bash
+mega-evme replay --rpc.replay-file ./fixtures/tx.json 0xabc123...
+```
+
 ## Spec Auto-Detection
 
 The EVM spec controls which opcodes, gas rules, and MegaETH-specific behaviors are active during execution.
@@ -79,7 +130,9 @@ See the linked pages for full details.
   See [SALT Buckets](../configuration/salt-buckets.md).
 - **State dump** — Dump or load pre/post-state snapshots.
   See [State Management](../configuration/state-management.md).
-- **RPC cache / retry** — Cache size, cache directory, chain-id override, retry and rate-limit settings.
+- **RPC cache file** — Single-file JSON-RPC capture and offline replay via `--rpc.capture-file` / `--rpc.replay-file`.
+  See [RPC Cache File](#rpc-cache-file) above.
+- **RPC cache / retry** — Per-chain response cache, chain-id override, retry and rate-limit settings.
   See [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry).
 - **Tracing** — Emit execution traces (call traces, opcode traces, gas profiles, etc.).
   See [Tracing Overview](../tracing/overview.md).
@@ -139,6 +192,21 @@ Options:
       --rpc <RPC>
           RPC URL to fetch transaction from
           [env: RPC_URL=] [default: http://localhost:8545] [aliases: --rpc-url]
+
+      --rpc.capture-file <PATH>
+          Capture JSON-RPC responses to a single file for later offline replay.
+          Requires `--rpc`. If the file already exists, its entries are loaded
+          and merged; missing entries are fetched via the RPC endpoint and
+          persisted on clean exit. Mutually exclusive with --rpc.replay-file,
+          --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, and
+          --rpc.cache-size.
+
+      --rpc.replay-file <PATH>
+          Replay from a previously captured JSON-RPC fixture file (offline).
+          Cannot be used with `--rpc`. Any RPC miss is a hard error; the file
+          is never written. Mutually exclusive with --rpc.capture-file,
+          --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, and
+          --rpc.cache-size.
 
   -v...
           Increase logging verbosity
