@@ -90,6 +90,6 @@ Allowing fee-exempt contract creation would let `SYSTEM_ADDRESS` deploy arbitrar
 
 - [MiniRex](../upgrades/minirex.md) introduced Mega System Transactions and the `MEGA_SYSTEM_ADDRESS` mechanism.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable semantics.
-- [Rex5](../upgrades/rex5.md) dynamized the system address: it is no longer a compile-time constant but is resolved per block from `SequencerRegistry._currentSequencer`.
+- [Rex5](../upgrades/rex5.md) dynamized the system address: it is no longer a compile-time constant but is resolved per block from `SequencerRegistry._currentSystemAddress`.
   Pre-REX5 blocks continue to use the legacy `MEGA_SYSTEM_ADDRESS` constant.
   The system transaction identification logic and whitelist are unchanged.

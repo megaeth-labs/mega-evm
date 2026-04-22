@@ -12,7 +12,7 @@ import {ISequencerRegistry} from "./interfaces/ISequencerRegistry.sol";
 ///      using a constructor immutable. This enables sequencer rotation without redeploying
 ///      the Oracle contract.
 contract Oracle is ISemver, IOracle {
-    /// @notice The SequencerRegistry contract used to look up the current sequencer.
+    /// @notice The SequencerRegistry contract used to look up the current system address.
     /// @dev Using `constant` (not `immutable`) because mega-evm deploys system contracts
     ///      by directly replacing deployed bytecode without running constructors.
     ISequencerRegistry public constant SEQUENCER_REGISTRY =
@@ -31,8 +31,8 @@ contract Oracle is ISemver, IOracle {
     /// @param data Arbitrary data to include in the log.
     event Log(bytes32 indexed topic, bytes data);
 
-    /// @notice Restricts function access to the current sequencer only.
-    /// @dev Reads the current sequencer from SequencerRegistry at call time.
+    /// @notice Restricts function access to the current system address only.
+    /// @dev Reads the current system address from SequencerRegistry at call time.
     ///      The check is placed after _; to facilitate off-chain simulation —
     ///      EVM inspector will be able to see the execution trace even if the sender check fails.
     modifier onlySystemAddress() {
@@ -40,10 +40,10 @@ contract Oracle is ISemver, IOracle {
         _onlySystemAddress();
     }
 
-    /// @notice Checks if the caller is the current sequencer.
-    /// @dev Reverts with NotSystemAddress if caller is not the current sequencer from registry.
+    /// @notice Checks if the caller is the current system address.
+    /// @dev Reverts with NotSystemAddress if caller is not the current system address from registry.
     function _onlySystemAddress() internal view {
-        if (msg.sender != SEQUENCER_REGISTRY.currentSequencer()) revert NotSystemAddress();
+        if (msg.sender != SEQUENCER_REGISTRY.currentSystemAddress()) revert NotSystemAddress();
     }
 
     /// @notice Returns the semantic version of this contract.

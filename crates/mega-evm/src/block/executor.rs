@@ -26,12 +26,13 @@ use revm::{
 };
 
 use crate::{
-    block::eips, resolve_system_address, transact_apply_pending_sequencer_change_if_due,
-    transact_deploy_access_control_contract, transact_deploy_high_precision_timestamp_oracle,
-    transact_deploy_keyless_deploy_contract, transact_deploy_limit_control_contract,
-    transact_deploy_oracle_contract, transact_deploy_sequencer_registry, BlockLimiter,
-    BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
-    MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
+    block::eips, is_apply_pending_changes_due, resolve_system_address,
+    transact_apply_pending_changes, transact_deploy_access_control_contract,
+    transact_deploy_high_precision_timestamp_oracle, transact_deploy_keyless_deploy_contract,
+    transact_deploy_limit_control_contract, transact_deploy_oracle_contract,
+    transact_deploy_sequencer_registry, BlockLimiter, BlockMegaTransactionOutcome, BucketId,
+    MegaBlockExecutionCtx, MegaHardforks, MegaSystemCallOutcome, MegaTransaction,
+    MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -272,24 +273,37 @@ where
                 .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
         }
 
-        // Rex5 hardfork: SequencerRegistry contract (constant bootstrap — no storage writes)
+        // Rex5 hardfork: SequencerRegistry (seeds system address, sequencer, admin, and
+        // initialFromBlock into storage on first deploy)
+        let block_timestamp: u64 = self.evm.block().timestamp.saturating_to();
+        let block_number = self.evm.block().number.to::<u64>();
         let result_and_state = transact_deploy_sequencer_registry(
             &self.hardforks,
-            self.evm.block().timestamp.saturating_to(),
+            block_timestamp,
+            block_number,
             self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
+            &self.hardforks.sequencer_registry_config(),
+        )?;
         if let Some(state) = result_and_state {
             outcomes
                 .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
         }
 
-        // Rex5 hardfork: apply pending sequencer rotation if due.
-        let result_and_state =
-            transact_apply_pending_sequencer_change_if_due(&self.hardforks, &mut self.evm)?;
-        if let Some(state) = result_and_state {
-            outcomes
-                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
+        // Rex5 hardfork: apply pending role rotations if any are due.
+        // NOTE: This pre-check reads from the DB *before* the deploy outcome is committed.
+        // On the bootstrap block, the registry account does not yet exist in the DB,
+        // so is_apply_pending_changes_due returns false. This is correct because the
+        // deploy does not seed any pending slots.
+        if self.hardforks.is_rex_5_active_at_timestamp(block_timestamp) &&
+            is_apply_pending_changes_due(self.evm.db_mut(), block_number)?
+        {
+            let result_and_state = transact_apply_pending_changes(&mut self.evm)?;
+            if let Some(ExecResultAndState { state, .. }) = result_and_state {
+                outcomes.push(MegaSystemCallOutcome {
+                    source: StateChangeSource::Transaction(0),
+                    state,
+                });
+            }
         }
 
         Ok(outcomes)
@@ -544,7 +558,7 @@ where
         // After all pre-block outcomes are committed, resolve the system address for this block.
         // This reads _currentSequencer from the now-committed SequencerRegistry storage.
         let spec = self.evm.ctx().mega_spec();
-        let system_address = resolve_system_address(spec, self.evm.db_mut())?;
+        let system_address = resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;
         self.evm.ctx_mut().set_system_address(system_address);
 
         Ok(())

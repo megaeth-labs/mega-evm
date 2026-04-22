@@ -16,7 +16,15 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs, ACCESS_CONTROL_ADDRESS,
+    ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+    HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+    LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX5, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+};
+use mega_system_contracts::sequencer_registry::storage_slots::{
+    ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
+    INITIAL_SYSTEM_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{ADD, LOG1, POP, SSTORE},
@@ -89,6 +97,36 @@ fn block_evm_env(spec: MegaSpecId) -> EvmEnv<MegaSpecId> {
         ..Default::default()
     };
     EvmEnv::new(cfg_env, block_env)
+}
+
+fn rex5_steady_state_db(contract_code: &Bytes) -> MemoryDatabase {
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CONTRACT, contract_code.clone());
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    // Predeploy all REX5 system contracts so this benchmark measures the steady-state
+    // pre-block path instead of repeatedly paying first-deploy cost.
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX5);
+    db.set_account_code(
+        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
+    );
+    db.set_account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
+    db.set_account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
+    db.set_account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
+    db.set_account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE);
+
+    // Seed the bootstrap SequencerRegistry slots exactly once so deploy stays idempotent
+    // and resolve_system_address reads committed steady-state data.
+    let initial_address = U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SEQUENCER, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, ADMIN, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_SYSTEM_ADDRESS, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_SEQUENCER, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_FROM_BLOCK, U256::from(1000));
+
+    db
 }
 
 /// Simple contract: just STOPs.
@@ -322,8 +360,11 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark pre-block overhead for REX5 (`SequencerRegistry` deploy + `is_rotation_due` +
-/// `resolve_system_address`). Measures the no-rotation common path.
+/// Benchmark the full REX5 pre-block path.
+///
+/// `bootstrap` starts from an empty DB and pays first-deploy cost for the REX5 system contracts.
+/// `no_rotation` starts from a steady-state DB where all deploy-only contracts already exist and
+/// the `SequencerRegistry` has no pending changes.
 fn bench_rex5_pre_block(c: &mut Criterion) {
     let mut group = c.benchmark_group("rex5_pre_block");
     group.sample_size(10);
@@ -331,7 +372,7 @@ fn bench_rex5_pre_block(c: &mut Criterion) {
     let contract_code = empty_contract();
     let spec = MegaSpecId::REX5;
 
-    // Bootstrap block: deploys SequencerRegistry + Oracle v2.0.0
+    // Bootstrap block: first REX5 pre-block on an empty state.
     group.bench_function("bootstrap", |b| {
         b.iter(|| {
             let mut db = MemoryDatabase::default();
@@ -360,17 +401,13 @@ fn bench_rex5_pre_block(c: &mut Criterion) {
         })
     });
 
-    // Steady-state block: SequencerRegistry already deployed, no pending rotation.
-    // Pre-deploy via MemoryDatabase so the benchmark measures the no-rotation common path.
+    // Steady-state block: all deploy-only system contracts already exist and the registry has no
+    // pending changes.
     group.bench_function("no_rotation", |b| {
-        use mega_evm::{SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE};
-
-        let mut db = MemoryDatabase::default();
-        db.set_account_code(CONTRACT, contract_code.clone());
-        db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
-        db.set_account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE);
+        let baseline_db = rex5_steady_state_db(&contract_code);
 
         b.iter(|| {
+            let mut db = baseline_db.clone();
             let mut state = State::builder().with_database(&mut db).build();
             let external_envs = TestExternalEnvs::<Infallible>::new();
             let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);

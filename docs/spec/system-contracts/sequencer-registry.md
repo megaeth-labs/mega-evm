@@ -1,19 +1,22 @@
 ---
-description: SequencerRegistry system contract — sequencer address lookup, rotation scheduling, and history.
+description: SequencerRegistry system contract — dual-role registry for system address and sequencer, with rotation scheduling and history.
 spec: Rex5
 ---
 
 # SequencerRegistry
 
 This page specifies the `SequencerRegistry` system contract.
-It records the current sequencer, pending rotations, and rotation history.
-On-chain contracts use it to verify mini-block signatures by looking up the sequencer active at a given block.
+It tracks two independent roles: the **system address** (Oracle/system-tx authority) and the **sequencer** (mini-block signing key).
+Each role has its own rotation lifecycle.
 
 ## Motivation
 
-MegaETH's mini-block signing feature requires on-chain verification of sequencer signatures.
-The `SequencerRegistry` provides a canonical source of truth for which address is the active sequencer at any block number.
-It also enables sequencer rotation without redeploying the Oracle contract.
+MegaETH needs to decouple the Oracle/system-transaction sender from the mini-block signing key so that each can be rotated independently without affecting the other.
+The `SequencerRegistry` provides a canonical on-chain source of truth for both roles, enabling:
+
+- On-chain verification of mini-block signatures via `currentSequencer()` and `sequencerAt()`.
+- Dynamic Oracle authority via `currentSystemAddress()`, replacing the hardcoded `MEGA_SYSTEM_ADDRESS`.
+- Independent rotation of each role without redeploying contracts.
 
 ## Specification
 
@@ -29,105 +32,105 @@ Version 1.0.0
 
 Since: [Rex5](../upgrades/rex5.md)
 
-Code hash: `0x1ab52fdc824e7014abade0233ffb0017234c8ffd4075a51ca600f5a8fc5e7a47`
+The contract is deployed via raw state patch with initial storage seeded at deploy time.
+No constructor is executed.
 
-The contract uses a constant-bootstrap pattern.
-`INITIAL_SEQUENCER` and `INITIAL_ADMIN` are compile-time constants in the bytecode.
-No storage is written during deployment.
-`address(0)` in storage means "use the constant default".
+### Storage Layout
+
+The storage layout is consensus-critical.
+Rust slot constants in `mega-system-contracts` must match this layout.
+
+| Slot | Name                            | Type               |
+| ---- | ------------------------------- | ------------------ |
+| 0    | `_currentSystemAddress`         | `address`          |
+| 1    | `_currentSequencer`             | `address`          |
+| 2    | `_admin`                        | `address`          |
+| 3    | `_initialSystemAddress`         | `address`          |
+| 4    | `_initialSequencer`             | `address`          |
+| 5    | `_initialFromBlock`             | `uint256`          |
+| 6    | `_pendingSystemAddress`         | `address`          |
+| 7    | `_systemAddressActivationBlock` | `uint256`          |
+| 8    | `_pendingSequencer`             | `address`          |
+| 9    | `_sequencerActivationBlock`     | `uint256`          |
+| 10   | `_systemAddressRotations`       | `RotationRecord[]` |
+| 11   | `_sequencerRotations`           | `RotationRecord[]` |
+
+`RotationRecord` is packed: `uint96 fromBlock` + `address addr` fit in one 32-byte slot.
 
 ### Interface
 
 ```solidity
 interface ISequencerRegistry {
+    // System address role
+    function currentSystemAddress() external view returns (address);
+    function systemAddressAt(uint256 blockNumber) external view returns (address);
+    function scheduleNextSystemAddressChange(address newSystemAddress, uint256 activationBlock) external;
+
+    // Sequencer role
     function currentSequencer() external view returns (address);
     function sequencerAt(uint256 blockNumber) external view returns (address);
     function scheduleNextSequencerChange(address newSequencer, uint256 activationBlock) external;
-    function applyPendingChange() external;
+
+    // Shared
+    function applyPendingChanges() external;
     function admin() external view returns (address);
     function transferAdmin(address newAdmin) external;
 }
 ```
 
-Errors:
-
-```solidity
-error FutureBlock();
-error NotAdmin();
-error ZeroAddress();
-error InvalidActivationBlock();
-error ActivationBlockTooLarge();
-```
-
-Events:
-
-```solidity
-event SequencerChangeScheduled(address indexed oldSequencer, address indexed newSequencer, uint256 activationBlock);
-event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
-```
-
 ### Read Methods
 
-`currentSequencer()` returns `_currentSequencer` if non-zero, otherwise `INITIAL_SEQUENCER`.
+`currentSystemAddress()` returns the value in `_currentSystemAddress`.
+`currentSequencer()` returns the value in `_currentSequencer`.
+Both are seeded at deploy time and updated only by `applyPendingChanges()`.
 
-`admin()` returns `_admin` if non-zero, otherwise `INITIAL_ADMIN`.
-
-`sequencerAt(blockNumber)` reverts with `FutureBlock` if `blockNumber > block.number`.
-Otherwise it searches the rotation history in reverse.
-If no rotation covers the queried block, it returns `INITIAL_SEQUENCER`.
+`systemAddressAt(blockNumber)` and `sequencerAt(blockNumber)` return the role address active at the given block.
+They revert with `FutureBlock` if `blockNumber > block.number` and `BeforeInitialBlock` if `blockNumber < _initialFromBlock`.
+Both roles share the same `_initialFromBlock`.
 
 ### Rotation Scheduling
 
-`scheduleNextSequencerChange(newSequencer, activationBlock)` is restricted to the current admin.
-`activationBlock` must be strictly greater than `block.number`.
-At most one pending schedule exists at a time; a new schedule overwrites the previous one.
-To cancel, pass `activationBlock = type(uint256).max` and `newSequencer = address(0)`.
+Each role has independent `schedule*Change(newAddress, activationBlock)`.
+`activationBlock` must be strictly greater than `block.number` and fit in `uint96`.
+At most one pending change per role exists at a time; a new schedule overwrites the previous one.
+To cancel, pass `activationBlock = type(uint256).max` and `newAddress = address(0)`.
 
 ### Pre-Block Apply
 
-`applyPendingChange()` is permissionless.
-It is called by the execution layer as a pre-block system call (same pattern as EIP-2935 and EIP-4788).
-It is only invoked when a Rust-side pre-check confirms a rotation is due.
-
-When pending and due:
-
-1. Writes `_pendingSequencer` to `_currentSequencer`.
-2. Appends a `RotationRecord` to the history array.
-3. Clears `_pendingSequencer` and `_activationBlock`.
-
-When not pending or not due: no-op.
+`applyPendingChanges()` is permissionless and applies both roles atomically.
+It is called by the execution layer as a pre-block system call when a Rust-side pre-check confirms any role rotation is due.
+For each role, if pending and due, it updates the current address, appends to the rotation history, and clears pending state.
 
 ### Interception
 
 `SequencerRegistry` does NOT use call interception.
 All methods run as normal on-chain bytecode.
 
-### Value Transfer
+### Deploy-Time Seeding
 
-All methods are non-payable.
+At first deploy, the execution layer writes 6 flat storage slots:
+`_currentSystemAddress`, `_currentSequencer`, `_admin`, `_initialSystemAddress`, `_initialSequencer`, `_initialFromBlock`.
+The values come from `SequencerRegistryConfig` on the chain's hardfork configuration.
 
 ## Constants
 
-| Name                         | Value                                        | Description                               |
-| ---------------------------- | -------------------------------------------- | ----------------------------------------- |
-| `SEQUENCER_REGISTRY_ADDRESS` | `0x6342000000000000000000000000000000000006` | Contract address                          |
-| `REX5_INITIAL_SEQUENCER`     | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Initial sequencer (compile-time constant) |
-| `REX5_REGISTRY_ADMIN`        | `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` | Initial admin (compile-time constant)     |
+| Name                         | Value                                        | Description      |
+| ---------------------------- | -------------------------------------------- | ---------------- |
+| `SEQUENCER_REGISTRY_ADDRESS` | `0x6342000000000000000000000000000000000006` | Contract address |
 
 ## Rationale
 
-**Why constant bootstrap instead of constructor parameters?**
-mega-evm deploys system contracts by replacing deployed bytecode without running constructors.
-Compile-time constants avoid the need for deploy-time storage initialization, keeping the deployment pattern consistent with all other system contracts.
+**Why two roles instead of one?**
+The Oracle/system-tx sender and the mini-block signing key are different operational concerns.
+Coupling them means rotating one silently revokes the other, which would break Oracle authority on the first sequencer key rotation.
 
 **Why a pre-block system call for rotation?**
-Applying rotation as a regular transaction would change `_currentSequencer` mid-block, breaking block-stability of `SYSTEM_ADDRESS`.
-A pre-block system call ensures the rotation is applied before any user transaction executes.
+Applying rotation as a regular transaction would change role addresses mid-block, breaking block-stability.
 
-**Why is the system call gated by a Rust pre-check?**
-Reading two storage slots (pending sequencer + activation block) is cheaper than an EVM call.
-On blocks without a pending rotation (the common case), the EVM call is skipped entirely.
+**Why deploy-time storage seeding instead of constant bootstrap?**
+The `_initialFromBlock` depends on the Rex5 activation block number, which is not known at compile time.
+Seeding all initial values at deploy time keeps the bootstrap mechanism uniform.
 
 ## Spec History
 
-- [Rex5](../upgrades/rex5.md) introduced the `SequencerRegistry` contract.
+- [Rex5](../upgrades/rex5.md) introduced the `SequencerRegistry` contract with dual roles.

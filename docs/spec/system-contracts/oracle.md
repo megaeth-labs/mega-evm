@@ -23,7 +23,7 @@ The Oracle system contract MUST exist at `ORACLE_CONTRACT_ADDRESS`.
 
 A node MUST deploy the bytecode version corresponding to the active spec.
 Versions 1.0.0 and 1.1.0 take `MEGA_SYSTEM_ADDRESS` as a constructor `immutable`.
-Version 2.0.0 reads the authorized address from `SequencerRegistry.currentSequencer()` via a `constant` reference.
+Version 2.0.0 reads the authorized address from `SequencerRegistry.currentSystemAddress()` via a `constant` reference.
 
 #### Version 1.0.0
 
@@ -53,7 +53,7 @@ Deployed bytecode:
 
 Since: [Rex5](../upgrades/rex5.md)
 
-The `onlySystemAddress` modifier reads the authorized address from [`SequencerRegistry.currentSequencer()`](sequencer-registry.md) instead of a constructor `immutable`.
+The `onlySystemAddress` modifier reads the authorized address from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) instead of a constructor `immutable`.
 This enables sequencer rotation without redeploying the Oracle contract.
 All other functionality is preserved from v1.1.0.
 
@@ -185,4 +185,4 @@ The no-op Solidity body provides a stable interface, while the [call interceptio
 - [MiniRex](../upgrades/minirex.md) introduced the Oracle contract.
 - [Rex2](../upgrades/rex2.md) added the `sendHint` entry point to the deployed Oracle bytecode.
 - [Rex3](../upgrades/rex3.md) changed oracle detention to SLOAD-based triggering and raised the oracle detention cap to 20M.
-- [Rex5](../upgrades/rex5.md) replaced the constructor `immutable` authority with a dynamic read from `SequencerRegistry.currentSequencer()` (Oracle v2.0.0).
+- [Rex5](../upgrades/rex5.md) replaced the constructor `immutable` authority with a dynamic read from `SequencerRegistry.currentSystemAddress()` (Oracle v2.0.0).

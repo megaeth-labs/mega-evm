@@ -7,7 +7,7 @@ use alloy_primitives::{BlockNumber, BlockTimestamp, U256};
 use auto_impl::auto_impl;
 use std::{boxed::Box, vec::Vec};
 
-use crate::MegaSpecId;
+use crate::{system::SequencerRegistryConfig, MegaSpecId};
 
 hardfork! {
     /// The name of MegaETH hardforks. It is expected to mix with [`EthereumHardfork`] and
@@ -61,6 +61,11 @@ pub trait MegaHardforks: OpHardforks {
     /// Retrieves [`ForkCondition`] by a [`MegaHardfork`]. If `fork` is not present, returns
     /// [`ForkCondition::Never`].
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
+
+    /// Returns the bootstrap configuration for `SequencerRegistry`.
+    fn sequencer_registry_config(&self) -> SequencerRegistryConfig {
+        SequencerRegistryConfig::default()
+    }
 
     /// Returns `true` if the given [`MegaHardfork`] is the hardfork to be activated at the
     /// given timestamp. One special case is that if the current block is the first block of the
@@ -184,6 +189,7 @@ pub trait MegaHardforks: OpHardforks {
 #[derive(Debug, Clone)]
 pub struct MegaHardforkConfig {
     hardforks: Vec<(Box<dyn Hardfork>, ForkCondition)>,
+    sequencer_registry_config: SequencerRegistryConfig,
 }
 
 impl Default for MegaHardforkConfig {
@@ -198,7 +204,10 @@ where
     H: Hardfork + 'static,
 {
     fn from(iter: I) -> Self {
-        Self { hardforks: iter.map(|(h, c)| (Box::new(h) as Box<dyn Hardfork>, c)).collect() }
+        Self {
+            hardforks: iter.map(|(h, c)| (Box::new(h) as Box<dyn Hardfork>, c)).collect(),
+            sequencer_registry_config: SequencerRegistryConfig::default(),
+        }
     }
 }
 
@@ -240,6 +249,7 @@ impl MegaHardforkConfig {
                 (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
                 (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
             ],
+            sequencer_registry_config: SequencerRegistryConfig::default(),
         }
     }
 
@@ -254,6 +264,15 @@ impl MegaHardforkConfig {
         self.insert(MegaHardfork::Rex3, ForkCondition::Timestamp(0));
         self.insert(MegaHardfork::Rex4, ForkCondition::Timestamp(0));
         self.insert(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
+        self
+    }
+
+    /// Sets the bootstrap configuration for `SequencerRegistry`.
+    pub fn with_sequencer_registry_config(
+        mut self,
+        sequencer_registry_config: SequencerRegistryConfig,
+    ) -> Self {
+        self.sequencer_registry_config = sequencer_registry_config;
         self
     }
 
@@ -315,6 +334,10 @@ impl MegaHardforks for MegaHardforkConfig {
             None => ForkCondition::Never,
         }
     }
+
+    fn sequencer_registry_config(&self) -> SequencerRegistryConfig {
+        self.sequencer_registry_config.clone()
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +378,7 @@ mod tests {
         );
         assert_eq!(config.op_fork_activation(OpHardfork::Isthmus), ForkCondition::Timestamp(0));
         assert_eq!(config.mega_fork_activation(MegaHardfork::MiniRex), ForkCondition::Never);
+        assert_eq!(config.sequencer_registry_config(), SequencerRegistryConfig::default());
     }
 
     #[test]
@@ -400,6 +424,24 @@ mod tests {
         ] {
             assert_eq!(config.mega_fork_activation(hardfork), ForkCondition::Timestamp(0));
         }
+    }
+
+    #[test]
+    fn test_with_sequencer_registry_config_overrides_registry_bootstrap_config() {
+        let config_override = SequencerRegistryConfig {
+            initial_system_address: alloy_primitives::address!(
+                "0x1111111111111111111111111111111111111111"
+            ),
+            initial_sequencer: alloy_primitives::address!(
+                "0x2222222222222222222222222222222222222222"
+            ),
+            initial_admin: alloy_primitives::address!("0x3333333333333333333333333333333333333333"),
+        };
+
+        let config =
+            MegaHardforkConfig::default().with_sequencer_registry_config(config_override.clone());
+
+        assert_eq!(config.sequencer_registry_config(), config_override);
     }
 
     #[test]

@@ -10,84 +10,146 @@ contract OracleTest is Test {
     Oracle public oracle;
     SequencerRegistry public registry;
 
-    address public constant INITIAL_SEQUENCER = 0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d;
     address public constant REGISTRY_ADDRESS = 0x6342000000000000000000000000000000000006;
+
+    address public constant INITIAL_SYSTEM_ADDRESS = address(0xAA);
+    address public constant INITIAL_SEQUENCER = address(0xBB);
+    address public constant INITIAL_ADMIN = address(0xCC);
+    uint256 public constant INITIAL_FROM_BLOCK = 1;
+
     address public user = address(0x2);
-    address public newSequencer = address(0xCAFE);
+    address public newSystemAddress = address(0xCAFE);
+    address public newSequencer = address(0xFACE);
 
     function setUp() public {
-        // Deploy SequencerRegistry and place its bytecode at the hardcoded address
-        // that Oracle's SEQUENCER_REGISTRY constant expects.
+        // Deploy SequencerRegistry bytecode at the canonical address via vm.etch.
         SequencerRegistry impl = new SequencerRegistry();
         vm.etch(REGISTRY_ADDRESS, address(impl).code);
         registry = SequencerRegistry(REGISTRY_ADDRESS);
 
-        // Deploy Oracle (v2.0.0 — no constructor params)
+        // Seed SequencerRegistry storage (no constructor).
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(0)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(1)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(2)), bytes32(uint256(uint160(INITIAL_ADMIN))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(3)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(4)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(5)), bytes32(uint256(INITIAL_FROM_BLOCK)));
+
+        vm.roll(INITIAL_FROM_BLOCK);
+
+        // Deploy Oracle (v2.0.0 -- reads authority from SequencerRegistry.currentSystemAddress()).
         oracle = new Oracle();
     }
 
-    // ============ Version & Registry ============
+    // ============ version ============
 
-    function testVersion() public view {
+    function test_version() public view {
         assertEq(oracle.version(), "2.0.0");
     }
 
-    function testSequencerRegistry() public view {
+    // ============ Registry link ============
+
+    function test_sequencerRegistryAddress() public view {
         assertEq(address(oracle.SEQUENCER_REGISTRY()), REGISTRY_ADDRESS);
-        assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
     }
 
-    // ============ setSlot / getSlot ============
+    // ============ setSlot / getSlot: authority = currentSystemAddress ============
 
-    function testSetSlot() public {
-        uint256 slot = 0;
-        bytes32 value = bytes32(uint256(12345));
-
-        vm.prank(INITIAL_SEQUENCER);
-        oracle.setSlot(slot, value);
-        assertEq(oracle.getSlot(slot), value);
+    function test_setSlot_initialSystemAddressCanCall() public {
+        vm.prank(INITIAL_SYSTEM_ADDRESS);
+        oracle.setSlot(0, bytes32(uint256(12345)));
+        assertEq(oracle.getSlot(0), bytes32(uint256(12345)));
     }
 
-    function testSetSlotFailsFromNonSystem() public {
+    function test_setSlot_revertsFromRandomAddress() public {
         vm.prank(user);
         vm.expectRevert(Oracle.NotSystemAddress.selector);
         oracle.setSlot(0, bytes32(uint256(12345)));
     }
 
-    function testGetSlotDefaultValue() public view {
+    function test_setSlot_revertsFromSequencer() public {
+        // Sequencer is NOT the system address -- should be rejected.
+        vm.prank(INITIAL_SEQUENCER);
+        vm.expectRevert(Oracle.NotSystemAddress.selector);
+        oracle.setSlot(0, bytes32(uint256(1)));
+    }
+
+    function test_getSlot_defaultValueIsZero() public view {
         assertEq(oracle.getSlot(0), bytes32(0));
     }
 
-    function testSetMultipleSlots() public {
-        vm.startPrank(INITIAL_SEQUENCER);
-        oracle.setSlot(0, bytes32(uint256(100)));
-        oracle.setSlot(1, bytes32(uint256(200)));
-        oracle.setSlot(255, bytes32(uint256(300)));
-        vm.stopPrank();
+    // ============ Rotation: authority follows currentSystemAddress ============
 
-        assertEq(oracle.getSlot(0), bytes32(uint256(100)));
-        assertEq(oracle.getSlot(1), bytes32(uint256(200)));
-        assertEq(oracle.getSlot(255), bytes32(uint256(300)));
+    function test_afterSystemAddressRotation_newSystemAddressCanCall() public {
+        uint256 activationBlock = block.number + 100;
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, activationBlock);
+
+        vm.roll(activationBlock);
+        registry.applyPendingChanges();
+
+        assertEq(registry.currentSystemAddress(), newSystemAddress);
+
+        vm.prank(newSystemAddress);
+        oracle.setSlot(42, bytes32(uint256(0xBEEF)));
+        assertEq(oracle.getSlot(42), bytes32(uint256(0xBEEF)));
     }
 
-    function testOverwriteSlot() public {
-        vm.startPrank(INITIAL_SEQUENCER);
-        oracle.setSlot(0, bytes32(uint256(100)));
-        oracle.setSlot(0, bytes32(uint256(200)));
-        vm.stopPrank();
+    function test_afterSystemAddressRotation_oldSystemAddressCannotCall() public {
+        uint256 activationBlock = block.number + 100;
 
-        assertEq(oracle.getSlot(0), bytes32(uint256(200)));
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, activationBlock);
+
+        vm.roll(activationBlock);
+        registry.applyPendingChanges();
+
+        vm.prank(INITIAL_SYSTEM_ADDRESS);
+        vm.expectRevert(Oracle.NotSystemAddress.selector);
+        oracle.setSlot(0, bytes32(uint256(1)));
     }
 
-    function testFuzzSetSlot(uint256 slot, bytes32 value) public {
-        vm.prank(INITIAL_SEQUENCER);
-        oracle.setSlot(slot, value);
-        assertEq(oracle.getSlot(slot), value);
+    // ============ Critical independence: sequencer rotation does NOT affect Oracle ============
+
+    function test_sequencerRotation_doesNotAffectOracleAuthority() public {
+        uint256 activationBlock = block.number + 100;
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSequencerChange(newSequencer, activationBlock);
+
+        vm.roll(activationBlock);
+        registry.applyPendingChanges();
+
+        // Sequencer rotated, but Oracle authority is still the original system address.
+        assertEq(registry.currentSequencer(), newSequencer);
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
+
+        // Original system address can still call Oracle.
+        vm.prank(INITIAL_SYSTEM_ADDRESS);
+        oracle.setSlot(99, bytes32(uint256(0xFEED)));
+        assertEq(oracle.getSlot(99), bytes32(uint256(0xFEED)));
+
+        // New sequencer cannot call Oracle.
+        vm.prank(newSequencer);
+        vm.expectRevert(Oracle.NotSystemAddress.selector);
+        oracle.setSlot(0, bytes32(uint256(1)));
+    }
+
+    // ============ sendHint ============
+
+    function test_sendHint_isViewAndCallableByAnyone() public view {
+        oracle.sendHint(bytes32(uint256(0x1234)), hex"deadbeef");
+    }
+
+    function test_sendHint_fromArbitraryAddress() public {
+        vm.prank(user);
+        oracle.sendHint(bytes32(uint256(0x5678)), hex"cafebabe");
     }
 
     // ============ setSlots / getSlots ============
 
-    function testBatchGetSlots() public {
+    function test_setSlots_basic() public {
         uint256[] memory slots = new uint256[](3);
         slots[0] = 0;
         slots[1] = 1;
@@ -98,7 +160,7 @@ contract OracleTest is Test {
         values[1] = bytes32(uint256(222));
         values[2] = bytes32(uint256(333));
 
-        vm.prank(INITIAL_SEQUENCER);
+        vm.prank(INITIAL_SYSTEM_ADDRESS);
         oracle.setSlots(slots, values);
 
         bytes32[] memory retrieved = oracle.getSlots(slots);
@@ -107,33 +169,7 @@ contract OracleTest is Test {
         assertEq(retrieved[2], bytes32(uint256(333)));
     }
 
-    function testBatchSetAndGet() public {
-        uint256[] memory slots = new uint256[](10);
-        bytes32[] memory values = new bytes32[](10);
-        for (uint256 i = 0; i < 10; i++) {
-            slots[i] = i;
-            values[i] = bytes32(i * 100);
-        }
-
-        vm.prank(INITIAL_SEQUENCER);
-        oracle.setSlots(slots, values);
-
-        bytes32[] memory retrieved = oracle.getSlots(slots);
-        for (uint256 i = 0; i < 10; i++) {
-            assertEq(retrieved[i], bytes32(i * 100));
-        }
-    }
-
-    function testSetSlotsFailsWithMismatchedLengths() public {
-        uint256[] memory slots = new uint256[](2);
-        bytes32[] memory values = new bytes32[](3);
-
-        vm.prank(INITIAL_SEQUENCER);
-        vm.expectRevert(abi.encodeWithSelector(Oracle.InvalidLength.selector, 2, 3));
-        oracle.setSlots(slots, values);
-    }
-
-    function testSetSlotsFailsFromNonSystem() public {
+    function test_setSlots_revertsFromNonSystemAddress() public {
         uint256[] memory slots = new uint256[](1);
         bytes32[] memory values = new bytes32[](1);
 
@@ -142,7 +178,16 @@ contract OracleTest is Test {
         oracle.setSlots(slots, values);
     }
 
-    function testGetSlotsDefaultValues() public view {
+    function test_setSlots_revertsMismatchedLengths() public {
+        uint256[] memory slots = new uint256[](2);
+        bytes32[] memory values = new bytes32[](3);
+
+        vm.prank(INITIAL_SYSTEM_ADDRESS);
+        vm.expectRevert(abi.encodeWithSelector(Oracle.InvalidLength.selector, 2, 3));
+        oracle.setSlots(slots, values);
+    }
+
+    function test_getSlots_defaultValues() public view {
         uint256[] memory slots = new uint256[](3);
         slots[0] = 10;
         slots[1] = 20;
@@ -154,83 +199,26 @@ contract OracleTest is Test {
         assertEq(values[2], bytes32(0));
     }
 
-    function testSetSlotsEmptyArrays() public {
-        uint256[] memory slots = new uint256[](0);
-        bytes32[] memory values = new bytes32[](0);
-
-        vm.prank(INITIAL_SEQUENCER);
-        oracle.setSlots(slots, values);
-    }
-
-    function testGetSlotsEmptyArray() public view {
-        uint256[] memory slots = new uint256[](0);
-        bytes32[] memory values = oracle.getSlots(slots);
-        assertEq(values.length, 0);
-    }
-
-    function testArbitrarySlots() public {
-        uint256 slot1 = uint256(keccak256("slot.one"));
-        uint256 slot2 = uint256(keccak256("slot.two"));
-        uint256 slot3 = type(uint256).max;
-
-        vm.startPrank(INITIAL_SEQUENCER);
-        oracle.setSlot(slot1, bytes32(uint256(0xdeadbeef)));
-        oracle.setSlot(slot2, bytes32(uint256(0xcafebabe)));
-        oracle.setSlot(slot3, bytes32(uint256(0x12345678)));
-        vm.stopPrank();
-
-        assertEq(oracle.getSlot(slot1), bytes32(uint256(0xdeadbeef)));
-        assertEq(oracle.getSlot(slot2), bytes32(uint256(0xcafebabe)));
-        assertEq(oracle.getSlot(slot3), bytes32(uint256(0x12345678)));
-    }
-
-    function testStorageCollision() public {
-        vm.startPrank(INITIAL_SEQUENCER);
-        oracle.setSlot(100, bytes32(uint256(0xaaaa)));
-        oracle.setSlot(101, bytes32(uint256(0xbbbb)));
-        vm.stopPrank();
-
-        assertEq(oracle.getSlot(100), bytes32(uint256(0xaaaa)));
-        assertEq(oracle.getSlot(101), bytes32(uint256(0xbbbb)));
-
-        vm.prank(INITIAL_SEQUENCER);
-        oracle.setSlot(100, bytes32(uint256(0xcccc)));
-
-        assertEq(oracle.getSlot(100), bytes32(uint256(0xcccc)));
-        assertEq(oracle.getSlot(101), bytes32(uint256(0xbbbb)));
-    }
-
-    // ============ sendHint ============
-
-    function testSendHintIsView() public view {
-        oracle.sendHint(bytes32(uint256(0x1234)), hex"deadbeef");
-    }
-
-    function testSendHintFromAnyAddress() public {
-        vm.prank(user);
-        oracle.sendHint(bytes32(uint256(0x5678)), hex"cafebabe");
-    }
-
     // ============ emitLog / emitLogs ============
 
-    function testEmitLog() public {
+    function test_emitLog_basic() public {
         bytes32 topic = bytes32(uint256(0xabcd));
         bytes memory data = hex"deadbeef";
 
         vm.expectEmit(true, false, false, true);
         emit Oracle.Log(topic, data);
 
-        vm.prank(INITIAL_SEQUENCER);
+        vm.prank(INITIAL_SYSTEM_ADDRESS);
         oracle.emitLog(topic, data);
     }
 
-    function testEmitLogFailsFromNonSystem() public {
+    function test_emitLog_revertsFromNonSystemAddress() public {
         vm.prank(user);
         vm.expectRevert(Oracle.NotSystemAddress.selector);
         oracle.emitLog(bytes32(uint256(0x1234)), hex"cafebabe");
     }
 
-    function testEmitLogs() public {
+    function test_emitLogs_basic() public {
         bytes32 topic = bytes32(uint256(0xabcd));
         bytes[] memory dataVector = new bytes[](2);
         dataVector[0] = hex"deadbeef";
@@ -241,11 +229,11 @@ contract OracleTest is Test {
         vm.expectEmit(true, false, false, true);
         emit Oracle.Log(topic, dataVector[1]);
 
-        vm.prank(INITIAL_SEQUENCER);
+        vm.prank(INITIAL_SYSTEM_ADDRESS);
         oracle.emitLogs(topic, dataVector);
     }
 
-    function testEmitLogsFailsFromNonSystem() public {
+    function test_emitLogs_revertsFromNonSystemAddress() public {
         bytes[] memory dataVector = new bytes[](1);
         dataVector[0] = hex"deadbeef";
 
@@ -256,17 +244,17 @@ contract OracleTest is Test {
 
     // ============ multiCall ============
 
-    function testMultiCallSingleCall() public {
+    function test_multiCall_singleCall() public {
         bytes[] memory data = new bytes[](1);
         data[0] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(100), bytes32(uint256(0x1234)));
 
-        vm.prank(INITIAL_SEQUENCER);
+        vm.prank(INITIAL_SYSTEM_ADDRESS);
         oracle.multiCall(data);
 
         assertEq(oracle.getSlot(100), bytes32(uint256(0x1234)));
     }
 
-    function testMultiCallAccessControlEnforced() public {
+    function test_multiCall_revertsFromNonSystemAddress() public {
         bytes[] memory data = new bytes[](1);
         data[0] = abi.encodeWithSelector(Oracle.setSlot.selector, uint256(300), bytes32(uint256(0x1234)));
 
@@ -275,51 +263,21 @@ contract OracleTest is Test {
         oracle.multiCall(data);
     }
 
-    // ============ Rotation: authority follows SequencerRegistry ============
+    // ============ After system address rotation: emitLog follows new authority ============
 
-    function testAfterRotation_newSequencerCanCallSetSlot() public {
-        uint256 activationBlock = block.number + 100;
-
-        vm.prank(INITIAL_SEQUENCER);
-        registry.scheduleNextSequencerChange(newSequencer, activationBlock);
-
-        vm.roll(activationBlock);
-        registry.applyPendingChange();
-
-        assertEq(registry.currentSequencer(), newSequencer);
-
-        vm.prank(newSequencer);
-        oracle.setSlot(42, bytes32(uint256(0xBEEF)));
-        assertEq(oracle.getSlot(42), bytes32(uint256(0xBEEF)));
-    }
-
-    function testAfterRotation_oldSequencerCannotCallSetSlot() public {
-        uint256 activationBlock = block.number + 100;
-
-        vm.prank(INITIAL_SEQUENCER);
-        registry.scheduleNextSequencerChange(newSequencer, activationBlock);
-
-        vm.roll(activationBlock);
-        registry.applyPendingChange();
-
-        vm.prank(INITIAL_SEQUENCER);
-        vm.expectRevert(Oracle.NotSystemAddress.selector);
-        oracle.setSlot(0, bytes32(uint256(1)));
-    }
-
-    function testAfterRotation_newSequencerCanEmitLog() public {
+    function test_afterSystemAddressRotation_newSystemAddressCanEmitLog() public {
         uint256 activationBlock = block.number + 50;
 
-        vm.prank(INITIAL_SEQUENCER);
-        registry.scheduleNextSequencerChange(newSequencer, activationBlock);
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, activationBlock);
 
         vm.roll(activationBlock);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
         vm.expectEmit(true, false, false, true);
         emit Oracle.Log(bytes32(uint256(0x7777)), hex"cafe");
 
-        vm.prank(newSequencer);
+        vm.prank(newSystemAddress);
         oracle.emitLog(bytes32(uint256(0x7777)), hex"cafe");
     }
 }

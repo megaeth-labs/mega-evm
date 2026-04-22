@@ -8,38 +8,66 @@ import {ISequencerRegistry} from "../contracts/interfaces/ISequencerRegistry.sol
 contract SequencerRegistryTest is Test {
     SequencerRegistry public registry;
 
-    address public constant INITIAL_SEQUENCER = 0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d;
-    address public constant INITIAL_ADMIN = 0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d;
+    address public constant REGISTRY_ADDRESS = 0x6342000000000000000000000000000000000006;
+
+    address public constant INITIAL_SYSTEM_ADDRESS = address(0xAA);
+    address public constant INITIAL_SEQUENCER = address(0xBB);
+    address public constant INITIAL_ADMIN = address(0xCC);
+    uint256 public constant INITIAL_FROM_BLOCK = 1;
 
     address public nonAdmin = address(0xBEEF);
-    address public newSequencer = address(0xCAFE);
+    address public newSystemAddress = address(0xCAFE);
+    address public newSequencer = address(0xFACE);
     address public newAdmin = address(0xDEAD);
 
     function setUp() public {
-        registry = new SequencerRegistry();
+        // Deploy SequencerRegistry implementation, then etch bytecode at the canonical address.
+        SequencerRegistry impl = new SequencerRegistry();
+        vm.etch(REGISTRY_ADDRESS, address(impl).code);
+        registry = SequencerRegistry(REGISTRY_ADDRESS);
+
+        // Seed initial storage via vm.store (no constructor).
+        // Slot layout:
+        //   0: _currentSystemAddress
+        //   1: _currentSequencer
+        //   2: _admin
+        //   3: _initialSystemAddress
+        //   4: _initialSequencer
+        //   5: _initialFromBlock
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(0)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(1)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(2)), bytes32(uint256(uint160(INITIAL_ADMIN))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(3)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(4)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(5)), bytes32(uint256(INITIAL_FROM_BLOCK)));
+
+        // Start at block >= INITIAL_FROM_BLOCK so lookups work.
+        vm.roll(INITIAL_FROM_BLOCK);
     }
 
-    // ============ currentSequencer Tests ============
+    // ============ version ============
 
-    function test_currentSequencer_returnsInitialOnFreshDeploy() public view {
+    function test_version() public view {
+        assertEq(registry.version(), "1.0.0");
+    }
+
+    // ============ currentSystemAddress / currentSequencer / admin ============
+
+    function test_currentSystemAddress_returnsSeededValue() public view {
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
+    }
+
+    function test_currentSequencer_returnsSeededValue() public view {
         assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
     }
 
-    // ============ admin Tests ============
-
-    function test_admin_returnsInitialOnFreshDeploy() public view {
+    function test_admin_returnsSeededValue() public view {
         assertEq(registry.admin(), INITIAL_ADMIN);
     }
 
-    // ============ transferAdmin Tests ============
+    // ============ transferAdmin ============
 
-    function test_transferAdmin_revertsZeroAddress() public {
-        vm.prank(INITIAL_ADMIN);
-        vm.expectRevert(ISequencerRegistry.ZeroAddress.selector);
-        registry.transferAdmin(address(0));
-    }
-
-    function test_transferAdmin_succeedsFromAdmin() public {
+    function test_transferAdmin_success() public {
         vm.prank(INITIAL_ADMIN);
         registry.transferAdmin(newAdmin);
         assertEq(registry.admin(), newAdmin);
@@ -53,44 +81,122 @@ contract SequencerRegistryTest is Test {
         registry.transferAdmin(newAdmin);
     }
 
-    function test_transferAdmin_revertsFromNonAdmin() public {
+    function test_transferAdmin_revertsNotAdmin() public {
         vm.prank(nonAdmin);
         vm.expectRevert(ISequencerRegistry.NotAdmin.selector);
         registry.transferAdmin(newAdmin);
     }
 
-    function test_transferAdmin_newAdminCanTransferAgain() public {
+    function test_transferAdmin_revertsZeroAddress() public {
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.ZeroAddress.selector);
+        registry.transferAdmin(address(0));
+    }
+
+    function test_transferAdmin_newAdminCanActOldAdminCannot() public {
         vm.prank(INITIAL_ADMIN);
         registry.transferAdmin(newAdmin);
 
+        // Old admin cannot act
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.NotAdmin.selector);
+        registry.transferAdmin(address(0x9999));
+
+        // New admin can act
         address anotherAdmin = address(0x1234);
         vm.prank(newAdmin);
         registry.transferAdmin(anotherAdmin);
         assertEq(registry.admin(), anotherAdmin);
     }
 
-    function test_transferAdmin_oldAdminCannotTransferAfterTransfer() public {
-        vm.prank(INITIAL_ADMIN);
-        registry.transferAdmin(newAdmin);
+    // ============ scheduleNextSystemAddressChange ============
+
+    function test_scheduleNextSystemAddressChange_success() public {
+        uint256 futureBlock = block.number + 100;
+
+        vm.expectEmit(true, true, false, true);
+        emit ISequencerRegistry.SystemAddressChangeScheduled(INITIAL_SYSTEM_ADDRESS, newSystemAddress, futureBlock);
 
         vm.prank(INITIAL_ADMIN);
-        vm.expectRevert(ISequencerRegistry.NotAdmin.selector);
-        registry.transferAdmin(address(0x9999));
+        registry.scheduleNextSystemAddressChange(newSystemAddress, futureBlock);
     }
 
-    // ============ scheduleNextSequencerChange Tests ============
+    function test_scheduleNextSystemAddressChange_revertsNotAdmin() public {
+        vm.prank(nonAdmin);
+        vm.expectRevert(ISequencerRegistry.NotAdmin.selector);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, block.number + 100);
+    }
 
-    function test_schedule_succeedsFromAdmin() public {
+    function test_scheduleNextSystemAddressChange_revertsZeroAddress() public {
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.ZeroAddress.selector);
+        registry.scheduleNextSystemAddressChange(address(0), block.number + 100);
+    }
+
+    function test_scheduleNextSystemAddressChange_revertsInvalidActivationBlock_current() public {
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.InvalidActivationBlock.selector);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, block.number);
+    }
+
+    function test_scheduleNextSystemAddressChange_revertsInvalidActivationBlock_past() public {
+        vm.roll(100);
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.InvalidActivationBlock.selector);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, 50);
+    }
+
+    function test_scheduleNextSystemAddressChange_revertsActivationBlockTooLarge() public {
+        uint256 tooLarge = uint256(type(uint96).max) + 1;
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.ActivationBlockTooLarge.selector);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, tooLarge);
+    }
+
+    function test_scheduleNextSystemAddressChange_overwrite() public {
+        uint256 futureBlock1 = block.number + 100;
+        uint256 futureBlock2 = block.number + 200;
+        address addr2 = address(0xAAAA);
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, futureBlock1);
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(addr2, futureBlock2);
+
+        // Roll to futureBlock1 -- first schedule was overwritten, should NOT apply.
+        vm.roll(futureBlock1);
+        registry.applyPendingChanges();
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
+
+        // Roll to futureBlock2 -- now it should apply.
+        vm.roll(futureBlock2);
+        registry.applyPendingChanges();
+        assertEq(registry.currentSystemAddress(), addr2);
+    }
+
+    function test_scheduleNextSystemAddressChange_cancel() public {
         uint256 futureBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSequencerChange(newSequencer, futureBlock);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, futureBlock);
 
-        // Verify event was emitted (tested separately below) and state is pending
-        // We cannot directly read _pendingSequencer, but we can verify via applyPendingChange
+        // Cancel: activationBlock = type(uint256).max, address = 0
+        vm.expectEmit(true, true, false, true);
+        emit ISequencerRegistry.SystemAddressChangeScheduled(INITIAL_SYSTEM_ADDRESS, address(0), type(uint256).max);
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(address(0), type(uint256).max);
+
+        // Roll past original activation -- should be no-op.
+        vm.roll(futureBlock + 1);
+        registry.applyPendingChanges();
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
     }
 
-    function test_schedule_emitsEvent() public {
+    // ============ scheduleNextSequencerChange ============
+
+    function test_scheduleNextSequencerChange_success() public {
         uint256 futureBlock = block.number + 100;
 
         vm.expectEmit(true, true, false, true);
@@ -100,254 +206,345 @@ contract SequencerRegistryTest is Test {
         registry.scheduleNextSequencerChange(newSequencer, futureBlock);
     }
 
-    function test_schedule_revertsFromNonAdmin() public {
-        uint256 futureBlock = block.number + 100;
-
+    function test_scheduleNextSequencerChange_revertsNotAdmin() public {
         vm.prank(nonAdmin);
         vm.expectRevert(ISequencerRegistry.NotAdmin.selector);
-        registry.scheduleNextSequencerChange(newSequencer, futureBlock);
+        registry.scheduleNextSequencerChange(newSequencer, block.number + 100);
     }
 
-    function test_schedule_revertsZeroAddress() public {
-        uint256 futureBlock = block.number + 100;
-
+    function test_scheduleNextSequencerChange_revertsZeroAddress() public {
         vm.prank(INITIAL_ADMIN);
         vm.expectRevert(ISequencerRegistry.ZeroAddress.selector);
-        registry.scheduleNextSequencerChange(address(0), futureBlock);
+        registry.scheduleNextSequencerChange(address(0), block.number + 100);
     }
 
-    function test_schedule_revertsActivationBlockAtCurrentBlock() public {
+    function test_scheduleNextSequencerChange_revertsInvalidActivationBlock_current() public {
         vm.prank(INITIAL_ADMIN);
         vm.expectRevert(ISequencerRegistry.InvalidActivationBlock.selector);
         registry.scheduleNextSequencerChange(newSequencer, block.number);
     }
 
-    function test_schedule_revertsActivationBlockInPast() public {
-        // Roll forward so we can test a past block
+    function test_scheduleNextSequencerChange_revertsInvalidActivationBlock_past() public {
         vm.roll(100);
-
         vm.prank(INITIAL_ADMIN);
         vm.expectRevert(ISequencerRegistry.InvalidActivationBlock.selector);
         registry.scheduleNextSequencerChange(newSequencer, 50);
     }
 
-    function test_schedule_revertsActivationBlockTooLarge() public {
+    function test_scheduleNextSequencerChange_revertsActivationBlockTooLarge() public {
         uint256 tooLarge = uint256(type(uint96).max) + 1;
-
         vm.prank(INITIAL_ADMIN);
         vm.expectRevert(ISequencerRegistry.ActivationBlockTooLarge.selector);
         registry.scheduleNextSequencerChange(newSequencer, tooLarge);
     }
 
-    function test_schedule_overwritePending() public {
+    function test_scheduleNextSequencerChange_overwrite() public {
         uint256 futureBlock1 = block.number + 100;
         uint256 futureBlock2 = block.number + 200;
-        address sequencer2 = address(0xAAAA);
+        address addr2 = address(0xAAAA);
 
-        // Schedule first
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, futureBlock1);
 
-        // Overwrite with second
         vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSequencerChange(sequencer2, futureBlock2);
+        registry.scheduleNextSequencerChange(addr2, futureBlock2);
 
-        // Roll to futureBlock1 — applyPendingChange should NOT apply the first schedule
         vm.roll(futureBlock1);
-        registry.applyPendingChange();
-        // The first schedule was overwritten, so currentSequencer should still be INITIAL
+        registry.applyPendingChanges();
         assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
 
-        // Roll to futureBlock2 — now it should apply
         vm.roll(futureBlock2);
-        registry.applyPendingChange();
-        assertEq(registry.currentSequencer(), sequencer2);
+        registry.applyPendingChanges();
+        assertEq(registry.currentSequencer(), addr2);
     }
 
-    function test_schedule_cancelPending() public {
+    function test_scheduleNextSequencerChange_cancel() public {
         uint256 futureBlock = block.number + 100;
 
-        // Schedule a rotation
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, futureBlock);
 
-        // Cancel by setting activationBlock to type(uint256).max
         vm.expectEmit(true, true, false, true);
         emit ISequencerRegistry.SequencerChangeScheduled(INITIAL_SEQUENCER, address(0), type(uint256).max);
 
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(address(0), type(uint256).max);
 
-        // Roll past the original activation block and apply — should be no-op
         vm.roll(futureBlock + 1);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
         assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
     }
 
-    // ============ applyPendingChange Tests ============
+    // ============ applyPendingChanges ============
 
-    function test_applyPendingChange_noopWhenNoPending() public {
-        // No schedule has been made; applyPendingChange should be a no-op
-        registry.applyPendingChange();
+    function test_applyPendingChanges_noopWhenNothingPending() public {
+        registry.applyPendingChanges();
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
         assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
     }
 
-    function test_applyPendingChange_noopWhenNotYetDue() public {
+    function test_applyPendingChanges_noopWhenNotYetDue() public {
         uint256 futureBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, futureBlock);
+        vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, futureBlock);
 
-        // Roll to a block before activation
         vm.roll(futureBlock - 1);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
-        // Should still be the initial sequencer
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
         assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
     }
 
-    function test_applyPendingChange_appliesWhenDue() public {
+    function test_applyPendingChanges_appliesSystemAddressWhenDue() public {
         uint256 futureBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSequencerChange(newSequencer, futureBlock);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, futureBlock);
 
-        // Roll to exactly the activation block
         vm.roll(futureBlock);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
-        // currentSequencer should now be the new sequencer
-        assertEq(registry.currentSequencer(), newSequencer);
+        assertEq(registry.currentSystemAddress(), newSystemAddress);
+        // Sequencer should be unchanged.
+        assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
     }
 
-    function test_applyPendingChange_appliesWhenPastDue() public {
-        uint256 futureBlock = block.number + 100;
-
-        vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSequencerChange(newSequencer, futureBlock);
-
-        // Roll past the activation block
-        vm.roll(futureBlock + 50);
-        registry.applyPendingChange();
-
-        assertEq(registry.currentSequencer(), newSequencer);
-    }
-
-    function test_applyPendingChange_clearsPendingState() public {
+    function test_applyPendingChanges_appliesSequencerWhenDue() public {
         uint256 futureBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, futureBlock);
 
         vm.roll(futureBlock);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
-        // Calling applyPendingChange again should be a no-op (pending was cleared)
-        registry.applyPendingChange();
         assertEq(registry.currentSequencer(), newSequencer);
+        // System address should be unchanged.
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
     }
 
-    function test_applyPendingChange_appendsRotationHistory() public {
+    function test_applyPendingChanges_appliesBothWhenBothDue() public {
         uint256 futureBlock = block.number + 100;
 
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, futureBlock);
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, futureBlock);
 
         vm.roll(futureBlock);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
-        // Verify rotation history via sequencerAt
-        assertEq(registry.sequencerAt(futureBlock), newSequencer);
-        assertEq(registry.sequencerAt(futureBlock - 1), INITIAL_SEQUENCER);
+        assertEq(registry.currentSystemAddress(), newSystemAddress);
+        assertEq(registry.currentSequencer(), newSequencer);
     }
 
-    function test_applyPendingChange_permissionless() public {
+    function test_applyPendingChanges_clearsPendingState() public {
+        uint256 futureBlock = block.number + 100;
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, futureBlock);
+
+        vm.roll(futureBlock);
+        registry.applyPendingChanges();
+
+        // Calling again should be a no-op.
+        registry.applyPendingChanges();
+        assertEq(registry.currentSystemAddress(), newSystemAddress);
+    }
+
+    function test_applyPendingChanges_permissionless() public {
         uint256 futureBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, futureBlock);
 
-        // Any address can call applyPendingChange
         vm.roll(futureBlock);
         vm.prank(nonAdmin);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
         assertEq(registry.currentSequencer(), newSequencer);
     }
 
-    // ============ sequencerAt Tests ============
+    // ============ systemAddressAt ============
+
+    function test_systemAddressAt_revertsFutureBlock() public {
+        vm.expectRevert(ISequencerRegistry.FutureBlock.selector);
+        registry.systemAddressAt(block.number + 1);
+    }
+
+    function test_systemAddressAt_revertsBeforeInitialBlock() public {
+        vm.roll(10);
+        vm.expectRevert(ISequencerRegistry.BeforeInitialBlock.selector);
+        registry.systemAddressAt(INITIAL_FROM_BLOCK - 1);
+    }
+
+    function test_systemAddressAt_returnsInitialWhenNoRotations() public view {
+        assertEq(registry.systemAddressAt(block.number), INITIAL_SYSTEM_ADDRESS);
+    }
+
+    function test_systemAddressAt_correctRangesAfterRotation() public {
+        uint256 rotationBlock = block.number + 100;
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, rotationBlock);
+
+        vm.roll(rotationBlock);
+        registry.applyPendingChanges();
+
+        // Before rotation
+        assertEq(registry.systemAddressAt(INITIAL_FROM_BLOCK), INITIAL_SYSTEM_ADDRESS);
+        assertEq(registry.systemAddressAt(rotationBlock - 1), INITIAL_SYSTEM_ADDRESS);
+        // At and after rotation
+        assertEq(registry.systemAddressAt(rotationBlock), newSystemAddress);
+    }
+
+    function test_systemAddressAt_multipleRotations() public {
+        address addr2 = address(0xAAAA);
+        address addr3 = address(0xBBBB);
+        uint256 block1 = 100;
+        uint256 block2 = 200;
+        uint256 block3 = 300;
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, block1);
+        vm.roll(block1);
+        registry.applyPendingChanges();
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(addr2, block2);
+        vm.roll(block2);
+        registry.applyPendingChanges();
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(addr3, block3);
+        vm.roll(block3);
+        registry.applyPendingChanges();
+
+        assertEq(registry.systemAddressAt(INITIAL_FROM_BLOCK), INITIAL_SYSTEM_ADDRESS);
+        assertEq(registry.systemAddressAt(block1 - 1), INITIAL_SYSTEM_ADDRESS);
+        assertEq(registry.systemAddressAt(block1), newSystemAddress);
+        assertEq(registry.systemAddressAt(block1 + 50), newSystemAddress);
+        assertEq(registry.systemAddressAt(block2 - 1), newSystemAddress);
+        assertEq(registry.systemAddressAt(block2), addr2);
+        assertEq(registry.systemAddressAt(block2 + 50), addr2);
+        assertEq(registry.systemAddressAt(block3 - 1), addr2);
+        assertEq(registry.systemAddressAt(block3), addr3);
+    }
+
+    // ============ sequencerAt ============
 
     function test_sequencerAt_revertsFutureBlock() public {
         vm.expectRevert(ISequencerRegistry.FutureBlock.selector);
         registry.sequencerAt(block.number + 1);
     }
 
+    function test_sequencerAt_revertsBeforeInitialBlock() public {
+        vm.roll(10);
+        vm.expectRevert(ISequencerRegistry.BeforeInitialBlock.selector);
+        registry.sequencerAt(INITIAL_FROM_BLOCK - 1);
+    }
+
     function test_sequencerAt_returnsInitialWhenNoRotations() public view {
         assertEq(registry.sequencerAt(block.number), INITIAL_SEQUENCER);
     }
 
-    function test_sequencerAt_returnsInitialForBlockZero() public view {
-        assertEq(registry.sequencerAt(0), INITIAL_SEQUENCER);
-    }
-
     function test_sequencerAt_correctRangesAfterRotation() public {
-        uint256 rotationBlock = 100;
+        uint256 rotationBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, rotationBlock);
 
         vm.roll(rotationBlock);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
-        // Before rotation: should return INITIAL_SEQUENCER
-        assertEq(registry.sequencerAt(0), INITIAL_SEQUENCER);
+        assertEq(registry.sequencerAt(INITIAL_FROM_BLOCK), INITIAL_SEQUENCER);
         assertEq(registry.sequencerAt(rotationBlock - 1), INITIAL_SEQUENCER);
-
-        // At and after rotation: should return newSequencer
         assertEq(registry.sequencerAt(rotationBlock), newSequencer);
     }
 
     function test_sequencerAt_multipleRotations() public {
-        address sequencer2 = address(0xAAAA);
-        address sequencer3 = address(0xBBBB);
-
+        address addr2 = address(0xAAAA);
+        address addr3 = address(0xBBBB);
         uint256 block1 = 100;
         uint256 block2 = 200;
         uint256 block3 = 300;
 
-        // First rotation
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, block1);
         vm.roll(block1);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
-        // Second rotation
         vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSequencerChange(sequencer2, block2);
+        registry.scheduleNextSequencerChange(addr2, block2);
         vm.roll(block2);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
-        // Third rotation
         vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSequencerChange(sequencer3, block3);
+        registry.scheduleNextSequencerChange(addr3, block3);
         vm.roll(block3);
-        registry.applyPendingChange();
+        registry.applyPendingChanges();
 
-        // Verify correct sequencer for each range
-        assertEq(registry.sequencerAt(0), INITIAL_SEQUENCER);
+        assertEq(registry.sequencerAt(INITIAL_FROM_BLOCK), INITIAL_SEQUENCER);
         assertEq(registry.sequencerAt(block1 - 1), INITIAL_SEQUENCER);
         assertEq(registry.sequencerAt(block1), newSequencer);
         assertEq(registry.sequencerAt(block1 + 50), newSequencer);
         assertEq(registry.sequencerAt(block2 - 1), newSequencer);
-        assertEq(registry.sequencerAt(block2), sequencer2);
-        assertEq(registry.sequencerAt(block2 + 50), sequencer2);
-        assertEq(registry.sequencerAt(block3 - 1), sequencer2);
-        assertEq(registry.sequencerAt(block3), sequencer3);
+        assertEq(registry.sequencerAt(block2), addr2);
+        assertEq(registry.sequencerAt(block2 + 50), addr2);
+        assertEq(registry.sequencerAt(block3 - 1), addr2);
+        assertEq(registry.sequencerAt(block3), addr3);
     }
 
-    // ============ version Tests ============
+    // ============ Independent rotation ============
 
-    function test_version() public view {
-        assertEq(registry.version(), "1.0.0");
+    function test_rotateSystemAddress_doesNotChangeSequencer() public {
+        uint256 futureBlock = block.number + 100;
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, futureBlock);
+
+        vm.roll(futureBlock);
+        registry.applyPendingChanges();
+
+        assertEq(registry.currentSystemAddress(), newSystemAddress);
+        assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
+    }
+
+    function test_rotateSequencer_doesNotChangeSystemAddress() public {
+        uint256 futureBlock = block.number + 100;
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSequencerChange(newSequencer, futureBlock);
+
+        vm.roll(futureBlock);
+        registry.applyPendingChanges();
+
+        assertEq(registry.currentSequencer(), newSequencer);
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
+    }
+
+    function test_independentRotations_differentBlocks() public {
+        uint256 sysBlock = block.number + 100;
+        uint256 seqBlock = block.number + 200;
+
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, sysBlock);
+        vm.prank(INITIAL_ADMIN);
+        registry.scheduleNextSequencerChange(newSequencer, seqBlock);
+
+        // After system address rotation only
+        vm.roll(sysBlock);
+        registry.applyPendingChanges();
+        assertEq(registry.currentSystemAddress(), newSystemAddress);
+        assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
+
+        // After sequencer rotation
+        vm.roll(seqBlock);
+        registry.applyPendingChanges();
+        assertEq(registry.currentSystemAddress(), newSystemAddress);
+        assertEq(registry.currentSequencer(), newSequencer);
     }
 }

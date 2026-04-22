@@ -74,4 +74,39 @@ pub mod sequencer_registry {
         #[sol(all_derives)]
         "contracts/interfaces/ISequencerRegistry.sol"
     );
+
+    /// Flat storage slot constants for `SequencerRegistry`.
+    pub mod storage_slots {
+        use alloy_primitives::U256;
+
+        /// Storage slot for `_currentSystemAddress`.
+        pub const CURRENT_SYSTEM_ADDRESS: U256 = U256::ZERO;
+
+        /// Storage slot for `_currentSequencer`.
+        pub const CURRENT_SEQUENCER: U256 = U256::from_limbs([1, 0, 0, 0]);
+
+        /// Storage slot for `_admin`.
+        pub const ADMIN: U256 = U256::from_limbs([2, 0, 0, 0]);
+
+        /// Storage slot for `_initialSystemAddress`.
+        pub const INITIAL_SYSTEM_ADDRESS: U256 = U256::from_limbs([3, 0, 0, 0]);
+
+        /// Storage slot for `_initialSequencer`.
+        pub const INITIAL_SEQUENCER: U256 = U256::from_limbs([4, 0, 0, 0]);
+
+        /// Storage slot for `_initialFromBlock`.
+        pub const INITIAL_FROM_BLOCK: U256 = U256::from_limbs([5, 0, 0, 0]);
+
+        /// Storage slot for `_pendingSystemAddress`.
+        pub const PENDING_SYSTEM_ADDRESS: U256 = U256::from_limbs([6, 0, 0, 0]);
+
+        /// Storage slot for `_systemAddressActivationBlock`.
+        pub const SYSTEM_ADDRESS_ACTIVATION_BLOCK: U256 = U256::from_limbs([7, 0, 0, 0]);
+
+        /// Storage slot for `_pendingSequencer`.
+        pub const PENDING_SEQUENCER: U256 = U256::from_limbs([8, 0, 0, 0]);
+
+        /// Storage slot for `_sequencerActivationBlock`.
+        pub const SEQUENCER_ACTIVATION_BLOCK: U256 = U256::from_limbs([9, 0, 0, 0]);
+    }
 }

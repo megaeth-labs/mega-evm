@@ -6,106 +6,130 @@ import {ISequencerRegistry} from "./interfaces/ISequencerRegistry.sol";
 
 /// @title SequencerRegistry
 /// @author MegaETH
-/// @notice System contract for managing the active sequencer and rotation history.
-/// @dev Uses compile-time constants for the initial sequencer and admin.
-///      Storage slot zero-values indicate "use the constant default".
-///      Deployed by mega-evm without constructor execution — initial state comes from constants.
+/// @notice System contract tracking two independent roles: system address and sequencer.
+/// @dev Deployed by mega-evm via raw state patch. Initial storage is seeded at deploy time
+///      (no constructor execution). Rotation is applied via pre-block system call.
 contract SequencerRegistry is ISemver, ISequencerRegistry {
-    // =========================================================================
-    // Protocol constants — must match the Rust-side REX5 constants.
-    // These are compiled into bytecode and verified at build time.
-    // =========================================================================
+    /// @notice The current system address used for system transactions and Oracle authorization.
+    address private _currentSystemAddress;
 
-    /// @notice The initial sequencer address, used when no rotation has occurred.
-    /// @dev Compile-time constant — must match the Rust-side REX5 protocol constant.
-    address public constant INITIAL_SEQUENCER = address(0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d);
-
-    /// @notice The initial admin address, used when admin has not been transferred.
-    /// @dev Compile-time constant — must match the Rust-side REX5 protocol constant.
-    address public constant INITIAL_ADMIN = address(0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d);
-
-    // =========================================================================
-    // Storage
-    // =========================================================================
-
-    /// @dev The current sequencer. Zero means INITIAL_SEQUENCER is in effect.
+    /// @notice The current sequencer used for mini-block signing.
     address private _currentSequencer;
 
-    /// @dev The current admin. Zero means INITIAL_ADMIN is in effect.
+    /// @notice The admin that can schedule role changes and transfer admin ownership.
     address private _admin;
 
-    /// @dev The pending sequencer for the next rotation. Zero means no pending rotation.
+    /// @notice The bootstrap system address returned before the first system address rotation.
+    address private _initialSystemAddress;
+
+    /// @notice The bootstrap sequencer returned before the first sequencer rotation.
+    address private _initialSequencer;
+
+    /// @notice The first block where this registry became valid for historical lookups.
+    uint256 private _initialFromBlock;
+
+    /// @notice The next system address waiting to be applied.
+    address private _pendingSystemAddress;
+
+    /// @notice The block at which the pending system address becomes active.
+    uint256 private _systemAddressActivationBlock;
+
+    /// @notice The next sequencer waiting to be applied.
     address private _pendingSequencer;
 
-    /// @dev The block number at which the pending rotation takes effect.
-    uint256 private _activationBlock;
+    /// @notice The block at which the pending sequencer becomes active.
+    uint256 private _sequencerActivationBlock;
 
-    /// @dev A record of a sequencer rotation.
-    ///      `fromBlock` is uint96 so `fromBlock` and `sequencer` pack in one storage slot.
+    /// @dev Packed: uint96 fromBlock + address addr fit in one 32-byte slot.
     struct RotationRecord {
         uint96 fromBlock;
-        address sequencer;
+        address addr;
     }
 
-    /// @dev History of applied rotations. Only written by applyPendingChange().
-    RotationRecord[] private _rotations;
+    /// @notice Historical system address rotations, ordered by activation block.
+    RotationRecord[] private _systemAddressRotations;
+
+    /// @notice Historical sequencer rotations, ordered by activation block.
+    RotationRecord[] private _sequencerRotations;
 
     // =========================================================================
     // ISemver
     // =========================================================================
 
-    /// @notice Returns the semantic version of this contract.
-    /// @return Semver string.
     function version() external pure returns (string memory) {
         return "1.0.0";
     }
 
     // =========================================================================
-    // Read methods
+    // System Address Role
+    // =========================================================================
+
+    /// @inheritdoc ISequencerRegistry
+    function currentSystemAddress() public view returns (address) {
+        return _currentSystemAddress;
+    }
+
+    /// @inheritdoc ISequencerRegistry
+    function systemAddressAt(uint256 blockNumber) external view returns (address) {
+        if (blockNumber > block.number) revert FutureBlock();
+        if (blockNumber < _initialFromBlock) revert BeforeInitialBlock();
+
+        uint256 len = _systemAddressRotations.length;
+        for (uint256 i = len; i > 0; i--) {
+            RotationRecord storage record = _systemAddressRotations[i - 1];
+            if (record.fromBlock <= blockNumber) {
+                return record.addr;
+            }
+        }
+        return _initialSystemAddress;
+    }
+
+    /// @inheritdoc ISequencerRegistry
+    function scheduleNextSystemAddressChange(
+        address newSystemAddress,
+        uint256 activationBlock
+    ) external onlyAdmin {
+        if (activationBlock <= block.number) revert InvalidActivationBlock();
+
+        if (activationBlock == type(uint256).max) {
+            if (newSystemAddress != address(0)) revert ZeroAddress();
+            delete _pendingSystemAddress;
+            delete _systemAddressActivationBlock;
+            emit SystemAddressChangeScheduled(currentSystemAddress(), address(0), type(uint256).max);
+            return;
+        }
+
+        if (activationBlock > type(uint96).max) revert ActivationBlockTooLarge();
+        if (newSystemAddress == address(0)) revert ZeroAddress();
+
+        _pendingSystemAddress = newSystemAddress;
+        _systemAddressActivationBlock = activationBlock;
+
+        emit SystemAddressChangeScheduled(currentSystemAddress(), newSystemAddress, activationBlock);
+    }
+
+    // =========================================================================
+    // Sequencer Role
     // =========================================================================
 
     /// @inheritdoc ISequencerRegistry
     function currentSequencer() public view returns (address) {
-        address current = _currentSequencer;
-        return current == address(0) ? INITIAL_SEQUENCER : current;
-    }
-
-    /// @inheritdoc ISequencerRegistry
-    function admin() public view returns (address) {
-        address currentAdmin = _admin;
-        return currentAdmin == address(0) ? INITIAL_ADMIN : currentAdmin;
+        return _currentSequencer;
     }
 
     /// @inheritdoc ISequencerRegistry
     function sequencerAt(uint256 blockNumber) external view returns (address) {
         if (blockNumber > block.number) revert FutureBlock();
+        if (blockNumber < _initialFromBlock) revert BeforeInitialBlock();
 
-        // Search rotations in reverse to find the last entry where fromBlock <= blockNumber.
-        uint256 len = _rotations.length;
+        uint256 len = _sequencerRotations.length;
         for (uint256 i = len; i > 0; i--) {
-            RotationRecord storage record = _rotations[i - 1];
+            RotationRecord storage record = _sequencerRotations[i - 1];
             if (record.fromBlock <= blockNumber) {
-                return record.sequencer;
+                return record.addr;
             }
         }
-
-        // No rotation covers this block — return the initial sequencer.
-        return INITIAL_SEQUENCER;
-    }
-
-    // =========================================================================
-    // Admin methods
-    // =========================================================================
-
-    /// @dev Reverts if msg.sender is not the current admin.
-    modifier onlyAdmin() {
-        _onlyAdmin();
-        _;
-    }
-
-    /// @dev Internal helper for onlyAdmin modifier to reduce code size.
-    function _onlyAdmin() internal view {
-        if (msg.sender != admin()) revert NotAdmin();
+        return _initialSequencer;
     }
 
     /// @inheritdoc ISequencerRegistry
@@ -115,12 +139,10 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
     ) external onlyAdmin {
         if (activationBlock <= block.number) revert InvalidActivationBlock();
 
-        // Cancel: activationBlock == type(uint256).max clears pending state.
-        // newSequencer must be address(0) on cancel to keep the API self-consistent.
         if (activationBlock == type(uint256).max) {
             if (newSequencer != address(0)) revert ZeroAddress();
             delete _pendingSequencer;
-            delete _activationBlock;
+            delete _sequencerActivationBlock;
             emit SequencerChangeScheduled(currentSequencer(), address(0), type(uint256).max);
             return;
         }
@@ -129,26 +151,62 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
         if (newSequencer == address(0)) revert ZeroAddress();
 
         _pendingSequencer = newSequencer;
-        _activationBlock = activationBlock;
+        _sequencerActivationBlock = activationBlock;
 
         emit SequencerChangeScheduled(currentSequencer(), newSequencer, activationBlock);
     }
 
+    // =========================================================================
+    // Shared: apply + admin
+    // =========================================================================
+
     /// @inheritdoc ISequencerRegistry
-    function applyPendingChange() external {
+    function applyPendingChanges() external {
+        _applySystemAddress();
+        _applySequencer();
+    }
+
+    function _applySystemAddress() internal {
+        address pending = _pendingSystemAddress;
+        if (pending == address(0)) return;
+
+        uint256 activation = _systemAddressActivationBlock;
+        if (block.number < activation) return;
+
+        _currentSystemAddress = pending;
+        _systemAddressRotations.push(RotationRecord({fromBlock: uint96(activation), addr: pending}));
+
+        delete _pendingSystemAddress;
+        delete _systemAddressActivationBlock;
+    }
+
+    function _applySequencer() internal {
         address pending = _pendingSequencer;
-        if (pending == address(0)) return; // no pending
+        if (pending == address(0)) return;
 
-        uint256 activation = _activationBlock;
-        if (block.number < activation) return; // not yet due
+        uint256 activation = _sequencerActivationBlock;
+        if (block.number < activation) return;
 
-        // Apply rotation
         _currentSequencer = pending;
-        _rotations.push(RotationRecord({fromBlock: uint96(activation), sequencer: pending}));
+        _sequencerRotations.push(RotationRecord({fromBlock: uint96(activation), addr: pending}));
 
-        // Clear pending state
         delete _pendingSequencer;
-        delete _activationBlock;
+        delete _sequencerActivationBlock;
+    }
+
+    /// @inheritdoc ISequencerRegistry
+    function admin() public view returns (address) {
+        return _admin;
+    }
+
+    /// @dev Reverts if msg.sender is not the current admin.
+    modifier onlyAdmin() {
+        _onlyAdmin();
+        _;
+    }
+
+    function _onlyAdmin() internal view {
+        if (msg.sender != admin()) revert NotAdmin();
     }
 
     /// @inheritdoc ISequencerRegistry
