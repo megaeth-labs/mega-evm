@@ -41,8 +41,9 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
     uint256 private _activationBlock;
 
     /// @dev A record of a sequencer rotation.
+    ///      `fromBlock` is uint96 so `fromBlock` and `sequencer` pack in one storage slot.
     struct RotationRecord {
-        uint256 fromBlock;
+        uint96 fromBlock;
         address sequencer;
     }
 
@@ -124,6 +125,7 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
             return;
         }
 
+        if (activationBlock > type(uint96).max) revert ActivationBlockTooLarge();
         if (newSequencer == address(0)) revert ZeroAddress();
 
         _pendingSequencer = newSequencer;
@@ -142,7 +144,7 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
 
         // Apply rotation
         _currentSequencer = pending;
-        _rotations.push(RotationRecord({fromBlock: activation, sequencer: pending}));
+        _rotations.push(RotationRecord({fromBlock: uint96(activation), sequencer: pending}));
 
         // Clear pending state
         delete _pendingSequencer;
