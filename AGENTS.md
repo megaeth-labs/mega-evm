@@ -281,6 +281,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Never change what an existing spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
+- **Pre-block helpers must return state, not commit directly.**
+  Any helper participating in `pre_execution_changes` (system contract deploys, pre-block system calls, etc.) MUST return `Option<EvmState>` and never call `db.commit(...)` directly.
+  Full convention: `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.
 - **Define value-transfer policy explicitly for system contract interceptors.**
   For read-only or control methods, reject calls with non-zero `transfer_value` in the interceptor.
   If a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
