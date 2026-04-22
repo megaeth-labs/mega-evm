@@ -1,7 +1,7 @@
 //! System transaction for the `MegaETH` EVM.
 //!
-//! The mega system transaction is a special transaction used by the sequencer to do state
-//! maintenance with minimal side effects:
+//! The mega system transaction is a special protocol-maintenance transaction with minimal
+//! side effects:
 //! - no transaction fee (no L2 gas fee, no L1 data fee, no base fee, etc.), thus no state change to
 //!   the block beneficiary or any fee vaults.
 //! - system address's nonce still bumps as normal transactions
@@ -18,7 +18,7 @@ use crate::{types::MegaTransaction, ORACLE_CONTRACT_ADDRESS};
 /// Normal transactions sent from this address are processed as deposit transactions,
 /// bypassing signature validation, nonce verification, and fee deduction.
 ///
-/// The mega system address is held by the sequencer and can only call whitelisted addresses.
+/// It can only call whitelisted addresses.
 pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The whitelist of addresses that are allowed to be called by the `MegaETH` system address.

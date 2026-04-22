@@ -285,7 +285,7 @@ pub fn resolve_system_address<DB: Database>(
 mod tests {
     use super::*;
     use alloy_primitives::{address, keccak256, B256};
-    use revm::{database::InMemoryDB, state::AccountInfo};
+    use revm::{context::BlockEnv, database::InMemoryDB, state::AccountInfo};
 
     use crate::{MegaHardforkConfig, MegaSpecId};
 
@@ -490,6 +490,26 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_rex5_wrong_code_hash_errors() {
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: B256::ZERO,
+                code: Some(Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]))),
+                ..Default::default()
+            },
+        );
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let err =
+            resolve_system_address(MegaHardforkConfig::default(), MegaSpecId::REX5, &mut state)
+                .expect_err("wrong code hash must fail closed");
+
+        assert!(err.to_string().contains("code hash mismatch"));
+    }
+
+    #[test]
     fn test_is_apply_pending_changes_due_no_registry() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
@@ -570,5 +590,188 @@ mod tests {
         let mut state = State::builder().with_database(&mut db).build();
 
         assert!(is_apply_pending_changes_due(&mut state, 500).unwrap());
+    }
+
+    #[test]
+    fn test_is_apply_pending_changes_due_checks_sequencer_when_system_not_due() {
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+                ..Default::default()
+            },
+        );
+        let new_sys = address!("0x1111111111111111111111111111111111111111");
+        let new_seq = address!("0x2222222222222222222222222222222222222222");
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            PENDING_SYSTEM_ADDRESS,
+            new_sys.into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+            U256::from(1001),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            PENDING_SEQUENCER,
+            new_seq.into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            SEQUENCER_ACTIVATION_BLOCK,
+            U256::from(1000),
+        )
+        .unwrap();
+        let mut state = State::builder().with_database(&mut db).build();
+
+        assert!(
+            is_apply_pending_changes_due(&mut state, 1000).unwrap(),
+            "sequencer rotation should still trigger the pre-block call when the system address is not due yet"
+        );
+    }
+
+    #[test]
+    fn test_transact_apply_pending_changes_updates_and_clears_due_roles() {
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+                ..Default::default()
+            },
+        );
+
+        let next_system_address = address!("0x1111111111111111111111111111111111111111");
+        let next_sequencer = address!("0x2222222222222222222222222222222222222222");
+
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            CURRENT_SYSTEM_ADDRESS,
+            TEST_SYSTEM_ADDRESS.into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            CURRENT_SEQUENCER,
+            TEST_SEQUENCER.into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            PENDING_SYSTEM_ADDRESS,
+            next_system_address.into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+            U256::from(1000),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            PENDING_SEQUENCER,
+            next_sequencer.into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            SEQUENCER_ACTIVATION_BLOCK,
+            U256::from(1000),
+        )
+        .unwrap();
+
+        let block =
+            BlockEnv { number: U256::from(1000), gas_limit: 30_000_000, ..Default::default() };
+        let mut context = crate::MegaContext::new(&mut db, MegaSpecId::REX5).with_block(block);
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        let mut evm = crate::MegaEvm::new(context);
+
+        let result = transact_apply_pending_changes(&mut evm)
+            .unwrap()
+            .expect("applyPendingChanges() should return state changes");
+        let state = result.state;
+        drop(evm);
+
+        revm::DatabaseCommit::commit(&mut db, state);
+
+        assert_eq!(
+            revm::Database::storage(&mut db, SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS)
+                .unwrap(),
+            address_to_storage_value(next_system_address),
+        );
+        assert_eq!(
+            revm::Database::storage(&mut db, SEQUENCER_REGISTRY_ADDRESS, CURRENT_SEQUENCER)
+                .unwrap(),
+            address_to_storage_value(next_sequencer),
+        );
+        assert_eq!(
+            revm::Database::storage(&mut db, SEQUENCER_REGISTRY_ADDRESS, PENDING_SYSTEM_ADDRESS)
+                .unwrap(),
+            U256::ZERO,
+        );
+        assert_eq!(
+            revm::Database::storage(&mut db, SEQUENCER_REGISTRY_ADDRESS, PENDING_SEQUENCER)
+                .unwrap(),
+            U256::ZERO,
+        );
+        assert_eq!(
+            revm::Database::storage(
+                &mut db,
+                SEQUENCER_REGISTRY_ADDRESS,
+                SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+            )
+            .unwrap(),
+            U256::ZERO,
+        );
+        assert_eq!(
+            revm::Database::storage(
+                &mut db,
+                SEQUENCER_REGISTRY_ADDRESS,
+                SEQUENCER_ACTIVATION_BLOCK,
+            )
+            .unwrap(),
+            U256::ZERO,
+        );
+    }
+
+    #[test]
+    fn test_transact_apply_pending_changes_errors_when_registry_reverts() {
+        let revert_code = Bytecode::new_legacy(Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd]));
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: revert_code.hash_slow(),
+                code: Some(revert_code),
+                ..Default::default()
+            },
+        );
+
+        let block =
+            BlockEnv { number: U256::from(1000), gas_limit: 30_000_000, ..Default::default() };
+        let mut context = crate::MegaContext::new(&mut db, MegaSpecId::REX5).with_block(block);
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        let mut evm = crate::MegaEvm::new(context);
+
+        let err = transact_apply_pending_changes(&mut evm)
+            .expect_err("reverting registry bytecode must fail closed");
+
+        assert!(err.to_string().contains("reverted or halted"));
     }
 }

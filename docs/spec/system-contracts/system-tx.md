@@ -10,7 +10,7 @@ These transactions provide protocol-level maintenance access to whitelisted syst
 
 ## Motivation
 
-MegaETH needs a protocol-native mechanism for sequencer-managed maintenance operations such as updating Oracle state.
+MegaETH needs a protocol-native mechanism for protocol-managed maintenance operations such as updating Oracle state.
 Those operations must execute with special fee and validation semantics while remaining part of the verifiable execution model.
 
 Mega System Transactions provide that mechanism.
@@ -20,7 +20,7 @@ Mega System Transactions provide that mechanism.
 ### System Address
 
 `SYSTEM_ADDRESS` denotes the protocol-maintenance sender for the current block.
-For the current spec, a node MUST resolve `SYSTEM_ADDRESS` from `SequencerRegistry.currentSequencer()` after all pre-block changes are committed.
+For the current spec, a node MUST resolve `SYSTEM_ADDRESS` from `SequencerRegistry.currentSystemAddress()` after all pre-block changes are committed.
 This page uses `SYSTEM_ADDRESS` for the dynamic current-block concept.
 `MEGA_SYSTEM_ADDRESS` names the legacy fixed protocol constant retained for history and compatibility references.
 

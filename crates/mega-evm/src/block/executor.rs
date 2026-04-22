@@ -556,7 +556,7 @@ where
         self.commit_system_call_outcomes(outcomes)?;
 
         // After all pre-block outcomes are committed, resolve the system address for this block.
-        // This reads _currentSequencer from the now-committed SequencerRegistry storage.
+        // This reads _currentSystemAddress from the now-committed SequencerRegistry storage.
         let spec = self.evm.ctx().mega_spec();
         let system_address = resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;
         self.evm.ctx_mut().set_system_address(system_address);
