@@ -9,22 +9,27 @@ use revm::{
 };
 use std::vec::Vec;
 
-use crate::{constants, JournalInspectTr, MegaTransaction};
+use crate::{constants, JournalInspectTr, MegaSpecId, MegaTransaction};
 
 use super::{LimitCheck, LimitKind};
 
 /// Per-frame metadata for trackers that need account update deduplication
 /// (data size and KV update trackers).
+///
+/// All fields are private to this module: the
+/// `push_call_frame` / `push_create_frame` / `pop_frame_unwind_parent` methods on
+/// `FrameLimitTracker<CallFrameInfo>` own the invariant that wires `target_updated` and
+/// `charged_parent_update` together. Callers should not touch these fields directly.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CallFrameInfo {
     /// The target address of the frame. `None` during CREATE until the address is known.
-    pub(crate) target_address: Option<Address>,
+    target_address: Option<Address>,
     /// Whether this frame's target address has been marked as updated.
-    pub(crate) target_updated: bool,
+    target_updated: bool,
     /// True when this frame caused the parent's `target_updated` to be flipped to `true`
-    /// (Rex5+ only). Used in `before_frame_return_result` to undo the parent flag on revert,
+    /// (Rex5+ only). Used by `pop_frame_unwind_parent` to undo the parent flag on revert,
     /// so a subsequent successful call from the same parent still charges the parent account.
-    pub(crate) charged_parent_update: bool,
+    charged_parent_update: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +39,16 @@ pub(crate) struct FrameLimitTracker<I> {
     tx_entry: FrameLimitEntry<()>,
     /// Stack of child frame entries.
     frame_stack: Vec<FrameLimitEntry<I>>,
+    /// Whether Rex4 (per-frame budgeting) is active. Used by the `CallFrameInfo`
+    /// specialization to choose between `push_frame` (Rex4+) and `push_frame_with_limit`
+    /// (`u64::MAX` for pre-Rex4) when constructing call/create/intercept frames.
+    /// Other instantiations (`FrameLimitTracker<()>`) currently do not consult this flag.
+    rex4_enabled: bool,
+    /// Whether Rex5 (parent account update dedup) is active. Used by the `CallFrameInfo`
+    /// specialization to gate the `target_updated` mutation in `push_call_frame` /
+    /// `push_create_frame` and the matching unwind in `pop_frame_unwind_parent`.
+    /// Other instantiations do not consult this flag.
+    rex5_enabled: bool,
 }
 
 /// Per-frame budget entry on the frame stack.
@@ -76,8 +91,13 @@ impl<I> FrameLimitEntry<I> {
 }
 
 impl<I> FrameLimitTracker<I> {
-    pub(crate) fn new(tx_limit: u64) -> Self {
-        Self { tx_entry: FrameLimitEntry::new(tx_limit, ()), frame_stack: Vec::new() }
+    pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
+        Self {
+            tx_entry: FrameLimitEntry::new(tx_limit, ()),
+            frame_stack: Vec::new(),
+            rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
+            rex5_enabled: spec.is_enabled(MegaSpecId::REX5),
+        }
     }
 
     /// Returns the TX-level limit.
@@ -203,6 +223,126 @@ impl<I> FrameLimitTracker<I> {
             total_refund += entry.refund;
         }
         total_used.saturating_sub(total_refund)
+    }
+}
+
+impl FrameLimitTracker<CallFrameInfo> {
+    /// Pushes a new `CallFrameInfo` frame using the per-spec budget choice:
+    /// - **Rex4+**: `max_forward_limit()` (parent × 98/100, or `tx_entry.remaining()` at top
+    ///   level).
+    /// - **Pre-Rex4**: `u64::MAX` since per-frame limits are not enforced.
+    fn push_call_frame_info(&mut self, info: CallFrameInfo) {
+        if self.rex4_enabled {
+            self.push_frame(info);
+        } else {
+            self.push_frame_with_limit(u64::MAX, info);
+        }
+    }
+
+    /// Pushes a synthetic frame for inspector / access-control interception paths.
+    ///
+    /// No parent-flag mutation: an intercepted call is short-circuited before any
+    /// state-modifying account update is recorded, so the parent does not need to be marked.
+    /// The frame exists only to keep the per-tracker frame stack aligned with the EVM's call
+    /// stack so that the matching `pop_frame_unwind_parent` finds an entry to pop.
+    pub(crate) fn push_intercept_frame(&mut self) {
+        self.push_call_frame_info(CallFrameInfo::default());
+    }
+
+    /// Pushes a CALL frame and updates the parent's dedup flag.
+    ///
+    /// Returns `true` when the parent's account info should be charged by the caller
+    /// (i.e., the parent has not been marked updated yet *and* this call transfers value).
+    /// Rex5+: the parent's `target_updated` flag is set so subsequent value-transferring
+    /// calls from the same parent frame don't double-charge the caller account; the
+    /// `charged_parent_update` flag is recorded on the new child so a revert can unwind it.
+    /// Pre-Rex5: the parent flag is left untouched, preserving pre-Rex5 semantics.
+    pub(crate) fn push_call_frame(&mut self, target: Address, has_transfer: bool) -> bool {
+        let rex5_enabled = self.rex5_enabled;
+        let parent_needs_update = has_transfer &&
+            match self.frame_mut() {
+                Some(entry) if !entry.info.target_updated => {
+                    if rex5_enabled {
+                        entry.info.target_updated = true;
+                    }
+                    true
+                }
+                _ => false,
+            };
+        let charged_parent_update = rex5_enabled && parent_needs_update;
+        self.push_call_frame_info(CallFrameInfo {
+            target_address: Some(target),
+            target_updated: has_transfer,
+            charged_parent_update,
+        });
+        parent_needs_update
+    }
+
+    /// Pushes a CREATE frame and updates the parent's dedup flag.
+    ///
+    /// Returns `true` when the parent's account info should be charged by the caller
+    /// (i.e., the parent has not been marked updated yet — CREATE always increments the
+    /// caller's nonce, so there is no `has_transfer` gate).
+    /// The created address is unknown at push time; callers should fill it in via
+    /// `set_created_address` once `frame_init` completes.
+    /// Rex5+ deduplication semantics match `push_call_frame`.
+    pub(crate) fn push_create_frame(&mut self) -> bool {
+        let rex5_enabled = self.rex5_enabled;
+        let parent_needs_update = match self.frame_mut() {
+            Some(entry) if !entry.info.target_updated => {
+                if rex5_enabled {
+                    entry.info.target_updated = true;
+                }
+                true
+            }
+            _ => false,
+        };
+        let charged_parent_update = rex5_enabled && parent_needs_update;
+        self.push_call_frame_info(CallFrameInfo {
+            target_address: None,
+            target_updated: true,
+            charged_parent_update,
+        });
+        parent_needs_update
+    }
+
+    /// Records the created address on the current CREATE frame.
+    ///
+    /// Asserts that the current frame's `target_address` has not already been set,
+    /// matching the previous inline behavior. Does nothing if the frame stack is empty.
+    pub(crate) fn set_created_address(&mut self, addr: Address) {
+        if let Some(entry) = self.frame_mut() {
+            assert!(entry.info.target_address.is_none(), "created account already recorded");
+            entry.info.target_address = Some(addr);
+        }
+    }
+
+    /// Pops the current frame and, on revert, unwinds the parent's `target_updated` flag
+    /// if this child set it.
+    ///
+    /// Rex5+ only: when the reverting child had `charged_parent_update` set, the parent's
+    /// `target_updated` is reset so the next successful call from the same parent still
+    /// charges the parent account (avoiding undercounting after a revert-then-retry pattern).
+    /// Pre-Rex5 child frames have `charged_parent_update = false`, so this method behaves
+    /// identically to `pop_frame` for older specs.
+    pub(crate) fn pop_frame_unwind_parent(
+        &mut self,
+        success: bool,
+    ) -> Option<FrameLimitEntry<CallFrameInfo>> {
+        let child = self.pop_frame(success);
+        if !success {
+            if let Some(child_entry) = &child {
+                if child_entry.info.charged_parent_update {
+                    // charged_parent_update=true implies a parent frame exists
+                    // (the flag is only set when frame_mut() returned Some).
+                    self.frame_mut()
+                        .expect("parent frame must exist when charged_parent_update is true")
+                        .info
+                        .target_updated = false;
+                }
+            }
+        }
+        child
     }
 }
 
