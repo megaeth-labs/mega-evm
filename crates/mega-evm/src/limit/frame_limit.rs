@@ -21,6 +21,10 @@ pub(crate) struct CallFrameInfo {
     pub(crate) target_address: Option<Address>,
     /// Whether this frame's target address has been marked as updated.
     pub(crate) target_updated: bool,
+    /// True when this frame caused the parent's `target_updated` to be flipped to `true`
+    /// (Rex5+ only). Used in `before_frame_return_result` to undo the parent flag on revert,
+    /// so a subsequent successful call from the same parent still charges the parent account.
+    pub(crate) charged_parent_update: bool,
 }
 
 #[derive(Debug, Clone)]
