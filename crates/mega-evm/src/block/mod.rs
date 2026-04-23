@@ -15,6 +15,16 @@
 //! 4. **[`BlockLimiter`]**: Stateful tracker that enforces limits and accumulates resource usage
 //! 5. **[`MegaBlockExecutionCtx`]**: Context for block execution including parent hash and limits
 //!
+//! # Pre-Block State Changes and Witness Recording
+//!
+//! [`MegaBlockExecutor::pre_execution_changes`] collects `Option<EvmState>` outcomes from each
+//! pre-block helper, and [`MegaBlockExecutor::commit_system_call_outcomes`] walks them calling
+//! `system_caller.on_state(source, &state)` **before** `db.commit(state)` for every entry. The
+//! `on_state` hook feeds the stateless witness generator with the complete read/write set, so
+//! helpers must return all accounts and slots they touched — including pure reads on
+//! idempotent no-change paths. See `crates/mega-evm/src/system/AGENTS.md` →
+//! `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
+//!
 //! # Resource Limit Enforcement
 //!
 //! `MegaETH` implements a comprehensive resource limiting system to prevent `DoS` attacks and

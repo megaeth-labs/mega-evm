@@ -1,6 +1,6 @@
 ---
 description: MegaETH glossary — definitions of protocol terms including EVM blocks, mini-blocks, compute gas, storage gas, and gas detention.
-spec: Rex4
+spec: Rex5
 ---
 
 # Glossary
@@ -172,3 +172,12 @@ A network upgrade event: when changes are activated on the chain.
 A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior).
 
 Multiple hardforks can map to the same spec (e.g., MiniRex1 → EQUIVALENCE, MiniRex2 → MINI_REX).
+
+## `MEGA_SYSTEM_ADDRESS`
+
+The authorized sender for [Mega System Transactions](system-contracts/system-tx.md).
+
+- Pre-[Rex5](upgrades/rex5.md): the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (defined in [system-tx.md § Constants](system-contracts/system-tx.md#constants)).
+- Rex5 onward: resolved per block from [`SequencerRegistry.currentSystemAddress()`](system-contracts/sequencer-registry.md).
+
+Exempt from oracle [gas detention](evm/gas-detention.md); carries [Oracle](system-contracts/oracle.md) write authority.
