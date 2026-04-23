@@ -75,6 +75,10 @@ Automate everything below the line.
 - `unsafe` blocks must have a `// SAFETY:` comment explaining why the invariant holds
 - Results and errors must always be checked.
   If intentionally ignored, an inline comment must explain why.
+- Pre-block helpers (system contract deploys, pre-exec system calls, etc.) must return `Option<EvmState>` for the block executor to commit — never call `db.commit(...)` directly.
+  The returned state feeds both the commit and the stateless witness recorder (`system_caller.on_state`).
+  Even idempotent "no change" paths must return `Some(EvmState)` with a read-only account entry; silently returning `None` drops the account from the witness read set and produces an incomplete stateless proof.
+  See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT` for the full pattern.
 
 ### Spec backward compatibility
 

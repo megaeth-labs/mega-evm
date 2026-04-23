@@ -168,6 +168,7 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 | Keyless Deploy           | `...0003`      | Deterministic contract deployment via Nick's Method |
 | MegaAccessControl        | `...0004`      | Access control (disableVolatileDataAccess)          |
 | MegaLimitControl         | `...0005`      | Limit query/control (currently remainingComputeGas) |
+| SequencerRegistry        | `...0006`      | System address and sequencer role registry          |
 
 Key design aspects:
 
@@ -280,6 +281,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Never change what an existing spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
+- **Pre-block helpers must return state, not commit directly.**
+  Any helper participating in `pre_execution_changes` (system contract deploys, pre-block system calls, etc.) MUST return `Option<EvmState>` and never call `db.commit(...)` directly.
+  Full convention: `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.
 - **Define value-transfer policy explicitly for system contract interceptors.**
   For read-only or control methods, reject calls with non-zero `transfer_value` in the interceptor.
   If a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
@@ -312,6 +316,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Also update this `AGENTS.md` when relevant (e.g., unstable spec marker, spec progression list, system contract table).
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.
+- **Run Prettier on docs before committing.**
+  `docs/` markdown files are checked by Prettier in CI (`prettier --check 'docs/**/*.md'`).
+  After editing any `docs/` file, run `npx prettier --write 'docs/**/*.md'` to fix formatting.
 
 ## Documentation Conventions (`docs/`)
 

@@ -256,6 +256,11 @@ fn main() {
             script_path: "scripts/MegaLimitControlBytecode.s.sol:SaveMegaLimitControlBytecode",
             generated_file: "limit_control_artifacts.rs",
         },
+        ContractConfig {
+            name: "SequencerRegistry",
+            script_path: "scripts/SequencerRegistryBytecode.s.sol:SaveSequencerRegistryBytecode",
+            generated_file: "sequencer_registry_artifacts.rs",
+        },
     ];
 
     // Set up rerun-if-changed triggers

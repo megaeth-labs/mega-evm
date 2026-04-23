@@ -7,7 +7,7 @@ use std::{format, rc::Rc};
 
 use crate::{
     AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv,
-    VolatileDataAccessTracker, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    VolatileDataAccessTracker, ORACLE_CONTRACT_ADDRESS,
 };
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
@@ -157,7 +157,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             // Mega system address transactions are exempted from oracle gas detention.
             // Note: This checks the transaction sender (from TxEnv) via Host::caller(),
             // unlike the pre-Rex3 CALL-based path which checked the frame-level caller.
-            if self.spec.is_enabled(MegaSpecId::REX3) && self.caller() != MEGA_SYSTEM_ADDRESS {
+            if self.spec.is_enabled(MegaSpecId::REX3) && self.caller() != self.system_address {
                 self.volatile_data_tracker.borrow_mut().check_and_mark_oracle_access(&address);
             }
 
