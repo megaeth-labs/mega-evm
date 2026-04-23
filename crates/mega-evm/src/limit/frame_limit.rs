@@ -414,7 +414,7 @@ mod tests {
     }
 
     /// `set_created_address` panics when called twice on the same CREATE frame
-    /// (invariant: target_address must be None when first filled in).
+    /// (invariant: `target_address` must be `None` when first filled in).
     #[test]
     #[should_panic(expected = "created account already recorded")]
     fn test_set_created_address_duplicate_panics() {
