@@ -19,6 +19,8 @@ Mega System Transactions provide that mechanism.
 
 ### Resolution
 
+> **Unstable** — The dynamic resolution described below is Rex5 behavior and may change before network activation.
+
 `MEGA_SYSTEM_ADDRESS` is the authorized system-transaction sender for the current block.
 
 Pre-Rex5, `MEGA_SYSTEM_ADDRESS` is the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`.

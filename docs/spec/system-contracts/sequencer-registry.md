@@ -5,6 +5,8 @@ spec: Rex5
 
 # SequencerRegistry
 
+> **Unstable** — Rex5 semantics described here are under active development and may change before network activation.
+
 This page specifies the `SequencerRegistry` system contract.
 It tracks two independent roles: the **system address** (Oracle/system-tx authority) and the **sequencer** (mini-block signing key).
 Each role has its own change lifecycle.
