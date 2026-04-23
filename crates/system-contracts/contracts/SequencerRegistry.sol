@@ -8,7 +8,7 @@ import {ISequencerRegistry} from "./interfaces/ISequencerRegistry.sol";
 /// @author MegaETH
 /// @notice System contract tracking two independent roles: system address and sequencer.
 /// @dev Deployed by mega-evm via raw state patch. Initial storage is seeded at deploy time
-///      (no constructor execution). Rotation is applied via pre-block system call.
+///      (no constructor execution). Due changes are applied via pre-block system call.
 contract SequencerRegistry is ISemver, ISequencerRegistry {
     /// @notice The current system address used for system transactions and Oracle authorization.
     address private _currentSystemAddress;
@@ -19,10 +19,10 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
     /// @notice The admin that can schedule role changes and transfer admin ownership.
     address private _admin;
 
-    /// @notice The bootstrap system address returned before the first system address rotation.
+    /// @notice The bootstrap system address returned before the first system address change.
     address private _initialSystemAddress;
 
-    /// @notice The bootstrap sequencer returned before the first sequencer rotation.
+    /// @notice The bootstrap sequencer returned before the first sequencer change.
     address private _initialSequencer;
 
     /// @notice The first block where this registry became valid for historical lookups.
@@ -40,17 +40,11 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
     /// @notice The block at which the pending sequencer becomes active.
     uint256 private _sequencerActivationBlock;
 
-    /// @dev Packed: uint96 fromBlock + address addr fit in one 32-byte slot.
-    struct RotationRecord {
-        uint96 fromBlock;
-        address addr;
-    }
+    /// @notice Historical system address changes, ordered by activation block.
+    ChangeRecord[] private _systemAddressHistory;
 
-    /// @notice Historical system address rotations, ordered by activation block.
-    RotationRecord[] private _systemAddressRotations;
-
-    /// @notice Historical sequencer rotations, ordered by activation block.
-    RotationRecord[] private _sequencerRotations;
+    /// @notice Historical sequencer changes, ordered by activation block.
+    ChangeRecord[] private _sequencerHistory;
 
     // =========================================================================
     // ISemver
@@ -74,9 +68,9 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
         if (blockNumber > block.number) revert FutureBlock();
         if (blockNumber < _initialFromBlock) revert BeforeInitialBlock();
 
-        uint256 len = _systemAddressRotations.length;
+        uint256 len = _systemAddressHistory.length;
         for (uint256 i = len; i > 0; i--) {
-            RotationRecord storage record = _systemAddressRotations[i - 1];
+            ChangeRecord storage record = _systemAddressHistory[i - 1];
             if (record.fromBlock <= blockNumber) {
                 return record.addr;
             }
@@ -122,9 +116,9 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
         if (blockNumber > block.number) revert FutureBlock();
         if (blockNumber < _initialFromBlock) revert BeforeInitialBlock();
 
-        uint256 len = _sequencerRotations.length;
+        uint256 len = _sequencerHistory.length;
         for (uint256 i = len; i > 0; i--) {
-            RotationRecord storage record = _sequencerRotations[i - 1];
+            ChangeRecord storage record = _sequencerHistory[i - 1];
             if (record.fromBlock <= blockNumber) {
                 return record.addr;
             }
@@ -174,7 +168,7 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
         if (block.number < activation) return;
 
         _currentSystemAddress = pending;
-        _systemAddressRotations.push(RotationRecord({fromBlock: uint96(activation), addr: pending}));
+        _systemAddressHistory.push(ChangeRecord({fromBlock: uint96(activation), addr: pending}));
 
         delete _pendingSystemAddress;
         delete _systemAddressActivationBlock;
@@ -188,7 +182,7 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
         if (block.number < activation) return;
 
         _currentSequencer = pending;
-        _sequencerRotations.push(RotationRecord({fromBlock: uint96(activation), addr: pending}));
+        _sequencerHistory.push(ChangeRecord({fromBlock: uint96(activation), addr: pending}));
 
         delete _pendingSequencer;
         delete _sequencerActivationBlock;

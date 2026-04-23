@@ -1,5 +1,5 @@
 ---
-description: SequencerRegistry system contract — dual-role registry for system address and sequencer, with rotation scheduling and history.
+description: SequencerRegistry system contract — dual-role registry for system address and sequencer, with change scheduling and history.
 spec: Rex5
 ---
 
@@ -7,16 +7,16 @@ spec: Rex5
 
 This page specifies the `SequencerRegistry` system contract.
 It tracks two independent roles: the **system address** (Oracle/system-tx authority) and the **sequencer** (mini-block signing key).
-Each role has its own rotation lifecycle.
+Each role has its own change lifecycle.
 
 ## Motivation
 
-MegaETH needs to decouple the Oracle/system-transaction sender from the mini-block signing key so that each can be rotated independently without affecting the other.
+MegaETH needs to decouple the Oracle/system-transaction sender from the mini-block signing key so that each can be changed independently without affecting the other.
 The `SequencerRegistry` provides a canonical on-chain source of truth for both roles, enabling:
 
 - On-chain verification of mini-block signatures via `currentSequencer()` and `sequencerAt()`.
 - Dynamic Oracle authority via `currentSystemAddress()`, replacing the hardcoded `MEGA_SYSTEM_ADDRESS`.
-- Independent rotation of each role without redeploying contracts.
+- Independent change of each role without redeploying contracts.
 
 ## Specification
 
@@ -40,22 +40,22 @@ No constructor is executed.
 The storage layout is consensus-critical.
 Rust slot constants in `mega-system-contracts` must match this layout.
 
-| Slot | Name                            | Type               |
-| ---- | ------------------------------- | ------------------ |
-| 0    | `_currentSystemAddress`         | `address`          |
-| 1    | `_currentSequencer`             | `address`          |
-| 2    | `_admin`                        | `address`          |
-| 3    | `_initialSystemAddress`         | `address`          |
-| 4    | `_initialSequencer`             | `address`          |
-| 5    | `_initialFromBlock`             | `uint256`          |
-| 6    | `_pendingSystemAddress`         | `address`          |
-| 7    | `_systemAddressActivationBlock` | `uint256`          |
-| 8    | `_pendingSequencer`             | `address`          |
-| 9    | `_sequencerActivationBlock`     | `uint256`          |
-| 10   | `_systemAddressRotations`       | `RotationRecord[]` |
-| 11   | `_sequencerRotations`           | `RotationRecord[]` |
+| Slot | Name                            | Type             |
+| ---- | ------------------------------- | ---------------- |
+| 0    | `_currentSystemAddress`         | `address`        |
+| 1    | `_currentSequencer`             | `address`        |
+| 2    | `_admin`                        | `address`        |
+| 3    | `_initialSystemAddress`         | `address`        |
+| 4    | `_initialSequencer`             | `address`        |
+| 5    | `_initialFromBlock`             | `uint256`        |
+| 6    | `_pendingSystemAddress`         | `address`        |
+| 7    | `_systemAddressActivationBlock` | `uint256`        |
+| 8    | `_pendingSequencer`             | `address`        |
+| 9    | `_sequencerActivationBlock`     | `uint256`        |
+| 10   | `_systemAddressHistory`         | `ChangeRecord[]` |
+| 11   | `_sequencerHistory`             | `ChangeRecord[]` |
 
-`RotationRecord` is packed: `uint96 fromBlock` + `address addr` fit in one 32-byte slot.
+`ChangeRecord` is packed: `uint96 fromBlock` + `address addr` fit in one 32-byte slot.
 
 ### Interface
 
@@ -88,7 +88,7 @@ Both are seeded at deploy time and updated only by `applyPendingChanges()`.
 They revert with `FutureBlock` if `blockNumber > block.number` and `BeforeInitialBlock` if `blockNumber < _initialFromBlock`.
 Both roles share the same `_initialFromBlock`.
 
-### Rotation Scheduling
+### Change Scheduling
 
 Each role has independent `schedule*Change(newAddress, activationBlock)`.
 `activationBlock` must be strictly greater than `block.number` and fit in `uint96`.
@@ -98,8 +98,8 @@ To cancel, pass `activationBlock = type(uint256).max` and `newAddress = address(
 ### Pre-Block Apply
 
 `applyPendingChanges()` is permissionless and applies both roles atomically.
-It is called by the execution layer as a pre-block system call when a Rust-side pre-check confirms any role rotation is due.
-For each role, if pending and due, it updates the current address, appends to the rotation history, and clears pending state.
+It is called by the execution layer as a pre-block system call when a Rust-side pre-check confirms any role change is due.
+For each role, if pending and due, it updates the current address, appends to the change history, and clears pending state.
 
 ### Interception
 
@@ -122,10 +122,10 @@ The values come from `SequencerRegistryConfig` on the chain's hardfork configura
 
 **Why two roles instead of one?**
 The Oracle/system-tx sender and the mini-block signing key are different operational concerns.
-Coupling them means rotating one silently revokes the other, which would break Oracle authority on the first sequencer key rotation.
+Coupling them means changing one silently revokes the other, which would break Oracle authority on the first sequencer key change.
 
-**Why a pre-block system call for rotation?**
-Applying rotation as a regular transaction would change role addresses mid-block, breaking block-stability.
+**Why a pre-block system call for role changes?**
+Applying a role change as a regular transaction would change role addresses mid-block, breaking block-stability.
 
 **Why deploy-time storage seeding instead of constant bootstrap?**
 The `_initialFromBlock` depends on the Rex5 activation block number, which is not known at compile time.

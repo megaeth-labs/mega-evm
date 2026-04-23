@@ -28,7 +28,7 @@ pub use mega_system_contracts::oracle::V1_1_0_CODE_HASH as ORACLE_CONTRACT_CODE_
 
 /// The code of the oracle contract (version 2.0.0, Rex5+).
 /// This version reads the authorized system address from `SequencerRegistry` instead of
-/// using a constructor `immutable`, enabling sequencer rotation without redeployment.
+/// using a constructor `immutable`, enabling system address change without redeployment.
 pub use mega_system_contracts::oracle::V2_0_0_CODE as ORACLE_CONTRACT_CODE_REX5;
 
 /// The code hash of the oracle contract (version 2.0.0, Rex5+).

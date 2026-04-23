@@ -16,8 +16,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs, ACCESS_CONTROL_ADDRESS,
-    ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs,
+    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
     HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
     LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
     ORACLE_CONTRACT_CODE_REX5, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
@@ -84,6 +84,11 @@ fn all_hardforks_config() -> MegaHardforkConfig {
         .with(MegaHardfork::Rex3, ForkCondition::Timestamp(0))
         .with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
         .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
+        .with_params(SequencerRegistryConfig {
+            initial_system_address: MEGA_SYSTEM_ADDRESS,
+            initial_sequencer: MEGA_SYSTEM_ADDRESS,
+            initial_admin: MEGA_SYSTEM_ADDRESS,
+        })
 }
 
 /// Create block EVM environment.
@@ -363,7 +368,7 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
 /// Benchmark the full REX5 pre-block path.
 ///
 /// `bootstrap` starts from an empty DB and pays first-deploy cost for the REX5 system contracts.
-/// `no_rotation` starts from a steady-state DB where all deploy-only contracts already exist and
+/// `no_change` starts from a steady-state DB where all deploy-only contracts already exist and
 /// the `SequencerRegistry` has no pending changes.
 fn bench_rex5_pre_block(c: &mut Criterion) {
     let mut group = c.benchmark_group("rex5_pre_block");
@@ -403,7 +408,7 @@ fn bench_rex5_pre_block(c: &mut Criterion) {
 
     // Steady-state block: all deploy-only system contracts already exist and the registry has no
     // pending changes.
-    group.bench_function("no_rotation", |b| {
+    group.bench_function("no_change", |b| {
         let baseline_db = rex5_steady_state_db(&contract_code);
 
         b.iter(|| {

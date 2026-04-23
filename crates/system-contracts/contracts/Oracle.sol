@@ -9,7 +9,7 @@ import {ISequencerRegistry} from "./interfaces/ISequencerRegistry.sol";
 /// @author MegaETH
 /// @notice Oracle provides a simple interface to directly read and set storage slots.
 /// @dev v2.0.0 reads the authorized system address from SequencerRegistry instead of
-///      using a constructor immutable. This enables sequencer rotation without redeploying
+///      using a constructor immutable. This enables system address change without redeploying
 ///      the Oracle contract.
 contract Oracle is ISemver, IOracle {
     /// @notice The SequencerRegistry contract used to look up the current system address.

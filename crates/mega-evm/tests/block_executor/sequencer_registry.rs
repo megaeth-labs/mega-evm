@@ -88,7 +88,7 @@ fn test_bootstrap_block_resolves_system_address() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
     let chain_spec = MegaHardforkConfig::default()
         .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
-        .with_sequencer_registry_config(sequencer_registry_config());
+        .with_params(sequencer_registry_config());
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
@@ -123,7 +123,7 @@ fn test_system_tx_uses_resolved_system_address() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
     let chain_spec = MegaHardforkConfig::default()
         .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
-        .with_sequencer_registry_config(sequencer_registry_config());
+        .with_params(sequencer_registry_config());
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
@@ -146,15 +146,15 @@ fn test_system_tx_uses_resolved_system_address() {
     assert!(result.is_ok(), "System tx should succeed: {:?}", result.err());
 }
 
-/// Pre-populate a pending system address rotation, run `apply_pre_execution_changes()`,
+/// Pre-populate a pending system address change, run `apply_pre_execution_changes()`,
 /// verify `system_address` switches to the new address, and confirm the old address is rejected.
 #[test]
-fn test_system_address_rotation() {
+fn test_system_address_change() {
     let mut db = MemoryDatabase::default();
     db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
     db.set_account_balance(NEW_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
 
-    // Pre-deploy SequencerRegistry with seeded storage + pending system address rotation
+    // Pre-deploy SequencerRegistry with seeded storage + pending system address change
     db.insert_account_info(
         SEQUENCER_REGISTRY_ADDRESS,
         AccountInfo {
@@ -170,7 +170,7 @@ fn test_system_address_rotation() {
         MEGA_SYSTEM_ADDRESS.into_word().into(),
     )
     .unwrap();
-    // Seed pending rotation: new system address at block 1000
+    // Seed pending change: new system address at block 1000
     db.insert_account_storage(
         SEQUENCER_REGISTRY_ADDRESS,
         PENDING_SYSTEM_ADDRESS,
@@ -189,7 +189,7 @@ fn test_system_address_rotation() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
     let chain_spec = MegaHardforkConfig::default()
         .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
-        .with_sequencer_registry_config(sequencer_registry_config());
+        .with_params(sequencer_registry_config());
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
@@ -201,14 +201,14 @@ fn test_system_address_rotation() {
         BlockLimits::no_limits(),
     );
 
-    // Block 1000 — rotation should be applied
+    // Block 1000 — change should be applied
     let mut executor =
         block_executor_factory.create_executor(&mut state, block_ctx, create_evm_env());
     executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
 
     // 1. Verify system_address switched
     let system_address = executor.evm().ctx_ref().system_address();
-    assert_eq!(system_address, NEW_SYSTEM_ADDRESS, "system_address should switch after rotation");
+    assert_eq!(system_address, NEW_SYSTEM_ADDRESS, "system_address should switch after change");
 
     // 2. New system address can send system tx to Oracle
     let calldata = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
@@ -220,18 +220,18 @@ fn test_system_address_rotation() {
     let calldata = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
     let tx = create_tx_from(MEGA_SYSTEM_ADDRESS, 0, ORACLE_CONTRACT_ADDRESS, Bytes::from(calldata));
     let result = executor.execute_transaction(&tx);
-    assert!(result.is_err(), "Tx from old system address should fail after rotation");
+    assert!(result.is_err(), "Tx from old system address should fail after change");
 }
 
-/// Sequencer rotation does NOT affect `system_address`.
+/// Sequencer change does NOT affect `system_address`.
 #[test]
-fn test_sequencer_rotation_does_not_affect_system_address() {
+fn test_sequencer_change_does_not_affect_system_address() {
     let new_sequencer = address!("4000000000000000000000000000000000000004");
 
     let mut db = MemoryDatabase::default();
     db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
 
-    // Pre-deploy with seeded storage + pending sequencer rotation
+    // Pre-deploy with seeded storage + pending sequencer change
     db.insert_account_info(
         SEQUENCER_REGISTRY_ADDRESS,
         AccountInfo {
@@ -252,7 +252,7 @@ fn test_sequencer_rotation_does_not_affect_system_address() {
         MEGA_SYSTEM_ADDRESS.into_word().into(),
     )
     .unwrap();
-    // Pending sequencer rotation at block 1000
+    // Pending sequencer change at block 1000
     db.insert_account_storage(
         SEQUENCER_REGISTRY_ADDRESS,
         PENDING_SEQUENCER,
@@ -271,7 +271,7 @@ fn test_sequencer_rotation_does_not_affect_system_address() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
     let chain_spec = MegaHardforkConfig::default()
         .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
-        .with_sequencer_registry_config(sequencer_registry_config());
+        .with_params(sequencer_registry_config());
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
@@ -287,11 +287,11 @@ fn test_sequencer_rotation_does_not_affect_system_address() {
         block_executor_factory.create_executor(&mut state, block_ctx, create_evm_env());
     executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
 
-    // system_address should NOT change — only the sequencer rotated
+    // system_address should NOT change — only the sequencer changed
     let system_address = executor.evm().ctx_ref().system_address();
     assert_eq!(
         system_address, MEGA_SYSTEM_ADDRESS,
-        "Sequencer rotation should not affect system_address"
+        "Sequencer change should not affect system_address"
     );
 
     // System tx from the original system address should still work
@@ -300,14 +300,14 @@ fn test_sequencer_rotation_does_not_affect_system_address() {
     let result = executor.execute_transaction(&tx);
     assert!(
         result.is_ok(),
-        "System tx from original system address should still work after sequencer rotation"
+        "System tx from original system address should still work after sequencer change"
     );
 }
 
-/// Both system address and sequencer rotate in the same block.
+/// Both system address and sequencer change in the same block.
 /// Verify `system_address` switches to the new system address (not the new sequencer).
 #[test]
-fn test_dual_rotation_in_same_block() {
+fn test_dual_change_in_same_block() {
     let new_sequencer = address!("4000000000000000000000000000000000000004");
 
     let mut db = MemoryDatabase::default();
@@ -335,7 +335,7 @@ fn test_dual_rotation_in_same_block() {
         MEGA_SYSTEM_ADDRESS.into_word().into(),
     )
     .unwrap();
-    // Pending system address rotation at block 1000
+    // Pending system address change at block 1000
     db.insert_account_storage(
         SEQUENCER_REGISTRY_ADDRESS,
         PENDING_SYSTEM_ADDRESS,
@@ -348,7 +348,7 @@ fn test_dual_rotation_in_same_block() {
         U256::from(1000),
     )
     .unwrap();
-    // Pending sequencer rotation at block 1000 (same block)
+    // Pending sequencer change at block 1000 (same block)
     db.insert_account_storage(
         SEQUENCER_REGISTRY_ADDRESS,
         PENDING_SEQUENCER,
@@ -365,8 +365,9 @@ fn test_dual_rotation_in_same_block() {
     let mut state = State::builder().with_database(&mut db).build();
     let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-    let chain_spec =
-        MegaHardforkConfig::default().with(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
+    let chain_spec = MegaHardforkConfig::default()
+        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
+        .with_params(sequencer_registry_config());
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
@@ -386,17 +387,17 @@ fn test_dual_rotation_in_same_block() {
     let system_address = executor.evm().ctx_ref().system_address();
     assert_eq!(
         system_address, NEW_SYSTEM_ADDRESS,
-        "Dual rotation: system_address should be NEW_SYSTEM_ADDRESS"
+        "Dual change: system_address should be NEW_SYSTEM_ADDRESS"
     );
 
     // New system address can send system tx
     let calldata = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
     let tx = create_tx_from(NEW_SYSTEM_ADDRESS, 0, ORACLE_CONTRACT_ADDRESS, Bytes::from(calldata));
     let result = executor.execute_transaction(&tx);
-    assert!(result.is_ok(), "New system address should work after dual rotation");
+    assert!(result.is_ok(), "New system address should work after dual change");
 }
 
-/// Pending rotation exists but activation block is in the future — no-op.
+/// Pending change exists but activation block is in the future — no-op.
 #[test]
 fn test_pending_not_yet_due_is_noop() {
     let mut db = MemoryDatabase::default();
@@ -433,8 +434,9 @@ fn test_pending_not_yet_due_is_noop() {
     let mut state = State::builder().with_database(&mut db).build();
     let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-    let chain_spec =
-        MegaHardforkConfig::default().with(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
+    let chain_spec = MegaHardforkConfig::default()
+        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
+        .with_params(sequencer_registry_config());
     let receipt_builder = OpAlloyReceiptBuilder::default();
     let block_executor_factory =
         MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
@@ -450,10 +452,45 @@ fn test_pending_not_yet_due_is_noop() {
         block_executor_factory.create_executor(&mut state, block_ctx, create_evm_env());
     executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
 
-    // system_address should still be the original — rotation not yet due
+    // system_address should still be the original — change not yet due
     let system_address = executor.evm().ctx_ref().system_address();
     assert_eq!(
         system_address, MEGA_SYSTEM_ADDRESS,
-        "Pending not-yet-due rotation should not change system_address"
+        "Pending not-yet-due change should not change system_address"
+    );
+}
+
+/// Rex5 activated but `SequencerRegistryConfig` not configured — `apply_pre_execution_changes` must
+/// fail.
+#[test]
+fn test_missing_sequencer_sequencer_registry_config_errors() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+    // Activate Rex5 but deliberately omit .with_params(SequencerRegistryConfig { ... }).
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let block_executor_factory =
+        MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
+
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+    );
+
+    let mut executor =
+        block_executor_factory.create_executor(&mut state, block_ctx, create_evm_env());
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("Rex5 without SequencerRegistryConfig must fail");
+    assert!(
+        err.to_string().contains("SequencerRegistryConfig not configured"),
+        "unexpected error: {err}"
     );
 }

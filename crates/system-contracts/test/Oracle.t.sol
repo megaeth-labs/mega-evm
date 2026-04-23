@@ -78,9 +78,9 @@ contract OracleTest is Test {
         assertEq(oracle.getSlot(0), bytes32(0));
     }
 
-    // ============ Rotation: authority follows currentSystemAddress ============
+    // ============ Authority follows currentSystemAddress ============
 
-    function test_afterSystemAddressRotation_newSystemAddressCanCall() public {
+    function test_afterSystemAddressChange_newSystemAddressCanCall() public {
         uint256 activationBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
@@ -96,7 +96,7 @@ contract OracleTest is Test {
         assertEq(oracle.getSlot(42), bytes32(uint256(0xBEEF)));
     }
 
-    function test_afterSystemAddressRotation_oldSystemAddressCannotCall() public {
+    function test_afterSystemAddressChange_oldSystemAddressCannotCall() public {
         uint256 activationBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
@@ -110,9 +110,9 @@ contract OracleTest is Test {
         oracle.setSlot(0, bytes32(uint256(1)));
     }
 
-    // ============ Critical independence: sequencer rotation does NOT affect Oracle ============
+    // ============ Critical independence: sequencer change does NOT affect Oracle ============
 
-    function test_sequencerRotation_doesNotAffectOracleAuthority() public {
+    function test_sequencerChange_doesNotAffectOracleAuthority() public {
         uint256 activationBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
@@ -121,7 +121,7 @@ contract OracleTest is Test {
         vm.roll(activationBlock);
         registry.applyPendingChanges();
 
-        // Sequencer rotated, but Oracle authority is still the original system address.
+        // Sequencer changed, but Oracle authority is still the original system address.
         assertEq(registry.currentSequencer(), newSequencer);
         assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
 
@@ -263,9 +263,9 @@ contract OracleTest is Test {
         oracle.multiCall(data);
     }
 
-    // ============ After system address rotation: emitLog follows new authority ============
+    // ============ After system address change: emitLog follows new authority ============
 
-    function test_afterSystemAddressRotation_newSystemAddressCanEmitLog() public {
+    function test_afterSystemAddressChange_newSystemAddressCanEmitLog() public {
         uint256 activationBlock = block.number + 50;
 
         vm.prank(INITIAL_ADMIN);

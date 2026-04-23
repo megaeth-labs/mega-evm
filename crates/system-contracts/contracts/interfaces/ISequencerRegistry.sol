@@ -4,8 +4,14 @@ pragma solidity ^0.8.0;
 /// @title ISequencerRegistry
 /// @notice Interface for the SequencerRegistry system contract.
 /// @dev Tracks two independent roles: system address (Oracle/system-tx authority) and
-///      sequencer (mini-block signing). Each role has its own rotation lifecycle.
+///      sequencer (mini-block signing). Each role has its own change lifecycle.
 interface ISequencerRegistry {
+    /// @notice Historical role-change record: packed into one slot.
+    struct ChangeRecord {
+        uint96 fromBlock;
+        address addr;
+    }
+
     /// @notice Thrown when a query targets a future block.
     error FutureBlock();
 
@@ -21,12 +27,12 @@ interface ISequencerRegistry {
     /// @notice Thrown when activationBlock is not strictly greater than block.number.
     error InvalidActivationBlock();
 
-    /// @notice Thrown when activationBlock exceeds uint96 range (packed RotationRecord).
+    /// @notice Thrown when activationBlock exceeds uint96 range (packed ChangeRecord).
     error ActivationBlockTooLarge();
 
     // ========================= System Address Role =========================
 
-    /// @notice Emitted when a system address rotation is scheduled.
+    /// @notice Emitted when a system address change is scheduled.
     event SystemAddressChangeScheduled(
         address indexed oldSystemAddress,
         address indexed newSystemAddress,
@@ -39,12 +45,12 @@ interface ISequencerRegistry {
     /// @notice Returns the system address that was active at the given block number.
     function systemAddressAt(uint256 blockNumber) external view returns (address);
 
-    /// @notice Schedules a system address rotation.
+    /// @notice Schedules a system address change.
     function scheduleNextSystemAddressChange(address newSystemAddress, uint256 activationBlock) external;
 
     // ============================ Sequencer Role ============================
 
-    /// @notice Emitted when a sequencer rotation is scheduled.
+    /// @notice Emitted when a sequencer change is scheduled.
     event SequencerChangeScheduled(
         address indexed oldSequencer,
         address indexed newSequencer,
@@ -57,7 +63,7 @@ interface ISequencerRegistry {
     /// @notice Returns the sequencer that was active at the given block number.
     function sequencerAt(uint256 blockNumber) external view returns (address);
 
-    /// @notice Schedules a sequencer rotation.
+    /// @notice Schedules a sequencer change.
     function scheduleNextSequencerChange(address newSequencer, uint256 activationBlock) external;
 
     // ============================== Shared ==============================

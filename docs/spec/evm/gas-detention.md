@@ -82,7 +82,7 @@ The following rules MUST apply:
 - `STATICCALL` to the oracle contract address alone MUST NOT trigger oracle detention.
 - Oracle detention is triggered by storage reads, not by message-call targeting alone.
 - `DELEGATECALL` to the oracle contract MUST NOT trigger oracle detention solely by virtue of targeting the oracle address, because `SLOAD` in a `DELEGATECALL` context reads the caller's storage, not the oracle contract's storage.
-- If the transaction sender is [`SYSTEM_ADDRESS`](../system-contracts/system-tx.md), oracle gas detention MUST NOT be applied.
+- If the transaction sender is [`MEGA_SYSTEM_ADDRESS`](../system-contracts/system-tx.md), oracle gas detention MUST NOT be applied.
 
 ### Cap Selection
 

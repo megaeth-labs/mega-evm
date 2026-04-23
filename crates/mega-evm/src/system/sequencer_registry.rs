@@ -1,17 +1,17 @@
 //! The `SequencerRegistry` system contract for the `MegaETH` EVM.
 //!
 //! Tracks two independent roles: system address (Oracle/system-tx authority) and
-//! sequencer (mini-block signing). Each role has its own rotation lifecycle.
+//! sequencer (mini-block signing). Each role has its own change lifecycle.
 //!
 //! Unlike intercepted system contracts (`LimitControl`, `AccessControl`), this contract runs
 //! normal on-chain bytecode. It does not have an interceptor.
 //!
 //! Deployed via raw state patch with initial storage seeded at deploy time.
-//! Due rotations are applied via a single pre-block EVM system call to
+//! Due changes are applied via a single pre-block EVM system call to
 //! `applyPendingChanges()`, following the same pattern as EIP-2935 and EIP-4788.
 //! The current system transaction sender should always be read through
-//! [`resolve_system_address`], which handles both the bootstrap fallback and the
-//! on-chain `SequencerRegistry` state.
+//! [`resolve_system_address`], which returns the legacy constant for pre-REX5 and
+//! reads the on-chain `SequencerRegistry` state for REX5+.
 
 use alloy_evm::{
     block::{BlockExecutionError, BlockValidationError},
@@ -27,11 +27,12 @@ use mega_system_contracts::sequencer_registry::storage_slots::{
 use revm::{
     context_interface::result::ResultAndState,
     database::State,
-    state::{Account, Bytecode, EvmState},
+    primitives::KECCAK_EMPTY,
+    state::{Account, Bytecode, EvmState, EvmStorageSlot},
     Database as RevmDatabase,
 };
 
-use crate::{MegaHardforks, MEGA_SYSTEM_ADDRESS};
+use crate::{HardforkParams, MegaHardfork, MegaHardforks, MEGA_SYSTEM_ADDRESS};
 
 /// The address of the `SequencerRegistry` system contract.
 pub const SEQUENCER_REGISTRY_ADDRESS: Address =
@@ -45,7 +46,9 @@ pub use mega_system_contracts::sequencer_registry::V1_0_0_CODE_HASH as SEQUENCER
 
 pub use mega_system_contracts::sequencer_registry::ISequencerRegistry;
 
-/// Bootstrap configuration for the initial `SequencerRegistry` deployment.
+/// Bootstrap configuration for `SequencerRegistry` (attached to Rex5 via [`HardforkParams`]).
+///
+/// All three addresses are required. There is no `Default`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequencerRegistryConfig {
     /// The initial system address (Oracle/system-tx sender).
@@ -56,15 +59,8 @@ pub struct SequencerRegistryConfig {
     pub initial_admin: Address,
 }
 
-impl Default for SequencerRegistryConfig {
-    fn default() -> Self {
-        Self {
-            // Preserve the legacy single-address behavior unless the chain spec overrides it.
-            initial_system_address: MEGA_SYSTEM_ADDRESS,
-            initial_sequencer: MEGA_SYSTEM_ADDRESS,
-            initial_admin: MEGA_SYSTEM_ADDRESS,
-        }
-    }
+impl HardforkParams for SequencerRegistryConfig {
+    const FORK: MegaHardfork = MegaHardfork::Rex5;
 }
 
 /// Encodes an address into its `U256` storage representation (standard Solidity address-in-slot).
@@ -80,14 +76,36 @@ fn read_registry_storage<DB: Database>(
     RevmDatabase::storage(db, SEQUENCER_REGISTRY_ADDRESS, slot).map_err(BlockExecutionError::other)
 }
 
+/// Returns whether a pending role change is due and records every storage read into the witness
+/// account.
+fn is_role_due<DB: Database>(
+    db: &mut State<DB>,
+    account: &mut Account,
+    pending_slot: U256,
+    activation_slot: U256,
+    block_number: u64,
+) -> Result<bool, BlockExecutionError> {
+    let pending = read_registry_storage(db, pending_slot)?;
+    // Read-only witness entry: record the slot access without marking it as changed.
+    account.storage.insert(pending_slot, EvmStorageSlot::new(pending, 0));
+    if pending.is_zero() {
+        return Ok(false);
+    }
+
+    let activation_block = read_registry_storage(db, activation_slot)?;
+    account.storage.insert(activation_slot, EvmStorageSlot::new(activation_block, 0));
+
+    Ok(block_number >= activation_block.saturating_to::<u64>())
+}
+
 /// Deploys the `SequencerRegistry` contract and seeds initial storage.
 ///
 /// On first deploy, writes 6 flat storage slots:
 /// - `_currentSystemAddress`, `_currentSequencer`, `_admin`
 /// - `_initialSystemAddress`, `_initialSequencer`, `_initialFromBlock`
 ///
-/// The dynamic rotation arrays remain empty on bootstrap and grow only when
-/// `applyPendingChanges()` commits a due rotation.
+/// The dynamic change-history arrays remain empty on bootstrap and grow only when
+/// `applyPendingChanges()` commits a due change.
 /// If already deployed with the correct code hash, returns the account as-is.
 pub fn transact_deploy_sequencer_registry<DB: Database>(
     hardforks: impl MegaHardforks,
@@ -111,20 +129,24 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
                 Account { info: account_info, ..Default::default() },
             )])));
         }
-        // Account exists but has wrong code hash. This is a stateful contract —
-        // silently overwriting would destroy rotation state and pending changes.
-        // This indicates state corruption or an unsupported migration path.
-        return Err(BlockValidationError::BlockHashContractCall {
-            message: format!(
-                "SequencerRegistry at {} has unexpected code hash {} (expected {}); \
-                 refusing to overwrite stateful contract storage without migration",
-                SEQUENCER_REGISTRY_ADDRESS, account_info.code_hash, SEQUENCER_REGISTRY_CODE_HASH,
-            ),
+        if account_info.code_hash != KECCAK_EMPTY {
+            // Account has actual contract code that doesn't match ours.
+            // Silently overwriting would destroy change history and pending state.
+            return Err(BlockValidationError::BlockHashContractCall {
+                message: format!(
+                    "SequencerRegistry at {} has unexpected code hash {} (expected {}); \
+                     refusing to overwrite stateful contract storage without migration",
+                    SEQUENCER_REGISTRY_ADDRESS,
+                    account_info.code_hash,
+                    SEQUENCER_REGISTRY_CODE_HASH,
+                ),
+            }
+            .into());
         }
-        .into());
+        // EOA with balance (KECCAK_EMPTY code hash) — safe to deploy on top.
     }
 
-    // First deploy — account does not exist yet.
+    // First deploy (or EOA-only account).
     let mut acc_info = acc.account_info().unwrap_or_default();
     acc_info.code_hash = SEQUENCER_REGISTRY_CODE_HASH;
     acc_info.code = Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE));
@@ -155,57 +177,52 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     Ok(Some(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, revm_acc)])))
 }
 
-/// Checks whether any pending role rotation is due by reading committed storage.
+/// Returns `(due, witness_state)` where `due` indicates whether the caller should issue
+/// the pre-block `applyPendingChanges()` system call.
 ///
-/// Returns `true` when the role has a non-zero pending value and its activation block
-/// has been reached in the current block.
-fn is_rotation_due<DB: Database>(
-    db: &mut State<DB>,
-    pending_slot: U256,
-    activation_slot: U256,
-    block_number: u64,
-) -> Result<bool, BlockExecutionError> {
-    let pending = read_registry_storage(db, pending_slot)?;
-    if pending.is_zero() {
-        return Ok(false);
-    }
-
-    let activation = read_registry_storage(db, activation_slot)?;
-    Ok(block_number >= activation.saturating_to::<u64>())
-}
-
-/// Returns `true` if the caller should issue the single pre-block
-/// `applyPendingChanges()` system call.
-///
-/// This is only a pre-check to avoid an EVM system call on every block.
-/// The contract-side `applyPendingChanges()` call applies both roles, so the caller
-/// only needs to know whether any role is due.
+/// The returned `EvmState` captures all reads (account + storage slots) as a witness record.
+/// The executor MUST push this into outcomes regardless of `due` so that the reads enter
+/// the stateless witness via `system_caller.on_state()`.
 pub(crate) fn is_apply_pending_changes_due<DB: Database>(
     db: &mut State<DB>,
     block_number: u64,
-) -> Result<bool, BlockExecutionError> {
+) -> Result<(bool, EvmState), BlockExecutionError> {
     let acc =
         db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-    if acc.account_info().is_none() {
-        return Ok(false);
-    }
 
-    if is_rotation_due(db, PENDING_SYSTEM_ADDRESS, SYSTEM_ADDRESS_ACTIVATION_BLOCK, block_number)? {
-        return Ok(true);
-    }
+    let Some(info) = acc.account_info() else {
+        // Account does not exist — record a not-existing account entry for the witness.
+        let account = Account::new_not_existing(0);
+        let state = EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, account)]);
+        return Ok((false, state));
+    };
 
-    is_rotation_due(db, PENDING_SEQUENCER, SEQUENCER_ACTIVATION_BLOCK, block_number)
+    // Account exists — build a read-only account entry to record all slot reads.
+    let mut account = Account { info, ..Default::default() };
+
+    let system_address_due = is_role_due(
+        db,
+        &mut account,
+        PENDING_SYSTEM_ADDRESS,
+        SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+        block_number,
+    )?;
+    let sequencer_due =
+        is_role_due(db, &mut account, PENDING_SEQUENCER, SEQUENCER_ACTIVATION_BLOCK, block_number)?;
+
+    let state = EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, account)]);
+    Ok((system_address_due || sequencer_due, state))
 }
 
 /// Executes the pre-block `applyPendingChanges()` system call on the `SequencerRegistry`.
 ///
-/// This single system call applies both the system address rotation and the sequencer
-/// rotation if they are due in the current block.
+/// This single system call applies both the system address change and the sequencer
+/// change if they are due in the current block.
 /// Caller should gate this with [`is_apply_pending_changes_due`] to avoid an EVM
 /// call on every block.
 pub(crate) fn transact_apply_pending_changes<Halt>(
     evm: &mut impl alloy_evm::Evm<HaltReason = Halt>,
-) -> Result<Option<ResultAndState<Halt>>, BlockExecutionError> {
+) -> Result<ResultAndState<Halt>, BlockExecutionError> {
     let calldata = ISequencerRegistry::applyPendingChangesCall {}.abi_encode();
     let result_and_state = match evm.transact_system_call(
         alloy_eips::eip4788::SYSTEM_ADDRESS,
@@ -228,37 +245,47 @@ pub(crate) fn transact_apply_pending_changes<Halt>(
         .into());
     }
 
-    Ok(Some(result_and_state))
+    Ok(result_and_state)
 }
 
 /// Resolves the current system address.
 ///
-/// Must be called after `commit_system_call_outcomes()`.
+/// Must be called after `commit_system_call_outcomes()` so that `SequencerRegistry` is
+/// already deployed and its storage committed.
 ///
-/// - Pre-REX5: returns `MEGA_SYSTEM_ADDRESS`.
-/// - REX5 before `SequencerRegistry` deployment: returns the configured bootstrap system address.
-/// - REX5 after deployment: returns `_currentSystemAddress` from committed registry storage.
+/// - Pre-REX5: returns `(MEGA_SYSTEM_ADDRESS, None)`.
+/// - REX5: reads `_currentSystemAddress` from committed registry storage.
 ///
-/// This helper is the only supported way for runtime code to resolve the current
-/// system transaction sender across the bootstrap and post-bootstrap phases.
+/// The optional `EvmState` captures account + slot reads as a witness record.
+/// The executor MUST commit this via `system_caller.on_state()` + `db.commit()`.
 pub fn resolve_system_address<DB: Database>(
     hardforks: impl MegaHardforks,
     spec: crate::MegaSpecId,
     db: &mut State<DB>,
-) -> Result<Address, BlockExecutionError> {
+) -> Result<(Address, Option<EvmState>), BlockExecutionError> {
     if !spec.is_enabled(crate::MegaSpecId::REX5) {
-        return Ok(MEGA_SYSTEM_ADDRESS);
+        return Ok((MEGA_SYSTEM_ADDRESS, None));
     }
 
-    let bootstrap_system_address = hardforks.sequencer_registry_config().initial_system_address;
+    // Fail fast if Rex5 is active but params are not configured.
+    hardforks.fork_params::<SequencerRegistryConfig>().ok_or_else(|| {
+        BlockValidationError::BlockHashContractCall {
+            message: "Rex5 active but SequencerRegistryConfig not configured".into(),
+        }
+    })?;
 
     let acc =
         db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
 
+    // Unreachable: deploy always runs and commits before resolve.
     let Some(info) = acc.account_info() else {
-        return Ok(bootstrap_system_address);
+        return Err(BlockValidationError::BlockHashContractCall {
+            message: "Rex5 active but SequencerRegistry account does not exist".into(),
+        }
+        .into());
     };
 
+    // Unreachable: deploy verifies the code hash before seeding storage.
     if info.code_hash != SEQUENCER_REGISTRY_CODE_HASH {
         return Err(BlockValidationError::BlockHashContractCall {
             message: format!(
@@ -269,8 +296,13 @@ pub fn resolve_system_address<DB: Database>(
         .into());
     }
 
+    // Build read-only witness: account entry + slot read.
+    let mut account = Account { info, ..Default::default() };
     let value = read_registry_storage(db, CURRENT_SYSTEM_ADDRESS)?;
+    // Read-only witness entry: record the slot access without marking it as changed.
+    account.storage.insert(CURRENT_SYSTEM_ADDRESS, EvmStorageSlot::new(value, 0));
 
+    // Unreachable: deploy seeds a non-zero initial system address.
     if value.is_zero() {
         return Err(BlockValidationError::BlockHashContractCall {
             message: "SequencerRegistry deployed but _currentSystemAddress is zero".into(),
@@ -278,7 +310,9 @@ pub fn resolve_system_address<DB: Database>(
         .into());
     }
 
-    Ok(Address::from_word(value.into()))
+    let state = EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, account)]);
+
+    Ok((Address::from_word(value.into()), Some(state)))
 }
 
 #[cfg(test)]
@@ -299,6 +333,10 @@ mod tests {
             initial_sequencer: TEST_SEQUENCER,
             initial_admin: TEST_ADMIN,
         }
+    }
+
+    fn rex5_hardforks() -> MegaHardforkConfig {
+        MegaHardforkConfig::default().with_all_activated().with_params(test_config())
     }
 
     #[test]
@@ -404,12 +442,13 @@ mod tests {
 
     #[test]
     fn test_deploy_wrong_existing_code_hash_returns_error() {
+        let wrong_code = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]));
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
-                code_hash: B256::ZERO,
-                code: Some(Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]))),
+                code_hash: wrong_code.hash_slow(),
+                code: Some(wrong_code),
                 ..Default::default()
             },
         );
@@ -426,18 +465,44 @@ mod tests {
     }
 
     #[test]
+    fn test_deploy_on_top_of_eoa_with_balance() {
+        let mut db = InMemoryDB::default();
+        // Simulate an EOA that received ETH before Rex5.
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default() // code_hash = KECCAK_EMPTY
+            },
+        );
+        let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        let result =
+            transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
+                .unwrap()
+                .unwrap();
+
+        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
+        assert!(account.is_created());
+        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
+        // Pre-existing balance is preserved.
+        assert_eq!(account.info.balance, U256::from(1_000_000));
+    }
+
+    #[test]
     fn test_resolve_pre_rex5_returns_legacy() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
 
-        let addr =
+        let (addr, _) =
             resolve_system_address(MegaHardforkConfig::default(), MegaSpecId::REX4, &mut state)
                 .unwrap();
         assert_eq!(addr, MEGA_SYSTEM_ADDRESS);
     }
 
     #[test]
-    fn test_resolve_rex5_returns_stored_system_address() {
+    fn test_resolve_rex5_returns_stored_system_address_with_witness() {
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
@@ -455,10 +520,22 @@ mod tests {
         .unwrap();
         let mut state = State::builder().with_database(&mut db).build();
 
-        let addr =
-            resolve_system_address(MegaHardforkConfig::default(), MegaSpecId::REX5, &mut state)
-                .unwrap();
+        let (addr, witness) =
+            resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state).unwrap();
         assert_eq!(addr, TEST_SYSTEM_ADDRESS);
+
+        // Witness must capture the registry account and the CURRENT_SYSTEM_ADDRESS slot.
+        let witness = witness.expect("post-deploy resolve must produce witness");
+        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("registry account in witness");
+        assert_eq!(acc.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
+        assert!(
+            acc.storage.contains_key(&CURRENT_SYSTEM_ADDRESS),
+            "witness must include CURRENT_SYSTEM_ADDRESS slot"
+        );
+        assert_eq!(acc.storage.len(), 1, "witness should contain exactly one slot");
+        let slot = acc.storage.get(&CURRENT_SYSTEM_ADDRESS).expect("slot must exist");
+        assert!(!slot.is_changed(), "read-only witness slot must not be marked changed");
+        assert_eq!(slot.original_value(), slot.present_value());
     }
 
     #[test]
@@ -474,19 +551,19 @@ mod tests {
         );
         let mut state = State::builder().with_database(&mut db).build();
 
-        let result =
-            resolve_system_address(MegaHardforkConfig::default(), MegaSpecId::REX5, &mut state);
+        let result = resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state);
         assert!(result.is_err(), "zero _currentSystemAddress should be an error");
     }
 
     #[test]
-    fn test_resolve_rex5_missing_registry_returns_bootstrap_system_address() {
+    fn test_resolve_rex5_missing_registry_errors() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_sequencer_registry_config(test_config());
+        let hardforks = rex5_hardforks();
 
-        let addr = resolve_system_address(&hardforks, MegaSpecId::REX5, &mut state).unwrap();
-        assert_eq!(addr, TEST_SYSTEM_ADDRESS);
+        let err = resolve_system_address(&hardforks, MegaSpecId::REX5, &mut state)
+            .expect_err("missing registry at Rex5 must fail closed");
+        assert!(err.to_string().contains("does not exist"));
     }
 
     #[test]
@@ -502,9 +579,8 @@ mod tests {
         );
         let mut state = State::builder().with_database(&mut db).build();
 
-        let err =
-            resolve_system_address(MegaHardforkConfig::default(), MegaSpecId::REX5, &mut state)
-                .expect_err("wrong code hash must fail closed");
+        let err = resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state)
+            .expect_err("wrong code hash must fail closed");
 
         assert!(err.to_string().contains("code hash mismatch"));
     }
@@ -514,7 +590,12 @@ mod tests {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
 
-        assert!(!is_apply_pending_changes_due(&mut state, 1000).unwrap());
+        let (due, witness) = is_apply_pending_changes_due(&mut state, 1000).unwrap();
+        assert!(!due);
+        // Witness must contain a not-existing account entry.
+        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness should exist");
+        assert_eq!(acc.status, revm::state::AccountStatus::LoadedAsNotExisting);
+        assert!(acc.storage.is_empty(), "no-registry witness should have no slots");
     }
 
     #[test]
@@ -530,7 +611,20 @@ mod tests {
         );
         let mut state = State::builder().with_database(&mut db).build();
 
-        assert!(!is_apply_pending_changes_due(&mut state, 1000).unwrap());
+        let (due, witness) = is_apply_pending_changes_due(&mut state, 1000).unwrap();
+        assert!(!due);
+        // Witness must include both PENDING_* slots (both zero = no change pending).
+        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness should exist");
+        assert!(
+            acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS),
+            "witness must include PENDING_SYSTEM_ADDRESS"
+        );
+        assert!(
+            acc.storage.contains_key(&PENDING_SEQUENCER),
+            "witness must include PENDING_SEQUENCER"
+        );
+        // No activation slots needed because both pending values are zero.
+        assert_eq!(acc.storage.len(), 2, "no-pending witness should have exactly 2 slots");
     }
 
     #[test]
@@ -557,10 +651,23 @@ mod tests {
             U256::from(1000),
         )
         .unwrap();
+        // Not yet due at block 999.
         let mut state = State::builder().with_database(&mut db).build();
+        let (due, witness) = is_apply_pending_changes_due(&mut state, 999).unwrap();
+        assert!(!due, "not yet due");
+        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness");
+        assert!(acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+        assert!(acc.storage.contains_key(&SYSTEM_ADDRESS_ACTIVATION_BLOCK));
 
-        assert!(!is_apply_pending_changes_due(&mut state, 999).unwrap(), "not yet due");
-        assert!(is_apply_pending_changes_due(&mut state, 1000).unwrap(), "exactly due");
+        // Exactly due at block 1000 (fresh State to avoid cache from prior call).
+        let mut state = State::builder().with_database(&mut db).build();
+        let (due, witness) = is_apply_pending_changes_due(&mut state, 1000).unwrap();
+        assert!(due, "exactly due");
+        // Both roles' pending slots are always read into the witness.
+        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness");
+        assert!(acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+        assert!(acc.storage.contains_key(&SYSTEM_ADDRESS_ACTIVATION_BLOCK));
+        assert!(acc.storage.contains_key(&PENDING_SEQUENCER));
     }
 
     #[test]
@@ -589,7 +696,15 @@ mod tests {
         .unwrap();
         let mut state = State::builder().with_database(&mut db).build();
 
-        assert!(is_apply_pending_changes_due(&mut state, 500).unwrap());
+        let (due, witness) = is_apply_pending_changes_due(&mut state, 500).unwrap();
+        assert!(due);
+        // System address has no pending change (slot is zero) so only PENDING_SYSTEM_ADDRESS
+        // is read. Then sequencer path reads PENDING_SEQUENCER + SEQUENCER_ACTIVATION_BLOCK.
+        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness");
+        assert!(acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+        assert!(acc.storage.contains_key(&PENDING_SEQUENCER));
+        assert!(acc.storage.contains_key(&SEQUENCER_ACTIVATION_BLOCK));
+        assert_eq!(acc.storage.len(), 3);
     }
 
     #[test]
@@ -631,10 +746,29 @@ mod tests {
         .unwrap();
         let mut state = State::builder().with_database(&mut db).build();
 
+        let (due, witness) = is_apply_pending_changes_due(&mut state, 1000).unwrap();
         assert!(
-            is_apply_pending_changes_due(&mut state, 1000).unwrap(),
-            "sequencer rotation should still trigger the pre-block call when the system address is not due yet"
+            due,
+            "sequencer change should still trigger the pre-block call when the system address is not due yet"
         );
+        // System address is not due (activation at 1001) but its pending slot + activation
+        // slot are still read.  Then the sequencer path reads its own pending + activation.
+        let acc = witness.get(&SEQUENCER_REGISTRY_ADDRESS).expect("witness");
+        assert!(acc.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
+        assert!(acc.storage.contains_key(&SYSTEM_ADDRESS_ACTIVATION_BLOCK));
+        assert!(acc.storage.contains_key(&PENDING_SEQUENCER));
+        assert!(acc.storage.contains_key(&SEQUENCER_ACTIVATION_BLOCK));
+        assert_eq!(acc.storage.len(), 4, "both roles' slots should be in the witness");
+        for slot_key in [
+            PENDING_SYSTEM_ADDRESS,
+            SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+            PENDING_SEQUENCER,
+            SEQUENCER_ACTIVATION_BLOCK,
+        ] {
+            let slot = acc.storage.get(&slot_key).expect("slot must exist");
+            assert!(!slot.is_changed(), "read-only witness slot must not be marked changed");
+            assert_eq!(slot.original_value(), slot.present_value());
+        }
     }
 
     #[test]
@@ -698,9 +832,8 @@ mod tests {
         });
         let mut evm = crate::MegaEvm::new(context);
 
-        let result = transact_apply_pending_changes(&mut evm)
-            .unwrap()
-            .expect("applyPendingChanges() should return state changes");
+        let result =
+            transact_apply_pending_changes(&mut evm).expect("applyPendingChanges() should succeed");
         let state = result.state;
         drop(evm);
 

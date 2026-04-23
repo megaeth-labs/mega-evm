@@ -190,7 +190,7 @@ impl EnvArgs {
     ///
     /// The `system_address` defaults to `MEGA_SYSTEM_ADDRESS`. For `run`/`tx` modes this is
     /// correct: these paths don't go through the block executor and don't resolve from
-    /// `SequencerRegistry`. If fork-state simulation with a rotated sequencer is needed,
+    /// `SequencerRegistry`. If fork-state simulation with a changed sequencer is needed,
     /// a `--system-address` CLI override can be added in the future.
     pub fn create_evm_context<DB: Database>(
         &self,

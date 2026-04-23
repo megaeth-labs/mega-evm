@@ -22,11 +22,14 @@ type TestExecutor<'a, 'db> =
     MegaBlockExecutor<MegaHardforkConfig, TestEvm<'a, 'db>, OpAlloyReceiptBuilder>;
 
 fn rex4_chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated()
+    MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex5)
 }
 
 fn rex3_chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex4)
+    MegaHardforkConfig::default()
+        .with_all_activated()
+        .without(MegaHardfork::Rex4)
+        .without(MegaHardfork::Rex5)
 }
 
 fn make_block_env(timestamp: u64) -> BlockEnv {

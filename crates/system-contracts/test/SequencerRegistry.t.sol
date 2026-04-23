@@ -381,27 +381,27 @@ contract SequencerRegistryTest is Test {
         registry.systemAddressAt(INITIAL_FROM_BLOCK - 1);
     }
 
-    function test_systemAddressAt_returnsInitialWhenNoRotations() public view {
+    function test_systemAddressAt_returnsInitialWhenNoChanges() public view {
         assertEq(registry.systemAddressAt(block.number), INITIAL_SYSTEM_ADDRESS);
     }
 
-    function test_systemAddressAt_correctRangesAfterRotation() public {
-        uint256 rotationBlock = block.number + 100;
+    function test_systemAddressAt_correctRangesAfterChange() public {
+        uint256 changeBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSystemAddressChange(newSystemAddress, rotationBlock);
+        registry.scheduleNextSystemAddressChange(newSystemAddress, changeBlock);
 
-        vm.roll(rotationBlock);
+        vm.roll(changeBlock);
         registry.applyPendingChanges();
 
-        // Before rotation
+        // Before change
         assertEq(registry.systemAddressAt(INITIAL_FROM_BLOCK), INITIAL_SYSTEM_ADDRESS);
-        assertEq(registry.systemAddressAt(rotationBlock - 1), INITIAL_SYSTEM_ADDRESS);
-        // At and after rotation
-        assertEq(registry.systemAddressAt(rotationBlock), newSystemAddress);
+        assertEq(registry.systemAddressAt(changeBlock - 1), INITIAL_SYSTEM_ADDRESS);
+        // At and after change
+        assertEq(registry.systemAddressAt(changeBlock), newSystemAddress);
     }
 
-    function test_systemAddressAt_multipleRotations() public {
+    function test_systemAddressAt_multipleChanges() public {
         address addr2 = address(0xAAAA);
         address addr3 = address(0xBBBB);
         uint256 block1 = 100;
@@ -447,25 +447,25 @@ contract SequencerRegistryTest is Test {
         registry.sequencerAt(INITIAL_FROM_BLOCK - 1);
     }
 
-    function test_sequencerAt_returnsInitialWhenNoRotations() public view {
+    function test_sequencerAt_returnsInitialWhenNoChanges() public view {
         assertEq(registry.sequencerAt(block.number), INITIAL_SEQUENCER);
     }
 
-    function test_sequencerAt_correctRangesAfterRotation() public {
-        uint256 rotationBlock = block.number + 100;
+    function test_sequencerAt_correctRangesAfterChange() public {
+        uint256 changeBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSequencerChange(newSequencer, rotationBlock);
+        registry.scheduleNextSequencerChange(newSequencer, changeBlock);
 
-        vm.roll(rotationBlock);
+        vm.roll(changeBlock);
         registry.applyPendingChanges();
 
         assertEq(registry.sequencerAt(INITIAL_FROM_BLOCK), INITIAL_SEQUENCER);
-        assertEq(registry.sequencerAt(rotationBlock - 1), INITIAL_SEQUENCER);
-        assertEq(registry.sequencerAt(rotationBlock), newSequencer);
+        assertEq(registry.sequencerAt(changeBlock - 1), INITIAL_SEQUENCER);
+        assertEq(registry.sequencerAt(changeBlock), newSequencer);
     }
 
-    function test_sequencerAt_multipleRotations() public {
+    function test_sequencerAt_multipleChanges() public {
         address addr2 = address(0xAAAA);
         address addr3 = address(0xBBBB);
         uint256 block1 = 100;
@@ -498,9 +498,9 @@ contract SequencerRegistryTest is Test {
         assertEq(registry.sequencerAt(block3), addr3);
     }
 
-    // ============ Independent rotation ============
+    // ============ Independent changes ============
 
-    function test_rotateSystemAddress_doesNotChangeSequencer() public {
+    function test_changeSystemAddress_doesNotChangeSequencer() public {
         uint256 futureBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
@@ -513,7 +513,7 @@ contract SequencerRegistryTest is Test {
         assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
     }
 
-    function test_rotateSequencer_doesNotChangeSystemAddress() public {
+    function test_changeSequencer_doesNotChangeSystemAddress() public {
         uint256 futureBlock = block.number + 100;
 
         vm.prank(INITIAL_ADMIN);
@@ -526,7 +526,7 @@ contract SequencerRegistryTest is Test {
         assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
     }
 
-    function test_independentRotations_differentBlocks() public {
+    function test_independentChanges_differentBlocks() public {
         uint256 sysBlock = block.number + 100;
         uint256 seqBlock = block.number + 200;
 
@@ -535,13 +535,13 @@ contract SequencerRegistryTest is Test {
         vm.prank(INITIAL_ADMIN);
         registry.scheduleNextSequencerChange(newSequencer, seqBlock);
 
-        // After system address rotation only
+        // After system address change only
         vm.roll(sysBlock);
         registry.applyPendingChanges();
         assertEq(registry.currentSystemAddress(), newSystemAddress);
         assertEq(registry.currentSequencer(), INITIAL_SEQUENCER);
 
-        // After sequencer rotation
+        // After sequencer change
         vm.roll(seqBlock);
         registry.applyPendingChanges();
         assertEq(registry.currentSystemAddress(), newSystemAddress);

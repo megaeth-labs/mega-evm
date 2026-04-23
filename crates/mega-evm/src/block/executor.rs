@@ -8,8 +8,8 @@ pub use alloy_evm::block::CommitChanges;
 use alloy_evm::{
     block::{
         state_changes::post_block_balance_increments, BlockExecutionError, BlockExecutionResult,
-        ExecutableTx, OnStateHook, StateChangePostBlockSource, StateChangePreBlockSource,
-        StateChangeSource, SystemCaller,
+        BlockValidationError, ExecutableTx, OnStateHook, StateChangePostBlockSource,
+        StateChangePreBlockSource, StateChangeSource, SystemCaller,
     },
     eth::receipt_builder::ReceiptBuilderCtx,
     Database, Evm as _, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv, RecoveredTx,
@@ -273,32 +273,48 @@ where
                 .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
         }
 
-        // Rex5 hardfork: SequencerRegistry (seeds system address, sequencer, admin, and
-        // initialFromBlock into storage on first deploy)
+        // Rex5 hardfork: deploy SequencerRegistry (first block only) and apply pending
+        // role changes if any are due.
         let block_timestamp: u64 = self.evm.block().timestamp.saturating_to();
         let block_number = self.evm.block().number.to::<u64>();
-        let result_and_state = transact_deploy_sequencer_registry(
-            &self.hardforks,
-            block_timestamp,
-            block_number,
-            self.evm.db_mut(),
-            &self.hardforks.sequencer_registry_config(),
-        )?;
-        if let Some(state) = result_and_state {
-            outcomes
-                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
-        }
+        if self.hardforks.is_rex_5_active_at_timestamp(block_timestamp) {
+            // Deploy: seeds system address, sequencer, admin, and initialFromBlock
+            // into storage on first deploy.
+            let params = self
+                .hardforks
+                .fork_params::<crate::SequencerRegistryConfig>()
+                .ok_or_else(|| BlockValidationError::BlockHashContractCall {
+                    message: "Rex5 active but SequencerRegistryConfig not configured".into(),
+                })?;
+            let result_and_state = transact_deploy_sequencer_registry(
+                &self.hardforks,
+                block_timestamp,
+                block_number,
+                self.evm.db_mut(),
+                params,
+            )?;
+            if let Some(state) = result_and_state {
+                outcomes.push(MegaSystemCallOutcome {
+                    source: StateChangeSource::Transaction(0),
+                    state,
+                });
+            }
 
-        // Rex5 hardfork: apply pending role rotations if any are due.
-        // NOTE: This pre-check reads from the DB *before* the deploy outcome is committed.
-        // On the bootstrap block, the registry account does not yet exist in the DB,
-        // so is_apply_pending_changes_due returns false. This is correct because the
-        // deploy does not seed any pending slots.
-        if self.hardforks.is_rex_5_active_at_timestamp(block_timestamp) &&
-            is_apply_pending_changes_due(self.evm.db_mut(), block_number)?
-        {
-            let result_and_state = transact_apply_pending_changes(&mut self.evm)?;
-            if let Some(ExecResultAndState { state, .. }) = result_and_state {
+            // Apply pending role changes if any are due.
+            // NOTE: The pre-check reads from the DB *before* the deploy outcome is committed.
+            // On the bootstrap block, the registry account does not yet exist in the DB,
+            // so the pre-check returns false. This is correct because deploy does not seed
+            // any pending slots.
+            let (due, witness_state) =
+                is_apply_pending_changes_due(self.evm.db_mut(), block_number)?;
+            // Always push the witness state (read-only account + slot records).
+            outcomes.push(MegaSystemCallOutcome {
+                source: StateChangeSource::Transaction(0),
+                state: witness_state,
+            });
+            if due {
+                let ExecResultAndState { state, .. } =
+                    transact_apply_pending_changes(&mut self.evm)?;
                 outcomes.push(MegaSystemCallOutcome {
                     source: StateChangeSource::Transaction(0),
                     state,
@@ -557,8 +573,14 @@ where
 
         // After all pre-block outcomes are committed, resolve the system address for this block.
         // This reads _currentSystemAddress from the now-committed SequencerRegistry storage.
+        // The returned EvmState captures the read as a witness record.
         let spec = self.evm.ctx().mega_spec();
-        let system_address = resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;
+        let (system_address, read_state) =
+            resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;
+        if let Some(state) = read_state {
+            self.system_caller.on_state(StateChangeSource::Transaction(0), &state);
+            self.evm.db_mut().commit(state);
+        }
         self.evm.ctx_mut().set_system_address(system_address);
 
         Ok(())
