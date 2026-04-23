@@ -40,6 +40,7 @@ use super::error::KeylessDeployError;
 ///
 /// # Validation
 /// - The RLP encoding must be valid
+/// - The input must not contain trailing bytes after the RLP transaction
 /// - The `to` field must be empty (contract creation)
 /// - The `v` value must be 27 or 28 (pre-EIP-155)
 ///
@@ -50,6 +51,13 @@ pub fn decode_keyless_tx(rlp_bytes: &[u8]) -> Result<Signed<TxLegacy>, KeylessDe
     let mut buf = rlp_bytes;
     let signed =
         TxLegacy::rlp_decode_signed(&mut buf).map_err(|_| KeylessDeployError::MalformedEncoding)?;
+
+    // Reject trailing bytes: the raw input is reused as `enveloped_tx` for L1 data-fee
+    // accounting, so any bytes past the signed RLP payload would otherwise be silently
+    // charged without being part of the signed transaction.
+    if !buf.is_empty() {
+        return Err(KeylessDeployError::MalformedEncoding);
+    }
 
     if !signed.tx().to.is_create() {
         return Err(KeylessDeployError::NotContractCreation);
@@ -247,6 +255,24 @@ pub mod tests {
         // Truncate the CREATE2 factory tx
         let truncated = &CREATE2_FACTORY_TX[..CREATE2_FACTORY_TX.len() - 10];
         let result = decode_keyless_tx(truncated);
+        assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
+    }
+
+    #[test]
+    fn test_decode_rejects_trailing_bytes() {
+        // A valid pre-EIP-155 CREATE transaction followed by arbitrary trailing bytes
+        // must be rejected: the trailing bytes are not part of the signed payload but
+        // would otherwise be reused verbatim as `sandbox_tx.enveloped_tx`, affecting
+        // L1 data-fee accounting.
+        let mut with_trailing = CREATE2_FACTORY_TX.to_vec();
+        with_trailing.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let result = decode_keyless_tx(&with_trailing);
+        assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
+
+        // A single trailing byte must also be rejected.
+        let mut with_one_trailing = CREATE2_FACTORY_TX.to_vec();
+        with_one_trailing.push(0x00);
+        let result = decode_keyless_tx(&with_one_trailing);
         assert_eq!(result, Err(KeylessDeployError::MalformedEncoding));
     }
 }
