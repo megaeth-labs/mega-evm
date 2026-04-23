@@ -325,13 +325,10 @@ impl FrameLimitTracker<CallFrameInfo> {
     /// charges the parent account (avoiding undercounting after a revert-then-retry pattern).
     /// Pre-Rex5 child frames have `charged_parent_update = false`, so this method behaves
     /// identically to `pop_frame` for older specs.
-    pub(crate) fn pop_frame_unwind_parent(
-        &mut self,
-        success: bool,
-    ) -> Option<FrameLimitEntry<CallFrameInfo>> {
+    pub(crate) fn pop_frame_unwind_parent(&mut self, success: bool) {
         let child = self.pop_frame(success);
         if !success {
-            if let Some(child_entry) = &child {
+            if let Some(child_entry) = child {
                 if child_entry.info.charged_parent_update {
                     // charged_parent_update=true implies a parent frame exists
                     // (the flag is only set when frame_mut() returned Some).
@@ -342,7 +339,6 @@ impl FrameLimitTracker<CallFrameInfo> {
                 }
             }
         }
-        child
     }
 }
 
