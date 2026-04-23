@@ -70,7 +70,7 @@ The `keylessDeploymentTransaction` argument MUST decode as a signed pre-EIP-155 
 The following conditions MUST hold:
 
 - the transaction encoding is valid RLP for `TxLegacy`,
-- the encoding contains no trailing bytes after the signed RLP payload,
+- (Rex5+) the encoding contains no trailing bytes after the signed RLP payload,
 - the transaction is a contract creation (`to = null`),
 - the transaction has no chain ID,
 - the transaction nonce is exactly `0`.
