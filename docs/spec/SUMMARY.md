@@ -23,6 +23,7 @@
 - [Keyless Deployment](system-contracts/keyless-deploy.md)
 - [MegaAccessControl](system-contracts/mega-access-control.md)
 - [MegaLimitControl](system-contracts/mega-limit-control.md)
+- [SequencerRegistry](system-contracts/sequencer-registry.md)
 - [Call Interception](system-contracts/interception.md)
 - [Mega System Transactions](system-contracts/system-tx.md)
 

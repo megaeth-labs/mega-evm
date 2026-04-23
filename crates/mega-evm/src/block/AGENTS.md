@@ -19,6 +19,7 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - System contract deployments are idempotent state patches and are hardfork-gated.
 - Executor constructor asserts hardfork/spec coherence for non-test builds.
 - Block limiter state is cumulative and must be updated only on committed outcomes.
+- `pre_execution_changes` collects `Option<EvmState>` outcomes from each helper into a vector; `commit_system_call_outcomes` walks them and calls `system_caller.on_state(source, &state)` **before** `db.commit(state)` for every entry. The `on_state` hook feeds the stateless witness generator with the complete read/write set. Helpers must therefore return all accounts and slots they touched (including reads). See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
 
 ## ANTI-PATTERNS
 - Do not apply post-execution limit counters before a tx outcome is commit-eligible.
@@ -26,6 +27,7 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - Do not infer spec from tx fields.
 - Always derive spec from hardfork activation at block timestamp.
 - Do not hardcode gas-limit assumptions outside `BlockLimits` plumbing.
+- Do not commit outcomes without first firing `on_state`. The two-step `on_state` → `commit` ordering is the witness-recorder contract; swapping or skipping it corrupts stateless proofs.
 
 ## WHERE TO LOOK
 - Add a new hardfork activation condition: `hardfork.rs` and `MegaHardforkConfig` wiring.

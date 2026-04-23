@@ -550,14 +550,18 @@ where
     /// Deploys system contracts based on the given spec.
     pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
         use mega_evm::{
-            MegaSpecId, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+            MegaSpecId, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+            HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
+            KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
             ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_REX2,
+            ORACLE_CONTRACT_CODE_REX5, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
         };
 
-        // MiniRex+: Oracle Contract (v1.0.0 or v1.1.0 based on Rex2)
+        // MiniRex+: Oracle Contract (v1.0.0, v1.1.0, or v2.0.0 based on hardfork)
         if spec >= MegaSpecId::MINI_REX {
-            let code = if spec >= MegaSpecId::REX2 {
+            let code = if spec >= MegaSpecId::REX5 {
+                ORACLE_CONTRACT_CODE_REX5
+            } else if spec >= MegaSpecId::REX2 {
                 ORACLE_CONTRACT_CODE_REX2
             } else {
                 ORACLE_CONTRACT_CODE
@@ -576,6 +580,24 @@ where
         // Rex2+: Keyless Deploy Contract
         if spec >= MegaSpecId::REX2 {
             self.set_account_code(KEYLESS_DEPLOY_ADDRESS, Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
+        }
+
+        // Rex4+: Access Control Contract
+        if spec >= MegaSpecId::REX4 {
+            self.set_account_code(ACCESS_CONTROL_ADDRESS, Bytecode::new_raw(ACCESS_CONTROL_CODE));
+        }
+
+        // Rex4+: Limit Control Contract
+        if spec >= MegaSpecId::REX4 {
+            self.set_account_code(LIMIT_CONTROL_ADDRESS, Bytecode::new_raw(LIMIT_CONTROL_CODE));
+        }
+
+        // Rex5+: SequencerRegistry Contract
+        if spec >= MegaSpecId::REX5 {
+            self.set_account_code(
+                SEQUENCER_REGISTRY_ADDRESS,
+                Bytecode::new_raw(SEQUENCER_REGISTRY_CODE),
+            );
         }
     }
 }

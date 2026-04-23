@@ -26,6 +26,14 @@ pub use mega_system_contracts::oracle::V1_1_0_CODE as ORACLE_CONTRACT_CODE_REX2;
 /// The code hash of the oracle contract (version 1.1.0, Rex2+).
 pub use mega_system_contracts::oracle::V1_1_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH_REX2;
 
+/// The code of the oracle contract (version 2.0.0, Rex5+).
+/// This version reads the authorized system address from `SequencerRegistry` instead of
+/// using a constructor `immutable`, enabling system address change without redeployment.
+pub use mega_system_contracts::oracle::V2_0_0_CODE as ORACLE_CONTRACT_CODE_REX5;
+
+/// The code hash of the oracle contract (version 2.0.0, Rex5+).
+pub use mega_system_contracts::oracle::V2_0_0_CODE_HASH as ORACLE_CONTRACT_CODE_HASH_REX5;
+
 pub use mega_system_contracts::oracle::IOracle;
 
 /// Ensures the oracle contract is deployed in the designated address and returns the state changes.
@@ -44,9 +52,14 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
         return Ok(None);
     }
 
-    // Select the appropriate bytecode based on hardfork
-    let (target_code, target_code_hash) = if hardforks.is_rex_2_active_at_timestamp(block_timestamp)
+    // Select the appropriate bytecode based on hardfork.
+    // - Pre-Rex2: v1.0.0 (without `sendHint`)
+    // - Rex2-Rex4: v1.1.0 (with `sendHint`)
+    // - Rex5+: v2.0.0 (reads system address from SequencerRegistry)
+    let (target_code, target_code_hash) = if hardforks.is_rex_5_active_at_timestamp(block_timestamp)
     {
+        (ORACLE_CONTRACT_CODE_REX5, ORACLE_CONTRACT_CODE_HASH_REX5)
+    } else if hardforks.is_rex_2_active_at_timestamp(block_timestamp) {
         (ORACLE_CONTRACT_CODE_REX2, ORACLE_CONTRACT_CODE_HASH_REX2)
     } else {
         (ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH)
@@ -169,7 +182,7 @@ mod tests {
         // Create a fresh in-memory database
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        // with_all_activated() includes Rex2, so we expect Rex2 bytecode
+        // with_all_activated() includes Rex5, so we expect Rex5 (v2.0.0) bytecode
         let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy the oracle contract
@@ -189,38 +202,38 @@ mod tests {
         assert!(account.is_touched(), "Account should be marked as touched");
         assert!(account.is_created(), "Account should be marked as created");
 
-        // Verify the account info (Rex2 bytecode)
+        // Verify the account info (Rex5 = v2.0.0 bytecode)
         let info = &account.info;
         assert_eq!(
-            info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
-            "Code hash should match the expected value"
+            info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
+            "Code hash should match the v2.0.0 value"
         );
         assert!(info.code.is_some(), "Code should be set");
 
         let code = info.code.as_ref().unwrap();
         assert_eq!(
             code.original_bytes(),
-            ORACLE_CONTRACT_CODE_REX2,
-            "Code bytes should match the expected value"
+            ORACLE_CONTRACT_CODE_REX5,
+            "Code bytes should match the v2.0.0 value"
         );
     }
 
     #[test]
     fn test_deploy_oracle_contract_idempotent() {
-        // Create a database with the oracle contract already deployed correctly (Rex2 bytecode)
+        // Create a database with the oracle contract already deployed correctly (Rex5 = v2.0.0)
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             ORACLE_CONTRACT_ADDRESS,
             AccountInfo {
                 balance: revm::primitives::U256::ZERO,
                 nonce: 0,
-                code_hash: ORACLE_CONTRACT_CODE_HASH_REX2,
-                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX2)),
+                code_hash: ORACLE_CONTRACT_CODE_HASH_REX5,
+                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX5)),
             },
         );
 
         let mut state = State::builder().with_database(&mut db).build();
-        // with_all_activated() includes Rex2
+        // with_all_activated() includes Rex5
         let hardforks = MegaHardforkConfig::default().with_all_activated();
 
         // Deploy should return state with the account marked as read (no update needed)
@@ -236,8 +249,8 @@ mod tests {
         // Verify the account is in the result
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
         assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
-            "Code hash should match Rex2 bytecode"
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
+            "Code hash should match v2.0.0 bytecode"
         );
     }
 
@@ -264,7 +277,7 @@ mod tests {
         // with_all_activated() includes Rex2
         let hardforks = MegaHardforkConfig::default().with_all_activated();
 
-        // Deploy should update the contract with correct code (Rex2 bytecode)
+        // Deploy should update the contract with correct code (Rex5 = v2.0.0 bytecode)
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
             .expect("Should return state");
@@ -275,8 +288,8 @@ mod tests {
         // Verify the updated account has the correct code hash
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
         assert_eq!(
-            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
-            "Code hash should be updated to Rex2 bytecode"
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
+            "Code hash should be updated to v2.0.0 bytecode"
         );
     }
 
@@ -305,19 +318,18 @@ mod tests {
 
     #[test]
     fn test_deploy_oracle_contract_pre_rex2() {
-        // Create a fresh in-memory database
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        // Activate all hardforks except Rex2
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex2);
+        // Activate MiniRex only (pre-Rex2, pre-Rex5)
+        let hardforks = MegaHardforkConfig::default()
+            .with_all_activated()
+            .without(MegaHardfork::Rex2)
+            .without(MegaHardfork::Rex5);
 
-        // Deploy the oracle contract
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
             .expect("Should return state");
 
-        // Verify that the v1.0.0 (pre-Rex2) bytecode is deployed
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
         assert_eq!(
             account.info.code_hash, ORACLE_CONTRACT_CODE_HASH,
@@ -327,28 +339,43 @@ mod tests {
 
     #[test]
     fn test_deploy_oracle_contract_rex2() {
-        // Create a fresh in-memory database
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        // Activate all hardforks including Rex2
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
+        // Activate Rex2 but not Rex5
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex5);
 
-        // Deploy the oracle contract
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
             .expect("Should return state");
 
-        // Verify that the v1.1.0 (Rex2) bytecode is deployed
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
         assert_eq!(
             account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
-            "Should deploy v1.1.0 bytecode on Rex2"
+            "Should deploy v1.1.0 bytecode on Rex2 (pre-Rex5)"
+        );
+    }
+
+    #[test]
+    fn test_deploy_oracle_contract_rex5() {
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+        // Activate all including Rex5
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
+            "Should deploy v2.0.0 bytecode on Rex5"
         );
     }
 
     #[test]
     fn test_deploy_oracle_contract_upgrade_to_rex2() {
-        // Create a database with the pre-Rex2 oracle contract already deployed
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             ORACLE_CONTRACT_ADDRESS,
@@ -361,19 +388,47 @@ mod tests {
         );
 
         let mut state = State::builder().with_database(&mut db).build();
-        // Activate all hardforks including Rex2
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
+        // Rex2 active, Rex5 not active
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex5);
 
-        // Deploy should upgrade the contract to Rex2 bytecode
         let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
             .expect("Deployment should succeed")
             .expect("Should return state");
 
-        // Verify that the contract was upgraded to v1.1.0
         let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
         assert_eq!(
             account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2,
             "Should upgrade to v1.1.0 bytecode on Rex2 activation"
+        );
+        assert!(account.is_touched(), "Account should be marked as touched");
+        assert!(account.is_created(), "Account should be marked as created");
+    }
+
+    #[test]
+    fn test_deploy_oracle_contract_upgrade_to_rex5() {
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            ORACLE_CONTRACT_ADDRESS,
+            AccountInfo {
+                balance: revm::primitives::U256::ZERO,
+                nonce: 0,
+                code_hash: ORACLE_CONTRACT_CODE_HASH_REX2,
+                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX2)),
+            },
+        );
+
+        let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(
+            account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5,
+            "Should upgrade to v2.0.0 bytecode on Rex5 activation"
         );
         assert!(account.is_touched(), "Account should be marked as touched");
         assert!(account.is_created(), "Account should be marked as created");
