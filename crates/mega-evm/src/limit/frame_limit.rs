@@ -394,21 +394,10 @@ mod tests {
 
     const ADDR: Address = address!("0000000000000000000000000000000000001234");
 
-    fn tracker(rex4: bool, rex5: bool) -> FrameLimitTracker<CallFrameInfo> {
-        let spec = if rex5 {
-            MegaSpecId::REX5
-        } else if rex4 {
-            MegaSpecId::REX4
-        } else {
-            MegaSpecId::EQUIVALENCE
-        };
-        FrameLimitTracker::new(spec, u64::MAX)
-    }
-
     /// `set_created_address` on an empty frame stack must be a no-op.
     #[test]
     fn test_set_created_address_empty_stack_is_noop() {
-        let mut t = tracker(false, false);
+        let mut t = FrameLimitTracker::<CallFrameInfo>::new(MegaSpecId::EQUIVALENCE, u64::MAX);
         // No frame on the stack — should not panic, just do nothing.
         t.set_created_address(ADDR);
     }
@@ -418,7 +407,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "created account already recorded")]
     fn test_set_created_address_duplicate_panics() {
-        let mut t = tracker(false, false);
+        let mut t = FrameLimitTracker::<CallFrameInfo>::new(MegaSpecId::EQUIVALENCE, u64::MAX);
         t.push_create_frame();
         t.set_created_address(ADDR);
         t.set_created_address(ADDR); // second call must panic
