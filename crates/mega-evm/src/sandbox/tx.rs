@@ -11,6 +11,7 @@
 //!
 //! Structural validation of the transaction format:
 //! - Valid RLP encoding of a legacy transaction
+//! - No trailing bytes after the RLP payload (rejected as `MalformedEncoding`)
 //! - EIP-2718 typed envelopes (0x01, 0x02, etc.) rejected as `MalformedEncoding`
 //! - `to` field must be empty (contract creation)
 //! - `v` must be 27 or 28 (pre-EIP-155, no chain ID)
