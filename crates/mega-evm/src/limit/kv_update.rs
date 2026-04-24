@@ -134,7 +134,7 @@ impl TxRuntimeLimit for KVUpdateTracker {
 
     #[inline]
     fn push_empty_frame(&mut self) {
-        self.frame_tracker.push_intercept_frame();
+        self.frame_tracker.push_dummy_frame();
     }
 
     /// Hook called before a new execution frame is initialized.

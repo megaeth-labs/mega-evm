@@ -245,7 +245,7 @@ impl FrameLimitTracker<CallFrameInfo> {
     /// state-modifying account update is recorded, so the parent does not need to be marked.
     /// The frame exists only to keep the per-tracker frame stack aligned with the EVM's call
     /// stack so that the matching `pop_frame_unwind_parent` finds an entry to pop.
-    pub(crate) fn push_intercept_frame(&mut self) {
+    pub(crate) fn push_dummy_frame(&mut self) {
         self.push_call_frame_info(CallFrameInfo::default());
     }
 
