@@ -45,7 +45,7 @@ impl ComputeGasTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             detained_limit: tx_limit,
-            frame_tracker: FrameLimitTracker::new(tx_limit),
+            frame_tracker: FrameLimitTracker::new(spec, tx_limit),
             rex1_enabled: spec.is_enabled(MegaSpecId::REX1),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
         }

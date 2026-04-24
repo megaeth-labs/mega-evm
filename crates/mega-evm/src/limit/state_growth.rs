@@ -103,7 +103,7 @@ pub(crate) struct StateGrowthTracker {
 
 impl StateGrowthTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
-        Self { spec, frame_tracker: FrameLimitTracker::new(tx_limit) }
+        Self { spec, frame_tracker: FrameLimitTracker::new(spec, tx_limit) }
     }
 
     /// Pushes a new frame onto the tracker.
