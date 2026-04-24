@@ -139,8 +139,11 @@ fn create_pre_eip155_deploy_tx(init_code: Bytes) -> (Bytes, Address) {
 
 /// Calculate the deployed contract address for a keyless deploy transaction.
 fn calculate_deploy_address_for_tx(tx_bytes: &[u8]) -> Address {
-    use mega_evm::sandbox::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer};
-    let signed = decode_keyless_tx(tx_bytes).expect("should decode tx");
+    use mega_evm::{
+        sandbox::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer},
+        MegaSpecId,
+    };
+    let signed = decode_keyless_tx(tx_bytes, MegaSpecId::REX2).expect("should decode tx");
     let signer = recover_signer(&signed).expect("should recover signer");
     calculate_keyless_deploy_address(signer)
 }
