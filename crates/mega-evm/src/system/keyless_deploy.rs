@@ -70,14 +70,19 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
     }
 
     // Update the account info with the contract code
+    let account_existed = acc.account_info().is_some();
     let mut acc_info = acc.account_info().unwrap_or_default();
     acc_info.code_hash = KEYLESS_DEPLOY_CODE_HASH;
     acc_info.code = Some(Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
 
     // Convert the cache account back into a revm account and mark it as touched.
+    // Only mark it as created when the account did not previously exist; an in-place
+    // bytecode upgrade of an existing account must not clear its storage.
     let mut revm_acc: revm::state::Account = acc_info.into();
     revm_acc.mark_touch();
-    revm_acc.mark_created();
+    if !account_existed {
+        revm_acc.mark_created();
+    }
 
     Ok(Some(EvmState::from_iter([(KEYLESS_DEPLOY_ADDRESS, revm_acc)])))
 }
