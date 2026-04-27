@@ -69,25 +69,31 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
     let acc = db.load_cache_account(ORACLE_CONTRACT_ADDRESS)?;
 
     // If the contract is already deployed with the correct code, return early
-    if let Some(account_info) = acc.account_info() {
+    let existing_info = acc.account_info();
+    if let Some(account_info) = &existing_info {
         if account_info.code_hash == target_code_hash {
             // Although we do not need to update the account, we need to mark it as read
             return Ok(Some(EvmState::from_iter([(
                 ORACLE_CONTRACT_ADDRESS,
-                Account { info: account_info, ..Default::default() },
+                Account { info: account_info.clone(), ..Default::default() },
             )])));
         }
     }
 
     // Update the account info with the contract code
-    let mut acc_info = acc.account_info().unwrap_or_default();
+    let account_existed = existing_info.is_some();
+    let mut acc_info = existing_info.unwrap_or_default();
     acc_info.code_hash = target_code_hash;
     acc_info.code = Some(Bytecode::new_raw(target_code));
 
     // Convert the cache account back into a revm account and mark it as touched.
+    // Only mark it as created when the account did not previously exist; an in-place
+    // bytecode upgrade of an existing account must not clear its storage.
     let mut revm_acc: revm::state::Account = acc_info.into();
     revm_acc.mark_touch();
-    revm_acc.mark_created();
+    if !account_existed {
+        revm_acc.mark_created();
+    }
 
     Ok(Some(EvmState::from_iter([(ORACLE_CONTRACT_ADDRESS, revm_acc)])))
 }
@@ -120,25 +126,31 @@ pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
     let acc = db.load_cache_account(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS)?;
 
     // If the contract is already deployed, return early
-    if let Some(account_info) = acc.account_info() {
+    let existing_info = acc.account_info();
+    if let Some(account_info) = &existing_info {
         if account_info.code_hash == HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH {
             // Although we do not need to update the account, we need to mark it as read
             return Ok(Some(EvmState::from_iter([(
                 HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-                Account { info: account_info, ..Default::default() },
+                Account { info: account_info.clone(), ..Default::default() },
             )])));
         }
     }
 
     // Update the account info with the contract code
-    let mut acc_info = acc.account_info().unwrap_or_default();
+    let account_existed = existing_info.is_some();
+    let mut acc_info = existing_info.unwrap_or_default();
     acc_info.code_hash = HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH;
     acc_info.code = Some(Bytecode::new_raw(HIGH_PRECISION_TIMESTAMP_ORACLE_CODE));
 
     // Convert the cache account back into a revm account and mark it as touched.
+    // Only mark it as created when the account did not previously exist; an in-place
+    // bytecode upgrade of an existing account must not clear its storage.
     let mut revm_acc: revm::state::Account = acc_info.into();
     revm_acc.mark_touch();
-    revm_acc.mark_created();
+    if !account_existed {
+        revm_acc.mark_created();
+    }
 
     Ok(Some(EvmState::from_iter([(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, revm_acc)])))
 }
@@ -402,7 +414,10 @@ mod tests {
             "Should upgrade to v1.1.0 bytecode on Rex2 activation"
         );
         assert!(account.is_touched(), "Account should be marked as touched");
-        assert!(account.is_created(), "Account should be marked as created");
+        assert!(
+            !account.is_created(),
+            "In-place bytecode upgrade must not mark the existing account as created, otherwise existing storage gets cleared on commit"
+        );
     }
 
     #[test]
@@ -431,7 +446,10 @@ mod tests {
             "Should upgrade to v2.0.0 bytecode on Rex5 activation"
         );
         assert!(account.is_touched(), "Account should be marked as touched");
-        assert!(account.is_created(), "Account should be marked as created");
+        assert!(
+            !account.is_created(),
+            "In-place bytecode upgrade must not mark the existing account as created, otherwise existing storage gets cleared on commit"
+        );
     }
 
     #[test]
@@ -481,5 +499,90 @@ mod tests {
             computed_hash, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
             "Code hash constant should match computed hash"
         );
+    }
+
+    /// Regression: upgrading the Oracle bytecode from v1.0.0 (pre-Rex2) to v1.1.0 (Rex2)
+    /// must not clear existing Oracle storage.
+    #[test]
+    fn test_oracle_storage_survives_pre_rex2_to_rex2_upgrade() {
+        let stored_slot = revm::primitives::U256::from(42);
+        let stored_value = revm::primitives::U256::from(0xdeadbeefu64);
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            ORACLE_CONTRACT_ADDRESS,
+            AccountInfo {
+                balance: revm::primitives::U256::ZERO,
+                nonce: 0,
+                code_hash: ORACLE_CONTRACT_CODE_HASH,
+                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE)),
+            },
+        );
+        db.insert_account_storage(ORACLE_CONTRACT_ADDRESS, stored_slot, stored_value)
+            .expect("Should insert storage slot");
+
+        let mut state = State::builder().with_database(&mut db).build();
+        // Rex2 active, Rex5 not active → upgrade target is v1.1.0.
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex5);
+
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        // Sanity check: this is an upgrade, not a fresh deploy.
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX2);
+        assert!(account.is_touched());
+        assert!(!account.is_created(), "upgrade must not mark account as created");
+
+        // Commit the upgrade and verify the pre-existing storage slot still resolves to its
+        // original value rather than being cleared back to zero.
+        revm::DatabaseCommit::commit(&mut state, result);
+
+        let read_back = revm::Database::storage(&mut state, ORACLE_CONTRACT_ADDRESS, stored_slot)
+            .expect("Storage read should succeed");
+        assert_eq!(read_back, stored_value, "Oracle storage must survive bytecode upgrade");
+    }
+
+    /// Regression: upgrading the Oracle bytecode from v1.1.0 (Rex2) to v2.0.0 (Rex5)
+    /// must not clear existing Oracle storage.
+    #[test]
+    fn test_oracle_storage_survives_rex2_to_rex5_upgrade() {
+        let stored_slot = revm::primitives::U256::from(7);
+        let stored_value = revm::primitives::U256::from(0xcafebabeu64);
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            ORACLE_CONTRACT_ADDRESS,
+            AccountInfo {
+                balance: revm::primitives::U256::ZERO,
+                nonce: 0,
+                code_hash: ORACLE_CONTRACT_CODE_HASH_REX2,
+                code: Some(Bytecode::new_raw(ORACLE_CONTRACT_CODE_REX2)),
+            },
+        );
+        db.insert_account_storage(ORACLE_CONTRACT_ADDRESS, stored_slot, stored_value)
+            .expect("Should insert storage slot");
+
+        let mut state = State::builder().with_database(&mut db).build();
+        // Rex5 active → upgrade target is v2.0.0.
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        let result = transact_deploy_oracle_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        // Sanity check: this is an upgrade, not a fresh deploy.
+        let account = result.get(&ORACLE_CONTRACT_ADDRESS).expect("Account should exist");
+        assert_eq!(account.info.code_hash, ORACLE_CONTRACT_CODE_HASH_REX5);
+        assert!(account.is_touched());
+        assert!(!account.is_created(), "upgrade must not mark account as created");
+
+        revm::DatabaseCommit::commit(&mut state, result);
+
+        let read_back = revm::Database::storage(&mut state, ORACLE_CONTRACT_ADDRESS, stored_slot)
+            .expect("Storage read should succeed");
+        assert_eq!(read_back, stored_value, "Oracle storage must survive bytecode upgrade");
     }
 }
