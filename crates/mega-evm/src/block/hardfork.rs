@@ -490,6 +490,41 @@ mod tests {
     }
 
     #[test]
+    fn test_default_validate_accepts_any_value() {
+        #[derive(Debug)]
+        struct NullParams;
+
+        impl HardforkParams for NullParams {
+            const FORK: MegaHardfork = MegaHardfork::Rex4;
+        }
+
+        assert!(NullParams.validate().is_ok());
+    }
+
+    #[test]
+    fn test_hardfork_params_error_display() {
+        let e = HardforkParamsError { message: "something went wrong".into() };
+        assert_eq!(e.to_string(), "something went wrong");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid params for fork")]
+    fn test_with_params_panics_on_validation_error() {
+        #[derive(Debug)]
+        struct AlwaysErrParams;
+
+        impl HardforkParams for AlwaysErrParams {
+            const FORK: MegaHardfork = MegaHardfork::Rex4;
+
+            fn validate(&self) -> Result<(), HardforkParamsError> {
+                Err(HardforkParamsError { message: "intentional test error".into() })
+            }
+        }
+
+        MegaHardforkConfig::default().with_all_activated().with_params(AlwaysErrParams);
+    }
+
+    #[test]
     fn test_hardfork_and_spec_id_follow_latest_active_timestamp() {
         let config = MegaHardforkConfig::default()
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(100))
