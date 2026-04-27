@@ -738,6 +738,7 @@ impl BlockLimiter {
     /// - `gas_limit`: Transaction's declared gas limit
     /// - `tx_size`: Transaction's encoded size in bytes (EIP-2718 encoding)
     /// - `da_size`: Transaction's compressed data availability size in bytes
+    /// - `is_deposit`: Whether the transaction is an L1-to-L2 deposit (exempt from DA size limits)
     ///
     /// # Returns
     ///
@@ -762,6 +763,7 @@ impl BlockLimiter {
     ///     tx.gas_limit(),
     ///     tx.encode_2718_len() as u64,
     ///     tx.estimated_da_size(),
+    ///     tx.is_deposit(),
     /// )?;
     /// ```
     pub fn pre_execution_check(
