@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn test_callcode_scheme_guard_skips_interception() {
         let code = BytecodeBuilder::default()
-            .mstore(0x0, &REMAINING_COMPUTE_GAS_SELECTOR)
+            .mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR)
             // CALLCODE(gas, addr, value, argsOffset, argsSize, retOffset, retSize)
             .push_number(0_u64) // retSize
             .push_number(0_u64) // retOffset
