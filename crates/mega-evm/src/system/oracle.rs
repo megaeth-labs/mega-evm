@@ -585,4 +585,40 @@ mod tests {
             .expect("Storage read should succeed");
         assert_eq!(read_back, stored_value, "Oracle storage must survive bytecode upgrade");
     }
+
+    /// Covers the `account_existed = true` branch in
+    /// `transact_deploy_high_precision_timestamp_oracle`: when the account already exists with
+    /// wrong code, the deploy updates the code without marking the account as created.
+    #[test]
+    fn test_high_precision_timestamp_oracle_existing_account_not_marked_created() {
+        let wrong_code = alloy_primitives::bytes!("0x6000");
+        let wrong_code_hash = alloy_primitives::keccak256(&wrong_code);
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+            AccountInfo {
+                balance: revm::primitives::U256::ZERO,
+                nonce: 0,
+                code_hash: wrong_code_hash,
+                code: Some(Bytecode::new_raw(wrong_code)),
+            },
+        );
+
+        let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        let result = transact_deploy_high_precision_timestamp_oracle(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        let account =
+            result.get(&HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS).expect("Account should exist");
+        assert_eq!(account.info.code_hash, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH);
+        assert!(account.is_touched());
+        assert!(
+            !account.is_created(),
+            "existing account must not be marked as created on code update"
+        );
+    }
 }
