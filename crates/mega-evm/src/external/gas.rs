@@ -53,7 +53,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::SSTORE_SET_STORAGE_GAS_BASE.saturating_mul(multiplier.saturating_sub(1))
+            constants::rex::SSTORE_SET_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
         } else {
             constants::mini_rex::SSTORE_SET_STORAGE_GAS.saturating_mul(multiplier)
         };
@@ -69,8 +69,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE
-                .saturating_mul(multiplier.saturating_sub(1))
+            constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
         } else {
             constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(multiplier)
         };
@@ -86,8 +85,7 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE
-                .saturating_mul(multiplier.saturating_sub(1))
+            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
         } else {
             constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(multiplier)
         };
@@ -104,6 +102,11 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
             Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
             Entry::Vacant(vacant_entry) => {
                 let capacity = self.salt_env.get_bucket_capacity(bucket_id)?;
+                assert!(
+                    capacity >= MIN_BUCKET_SIZE as u64,
+                    "SaltEnv returned bucket_capacity={capacity} below MIN_BUCKET_SIZE ({})",
+                    MIN_BUCKET_SIZE,
+                );
                 let multiplier = capacity / MIN_BUCKET_SIZE as u64;
                 vacant_entry.insert(multiplier);
                 Ok(multiplier)
@@ -169,17 +172,5 @@ mod tests {
         let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
         let gas = cost.create_contract_gas(Address::ZERO).unwrap();
         assert_eq!(gas, u64::MAX);
-    }
-
-    /// A bucket capacity below `MIN_BUCKET_SIZE` produces `multiplier == 0`. The REX path
-    /// computes `multiplier - 1`, which would panic on debug builds and underflow on release;
-    /// `saturating_sub` clamps it to zero so the resulting gas cost is zero.
-    #[test]
-    fn test_rex_paths_handle_zero_multiplier() {
-        let mut cost = cost_with_capacity(MegaSpecId::REX, 0);
-
-        assert_eq!(cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap(), 0);
-        assert_eq!(cost.new_account_gas(Address::ZERO).unwrap(), 0);
-        assert_eq!(cost.create_contract_gas(Address::ZERO).unwrap(), 0);
     }
 }
