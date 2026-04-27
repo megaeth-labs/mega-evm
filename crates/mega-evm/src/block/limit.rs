@@ -652,24 +652,12 @@ impl BlockLimits {
 ///
 /// for tx in transactions {
 ///     // Pre-execution check
-///     limiter.pre_execution_check(
-///         tx.hash(),
-///         tx.gas_limit(),
-///         tx.size(),
-///         tx.da_size(),
-///     )?;
+///     limiter.pre_execution_check(tx.hash(), tx.gas_limit(), tx.size(), tx.da_size(), is_deposit)?;
 ///
-///     let result = execute_transaction(tx);
+///     let outcome = execute_transaction(tx);
 ///
 ///     // Post-execution update
-///     limiter.post_execution_update(
-///         tx.hash(),
-///         result.gas_used,
-///         tx.size(),
-///         tx.da_size(),
-///         result.data_size,
-///         result.kv_updates,
-///     )?;
+///     limiter.post_execution_update(&outcome)?;
 /// }
 /// ```
 #[derive(Debug, Clone)]
