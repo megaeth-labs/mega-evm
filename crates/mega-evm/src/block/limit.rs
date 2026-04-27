@@ -124,8 +124,10 @@
 //!    - During execution, tx-level limits (4-6) are enforced in EVM
 //!    - If exceeded → Transaction fails but continues to step 3
 //!
-//! 3. **Post-execution check** - [`BlockLimiter::post_execution_check`]
-//!    - If block-level violation → Discard outcome, skip, try next transaction
+//! 3. **Post-execution update** - [`BlockLimiter::post_execution_update`]
+//!    - Accumulates resource usage from the executed transaction into block-level counters
+//!    - Does not validate post-execution limits; over-limit enforcement happens before admitting
+//!      the next transaction in [`BlockLimiter::pre_execution_check`]
 //!
 //! 4. **Commit transaction** - [`crate::MegaBlockExecutor::commit_execution_outcome`]
 //!    - Include in block (with success or failed receipt)
@@ -659,8 +661,8 @@ impl BlockLimits {
 ///
 ///     let result = execute_transaction(tx);
 ///
-///     // Post-execution check and update
-///     limiter.post_execution_check(
+///     // Post-execution update
+///     limiter.post_execution_update(
 ///         tx.hash(),
 ///         result.gas_used,
 ///         tx.size(),
@@ -739,7 +741,7 @@ impl BlockLimiter {
     /// - Remaining block DA size capacity
     ///
     /// **Important**: This method does **not** modify any state. It only performs validation.
-    /// Call [`post_execution_check`](Self::post_execution_check) after execution to update
+    /// Call [`post_execution_update`](Self::post_execution_update) after execution to update
     /// usage counters.
     ///
     /// # Parameters
@@ -901,15 +903,15 @@ impl BlockLimiter {
 
     /// Update usage counters after transaction execution.
     ///
-    /// This method is called **after** transaction execution to update the limiter's cumulative
-    /// usage counters. With the new block limit strategy, this method no longer validates limits -
-    /// it only updates counters. The transaction may cause the block to exceed limits, which is
-    /// intentional to maximize block utilization.
+    /// This method is called **after** transaction execution to accumulate the executed
+    /// transaction's resource usage into the limiter's block-level counters. It does **not**
+    /// validate post-execution limits — over-limit enforcement happens in
+    /// [`pre_execution_check`](Self::pre_execution_check) before admitting the next transaction.
+    /// The transaction may cause the block to exceed limits, which is intentional to maximize
+    /// block utilization.
     ///
-    /// This method always succeeds and allows the block to exceed post-execution
-    /// limits (data, KV updates, compute gas, state growth). The exceeded state will be checked
-    /// in `pre_execution_check` before the next transaction to prevent further transactions from
-    /// being added.
+    /// The return type remains `Result` to leave room for future fallible post-execution logic;
+    /// the current implementation always returns `Ok(())`.
     ///
     /// # Parameters
     ///
@@ -938,13 +940,13 @@ impl BlockLimiter {
     /// ```rust,ignore
     /// let outcome = executor.execute_mega_transaction(tx)?;
     ///
-    /// // This always succeeds and may cause block to exceed limits
-    /// limiter.post_execution_check(&outcome)?;
+    /// // Accumulates usage; may cause block-level counters to exceed limits.
+    /// limiter.post_execution_update(&outcome)?;
     ///
     /// // Commit the transaction state
     /// executor.commit_execution_outcome(outcome)?;
     /// ```
-    pub fn post_execution_check<T: Transaction + MegaTransactionExt>(
+    pub fn post_execution_update<T: Transaction + MegaTransactionExt>(
         &mut self,
         outcome: &BlockMegaTransactionOutcome<impl RecoveredTx<T>>,
     ) -> Result<(), BlockExecutionError> {
@@ -966,7 +968,7 @@ impl BlockLimiter {
 
     /// Update usage counters after transaction execution using raw values.
     ///
-    /// This mirrors [`post_execution_check`](Self::post_execution_check) but takes precomputed
+    /// This mirrors [`post_execution_update`](Self::post_execution_update) but takes precomputed
     /// resource usage values instead of a full execution outcome.
     #[allow(clippy::too_many_arguments)]
     pub fn post_execution_update_raw(
