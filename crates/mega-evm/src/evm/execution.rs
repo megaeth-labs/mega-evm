@@ -637,17 +637,25 @@ where
         // Short-circuiting paths return Some(FrameResult).
         // These synthetic results skip `AdditionalLimit::before_frame_init`; we only push an
         // empty tracking frame to keep the additional-limit stacks aligned.
+        //
+        // Only `CALL` and `STATICCALL` enter interceptor dispatch. `CALLCODE` and
+        // `DELEGATECALL` execute in the caller's state context and use the caller's
+        // address as `target_address`, so they would never match a system contract
+        // address today — the explicit scheme guard makes this policy independent of
+        // upstream call-frame semantics.
         if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-            if let Some(result) =
-                dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
-            {
-                // Push an empty frame to keep the limit tracker stack balanced:
-                // `frame_return_result` / `last_frame_result` will pop a frame, but
-                // `after_frame_init` (which normally pushes) was skipped.
-                if is_mini_rex_enabled {
-                    additional_limit.borrow_mut().push_empty_frame();
+            if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
+                if let Some(result) =
+                    dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
+                {
+                    // Push an empty frame to keep the limit tracker stack balanced:
+                    // `frame_return_result` / `last_frame_result` will pop a frame, but
+                    // `after_frame_init` (which normally pushes) was skipped.
+                    if is_mini_rex_enabled {
+                        additional_limit.borrow_mut().push_empty_frame();
+                    }
+                    return Ok(FrameInitResult::Result(result));
                 }
-                return Ok(FrameInitResult::Result(result));
             }
         }
 

@@ -80,8 +80,14 @@ pub fn dispatch_system_contract_interceptors<DB: Database, ExtEnvs: ExternalEnvT
     let spec = ctx.spec;
 
     // Oracle Hint (Rex2+) — side-effect only, never returns Some.
+    // The assertion makes the invariant explicit so a future change that returns
+    // Some(FrameResult) is caught in debug builds rather than silently ignored.
     if spec.is_enabled(OracleHintInterceptor::ACTIVATION_SPEC) {
-        OracleHintInterceptor::intercept(ctx, call_inputs, depth);
+        let hint_result = OracleHintInterceptor::intercept(ctx, call_inputs, depth);
+        debug_assert!(
+            hint_result.is_none(),
+            "OracleHintInterceptor must be side-effect only and never short-circuit",
+        );
     }
 
     // Keyless Deploy (Rex2+)
