@@ -51,6 +51,9 @@ This enables system address change without redeploying the Oracle.
 
 All other Oracle functionality (`sendHint`, `multiCall`, `getSlot`, `setSlot`, etc.) is preserved from v1.1.0.
 
+From Rex5, in-place Oracle bytecode upgrades no longer mark the Oracle account as newly created, so any Oracle storage accumulated before the upgrade is preserved across the transition.
+This differs from pre-Rex5 upgrades, which cleared existing Oracle storage.
+
 ### 4. Pre-Block Role Change
 
 Pending role changes are applied during `pre_execution_changes` via a single pre-block EVM system call to `SequencerRegistry.applyPendingChanges()`.
