@@ -668,74 +668,9 @@ fn test_inspector_sees_remaining_compute_gas_system_call() {
 // 5. CALL VARIANTS
 // ============================================================================
 
-/// Regression test for the explicit call-scheme guard in `frame_init`.
-///
-/// The interceptor dispatch is gated on `CALL` and `STATICCALL` only.
-/// A `CALLCODE` to a system contract address with a recognized selector must
-/// NOT be intercepted — even though the calldata would match — because the
-/// scheme guard rejects it before address or selector decoding.
-/// The call falls through to on-chain bytecode, which reverts with `NotIntercepted()`.
-#[test]
-fn test_callcode_scheme_guard_skips_interception() {
-    let parent_code = BytecodeBuilder::default().mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR);
-    let parent_code = append_callcode(parent_code, LIMIT_CONTROL_ADDRESS, 100_000_u64)
-        .push_number(0_u64)
-        .append(MSTORE)
-        .push_number(32_u64)
-        .push_number(0_u64)
-        .append(RETURN)
-        .build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(CONTRACT, parent_code)
-        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
-
-    let result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
-    assert!(result.result.is_success(), "outer tx should succeed");
-
-    let output = result.result.output().expect("should have output");
-    let success_flag = U256::from_be_slice(output);
-    assert_eq!(
-        success_flag,
-        U256::from(0),
-        "CALLCODE to system contract must not be intercepted — scheme guard must reject it"
-    );
-}
-
-/// Regression test for the explicit call-scheme guard: `DELEGATECALL` path.
-///
-/// Same policy as `CALLCODE`: the scheme guard rejects `DELEGATECALL` before
-/// any interceptor sees the call, so the call falls through to bytecode.
-#[test]
-fn test_delegatecall_scheme_guard_skips_interception() {
-    let parent_code = BytecodeBuilder::default().mstore(0x0, REMAINING_COMPUTE_GAS_SELECTOR);
-    let parent_code = append_delegatecall(parent_code, LIMIT_CONTROL_ADDRESS, 100_000_u64)
-        .push_number(0_u64)
-        .append(MSTORE)
-        .push_number(32_u64)
-        .push_number(0_u64)
-        .append(RETURN)
-        .build();
-
-    let mut db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000))
-        .account_code(CONTRACT, parent_code)
-        .account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
-
-    let result = transact(MegaSpecId::REX4, &mut db, default_tx(CONTRACT)).unwrap();
-    assert!(result.result.is_success(), "outer tx should succeed");
-
-    let output = result.result.output().expect("should have output");
-    let success_flag = U256::from_be_slice(output);
-    assert_eq!(
-        success_flag,
-        U256::from(0),
-        "DELEGATECALL to system contract must not be intercepted — scheme guard must reject it"
-    );
-}
-
 /// DELEGATECALL to the contract should NOT be intercepted.
+/// The scheme guard in `frame_init` rejects `DELEGATECALL` and `CALLCODE` before any
+/// interceptor sees the call; the unit-level coverage lives in `src/system/intercept.rs`.
 #[test]
 fn test_delegatecall_not_intercepted() {
     // Parent: DELEGATECALL to LIMIT_CONTROL_ADDRESS with selector,
@@ -767,6 +702,7 @@ fn test_delegatecall_not_intercepted() {
 }
 
 /// CALLCODE to the contract should NOT be intercepted.
+/// Same scheme-guard policy as `DELEGATECALL` above.
 #[test]
 fn test_callcode_not_intercepted() {
     // Parent: CALLCODE to LIMIT_CONTROL_ADDRESS with selector,

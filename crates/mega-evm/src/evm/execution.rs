@@ -639,10 +639,10 @@ where
         // empty tracking frame to keep the additional-limit stacks aligned.
         //
         // Only `CALL` and `STATICCALL` enter interceptor dispatch. `CALLCODE` and
-        // `DELEGATECALL` execute in the caller's state context and use the caller's
-        // address as `target_address`, so they would never match a system contract
-        // address today — the explicit scheme guard makes this policy independent of
-        // upstream call-frame semantics.
+        // `DELEGATECALL` execute in the caller's state context, so intercepting them
+        // would apply system-contract logic in the wrong state context — the scheme
+        // guard enforces this policy explicitly rather than relying on upstream
+        // call-frame semantics to keep `target_address` distinct.
         if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
             if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
                 if let Some(result) =

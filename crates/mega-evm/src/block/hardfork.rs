@@ -56,6 +56,14 @@ impl MegaHardfork {
     }
 }
 
+/// Validation error returned by [`HardforkParams::validate`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
+#[display("{message}")]
+pub struct HardforkParamsError {
+    /// Human-readable description of the invalid field or invariant.
+    pub message: std::string::String,
+}
+
 /// Marker trait for per-fork parameters.
 ///
 /// Each params type is pinned to exactly one [`MegaHardfork`] variant via `FORK`.
@@ -64,6 +72,15 @@ impl MegaHardfork {
 pub trait HardforkParams: Any + core::fmt::Debug + Send + Sync {
     /// The hardfork this params type belongs to.
     const FORK: MegaHardfork;
+
+    /// Validates construction-time invariants (no cross-fork context required).
+    ///
+    /// Called by [`MegaHardforkConfig::with_params`] so misconfiguration is caught
+    /// at chain-config load time rather than at the first block where the fork activates.
+    /// The default implementation accepts any value.
+    fn validate(&self) -> Result<(), HardforkParamsError> {
+        Ok(())
+    }
 }
 
 /// Extends [`OpHardforks`] with `MegaETH` helper methods.
@@ -274,8 +291,11 @@ impl MegaHardforkConfig {
     /// Attaches per-fork parameters to the entry identified by `P::FORK`.
     ///
     /// The fork must already exist in the config (via [`with`](Self::with) or default).
-    /// Panics if the fork is not found.
+    /// Panics if the fork is not found or if `params.validate()` returns an error.
     pub fn with_params<P: HardforkParams>(mut self, params: P) -> Self {
+        if let Err(e) = params.validate() {
+            panic!("Invalid params for fork {:?}: {}", P::FORK, e.message,);
+        }
         let entry =
             self.entries.iter_mut().find(|e| e.fork.name() == P::FORK.name()).unwrap_or_else(
                 || {
