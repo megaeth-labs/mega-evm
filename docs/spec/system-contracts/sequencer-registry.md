@@ -114,6 +114,12 @@ At first deploy, the execution layer writes 6 flat storage slots:
 `_currentSystemAddress`, `_currentSequencer`, `_admin`, `_initialSystemAddress`, `_initialSequencer`, `_initialFromBlock`.
 The values come from `SequencerRegistryConfig` on the chain's hardfork configuration.
 
+**Validation constraints:** All three address fields — `initial_system_address`, `initial_sequencer`, and `initial_admin` — must be non-zero.
+Deployment fails with a block execution error if any of them is the zero address.
+A zero `initial_admin` would permanently lock all admin-only registry operations.
+A zero `initial_system_address` would break system-address resolution after deployment.
+A zero `initial_sequencer` produces an invalid initial sequencer state.
+
 ## Constants
 
 | Name                         | Value                                        | Description      |
