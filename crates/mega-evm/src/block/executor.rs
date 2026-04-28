@@ -474,8 +474,10 @@ where
             outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE,
         )?;
 
-        // Check block-level limits after transaction execution but before committing
-        self.block_limiter.post_execution_check(&outcome)?;
+        // Accumulate post-execution resource usage into block-level counters.
+        // This does not validate limits; over-limit enforcement happens in
+        // `pre_execution_check` before the next transaction.
+        self.block_limiter.post_execution_update(&outcome)?;
 
         let BlockMegaTransactionOutcome { tx, depositor, inner, .. } = outcome;
         let MegaTransactionOutcome { result, state, .. } = inner;
