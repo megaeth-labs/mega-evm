@@ -137,13 +137,17 @@ pub mod rex5 {
     /// `SequencerRegistry.applyPendingChanges()` via
     /// [`crate::MegaEvm::transact_system_call_with_gas_limit`].
     ///
-    /// The value (30M) is fixed to match revm's hardcoded system-call default —
-    /// see the `gas_limit(30_000_000)` literal in
+    /// The value (30M) matches the historical revm system-call default at the
+    /// time REX5 was specified — see the `gas_limit(30_000_000)` literal in
     /// [`revm::handler::SystemCallTx::new_system_tx_with_caller`]'s `TxEnv` impl
     /// (`revm-handler/src/system_call.rs`).
     /// revm does not export this as a `pub const`, so we mirror the literal here
-    /// instead of aliasing it. If upstream ever changes the default, update this
-    /// constant to keep them in sync.
+    /// instead of aliasing it. Do NOT raise this value to follow upstream
+    /// changes — the floor must remain at the historical 30M to preserve
+    /// backward compatibility for REX5 chains whose block gas limit is smaller
+    /// than any new upstream default. Lifting it would silently increase the
+    /// minimum guaranteed budget and become observable via the `GAS` opcode
+    /// inside `applyPendingChanges()`.
     ///
     /// Keeping the floor at the historical default ensures test harnesses or
     /// chains configured with a sub-30M block gas limit still receive the
