@@ -157,6 +157,16 @@ The following gas and detention rules MUST apply:
 Pre-[Rex2](../upgrades/rex2.md), the deployed Oracle bytecode does not include `sendHint`.
 From [Rex2](../upgrades/rex2.md) onward, the stable Oracle bytecode includes `sendHint`.
 
+**Upgrade storage semantics.**
+When the Oracle account's bytecode is upgraded, the fate of existing Oracle storage is consensus-critical.
+
+Pre-[Rex5](../upgrades/rex5.md), each bytecode upgrade MUST mark the Oracle account as newly created.
+This clears any storage accumulated under the previous bytecode version.
+Canonical mainnet state reflects this: Oracle storage present at the Rex2 activation boundary was cleared by the Rex2 upgrade.
+
+From [Rex5](../upgrades/rex5.md) onward, a bytecode upgrade MUST NOT mark the Oracle account as newly created.
+Existing Oracle storage MUST be preserved across the upgrade.
+
 ## Constants
 
 | Constant                  | Value                                        | Description                           |
