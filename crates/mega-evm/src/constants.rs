@@ -131,7 +131,15 @@ pub mod rex4 {
 }
 
 /// Constants for the `REX5` spec.
-pub mod rex5 {}
+pub mod rex5 {
+    /// Floor for the gas limit assigned to pre-block system calls.
+    ///
+    /// From REX5, `transact_system_call_with_caller` uses
+    /// `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)`. The floor matches the
+    /// upstream revm default (30M) so that test harnesses or chains running with a
+    /// very small block gas limit still have at least the historical budget.
+    pub const SYSTEM_CALL_GAS_LIMIT_FLOOR: u64 = 30_000_000;
+}
 
 /// Constants for the `REX` spec.
 pub mod rex {

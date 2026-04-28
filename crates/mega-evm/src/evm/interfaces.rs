@@ -73,7 +73,11 @@ where
     /// # Note
     ///
     /// This function copies the logic from `alloy_op_evm::OpEvm::transact_system_call`
-    /// to maintain compatibility with the Optimism EVM system call interface.
+    /// to maintain compatibility with the Optimism EVM system call interface. The
+    /// transaction's gas limit follows revm's upstream-fixed 30M default. Callers that
+    /// need to use the live block gas budget — e.g. REX5 pre-block helpers whose cost is
+    /// sensitive to dynamic storage gas — should use
+    /// [`MegaEvm::transact_system_call_with_gas_limit`] instead.
     fn transact_system_call(
         &mut self,
         caller: Address,
@@ -195,5 +199,41 @@ where
         ));
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run_system_call(&mut h, self)
+    }
+}
+
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+{
+    /// Transact a system call with an explicit gas limit and finalize.
+    ///
+    /// Behaves like [`alloy_evm::Evm::transact_system_call`] but lets the caller specify
+    /// the gas limit instead of relying on revm's upstream-fixed 30M default. This is
+    /// intended for REX5+ pre-block helpers (e.g.
+    /// [`crate::system::sequencer_registry::transact_apply_pending_changes`]) whose
+    /// real cost is sensitive to dynamic storage gas and is no longer guaranteed to
+    /// fit within 30M on activation blocks.
+    ///
+    /// The recommended argument is `block.gas_limit.max(SYSTEM_CALL_GAS_LIMIT_FLOOR)`.
+    pub fn transact_system_call_with_gas_limit(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+        gas_limit: u64,
+    ) -> Result<ResultAndState<MegaHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
+        let mut tx =
+            <MegaTransaction as SystemCallTx>::new_system_tx_with_caller(caller, contract, data);
+        tx.base.gas_limit = gas_limit;
+        self.ctx().set_tx(tx);
+        let mut h: MegaHandler<
+            Self,
+            EVMError<DB::Error, MegaTransactionError>,
+            EthFrame<EthInterpreter>,
+        > = MegaHandler::new();
+        let result = revm::handler::Handler::run_system_call(&mut h, self)?;
+        let state = self.inner.ctx.journal_mut().finalize();
+        Ok(ResultAndState { result, state })
     }
 }

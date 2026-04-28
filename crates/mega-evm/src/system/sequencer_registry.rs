@@ -220,14 +220,26 @@ pub(crate) fn is_apply_pending_changes_due<DB: Database>(
 /// change if they are due in the current block.
 /// Caller should gate this with [`is_apply_pending_changes_due`] to avoid an EVM
 /// call on every block.
-pub(crate) fn transact_apply_pending_changes<Halt>(
-    evm: &mut impl alloy_evm::Evm<HaltReason = Halt>,
-) -> Result<ResultAndState<Halt>, BlockExecutionError> {
+///
+/// The system call is issued with `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)`
+/// instead of the upstream-fixed 30M. `applyPendingChanges()` writes role-rotation
+/// slots whose actual cost depends on REX dynamic storage gas, so the upstream default
+/// is no longer guaranteed to be enough on activation blocks.
+pub(crate) fn transact_apply_pending_changes<DB, INSP, ExtEnvs>(
+    evm: &mut crate::MegaEvm<DB, INSP, ExtEnvs>,
+) -> Result<ResultAndState<crate::MegaHaltReason>, BlockExecutionError>
+where
+    DB: alloy_evm::Database,
+    ExtEnvs: crate::ExternalEnvTypes,
+{
     let calldata = ISequencerRegistry::applyPendingChangesCall {}.abi_encode();
-    let result_and_state = match evm.transact_system_call(
+    let gas_limit =
+        evm.block_env_ref().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
+    let result_and_state = match evm.transact_system_call_with_gas_limit(
         alloy_eips::eip4788::SYSTEM_ADDRESS,
         SEQUENCER_REGISTRY_ADDRESS,
         Bytes::from(calldata),
+        gas_limit,
     ) {
         Ok(res) => res,
         Err(e) => {
@@ -876,6 +888,64 @@ mod tests {
             )
             .unwrap(),
             U256::ZERO,
+        );
+    }
+
+    #[test]
+    fn test_transact_apply_pending_changes_uses_block_gas_limit() {
+        // Block gas_limit > 30M must be passed through to the system call so that
+        // applyPendingChanges() can absorb the variable cost from REX dynamic
+        // storage gas instead of being capped at the upstream-fixed 30M.
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+                ..Default::default()
+            },
+        );
+
+        let block =
+            BlockEnv { number: U256::from(1000), gas_limit: 250_000_000, ..Default::default() };
+        let mut context = crate::MegaContext::new(&mut db, MegaSpecId::REX5).with_block(block);
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        let mut evm = crate::MegaEvm::new(context);
+
+        transact_apply_pending_changes(&mut evm).expect("system call should succeed");
+        assert_eq!(revm::handler::EvmTr::ctx_ref(&evm).tx.base.gas_limit, 250_000_000);
+    }
+
+    #[test]
+    fn test_transact_apply_pending_changes_respects_30m_floor() {
+        // When the block gas limit is below the 30M floor, the system call must
+        // still receive at least the historical default budget.
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+                ..Default::default()
+            },
+        );
+
+        let block =
+            BlockEnv { number: U256::from(1000), gas_limit: 1_000_000, ..Default::default() };
+        let mut context = crate::MegaContext::new(&mut db, MegaSpecId::REX5).with_block(block);
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        let mut evm = crate::MegaEvm::new(context);
+
+        transact_apply_pending_changes(&mut evm).expect("system call should succeed");
+        assert_eq!(
+            revm::handler::EvmTr::ctx_ref(&evm).tx.base.gas_limit,
+            crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR,
         );
     }
 

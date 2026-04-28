@@ -537,6 +537,43 @@ mod tests {
     }
 
     #[test]
+    fn test_transact_system_call_with_gas_limit_uses_passed_value() {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(CALLEE, Bytes::new());
+        let mut evm = MegaEvm::new(configure_context(&mut db));
+
+        let result = evm
+            .transact_system_call_with_gas_limit(CALLER, CALLEE, Bytes::new(), 123_456_789)
+            .unwrap();
+        assert!(result.result.is_success());
+        // The custom gas limit must be applied to the underlying tx.
+        assert_eq!(evm.inner.ctx.tx.base.gas_limit, 123_456_789);
+    }
+
+    #[test]
+    fn test_default_system_call_keeps_upstream_30m_gas_limit() {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000))
+            .account_code(CALLEE, Bytes::new());
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::ZERO);
+            chain.operator_fee_constant = Some(U256::ZERO);
+        });
+        context.block.gas_limit = 100_000_000;
+        let mut evm = MegaEvm::new(context);
+
+        // The default system-call entry point must NOT be widened by REX5 — only the
+        // explicit `transact_system_call_with_gas_limit` path should pick up the live
+        // block budget. This preserves byte-level behavior of EIP-2935 / EIP-4788
+        // pre-block calls across all specs.
+        SystemCallEvm::transact_system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
+            .unwrap();
+        assert_eq!(evm.inner.ctx.tx.base.gas_limit, 30_000_000);
+    }
+
+    #[test]
     fn test_mega_evm_exposes_state_wrapper_block_hashes() {
         let mut db = MemoryDatabase::default();
         let mut state = State::builder().with_database(&mut db).build();
