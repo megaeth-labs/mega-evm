@@ -32,7 +32,9 @@ use revm::{
     Database as RevmDatabase,
 };
 
-use crate::{HardforkParams, MegaHardfork, MegaHardforks, MEGA_SYSTEM_ADDRESS};
+use crate::{
+    HardforkParams, HardforkParamsError, MegaHardfork, MegaHardforks, MEGA_SYSTEM_ADDRESS,
+};
 
 /// The address of the `SequencerRegistry` system contract.
 pub const SEQUENCER_REGISTRY_ADDRESS: Address =
@@ -61,6 +63,25 @@ pub struct SequencerRegistryConfig {
 
 impl HardforkParams for SequencerRegistryConfig {
     const FORK: MegaHardfork = MegaHardfork::Rex5;
+
+    fn validate(&self) -> Result<(), HardforkParamsError> {
+        if self.initial_system_address.is_zero() {
+            return Err(HardforkParamsError {
+                message: "SequencerRegistryConfig.initial_system_address must not be zero".into(),
+            });
+        }
+        if self.initial_sequencer.is_zero() {
+            return Err(HardforkParamsError {
+                message: "SequencerRegistryConfig.initial_sequencer must not be zero".into(),
+            });
+        }
+        if self.initial_admin.is_zero() {
+            return Err(HardforkParamsError {
+                message: "SequencerRegistryConfig.initial_admin must not be zero".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Encodes an address into its `U256` storage representation (standard Solidity address-in-slot).
@@ -117,6 +138,13 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     if !hardforks.is_rex_5_active_at_timestamp(block_timestamp) {
         return Ok(None);
     }
+
+    // Belt-and-braces: `with_params` already calls `validate()` at chain-config load time.
+    debug_assert!(
+        config.validate().is_ok(),
+        "SequencerRegistryConfig::validate() failed at deploy time — \
+         this should have been caught by with_params()"
+    );
 
     let acc =
         db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
@@ -380,6 +408,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_initial_system_address() {
+        let mut config = test_config();
+        config.initial_system_address = Address::ZERO;
+        let err = config.validate().expect_err("zero initial_system_address must be rejected");
+        assert!(
+            err.message.contains("initial_system_address must not be zero"),
+            "unexpected message: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_initial_sequencer() {
+        let mut config = test_config();
+        config.initial_sequencer = Address::ZERO;
+        let err = config.validate().expect_err("zero initial_sequencer must be rejected");
+        assert!(
+            err.message.contains("initial_sequencer must not be zero"),
+            "unexpected message: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_initial_admin() {
+        let mut config = test_config();
+        config.initial_admin = Address::ZERO;
+        let err = config.validate().expect_err("zero initial_admin must be rejected");
+        assert!(
+            err.message.contains("initial_admin must not be zero"),
+            "unexpected message: {}",
+            err.message,
+        );
     }
 
     #[test]

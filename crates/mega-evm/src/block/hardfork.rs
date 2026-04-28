@@ -56,6 +56,14 @@ impl MegaHardfork {
     }
 }
 
+/// Validation error returned by [`HardforkParams::validate`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display, derive_more::Error)]
+#[display("{message}")]
+pub struct HardforkParamsError {
+    /// Human-readable description of the invalid field or invariant.
+    pub message: std::string::String,
+}
+
 /// Marker trait for per-fork parameters.
 ///
 /// Each params type is pinned to exactly one [`MegaHardfork`] variant via `FORK`.
@@ -64,6 +72,15 @@ impl MegaHardfork {
 pub trait HardforkParams: Any + core::fmt::Debug + Send + Sync {
     /// The hardfork this params type belongs to.
     const FORK: MegaHardfork;
+
+    /// Validates construction-time invariants (no cross-fork context required).
+    ///
+    /// Called by [`MegaHardforkConfig::with_params`] so misconfiguration is caught
+    /// at chain-config load time rather than at the first block where the fork activates.
+    /// The default implementation accepts any value.
+    fn validate(&self) -> Result<(), HardforkParamsError> {
+        Ok(())
+    }
 }
 
 /// Extends [`OpHardforks`] with `MegaETH` helper methods.
@@ -274,8 +291,11 @@ impl MegaHardforkConfig {
     /// Attaches per-fork parameters to the entry identified by `P::FORK`.
     ///
     /// The fork must already exist in the config (via [`with`](Self::with) or default).
-    /// Panics if the fork is not found.
+    /// Panics if the fork is not found or if `params.validate()` returns an error.
     pub fn with_params<P: HardforkParams>(mut self, params: P) -> Self {
+        if let Err(e) = params.validate() {
+            panic!("Invalid params for fork {:?}: {}", P::FORK, e.message,);
+        }
         let entry =
             self.entries.iter_mut().find(|e| e.fork.name() == P::FORK.name()).unwrap_or_else(
                 || {
@@ -467,6 +487,41 @@ mod tests {
             MegaHardforkConfig::default().with(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
 
         assert!(config.fork_params::<SequencerRegistryConfig>().is_none());
+    }
+
+    #[test]
+    fn test_default_validate_accepts_any_value() {
+        #[derive(Debug)]
+        struct NullParams;
+
+        impl HardforkParams for NullParams {
+            const FORK: MegaHardfork = MegaHardfork::Rex4;
+        }
+
+        assert!(NullParams.validate().is_ok());
+    }
+
+    #[test]
+    fn test_hardfork_params_error_display() {
+        let e = HardforkParamsError { message: "something went wrong".into() };
+        assert_eq!(e.to_string(), "something went wrong");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid params for fork")]
+    fn test_with_params_panics_on_validation_error() {
+        #[derive(Debug)]
+        struct AlwaysErrParams;
+
+        impl HardforkParams for AlwaysErrParams {
+            const FORK: MegaHardfork = MegaHardfork::Rex4;
+
+            fn validate(&self) -> Result<(), HardforkParamsError> {
+                Err(HardforkParamsError { message: "intentional test error".into() })
+            }
+        }
+
+        MegaHardforkConfig::default().with_all_activated().with_params(AlwaysErrParams);
     }
 
     #[test]
