@@ -570,6 +570,9 @@ mod tests {
         // pre-block calls across all specs.
         SystemCallEvm::transact_system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
             .unwrap();
+        // Literal, not `SYSTEM_CALL_GAS_LIMIT_FLOOR`: this assertion verifies revm's
+        // upstream hardcoded default. If upstream ever drifts from our floor, this
+        // test should fail loudly rather than be auto-aligned by our constant.
         assert_eq!(evm.inner.ctx.tx.base.gas_limit, 30_000_000);
     }
 
