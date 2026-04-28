@@ -669,6 +669,8 @@ fn test_inspector_sees_remaining_compute_gas_system_call() {
 // ============================================================================
 
 /// DELEGATECALL to the contract should NOT be intercepted.
+/// The scheme guard in `frame_init` rejects `DELEGATECALL` and `CALLCODE` before any
+/// interceptor sees the call; the unit-level coverage lives in `src/system/intercept.rs`.
 #[test]
 fn test_delegatecall_not_intercepted() {
     // Parent: DELEGATECALL to LIMIT_CONTROL_ADDRESS with selector,
@@ -700,6 +702,7 @@ fn test_delegatecall_not_intercepted() {
 }
 
 /// CALLCODE to the contract should NOT be intercepted.
+/// Same scheme-guard policy as `DELEGATECALL` above.
 #[test]
 fn test_callcode_not_intercepted() {
     // Parent: CALLCODE to LIMIT_CONTROL_ADDRESS with selector,

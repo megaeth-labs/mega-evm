@@ -1,5 +1,5 @@
 ---
-description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, and Oracle v2.0.0.
+description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, and caller-account update deduplication.
 ---
 
 # Rex5 Network Upgrade
@@ -15,6 +15,8 @@ For the full normative definition, see the Rex5 spec in the mega-evm repository.
 
 Rex5 introduces the `SequencerRegistry` system contract, which tracks two independent roles: the **system address** (Oracle/system-tx authority) and the **sequencer** (mini-block signing key).
 It also upgrades the Oracle contract to v2.0.0 to read its authority from the registry.
+
+Rex5 also corrects a resource-accounting bug where the caller-account update was overcounted whenever a contract performed multiple value-transferring sub-calls or contract creations from the same call frame.
 
 ## What Changed
 
@@ -49,6 +51,9 @@ This enables system address change without redeploying the Oracle.
 
 All other Oracle functionality (`sendHint`, `multiCall`, `getSlot`, `setSlot`, etc.) is preserved from v1.1.0.
 
+From Rex5, in-place Oracle bytecode upgrades no longer mark the Oracle account as newly created, so any Oracle storage accumulated before the upgrade is preserved across the transition.
+This differs from pre-Rex5 upgrades, which cleared existing Oracle storage.
+
 ### 4. Pre-Block Role Change
 
 Pending role changes are applied during `pre_execution_changes` via a single pre-block EVM system call to `SequencerRegistry.applyPendingChanges()`.
@@ -56,11 +61,26 @@ This follows the same pattern as EIP-2935 and EIP-4788.
 The system call is only issued when a Rust-side pre-check confirms any role change is due.
 Unlike EIP-2935 / EIP-4788 — which carry the upstream-fixed 30M `gas_limit` — this system call is issued with `max(block.gas_limit, 30_000_000)`, since the slot-rotation cost depends on REX dynamic storage gas and is no longer guaranteed to fit within 30M on activation blocks.
 
+### 5. Caller-Account Update Deduplication (Data Size and KV Updates)
+
+**Previous behavior (Rex4 and earlier):**
+When a call frame performed a value-transferring `CALL` / `CALLCODE` or a `CREATE` / `CREATE2`, the implementation charged the _caller_ account update to the child frame's discardable budget.
+However, the parent frame's `target_updated` flag was never marked after the first charge.
+As a result, every subsequent value-transferring sub-call or create from the same parent frame re-charged the caller account, overcounting both data-size bytes and KV-update counts for the caller.
+
+**New behavior (Rex5):**
+After charging the first caller-account update within a parent call frame, the frame's `target_updated` flag is marked.
+All subsequent value-transferring sub-calls and creates from the same parent frame no longer re-charge the caller account.
+Each distinct callee or created account is still counted independently.
+The discardable-on-revert mechanic is unchanged: charges recorded inside a child frame that reverts are still dropped.
+
 ## Developer Impact
 
 - Contracts that verify mini-block signatures can use `SequencerRegistry.currentSequencer()` to look up the signing authority.
 - Contracts that need historical information can use `systemAddressAt(blockNumber)` or `sequencerAt(blockNumber)`.
 - The Oracle contract's write methods (`setSlot`, `emitLog`, etc.) now accept calls from the current system address as reported by `SequencerRegistry`, not from a fixed address.
+- Transactions that perform multiple value-transferring sub-calls or creates from the same contract now report lower data-size and KV-update usage than they did under Rex4.
+  This only affects usage tracking; it does not change execution semantics, state transitions, or the base transaction gas model.
 
 ## Safety and Compatibility
 
@@ -68,6 +88,8 @@ Unlike EIP-2935 / EIP-4788 — which carry the upstream-fixed 30M `gas_limit` �
 - `SequencerRegistry` does not have an interceptor. It runs normal on-chain bytecode.
 - Both `_currentSystemAddress` and `_currentSequencer` are only updated during pre-block system calls, ensuring block-stability.
 - Changing one role does not affect the other.
+- Rex4 and earlier retain the original caller-account overcounting behavior unchanged.
+- Rex5 is the current unstable spec under active development; its semantics may still change before network activation.
 
 ## References
 

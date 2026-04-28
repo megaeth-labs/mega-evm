@@ -281,6 +281,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Never change what an existing spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
+- **Override `HardforkParams::validate()` for every new params type.**
+  The default implementation accepts any value silently.
+  Override it with field-level invariant checks (e.g., non-zero addresses) so that `with_params()` panics loudly at chain-config load time rather than allowing the error to surface at the first block where the fork activates.
 - **Pre-block helpers must return state, not commit directly.**
   Any helper participating in `pre_execution_changes` (system contract deploys, pre-block system calls, etc.) MUST return `Option<EvmState>` and never call `db.commit(...)` directly.
   Full convention: `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.
@@ -289,6 +292,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   If a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
 - **Do not intercept unknown selectors for system contracts.**
   Unknown selectors should fall through to on-chain bytecode and revert with a stable custom error such as `NotIntercepted()`.
+- **Only `CALL` and `STATICCALL` reach interceptor dispatch.**
+  `CALLCODE` and `DELEGATECALL` are rejected by the call-scheme guard in `frame_init` before any interceptor is consulted.
+  Do not expect these schemes to trigger system contract interception.
 - **System contract interceptor tests must cover boundary behaviors.**
   Include tests for normal intercepted path, non-zero value behavior, unknown selector fallback, and CALL vs DELEGATECALL/CALLCODE interception boundaries.
 - **Respect `no_std` in `mega-evm` crate.**

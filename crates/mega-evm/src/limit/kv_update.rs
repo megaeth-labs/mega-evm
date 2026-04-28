@@ -41,21 +41,7 @@ impl KVUpdateTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
-            frame_tracker: FrameLimitTracker::new(tx_limit),
-        }
-    }
-
-    /// Pushes a new frame onto the tracker.
-    ///
-    /// In Rex4+, delegates to `FrameLimitTracker::push_frame()` which uses
-    /// `tx_entry.remaining()` for the top-level frame (accounts for intrinsic usage)
-    /// and parent's remaining × 98/100 for nested frames.
-    /// In pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced.
-    fn push_frame(&mut self, info: CallFrameInfo) {
-        if self.rex4_enabled {
-            self.frame_tracker.push_frame(info);
-        } else {
-            self.frame_tracker.push_frame_with_limit(u64::MAX, info);
+            frame_tracker: FrameLimitTracker::new(spec, tx_limit),
         }
     }
 
@@ -148,7 +134,7 @@ impl TxRuntimeLimit for KVUpdateTracker {
 
     #[inline]
     fn push_empty_frame(&mut self) {
-        self.push_frame(CallFrameInfo { target_address: None, target_updated: false });
+        self.frame_tracker.push_dummy_frame();
     }
 
     /// Hook called before a new execution frame is initialized.
@@ -167,36 +153,21 @@ impl TxRuntimeLimit for KVUpdateTracker {
         match &frame_init.frame_input {
             FrameInput::Call(call_inputs) => {
                 let has_transfer = call_inputs.transfers_value();
-                // Check if parent's account info needs updating BEFORE pushing the child frame.
-                // Note: we do NOT set parent's target_updated to true — matching the old tracker,
-                // which never mutates it after frame creation.
-                let parent_needs_update = has_transfer &&
-                    self.frame_tracker
-                        .frame_mut()
-                        .is_some_and(|entry| !entry.info.target_updated);
-                // Push new frame
-                self.push_frame(CallFrameInfo {
-                    target_address: Some(call_inputs.target_address),
-                    target_updated: has_transfer,
-                });
+                let parent_needs_update =
+                    self.frame_tracker.push_call_frame(call_inputs.target_address, has_transfer);
                 if has_transfer {
                     if parent_needs_update {
-                        // Parent's account info update goes to child's discardable,
-                        // matching the old tracker's behavior.
+                        // Parent's account info update goes to child's discardable.
                         self.record_discardable(1);
                     }
-                    // Record target account info update in child's discardable
+                    // Record target account info update in child's discardable.
                     self.record_discardable(1);
                 }
             }
             FrameInput::Create(_) => {
-                // Check if parent's account info needs updating BEFORE pushing the child frame.
-                let parent_needs_update =
-                    self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
-                // Push new frame (address unknown until after init)
-                self.push_frame(CallFrameInfo { target_address: None, target_updated: true });
+                let parent_needs_update = self.frame_tracker.push_create_frame();
                 if parent_needs_update {
-                    // Parent's account info update goes to child's discardable,
+                    // Parent's account info update goes to child's discardable.
                     self.record_discardable(1);
                 }
             }
@@ -212,19 +183,22 @@ impl TxRuntimeLimit for KVUpdateTracker {
         if frame.data.is_create() {
             let created_address =
                 frame.data.created_address().expect("created address is none for create frame");
-            if let Some(entry) = self.frame_tracker.frame_mut() {
-                assert!(entry.info.target_address.is_none(), "created account already recorded");
-                entry.info.target_address = Some(created_address);
-                // Record account info update for created address
-                entry.discardable_usage += 1;
-            }
+            self.frame_tracker.set_created_address(created_address);
+            // Record account info update for created address
+            self.record_discardable(1);
         }
     }
 
     /// Hook called when a frame returns its result to the parent frame.
+    ///
+    /// Rex5+: if the reverting child had set the parent's account-update flag, the flag
+    /// is reset so the next successful call from the same parent still charges the parent
+    /// account (avoiding undercounting after a revert-then-retry pattern). The unwind is
+    /// owned by `FrameLimitTracker::pop_frame_unwind_parent`.
     fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
         assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
-        self.frame_tracker.pop_frame(result.instruction_result().is_ok());
+        let is_success = result.instruction_result().is_ok();
+        self.frame_tracker.pop_frame_unwind_parent(is_success);
     }
 
     /// Hook called when a storage slot is written via `SSTORE`.

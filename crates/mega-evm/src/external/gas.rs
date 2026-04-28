@@ -53,9 +53,9 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::SSTORE_SET_STORAGE_GAS_BASE * (multiplier - 1)
+            constants::rex::SSTORE_SET_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
         } else {
-            constants::mini_rex::SSTORE_SET_STORAGE_GAS * multiplier
+            constants::mini_rex::SSTORE_SET_STORAGE_GAS.saturating_mul(multiplier)
         };
 
         Ok(gas)
@@ -69,9 +69,9 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1)
+            constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
         } else {
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * multiplier
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(multiplier)
         };
 
         Ok(gas)
@@ -85,9 +85,9 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
         let multiplier = self.load_bucket_cost_multiplier(bucket_id)?;
 
         let gas = if self.spec.is_enabled(MegaSpecId::REX) {
-            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE * (multiplier - 1)
+            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE.saturating_mul(multiplier - 1)
         } else {
-            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS * multiplier
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(multiplier)
         };
 
         Ok(gas)
@@ -102,6 +102,11 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
             Entry::Occupied(occupied_entry) => Ok(*occupied_entry.get()),
             Entry::Vacant(vacant_entry) => {
                 let capacity = self.salt_env.get_bucket_capacity(bucket_id)?;
+                assert!(
+                    capacity >= MIN_BUCKET_SIZE as u64,
+                    "SaltEnv returned bucket_capacity={capacity} below MIN_BUCKET_SIZE ({})",
+                    MIN_BUCKET_SIZE,
+                );
                 let multiplier = capacity / MIN_BUCKET_SIZE as u64;
                 vacant_entry.insert(multiplier);
                 Ok(multiplier)
@@ -113,5 +118,59 @@ impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
 impl<SaltEnvImpl: SaltEnv> DynamicGasCost<SaltEnvImpl> {
     pub(crate) fn on_new_block(&mut self, block: &BlockEnv) {
         self.reset(block.number.to::<u64>().saturating_sub(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::external::test_utils::TestExternalEnvs;
+
+    fn cost_with_capacity(spec: MegaSpecId, capacity: u64) -> DynamicGasCost<TestExternalEnvs> {
+        // Map the bucket id that the simple bucket hasher will produce for the zero address /
+        // zero slot to the requested capacity.
+        let bucket_for_account =
+            <TestExternalEnvs as SaltEnv>::bucket_id_for_account(Address::ZERO);
+        let bucket_for_slot =
+            <TestExternalEnvs as SaltEnv>::bucket_id_for_slot(Address::ZERO, U256::ZERO);
+        let env = TestExternalEnvs::new()
+            .with_bucket_capacity(bucket_for_account, capacity)
+            .with_bucket_capacity(bucket_for_slot, capacity);
+        DynamicGasCost::new(spec, env, 0)
+    }
+
+    /// `MIN_BUCKET_SIZE * u64::MAX` cannot be represented in `u64`; verify the hardened
+    /// arithmetic does not panic and saturates instead of wrapping.
+    #[test]
+    fn test_sstore_set_gas_saturates_on_huge_multiplier() {
+        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
+        let gas = cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap();
+        assert_eq!(gas, u64::MAX);
+
+        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
+        let gas = cost.sstore_set_gas(Address::ZERO, U256::ZERO).unwrap();
+        assert_eq!(gas, u64::MAX);
+    }
+
+    #[test]
+    fn test_new_account_gas_saturates_on_huge_multiplier() {
+        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
+        let gas = cost.new_account_gas(Address::ZERO).unwrap();
+        assert_eq!(gas, u64::MAX);
+
+        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
+        let gas = cost.new_account_gas(Address::ZERO).unwrap();
+        assert_eq!(gas, u64::MAX);
+    }
+
+    #[test]
+    fn test_create_contract_gas_saturates_on_huge_multiplier() {
+        let mut cost = cost_with_capacity(MegaSpecId::REX, u64::MAX);
+        let gas = cost.create_contract_gas(Address::ZERO).unwrap();
+        assert_eq!(gas, u64::MAX);
+
+        let mut cost = cost_with_capacity(MegaSpecId::MINI_REX, u64::MAX);
+        let gas = cost.create_contract_gas(Address::ZERO).unwrap();
+        assert_eq!(gas, u64::MAX);
     }
 }
