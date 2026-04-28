@@ -210,12 +210,12 @@ where
     ///
     /// Behaves like [`alloy_evm::Evm::transact_system_call`] but lets the caller specify
     /// the gas limit instead of relying on revm's upstream-fixed 30M default. This is
-    /// intended for REX5+ pre-block helpers (e.g.
-    /// [`crate::system::sequencer_registry::transact_apply_pending_changes`]) whose
-    /// real cost is sensitive to dynamic storage gas and is no longer guaranteed to
-    /// fit within 30M on activation blocks.
+    /// intended for REX5+ pre-block helpers (e.g. `transact_apply_pending_changes` in
+    /// `system::sequencer_registry`) whose real cost is sensitive to dynamic storage gas
+    /// and is no longer guaranteed to fit within 30M on activation blocks.
     ///
-    /// The recommended argument is `block.gas_limit.max(SYSTEM_CALL_GAS_LIMIT_FLOOR)`.
+    /// The recommended argument is
+    /// `block.gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR)`.
     pub fn transact_system_call_with_gas_limit(
         &mut self,
         caller: Address,
@@ -227,13 +227,10 @@ where
             <MegaTransaction as SystemCallTx>::new_system_tx_with_caller(caller, contract, data);
         tx.base.gas_limit = gas_limit;
         self.ctx().set_tx(tx);
-        let mut h: MegaHandler<
-            Self,
-            EVMError<DB::Error, MegaTransactionError>,
-            EthFrame<EthInterpreter>,
-        > = MegaHandler::new();
-        let result = revm::handler::Handler::run_system_call(&mut h, self)?;
-        let state = self.inner.ctx.journal_mut().finalize();
-        Ok(ResultAndState { result, state })
+        let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
+        revm::handler::Handler::run_system_call(&mut h, self).map(|result| {
+            let state = self.inner.ctx.journal_mut().finalize();
+            ResultAndState { result, state }
+        })
     }
 }

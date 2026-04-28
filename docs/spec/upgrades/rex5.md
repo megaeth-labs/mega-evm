@@ -54,6 +54,7 @@ All other Oracle functionality (`sendHint`, `multiCall`, `getSlot`, `setSlot`, e
 Pending role changes are applied during `pre_execution_changes` via a single pre-block EVM system call to `SequencerRegistry.applyPendingChanges()`.
 This follows the same pattern as EIP-2935 and EIP-4788.
 The system call is only issued when a Rust-side pre-check confirms any role change is due.
+Unlike EIP-2935 / EIP-4788 — which carry the upstream-fixed 30M `gas_limit` — this system call is issued with `max(block.gas_limit, 30_000_000)`, since the slot-rotation cost depends on REX dynamic storage gas and is no longer guaranteed to fit within 30M on activation blocks.
 
 ## Developer Impact
 
