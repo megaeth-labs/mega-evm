@@ -1203,7 +1203,6 @@ pub mod storage_gas_ext {
     }
 
     wrap_call_with_storage_gas!(call, "CALL", compute_gas_ext::call, true);
-    wrap_call_with_storage_gas!(call_code, "CALLCODE", compute_gas_ext::call_code, true);
     wrap_call_with_storage_gas!(
         delegate_call,
         "DELEGATECALL",
@@ -1211,6 +1210,67 @@ pub mod storage_gas_ext {
         false
     );
     wrap_call_with_storage_gas!(static_call, "STATICCALL", compute_gas_ext::static_call, false);
+
+    /// `CALLCODE` opcode implementation modified from `revm` with compute gas tracking and
+    /// dynamically-scaled storage gas costs.
+    ///
+    /// This is intentionally not generated via [`wrap_call_with_storage_gas!`] because `CALLCODE`
+    /// has different storage-context semantics than `CALL`. For `CALLCODE`, execution happens in
+    /// the caller's account context, so new-account storage gas should be metered against the
+    /// caller's storage account, not the stack `to` address (which is only the code-source).
+    ///
+    /// # Spec gating
+    ///
+    /// Rex5+: emptiness check and `new_account_storage_gas` use
+    /// `interpreter.input.target_address()` (the current frame's storage account).
+    /// Pre-Rex5: preserves the (frozen) prior behavior of metering against the stack `to`
+    /// address for backward compatibility.
+    pub fn call_code<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let spec = context.interpreter.runtime_flag.spec_id();
+        let Some(to) = context.interpreter.stack.inspect::<1>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let to = to.into_address();
+        let mega_spec = context.host.spec_id();
+        // For Rex5+, meter new-account storage gas against the caller's storage context.
+        // For pre-Rex5, preserve the legacy (frozen) behavior of using the code-source address.
+        let storage_address = if mega_spec.is_enabled(MegaSpecId::REX5) {
+            context.interpreter.input.target_address()
+        } else {
+            to
+        };
+        let Ok(storage_account) =
+            context.host.inspect_account_delegated(mega_spec, storage_address)
+        else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let is_empty = storage_account.state_clear_aware_is_empty(spec);
+        let Some(value) = context.interpreter.stack.inspect::<2>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let has_transfer = !value.is_zero();
+        // Charge additional storage gas cost for creating a new account
+        if is_empty && has_transfer {
+            let Some(new_account_storage_gas) =
+                context.host.new_account_storage_gas(storage_address)
+            else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            gas!(context.interpreter, new_account_storage_gas);
+        }
+
+        // Call the original instruction
+        run_inner_instruction_or_abort!(compute_gas_ext::call_code, context);
+    }
 
     /// `CREATE`/`CREATE2` opcode implementation modified from `revm` with compute gas tracking and
     /// dynamically-scaled storage gas costs.

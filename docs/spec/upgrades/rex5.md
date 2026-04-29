@@ -1,5 +1,5 @@
 ---
-description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, and caller-account update deduplication.
+description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, caller-account update deduplication, and CALLCODE new-account storage gas metering fix.
 ---
 
 # Rex5 Network Upgrade
@@ -17,6 +17,8 @@ Rex5 introduces the `SequencerRegistry` system contract, which tracks two indepe
 It also upgrades the Oracle contract to v2.0.0 to read its authority from the registry.
 
 Rex5 also corrects a resource-accounting bug where the caller-account update was overcounted whenever a contract performed multiple value-transferring sub-calls or contract creations from the same call frame.
+
+Rex5 additionally corrects a `CALLCODE` storage-gas metering bug: new-account storage gas is now charged against the caller's storage context rather than the code-source address.
 
 ## What Changed
 
@@ -60,7 +62,20 @@ Pending role changes are applied during `pre_execution_changes` via a single pre
 This follows the same pattern as EIP-2935 and EIP-4788.
 The system call is only issued when a Rust-side pre-check confirms any role change is due.
 
-### 5. Caller-Account Update Deduplication (Data Size and KV Updates)
+### 5. CALLCODE New-Account Storage Gas Metering
+
+**Previous behavior (Rex4 and earlier):**
+The storage-gas wrapper for `CALLCODE` charged new-account storage gas against the stack `to` address — i.e. the code-source address.
+For `CALLCODE`, however, execution happens in the caller's account context: the stack `to` only selects which code to load, while the storage / account context remains the caller's.
+Charging new-account storage gas against the code-source address can therefore charge spuriously when the code-source is empty.
+
+**New behavior (Rex5):**
+The new-account emptiness check and the `new_account_storage_gas(...)` charge are performed against the current frame's storage account (`interpreter.input.target_address()` — the caller / executing contract).
+The stack `to` continues to be used solely as the code-source for the underlying `CALLCODE` instruction.
+Pre-Rex5 specs preserve the (frozen) prior behavior for backward compatibility.
+`CALL` semantics are unchanged: the stack `to` is still the value recipient and is the correct address for new-account metering.
+
+### 6. Caller-Account Update Deduplication (Data Size and KV Updates)
 
 **Previous behavior (Rex4 and earlier):**
 When a call frame performed a value-transferring `CALL` / `CALLCODE` or a `CREATE` / `CREATE2`, the implementation charged the _caller_ account update to the child frame's discardable budget.
@@ -80,6 +95,8 @@ The discardable-on-revert mechanic is unchanged: charges recorded inside a child
 - The Oracle contract's write methods (`setSlot`, `emitLog`, etc.) now accept calls from the current system address as reported by `SequencerRegistry`, not from a fixed address.
 - Transactions that perform multiple value-transferring sub-calls or creates from the same contract now report lower data-size and KV-update usage than they did under Rex4.
   This only affects usage tracking; it does not change execution semantics, state transitions, or the base transaction gas model.
+- Value-transferring `CALLCODE` no longer charges new-account storage gas based on the code-source address.
+  Contracts that previously paid spurious new-account storage gas via `CALLCODE` to an empty address see lower gas usage under Rex5.
 
 ## Safety and Compatibility
 
@@ -88,6 +105,7 @@ The discardable-on-revert mechanic is unchanged: charges recorded inside a child
 - Both `_currentSystemAddress` and `_currentSequencer` are only updated during pre-block system calls, ensuring block-stability.
 - Changing one role does not affect the other.
 - Rex4 and earlier retain the original caller-account overcounting behavior unchanged.
+- Rex4 and earlier retain the original `CALLCODE` new-account storage gas metering behavior unchanged.
 - Rex5 is the current unstable spec under active development; its semantics may still change before network activation.
 
 ## References
