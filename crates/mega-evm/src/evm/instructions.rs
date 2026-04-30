@@ -1232,11 +1232,9 @@ pub mod storage_gas_ext {
         context: InstructionContext<'_, H, WIRE>,
     ) {
         let spec = context.interpreter.runtime_flag.spec_id();
-        let Some(to) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        let to = to.into_address();
+        // CALLCODE (0xf2) requires 7 stack items; the interpreter validates min stack depth before
+        // dispatching to this handler, so inspect::<1>() and inspect::<2>() always return Some.
+        let to = context.interpreter.stack.inspect::<1>().unwrap().into_address();
         let mega_spec = context.host.spec_id();
         // For Rex5+, meter new-account storage gas against the caller's storage context.
         // For pre-Rex5, preserve the legacy (frozen) behavior of using the code-source address.
@@ -1252,11 +1250,7 @@ pub mod storage_gas_ext {
             return;
         };
         let is_empty = storage_account.state_clear_aware_is_empty(spec);
-        let Some(value) = context.interpreter.stack.inspect::<2>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        let has_transfer = !value.is_zero();
+        let has_transfer = !context.interpreter.stack.inspect::<2>().unwrap().is_zero();
         // Charge additional storage gas cost for creating a new account
         if is_empty && has_transfer {
             let Some(new_account_storage_gas) =

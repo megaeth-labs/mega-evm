@@ -20,9 +20,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    EVMError, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
+    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
+    BucketId, EmptyExternalEnv, EVMError, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv, TestExternalEnvs,
+    MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, STOP},
@@ -194,4 +195,150 @@ fn test_rex4_call_to_empty_charges_new_account_storage_gas() {
         expected_extra,
         "Rex4 CALL must charge new-account storage gas against the target bucket",
     );
+}
+
+// ============================================================================
+// Error-path tests — coverage for FatalExternalError branches in call_code
+// ============================================================================
+
+/// A SALT environment that always fails `get_bucket_capacity`, triggering the
+/// `new_account_storage_gas` → `None` → `FatalExternalError` path in `call_code`.
+#[derive(Debug)]
+struct FailingSaltEnv;
+
+impl SaltEnv for FailingSaltEnv {
+    type Error = String;
+
+    fn get_bucket_capacity(&self, _bucket_id: BucketId) -> Result<u64, String> {
+        Err("injected salt error".into())
+    }
+
+    fn bucket_id_for_account(_account: Address) -> BucketId {
+        0
+    }
+
+    fn bucket_id_for_slot(_address: Address, _key: U256) -> BucketId {
+        0
+    }
+}
+
+fn transact_with_error_db(
+    spec: MegaSpecId,
+    db: ErrorInjectingDatabase,
+    caller: Address,
+    callee: Address,
+    gas_limit: u64,
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, MegaTransactionError>> {
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let mut context = MegaContext::new(db, spec)
+        .with_external_envs(external_envs.into())
+        .with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_data_size_limit(u64::MAX)
+                .with_tx_kv_updates_limit(u64::MAX),
+        );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let tx = TxEnv {
+        caller,
+        kind: TxKind::Call(callee),
+        data: Bytes::new(),
+        value: U256::ZERO,
+        gas_limit,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    alloy_evm::Evm::transact_raw(&mut evm, tx)
+}
+
+fn transact_with_failing_salt(
+    spec: MegaSpecId,
+    db: &mut MemoryDatabase,
+    caller: Address,
+    callee: Address,
+    gas_limit: u64,
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+    let envs: ExternalEnvs<(FailingSaltEnv, EmptyExternalEnv)> =
+        ExternalEnvs { salt_env: FailingSaltEnv, oracle_env: EmptyExternalEnv };
+    let mut context = MegaContext::new(db, spec)
+        .with_external_envs(envs)
+        .with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits()
+                .with_tx_data_size_limit(u64::MAX)
+                .with_tx_kv_updates_limit(u64::MAX),
+        );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context);
+    let tx = TxEnv {
+        caller,
+        kind: TxKind::Call(callee),
+        data: Bytes::new(),
+        value: U256::ZERO,
+        gas_limit,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    alloy_evm::Evm::transact_raw(&mut evm, tx)
+}
+
+/// When `inspect_account_delegated` fails during CALLCODE (in `storage_gas_ext::call_code`),
+/// the EVM should halt with `FatalExternalError` and return `EVMError::Custom`.
+/// Under Rex4, the storage address is the code-source (stack `to` = `EMPTY_TARGET`).
+#[test]
+fn test_callcode_db_error_on_inspect_account() {
+    let bytecode = callcode_bytecode(EMPTY_TARGET);
+    let inner_db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+        .account_balance(CALLEE, U256::from(1_000_000_000u64))
+        .account_code(CALLEE, bytecode);
+
+    let mut db = ErrorInjectingDatabase::new(inner_db);
+    db.fail_on_account = Some(EMPTY_TARGET);
+
+    let result = transact_with_error_db(MegaSpecId::REX4, db, CALLER, CALLEE, 1_000_000);
+
+    match result {
+        Err(EVMError::Custom(msg)) => {
+            assert!(
+                msg.contains("injected basic()"),
+                "error message should contain injected error, got: {msg}"
+            );
+        }
+        Err(other) => panic!("expected EVMError::Custom, got: {other:?}"),
+        Ok(result) => panic!("expected error, got success: {:?}", result.result),
+    }
+}
+
+/// When the SALT environment fails during `new_account_storage_gas` inside CALLCODE
+/// (in `storage_gas_ext::call_code`), the EVM should halt with `FatalExternalError`.
+/// This path is reached under Rex4 when the code-source is empty and value is non-zero.
+#[test]
+fn test_callcode_salt_error_on_new_account_storage_gas() {
+    let bytecode = callcode_bytecode(EMPTY_TARGET);
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+        .account_balance(CALLEE, U256::from(1_000_000_000u64))
+        .account_code(CALLEE, bytecode);
+
+    let result =
+        transact_with_failing_salt(MegaSpecId::REX4, &mut db, CALLER, CALLEE, 1_000_000);
+
+    match result {
+        Err(EVMError::Custom(msg)) => {
+            assert!(
+                msg.contains("injected salt error"),
+                "error message should contain salt error, got: {msg}"
+            );
+        }
+        Err(other) => panic!("expected EVMError::Custom, got: {other:?}"),
+        Ok(result) => panic!("expected error, got success: {:?}", result.result),
+    }
 }
