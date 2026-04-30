@@ -21,7 +21,7 @@ use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
-    BucketId, EmptyExternalEnv, EVMError, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
+    BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
     MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv, TestExternalEnvs,
     MIN_BUCKET_SIZE,
 };
@@ -230,9 +230,8 @@ fn transact_with_error_db(
     gas_limit: u64,
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, MegaTransactionError>> {
     let external_envs = TestExternalEnvs::<Infallible>::new();
-    let mut context = MegaContext::new(db, spec)
-        .with_external_envs(external_envs.into())
-        .with_tx_runtime_limits(
+    let mut context =
+        MegaContext::new(db, spec).with_external_envs(external_envs.into()).with_tx_runtime_limits(
             EvmTxRuntimeLimits::no_limits()
                 .with_tx_data_size_limit(u64::MAX)
                 .with_tx_kv_updates_limit(u64::MAX),
@@ -264,13 +263,11 @@ fn transact_with_failing_salt(
 ) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
     let envs: ExternalEnvs<(FailingSaltEnv, EmptyExternalEnv)> =
         ExternalEnvs { salt_env: FailingSaltEnv, oracle_env: EmptyExternalEnv };
-    let mut context = MegaContext::new(db, spec)
-        .with_external_envs(envs)
-        .with_tx_runtime_limits(
-            EvmTxRuntimeLimits::no_limits()
-                .with_tx_data_size_limit(u64::MAX)
-                .with_tx_kv_updates_limit(u64::MAX),
-        );
+    let mut context = MegaContext::new(db, spec).with_external_envs(envs).with_tx_runtime_limits(
+        EvmTxRuntimeLimits::no_limits()
+            .with_tx_data_size_limit(u64::MAX)
+            .with_tx_kv_updates_limit(u64::MAX),
+    );
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -328,8 +325,7 @@ fn test_callcode_salt_error_on_new_account_storage_gas() {
         .account_balance(CALLEE, U256::from(1_000_000_000u64))
         .account_code(CALLEE, bytecode);
 
-    let result =
-        transact_with_failing_salt(MegaSpecId::REX4, &mut db, CALLER, CALLEE, 1_000_000);
+    let result = transact_with_failing_salt(MegaSpecId::REX4, &mut db, CALLER, CALLEE, 1_000_000);
 
     match result {
         Err(EVMError::Custom(msg)) => {
