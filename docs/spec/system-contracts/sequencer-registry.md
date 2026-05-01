@@ -103,6 +103,9 @@ To cancel, pass `activationBlock = type(uint256).max` and `newAddress = address(
 It is called by the execution layer as a pre-block system call when a Rust-side pre-check confirms any role change is due.
 For each role, if pending and due, it updates the current address, appends to the change history, and clears pending state.
 
+The system call is issued with `gas_limit = max(block.gas_limit, 30_000_000)` instead of the upstream-fixed 30M used for EIP-2935 / EIP-4788.
+This is required because the slot-rotation cost scales with REX dynamic storage gas (SALT bucket capacity), and a fixed 30M is no longer guaranteed to be sufficient on activation blocks.
+
 ### Interception
 
 `SequencerRegistry` does NOT use call interception.
