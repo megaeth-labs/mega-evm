@@ -19,6 +19,10 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
     /// @notice The admin that can schedule role changes and transfer admin ownership.
     address private _admin;
 
+    /// @notice The address allowed to call `acceptAdmin()` to complete a two-step admin transfer,
+    ///         or `address(0)` if no transfer is pending.
+    address private _pendingAdmin;
+
     /// @notice The bootstrap system address returned before the first system address change.
     address private _initialSystemAddress;
 
@@ -193,6 +197,11 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
         return _admin;
     }
 
+    /// @inheritdoc ISequencerRegistry
+    function pendingAdmin() public view returns (address) {
+        return _pendingAdmin;
+    }
+
     /// @dev Reverts if msg.sender is not the current admin.
     modifier onlyAdmin() {
         _onlyAdmin();
@@ -204,12 +213,23 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
     }
 
     /// @inheritdoc ISequencerRegistry
+    /// @dev Two-step transfer: sets `_pendingAdmin` and does NOT change `_admin`. The new admin
+    ///      becomes effective only when they call `acceptAdmin()`. Passing `address(0)` cancels
+    ///      any previously pending transfer. A subsequent call overwrites the pending slot.
     function transferAdmin(address newAdmin) external onlyAdmin {
-        if (newAdmin == address(0)) revert ZeroAddress();
+        _pendingAdmin = newAdmin;
+        emit AdminTransferStarted(admin(), newAdmin);
+    }
 
-        address oldAdmin = admin();
-        _admin = newAdmin;
+    /// @inheritdoc ISequencerRegistry
+    function acceptAdmin() external {
+        address pending = _pendingAdmin;
+        if (msg.sender != pending) revert NotPendingAdmin();
 
-        emit AdminTransferred(oldAdmin, newAdmin);
+        address oldAdmin = _admin;
+        _admin = pending;
+        delete _pendingAdmin;
+
+        emit AdminTransferred(oldAdmin, pending);
     }
 }

@@ -50,34 +50,35 @@ pub use mega_system_contracts::sequencer_registry::ISequencerRegistry;
 
 /// Bootstrap configuration for `SequencerRegistry` (attached to Rex5 via [`HardforkParams`]).
 ///
-/// All three addresses are required. There is no `Default`.
+/// The initial system address is fixed to [`MEGA_SYSTEM_ADDRESS`] at genesis and is not
+/// configurable: pre-Rex5 components (payload executor, txpool, replay) all assume the
+/// system tx sender equals the legacy constant, and a configurable initial value would
+/// silently break those invariants. After Rex5 activation, the system address can be
+/// rotated via the registry's scheduling/apply flow.
+///
+/// Field names carry an explicit `rex5_` prefix because these values seed the
+/// `SequencerRegistry` only when Rex5 activates; pre-Rex5 blocks read the system address
+/// from the legacy constant and ignore this struct entirely.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequencerRegistryConfig {
-    /// The initial system address (Oracle/system-tx sender).
-    pub initial_system_address: Address,
-    /// The initial sequencer (mini-block signing key).
-    pub initial_sequencer: Address,
-    /// The initial admin for the registry.
-    pub initial_admin: Address,
+    /// The initial sequencer (mini-block signing key) seeded at Rex5 activation.
+    pub rex5_initial_sequencer: Address,
+    /// The initial admin for the registry, seeded at Rex5 activation.
+    pub rex5_initial_admin: Address,
 }
 
 impl HardforkParams for SequencerRegistryConfig {
     const FORK: MegaHardfork = MegaHardfork::Rex5;
 
     fn validate(&self) -> Result<(), HardforkParamsError> {
-        if self.initial_system_address.is_zero() {
+        if self.rex5_initial_sequencer.is_zero() {
             return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.initial_system_address must not be zero".into(),
+                message: "SequencerRegistryConfig.rex5_initial_sequencer must not be zero".into(),
             });
         }
-        if self.initial_sequencer.is_zero() {
+        if self.rex5_initial_admin.is_zero() {
             return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.initial_sequencer must not be zero".into(),
-            });
-        }
-        if self.initial_admin.is_zero() {
-            return Err(HardforkParamsError {
-                message: "SequencerRegistryConfig.initial_admin must not be zero".into(),
+                message: "SequencerRegistryConfig.rex5_initial_admin must not be zero".into(),
             });
         }
         Ok(())
@@ -184,9 +185,11 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     revm_acc.mark_created();
 
     // Seed initial storage (flat slots only, no dynamic arrays).
-    let initial_system_address = address_to_storage_value(config.initial_system_address);
-    let initial_sequencer = address_to_storage_value(config.initial_sequencer);
-    let initial_admin = address_to_storage_value(config.initial_admin);
+    // The initial system address is fixed to MEGA_SYSTEM_ADDRESS at genesis — see
+    // [`SequencerRegistryConfig`] for rationale.
+    let initial_system_address = address_to_storage_value(MEGA_SYSTEM_ADDRESS);
+    let initial_sequencer = address_to_storage_value(config.rex5_initial_sequencer);
+    let initial_admin = address_to_storage_value(config.rex5_initial_admin);
     let initial_from_block = U256::from(current_block_number);
 
     for (slot, value) in [
@@ -347,19 +350,22 @@ pub fn resolve_system_address<DB: Database>(
 mod tests {
     use super::*;
     use alloy_primitives::{address, keccak256, B256};
+    use mega_system_contracts::sequencer_registry::storage_slots::PENDING_ADMIN;
     use revm::{context::BlockEnv, database::InMemoryDB, state::AccountInfo};
 
     use crate::{MegaHardforkConfig, MegaSpecId};
 
-    const TEST_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
     const TEST_SEQUENCER: Address = address!("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
     const TEST_ADMIN: Address = address!("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
+    /// A non-system test address, used as a stand-in for a `_currentSystemAddress` that has
+    /// already been rotated away from the genesis `MEGA_SYSTEM_ADDRESS`. Distinct from
+    /// genesis so tests can tell the two apart.
+    const TEST_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
     fn test_config() -> SequencerRegistryConfig {
         SequencerRegistryConfig {
-            initial_system_address: TEST_SYSTEM_ADDRESS,
-            initial_sequencer: TEST_SEQUENCER,
-            initial_admin: TEST_ADMIN,
+            rex5_initial_sequencer: TEST_SEQUENCER,
+            rex5_initial_admin: TEST_ADMIN,
         }
     }
 
@@ -381,17 +387,23 @@ mod tests {
         assert_eq!(CURRENT_SYSTEM_ADDRESS, U256::from(0), "_currentSystemAddress = slot 0");
         assert_eq!(CURRENT_SEQUENCER, U256::from(1), "_currentSequencer = slot 1");
         assert_eq!(ADMIN, U256::from(2), "_admin = slot 2");
-        assert_eq!(INITIAL_SYSTEM_ADDRESS, U256::from(3), "_initialSystemAddress = slot 3");
-        assert_eq!(INITIAL_SEQUENCER, U256::from(4), "_initialSequencer = slot 4");
-        assert_eq!(INITIAL_FROM_BLOCK, U256::from(5), "_initialFromBlock = slot 5");
-        assert_eq!(PENDING_SYSTEM_ADDRESS, U256::from(6), "_pendingSystemAddress = slot 6");
+        assert_eq!(PENDING_ADMIN, U256::from(3), "_pendingAdmin = slot 3");
+        assert_eq!(INITIAL_SYSTEM_ADDRESS, U256::from(4), "_initialSystemAddress = slot 4");
+        assert_eq!(INITIAL_SEQUENCER, U256::from(5), "_initialSequencer = slot 5");
+        assert_eq!(INITIAL_FROM_BLOCK, U256::from(6), "_initialFromBlock = slot 6");
+        assert_eq!(PENDING_SYSTEM_ADDRESS, U256::from(7), "_pendingSystemAddress = slot 7");
         assert_eq!(
             SYSTEM_ADDRESS_ACTIVATION_BLOCK,
-            U256::from(7),
-            "_systemAddressActivationBlock = slot 7"
+            U256::from(8),
+            "_systemAddressActivationBlock = slot 8"
         );
-        assert_eq!(PENDING_SEQUENCER, U256::from(8), "_pendingSequencer = slot 8");
-        assert_eq!(SEQUENCER_ACTIVATION_BLOCK, U256::from(9), "_sequencerActivationBlock = slot 9");
+        assert_eq!(PENDING_SEQUENCER, U256::from(9), "_pendingSequencer = slot 9");
+        assert_eq!(
+            SEQUENCER_ACTIVATION_BLOCK,
+            U256::from(10),
+            "_sequencerActivationBlock = slot 10"
+        );
+        // Slots 11 (_systemAddressHistory) and 12 (_sequencerHistory) are dynamic arrays.
     }
 
     #[test]
@@ -411,36 +423,24 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_zero_initial_system_address() {
+    fn test_validate_rejects_zero_rex5_initial_sequencer() {
         let mut config = test_config();
-        config.initial_system_address = Address::ZERO;
-        let err = config.validate().expect_err("zero initial_system_address must be rejected");
+        config.rex5_initial_sequencer = Address::ZERO;
+        let err = config.validate().expect_err("zero rex5_initial_sequencer must be rejected");
         assert!(
-            err.message.contains("initial_system_address must not be zero"),
+            err.message.contains("rex5_initial_sequencer must not be zero"),
             "unexpected message: {}",
             err.message,
         );
     }
 
     #[test]
-    fn test_validate_rejects_zero_initial_sequencer() {
+    fn test_validate_rejects_zero_rex5_initial_admin() {
         let mut config = test_config();
-        config.initial_sequencer = Address::ZERO;
-        let err = config.validate().expect_err("zero initial_sequencer must be rejected");
+        config.rex5_initial_admin = Address::ZERO;
+        let err = config.validate().expect_err("zero rex5_initial_admin must be rejected");
         assert!(
-            err.message.contains("initial_sequencer must not be zero"),
-            "unexpected message: {}",
-            err.message,
-        );
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_initial_admin() {
-        let mut config = test_config();
-        config.initial_admin = Address::ZERO;
-        let err = config.validate().expect_err("zero initial_admin must be rejected");
-        assert!(
-            err.message.contains("initial_admin must not be zero"),
+            err.message.contains("rex5_initial_admin must not be zero"),
             "unexpected message: {}",
             err.message,
         );
@@ -464,7 +464,13 @@ mod tests {
 
         assert_eq!(
             account.storage.get(&CURRENT_SYSTEM_ADDRESS).unwrap().present_value(),
-            U256::from_be_bytes(TEST_SYSTEM_ADDRESS.into_word().0),
+            U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0),
+            "initial system address is hardcoded to MEGA_SYSTEM_ADDRESS",
+        );
+        assert_eq!(
+            account.storage.get(&INITIAL_SYSTEM_ADDRESS).unwrap().present_value(),
+            U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0),
+            "_initialSystemAddress is hardcoded to MEGA_SYSTEM_ADDRESS",
         );
         assert_eq!(
             account.storage.get(&CURRENT_SEQUENCER).unwrap().present_value(),

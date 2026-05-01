@@ -32,9 +32,10 @@ Key methods:
 - `systemAddressAt(blockNumber)` / `sequencerAt(blockNumber)` — historical role lookups.
 - `scheduleNextSystemAddressChange(...)` / `scheduleNextSequencerChange(...)` — admin schedules a change for either role.
 - `applyPendingChanges()` — permissionless; applies both roles atomically as a pre-block system call.
-- `admin()` / `transferAdmin(newAdmin)` — admin management.
+- `admin()` / `pendingAdmin()` / `transferAdmin(newAdmin)` / `acceptAdmin()` — two-step admin handoff. `transferAdmin` only sets `_pendingAdmin`; the new admin must call `acceptAdmin` for the change to take effect, preventing single-step lockouts from a mistyped or phished address.
 
-Initial storage is seeded at deploy time from the chain's `SequencerRegistryConfig`.
+Initial storage is seeded at deploy time.
+The initial system address is fixed to `MEGA_SYSTEM_ADDRESS` and is not configurable on `SequencerRegistryConfig`; the initial sequencer and admin come from the chain's `SequencerRegistryConfig`.
 No constructor is executed.
 
 ### 2. Dynamic System Address
