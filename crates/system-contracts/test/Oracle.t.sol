@@ -28,17 +28,59 @@ contract OracleTest is Test {
         registry = SequencerRegistry(REGISTRY_ADDRESS);
 
         // Seed SequencerRegistry storage (no constructor).
+        // Slot layout (kept in sync with SequencerRegistry.t.sol::setUp):
+        //   0: _currentSystemAddress
+        //   1: _currentSequencer
+        //   2: _admin
+        //   3: _pendingAdmin (left at zero — no pending transfer at bootstrap)
+        //   4: _initialSystemAddress
+        //   5: _initialSequencer
+        //   6: _initialFromBlock
         vm.store(REGISTRY_ADDRESS, bytes32(uint256(0)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
         vm.store(REGISTRY_ADDRESS, bytes32(uint256(1)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
         vm.store(REGISTRY_ADDRESS, bytes32(uint256(2)), bytes32(uint256(uint160(INITIAL_ADMIN))));
-        vm.store(REGISTRY_ADDRESS, bytes32(uint256(3)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
-        vm.store(REGISTRY_ADDRESS, bytes32(uint256(4)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
-        vm.store(REGISTRY_ADDRESS, bytes32(uint256(5)), bytes32(uint256(INITIAL_FROM_BLOCK)));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(4)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(5)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(6)), bytes32(uint256(INITIAL_FROM_BLOCK)));
 
         vm.roll(INITIAL_FROM_BLOCK);
 
         // Deploy Oracle (v2.0.0 -- reads authority from SequencerRegistry.currentSystemAddress()).
         oracle = new Oracle();
+    }
+
+    // ============ setUp invariants ============
+
+    /// @notice Verifies that `setUp` seeded `SequencerRegistry` storage at the correct slots.
+    /// @dev This test reads the bootstrap state through the contract's own view functions, so
+    ///      every slot the fixture writes is exercised end-to-end against the Solidity-defined
+    ///      storage layout. If a future change reorders or renumbers slots without keeping the
+    ///      `vm.store(...)` calls in `setUp` aligned, this test fails — preventing the silent
+    ///      fixture drift that previously hid in plain sight.
+    function test_setUp_seedsRegistryBootstrapStateCorrectly() public view {
+        // Slots 0, 1, 2 (current system address / sequencer / admin).
+        assertEq(registry.admin(), INITIAL_ADMIN, "admin (slot 2)");
+        assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS, "currentSystemAddress (slot 0)");
+        assertEq(registry.currentSequencer(), INITIAL_SEQUENCER, "currentSequencer (slot 1)");
+
+        // Slot 3 (pendingAdmin) must be untouched by the bootstrap fixture.
+        assertEq(registry.pendingAdmin(), address(0), "pendingAdmin (slot 3) must be zero at bootstrap");
+
+        // Indirectly exercises `_initialSystemAddress` (slot 4) and `_initialFromBlock` (slot 6):
+        // `systemAddressAt` reads `_systemAddressHistory` first (empty at bootstrap) and falls
+        // through to `_initialSystemAddress`; the lower-bound check uses `_initialFromBlock`.
+        assertEq(
+            registry.systemAddressAt(INITIAL_FROM_BLOCK),
+            INITIAL_SYSTEM_ADDRESS,
+            "systemAddressAt(INITIAL_FROM_BLOCK) covers slots 4 + 6"
+        );
+
+        // Indirectly exercises `_initialSequencer` (slot 5) and `_initialFromBlock` (slot 6).
+        assertEq(
+            registry.sequencerAt(INITIAL_FROM_BLOCK),
+            INITIAL_SEQUENCER,
+            "sequencerAt(INITIAL_FROM_BLOCK) covers slots 5 + 6"
+        );
     }
 
     // ============ version ============

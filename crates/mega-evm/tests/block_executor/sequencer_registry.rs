@@ -36,9 +36,8 @@ const BOOTSTRAP_ADMIN: Address = address!("0x50000000000000000000000000000000000
 
 fn sequencer_registry_config() -> SequencerRegistryConfig {
     SequencerRegistryConfig {
-        initial_system_address: MEGA_SYSTEM_ADDRESS,
-        initial_sequencer: BOOTSTRAP_SEQUENCER,
-        initial_admin: BOOTSTRAP_ADMIN,
+        rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
+        rex5_initial_admin: BOOTSTRAP_ADMIN,
     }
 }
 
@@ -75,9 +74,8 @@ fn create_tx_from(
 }
 
 /// After `apply_pre_execution_changes()`, the context's `system_address` should be
-/// the `initial_system_address` from `SequencerRegistryConfig` because the
-/// `SequencerRegistry` was
-/// just deployed with that value seeded into storage.
+/// `MEGA_SYSTEM_ADDRESS` because `SequencerRegistry` is deployed at genesis with the
+/// initial system address hardcoded to that constant.
 #[test]
 fn test_bootstrap_block_resolves_system_address() {
     let mut db = MemoryDatabase::default();
@@ -107,8 +105,8 @@ fn test_bootstrap_block_resolves_system_address() {
     let system_address = executor.evm().ctx_ref().system_address();
     assert_eq!(
         system_address, MEGA_SYSTEM_ADDRESS,
-        "Bootstrap block should resolve system_address to \
-         SequencerRegistryConfig.initial_system_address"
+        "Bootstrap block should resolve system_address to MEGA_SYSTEM_ADDRESS \
+         (the genesis-hardcoded initial system address)"
     );
 }
 

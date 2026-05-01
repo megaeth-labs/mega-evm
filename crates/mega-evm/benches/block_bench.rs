@@ -85,9 +85,8 @@ fn all_hardforks_config() -> MegaHardforkConfig {
         .with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
         .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
         .with_params(SequencerRegistryConfig {
-            initial_system_address: MEGA_SYSTEM_ADDRESS,
-            initial_sequencer: MEGA_SYSTEM_ADDRESS,
-            initial_admin: MEGA_SYSTEM_ADDRESS,
+            rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
+            rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
         })
 }
 

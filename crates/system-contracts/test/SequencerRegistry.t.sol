@@ -2,6 +2,7 @@
 pragma solidity ^0.8.0;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {SequencerRegistry} from "../contracts/SequencerRegistry.sol";
 import {ISequencerRegistry} from "../contracts/interfaces/ISequencerRegistry.sol";
 
@@ -31,15 +32,16 @@ contract SequencerRegistryTest is Test {
         //   0: _currentSystemAddress
         //   1: _currentSequencer
         //   2: _admin
-        //   3: _initialSystemAddress
-        //   4: _initialSequencer
-        //   5: _initialFromBlock
+        //   3: _pendingAdmin (left at zero — no pending transfer at bootstrap)
+        //   4: _initialSystemAddress
+        //   5: _initialSequencer
+        //   6: _initialFromBlock
         vm.store(REGISTRY_ADDRESS, bytes32(uint256(0)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
         vm.store(REGISTRY_ADDRESS, bytes32(uint256(1)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
         vm.store(REGISTRY_ADDRESS, bytes32(uint256(2)), bytes32(uint256(uint160(INITIAL_ADMIN))));
-        vm.store(REGISTRY_ADDRESS, bytes32(uint256(3)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
-        vm.store(REGISTRY_ADDRESS, bytes32(uint256(4)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
-        vm.store(REGISTRY_ADDRESS, bytes32(uint256(5)), bytes32(uint256(INITIAL_FROM_BLOCK)));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(4)), bytes32(uint256(uint160(INITIAL_SYSTEM_ADDRESS))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(5)), bytes32(uint256(uint160(INITIAL_SEQUENCER))));
+        vm.store(REGISTRY_ADDRESS, bytes32(uint256(6)), bytes32(uint256(INITIAL_FROM_BLOCK)));
 
         // Start at block >= INITIAL_FROM_BLOCK so lookups work.
         vm.roll(INITIAL_FROM_BLOCK);
@@ -65,20 +67,44 @@ contract SequencerRegistryTest is Test {
         assertEq(registry.admin(), INITIAL_ADMIN);
     }
 
-    // ============ transferAdmin ============
-
-    function test_transferAdmin_success() public {
-        vm.prank(INITIAL_ADMIN);
-        registry.transferAdmin(newAdmin);
-        assertEq(registry.admin(), newAdmin);
+    function test_setUp_pendingAdminIsZero() public view {
+        // Slot 3 must be empty at bootstrap; `transferAdmin` is the only way to populate it.
+        // This test is the symmetric guard to `OracleTest::test_setUp_seedsRegistryBootstrapStateCorrectly`:
+        // it fails immediately if a future fixture or layout change accidentally writes to slot 3.
+        assertEq(registry.pendingAdmin(), address(0));
     }
 
-    function test_transferAdmin_emitsEvent() public {
-        vm.expectEmit(true, true, false, true);
-        emit ISequencerRegistry.AdminTransferred(INITIAL_ADMIN, newAdmin);
+    // ============ transferAdmin (two-step: schedule pending) ============
+
+    function test_transferAdmin_setsPendingButDoesNotChangeAdmin() public {
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
+
+        // Current admin is unchanged until acceptance.
+        assertEq(registry.admin(), INITIAL_ADMIN);
+        assertEq(registry.pendingAdmin(), newAdmin);
+    }
+
+    function test_transferAdmin_emitsAdminTransferStarted() public {
+        vm.expectEmit(true, true, false, false);
+        emit ISequencerRegistry.AdminTransferStarted(INITIAL_ADMIN, newAdmin);
 
         vm.prank(INITIAL_ADMIN);
         registry.transferAdmin(newAdmin);
+    }
+
+    function test_transferAdmin_doesNotEmitAdminTransferred() public {
+        // AdminTransferred is reserved for the accept step. Recording logs proves it is not
+        // emitted on schedule.
+        vm.recordLogs();
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
+
+        bytes32 transferredSig = keccak256("AdminTransferred(address,address)");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != transferredSig, "transfer must not emit AdminTransferred");
+        }
     }
 
     function test_transferAdmin_revertsNotAdmin() public {
@@ -87,26 +113,118 @@ contract SequencerRegistryTest is Test {
         registry.transferAdmin(newAdmin);
     }
 
-    function test_transferAdmin_revertsZeroAddress() public {
+    function test_transferAdmin_zeroCancelsPending() public {
         vm.prank(INITIAL_ADMIN);
-        vm.expectRevert(ISequencerRegistry.ZeroAddress.selector);
+        registry.transferAdmin(newAdmin);
+        assertEq(registry.pendingAdmin(), newAdmin);
+
+        vm.expectEmit(true, true, false, false);
+        emit ISequencerRegistry.AdminTransferStarted(INITIAL_ADMIN, address(0));
+
+        vm.prank(INITIAL_ADMIN);
         registry.transferAdmin(address(0));
+        assertEq(registry.pendingAdmin(), address(0));
+        assertEq(registry.admin(), INITIAL_ADMIN, "current admin must not change on cancel");
     }
 
-    function test_transferAdmin_newAdminCanActOldAdminCannot() public {
+    function test_transferAdmin_overwritesPending() public {
         vm.prank(INITIAL_ADMIN);
         registry.transferAdmin(newAdmin);
 
-        // Old admin cannot act
+        address otherCandidate = address(0x9999);
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(otherCandidate);
+        assertEq(registry.pendingAdmin(), otherCandidate);
+
+        // Original `newAdmin` must no longer be able to accept.
+        vm.prank(newAdmin);
+        vm.expectRevert(ISequencerRegistry.NotPendingAdmin.selector);
+        registry.acceptAdmin();
+    }
+
+    function test_transferAdmin_pendingDoesNotGrantAdminPowers() public {
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
+
+        // pendingAdmin cannot act as admin until they accept.
+        vm.prank(newAdmin);
+        vm.expectRevert(ISequencerRegistry.NotAdmin.selector);
+        registry.scheduleNextSystemAddressChange(address(0xDEAD), block.number + 1);
+    }
+
+    // ============ acceptAdmin ============
+
+    function test_acceptAdmin_promotesPendingAndClearsSlot() public {
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
+
+        vm.prank(newAdmin);
+        registry.acceptAdmin();
+
+        assertEq(registry.admin(), newAdmin);
+        assertEq(registry.pendingAdmin(), address(0));
+    }
+
+    function test_acceptAdmin_emitsAdminTransferred() public {
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
+
+        vm.expectEmit(true, true, false, false);
+        emit ISequencerRegistry.AdminTransferred(INITIAL_ADMIN, newAdmin);
+
+        vm.prank(newAdmin);
+        registry.acceptAdmin();
+    }
+
+    function test_acceptAdmin_revertsNotPendingAdmin() public {
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
+
+        vm.prank(nonAdmin);
+        vm.expectRevert(ISequencerRegistry.NotPendingAdmin.selector);
+        registry.acceptAdmin();
+    }
+
+    function test_acceptAdmin_revertsWhenNoPending() public {
+        // No transfer has been started — pending is the default zero address. Even the old admin
+        // must be rejected because msg.sender != address(0).
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.NotPendingAdmin.selector);
+        registry.acceptAdmin();
+    }
+
+    function test_acceptAdmin_oldAdminCannotActAfterAccept() public {
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
+        vm.prank(newAdmin);
+        registry.acceptAdmin();
+
         vm.prank(INITIAL_ADMIN);
         vm.expectRevert(ISequencerRegistry.NotAdmin.selector);
-        registry.transferAdmin(address(0x9999));
+        registry.transferAdmin(address(0x1234));
+    }
 
-        // New admin can act
-        address anotherAdmin = address(0x1234);
+    function test_acceptAdmin_isOneShot() public {
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
         vm.prank(newAdmin);
-        registry.transferAdmin(anotherAdmin);
-        assertEq(registry.admin(), anotherAdmin);
+        registry.acceptAdmin();
+
+        // Pending is cleared; calling acceptAdmin again must revert.
+        vm.prank(newAdmin);
+        vm.expectRevert(ISequencerRegistry.NotPendingAdmin.selector);
+        registry.acceptAdmin();
+    }
+
+    function test_fullHandoff_newAdminCanActAfterAccept() public {
+        vm.prank(INITIAL_ADMIN);
+        registry.transferAdmin(newAdmin);
+        vm.prank(newAdmin);
+        registry.acceptAdmin();
+
+        // New admin can perform admin-only operations.
+        vm.prank(newAdmin);
+        registry.scheduleNextSystemAddressChange(address(0xCAFE), block.number + 1);
     }
 
     // ============ scheduleNextSystemAddressChange ============
