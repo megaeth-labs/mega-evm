@@ -13,15 +13,15 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, IOracle, MegaBlockExecutionCtx,
+    test_utils::MemoryDatabase, BlockLimits, IOracle, ISequencerRegistry, MegaBlockExecutionCtx,
     MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
     MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
     ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
     SEQUENCER_REGISTRY_CODE_HASH,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::{
-    CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS,
-    SEQUENCER_ACTIVATION_BLOCK, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+    ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, PENDING_ADMIN, PENDING_SEQUENCER,
+    PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
 };
 use revm::{
     context::BlockEnv,
@@ -33,6 +33,7 @@ use revm::{
 const NEW_SYSTEM_ADDRESS: Address = address!("3000000000000000000000000000000000000003");
 const BOOTSTRAP_SEQUENCER: Address = address!("0x4000000000000000000000000000000000000004");
 const BOOTSTRAP_ADMIN: Address = address!("0x5000000000000000000000000000000000000005");
+const NEW_ADMIN: Address = address!("0x6000000000000000000000000000000000000006");
 
 fn sequencer_registry_config() -> SequencerRegistryConfig {
     SequencerRegistryConfig {
@@ -64,6 +65,30 @@ fn create_tx_from(
         nonce,
         gas_price: 0,
         gas_limit: 1_000_000_000,
+        to: TxKind::Call(target),
+        value: U256::ZERO,
+        input: data,
+    };
+    let signed = Signed::new_unchecked(tx_legacy, Signature::test_signature(), Default::default());
+    let tx = MegaTxEnvelope::Legacy(signed);
+    alloy_consensus::transaction::Recovered::new_unchecked(tx, sender)
+}
+
+/// Like [`create_tx_from`] but with an explicit `gas_limit`. System-address senders bypass
+/// block gas-limit validation, so existing tests can use the very-large 1B figure;
+/// regular-EOA tests must respect the block gas limit (30M in `create_evm_env`).
+fn create_tx_from_with_gas_limit(
+    sender: Address,
+    nonce: u64,
+    target: Address,
+    data: Bytes,
+    gas_limit: u64,
+) -> alloy_consensus::transaction::Recovered<MegaTxEnvelope> {
+    let tx_legacy = TxLegacy {
+        chain_id: Some(8453),
+        nonce,
+        gas_price: 0,
+        gas_limit,
         to: TxKind::Call(target),
         value: U256::ZERO,
         input: data,
@@ -491,4 +516,104 @@ fn test_missing_sequencer_sequencer_registry_config_errors() {
         err.to_string().contains("SequencerRegistryConfig not configured"),
         "unexpected error: {err}"
     );
+}
+
+/// End-to-end exercise of the two-step admin handoff through the block executor: the current
+/// admin submits `transferAdmin`, the new admin submits `acceptAdmin`, and the registry's
+/// `_admin` slot is promoted while `_pendingAdmin` is cleared. Mirrors the pattern used by
+/// `test_system_address_change` for the system-address rotation flow.
+#[test]
+fn test_admin_handoff_via_block_executor() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
+    db.set_account_balance(BOOTSTRAP_ADMIN, U256::from(1_000_000_000_000_000u64));
+    db.set_account_balance(NEW_ADMIN, U256::from(1_000_000_000_000_000u64));
+
+    db.insert_account_info(
+        SEQUENCER_REGISTRY_ADDRESS,
+        AccountInfo {
+            code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+            code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+            ..Default::default()
+        },
+    );
+    // Seed the slots the handoff path actually reads/writes (slot 0 keeps Oracle/system-address
+    // resolution happy across `apply_pre_execution_changes`; slot 2 is the modifier guard).
+    db.insert_account_storage(
+        SEQUENCER_REGISTRY_ADDRESS,
+        CURRENT_SYSTEM_ADDRESS,
+        MEGA_SYSTEM_ADDRESS.into_word().into(),
+    )
+    .unwrap();
+    db.insert_account_storage(
+        SEQUENCER_REGISTRY_ADDRESS,
+        ADMIN,
+        BOOTSTRAP_ADMIN.into_word().into(),
+    )
+    .unwrap();
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+    let chain_spec = MegaHardforkConfig::default()
+        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
+        .with_params(sequencer_registry_config());
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let block_executor_factory =
+        MegaBlockExecutorFactory::new(chain_spec, evm_factory, receipt_builder);
+
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+    );
+
+    let mut executor =
+        block_executor_factory.create_executor(&mut state, block_ctx, create_evm_env());
+    executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
+
+    // tx#1: current admin schedules a transfer to NEW_ADMIN.
+    let calldata = ISequencerRegistry::transferAdminCall { newAdmin: NEW_ADMIN }.abi_encode();
+    let tx = create_tx_from_with_gas_limit(
+        BOOTSTRAP_ADMIN,
+        0,
+        SEQUENCER_REGISTRY_ADDRESS,
+        Bytes::from(calldata),
+        1_000_000,
+    );
+    let receipt = executor
+        .execute_transaction(&tx)
+        .expect("transferAdmin tx should be accepted by the executor");
+    assert!(receipt > 0, "transferAdmin tx should report non-zero gas used");
+
+    // tx#2: NEW_ADMIN completes the handoff.
+    let calldata = ISequencerRegistry::acceptAdminCall {}.abi_encode();
+    let tx = create_tx_from_with_gas_limit(
+        NEW_ADMIN,
+        0,
+        SEQUENCER_REGISTRY_ADDRESS,
+        Bytes::from(calldata),
+        1_000_000,
+    );
+    let receipt = executor
+        .execute_transaction(&tx)
+        .expect("acceptAdmin tx should be accepted by the executor");
+    assert!(receipt > 0, "acceptAdmin tx should report non-zero gas used");
+
+    // Drop the executor to release the &mut borrow on `state`, then read the post-state.
+    drop(executor);
+
+    let admin_slot = revm::Database::storage(&mut state, SEQUENCER_REGISTRY_ADDRESS, ADMIN)
+        .expect("read ADMIN slot");
+    assert_eq!(
+        admin_slot,
+        U256::from_be_bytes(NEW_ADMIN.into_word().0),
+        "_admin must be promoted to NEW_ADMIN after acceptAdmin",
+    );
+
+    let pending_slot =
+        revm::Database::storage(&mut state, SEQUENCER_REGISTRY_ADDRESS, PENDING_ADMIN)
+            .expect("read PENDING_ADMIN slot");
+    assert_eq!(pending_slot, U256::ZERO, "_pendingAdmin must be cleared after acceptAdmin");
 }
