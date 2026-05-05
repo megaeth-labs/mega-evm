@@ -317,6 +317,34 @@ fn test_callcode_db_error_on_inspect_account() {
 /// When the SALT environment fails during `new_account_storage_gas` inside CALLCODE
 /// (in `storage_gas_ext::call_code`), the EVM should halt with `FatalExternalError`.
 /// This path is reached under Rex4 when the code-source is empty and value is non-zero.
+/// When `inspect_account_delegated` fails during CALLCODE under Rex5, the EVM should halt with
+/// `FatalExternalError` and return `EVMError::Custom`. Under Rex5, the storage address is the
+/// current frame target (`CALLEE`), not the code-source.
+#[test]
+fn test_rex5_callcode_db_error_on_inspect_account() {
+    let bytecode = callcode_bytecode(EMPTY_TARGET);
+    let inner_db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+        .account_balance(CALLEE, U256::from(1_000_000_000u64))
+        .account_code(CALLEE, bytecode);
+
+    let mut db = ErrorInjectingDatabase::new(inner_db);
+    db.fail_on_account = Some(CALLEE);
+
+    let result = transact_with_error_db(MegaSpecId::REX5, db, CALLER, CALLEE, 1_000_000);
+
+    match result {
+        Err(EVMError::Database(err)) => {
+            assert!(
+                err.to_string().contains("injected basic()"),
+                "error message should contain injected error, got: {err}"
+            );
+        }
+        Err(other) => panic!("expected EVMError::Database, got: {other:?}"),
+        Ok(result) => panic!("expected error, got success: {:?}", result.result),
+    }
+}
+
 #[test]
 fn test_callcode_salt_error_on_new_account_storage_gas() {
     let bytecode = callcode_bytecode(EMPTY_TARGET);
