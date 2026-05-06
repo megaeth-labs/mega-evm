@@ -96,7 +96,7 @@ For `setSlots`, if the `slots` and `values` array lengths differ, the call MUST 
 #### Authorization Check Ordering
 
 For `setSlot`, `setSlots`, `emitLog`, and `emitLogs`, the function body — including all `SSTORE` operations and `LOG` emissions — MUST execute before the caller authorization check.
-On an unauthorized call, the body MUST run to completion (consuming gas for the iteration and any storage writes), and the call MUST then revert with `NotSystemAddress()`.
+On an unauthorized call, the body MUST run to completion (consuming gas for all operations it performs — `SSTORE` writes, `LOG` emissions, and any loop iterations), and the call MUST then revert with `NotSystemAddress()`.
 The revert MUST roll back all storage writes and log emissions performed by the body, leaving no observable state change at the transaction boundary if the surrounding transaction does not catch the revert.
 
 Authorization for `setSlots` is checked after the array-length equality check.
