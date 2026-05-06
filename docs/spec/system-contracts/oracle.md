@@ -93,6 +93,20 @@ Calls from any other sender MUST revert with `NotSystemAddress()`.
 
 For `setSlots`, if the `slots` and `values` array lengths differ, the call MUST revert with `InvalidLength(uint256 slotsLength, uint256 valuesLength)`.
 
+#### Authorization Check Ordering
+
+For `setSlot`, `setSlots`, `emitLog`, and `emitLogs`, the function body — including all `SSTORE` operations and `LOG` emissions — MUST execute before the caller authorization check.
+On an unauthorized call, the body MUST run to completion (consuming gas for the iteration and any storage writes), and the call MUST then revert with `NotSystemAddress()`.
+The revert MUST roll back all storage writes and log emissions performed by the body, leaving no observable state change at the transaction boundary if the surrounding transaction does not catch the revert.
+
+Authorization for `setSlots` is checked after the array-length equality check.
+If the lengths differ, the call MUST revert with `InvalidLength(uint256, uint256)` before any `SSTORE` runs and before the authorization check.
+
+{% hint style="info" %}
+**Design intent.** Running the body before the authorization check makes the would-be storage writes and log emissions visible to off-chain EVM inspectors and trace consumers, even when the call ultimately reverts.
+This is intentional and is part of the observable behavior of the Oracle contract.
+{% endhint %}
+
 ### Auxiliary Interface
 
 The Oracle contract MUST expose the following auxiliary methods:
@@ -191,6 +205,28 @@ The sequencer's frontrunning system transaction ensures that the lazily served v
 **Why intercept `sendHint` during call interception?**
 Hint forwarding depends on external backend behavior that cannot be expressed by on-chain bytecode alone.
 The no-op Solidity body provides a stable interface, while the [call interception](interception.md) mechanism supplies the protocol-level side effect.
+
+**Why run the restricted-write body before the authorization check?**
+The authorization check is intentionally placed after the function body so that off-chain EVM inspectors observe the would-be storage writes and log emissions even when the call reverts.
+This preserves trace visibility for simulators that exercise the Oracle's write paths from non-system callers, at the cost of allowing unauthorized callers to perform unbounded body work that is rolled back on revert.
+The trade-off and its consequences are spelled out in [Security Considerations](#security-considerations).
+
+## Security Considerations
+
+**Block gas consumption by unauthorized callers.**
+Because the body of `setSlot`, `setSlots`, `emitLog`, and `emitLogs` runs before the authorization check, an unauthorized caller MAY supply arbitrarily large input arrays to `setSlots` or `emitLogs` and cause the body to iterate and `SSTORE` (or emit `LOG`) up to the caller's gas allowance before the call reverts.
+The unauthorized caller pays the full gas cost of this work, but the gas consumed counts against the block's gas budget.
+This is not differentiable from any other unbounded-loop gas-burn pattern reachable from ordinary EVM bytecode, so it does not imply a contract change.
+A node implementation that gates the `SSTORE` or `LOG` operations on authorization first would produce gas accounting that disagrees with the canonical Oracle bytecode and MUST NOT be used.
+
+**Execution trace semantics for trace consumers.**
+A trace produced by `debug_traceTransaction` or any equivalent inspector for an Oracle write call MAY contain `SSTORE` and `LOG` operations even when the surrounding call reverts.
+A consumer that infers permanent state changes from raw trace operations alone MUST NOT treat such operations as committed without first checking the final transaction status: if the transaction reverts, all `SSTORE`s and `LOG`s in its trace MUST be discarded.
+A consumer that fails to filter by transaction status MAY misattribute Oracle slot updates to unauthorized callers and corrupt downstream indexing or replay state.
+
+**Invariants preserved.**
+The Oracle's restricted-write methods preserve the invariant that, at the transaction boundary, no Oracle storage slot is modified and no `Log` event is emitted by an unauthorized caller.
+Per-frame trace visibility of the would-be writes is informative only and MUST NOT be interpreted as a state change.
 
 ## Spec History
 
