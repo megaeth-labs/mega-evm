@@ -103,10 +103,10 @@ Both roles share the same `_initialFromBlock`.
 ### Change Scheduling
 
 Each role has independent `schedule*Change(newAddress, activationBlock)`.
-`activationBlock` MUST be strictly greater than `block.number`; otherwise the call MUST revert with `InvalidActivationBlock()`.
+To cancel a pending change, pass `activationBlock = type(uint256).max` and `newAddress = address(0)`; the call is handled as a special cancellation case before any other validation.
+For all other values, `activationBlock` MUST be strictly greater than `block.number`; otherwise the call MUST revert with `InvalidActivationBlock()`.
 `activationBlock` MUST also fit in `uint96`; if it exceeds `type(uint96).max`, the call MUST revert with `ActivationBlockTooLarge()`.
 At most one pending change per role exists at a time; a new schedule overwrites the previous one.
-To cancel, pass `activationBlock = type(uint256).max` and `newAddress = address(0)`.
 
 ### Pre-Block Apply
 
