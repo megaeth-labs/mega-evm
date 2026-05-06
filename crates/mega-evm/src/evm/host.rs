@@ -447,6 +447,9 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         } else {
             self.inspect_account_delegated(spec, address)?
         };
+        // Capture before any potential re-borrow. Used below to skip the DB lookup for
+        // accounts created in this transaction, mirroring revm's `sload_with_account`.
+        let is_newly_created = account.is_created();
         if account.storage.contains_key(&key) {
             // Slot already exists, return reference to it.
             // Need to reload account to satisfy borrow checker.
@@ -457,9 +460,15 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
             };
             return Ok(account.storage.get(&key).unwrap());
         }
-        // Slot doesn't exist, load from DB and insert
-        let slot = self.database.storage(address, key)?;
-        let mut slot = EvmStorageSlot::new(slot, transaction_id);
+        // Slot doesn't exist. For newly-created accounts, post-CREATE storage is
+        // guaranteed empty (EIP-161 / EIP-6780), so return ZERO without touching the DB.
+        // Querying here would otherwise generate a witness lookup for a slot that has no
+        // meaningful pre-state value — which fails for stateless replay when CREATE lands
+        // on a pre-funded address (its `Loaded` cache status bypasses revm's
+        // `State::storage` short-circuit and exposes the call to the witness backend).
+        let slot_value =
+            if is_newly_created { U256::ZERO } else { self.database.storage(address, key)? };
+        let mut slot = EvmStorageSlot::new(slot_value, transaction_id);
         // deliberately mark the slot as cold since we are only inspecting it, not warming it
         slot.mark_cold();
         // Load account again to bypass the borrow checker and insert the slot
