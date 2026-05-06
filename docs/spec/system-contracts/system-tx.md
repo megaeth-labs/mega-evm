@@ -26,7 +26,7 @@ It is the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (see [Cons
 <summary>Rex5 (unstable): Dynamic system address resolution</summary>
 
 `MEGA_SYSTEM_ADDRESS` MUST be resolved per block from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) after all pre-block changes are committed.
-The fixed-constant resolution above no longer applies.
+The fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` is replaced by this dynamic resolution; the fixed-constant rule does not apply in Rex5 and later.
 
 </details>
 

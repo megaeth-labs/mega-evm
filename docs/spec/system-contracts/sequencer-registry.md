@@ -30,7 +30,9 @@ The `SequencerRegistry` provides a canonical on-chain source of truth for both r
 
 ### Bytecode
 
-Version 1.0.0
+A node MUST deploy the bytecode version corresponding to the active spec.
+
+#### Version 1.0.0
 
 Since: [Rex5](../upgrades/rex5.md)
 
