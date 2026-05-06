@@ -70,12 +70,19 @@ The `keylessDeploymentTransaction` argument MUST decode as a signed pre-EIP-155 
 The following conditions MUST hold:
 
 - the transaction encoding is valid RLP for `TxLegacy`,
-- (Rex5+) the encoding contains no trailing bytes after the signed RLP payload,
 - the transaction is a contract creation (`to = null`),
 - the transaction has no chain ID,
 - the transaction nonce is exactly `0`.
 
 If any of those conditions fail, the call MUST revert with the corresponding validation error.
+
+<details>
+<summary>Rex5 (unstable): Trailing-bytes rejection</summary>
+
+In addition to the conditions above, the encoding MUST contain no trailing bytes after the signed RLP payload.
+If trailing bytes are present, the call MUST revert with `MalformedEncoding()`.
+
+</details>
 
 ### Validation Rules
 
@@ -186,3 +193,4 @@ Allowing nonce `1` preserves deployability in that case while still preventing a
 
 - [Rex2](../upgrades/rex2.md) introduced KeylessDeploy and its stable top-level interception model.
 - [Rex3](../upgrades/rex3.md) makes the overhead gas count toward compute gas accounting.
+- [Rex5](../upgrades/rex5.md) (**unstable**) rejects encodings with trailing bytes after the signed RLP payload by reverting with `MalformedEncoding()`.

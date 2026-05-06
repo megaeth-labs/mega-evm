@@ -1,5 +1,5 @@
 ---
-description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, and caller-account update deduplication.
+description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, KeylessDeploy trailing-bytes rejection, and caller-account update deduplication.
 ---
 
 # Rex5 Network Upgrade
@@ -60,7 +60,17 @@ Pending role changes are applied during `pre_execution_changes` via a single pre
 This follows the same pattern as EIP-2935 and EIP-4788.
 The system call is only issued when a Rust-side pre-check confirms any role change is due.
 
-### 5. Caller-Account Update Deduplication (Data Size and KV Updates)
+### 5. KeylessDeploy Trailing-Bytes Rejection
+
+**Previous behavior (Rex4 and earlier):**
+The `keylessDeploy` interceptor decoded the inner pre-EIP-155 transaction RLP without rejecting trailing bytes after the signed payload.
+Encodings with trailing data were accepted as long as the leading bytes formed a valid `TxLegacy`.
+
+**New behavior (Rex5):**
+The decoder MUST reject any encoding that contains bytes after the signed RLP payload by reverting with `MalformedEncoding()`.
+This tightens validation so that two distinct byte strings cannot both pass as the "same" inner deployment transaction.
+
+### 6. Caller-Account Update Deduplication (Data Size and KV Updates)
 
 **Previous behavior (Rex4 and earlier):**
 When a call frame performed a value-transferring `CALL` / `CALLCODE` or a `CREATE` / `CREATE2`, the implementation charged the _caller_ account update to the child frame's discardable budget.
@@ -94,6 +104,7 @@ The discardable-on-revert mechanic is unchanged: charges recorded inside a child
 
 - [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
 - [Hardforks and Specs](../hardfork-spec.md) — spec progression and backward-compatibility model
-- `crates/mega-evm/src/system/sequencer_registry.rs` — Rust implementation
-- `crates/system-contracts/contracts/SequencerRegistry.sol` — Solidity contract
-- `crates/system-contracts/contracts/Oracle.sol` — Oracle v2.0.0
+- [SequencerRegistry](../system-contracts/sequencer-registry.md) — system contract specification
+- [Oracle](../system-contracts/oracle.md) — Oracle v2.0.0 specification
+- [KeylessDeploy](../system-contracts/keyless-deploy.md) — KeylessDeploy specification
+- [Resource Accounting](../evm/resource-accounting.md) — caller-account update deduplication
