@@ -30,9 +30,13 @@ The `SequencerRegistry` provides a canonical on-chain source of truth for both r
 
 ### Bytecode
 
-Version 1.0.0
+A node MUST deploy the bytecode version corresponding to the active spec.
+
+#### Version 1.0.0
 
 Since: [Rex5](../upgrades/rex5.md)
+
+Code hash: `0x2dd91bc339d4dadc8cec5a7096213af7cacb02bbbd97308e168564ee5357fb65`
 
 The contract is deployed via raw state patch with initial storage seeded at deploy time.
 No constructor is executed.
@@ -77,6 +81,14 @@ interface ISequencerRegistry {
     function applyPendingChanges() external;
     function admin() external view returns (address);
     function transferAdmin(address newAdmin) external;
+
+    // Errors
+    error FutureBlock();
+    error BeforeInitialBlock();
+    error NotAdmin();
+    error ZeroAddress();
+    error InvalidActivationBlock();
+    error ActivationBlockTooLarge();
 }
 ```
 
@@ -93,9 +105,10 @@ Both roles share the same `_initialFromBlock`.
 ### Change Scheduling
 
 Each role has independent `schedule*Change(newAddress, activationBlock)`.
-`activationBlock` must be strictly greater than `block.number` and fit in `uint96`.
+To cancel a pending change, pass `activationBlock = type(uint256).max` and `newAddress = address(0)`; the call is handled as a special cancellation case before any other validation.
+For all other values, `activationBlock` MUST be strictly greater than `block.number`; otherwise the call MUST revert with `InvalidActivationBlock()`.
+`activationBlock` MUST also fit in `uint96`; if it exceeds `type(uint96).max`, the call MUST revert with `ActivationBlockTooLarge()`.
 At most one pending change per role exists at a time; a new schedule overwrites the previous one.
-To cancel, pass `activationBlock = type(uint256).max` and `newAddress = address(0)`.
 
 ### Pre-Block Apply
 

@@ -27,8 +27,6 @@ The MegaAccessControl system contract MUST exist at `MEGA_ACCESS_CONTROL_ADDRESS
 The contract takes no constructor arguments.
 A node MUST deploy the bytecode version corresponding to the active spec.
 
-Source: [`MegaAccessControl.sol`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/contracts/MegaAccessControl.sol)
-
 #### Version 1.0.0
 
 Since: [Rex4](../upgrades/rex4.md)
