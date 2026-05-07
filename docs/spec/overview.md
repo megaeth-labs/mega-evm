@@ -53,7 +53,7 @@ MegaETH uses a spec system to version its verifiable behavior at each stage of t
 Each newer spec includes all previous behaviors:
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5
 ```
 
 {% hint style="info" %}
@@ -69,6 +69,7 @@ Contracts deployed under a given spec will continue to behave identically, regar
 - **REX2** — SELFDESTRUCT re-enabled (EIP-6780), KeylessDeploy system contract.
 - **REX3** — Oracle gas cap raised to 20M, SLOAD-based oracle detention, keyless deploy compute gas tracking.
 - **REX4** — Per-call-frame resource budgets, relative gas detention, [storage gas stipend](glossary.md#storage-gas-stipend), MegaAccessControl and MegaLimitControl system contracts.
+- **REX5** _(unstable)_ — SequencerRegistry system contract, Oracle v2.0.0 with dynamic system address, caller-account update deduplication, KeylessDeploy trailing-bytes rejection.
 
 See [Hardforks and Specs](hardfork-spec.md) for full details.
 

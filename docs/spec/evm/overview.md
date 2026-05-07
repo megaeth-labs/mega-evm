@@ -101,4 +101,13 @@ MegaETH predeploys the following stable system contracts:
 | [MegaAccessControl](../system-contracts/mega-access-control.md)             | `0x6342000000000000000000000000000000000004` | [Rex4](../upgrades/rex4.md)       | Volatile-data access control         |
 | [MegaLimitControl](../system-contracts/mega-limit-control.md)               | `0x6342000000000000000000000000000000000005` | [Rex4](../upgrades/rex4.md)       | Query remaining compute-gas budget   |
 
+<details>
+<summary>Rex5 (unstable): SequencerRegistry</summary>
+
+| Contract                                                       | Address                                      | Since                       | Purpose                                                  |
+| -------------------------------------------------------------- | -------------------------------------------- | --------------------------- | -------------------------------------------------------- |
+| [SequencerRegistry](../system-contracts/sequencer-registry.md) | `0x6342000000000000000000000000000000000006` | [Rex5](../upgrades/rex5.md) | Dual-role registry for system address and sequencer keys |
+
+</details>
+
 For the full registry and behavioral semantics, see [System Contracts Overview](../system-contracts/overview.md).

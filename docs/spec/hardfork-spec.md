@@ -12,8 +12,8 @@ This page defines both concepts and summarizes what each spec introduces.
 
 The protocol distinguishes between two related concepts:
 
-- **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: _when_ changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior). Represented as `MegaHardfork` in the reference implementation.
-- **[Spec](glossary.md#spec-megaspecid)** — A set of MegaETH verifiable behaviors: _what_ a correct node does. A spec captures the execution-layer semantics that determine node correctness. Represented as `MegaSpecId` in the reference implementation.
+- **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: _when_ changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior).
+- **[Spec](glossary.md#spec-megaspecid)** — A set of MegaETH verifiable behaviors: _what_ a correct node does. A spec captures the execution-layer semantics that determine node correctness.
 
 Multiple hardforks can map to the same spec.
 A hardfork can also map to an older spec.
@@ -37,14 +37,14 @@ All other specs are stable (frozen).
 
 EVM semantics for stable (activated) specs are frozen.
 A new spec may add behavior or change the unstable spec, but it never alters what an existing stable spec does.
-Every spec carries the invariant: "Stable pre-{Spec} semantics MUST remain unchanged."
+Every spec carries the invariant that stable pre-{Spec} semantics remain unchanged.
 
 This means:
 
-- Contracts deployed under a given spec will continue to behave identically after future upgrades.
+- Contracts deployed under a given spec continue to behave identically after future upgrades.
 - Adding or modifying a system contract requires introducing a new spec.
 - Changing gas costs, opcode behavior, or resource limits requires a new spec.
-- Implementations MUST gate spec-specific behavior on the active spec.
+- Implementations gate spec-specific behavior on the active spec.
 
 ## Spec Summary
 
@@ -117,7 +117,10 @@ _See [Rex4 Network Upgrade](upgrades/rex4.md) for full details._
 > **Unstable** — This spec is under active development.
 > Its semantics may change before network activation.
 
-No behavioral changes have been defined yet.
-This spec serves as the placeholder for the next upgrade cycle.
+- **[SequencerRegistry](system-contracts/sequencer-registry.md) system contract** — Tracks the system address and sequencer roles independently with on-chain change scheduling and history.
+- **Dynamic system address** — `MEGA_SYSTEM_ADDRESS` is resolved per block from `SequencerRegistry.currentSystemAddress()` instead of a hardcoded constant.
+- **Oracle v2.0.0** — `onlySystemAddress` reads the authority from `SequencerRegistry`. In-place Oracle bytecode upgrades preserve existing storage instead of clearing it.
+- **Caller-account update deduplication** — Fixes overcounting of caller-account data-size and KV updates across multiple value-transferring sub-calls or creates from the same parent frame.
+- **[KeylessDeploy](system-contracts/keyless-deploy.md) trailing-bytes rejection** — RLP encodings with trailing bytes after the signed payload are rejected with `MalformedEncoding()`.
 
-_See [Rex5 Network Upgrade](upgrades/rex5.md) for the latest status._
+_See [Rex5 Network Upgrade](upgrades/rex5.md) for full details._
