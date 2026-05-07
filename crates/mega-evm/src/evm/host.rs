@@ -439,6 +439,13 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
     ) -> Result<&EvmStorageSlot, Self::DBError> {
         let transaction_id = self.transaction_id;
         let is_rex4_enabled = spec.is_enabled(MegaSpecId::REX4);
+        // EIP-7702 storage semantics: storage belongs to the original address (delegator),
+        // not the delegate. So `is_created` must be checked on the original address — an
+        // EOA delegating via 7702 is never CREATEd, so its flag is always false. Checking
+        // the delegate's flag instead would mistakenly short-circuit storage reads when the
+        // delegate happens to be a freshly-CREATEd contract in the same tx, corrupting
+        // SSTORE accounting (gas / kv_updates / data_size) on the delegator's slots.
+        let is_newly_created = inspect_account(self, address)?.is_created();
         // REX4+: storage belongs to the original address, not the delegate — do not follow
         // EIP-7702 delegation here (matching upstream revm's sload behavior).
         // Pre-REX4: follows delegation (original behavior).
@@ -457,9 +464,15 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
             };
             return Ok(account.storage.get(&key).unwrap());
         }
-        // Slot doesn't exist, load from DB and insert
-        let slot = self.database.storage(address, key)?;
-        let mut slot = EvmStorageSlot::new(slot, transaction_id);
+        // Slot doesn't exist. For newly-created accounts, post-CREATE storage is
+        // guaranteed empty (EIP-161 / EIP-6780), so return ZERO without touching the DB.
+        // Querying here would otherwise generate a witness lookup for a slot that has no
+        // meaningful pre-state value — which fails for stateless replay when CREATE lands
+        // on a pre-funded address (its `Loaded` cache status bypasses revm's
+        // `State::storage` short-circuit and exposes the call to the witness backend).
+        let slot_value =
+            if is_newly_created { U256::ZERO } else { self.database.storage(address, key)? };
+        let mut slot = EvmStorageSlot::new(slot_value, transaction_id);
         // deliberately mark the slot as cold since we are only inspecting it, not warming it
         slot.mark_cold();
         // Load account again to bypass the borrow checker and insert the slot
