@@ -36,7 +36,7 @@ A node MUST deploy the bytecode version corresponding to the active spec.
 
 Since: [Rex5](../upgrades/rex5.md)
 
-Code hash: `0x2dd91bc339d4dadc8cec5a7096213af7cacb02bbbd97308e168564ee5357fb65`
+Code hash: `0x63cd411a379be1c198613ef1d15c3058e7b0db4a5d07d4bcf07014af90040315`
 
 The contract is deployed via raw state patch with initial storage seeded at deploy time.
 No constructor is executed.
@@ -70,15 +70,31 @@ Future versions of `SequencerRegistry` may only **append** new slots; reordering
 
 ```solidity
 interface ISequencerRegistry {
+    // Packed history entry
+    struct ChangeRecord {
+        uint96 fromBlock;
+        address addr;
+    }
+
     // System address role
     function currentSystemAddress() external view returns (address);
     function systemAddressAt(uint256 blockNumber) external view returns (address);
     function scheduleNextSystemAddressChange(address newSystemAddress, uint256 activationBlock) external;
+    event SystemAddressChangeScheduled(
+        address indexed oldSystemAddress,
+        address indexed newSystemAddress,
+        uint256 activationBlock
+    );
 
     // Sequencer role
     function currentSequencer() external view returns (address);
     function sequencerAt(uint256 blockNumber) external view returns (address);
     function scheduleNextSequencerChange(address newSequencer, uint256 activationBlock) external;
+    event SequencerChangeScheduled(
+        address indexed oldSequencer,
+        address indexed newSequencer,
+        uint256 activationBlock
+    );
 
     // Shared
     function applyPendingChanges() external;
@@ -86,11 +102,14 @@ interface ISequencerRegistry {
     function pendingAdmin() external view returns (address);
     function transferAdmin(address newAdmin) external; // step 1: schedule
     function acceptAdmin() external;                   // step 2: complete
-    
+    event AdminTransferStarted(address indexed currentAdmin, address indexed newPendingAdmin);
+    event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
+
     // Errors
     error FutureBlock();
     error BeforeInitialBlock();
     error NotAdmin();
+    error NotPendingAdmin();
     error ZeroAddress();
     error InvalidActivationBlock();
     error ActivationBlockTooLarge();
