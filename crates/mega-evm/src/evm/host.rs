@@ -439,6 +439,13 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
     ) -> Result<&EvmStorageSlot, Self::DBError> {
         let transaction_id = self.transaction_id;
         let is_rex4_enabled = spec.is_enabled(MegaSpecId::REX4);
+        // EIP-7702 storage semantics: storage belongs to the original address (delegator),
+        // not the delegate. So `is_created` must be checked on the original address — an
+        // EOA delegating via 7702 is never CREATEd, so its flag is always false. Checking
+        // the delegate's flag instead would mistakenly short-circuit storage reads when the
+        // delegate happens to be a freshly-CREATEd contract in the same tx, corrupting
+        // SSTORE accounting (gas / kv_updates / data_size) on the delegator's slots.
+        let is_newly_created = inspect_account(self, address)?.is_created();
         // REX4+: storage belongs to the original address, not the delegate — do not follow
         // EIP-7702 delegation here (matching upstream revm's sload behavior).
         // Pre-REX4: follows delegation (original behavior).
@@ -447,9 +454,6 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         } else {
             self.inspect_account_delegated(spec, address)?
         };
-        // Capture before any potential re-borrow. Used below to skip the DB lookup for
-        // accounts created in this transaction, mirroring revm's `sload_with_account`.
-        let is_newly_created = account.is_created();
         if account.storage.contains_key(&key) {
             // Slot already exists, return reference to it.
             // Need to reload account to satisfy borrow checker.
