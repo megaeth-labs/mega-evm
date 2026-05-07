@@ -87,9 +87,8 @@ impl BucketHasher for SingleBucketHasher {
 
 fn sequencer_registry_config() -> SequencerRegistryConfig {
     SequencerRegistryConfig {
-        initial_system_address: MEGA_SYSTEM_ADDRESS,
-        initial_sequencer: BOOTSTRAP_SEQUENCER,
-        initial_admin: BOOTSTRAP_ADMIN,
+        rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
+        rex5_initial_admin: BOOTSTRAP_ADMIN,
     }
 }
 
