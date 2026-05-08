@@ -314,12 +314,9 @@ fn test_callcode_db_error_on_inspect_account() {
     }
 }
 
-/// When the SALT environment fails during `new_account_storage_gas` inside CALLCODE
-/// (in `storage_gas_ext::call_code`), the EVM should halt with `FatalExternalError`.
-/// This path is reached under Rex4 when the code-source is empty and value is non-zero.
-/// When `inspect_account_delegated` fails during CALLCODE under Rex5, the EVM should halt with
-/// `FatalExternalError` and return `EVMError::Custom`. Under Rex5, the storage address is the
-/// current frame target (`CALLEE`), not the code-source.
+/// Under Rex5, CALLCODE storage metering inspects the current frame target (`CALLEE`),
+/// not the code-source. This injected database failure is triggered while loading
+/// `CALLEE` during transaction setup, so it surfaces as `EVMError::Database`.
 #[test]
 fn test_rex5_callcode_db_error_on_inspect_account() {
     let bytecode = callcode_bytecode(EMPTY_TARGET);

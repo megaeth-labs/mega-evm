@@ -116,10 +116,10 @@ These are frequently accessed by many transactions and are a major source of par
 
 The effective compute gas cap imposed by [gas detention](evm/gas-detention.md).
 
-An absolute cap on total compute gas for the transaction; if the transaction has already consumed more gas than the cap when the volatile access occurs, execution halts immediately.
+A relative cap of `current_usage + cap` set at the time of volatile access; if the transaction's compute gas usage later exceeds this cap, execution halts immediately.
 
-In Rex4 and later, this is a relative cap — `current_usage + cap` at the time of volatile access.
-See the [Rex4 upgrade page](upgrades/rex4.md) for details.
+In Rex3 and earlier, this was an absolute cap on total compute gas for the transaction: if the transaction had already consumed more gas than the cap when the volatile access occurred, execution halted immediately at that point.
+The relative-cap definition above was introduced in [Rex4](upgrades/rex4.md).
 
 ## Beneficiary
 
@@ -161,7 +161,8 @@ A set of MegaETH verifiable behaviors: the complete definition of what a correct
 
 Captures the execution-layer semantics that determine node correctness.
 
-Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4`.
+Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5`.
+REX5 is the current unstable spec under active development.
 
 See [Hardforks and Specs](hardfork-spec.md).
 
@@ -177,7 +178,7 @@ Multiple hardforks can map to the same spec (e.g., MiniRex1 → EQUIVALENCE, Min
 
 The authorized sender for [Mega System Transactions](system-contracts/system-tx.md).
 
-- Pre-[Rex5](upgrades/rex5.md): the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (defined in [system-tx.md § Constants](system-contracts/system-tx.md#constants)).
-- Rex5 onward: resolved per block from [`SequencerRegistry.currentSystemAddress()`](system-contracts/sequencer-registry.md).
+- The fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (defined in [system-tx.md § Constants](system-contracts/system-tx.md#constants)).
+- _(Rex5, unstable)_ Resolved per block from [`SequencerRegistry.currentSystemAddress()`](system-contracts/sequencer-registry.md) instead of the fixed constant.
 
 Exempt from oracle [gas detention](evm/gas-detention.md); carries [Oracle](system-contracts/oracle.md) write authority.

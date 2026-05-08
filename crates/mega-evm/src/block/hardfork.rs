@@ -462,13 +462,12 @@ mod tests {
     #[test]
     fn test_fork_params_typed_access() {
         let params = SequencerRegistryConfig {
-            initial_system_address: alloy_primitives::address!(
-                "0x1111111111111111111111111111111111111111"
-            ),
-            initial_sequencer: alloy_primitives::address!(
+            rex5_initial_sequencer: alloy_primitives::address!(
                 "0x2222222222222222222222222222222222222222"
             ),
-            initial_admin: alloy_primitives::address!("0x3333333333333333333333333333333333333333"),
+            rex5_initial_admin: alloy_primitives::address!(
+                "0x3333333333333333333333333333333333333333"
+            ),
         };
 
         let config = MegaHardforkConfig::default()

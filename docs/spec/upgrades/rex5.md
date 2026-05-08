@@ -1,5 +1,5 @@
 ---
-description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, caller-account update deduplication, and CALLCODE new-account storage gas metering fix.
+description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, KeylessDeploy trailing-bytes rejection, caller-account update deduplication, and CALLCODE new-account storage gas metering fix.
 ---
 
 # Rex5 Network Upgrade
@@ -16,7 +16,9 @@ For the full normative definition, see the Rex5 spec in the mega-evm repository.
 Rex5 introduces the `SequencerRegistry` system contract, which tracks two independent roles: the **system address** (Oracle/system-tx authority) and the **sequencer** (mini-block signing key).
 It also upgrades the Oracle contract to v2.0.0 to read its authority from the registry.
 
-Rex5 also corrects a resource-accounting bug where the caller-account update was overcounted whenever a contract performed multiple value-transferring sub-calls or contract creations from the same call frame.
+Rex5 also tightens KeylessDeploy validation by rejecting signed inner transaction encodings with trailing bytes.
+
+Rex5 corrects a resource-accounting bug where the caller-account update was overcounted whenever a contract performed multiple value-transferring sub-calls or contract creations from the same call frame.
 
 Rex5 additionally corrects a `CALLCODE` storage-gas metering bug: new-account storage gas is now charged against the caller's storage context rather than the code-source address.
 
@@ -34,9 +36,10 @@ Key methods:
 - `systemAddressAt(blockNumber)` / `sequencerAt(blockNumber)` — historical role lookups.
 - `scheduleNextSystemAddressChange(...)` / `scheduleNextSequencerChange(...)` — admin schedules a change for either role.
 - `applyPendingChanges()` — permissionless; applies both roles atomically as a pre-block system call.
-- `admin()` / `transferAdmin(newAdmin)` — admin management.
+- `admin()` / `pendingAdmin()` / `transferAdmin(newAdmin)` / `acceptAdmin()` — two-step admin handoff. `transferAdmin` only sets `_pendingAdmin`; the new admin must call `acceptAdmin` for the change to take effect, preventing single-step lockouts from a mistyped or phished address.
 
-Initial storage is seeded at deploy time from the chain's `SequencerRegistryConfig`.
+Initial storage is seeded at deploy time.
+The initial system address is fixed to `MEGA_SYSTEM_ADDRESS` and is not configurable on `SequencerRegistryConfig`; the initial sequencer and admin come from the chain's `SequencerRegistryConfig`.
 No constructor is executed.
 
 ### 2. Dynamic System Address
@@ -61,8 +64,20 @@ This differs from pre-Rex5 upgrades, which cleared existing Oracle storage.
 Pending role changes are applied during `pre_execution_changes` via a single pre-block EVM system call to `SequencerRegistry.applyPendingChanges()`.
 This follows the same pattern as EIP-2935 and EIP-4788.
 The system call is only issued when a Rust-side pre-check confirms any role change is due.
+Unlike EIP-2935 / EIP-4788, which carry the upstream-fixed 30M `gas_limit`, this system call is issued with `max(block.gas_limit, 30_000_000)`.
+This is required because the role-rotation slot writes are charged by REX dynamic storage gas, so their cost is no longer guaranteed to fit within a fixed 30M budget on activation blocks.
 
-### 5. CALLCODE New-Account Storage Gas Metering
+### 5. KeylessDeploy Trailing-Bytes Rejection
+
+**Previous behavior (Rex4 and earlier):**
+The `keylessDeploy` interceptor decoded the inner pre-EIP-155 transaction RLP without rejecting trailing bytes after the signed payload.
+Encodings with trailing data were accepted as long as the leading bytes formed a valid `TxLegacy`.
+
+**New behavior (Rex5):**
+The decoder MUST reject any encoding that contains bytes after the signed RLP payload by reverting with `MalformedEncoding()`.
+This tightens validation so that two distinct byte strings cannot both pass as the "same" inner deployment transaction.
+
+### 6. CALLCODE New-Account Storage Gas Metering
 
 **Previous behavior (Rex4 and earlier):**
 The storage-gas wrapper for `CALLCODE` charged new-account storage gas against the stack `to` address — i.e. the code-source address.
@@ -75,7 +90,7 @@ The stack `to` continues to be used solely as the code-source for the underlying
 Pre-Rex5 specs preserve the (frozen) prior behavior for backward compatibility.
 `CALL` semantics are unchanged: the stack `to` is still the value recipient and is the correct address for new-account metering.
 
-### 6. Caller-Account Update Deduplication (Data Size and KV Updates)
+### 7. Caller-Account Update Deduplication (Data Size and KV Updates)
 
 **Previous behavior (Rex4 and earlier):**
 When a call frame performed a value-transferring `CALL` / `CALLCODE` or a `CREATE` / `CREATE2`, the implementation charged the _caller_ account update to the child frame's discardable budget.
@@ -93,6 +108,7 @@ The discardable-on-revert mechanic is unchanged: charges recorded inside a child
 - Contracts that verify mini-block signatures can use `SequencerRegistry.currentSequencer()` to look up the signing authority.
 - Contracts that need historical information can use `systemAddressAt(blockNumber)` or `sequencerAt(blockNumber)`.
 - The Oracle contract's write methods (`setSlot`, `emitLog`, etc.) now accept calls from the current system address as reported by `SequencerRegistry`, not from a fixed address.
+- KeylessDeploy signed inner transaction encodings with trailing bytes now revert with `MalformedEncoding()`.
 - Transactions that perform multiple value-transferring sub-calls or creates from the same contract now report lower data-size and KV-update usage than they did under Rex4.
   This only affects usage tracking; it does not change execution semantics, state transitions, or the base transaction gas model.
 - Value-transferring `CALLCODE` no longer charges new-account storage gas based on the code-source address.
@@ -104,6 +120,7 @@ The discardable-on-revert mechanic is unchanged: charges recorded inside a child
 - `SequencerRegistry` does not have an interceptor. It runs normal on-chain bytecode.
 - Both `_currentSystemAddress` and `_currentSequencer` are only updated during pre-block system calls, ensuring block-stability.
 - Changing one role does not affect the other.
+- Rex4 and earlier retain the original KeylessDeploy trailing-bytes behavior unchanged.
 - Rex4 and earlier retain the original caller-account overcounting behavior unchanged.
 - Rex4 and earlier retain the original `CALLCODE` new-account storage gas metering behavior unchanged.
 - Rex5 is the current unstable spec under active development; its semantics may still change before network activation.
@@ -112,6 +129,7 @@ The discardable-on-revert mechanic is unchanged: charges recorded inside a child
 
 - [mega-evm repository](https://github.com/megaeth-labs/mega-evm)
 - [Hardforks and Specs](../hardfork-spec.md) — spec progression and backward-compatibility model
-- `crates/mega-evm/src/system/sequencer_registry.rs` — Rust implementation
-- `crates/system-contracts/contracts/SequencerRegistry.sol` — Solidity contract
-- `crates/system-contracts/contracts/Oracle.sol` — Oracle v2.0.0
+- [SequencerRegistry](../system-contracts/sequencer-registry.md) — system contract specification
+- [Oracle](../system-contracts/oracle.md) — Oracle v2.0.0 specification
+- [KeylessDeploy](../system-contracts/keyless-deploy.md) — KeylessDeploy specification
+- [Resource Accounting](../evm/resource-accounting.md) — caller-account update deduplication

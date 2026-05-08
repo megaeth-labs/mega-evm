@@ -1,5 +1,5 @@
 ---
-description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex4 with activation dates and behavioral deltas.
+description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex5 with activation dates and behavioral deltas.
 ---
 
 # Overview
@@ -108,7 +108,7 @@ Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas deten
 
 ### [Rex5](rex5.md) _(unstable)_
 
-No behavioral changes defined yet.
+[SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection.
 
 ## How to Read These Pages
 

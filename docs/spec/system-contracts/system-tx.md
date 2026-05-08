@@ -1,6 +1,6 @@
 ---
 description: Mega system transactions — sender/recipient identification rules, whitelisted contracts, and execution bypass semantics.
-spec: Rex5
+spec: Rex4
 ---
 
 # Mega System Transactions
@@ -19,12 +19,16 @@ Mega System Transactions provide that mechanism.
 
 ### Resolution
 
-> **Unstable** — The dynamic resolution described below is Rex5 behavior and may change before network activation.
-
 `MEGA_SYSTEM_ADDRESS` is the authorized system-transaction sender for the current block.
+It is the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (see [Constants](#constants)).
 
-Pre-Rex5, `MEGA_SYSTEM_ADDRESS` is the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`.
-From [Rex5](../upgrades/rex5.md) onward, `MEGA_SYSTEM_ADDRESS` is resolved per block from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) after all pre-block changes are committed.
+<details>
+<summary>Rex5 (unstable): Dynamic system address resolution</summary>
+
+`MEGA_SYSTEM_ADDRESS` MUST be resolved per block from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) after all pre-block changes are committed.
+The fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` is replaced by this dynamic resolution; the fixed-constant rule does not apply in Rex5 and later.
+
+</details>
 
 ### Identification
 
