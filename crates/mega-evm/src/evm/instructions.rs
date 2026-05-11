@@ -14,8 +14,8 @@ use revm::{
         instructions::{self, control, utility::IntoAddress},
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
-        FrameInput, Instruction, InstructionContext, InstructionResult, InstructionTable,
-        InterpreterAction, InterpreterTypes, SStoreResult, Stack,
+        resize_memory, FrameInput, Instruction, InstructionContext, InstructionResult,
+        InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
 };
 
@@ -1244,6 +1244,7 @@ pub mod storage_gas_ext {
         };
 
         // Calculate the created address
+        let mut resize_gas: u64 = 0;
         let created_address = if IS_CREATE2 {
             let Some(initcode_offset) = context.interpreter.stack.inspect::<1>() else {
                 context.interpreter.halt(InstructionResult::StackUnderflow);
@@ -1255,6 +1256,19 @@ pub mod storage_gas_ext {
             };
             let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
             let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
+            // Expand memory before slicing so the read can never go out of bounds. The canonical
+            // CREATE2 path called below also calls `resize_memory!`, which is a no-op once memory
+            // is already sized to fit the requested slice. The expansion gas is metered into the
+            // compute gas tracker AFTER the inner CREATE2 returns (see end of function), so it
+            // is accounted in the same gas dimension as the canonical path would have recorded
+            // it (via `compute_gas_ext::create2`'s `gas_before`/`gas_after` window). Recording
+            // late also matches `wrap_op_compute_gas`'s "skip on inner error" semantics: if the
+            // storage-gas charge or inner CREATE2 OOGs the interpreter, the early-return in
+            // `run_inner_instruction_or_abort!` skips recording, just as the canonical path
+            // would have skipped recording on inner failure.
+            let gas_before_resize = context.interpreter.gas.remaining();
+            resize_memory!(context.interpreter, initcode_offset, initcode_len);
+            resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
             let code = Bytes::copy_from_slice(
                 context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
             );
@@ -1289,6 +1303,17 @@ pub mod storage_gas_ext {
             run_inner_instruction_or_abort!(compute_gas_ext::create2, context);
         } else {
             run_inner_instruction_or_abort!(compute_gas_ext::create, context);
+        }
+
+        // Record the CREATE2 initcode memory expansion gas as compute gas. We defer the
+        // recording until after the inner CREATE2 returns successfully so that on any
+        // intermediate OOG (storage-gas charge or inner CREATE2 itself) the early-return in
+        // `run_inner_instruction_or_abort!` skips this — matching the historical pattern in
+        // `wrap_op_compute_gas` where the canonical CREATE2's expansion gas was only recorded
+        // when the inner instruction completed without an EVM error.
+        if resize_gas > 0 {
+            let mut additional_limit = context.host.additional_limit().borrow_mut();
+            compute_gas!(context.interpreter, additional_limit, resize_gas);
         }
     }
 
