@@ -88,6 +88,34 @@ impl DataSizeTracker {
             entry.refund += size;
         }
     }
+
+    /// Records an account info write (40 bytes) as discardable data in the current frame.
+    ///
+    /// Used by SELFDESTRUCT beneficiary metering (REX5+) to charge data size for
+    /// creating a new beneficiary account.
+    pub(crate) fn record_account_write(&mut self) {
+        self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+    }
+
+    /// Merges external persistent usage into the TX-level entry.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox data size consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
+        self.frame_tracker.tx_mut().persistent_usage += amount;
+    }
+
+    /// Returns the remaining data size budget for the current call frame, capped by
+    /// the TX-level remaining.
+    pub(crate) fn current_call_remaining(&self) -> u64 {
+        let tx_remaining =
+            self.frame_tracker.tx_limit().saturating_sub(self.frame_tracker.net_usage());
+        if self.rex4_enabled {
+            self.frame_tracker.current_frame_remaining().min(tx_remaining)
+        } else {
+            tx_remaining
+        }
+    }
 }
 
 impl TxRuntimeLimit for DataSizeTracker {

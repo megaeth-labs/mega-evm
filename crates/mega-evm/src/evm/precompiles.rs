@@ -164,7 +164,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
         )?;
         // Record the compute gas cost
         Ok(maybe_output.inspect(|output| {
-            if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+            if context.spec.is_enabled(MegaSpecId::REX5) {
+                // REX5+: On error paths (PrecompileOOG, PrecompileError), revm does not call
+                // record_cost(), so spent() returns 0. But the parent permanently loses the
+                // full forwarded amount (is_ok_or_revert() is false -> no gas refund).
+                // Record the full forwarded amount as compute gas to match EVM gas consumption.
+                let compute_gas = if output.result.is_ok_or_revert() {
+                    output.gas.spent()
+                } else {
+                    output.gas.limit()
+                };
+                context.additional_limit.borrow_mut().record_compute_gas(compute_gas);
+            } else if context.spec.is_enabled(MegaSpecId::MINI_REX) {
                 context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
             }
         }))

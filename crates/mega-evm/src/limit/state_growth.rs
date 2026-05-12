@@ -10,6 +10,8 @@
 //!
 //! - **+1** for creating a new account (via `CREATE`, `CREATE2`, or `CALL` with value to empty
 //!   account)
+//! - **+1** for each valid EIP-7702 authorization that creates a previously non-existent authority
+//!   account (Rex5+)
 //! - **+1** for writing a storage slot from zero to non-zero for the first time
 //! - **-1** for clearing a storage slot back to zero (only when the slot was empty at transaction
 //!   start)
@@ -90,6 +92,8 @@ use crate::{FrameLimitTracker, JournalInspectTr, MegaSpecId, TxRuntimeLimit};
 ///
 /// - **+1** for creating a new account (via `CREATE`, `CREATE2`, or `CALL` with value to empty
 ///   account per EIP-161)
+/// - **+1** for each valid EIP-7702 authorization that creates a previously non-existent authority
+///   account (Rex5+)
 /// - **+1** for writing a storage slot from zero to non-zero for the first time
 /// - **-1** for clearing a storage slot back to zero (only when the slot was empty at transaction
 ///   start)
@@ -122,7 +126,7 @@ impl StateGrowthTracker {
     }
 
     /// Records positive state growth in the current frame.
-    fn record_growth(&mut self, n: u64) {
+    pub(crate) fn record_growth(&mut self, n: u64) {
         if let Some(entry) = self.frame_tracker.frame_mut() {
             // For state growth, all growth in the current transaction is discardable on revert.
             entry.discardable_usage += n;
@@ -133,6 +137,34 @@ impl StateGrowthTracker {
     fn record_refund(&mut self, n: u64) {
         if let Some(entry) = self.frame_tracker.frame_mut() {
             entry.refund += n;
+        }
+    }
+
+    /// Merges external persistent usage into the TX-level entry.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox state growth consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
+        self.frame_tracker.tx_mut().persistent_usage += amount;
+    }
+
+    /// Records EIP-7702 authority accounts that were created by pre-execution auth processing.
+    ///
+    /// This is TX-level persistent usage because authorization-list changes are applied before the
+    /// first EVM frame and are not discarded by frame revert.
+    pub(crate) fn record_authority_creations(&mut self, amount: u64) {
+        self.frame_tracker.tx_mut().persistent_usage += amount;
+    }
+
+    /// Returns the remaining state growth budget for the current call frame, capped by
+    /// the TX-level remaining.
+    pub(crate) fn current_call_remaining(&self) -> u64 {
+        let tx_remaining =
+            self.frame_tracker.tx_limit().saturating_sub(self.frame_tracker.net_usage());
+        if self.spec.is_enabled(MegaSpecId::REX4) {
+            self.frame_tracker.current_frame_remaining().min(tx_remaining)
+        } else {
+            tx_remaining
         }
     }
 }
@@ -161,8 +193,8 @@ impl TxRuntimeLimit for StateGrowthTracker {
     /// Returns whether the state growth limit has been exceeded.
     ///
     /// For Rex4+, checks the per-frame budget first, then falls through to a TX-level check.
-    /// The TX-level fallthrough is a defense-in-depth safety net (state growth currently has
-    /// no intrinsic usage in `tx_entry`, so the fallthrough is a no-op today).
+    /// The TX-level fallthrough catches Rex5 pre-frame authority usage and serves as a
+    /// defense-in-depth safety net for any future TX-level persistent usage.
     /// For pre-Rex4, checks total net growth across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
         if self.spec.is_enabled(MegaSpecId::REX4) {
@@ -171,9 +203,8 @@ impl TxRuntimeLimit for StateGrowthTracker {
             if frame_check.exceeded_limit() {
                 return frame_check;
             }
-            // TX-level fallthrough: defense-in-depth safety net.
-            // State growth currently has no intrinsic usage in tx_entry, so this
-            // should not exceed during normal execution.
+            // TX-level fallthrough: catches Rex5 pre-frame authority usage and any
+            // future TX-level state-growth contribution.
         }
         let used = self.tx_usage();
         let limit = self.frame_tracker.tx_limit();
@@ -188,6 +219,12 @@ impl TxRuntimeLimit for StateGrowthTracker {
             super::LimitCheck::WithinLimit
         }
     }
+
+    /// No-op.
+    ///
+    /// REX5 EIP-7702 authority state growth is journal-dependent, so it is recorded later during
+    /// pre-execution via `record_authority_creations()` rather than from transaction-only data.
+    fn before_tx_start(&mut self, _tx: &crate::MegaTransaction) {}
 
     /// Called when inspector intercepts and skips a call/create.
     ///
@@ -219,8 +256,12 @@ impl TxRuntimeLimit for StateGrowthTracker {
             FrameInput::Call(call_inputs) => {
                 // EIP-161: only value transfers to empty accounts count as creating an account.
                 if call_inputs.transfers_value() {
-                    let to_account =
-                        journal.inspect_account_delegated(self.spec, call_inputs.target_address)?;
+                    // REX5+: use non-delegating inspection to get the authority's own state.
+                    let to_account = if self.spec.is_enabled(MegaSpecId::REX5) {
+                        journal.inspect_account(call_inputs.target_address)?
+                    } else {
+                        journal.inspect_account_delegated(self.spec, call_inputs.target_address)?
+                    };
                     let is_empty = to_account.state_clear_aware_is_empty(SpecId::PRAGUE);
                     if is_empty {
                         self.record_growth(1);

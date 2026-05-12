@@ -8,11 +8,12 @@ use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
 use mega_system_contracts::keyless_deploy::IKeylessDeploy;
 
-use crate::MegaHaltReason;
+use crate::{LimitKind, MegaHaltReason};
 
 /// Error types for keyless deployment operations.
 ///
-/// These map directly to the Solidity errors defined in `IKeylessDeploy`.
+/// Most variants map directly to Solidity errors defined in `IKeylessDeploy`.
+/// Internal-only variants are mapped at the ABI boundary by `encode_error_result`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeylessDeployError {
     /// The transaction data is malformed (invalid RLP encoding)
@@ -52,6 +53,21 @@ pub enum KeylessDeployError {
         gas_used: u64,
         /// The reason
         reason: MegaHaltReason,
+    },
+    /// Rex5 preflight rejected the call: the parent's remaining TX-level budget for some
+    /// dimension is smaller than the sandbox's known pre-frame intrinsic usage, so the
+    /// sandbox is guaranteed to fail internally and is not started.
+    ///
+    /// Returned as a Revert (like other validation errors) since no sandbox execution
+    /// has started and no signer state needs to persist.
+    ParentBudgetExceeded {
+        /// The dimension whose parent remaining is too small.
+        kind: LimitKind,
+        /// The parent's remaining limit for that dimension, i.e. the cap the sandbox
+        /// would have been given.
+        limit: u64,
+        /// The sandbox's known pre-frame intrinsic usage for that dimension.
+        used: u64,
     },
     /// Contract creation succeeded but returned empty bytecode
     EmptyCodeDeployed {
@@ -118,6 +134,11 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         }
         KeylessDeployError::ExecutionHalted { gas_used, .. } => {
             IKeylessDeploy::ExecutionHalted { gasUsed: gas_used }.abi_encode().into()
+        }
+        KeylessDeployError::ParentBudgetExceeded { kind, limit, used } => {
+            IKeylessDeploy::ParentBudgetExceeded { kind: kind.as_u8(), limit, used }
+                .abi_encode()
+                .into()
         }
         KeylessDeployError::EmptyCodeDeployed { gas_used } => {
             IKeylessDeploy::EmptyCodeDeployed { gasUsed: gas_used }.abi_encode().into()
@@ -195,6 +216,13 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
                     revm::context::result::OutOfGasError::Basic,
                 ),
             )),
+        });
+    }
+    if let Ok(e) = IKeylessDeploy::ParentBudgetExceeded::abi_decode(output) {
+        return Some(KeylessDeployError::ParentBudgetExceeded {
+            kind: LimitKind::from_u8(e.kind)?,
+            limit: e.limit,
+            used: e.used,
         });
     }
     if let Ok(e) = IKeylessDeploy::EmptyCodeDeployed::abi_decode(output) {

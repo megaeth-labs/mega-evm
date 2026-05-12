@@ -106,9 +106,9 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, [storage gas stipend](../glossary.md#storage-gas-stipend), MegaAccessControl, MegaLimitControl, sandbox environment inheritance.
 
-### [Rex5](rex5.md) _(unstable)_
+### [Rex5](rex5.md)
 
-[SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection.
+[SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection and sandbox resource accounting, precompile [compute gas](../glossary.md#compute-gas) correction, EIP-7702 [state growth](../evm/resource-accounting.md#state-growth) tracking, non-delegating metering inspection, SELFDESTRUCT beneficiary accounting.
 
 ## How to Read These Pages
 

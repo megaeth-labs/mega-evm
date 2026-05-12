@@ -140,6 +140,14 @@ impl ComputeGasTracker {
             self.frame_tracker.tx_mut().persistent_usage += gas;
         }
     }
+
+    /// Merges external persistent usage into the TX-level entry.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox compute gas consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
+        self.frame_tracker.tx_mut().persistent_usage += amount;
+    }
 }
 
 impl TxRuntimeLimit for ComputeGasTracker {

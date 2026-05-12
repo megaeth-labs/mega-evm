@@ -9,7 +9,7 @@ offline = true
 root_dir = "docs"
 
 # Check anchor fragments (#section-name)
-include_fragments = true
+include_fragments = "full"
 
 # Skip these URL patterns (regex)
 exclude = [

@@ -6,8 +6,9 @@ use revm::{
     context::result::{HaltReason, OutOfGasError},
     handler::{EthFrame, FrameResult, ItemOrResult},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, CreateOutcome,
-        FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult, SStoreResult,
+        gas::calculate_initial_tx_gas_for_tx, interpreter::EthInterpreter,
+        interpreter_action::FrameInit, CallOutcome, CreateOutcome, FrameInput, Gas,
+        InstructionResult, InterpreterAction, InterpreterResult, SStoreResult,
     },
 };
 
@@ -36,7 +37,8 @@ use super::LimitCheck;
 /// - **Data size / KV update**: TX-level fallthrough is active in all specs. In Rex4+ it catches
 ///   intrinsic overflow (when the frame stack is empty) and serves as a safety net behind the
 ///   per-frame check.
-/// - **State growth**: TX-level check applies in pre-Rex4 specs only (no intrinsic usage).
+/// - **State growth**: TX-level fallthrough catches Rex5 pre-frame authority usage and serves as a
+///   safety net behind the per-frame check.
 ///
 /// ## Per-Frame Enforcement (Rex4+)
 ///
@@ -176,6 +178,37 @@ impl AdditionalLimit {
         }
     }
 
+    /// Checks whether the Rex5 sandbox's TX-level pre-frame intrinsic usage fits inside
+    /// `limits`.
+    ///
+    /// Runs a trial `AdditionalLimit` through the same entry points production uses —
+    /// `before_tx_start` (data size / KV updates) and `record_compute_gas(initial_gas)`
+    /// (intrinsic compute gas, via `MegaHandler::validate`) — then returns its `check_limit()`
+    /// result. Reusing production logic keeps tracker changes and dimension-priority ordering
+    /// in sync automatically. Consumed by the `KeylessDeploy` preflight.
+    ///
+    /// Any future TX-level persistent usage recorded before the first frame through a different
+    /// path MUST be added here too when it can be computed from the transaction alone. DB-dependent
+    /// contributions, such as REX5 EIP-7702 net-new authority state growth, are recorded during
+    /// pre-execution once the journal is available. Missing additions do not fail open — the
+    /// `KeylessDeploy` post-merge overflow check still catches residual overflow — but the failure
+    /// mode degrades from the preflight fast-path (pre-sandbox revert with `ParentBudgetExceeded`)
+    /// to an outer `OutOfGas` halt after sandbox setup has already run.
+    pub(crate) fn intrinsic_check_for_tx(
+        spec: MegaSpecId,
+        tx: &MegaTransaction,
+        limits: EvmTxRuntimeLimits,
+    ) -> LimitCheck {
+        debug_assert!(spec.is_enabled(MegaSpecId::REX5));
+        let mut trial = Self::new(spec, limits);
+        trial.before_tx_start(tx);
+
+        let initial_and_floor_gas = calculate_initial_tx_gas_for_tx(tx, spec.into_eth_spec());
+        trial.record_compute_gas(initial_and_floor_gas.initial_gas);
+
+        trial.check_limit()
+    }
+
     /// Pushes an empty frame to all trackers so `before_frame_return_result` can pop
     /// them to keep stacks aligned with the EVM's call stack.
     ///
@@ -208,6 +241,24 @@ impl AdditionalLimit {
     #[inline]
     pub fn current_call_remaining_compute_gas(&self) -> u64 {
         self.compute_gas.current_call_remaining()
+    }
+
+    /// Returns the remaining data size budget for the current call frame.
+    #[inline]
+    pub fn current_call_remaining_data_size(&self) -> u64 {
+        self.data_size.current_call_remaining()
+    }
+
+    /// Returns the remaining KV update budget for the current call frame.
+    #[inline]
+    pub fn current_call_remaining_kv_updates(&self) -> u64 {
+        self.kv_update.current_call_remaining()
+    }
+
+    /// Returns the remaining state growth budget for the current call frame.
+    #[inline]
+    pub fn current_call_remaining_state_growth(&self) -> u64 {
+        self.state_growth.current_call_remaining()
     }
 
     /// Returns the detained compute gas limit (independent of the natural TX limit).
@@ -344,20 +395,40 @@ impl AdditionalLimit {
 
     /// Hook called when a new transaction starts.
     ///
-    /// Records intrinsic resource usage (calldata size, access lists, caller account
-    /// update, etc.) and checks TX-level limits. If intrinsic usage already exceeds
-    /// a configured limit, sets `has_exceeded_limit` so that the subsequent
-    /// `frame_result_if_exceeding_limit()` or `before_frame_init()` call produces a
-    /// normal execution failure (Halt), keeping the failure on the standard
+    /// Records transaction-only intrinsic resource usage that can be computed from the
+    /// transaction itself (calldata size, access lists, EIP-7702 authority account update
+    /// footprint, caller account update, etc.) and checks TX-level limits.
+    ///
+    /// DB-dependent pre-frame usage is recorded later once the journal is available.
+    /// In particular, REX5 EIP-7702 net-new authority state growth is accounted during
+    /// pre-execution rather than here because `before_tx_start()` cannot tell whether an
+    /// authority account already exists.
+    ///
+    /// If the recorded usage already exceeds a configured limit, sets `has_exceeded_limit`
+    /// so that the subsequent `frame_result_if_exceeding_limit()` or `before_frame_init()`
+    /// call produces a normal execution failure (Halt), keeping the failure on the standard
     /// additional-limit path.
     ///
-    /// Intrinsic overflow detection works through each tracker's own `check_limit()`,
-    /// which includes a TX-level fallthrough that catches `tx_usage > tx_limit` even
-    /// when the frame stack is empty (before the first frame is pushed).
+    /// Intrinsic overflow detection works through each tracker's own `check_limit()`, which
+    /// includes a TX-level fallthrough that catches `tx_usage > tx_limit` even when the frame
+    /// stack is empty (before the first frame is pushed).
     pub(crate) fn before_tx_start(&mut self, tx: &MegaTransaction) {
         self.state_growth.before_tx_start(tx);
         self.data_size.before_tx_start(tx);
         self.kv_update.before_tx_start(tx);
+        self.check_limit();
+    }
+
+    /// Records REX5 EIP-7702 authority accounts that are net-new state entries.
+    ///
+    /// Called during pre-execution after the journal has loaded each valid authority account and
+    /// before revm writes the delegation bytecode. This cannot live in `before_tx_start()`
+    /// because the net-new check needs DB/journal state.
+    ///
+    /// This also runs `check_limit()` to latch any TX-level overflow into `has_exceeded_limit`,
+    /// which is then turned into the normal execution failure at the next frame boundary.
+    pub(crate) fn on_eip7702_authority_creations(&mut self, amount: u64) {
+        self.state_growth.record_authority_creations(amount);
         self.check_limit();
     }
 
@@ -594,6 +665,17 @@ impl AdditionalLimit {
         }
     }
 
+    /// Merges resource usage from a sandbox execution into this tracker.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox resource consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_usage(&mut self, usage: LimitUsage) {
+        self.compute_gas.merge_persistent_usage(usage.compute_gas);
+        self.data_size.merge_persistent_usage(usage.data_size);
+        self.kv_update.merge_persistent_usage(usage.kv_updates);
+        self.state_growth.merge_persistent_usage(usage.state_growth);
+    }
+
     /// Hook called when an orginally zero storage slot is written non-zero value for the first time
     /// in the transaction. Returns `false` if the limit has been exceeded.
     pub(crate) fn on_sstore(
@@ -623,6 +705,16 @@ impl AdditionalLimit {
     /// The caller is responsible for computing the total refund before calling this.
     pub(crate) fn on_selfdestruct(&mut self, refund: u64) {
         self.state_growth.after_selfdestruct(refund);
+    }
+
+    /// Records resource usage when SELFDESTRUCT creates a new beneficiary account (REX5+).
+    ///
+    /// Charges data size (+40 for account info write), KV update (+1), and state growth (+1).
+    pub(crate) fn on_selfdestruct_new_account(&mut self) {
+        // Account info write: same as DataSizeTracker's ACCOUNT_INFO_WRITE_SIZE (40 bytes)
+        self.data_size.record_account_write();
+        self.kv_update.record_account_update();
+        self.state_growth.record_growth(1);
     }
 }
 

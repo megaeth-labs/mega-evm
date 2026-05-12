@@ -45,6 +45,16 @@ interface IKeylessDeploy {
     /// @param gasUsed The amount of gas used before halting.
     error ExecutionHalted(uint64 gasUsed);
 
+    /// @notice Rex5 preflight rejected the call because the parent transaction's remaining budget
+    ///         for a resource dimension is smaller than the sandbox's known pre-frame intrinsic usage.
+    /// @dev Emitted as a Revert by the Rust interceptor when the preflight check fails.
+    ///      Not used by the on-chain KeylessDeploy bytecode.
+    /// @param kind The resource dimension that exceeded (0=DataSize, 1=KVUpdate, 2=ComputeGas,
+    ///        3=StateGrowth).
+    /// @param limit The parent's remaining limit for that dimension.
+    /// @param used The sandbox's known pre-frame intrinsic usage for that dimension.
+    error ParentBudgetExceeded(uint8 kind, uint64 limit, uint64 used);
+
     /// @notice Contract creation succeeded but returned empty bytecode.
     /// @param gasUsed The amount of gas used.
     error EmptyCodeDeployed(uint64 gasUsed);
@@ -97,5 +107,6 @@ interface IKeylessDeploy {
     ///         Execution errors (ExecutionReverted, ExecutionHalted, EmptyCodeDeployed) return
     ///         success with errorData populated. Validation errors revert the entire call.
     function keylessDeploy(bytes calldata keylessDeploymentTransaction, uint256 gasLimitOverride)
-        external returns (uint64 gasUsed, address deployedAddress, bytes memory errorData);
+        external
+        returns (uint64 gasUsed, address deployedAddress, bytes memory errorData);
 }

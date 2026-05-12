@@ -328,6 +328,14 @@ pub trait JournalInspectTr {
     type DBError: core::fmt::Debug;
 
     /// Inspect the account at the given address without marking it as warm.
+    /// Unlike `inspect_account_delegated`, does NOT follow EIP-7702 delegation.
+    ///
+    /// Use this for metering inspections where the authority's own state matters
+    /// (e.g., new-account storage-gas premium, SALT bucket lookup, state-growth
+    /// emptiness check) rather than the delegate's state.
+    fn inspect_account(&mut self, address: Address) -> Result<&mut Account, Self::DBError>;
+
+    /// Inspect the account at the given address without marking it as warm.
     /// If the account is EIP-7702 type, follows delegation.
     ///
     /// Starting from REX4, resolves exactly one hop (matching upstream revm behavior).
@@ -383,6 +391,10 @@ fn inspect_account<DB: revm::Database>(
 
 impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
     type DBError = <DB as revm::Database>::Error;
+
+    fn inspect_account(&mut self, address: Address) -> Result<&mut Account, Self::DBError> {
+        inspect_account(self, address)
+    }
 
     fn inspect_account_delegated(
         &mut self,
@@ -493,6 +505,14 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
 /// Callers should halt with `FatalExternalError` when receiving `Err`.
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> JournalInspectTr for MegaContext<DB, ExtEnvs> {
     type DBError = ();
+
+    fn inspect_account(&mut self, address: Address) -> Result<&mut Account, ()> {
+        let journal = &mut self.inner.journaled_state;
+        let error = &mut self.inner.error;
+        journal.inspect_account(address).map_err(|e| {
+            *error = Err(ContextError::Custom(format!("{e}")));
+        })
+    }
 
     fn inspect_account_delegated(
         &mut self,

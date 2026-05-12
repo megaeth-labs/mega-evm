@@ -331,7 +331,9 @@ mod rex5 {
 
     /// Returns the instruction table for the `REX5` spec.
     ///
-    /// Changes from Rex4: none yet.
+    /// Changes from Rex4:
+    /// - SELFDESTRUCT: `storage_gas_ext::selfdestruct` → `volatile_data_ext::selfdestruct` →
+    ///   `compute_gas_ext::selfdestruct` (charges storage gas for new beneficiary accounts)
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -339,7 +341,13 @@ mod rex5 {
     where
         WIRE::Stack: StackInspectTr,
     {
-        rex4::instruction_table::<WIRE, H>()
+        use revm::bytecode::opcode::*;
+        let mut table = rex4::instruction_table::<WIRE, H>();
+
+        // REX5: SELFDESTRUCT charges storage gas for new beneficiary accounts.
+        table[SELFDESTRUCT as usize] = storage_gas_ext::selfdestruct;
+
+        table
     }
 }
 
@@ -1173,7 +1181,11 @@ pub mod storage_gas_ext {
                 };
                 let to = to.into_address();
                 let mega_spec = context.host.spec_id();
-                let Ok(to_account) = context.host.inspect_account_delegated(mega_spec, to) else {
+                let Ok(to_account) = (if mega_spec.is_enabled(MegaSpecId::REX5) {
+                    context.host.inspect_account(to)
+                } else {
+                    context.host.inspect_account_delegated(mega_spec, to)
+                }) else {
                     context.interpreter.halt(InstructionResult::FatalExternalError);
                     return;
                 };
@@ -1238,7 +1250,12 @@ pub mod storage_gas_ext {
         let creator_address = context.interpreter.input.target_address();
         // Load the creator account without marking it warm (it is already warm since the creator
         // must have been warmed when the current frame begins).
-        let Ok(creator) = context.host.inspect_account_delegated(spec, creator_address) else {
+        // REX5+: use non-delegating inspection to get the authority's own state.
+        let Ok(creator) = (if spec.is_enabled(MegaSpecId::REX5) {
+            context.host.inspect_account(creator_address)
+        } else {
+            context.host.inspect_account_delegated(spec, creator_address)
+        }) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
@@ -1426,6 +1443,60 @@ pub mod storage_gas_ext {
 
         // Execute the original SSTORE instruction
         run_inner_instruction_or_abort!(compute_gas_ext::sstore, context);
+    }
+
+    /// `SELFDESTRUCT` opcode implementation with storage gas metering for
+    /// new beneficiary account creation (REX5+).
+    ///
+    /// When SELFDESTRUCT sends remaining balance to an empty beneficiary, charges:
+    /// - Storage gas for new account creation (dynamic bucket-based cost)
+    /// - Data size (+40 for account info write)
+    /// - KV update (+1)
+    /// - State growth (+1)
+    pub fn selfdestruct<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let eth_spec = context.interpreter.runtime_flag.spec_id();
+
+        // Peek beneficiary address from stack (SELFDESTRUCT uses stack position 0)
+        let Some(target) = context.interpreter.stack.inspect::<0>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let target = target.into_address();
+
+        // Use non-delegating inspection (REX5+)
+        let Ok(target_account) = context.host.inspect_account(target) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let is_empty = target_account.state_clear_aware_is_empty(eth_spec);
+
+        // Check if caller has balance (value will be transferred to beneficiary)
+        let caller = context.interpreter.input.target_address();
+        let Ok(caller_account) = context.host.inspect_account(caller) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let has_value = !caller_account.info.balance.is_zero();
+
+        if is_empty && has_value {
+            // Charge storage gas for creating a new account
+            let Some(cost) = context.host.new_account_storage_gas(target) else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            gas!(context.interpreter, cost);
+
+            // Record resource usage for new beneficiary account
+            context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
+        }
+
+        // Delegate to the volatile_data_ext wrapper (which wraps compute_gas_ext)
+        run_inner_instruction_or_abort!(volatile_data_ext::selfdestruct, context);
     }
 }
 

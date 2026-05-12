@@ -116,12 +116,42 @@ If validation succeeds, the node MUST execute the inner deployment transaction i
 The sandbox MUST read from the parent transaction's current journal state.
 The KeylessDeploy interceptor MUST be disabled inside the sandbox.
 
+<details>
+<summary>Rex5 (unstable)</summary>
+
+`gasLimitOverride` MUST be capped to the parent transaction's remaining gas before sandbox execution starts.
+The sandbox MUST use its own fresh resource trackers.
+Those sandbox transaction limits MUST be capped to the parent transaction's remaining resource budgets before execution starts.
+The capped budgets are the parent's current-call remaining compute gas and the parent's remaining transaction-level data size, KV updates, and state growth capacity.
+Before sandbox execution starts, the node MUST preflight the sandbox transaction's known tx-level intrinsic usage against those capped budgets.
+Known intrinsic usage includes intrinsic compute gas, base transaction data size, transaction input data size, caller account update usage, and any future tx-level persistent usage recorded before the first sandbox frame.
+The sandbox limits MUST NOT subtract that intrinsic usage because the sandbox tracker records it during normal transaction startup.
+If preflight fails, the node MUST NOT start sandbox execution.
+
+</details>
+
 ### State Merge Semantics
 
-After sandbox execution completes, the sandbox state MUST be merged into the parent context on both sandbox success and sandbox execution failure.
+After sandbox execution completes, the sandbox state MUST be merged into the parent context on both sandbox success and sandbox execution failure, unless a spec-specific rule rejects the outer call before state merge.
 That merged state includes signer balance deduction, signer nonce update, and any resulting deployed code or logs when applicable.
 
 Validation failures MUST NOT merge sandbox state.
+
+<details>
+<summary>Rex5 (unstable)</summary>
+
+The sandbox MUST enforce the capped resource budgets internally.
+If the sandbox exceeds one of those budgets, the sandbox execution MUST fail inside the sandbox using the normal execution-failure path.
+After sandbox execution completes, the node MUST merge the sandbox's resource usage into the parent transaction's resource trackers before merging sandbox state.
+In the normal case, sandbox success or frame-local revert, the merged usage fits inside the parent's remaining resource envelope because the sandbox was capped up front.
+
+Known pre-frame intrinsic overflow MUST be rejected by the preflight check before sandbox execution starts.
+Residual edge cases can still exceed the parent's envelope after merge, such as a single-opcode overshoot at a TX-level compute-gas check or a future tx-level persistent accounting path that was not included in the preflight estimator.
+In that case the node MUST NOT merge sandbox state.
+The outer KeylessDeploy call MUST be rejected by charging the sandbox's EVM gas to the parent gas meter, rescuing any remaining outer gas for refund, and halting the outer call with `OutOfGas` marked as exceeding the parent's TX-level limit.
+This ensures no partial deployment state survives a parent-level reject, matching the ordinary revm convention that halted transactions commit only pre-execution state.
+
+</details>
 
 ### Result Semantics
 
@@ -131,7 +161,20 @@ If sandbox execution succeeds and produces non-empty bytecode at the expected ad
 - `deployedAddress = expected_address`,
 - `errorData = empty`.
 
-If sandbox execution reverts, halts, or produces empty deployed bytecode, the outer KeylessDeploy call MUST still return successfully at the EVM level so that merged state persists.
+If sandbox execution reverts, halts, or produces empty deployed bytecode, the outer KeylessDeploy call MUST still return successfully at the EVM level so that merged state persists, unless a spec-specific parent-level reject applies before state merge.
+
+<details>
+<summary>Rex5 (unstable)</summary>
+
+This success-style return still applies when sandbox execution fails because the capped sandbox resource budgets are exceeded during normal (frame-local) execution.
+In that case the sandbox fails internally and returns encoded `errorData`.
+
+The preflight check is a validation failure, not an execution failure: if the sandbox's known intrinsic usage alone exceeds the parent's remaining resource budget, no sandbox starts, no state is merged, and the outer call reverts with `ParentBudgetExceeded`.
+
+The success-style return does NOT apply when the sandbox's merged TX-level usage overflows the parent's envelope after sandbox execution has already run.
+In that case the outer call halts with `OutOfGas` and no sandbox state is merged.
+
+</details>
 In that case it MUST return:
 
 - `gasUsed = sandbox_gas_used`,
@@ -160,6 +203,7 @@ The stable validation errors are:
 - `NoContractCreated()`
 - `InternalError(string message)`
 - `NotIntercepted()`
+- `ParentBudgetExceeded(uint8 kind, uint64 limit, uint64 used)`
 
 The stable execution errors are:
 
@@ -193,4 +237,4 @@ Allowing nonce `1` preserves deployability in that case while still preventing a
 
 - [Rex2](../upgrades/rex2.md) introduced KeylessDeploy and its stable top-level interception model.
 - [Rex3](../upgrades/rex3.md) makes the overhead gas count toward compute gas accounting.
-- [Rex5](../upgrades/rex5.md) (**unstable**) rejects encodings with trailing bytes after the signed RLP payload by reverting with `MalformedEncoding()`.
+- [Rex5](../upgrades/rex5.md) (**unstable**) rejects encodings with trailing bytes after the signed RLP payload by reverting with `MalformedEncoding()`; propagates sandbox resource usage to the parent transaction, caps `gasLimitOverride` to remaining gas, caps sandbox resource budgets to the parent's remaining limits before execution, preflights known sandbox intrinsic usage, and rejects the outer call without merging sandbox state on the residual overflow path.

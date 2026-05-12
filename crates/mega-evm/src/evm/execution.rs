@@ -1,9 +1,9 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::string::ToString;
+use std::{string::ToString, vec::Vec};
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
-use alloy_primitives::{Bytes, TxKind};
+use alloy_primitives::{Address, Bytes, TxKind, U256};
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
@@ -12,6 +12,7 @@ use op_revm::{
 use revm::{
     context::{
         result::{ExecutionResult, FromStringError, InvalidTransaction},
+        transaction::{AuthorizationTr, TransactionType},
         ContextTr, FrameStack, JournalTr, Transaction,
     },
     handler::{
@@ -124,6 +125,102 @@ where
     }
 }
 
+impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
+where
+    DB: Database,
+    ExtEnvs: ExternalEnvTypes,
+    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
+    ERROR: From<DB::Error> + FromStringError,
+{
+    /// Returns the authority nonce from the transaction-local simulated auth-list state.
+    ///
+    /// Used to mirror revm's sequential EIP-7702 auth processing when the same authority appears
+    /// multiple times in one transaction.
+    fn simulated_authority_nonce(
+        simulated_authorities: &[(Address, u64)],
+        authority: Address,
+    ) -> Option<u64> {
+        simulated_authorities.iter().find_map(|(simulated_authority, nonce)| {
+            (*simulated_authority == authority).then_some(*nonce)
+        })
+    }
+
+    /// Records REX5 state growth for EIP-7702 authorizations that create authority accounts.
+    ///
+    /// The scan mirrors revm's auth-list validation order but stops before mutating delegation
+    /// bytecode. `before_tx_start()` cannot do this because it has no journal/DB access.
+    /// Any overflow is latched into `AdditionalLimit::has_exceeded_limit` and converted into the
+    /// normal execution failure when the first frame is initialized.
+    #[inline]
+    fn record_eip7702_authority_state_growth(&self, evm: &mut EVM) -> Result<(), ERROR> {
+        let ctx = evm.ctx_mut();
+        if !ctx.spec.is_enabled(MegaSpecId::REX5) || ctx.tx().tx_type() != TransactionType::Eip7702
+        {
+            return Ok(());
+        }
+
+        let chain_id = ctx.cfg().chain_id;
+        let authority_creations = {
+            let (tx, journal) = ctx.tx_journal_mut();
+            let mut authority_creations = 0;
+            let mut simulated_authorities = Vec::<(Address, u64)>::new();
+            for authorization in tx.authorization_list() {
+                let auth_chain_id = authorization.chain_id();
+                if !auth_chain_id.is_zero() && auth_chain_id != U256::from(chain_id) {
+                    continue;
+                }
+                if authorization.nonce() == u64::MAX {
+                    continue;
+                }
+                let Some(authority) = authorization.authority() else {
+                    continue;
+                };
+
+                let (authority_nonce, creates_authority) = if let Some(nonce) =
+                    Self::simulated_authority_nonce(&simulated_authorities, authority)
+                {
+                    (nonce, false)
+                } else {
+                    let authority_acc = journal.load_account_code(authority)?;
+                    if let Some(bytecode) = &authority_acc.info.code {
+                        if !bytecode.is_empty() && !bytecode.is_eip7702() {
+                            continue;
+                        }
+                    }
+                    (
+                        authority_acc.info.nonce,
+                        authority_acc.is_empty() &&
+                            authority_acc.is_loaded_as_not_existing_not_touched(),
+                    )
+                };
+
+                if authorization.nonce() != authority_nonce {
+                    continue;
+                }
+
+                if creates_authority {
+                    authority_creations += 1;
+                }
+                let next_nonce = authority_nonce.saturating_add(1);
+                if let Some((_, nonce)) = simulated_authorities
+                    .iter_mut()
+                    .find(|(simulated_authority, _)| *simulated_authority == authority)
+                {
+                    *nonce = next_nonce;
+                } else {
+                    simulated_authorities.push((authority, next_nonce));
+                }
+            }
+            authority_creations
+        };
+        if authority_creations > 0 {
+            ctx.additional_limit.borrow_mut().on_eip7702_authority_creations(authority_creations);
+        }
+
+        Ok(())
+    }
+}
+
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// This is the hook to be called in the beginning of the `frame_run` and `inspect_frame_run`
     /// functions. This function checks if the additional limit is already exceeded, if so, we
@@ -232,10 +329,16 @@ where
                 &self,
                 evm: &mut Self::Evm,
             ) -> Result<(), Self::Error>;
-            fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
             fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
         }
+    }
+
+    fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
+        self.validate_against_state_and_deduct_caller(evm)?;
+        self.load_accounts(evm)?;
+        self.record_eip7702_authority_state_growth(evm)?;
+        self.apply_eip7702_auth_list(evm)
     }
 
     fn run_system_call(
