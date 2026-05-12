@@ -5,11 +5,12 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{string::ToString, vec::Vec};
+use std::vec::Vec;
 
 use alloy_evm::Database as AlloyDatabase;
 use alloy_primitives::{Address, U256};
 use revm::{context::ContextTr, primitives::KECCAK_EMPTY, state::EvmState, Journal, JournalEntry};
+use tracing::error;
 
 use crate::{
     merge_evm_state_optional_status, ExternalEnvTypes, JournalInspectTr, MegaContext, MegaSpecId,
@@ -98,9 +99,14 @@ fn apply_sandbox_state_journaled_inner<DB: AlloyDatabase>(
         // Ensure the account is loaded into the parent journal cache without warming it.
         // Sandbox state merge must preserve the parent's own observable coldness-dependent gas
         // semantics.
-        journal
-            .inspect_account(*address)
-            .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?;
+        journal.inspect_account(*address).map_err(|e| {
+            error!(
+                error = %e,
+                address = ?address,
+                "sandbox merge inspect_account failed",
+            );
+            KeylessDeployError::InternalError
+        })?;
 
         if sandbox_account.is_selfdestructed() {
             apply_sandbox_created_selfdestruct(journal, *address, sandbox_account)?;
@@ -129,9 +135,13 @@ fn apply_sandbox_state_journaled_inner<DB: AlloyDatabase>(
         }
 
         if sandbox_account.info.nonce < parent_nonce {
-            return Err(KeylessDeployError::InternalError(
-                "sandbox merge would decrease parent account nonce".into(),
-            ));
+            error!(
+                address = ?address,
+                parent_nonce,
+                sandbox_nonce = sandbox_account.info.nonce,
+                "sandbox merge would decrease parent account nonce",
+            );
+            return Err(KeylessDeployError::InternalError);
         }
 
         // Nonce diff (one NonceChange entry per increment for correct revert).
@@ -166,14 +176,18 @@ fn apply_sandbox_state_journaled_inner<DB: AlloyDatabase>(
             }
         } else {
             if parent_code_hash != KECCAK_EMPTY {
-                return Err(KeylessDeployError::InternalError(
-                    "sandbox merge would replace non-empty parent code".into(),
-                ));
+                error!(
+                    address = ?address,
+                    "sandbox merge would replace non-empty parent code",
+                );
+                return Err(KeylessDeployError::InternalError);
             }
             let Some(code) = &sandbox_account.info.code else {
-                return Err(KeylessDeployError::InternalError(
-                    "sandbox account changed code hash without bytecode".into(),
-                ));
+                error!(
+                    address = ?address,
+                    "sandbox account changed code hash without bytecode",
+                );
+                return Err(KeylessDeployError::InternalError);
             };
             journal.inner.set_code_with_hash(
                 *address,
@@ -229,9 +243,12 @@ fn ensure_sandbox_create_can_merge(
     parent_code_hash: alloy_primitives::B256,
 ) -> Result<(), KeylessDeployError> {
     if parent_nonce != 0 || parent_code_hash != KECCAK_EMPTY {
-        return Err(KeylessDeployError::InternalError(
-            "sandbox merge would create over non-empty parent account".into(),
-        ));
+        error!(
+            parent_nonce,
+            parent_code_hash = ?parent_code_hash,
+            "sandbox merge would create over non-empty parent account",
+        );
+        return Err(KeylessDeployError::InternalError);
     }
     Ok(())
 }
@@ -299,9 +316,11 @@ fn apply_sandbox_created_selfdestruct<DB: AlloyDatabase>(
     sandbox_account: &revm::state::Account,
 ) -> Result<(), KeylessDeployError> {
     if !sandbox_account.is_created() {
-        return Err(KeylessDeployError::InternalError(
-            "sandbox selfdestructed account was not created in the sandbox".into(),
-        ));
+        error!(
+            address = ?address,
+            "sandbox selfdestructed account was not created in the sandbox",
+        );
+        return Err(KeylessDeployError::InternalError);
     }
 
     let parent = journal.inner.state.get(&address).unwrap();
@@ -602,10 +621,7 @@ mod tests {
 
         let error = apply_sandbox_state(&mut ctx, sandbox_state, signer)
             .expect_err("nonce decrease should fail defensively");
-        assert!(
-            matches!(error, KeylessDeployError::InternalError(_)),
-            "unexpected error: {error:?}"
-        );
+        assert!(matches!(error, KeylessDeployError::InternalError), "unexpected error: {error:?}");
 
         let journal = ctx.journal_mut();
         assert_eq!(
@@ -726,5 +742,169 @@ mod tests {
             "storage should be restored after revert"
         );
         assert!(!restored.is_created(), "created marker should be reverted with the checkpoint");
+    }
+
+    /// Parent has non-empty code and the sandbox attempts to install a different code
+    /// hash — defensive merge MUST reject. Pinned because silently overwriting code on a
+    /// live account would let a keyless deploy hijack any address whose code happened to
+    /// be loaded into the cache during the parent's prior steps.
+    #[test]
+    fn test_rex5_apply_sandbox_state_rejects_non_empty_parent_code_replacement() {
+        let signer = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001");
+        let target = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0002");
+
+        // Parent: an existing contract with non-empty code.
+        let parent_code = revm::bytecode::Bytecode::new_raw(Bytes::from_static(&[0x60, 0x01]));
+        let parent_code_hash = revm::primitives::keccak256(parent_code.bytes_slice());
+
+        let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(EmptyDB::default(), MegaSpecId::REX5);
+        ctx.journal_mut().inner.state.insert(target, {
+            Account::from(AccountInfo {
+                balance: U256::ZERO,
+                nonce: 0,
+                code_hash: parent_code_hash,
+                code: Some(parent_code),
+            })
+        });
+
+        // Sandbox: tries to replace with a different code hash.
+        let sandbox_code = revm::bytecode::Bytecode::new_raw(Bytes::from_static(&[0x60, 0x02]));
+        let sandbox_code_hash = revm::primitives::keccak256(sandbox_code.bytes_slice());
+        let mut sandbox_state = EvmState::default();
+        sandbox_state.insert(target, {
+            let mut acc = Account::from(AccountInfo {
+                balance: U256::ZERO,
+                nonce: 0,
+                code_hash: sandbox_code_hash,
+                code: Some(sandbox_code),
+            });
+            acc.mark_touch();
+            acc
+        });
+
+        let error = apply_sandbox_state(&mut ctx, sandbox_state, signer)
+            .expect_err("merge must reject code replacement");
+        assert!(matches!(error, KeylessDeployError::InternalError), "unexpected error: {error:?}");
+    }
+
+    /// Sandbox account reports a non-empty `code_hash` but no `info.code` payload.
+    /// Defensive merge MUST reject because the inner `set_code_with_hash` call would
+    /// otherwise panic / silently install no bytecode.
+    #[test]
+    fn test_rex5_apply_sandbox_state_rejects_code_hash_without_bytecode() {
+        let signer = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001");
+        let target = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0002");
+
+        let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(EmptyDB::default(), MegaSpecId::REX5);
+        // Parent: empty (KECCAK_EMPTY) so the "different code_hash, parent is empty" branch fires.
+
+        let mut sandbox_state = EvmState::default();
+        sandbox_state.insert(target, {
+            let mut acc = Account::from(AccountInfo {
+                balance: U256::ZERO,
+                nonce: 0,
+                // Non-empty code_hash but `code: None` — exactly the invariant violation.
+                code_hash: revm::primitives::keccak256([0x60u8, 0x00]),
+                code: None,
+            });
+            acc.mark_touch();
+            acc
+        });
+
+        let error = apply_sandbox_state(&mut ctx, sandbox_state, signer)
+            .expect_err("merge must reject mismatched code_hash without bytecode");
+        assert!(matches!(error, KeylessDeployError::InternalError), "unexpected error: {error:?}");
+    }
+
+    /// `ensure_sandbox_create_can_merge`: sandbox is marked `is_created()` but the
+    /// parent already has a non-zero nonce (not an empty slot). Defensive merge MUST
+    /// reject — committing a CREATE over an existing account would silently overwrite
+    /// its on-chain state.
+    #[test]
+    fn test_rex5_apply_sandbox_state_rejects_create_over_non_empty_parent_nonce() {
+        let signer = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001");
+        let deploy_addr = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0002");
+
+        let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(EmptyDB::default(), MegaSpecId::REX5);
+        ctx.journal_mut().inner.state.insert(deploy_addr, {
+            Account::from(AccountInfo {
+                balance: U256::ZERO,
+                // Non-zero nonce triggers the rejection.
+                nonce: 5,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            })
+        });
+
+        let mut sandbox_state = EvmState::default();
+        sandbox_state
+            .insert(deploy_addr, sandbox_created_account(Bytes::from_static(&[0x60, 0x00])));
+
+        let error = apply_sandbox_state(&mut ctx, sandbox_state, signer)
+            .expect_err("merge must reject CREATE over non-empty parent");
+        assert!(matches!(error, KeylessDeployError::InternalError), "unexpected error: {error:?}");
+    }
+
+    /// `inspect_account` may surface a `DBError` (the DB call fails mid-merge). The
+    /// merge MUST translate that into the selector-only `InternalError` and revert any
+    /// partial journal entries via the inner checkpoint. Without this guard a DB blip
+    /// could leave a partially merged sandbox state in the parent journal.
+    #[test]
+    fn test_rex5_apply_sandbox_state_db_error_during_inspect_maps_to_internal_error() {
+        use crate::test_utils::ErrorInjectingDatabase;
+
+        let signer = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001");
+        let target = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0002");
+
+        let mut db = ErrorInjectingDatabase::new(MemoryDatabase::default());
+        // The merge's first DB-touching step is the `inspect_account` call for each
+        // sandbox-modified address. Fail that lookup for `target`.
+        db.fail_on_account = Some(target);
+
+        let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(db, MegaSpecId::REX5);
+
+        let mut sandbox_state = EvmState::default();
+        sandbox_state.insert(target, {
+            let mut acc = Account::from(AccountInfo::default());
+            acc.mark_touch();
+            acc
+        });
+
+        let error = apply_sandbox_state(&mut ctx, sandbox_state, signer)
+            .expect_err("inspect_account DB error must surface as InternalError");
+        assert!(matches!(error, KeylessDeployError::InternalError), "unexpected error: {error:?}");
+    }
+
+    /// `apply_sandbox_created_selfdestruct` guard: sandbox account is selfdestructed
+    /// but NOT marked `is_created()`. That's not a same-tx CREATE+SELFDESTRUCT — it's
+    /// the sandbox trying to wipe an account that existed before the keyless tx.
+    /// Defensive merge MUST reject.
+    #[test]
+    fn test_rex5_apply_sandbox_state_rejects_selfdestruct_without_created_marker() {
+        let signer = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001");
+        let target = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0002");
+
+        let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(EmptyDB::default(), MegaSpecId::REX5);
+        ctx.journal_mut().inner.state.insert(target, {
+            Account::from(AccountInfo {
+                balance: U256::from(1u64),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            })
+        });
+
+        let mut sandbox_state = EvmState::default();
+        sandbox_state.insert(target, {
+            let mut acc = Account::from(AccountInfo::default());
+            acc.mark_touch();
+            // No `mark_created()`: this is the invariant violation.
+            acc.mark_selfdestruct();
+            acc
+        });
+
+        let error = apply_sandbox_state(&mut ctx, sandbox_state, signer)
+            .expect_err("merge must reject selfdestruct without created marker");
+        assert!(matches!(error, KeylessDeployError::InternalError), "unexpected error: {error:?}");
     }
 }

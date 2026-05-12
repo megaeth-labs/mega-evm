@@ -58,6 +58,22 @@ Although nonce validation is bypassed, the sender nonce MUST still increment aft
 
 Mega System Transactions MUST NOT cause state changes to the block beneficiary or fee vaults.
 
+<details>
+<summary>Rex5 (unstable): Restored chain-id, nonce, and code-on-sender checks</summary>
+
+Before applying the special semantics above, a node MUST validate the transaction's chain-id and nonce against the same canonical rules that ordinary transactions follow:
+
+- The `chain_id` field MUST be present and MUST equal the node's configured chain id, subject to `cfg.tx_chain_id_check`.
+- The `nonce` field MUST equal `state.nonce(MEGA_SYSTEM_ADDRESS)`, subject to `cfg.disable_nonce_check`.
+- If `MEGA_SYSTEM_ADDRESS` carries code, the EIP-3607 check applies, subject to `cfg.disable_eip3607`.
+
+A transaction failing any of these checks MUST be rejected as a canonical `InvalidTransaction` variant (`MissingChainId`, `InvalidChainId`, `NonceTooLow`, `NonceTooHigh`, `RejectCallerWithCode`) before any state mutation, signature bypass, or fee bypass takes effect.
+The remaining bypasses (signature, gas-fee charging, balance) still apply once the checks pass.
+
+Rationale: pre-Rex5 specs bypassed all four canonical pre-checks via OP-style deposit promotion. OP deposits get away with this because L1 derivation and per-deposit `source_hash` uniqueness provide replay protection at a higher layer; MegaETH system transactions have neither, so the canonical checks are restored. The `CfgEnv` toggles are honored to keep the system-tx validate path symmetric with the canonical user-tx validate path for debug, state-test, and replay tooling.
+
+</details>
+
 ### Scope
 
 This page specifies the execution semantics of Mega System Transactions.

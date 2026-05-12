@@ -3,22 +3,31 @@
 //! Implements Nick's Method deterministic deployment via an isolated sandbox. See the
 //! module-level `Spam Protection` section in `sandbox/mod.rs` for the invariants that
 //! govern when each path is taken (normal completion / Rex5 preflight reject / Rex5
-//! residual-overflow reject).
+//! residual-overflow reject / Rex5 sandbox-`validate()` reject).
 //!
 //! The three Rex5 defense layers referenced by the module doc are implemented here as:
 //! `sandbox_runtime_limits` (upfront cap), `sandbox_intrinsic_overflow_error` (preflight),
 //! and `merge_and_reject_if_overflow` (post-merge safety net).
+//!
+//! Rex5 sandbox-`validate()` rejection — the final Mega-side intrinsic / floor gas check
+//! inside `MegaHandler::validate` — fires *before* `pre_execution()` debits the signer.
+//! In that path the outer keyless-deploy call surfaces as `Revert` with
+//! `IKeylessDeploy::InvalidTransaction`. The signer is not charged because no replay
+//! barrier (nonce bump or code install) is consumed; the relayer (depth-0 caller) pays
+//! for the outer call gas like any other relayer-submitted revert. Pre-Rex5 specs do
+//! not return this class of validation error for the same input shape, so the
+//! outer-revert path is unreachable on stable specs.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{rc::Rc, string::ToString, vec::Vec};
+use std::{rc::Rc, vec::Vec};
 
 use alloy_consensus::Transaction as AlloyTransaction;
 use alloy_evm::{Database as AlloyDatabase, Evm};
 use alloy_primitives::{Address, Bytes, Log, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_system_contracts::keyless_deploy::IKeylessDeploy;
-use op_revm::L1BlockInfo;
+use op_revm::{handler::IsTxError, L1BlockInfo};
 use revm::{
     context::{
         result::{ExecutionResult, ResultAndState},
@@ -31,6 +40,7 @@ use revm::{
     state::EvmState,
     Database as RevmDatabase,
 };
+use tracing::{error, warn};
 
 use crate::{
     constants, mark_frame_result_as_exceeding_limit, AdditionalLimit, EvmTxRuntimeLimits,
@@ -64,7 +74,8 @@ use super::{
 ///
 /// Must only be called at `depth == 0` (enforced by `evm/execution.rs`); a wrapping contract
 /// must not be able to intercept and revert the charge. See the module-level `Spam Protection`
-/// section for the full payment invariants across the three Rex5 defense layers.
+/// section for the full payment invariants across the four Rex5 defense layers (preflight,
+/// upfront cap, post-merge safety net, sandbox-`validate()` rejection).
 pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     call_inputs: &revm::interpreter::CallInputs,
@@ -231,11 +242,14 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
 
     // Step 7: check the deterministic deploy address isn't already occupied.
     {
-        let deploy_account = ctx
-            .journal_mut()
-            .database
-            .basic(deploy_address)
-            .map_err(|e| KeylessDeployError::InternalError(e.to_string()));
+        let deploy_account = ctx.journal_mut().database.basic(deploy_address).map_err(|e| {
+            error!(
+                error = %e,
+                deploy_address = ?deploy_address,
+                "keyless deploy deploy-address state read failed",
+            );
+            KeylessDeployError::InternalError
+        });
         match deploy_account {
             Ok(Some(info)) if info.code_hash != KECCAK_EMPTY => {
                 return make_error!(KeylessDeployError::ContractAlreadyExists);
@@ -371,7 +385,14 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     // Check signer balance
     let signer_account = sandbox_db
         .basic(deploy_signer)
-        .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?
+        .map_err(|e| {
+            error!(
+                error = %e,
+                deploy_signer = ?deploy_signer,
+                "keyless deploy signer balance read failed",
+            );
+            KeylessDeployError::InternalError
+        })?
         .unwrap_or_default();
 
     // Ensure signer has enough balance to cover gas cost and value
@@ -444,51 +465,81 @@ pub enum SandboxOutcome {
 /// Processes the result of sandbox EVM execution into a [`SandboxOutcome`].
 ///
 /// Handles all execution result variants (success, revert, halt) and transact errors.
-fn process_sandbox_transact_result(
-    result: Result<ResultAndState<MegaHaltReason>, impl core::fmt::Display>,
+///
+/// `transact_raw` errors are split into two `KeylessDeployError` variants by selector
+/// so relayer-side decoders can tell them apart:
+/// - `InvalidTransaction` when `IsTxError::is_tx_error()` returns `true`.
+/// - `InternalError` for everything else (DB I/O, header validation, `EVMError::Custom`).
+fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
+    result: Result<ResultAndState<MegaHaltReason>, E>,
     limit_usage: LimitUsage,
 ) -> Result<SandboxOutcome, KeylessDeployError> {
     match result {
-        Ok(ResultAndState { result: exec_result, state: sandbox_state }) => {
-            match exec_result {
-                ExecutionResult::Success { gas_used, output, logs, .. } => {
-                    if let revm::context::result::Output::Create(bytecode, Some(created_addr)) =
-                        output
-                    {
-                        // Empty bytecode is treated as failure to prevent replay attacks.
-                        // Without this check, a keyless deploy tx that returns empty code could
-                        // be submitted multiple times, draining the signer's funds.
-                        if bytecode.is_empty() {
-                            return Ok(SandboxOutcome::Failure {
-                                state: sandbox_state,
-                                error: KeylessDeployError::EmptyCodeDeployed { gas_used },
-                                limit_usage,
-                            });
-                        }
-                        Ok(SandboxOutcome::Success {
+        Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
+            ExecutionResult::Success { gas_used, output, logs, .. } => {
+                if let revm::context::result::Output::Create(bytecode, Some(created_addr)) = output
+                {
+                    // Empty deployed bytecode is treated as a sandbox failure so the deploy
+                    // address never gets a barrier installed for an empty contract. Without
+                    // this check the same signed keyless tx could be charged on every
+                    // submission while leaving the deploy slot re-usable.
+                    if bytecode.is_empty() {
+                        return Ok(SandboxOutcome::Failure {
                             state: sandbox_state,
-                            result: SandboxResult { deploy_address: created_addr, gas_used, logs },
+                            error: KeylessDeployError::EmptyCodeDeployed { gas_used },
                             limit_usage,
-                        })
-                    } else {
-                        // Contract creation didn't return an address - should never happen
-                        // but we return an error instead of panicking to avoid crashing the node
-                        Err(KeylessDeployError::NoContractCreated)
+                        });
                     }
+                    Ok(SandboxOutcome::Success {
+                        state: sandbox_state,
+                        result: SandboxResult { deploy_address: created_addr, gas_used, logs },
+                        limit_usage,
+                    })
+                } else {
+                    // Contract creation didn't return an address - should never happen
+                    // but we return an error instead of panicking to avoid crashing the node
+                    Err(KeylessDeployError::NoContractCreated)
                 }
-                ExecutionResult::Revert { gas_used, output } => Ok(SandboxOutcome::Failure {
-                    state: sandbox_state,
-                    error: KeylessDeployError::ExecutionReverted { gas_used, output },
-                    limit_usage,
-                }),
-                ExecutionResult::Halt { gas_used, reason } => Ok(SandboxOutcome::Failure {
+            }
+            ExecutionResult::Revert { gas_used, output } => Ok(SandboxOutcome::Failure {
+                state: sandbox_state,
+                error: KeylessDeployError::ExecutionReverted { gas_used, output },
+                limit_usage,
+            }),
+            ExecutionResult::Halt { gas_used, reason } => {
+                // The halt `reason` is dropped on the ABI wire (the Solidity error
+                // carries only `gasUsed`) and `decode_error_result` synthesizes a
+                // placeholder on the way back, so node-side `tracing` is the only
+                // place the real cause is observable.
+                warn!(
+                    reason = ?reason,
+                    gas_used,
+                    "keyless deploy sandbox halted",
+                );
+                Ok(SandboxOutcome::Failure {
                     state: sandbox_state,
                     error: KeylessDeployError::ExecutionHalted { gas_used, reason },
                     limit_usage,
-                }),
+                })
             }
+        },
+        // Split tx-validation rejections (selector `InvalidTransaction`) from genuine
+        // internal failures (selector `InternalError`) so relayer-side decoders can tell
+        // them apart. Both are selector-only on the wire — see `encode_error_result`.
+        Err(e) if e.is_tx_error() => {
+            warn!(
+                error = %e,
+                "keyless deploy sandbox transaction rejected during validation",
+            );
+            Err(KeylessDeployError::InvalidTransaction)
         }
-        Err(e) => Err(KeylessDeployError::InternalError(e.to_string())),
+        Err(e) => {
+            error!(
+                error = %e,
+                "keyless deploy sandbox failed with internal error",
+            );
+            Err(KeylessDeployError::InternalError)
+        }
     }
 }
 
@@ -611,7 +662,124 @@ fn get_account_nonce<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     Ok(journal
         .database
         .basic(address)
-        .map_err(|e| KeylessDeployError::InternalError(e.to_string()))?
+        .map_err(|e| {
+            error!(
+                error = %e,
+                address = ?address,
+                "keyless deploy nonce read failed",
+            );
+            KeylessDeployError::InternalError
+        })?
         .map(|info| info.nonce)
         .unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use revm::context::result::Output;
+
+    /// Test error type that lets us drive `process_sandbox_transact_result`'s `Err` arms
+    /// directly without standing up a full sandbox EVM. The two arms differ only by
+    /// `IsTxError::is_tx_error()`, so a single struct with a configurable flag covers
+    /// both selector mappings.
+    struct FakeTxErr {
+        is_tx: bool,
+        msg: &'static str,
+    }
+
+    impl core::fmt::Display for FakeTxErr {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(self.msg)
+        }
+    }
+
+    impl IsTxError for FakeTxErr {
+        fn is_tx_error(&self) -> bool {
+            self.is_tx
+        }
+    }
+
+    /// The sandbox's create transaction always asks for `TxKind::Create`, but if revm
+    /// ever surfaces a `Success` with `Output::Call` for that input shape the merge code
+    /// would otherwise unwrap into an address-less success. Pin the defensive
+    /// `NoContractCreated` mapping.
+    #[test]
+    fn test_process_result_call_output_maps_to_no_contract_created() {
+        let result: Result<ResultAndState<MegaHaltReason>, FakeTxErr> = Ok(ResultAndState {
+            result: ExecutionResult::Success {
+                reason: revm::context::result::SuccessReason::Stop,
+                gas_used: 1,
+                gas_refunded: 0,
+                logs: Vec::new(),
+                output: Output::Call(Bytes::new()),
+            },
+            state: EvmState::default(),
+        });
+        let out = process_sandbox_transact_result(result, LimitUsage::default());
+        assert!(matches!(out, Err(KeylessDeployError::NoContractCreated)), "unexpected: {out:?}");
+    }
+
+    /// `Output::Create(_, None)` — Create succeeded but revm did not return an address.
+    /// Same defensive `NoContractCreated` shape as the Call branch.
+    #[test]
+    fn test_process_result_create_without_address_maps_to_no_contract_created() {
+        let result: Result<ResultAndState<MegaHaltReason>, FakeTxErr> = Ok(ResultAndState {
+            result: ExecutionResult::Success {
+                reason: revm::context::result::SuccessReason::Stop,
+                gas_used: 1,
+                gas_refunded: 0,
+                logs: Vec::new(),
+                output: Output::Create(Bytes::from_static(&[0x60, 0x00]), None),
+            },
+            state: EvmState::default(),
+        });
+        let out = process_sandbox_transact_result(result, LimitUsage::default());
+        assert!(matches!(out, Err(KeylessDeployError::NoContractCreated)), "unexpected: {out:?}");
+    }
+
+    /// `transact_raw` error where `is_tx_error()` is `false` (DB I/O, header validation,
+    /// `EVMError::Custom`, etc.) MUST map to the selector-only `InternalError`. Pinned
+    /// because a regression that re-collapses this into `InvalidTransaction` would
+    /// silently re-classify infrastructure failures as user-input rejections.
+    #[test]
+    fn test_process_result_non_tx_error_maps_to_internal_error() {
+        let result: Result<ResultAndState<MegaHaltReason>, FakeTxErr> =
+            Err(FakeTxErr { is_tx: false, msg: "db blew up" });
+        let out = process_sandbox_transact_result(result, LimitUsage::default());
+        assert!(matches!(out, Err(KeylessDeployError::InternalError)), "unexpected: {out:?}");
+    }
+
+    /// Mirror of the above for `is_tx_error() == true`: MUST map to
+    /// `InvalidTransaction` with its dedicated selector.
+    #[test]
+    fn test_process_result_tx_error_maps_to_invalid_transaction() {
+        let result: Result<ResultAndState<MegaHaltReason>, FakeTxErr> =
+            Err(FakeTxErr { is_tx: true, msg: "intrinsic gas too low" });
+        let out = process_sandbox_transact_result(result, LimitUsage::default());
+        assert!(matches!(out, Err(KeylessDeployError::InvalidTransaction)), "unexpected: {out:?}");
+    }
+
+    /// `get_account_nonce`: cache miss path on a failing DB MUST map the underlying
+    /// `DBError` to selector-only `InternalError`. This is the only sandbox-internal
+    /// call site that reads a nonce via the parent journal database directly (rather
+    /// than via the journal cache or `SandboxDb` fallthrough), so the `error!` `map_err`
+    /// is the only place the failure can be classified.
+    #[test]
+    fn test_get_account_nonce_db_error_maps_to_internal_error() {
+        use crate::{
+            test_utils::{ErrorInjectingDatabase, MemoryDatabase},
+            EmptyExternalEnv,
+        };
+        use alloy_primitives::address;
+
+        let signer = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001");
+        let mut db = ErrorInjectingDatabase::new(MemoryDatabase::default());
+        db.fail_on_account = Some(signer);
+
+        let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(db, MegaSpecId::REX5);
+        // Cache is empty → cache miss → DB fallback → injected error.
+        let out = get_account_nonce(&mut ctx, signer);
+        assert!(matches!(out, Err(KeylessDeployError::InternalError)), "unexpected: {out:?}");
+    }
 }

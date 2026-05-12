@@ -1,9 +1,5 @@
 //! Error types for sandbox execution.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::string::String;
-
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
 use mega_system_contracts::keyless_deploy::IKeylessDeploy;
@@ -92,8 +88,15 @@ pub enum KeylessDeployError {
         /// The actual compute gas usage
         used: u64,
     },
-    /// Internal error during sandbox execution
-    InternalError(String),
+    /// Internal sandbox failure (DB I/O, header validation, etc.).
+    /// Selector-only — precompile return data is consensus-affecting, so the wire must
+    /// not pin consensus to upstream revm/op-revm `Display` impls.
+    InternalError,
+    /// Sandbox rejected the inner transaction as a tx-validation error
+    /// (`IsTxError::is_tx_error() == true`). A dedicated selector lets relayer-side
+    /// decoders distinguish this from a genuine internal failure. Selector-only for the
+    /// same consensus-decoupling reason as `InternalError`.
+    InvalidTransaction,
     /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner
     /// calls)
     NotIntercepted,
@@ -160,8 +163,9 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         KeylessDeployError::InsufficientComputeGas { limit, used } => {
             IKeylessDeploy::InsufficientComputeGas { limit, used }.abi_encode().into()
         }
-        KeylessDeployError::InternalError(message) => {
-            IKeylessDeploy::InternalError { message }.abi_encode().into()
+        KeylessDeployError::InternalError => IKeylessDeploy::InternalError {}.abi_encode().into(),
+        KeylessDeployError::InvalidTransaction => {
+            IKeylessDeploy::InvalidTransaction {}.abi_encode().into()
         }
         KeylessDeployError::NotIntercepted => IKeylessDeploy::NotIntercepted {}.abi_encode().into(),
     }
@@ -240,11 +244,41 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
             provided_gas_limit: e.providedGasLimit,
         });
     }
-    if let Ok(e) = IKeylessDeploy::InternalError::abi_decode(output) {
-        return Some(KeylessDeployError::InternalError(e.message));
+    if IKeylessDeploy::InvalidTransaction::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::InvalidTransaction);
+    }
+    if IKeylessDeploy::InternalError::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::InternalError);
     }
     if IKeylessDeploy::NotIntercepted::abi_decode(output).is_ok() {
         return Some(KeylessDeployError::NotIntercepted);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `InternalError` and `InvalidTransaction` carry no payload on the wire, so a
+    /// roundtrip MUST produce the same variant. Pinned because both selectors are
+    /// reachable on-chain via `RETURNDATACOPY` and any divergence between
+    /// `encode_error_result` and `decode_error_result` would break consensus.
+    #[test]
+    fn test_internal_error_roundtrip_is_selector_only() {
+        let encoded = encode_error_result(KeylessDeployError::InternalError);
+        // Selector-only: the encoded form is exactly the 4-byte Solidity selector.
+        assert_eq!(encoded.len(), 4, "InternalError must be selector-only");
+        assert!(matches!(decode_error_result(&encoded), Some(KeylessDeployError::InternalError)));
+    }
+
+    #[test]
+    fn test_invalid_transaction_roundtrip_is_selector_only() {
+        let encoded = encode_error_result(KeylessDeployError::InvalidTransaction);
+        assert_eq!(encoded.len(), 4, "InvalidTransaction must be selector-only");
+        assert!(matches!(
+            decode_error_result(&encoded),
+            Some(KeylessDeployError::InvalidTransaction)
+        ));
+    }
 }

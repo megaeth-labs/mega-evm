@@ -45,6 +45,7 @@ fn sequencer_registry_config() -> SequencerRegistryConfig {
 fn create_evm_env() -> EvmEnv<MegaSpecId> {
     let mut cfg_env = revm::context::CfgEnv::default();
     cfg_env.spec = MegaSpecId::REX5;
+    cfg_env.chain_id = 8453;
     let block_env = BlockEnv {
         number: U256::from(1000),
         timestamp: U256::from(1_800_000_000),

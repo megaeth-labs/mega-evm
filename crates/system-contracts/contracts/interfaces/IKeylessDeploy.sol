@@ -79,9 +79,18 @@ interface IKeylessDeploy {
     /// @param used The compute gas usage.
     error InsufficientComputeGas(uint64 limit, uint64 used);
 
-    /// @notice Internal error during sandbox execution.
-    /// @param message The error message.
-    error InternalError(string message);
+    /// @notice Internal sandbox failure (DB I/O, header validation, etc.).
+    /// @dev Selector-only: precompile return data is consensus-affecting, so the wire
+    ///      must not pin consensus to upstream revm/op-revm `Display` impls.
+    error InternalError();
+
+    /// @notice Sandbox rejected the inner transaction as a tx-validation error — any
+    /// `IsTxError::is_tx_error() == true` outcome of the sandbox `transact_raw` call.
+    /// Behaviorally identical to `InternalError` (outer call reverts, signer is not
+    /// charged because `pre_execution()` never ran); a dedicated selector lets
+    /// relayer-side decoders distinguish this from a genuine internal failure.
+    /// @dev Selector-only for the same consensus-decoupling reason as `InternalError`.
+    error InvalidTransaction();
 
     /// @notice The call was not intercepted by the EVM (called on unsupported network).
     error NotIntercepted();

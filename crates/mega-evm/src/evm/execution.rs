@@ -18,6 +18,7 @@ use revm::{
     handler::{
         evm::{ContextDbError, FrameInitResult},
         instructions::InstructionProvider,
+        pre_execution::validate_account_nonce_and_code,
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr, Handler,
         ItemOrResult,
     },
@@ -35,8 +36,9 @@ use revm::{
 
 use crate::{
     constants, dispatch_system_contract_interceptors, is_mega_system_transaction_with,
-    sent_from_system_address, ExternalEnvTypes, HostExt, MegaContext, MegaEvm, MegaHaltReason,
-    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    sent_from_system_address, ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaEvm,
+    MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -64,43 +66,82 @@ where
     DB: Database,
     ExtEnvs: ExternalEnvTypes,
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
-    ERROR: FromStringError,
+    ERROR: FromStringError + From<InvalidTransaction>,
 {
     /// The hook to be called in `revm::handler::Handler::run_without_catch_error` and
-    /// `revm::handler::InspectorHandler::inspect_run_without_catch_error`
+    /// `revm::handler::InspectorHandler::inspect_run_without_catch_error`.
+    ///
+    /// Promotes a legacy `system_address` transaction into the OP deposit-style path so it
+    /// bypasses signature, nonce, and fee validation. REX5+ restores nonce and chain-id
+    /// checks before the promotion (the deposit path otherwise drops them, leaving the
+    /// transaction replayable). Pre-REX5 specs preserve the original behavior so existing
+    /// chain replay is unaffected.
     #[inline]
     fn before_run(&self, evm: &mut EVM) -> Result<(), ERROR> {
-        // Before validation, we need to properly set the mega system transaction
         let ctx = evm.ctx_mut();
-        if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
-            // Check if this is a mega system address transaction
+        let spec = ctx.spec;
+        if spec.is_enabled(MegaSpecId::MINI_REX) {
             let system_address = ctx.system_address;
-            let tx = &mut ctx.inner.tx;
+            let is_rex5_enabled = spec.is_enabled(MegaSpecId::REX5);
+            // Honor the same `CfgEnv` toggles as the canonical revm validate path.
+            // Ordinary txs are already filtered by the upstream validate path before
+            // reaching this promotion logic, so keeping system txs aligned here does
+            // not introduce a separate replay-only escape hatch.
+            let cfg = ctx.cfg();
+            let cfg_chain_id = cfg.chain_id;
+            let tx_chain_id_check = cfg.tx_chain_id_check;
+            let disable_nonce_check = cfg.disable_nonce_check;
+            let disable_eip3607 = cfg.disable_eip3607;
+            let tx = ctx.tx();
+
             if sent_from_system_address(tx, system_address) {
-                // Modify the transaction to make it appear as a deposit transaction
-                // This will cause the OpHandler to automatically bypass signature validation,
-                // nonce verification, and fee deduction during validation
+                // Whitelist rejection has no canonical `InvalidTransaction` variant; keep the
+                // existing string-error shape pre-REX5 callers already expect.
                 if !is_mega_system_transaction_with(tx, system_address) {
                     return Err(FromStringError::from_string(
                         "Mega system transaction callee is not in the whitelist".to_string(),
                     ));
                 }
 
-                // Set the deposit source hash of the transaction to mark it as a deposit
-                // transaction for `OpHandler`.
-                // The implementation of `revm::context_interface::Transaction` trait for
-                // `MegaTransaction` determines the tx type by the existence of the source
-                // hash.
+                if is_rex5_enabled {
+                    if tx_chain_id_check {
+                        match tx.chain_id() {
+                            None => return Err(InvalidTransaction::MissingChainId.into()),
+                            Some(cid) if cid != cfg_chain_id => {
+                                return Err(InvalidTransaction::InvalidChainId.into());
+                            }
+                            Some(_) => {}
+                        }
+                    }
+
+                    // Inspect without warming so validation does not mutate the EIP-2929
+                    // access list. The journal cache still lets consecutive in-block system
+                    // txs observe committed nonce bumps.
+                    let tx_nonce = tx.nonce();
+                    let state_account = ctx.journal_mut().inspect_account(system_address).map_err(
+                        |e| -> ERROR {
+                            FromStringError::from_string(format!(
+                                "Mega system transaction state read failed: {e:?}"
+                            ))
+                        },
+                    )?;
+                    validate_account_nonce_and_code(
+                        &mut state_account.info,
+                        tx_nonce,
+                        disable_eip3607,
+                        disable_nonce_check,
+                    )?;
+                }
+
+                // Mark the tx as deposit-style for `OpHandler` and force gas_price to 0
+                // so fee / L1 / operator / beneficiary accounting all degenerate to no-ops.
+                let tx = &mut ctx.inner.tx;
                 tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-                // Set gas_price to 0 so the transaction doesn't pay L2 execution gas,
-                // consistent with OP deposit transaction behavior where gas is pre-paid on L1.
                 tx.base.gas_price = 0;
             }
         }
 
-        // Call the `on_new_tx` hook to initialize the transaction context.
-        evm.ctx_mut().on_new_tx();
-
+        ctx.on_new_tx();
         Ok(())
     }
 
@@ -379,6 +420,10 @@ where
 
     /// This function copies the logic from `revm::handler::Handler::validate` to and
     /// add additional storage gas cost for calldata.
+    ///
+    /// REX5+ adds a final initial+floor gas validation after all Mega-side dynamic storage gas
+    /// has been accounted for. Pre-REX5 specs keep the historical mid-sequence check exactly
+    /// where it was so byte-for-byte replay is preserved.
     fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
         self.validate_env(evm)?;
         let mut initial_and_floor_gas = self.validate_initial_tx_gas(evm)?;
@@ -386,6 +431,7 @@ where
         let ctx = evm.ctx_mut();
         let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
         let is_rex_enabled = ctx.spec.is_enabled(MegaSpecId::REX);
+        let is_rex5_enabled = ctx.spec.is_enabled(MegaSpecId::REX5);
         if is_mini_rex_enabled {
             // record the initial gas cost as compute gas cost, limit exceeding will be captured in
             // `frame_init` function.
@@ -406,12 +452,20 @@ where
 
             // MegaETH Rex modification: additional intrinsic storage gas cost
             // Add 39,000 gas on top of base intrinsic gas for all transactions
-            if ctx.spec.is_enabled(MegaSpecId::REX) {
+            if is_rex_enabled {
                 initial_and_floor_gas.initial_gas += constants::rex::TX_INTRINSIC_STORAGE_GAS;
             }
 
-            // If the initial_gas exceeds the tx gas limit, return an error
-            if initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
+            // Pre-REX5: keep the historical mid-sequence initial-gas check here so existing
+            // stable-spec replays produce exactly the same OOG-after-fee-charge result on
+            // transactions whose final Mega-adjusted initial_gas exceeds gas_limit only after
+            // CREATE/new-account storage gas is added below.
+            //
+            // REX5+: this mid-sequence check is deferred to the final check below, which runs
+            // after CREATE/new-account storage gas has also been added so a transaction that
+            // cannot fit its final Mega-side intrinsic+storage gas is rejected as a validation
+            // error before pre_execution() debits the sender or bumps the nonce.
+            if !is_rex5_enabled && initial_and_floor_gas.initial_gas > ctx.tx().gas_limit() {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
                     gas_limit: ctx.tx().gas_limit(),
                     initial_gas: initial_and_floor_gas.initial_gas,
@@ -451,6 +505,29 @@ where
                     format!("Failed to get storage gas for callee address: {callee_address}",);
                 Self::Error::from_string(err_str)
             })?;
+
+            // REX5+: final initial+floor gas validation, after every Mega-side storage gas
+            // contribution has been added. A transaction that fails either bound is rejected
+            // here as a canonical validation error so callers see Err(...) rather than an
+            // ExecutionResult::Halt with full gas spent — i.e. fees and nonce stay untouched
+            // when the tx cannot fit its final intrinsic+storage gas requirement.
+            if is_rex5_enabled {
+                let gas_limit = ctx.tx().gas_limit();
+                if initial_and_floor_gas.initial_gas > gas_limit {
+                    return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
+                        gas_limit,
+                        initial_gas: initial_and_floor_gas.initial_gas,
+                    }
+                    .into());
+                }
+                if initial_and_floor_gas.floor_gas > gas_limit {
+                    return Err(InvalidTransaction::GasFloorMoreThanGasLimit {
+                        gas_limit,
+                        gas_floor: initial_and_floor_gas.floor_gas,
+                    }
+                    .into());
+                }
+            }
         }
 
         Ok(initial_and_floor_gas)

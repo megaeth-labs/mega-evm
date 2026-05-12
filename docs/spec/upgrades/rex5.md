@@ -1,5 +1,5 @@
 ---
-description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, KeylessDeploy trailing-bytes rejection and sandbox resource accounting, caller-account update deduplication, precompile compute-gas correction, EIP-7702 metering fixes, and SELFDESTRUCT beneficiary accounting.
+description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, KeylessDeploy trailing-bytes rejection and sandbox resource accounting, caller-account update deduplication, precompile compute-gas correction, EIP-7702 metering fixes, SELFDESTRUCT beneficiary accounting, system-tx chain-id and nonce validation, deferred final Mega-side gas validation, and KeylessDeploy error ABI refactor.
 ---
 
 # Rex5 Network Upgrade
@@ -165,6 +165,50 @@ The discardable-on-revert mechanic is unchanged: charges recorded inside a child
 
 - A `storage_gas_ext::selfdestruct` instruction wrapper charges the new-account storage-gas premium and records data size (+40 bytes), KV update (+1), and state growth (+1) when `SELFDESTRUCT` sends value to an empty beneficiary.
 - Zero-balance `SELFDESTRUCT` does not trigger new-account charges (no value transfer means no account creation).
+
+### 12. System Transaction Chain-Id and Nonce Validation
+
+**Previous behavior (Rex4 and earlier):**
+A legacy transaction whose signer is `MEGA_SYSTEM_ADDRESS` was promoted to an OP-style deposit transaction before ordinary validation ran, bypassing signature, chain-id, nonce, balance, and fee checks.
+A captured raw system transaction could in principle be replayed against any chain configuration that accepted the same byte string.
+
+**New behavior (Rex5):**
+Before the deposit promotion, a node MUST validate the system transaction's chain-id and nonce against the same canonical rules ordinary user transactions follow:
+
+- `chain_id` MUST be present and MUST equal the node's configured chain id (subject to `cfg.tx_chain_id_check`).
+- `nonce` MUST equal `state.nonce(MEGA_SYSTEM_ADDRESS)` (subject to `cfg.disable_nonce_check`).
+- If `MEGA_SYSTEM_ADDRESS` carries code, the EIP-3607 check applies (subject to `cfg.disable_eip3607`).
+
+A failure surfaces as a canonical `InvalidTransaction` variant before any state mutation.
+Signature, balance, and fee bypasses are preserved once the checks pass.
+
+The `CfgEnv` toggles are honored so the system-tx validate path stays symmetric with the canonical user-tx validate path for debug, state-test, and replay tooling.
+This is correctness recovery, not new defense in depth: OP deposits get away with bypassing these checks because L1 derivation plus per-deposit `source_hash` uniqueness provides higher-layer replay protection that MegaETH system transactions do not have.
+See [system-tx.md](../system-contracts/system-tx.md) for the normative specification.
+
+### 13. Final Mega-Side Gas Validation Ordering
+
+**Previous behavior (Rex4 and earlier):**
+The intrinsic-gas check (`initial_gas > gas_limit`) fired after MegaETH calldata storage gas was added but before CREATE / new-callee account storage gas.
+A transaction whose final Mega-adjusted `initial_gas` exceeded `gas_limit` only after those later storage gas contributions produced an `ExecutionResult::Halt` with `gas_used == gas_limit` — sender debited, nonce bumped, no call effects.
+
+**New behavior (Rex5):**
+The check is deferred until after every Mega-side intrinsic and dynamic storage gas contribution has been added.
+A transaction that cannot fit its final Mega-side intrinsic or floor gas requirement is rejected as a canonical validation error (`InvalidTransaction::CallGasCostMoreThanGasLimit` or `InvalidTransaction::GasFloorMoreThanGasLimit`) before `pre_execution()` runs, leaving sender balance and nonce untouched.
+
+### 14. KeylessDeploy Error ABI Refactor
+
+**Previous behavior (Rex4 and earlier):**
+`IKeylessDeploy::InternalError(string message)` carried a stringified upstream revm/op-revm error as its ABI payload.
+
+**New behavior (Rex5):**
+
+- `InternalError(string)` becomes `InternalError()` (selector-only). The `message` field is dropped from the wire; root cause is reported off-chain via node logs.
+- A new selector-only error `InvalidTransaction()` is added to the stable validation error set, raised when the sandbox `MegaHandler::validate` rejects the inner transaction before `pre_execution()` runs (typically section 13's final gas check, but structurally any `IsTxError::is_tx_error() == true` outcome).
+  The outer KeylessDeploy call MUST revert with `InvalidTransaction()` and the signer MUST NOT be charged in this path.
+
+Both errors are selector-only because precompile return data is reachable on-chain via `RETURNDATACOPY` → `SSTORE` → state root, so coupling the wire format to a non-stability upstream `Display` impl would pin consensus to those impls.
+See [keyless-deploy.md](../system-contracts/keyless-deploy.md) for the normative error list.
 
 ## Developer Impact
 

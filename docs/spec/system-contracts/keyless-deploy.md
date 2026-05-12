@@ -211,6 +211,19 @@ The stable execution errors are:
 - `ExecutionHalted(uint64 gasUsed)`
 - `EmptyCodeDeployed(uint64 gasUsed)`
 
+<details>
+<summary>Rex5 (unstable): Selector-only error refactor and new `InvalidTransaction()`</summary>
+
+On Rex5+ the stable validation error set is modified as follows:
+
+- `InternalError(string message)` becomes `InternalError()` (selector-only). The `message` field MUST NOT be ABI-encoded. Root cause is reported off-chain via node logs.
+- A new error `InvalidTransaction()` is added (selector-only). It MUST be returned when the sandbox `MegaHandler::validate` rejects the inner transaction before `pre_execution()` runs — typically the final Mega-side intrinsic / floor gas check, but structurally any outcome where `IsTxError::is_tx_error()` returns `true`. The outer KeylessDeploy call MUST revert with `InvalidTransaction()` and the signer MUST NOT be charged in this path because `pre_execution()` never ran.
+
+Both errors are selector-only because precompile return data is reachable on-chain via `RETURNDATACOPY` → `SSTORE` → state root.
+Stringifying upstream revm/op-revm error wording into the wire payload would pin consensus to those crates' non-stability error surfaces.
+
+</details>
+
 ## Constants
 
 | Constant                      | Value                                        | Description                                                 |
@@ -237,4 +250,4 @@ Allowing nonce `1` preserves deployability in that case while still preventing a
 
 - [Rex2](../upgrades/rex2.md) introduced KeylessDeploy and its stable top-level interception model.
 - [Rex3](../upgrades/rex3.md) makes the overhead gas count toward compute gas accounting.
-- [Rex5](../upgrades/rex5.md) (**unstable**) rejects encodings with trailing bytes after the signed RLP payload by reverting with `MalformedEncoding()`; propagates sandbox resource usage to the parent transaction, caps `gasLimitOverride` to remaining gas, caps sandbox resource budgets to the parent's remaining limits before execution, preflights known sandbox intrinsic usage, and rejects the outer call without merging sandbox state on the residual overflow path.
+- [Rex5](../upgrades/rex5.md) (**unstable**) rejects encodings with trailing bytes after the signed RLP payload by reverting with `MalformedEncoding()`; propagates sandbox resource usage to the parent transaction, caps `gasLimitOverride` to remaining gas, caps sandbox resource budgets to the parent's remaining limits before execution, preflights known sandbox intrinsic usage, and rejects the outer call without merging sandbox state on the residual overflow path; refactors `InternalError` to selector-only and adds the new selector-only `InvalidTransaction()` validation error.

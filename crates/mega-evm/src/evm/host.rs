@@ -327,12 +327,17 @@ pub trait JournalInspectTr {
     /// The error type returned on DB failures.
     type DBError: core::fmt::Debug;
 
-    /// Inspect the account at the given address without marking it as warm.
-    /// Unlike `inspect_account_delegated`, does NOT follow EIP-7702 delegation.
+    /// Inspect the account at the given address without marking it as warm and without
+    /// following EIP-7702 delegation.
     ///
-    /// Use this for metering inspections where the authority's own state matters
-    /// (e.g., new-account storage-gas premium, SALT bucket lookup, state-growth
-    /// emptiness check) rather than the delegate's state.
+    /// Loads the account from the database into the journal cache (so subsequent
+    /// in-block reads see this committed state), then explicitly marks it cold so the
+    /// inspection does not show up in EIP-2929's access list and produces no
+    /// `account_warmed` journal entry. Use this for metering inspections where the
+    /// authority's own state matters (e.g., new-account storage-gas premium, SALT
+    /// bucket lookup, state-growth emptiness check) rather than the delegate's state,
+    /// and for validate-path reads (nonce, code) that must not participate in the
+    /// access-list accounting the execution path will perform later.
     fn inspect_account(&mut self, address: Address) -> Result<&mut Account, Self::DBError>;
 
     /// Inspect the account at the given address without marking it as warm.
