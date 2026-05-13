@@ -178,13 +178,24 @@ where
         // clear flag to true.
         self.evm.db_mut().set_state_clear_flag(true);
 
+        let block_timestamp: u64 = self.evm.block().timestamp.saturating_to();
+        let is_rex_5 = self.hardforks.is_rex_5_active_at_timestamp(block_timestamp);
+
         // EIP-2935
         let result_and_state = eips::transact_blockhashes_contract_call(
             &self.hardforks,
             self.ctx.parent_hash,
             &mut self.evm,
         )?;
-        if let Some(ExecResultAndState { state, .. }) = result_and_state {
+        if let Some(ExecResultAndState { result, state }) = result_and_state {
+            if is_rex_5 && !result.is_success() {
+                return Err(BlockValidationError::BlockHashContractCall {
+                    message: std::format!(
+                        "EIP-2935 pre-block system call did not succeed: {result:?}"
+                    ),
+                }
+                .into());
+            }
             outcomes.push(MegaSystemCallOutcome {
                 source: StateChangeSource::PreBlock(StateChangePreBlockSource::BlockHashesContract),
                 state,
@@ -197,7 +208,18 @@ where
             self.ctx.parent_beacon_block_root,
             &mut self.evm,
         )?;
-        if let Some(ExecResultAndState { state, .. }) = result_and_state {
+        if let Some(ExecResultAndState { result, state }) = result_and_state {
+            if is_rex_5 && !result.is_success() {
+                let parent_beacon_block_root =
+                    self.ctx.parent_beacon_block_root.unwrap_or_default();
+                return Err(BlockValidationError::BeaconRootContractCall {
+                    parent_beacon_block_root: Box::new(parent_beacon_block_root),
+                    message: std::format!(
+                        "EIP-4788 pre-block system call did not succeed: {result:?}"
+                    ),
+                }
+                .into());
+            }
             outcomes.push(MegaSystemCallOutcome {
                 source: StateChangeSource::PreBlock(StateChangePreBlockSource::BeaconRootContract),
                 state,
@@ -209,12 +231,9 @@ where
         // that `ensure_create2_deployer` function will never be called.
 
         // MiniRex hardfork: oracle contract
-        let result_and_state = transact_deploy_oracle_contract(
-            &self.hardforks,
-            self.evm.block().timestamp.saturating_to(),
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
+        let result_and_state =
+            transact_deploy_oracle_contract(&self.hardforks, block_timestamp, self.evm.db_mut())
+                .map_err(BlockExecutionError::other)?;
         if let Some(state) = result_and_state {
             outcomes.push(MegaSystemCallOutcome {
                 // We tentatively use `StateChangeSource::Transaction(0)` as state change source as
@@ -228,7 +247,7 @@ where
         // MiniRex hardfork: high precision timestamp oracle contract
         let result_and_state = transact_deploy_high_precision_timestamp_oracle(
             &self.hardforks,
-            self.evm.block().timestamp.saturating_to(),
+            block_timestamp,
             self.evm.db_mut(),
         )
         .map_err(BlockExecutionError::other)?;
@@ -240,7 +259,7 @@ where
         // Rex2 hardfork: keyless deploy contract
         let result_and_state = transact_deploy_keyless_deploy_contract(
             &self.hardforks,
-            self.evm.block().timestamp.saturating_to(),
+            block_timestamp,
             self.evm.db_mut(),
         )
         .map_err(BlockExecutionError::other)?;
@@ -252,7 +271,7 @@ where
         // Rex4 hardfork: access control contract
         let result_and_state = transact_deploy_access_control_contract(
             &self.hardforks,
-            self.evm.block().timestamp.saturating_to(),
+            block_timestamp,
             self.evm.db_mut(),
         )
         .map_err(BlockExecutionError::other)?;
@@ -264,7 +283,7 @@ where
         // Rex4 hardfork: MegaLimitControl contract
         let result_and_state = transact_deploy_limit_control_contract(
             &self.hardforks,
-            self.evm.block().timestamp.saturating_to(),
+            block_timestamp,
             self.evm.db_mut(),
         )
         .map_err(BlockExecutionError::other)?;
@@ -275,9 +294,8 @@ where
 
         // Rex5 hardfork: deploy SequencerRegistry (first block only) and apply pending
         // role changes if any are due.
-        let block_timestamp: u64 = self.evm.block().timestamp.saturating_to();
         let block_number = self.evm.block().number.to::<u64>();
-        if self.hardforks.is_rex_5_active_at_timestamp(block_timestamp) {
+        if is_rex_5 {
             // Deploy: seeds system address, sequencer, admin, and initialFromBlock
             // into storage on first deploy.
             let params = self

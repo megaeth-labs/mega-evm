@@ -13,7 +13,7 @@ use revm::{
     context::{
         result::{ExecutionResult, FromStringError, InvalidTransaction},
         transaction::{AuthorizationTr, TransactionType},
-        ContextTr, FrameStack, JournalTr, Transaction,
+        Cfg, ContextTr, FrameStack, JournalTr, Transaction,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
@@ -303,6 +303,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
             return Ok(());
         }
+        let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
 
         if let InterpreterAction::Return(interpreter_result) = action {
             // Charge storage gas cost for the number of bytes
@@ -311,6 +312,28 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
                     interpreter_result.output.len() as u64;
                 if !interpreter_result.gas.record_cost(code_deposit_storage_gas) {
                     interpreter_result.result = InstructionResult::OutOfGas;
+                }
+            }
+
+            // REX5+: pre-charge canonical code-deposit compute gas before
+            // process_next_action commits the CREATE checkpoint. Skip when
+            // revm's return_create would not charge it; the existing
+            // limit-side hook below owns the result-marking on exceed.
+            if is_rex5 && frame.data.is_create() {
+                let cfg = ctx.cfg();
+                if will_return_create_charge_code_deposit(
+                    interpreter_result,
+                    cfg.max_code_size(),
+                    cfg.spec().into(),
+                    cfg.is_eip3541_disabled(),
+                ) {
+                    let code_len = interpreter_result.output.len() as u64;
+                    let canonical_code_deposit_gas =
+                        code_len.saturating_mul(revm::interpreter::gas::CODEDEPOSIT);
+                    let _ = ctx
+                        .additional_limit
+                        .borrow_mut()
+                        .record_compute_gas(canonical_code_deposit_gas);
                 }
             }
         }
@@ -323,8 +346,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// Apply `MiniRex` additional limits after frame action processing.
     ///
-    /// This records compute gas cost induced in frame action processing (e.g., code deposit cost)
-    /// and marks the frame result as exceeding limit if needed.
+    /// Under REX5+ for CREATE results, the code-deposit compute gas was
+    /// already pre-charged in [`after_frame_run_instructions`]; pass
+    /// `None` here so the post-action hook does not double-record.
     #[inline]
     fn after_frame_run(
         ctx: &MegaContext<DB, ExtEnvs>,
@@ -334,15 +358,56 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
             return Ok(());
         }
+        let is_rex5 = ctx.spec.is_enabled(MegaSpecId::REX5);
 
         if let ItemOrResult::Result(frame_result) = frame_output {
-            ctx.additional_limit
-                .borrow_mut()
-                .after_frame_run(frame_result, gas_remaining_before_process_action);
+            // REX5+: code-deposit compute gas for CREATE results was already
+            // pre-charged. Skip post-action recording so we don't double-count.
+            let pass_through = if is_rex5 && matches!(frame_result, FrameResult::Create(_)) {
+                None
+            } else {
+                gas_remaining_before_process_action
+            };
+            ctx.additional_limit.borrow_mut().after_frame_run(frame_result, pass_through);
         }
 
         Ok(())
     }
+}
+
+/// Mirrors `revm_handler::frame::return_create`'s pre-commit predicate.
+/// Returns `true` iff `return_create` would charge `code_len * CODEDEPOSIT`
+/// from the interpreter gas and commit the checkpoint.
+///
+/// REVIEW ON UPSTREAM BUMP: keep in lockstep with
+/// `revm-handler::frame::return_create`. Any revm bump that touches the
+/// predicate inputs (`is_ok`, EIP-3541 gate, EIP-170 gate, code-deposit
+/// gas availability) requires re-auditing this helper.
+fn will_return_create_charge_code_deposit(
+    interpreter_result: &InterpreterResult,
+    max_code_size: usize,
+    runtime_spec_id: revm::primitives::hardfork::SpecId,
+    is_eip3541_disabled: bool,
+) -> bool {
+    use revm::primitives::hardfork::SpecId;
+
+    if !interpreter_result.result.is_ok() {
+        return false;
+    }
+    if !is_eip3541_disabled &&
+        runtime_spec_id.is_enabled_in(SpecId::LONDON) &&
+        interpreter_result.output.first() == Some(&0xEF)
+    {
+        return false;
+    }
+    if runtime_spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) &&
+        interpreter_result.output.len() > max_code_size
+    {
+        return false;
+    }
+    let code_deposit_gas = (interpreter_result.output.len() as u64)
+        .saturating_mul(revm::interpreter::gas::CODEDEPOSIT);
+    interpreter_result.gas.remaining() >= code_deposit_gas
 }
 
 impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes> Handler
@@ -475,11 +540,26 @@ where
 
             // MegaETH modification: additional storage gas cost for creating account
             let kind = ctx.tx().kind();
+            let is_rex5_enabled = ctx.spec.is_enabled(MegaSpecId::REX5);
             let (callee_address, storage_gas) = match kind {
                 TxKind::Create => {
-                    let tx = ctx.tx();
-                    let caller = tx.caller();
-                    let nonce = tx.nonce();
+                    let caller = ctx.tx().caller();
+                    // REX5+: derive the created address from the caller's
+                    // state nonce — the same value `make_create_frame` uses
+                    // for the actual deployment. Pre-REX5 keeps `tx.nonce()`.
+                    let nonce = if is_rex5_enabled {
+                        ctx.journal_mut()
+                            .inspect_account(caller)
+                            .map_err(|e| {
+                                Self::Error::from_string(format!(
+                                    "Failed to inspect caller account for CREATE storage gas: {e:?}",
+                                ))
+                            })?
+                            .info
+                            .nonce
+                    } else {
+                        ctx.tx().nonce()
+                    };
                     let created_address = caller.create(nonce);
 
                     let storage_gas = if is_rex_enabled {
