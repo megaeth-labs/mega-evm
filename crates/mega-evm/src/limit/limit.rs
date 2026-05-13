@@ -691,6 +691,39 @@ impl AdditionalLimit {
         !self.check_limit().exceeded_limit()
     }
 
+    /// REX5+: record that the current transaction's caller account is being materialised
+    /// by deposit pre-execution (mint balance increment, nonce bump, or both).
+    ///
+    /// Routes a `+1` to `state_growth`'s TX intrinsic lane only. Does **not** touch
+    /// `data_size` or `kv_update`: their `before_tx_start` hooks already record the
+    /// caller's account-info write unconditionally for every transaction (protocol-level
+    /// definition: one caller account-info write per tx). Adding a second record here
+    /// would double-count.
+    ///
+    /// Must be called exactly once per deposit-like transaction, only when the caller
+    /// account is empty at validation time (before `OpHandler::pre_execution` runs).
+    pub(crate) fn record_deposit_caller_creation(&mut self) {
+        self.state_growth.record_deposit_caller_creation();
+        let _ = self.check_limit();
+    }
+
+    /// REX5+: meter an oracle-hint payload against the TX data-size budget.
+    ///
+    /// Records `len` bytes into the TX intrinsic data-size lane (same lane as calldata) and
+    /// runs `check_limit()` so `has_exceeded_limit` is flipped to a TX-level exceed if the
+    /// recording overflows.
+    ///
+    /// Returns `true` if the recording stayed within the limit, `false` otherwise.
+    ///
+    /// **Caller contract**: on `false`, do NOT synthesize a result. Return `None` from the
+    /// interceptor and let the next `frame_init` step (`before_frame_init` →
+    /// `create_exceeded_limit_result`) produce the canonical TX-level `OutOfGas` halt with
+    /// rescued gas. This keeps the failure shape identical to any other data-size overflow.
+    pub(crate) fn record_oracle_hint_bytes(&mut self, len: u64) -> bool {
+        self.data_size.record_oracle_hint_bytes(len);
+        !self.check_limit().exceeded_limit()
+    }
+
     /// Hook called when a log is written. Returns `false` if the limit has been exceeded.
     pub(crate) fn on_log(&mut self, num_topics: u64, data_size: u64) -> bool {
         self.state_growth.after_log(num_topics, data_size);

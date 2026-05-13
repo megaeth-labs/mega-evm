@@ -31,14 +31,15 @@ use revm::{
         CallOutcome, CallScheme, CreateOutcome, FrameInput, Gas, InitialAndFloorGas,
         InstructionResult, InterpreterAction, InterpreterResult,
     },
+    primitives::CALL_STACK_LIMIT,
     Inspector, Journal,
 };
 
 use crate::{
-    constants, dispatch_system_contract_interceptors, is_mega_system_transaction_with,
-    sent_from_system_address, ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaEvm,
-    MegaHaltReason, MegaInstructions, MegaSpecId, MegaTransactionError,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    constants, dispatch_system_contract_interceptors, is_deposit_like_transaction,
+    is_mega_system_transaction_with, sent_from_system_address, ExternalEnvTypes, HostExt,
+    JournalInspectTr, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
+    MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -586,6 +587,50 @@ where
                 Self::Error::from_string(err_str)
             })?;
 
+            // REX5+: charge dynamic new-account storage gas for a deposit-driven caller
+            // materialisation (either `tx.mint() > 0` balance increment or pre-execution
+            // nonce bump). Mirrors the `TxKind::Call(address) with value` branch above,
+            // but for the caller side. Detection runs here so we observe the pre-
+            // pre-execution state — `OpHandler::pre_execution` (run after `validate`) is
+            // what actually materialises the caller account.
+            //
+            // `data_size` / `kv_update` are intentionally NOT touched: their
+            // `before_tx_start` hooks already record the caller's account-info write
+            // unconditionally for every transaction. Only `state_growth` (which has no
+            // pre-existing caller-side accounting) and intrinsic gas need the charge.
+            if is_rex5_enabled {
+                let caller = ctx.tx().caller();
+                let system_address = ctx.system_address;
+                if is_deposit_like_transaction(&ctx.inner.tx, system_address) {
+                    let caller_is_empty =
+                        ctx.db_mut().basic(caller)?.is_none_or(|acc| acc.is_empty());
+                    if caller_is_empty {
+                        // Self-call corner: if the deposit is a `TxKind::Call(caller)` with
+                        // non-zero `value` AND the same empty caller as callee, the existing
+                        // callee branch above has already charged `new_account_storage_gas(caller)`
+                        // for the same account materialisation. Don't charge the gas a second
+                        // time — but still record the state-growth event (the existing branch
+                        // never records state_growth; the +1 here reflects the single account
+                        // materialisation that pre_execution will perform).
+                        let already_charged_as_callee = matches!(
+                            ctx.tx().kind(),
+                            TxKind::Call(addr) if addr == caller,
+                        ) && !ctx.tx().value().is_zero();
+                        if !already_charged_as_callee {
+                            let storage_gas =
+                                ctx.new_account_storage_gas(caller).ok_or_else(|| {
+                                    let err_str = format!(
+                                        "Failed to get storage gas for deposit caller: {caller}",
+                                    );
+                                    Self::Error::from_string(err_str)
+                                })?;
+                            initial_and_floor_gas.initial_gas += storage_gas;
+                        }
+                        ctx.additional_limit.borrow_mut().record_deposit_caller_creation();
+                    }
+                }
+            }
+
             // REX5+: final initial+floor gas validation, after every Mega-side storage gas
             // contribution has been added. A transaction that fails either bound is rejected
             // here as a canonical validation error so callers see Err(...) rather than an
@@ -833,6 +878,7 @@ where
         let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
         let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
         let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
+        let is_rex5_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX5);
         let additional_limit = self.ctx().additional_limit.clone();
 
         // Check if this is a call to the oracle contract and mark it as accessed.
@@ -888,6 +934,23 @@ where
             if let Some(frame_result) = exceeded {
                 additional_limit.borrow_mut().push_empty_frame();
                 return Ok(FrameInitResult::Result(frame_result));
+            }
+        }
+
+        // REX5+: enforce `CALL_STACK_LIMIT` before interceptor dispatch. Interceptors
+        // short-circuit before revm's `make_call_frame` runs its own depth check, so
+        // without this guard a system contract could be invoked at unbounded depth.
+        // Scope mirrors interceptor dispatch (Call/StaticCall only); other schemes still
+        // flow into revm where its own depth check applies.
+        if is_rex5_enabled {
+            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
+                    frame_init.depth > CALL_STACK_LIMIT as usize
+                {
+                    let frame_result = gen_call_too_deep_result(call_inputs);
+                    additional_limit.borrow_mut().push_empty_frame();
+                    return Ok(FrameInitResult::Result(frame_result));
+                }
             }
         }
 
@@ -1063,16 +1126,27 @@ where
         mut frame_init: <Self::Frame as FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         let (ctx, inspector) = self.ctx_inspector();
+        let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
+        let is_rex4_enabled = ctx.spec.is_enabled(MegaSpecId::REX4);
+        let is_rex5_enabled = ctx.spec.is_enabled(MegaSpecId::REX5);
 
         // Check if inspector wants to skip this call/create
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
             // Inspector intercepted — `frame_init()` is skipped entirely, so neither
             // `frame_result_if_exceeding_limit` nor `before_frame_init` would run.
             //
-            // REX4+: if a TX-level limit is already exceeded (e.g., intrinsic
+            // The priority order below mirrors `frame_init`'s exact order so that a
+            // TX-level additional-limit exceed is reported instead of being shadowed by
+            // a CallTooDeep guard:
+            //   1. TX-level limit exceed (REX4+)
+            //   2. CALL_STACK_LIMIT depth guard (REX5+)
+            //   3. Deliver the inspector's synthetic output
+            // Each early-return path calls `frame_end` to keep inspector callbacks paired.
+
+            // (1) REX4+: if a TX-level limit is already exceeded (e.g., intrinsic
             // overflow), abort to ensure correct gas rescue before inspector callbacks.
             // Gated to REX4 to avoid changing stable spec behavior.
-            if ctx.spec.is_enabled(MegaSpecId::REX4) {
+            if is_rex4_enabled {
                 let exceeded = ctx
                     .additional_limit
                     .borrow_mut()
@@ -1083,9 +1157,24 @@ where
                     return Ok(ItemOrResult::Result(frame_result));
                 }
             }
-            // MINI_REX+: push empty frame to keep the limit tracker stack balanced
+            // (2) REX5+: enforce CALL_STACK_LIMIT for Call/StaticCall so an inspector
+            // cannot deliver a synthetic call result at unbounded depth, mirroring the
+            // protection added to `frame_init` before interceptor dispatch.
+            if is_rex5_enabled {
+                if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                    if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
+                        frame_init.depth > CALL_STACK_LIMIT as usize
+                    {
+                        let mut frame_result = gen_call_too_deep_result(call_inputs);
+                        ctx.additional_limit.borrow_mut().push_empty_frame();
+                        frame_end(ctx, inspector, &frame_init.frame_input, &mut frame_result);
+                        return Ok(ItemOrResult::Result(frame_result));
+                    }
+                }
+            }
+            // (3) MINI_REX+: push empty frame to keep the limit tracker stack balanced
             // (`before_frame_return_result` will pop).
-            if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
+            if is_mini_rex_enabled {
                 ctx.additional_limit.borrow_mut().push_empty_frame();
             }
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
@@ -1160,8 +1249,39 @@ where
     }
 }
 
+/// Builds a `FrameResult` matching revm's `make_call_frame` `CallTooDeep` return:
+/// `Gas::new(gas_limit)` (no spend, fully refundable to caller via `erase_cost`),
+/// empty output, and the caller's `return_memory_offset`.
+///
+/// Used by the REX5+ depth guard that runs before system-contract interceptor dispatch.
+/// Interceptors short-circuit before revm's own depth check, so without this guard a
+/// system contract could be invoked at any call-stack depth.
+fn gen_call_too_deep_result(call_inputs: &revm::interpreter::CallInputs) -> FrameResult {
+    FrameResult::Call(CallOutcome::new(
+        InterpreterResult::new(
+            InstructionResult::CallTooDeep,
+            Bytes::new(),
+            Gas::new(call_inputs.gas_limit),
+        ),
+        call_inputs.return_memory_offset.clone(),
+    ))
+}
+
+/// Builds a top-level `FrameResult` for the case where `validate()` returned an
+/// `initial_gas` that exceeds the transaction's `gas_limit` by the time
+/// `before_execution` re-checks it.
+///
+/// The frame result carries `InstructionResult::OutOfGas` with `Gas::new_spent(gas_limit)`
+/// (entire tx budget burnt, no remaining), matching how an EVM-level OOG halt is
+/// represented for top-level transactions. The `FrameResult` variant (`Call` vs `Create`)
+/// is chosen by `tx_kind` so the downstream output helper can extract the right
+/// fields without re-matching on transaction kind.
+///
+/// Called from `MegaHandler::before_execution` when `tx.gas_limit() < init_gas`,
+/// which can happen after `MegaHandler::validate` has added any MegaETH-specific
+/// intrinsic gas (calldata storage gas, REX intrinsic storage gas, callee-side
+/// new-account storage gas, or the REX5+ deposit-caller storage gas).
 fn gen_oog_frame_result(tx_kind: TxKind, gas_limit: u64) -> FrameResult {
-    // If not sufficient gas, we halt with out of gas
     match tx_kind {
         TxKind::Call(_address) => FrameResult::Call(CallOutcome::new(
             InterpreterResult::new(

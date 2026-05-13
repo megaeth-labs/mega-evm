@@ -232,21 +232,14 @@ fn test_create_with_eip3541_prefix_skips_pre_charge() {
     assert!(!deployed_account_has_code(&res.state, deployed_address));
 }
 
-/// A CREATE whose constructor returns valid code but leaves
-/// `gas.remaining() < code_deposit_gas` takes `return_create`'s
-/// `record_cost` fail path (post-Homestead `OutOfGas`). That is the
-/// fourth branch of the pre-charge predicate, and it must skip the
-/// pre-charge: revm reverts the checkpoint itself, so a spurious
-/// REX5 pre-charge would only double-bill the compute meter.
-///
-/// We engineer `gas.remaining() < code_deposit_gas` with a tight tx
-/// gas limit (`1_650_000` vs `code_deposit_gas = CODE_LEN * 200 =
-/// 1_600_000`) and use `TIGHT_COMPUTE_BUDGET` so that any spurious
-/// pre-charge would visibly trip the compute meter — the halt would
-/// surface as `ComputeGasLimitExceeded` rather than the natural revm
-/// `OutOfGas`.
+/// `gas.remaining() < code_deposit_gas` at RETURN must skip the REX5 pre-charge:
+/// revm's `return_create` reverts on its own with `OutOfGas`. A spurious
+/// pre-charge would surface as `ComputeGasLimitExceeded` instead, so the halt
+/// reason discriminates the two paths.
 #[test]
 fn test_create_insufficient_gas_for_code_deposit_skips_pre_charge() {
+    // tx gas (1_650_000) just below code_deposit_gas (CODE_LEN * 200 = 1_600_000)
+    // plus constructor cost, so revm's record_cost on the deposit fails.
     let res = run_create_with_gas_limit(
         MegaSpecId::REX5,
         TIGHT_COMPUTE_BUDGET,
@@ -261,9 +254,7 @@ fn test_create_insufficient_gas_for_code_deposit_skips_pre_charge() {
     };
     assert!(
         matches!(reason, MegaHaltReason::Base(OpHaltReason::Base(EthHaltReason::OutOfGas(_)))),
-        "halt reason must be the natural revm OutOfGas (return_create's \
-         code-deposit record_cost fail), not a compute-meter halt that \
-         would signal a spurious pre-charge; got: {reason:?}",
+        "got: {reason:?}",
     );
 
     let deployed_address = CALLER.create(0);

@@ -59,6 +59,7 @@ pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAG
 #[derive(Debug, Clone)]
 pub(crate) struct DataSizeTracker {
     rex4_enabled: bool,
+    rex5_enabled: bool,
     frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
@@ -66,6 +67,7 @@ impl DataSizeTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
+            rex5_enabled: spec.is_enabled(MegaSpecId::REX5),
             frame_tracker: FrameLimitTracker::new(spec, tx_limit),
         }
     }
@@ -87,6 +89,16 @@ impl DataSizeTracker {
         if let Some(entry) = self.frame_tracker.frame_mut() {
             entry.refund += size;
         }
+    }
+
+    /// REX5+: meter an oracle-hint payload against the TX intrinsic data-size lane.
+    ///
+    /// Hints are a TX-scoped side-channel into the off-chain oracle backend. They do not
+    /// belong to any call frame (the inner Oracle frame may revert, but the hint has already
+    /// flowed out), so we record into `tx_entry.persistent_usage` — the same lane as calldata
+    /// — rather than the current frame's discardable usage.
+    pub(crate) fn record_oracle_hint_bytes(&mut self, len: u64) {
+        self.frame_tracker.tx_mut().persistent_usage += len;
     }
 
     /// Records an account info write (40 bytes) as discardable data in the current frame.
@@ -155,8 +167,14 @@ impl TxRuntimeLimit for DataSizeTracker {
         let used = self.tx_usage();
         let limit = self.frame_tracker.tx_limit();
         if used > limit {
+            // Defense-in-depth: pre-REX5, the only mid-execution writer to `tx_entry` is
+            // `before_tx_start` (which runs before any frame is pushed), so a TX-level
+            // exceed with an active frame indicates a budget-accounting bug. REX5+ adds
+            // `record_oracle_hint_bytes` which legitimately writes to `tx_entry` mid-
+            // execution to meter oracle-hint payloads as TX-scoped side-channel cost, so
+            // the invariant is only asserted on pre-REX5 specs.
             debug_assert!(
-                !self.rex4_enabled || !self.frame_tracker.has_active_frame(),
+                !self.rex4_enabled || self.rex5_enabled || !self.frame_tracker.has_active_frame(),
                 "DataSize TX-level exceeded with active frame — budget invariant violated"
             );
             super::LimitCheck::ExceedsLimit {

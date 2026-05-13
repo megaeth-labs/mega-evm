@@ -140,6 +140,15 @@ impl StateGrowthTracker {
         }
     }
 
+    /// REX5+: record +1 net state growth for the materialisation of an empty deposit
+    /// caller during `OpHandler::pre_execution` (mint balance increment and/or nonce
+    /// bump). This event does not correspond to any EVM frame, so the +1 is written
+    /// directly to the TX intrinsic lane (`tx_entry.persistent_usage`) — same lane
+    /// `before_tx_start` uses for other intrinsic accounting.
+    pub(crate) fn record_deposit_caller_creation(&mut self) {
+        self.frame_tracker.tx_mut().persistent_usage += 1;
+    }
+
     /// Merges external persistent usage into the TX-level entry.
     ///
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox state growth consumption
@@ -193,8 +202,9 @@ impl TxRuntimeLimit for StateGrowthTracker {
     /// Returns whether the state growth limit has been exceeded.
     ///
     /// For Rex4+, checks the per-frame budget first, then falls through to a TX-level check.
-    /// The TX-level fallthrough catches Rex5 pre-frame authority usage and serves as a
-    /// defense-in-depth safety net for any future TX-level persistent usage.
+    /// The TX-level fallthrough catches intrinsic usage written directly to `tx_entry` —
+    /// notably the REX5+ deposit-caller-creation record and Rex5 pre-frame authority
+    /// usage — and any frame-level overflow that has already been popped into `tx_entry`.
     /// For pre-Rex4, checks total net growth across all frames against the TX limit.
     fn check_limit(&self) -> super::LimitCheck {
         if self.spec.is_enabled(MegaSpecId::REX4) {

@@ -2,10 +2,9 @@
 //! Tests for top-level CREATE storage-gas pricing.
 //!
 //! Under `MegaSpecId::REX5`, `MegaHandler::validate` derives the CREATE
-//! address from the caller's state nonce (read via `journal.inspect_account`,
-//! which does not warm the caller in the EIP-2929 access list or push a
-//! journal entry), matching `make_create_frame`. Pre-REX5 keeps the
-//! `tx.nonce()`-based pricing for replay determinism.
+//! address from the caller's state nonce (read via non-destructive
+//! `journal.inspect_account`), matching `make_create_frame`. Pre-REX5 keeps
+//! the `tx.nonce()`-based pricing for replay determinism.
 
 use std::convert::Infallible;
 

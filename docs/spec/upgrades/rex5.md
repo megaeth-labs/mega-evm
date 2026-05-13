@@ -1,5 +1,5 @@
 ---
-description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, KeylessDeploy trailing-bytes rejection and sandbox resource accounting, caller-account update deduplication, precompile compute-gas correction, EIP-7702 metering fixes, SELFDESTRUCT beneficiary accounting, system-tx chain-id and nonce validation, deferred final Mega-side gas validation, and KeylessDeploy error ABI refactor.
+description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, KeylessDeploy trailing-bytes rejection and sandbox resource accounting, caller-account update deduplication, precompile compute-gas correction and cap, EIP-7702 metering fixes, SELFDESTRUCT beneficiary accounting, system-tx chain-id and nonce validation, deferred final Mega-side gas validation, KeylessDeploy error ABI refactor, deposit-caller new-account accounting, CALL_STACK_LIMIT depth gate for system contract interceptors, oracle hint admission and metering, and zero-copy interceptor selector probe.
 ---
 
 # Rex5 Network Upgrade
@@ -18,8 +18,13 @@ Rex5 closes additional resource-accounting gaps identified in an external audit.
 The most significant change is that [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox execution now propagates its resource consumption back to the parent transaction, preventing low-cost state bloat via unmetered sandbox work.
 Rex5 also corrects [compute gas](../glossary.md#compute-gas) recording for failed precompile calls, adds [state growth](../evm/resource-accounting.md#state-growth) tracking for EIP-7702 authority accounts, uses non-delegating account inspection for [storage gas](../glossary.md#storage-gas) metering, and charges new-account costs when `SELFDESTRUCT` creates a beneficiary account.
 
-All changes are gated on the Rex5 spec.
-Behavior for Rex4 and earlier specs is unchanged.
+Rex5 further hardens several consensus-visible boundaries: precompile calls are now bounded by the remaining compute-gas budget, deposit transactions that materialize the caller account pay the new-account storage gas and contribute to state growth, system-contract interceptor dispatch respects `CALL_STACK_LIMIT`, and oracle hint forwarding requires positive `gas_limit` and meters the hint payload against the data-size budget.
+
+Alongside Rex5, the system-contract interceptor dispatch for `AccessControl`, `LimitControl`, and the selector-prefix of `KeylessDeploy` adopts a zero-copy selector probe (reads only the four selector bytes from shared memory) that applies uniformly across all specs.
+This is a host-side allocation change only; admission decisions remain bit-identical to the historical `abi_decode` dispatch on every spec, so consensus-visible behavior for Rex4 and earlier is unchanged.
+
+All consensus-visible changes are gated on the Rex5 spec.
+The cross-spec selector probe is the sole carve-out and is explicitly justified in section 19.
 
 ## What Changed
 
@@ -210,6 +215,93 @@ A transaction that cannot fit its final Mega-side intrinsic or floor gas require
 Both errors are selector-only because precompile return data is reachable on-chain via `RETURNDATACOPY` → `SSTORE` → state root, so coupling the wire format to a non-stability upstream `Display` impl would pin consensus to those impls.
 See [keyless-deploy.md](../system-contracts/keyless-deploy.md) for the normative error list.
 
+### 15. Precompile Compute-Gas Cap
+
+**Previous behavior (Rex4 and earlier):**
+A precompile invocation forwarded the caller's `gas_limit` to the precompile unchanged.
+Compute gas was recorded post-hoc from the precompile's reported spent gas.
+A precompile whose natural cost exceeded the remaining compute-gas budget would still execute fully, and the overshoot was only detected after the fact.
+
+**New behavior (Rex5):**
+The gas forwarded into a precompile is capped at `min(call_gas_limit, current_call_remaining_compute_gas)`.
+A precompile whose minimum cost exceeds the cap MUST return `PrecompileOOG` without performing the computation.
+On successful or reverting precompile returns, the caller-visible `Gas` object is normalized so that the caller's refund accounting reflects the original forwarded `gas_limit` minus the precompile's actual spent.
+Halt-class returns (`PrecompileOOG` and `PrecompileError`) preserve the underlying precompile's `Gas` shape unchanged, because halt paths do not consume the `remaining` field in caller refund.
+
+### 16. Deposit Caller New-Account Accounting
+
+**Previous behavior (Rex4 and earlier):**
+A deposit-like transaction (Optimism deposit or mega-system deposit-marked legacy) whose caller account was empty at validation time could materialize the caller via `mint` balance increment or pre-execution nonce bump.
+The materialization did not pay `new_account_storage_gas(caller)` and did not contribute to `state_growth`.
+
+**New behavior (Rex5):**
+For every deposit-like transaction whose caller account is empty at the pre-pre-execution snapshot, a node MUST add `new_account_storage_gas(caller)` to the transaction's intrinsic gas and MUST record exactly one new-account event (`+1`) on the `state_growth` TX intrinsic lane.
+The recording is single-shot — a subsequent transaction whose caller is the now-non-empty account incurs no additional charge.
+Where the same address appears as both caller and callee on a value-transferring `TxKind::Call` deposit, the existing callee-side `new_account_storage_gas` charge is the single gas charge and the deposit-caller path records only the state-growth event without re-charging the gas.
+
+The `data_size` and `kv_update` lanes are unaffected by this rule.
+Their existing `before_tx_start` charges already account for the caller's account-info write on every transaction.
+
+### 17. CALL_STACK_LIMIT Depth Gate for System Contract Interceptors
+
+**Previous behavior (Rex4 and earlier):**
+System contract interceptor dispatch in `frame_init` ran before revm's own `depth > CALL_STACK_LIMIT` check, which lives inside `make_call_frame`.
+A call to a system contract from a frame whose depth exceeded the limit could therefore receive a synthetic interceptor result instead of `CallTooDeep`.
+
+**New behavior (Rex5):**
+For any `FrameInput::Call(call_inputs)` with `scheme ∈ {Call, StaticCall}` whose `frame_init.depth > CALL_STACK_LIMIT`, a node MUST short-circuit `frame_init` with a synthetic `CallTooDeep` frame result and `Gas::new(call_inputs.gas_limit)` (no spend, fully refundable to caller via `erase_cost`) BEFORE consulting any system contract interceptor.
+No interceptor side effects (volatile-data tracker mutation, oracle hint forwarding, keyless deploy) MUST be performed in the too-deep case.
+
+A TX-level additional-limit exceed detected by `frame_result_if_exceeding_limit` takes priority over this depth gate.
+The `inspect_frame_init` path mirrors the same ordering: exceeded-limit check, then depth gate, then any inspector-provided synthetic output.
+
+`CallCode`, `DelegateCall`, and `FrameInput::Create` are out of scope for this gate.
+Their depth checks remain in revm's `make_call_frame` / `make_create_frame`.
+
+### 18. Oracle Hint Admission and Metering
+
+**Previous behavior (Rex4 and earlier):**
+The oracle `sendHint(bytes32 topic, bytes data)` interceptor invoked `OracleEnv::on_hint(caller, topic, data)` whenever the calldata decoded successfully, regardless of the call's `gas_limit`.
+A call with `gas_limit = 0` would forward the hint to the off-chain oracle backend before the on-chain Oracle frame ran out of gas.
+The hint payload was not charged against any transaction-level budget.
+
+**New behavior (Rex5):**
+A node MUST forward a hint to the off-chain backend via `OracleEnv::on_hint` only when all of the following hold:
+
+1. The call's `gas_limit > 0`.
+2. The leading four bytes of the calldata match `IOracle::sendHintCall::SELECTOR`.
+3. The full calldata decodes as a valid `sendHint(bytes32 topic, bytes data)` invocation.
+4. The recording of `data.len() + 32` bytes against the TX `data_size` intrinsic lane keeps `data_size_used` within the configured TX `data_size` limit.
+
+When any of (1)–(4) fails, the interceptor MUST NOT invoke `on_hint`.
+A failure of (4) MUST cause the transaction to halt with the canonical TX-level data-size `OutOfGas` failure (matching every other data-size overflow); the failure does not introduce a new failure shape.
+A failure of (1) or (3) lets the call fall through to the on-chain Oracle bytecode for canonical handling.
+
+The 32-byte addend in the recorded bytes accounts for the fixed `bytes32 topic`, which is a user-controlled value that flows to the off-chain backend on every accepted hint alongside `data`.
+The 20-byte caller address that also flows out is not added because it is EVM call-frame metadata, already covered by the transaction's intrinsic data-size cost.
+
+### 19. Zero-Copy Interceptor Selector Probe
+
+**Scope:** Applied uniformly across all specs for `AccessControl`, `LimitControl`, and the selector-prefix of `KeylessDeploy`.
+The `OracleHint` interceptor keeps a Rex5-only selector probe because its branch bundles observable behavior changes (see section 18) that must remain spec-gated.
+
+**Previous behavior:**
+Each system contract interceptor began with `call_inputs.input.bytes(ctx)`, which for `CallInput::SharedBuffer` copies the full `argsSize` range out of shared memory on every dispatch attempt — including for selectors that ultimately do not match.
+
+**New behavior:**
+A node MUST decide whether to admit a system-contract call into the interceptor handler based on the four-byte selector alone.
+Only the head four bytes of the calldata MAY be read from shared memory at admission time.
+The full calldata MUST be materialized only after the selector matches and the interceptor needs the argument decoding.
+
+Admission rules are NOT tightened.
+A call whose calldata is a four-byte known selector followed by arbitrary trailing bytes is still accepted, matching the historical admission semantics of `SolCall::abi_decode` for parameterless calls (`AccessControl`, `LimitControl`) and the parametrized admission for `KeylessDeploy` (selector match + full `abi_decode` of `(bytes, uint64)`).
+This change is observable only to off-chain tooling that measures host-side allocation, not to consensus.
+
+**Why this is consensus-safe across stable specs:**
+For the three affected interceptors, the selector probe produces bit-identical admission decisions to the historical `abi_decode`-based dispatch.
+For parameterless methods (`AccessControl`, `LimitControl`), this relies on alloy's `decode_sequence::<()>` returning `Ok(())` for selector plus any trailing bytes; for `KeylessDeploy` both paths still feed the full payload to the same `abi_decode` after the selector matches.
+The alloy behavior is pinned by a CI-time assertion so a future upstream tightening fails before it can break replay determinism on stable specs.
+
 ## Developer Impact
 
 - Contracts that verify mini-block signatures can use `SequencerRegistry.currentSequencer()` to look up the signing authority.
@@ -217,6 +309,10 @@ See [keyless-deploy.md](../system-contracts/keyless-deploy.md) for the normative
 - The Oracle contract's write methods (`setSlot`, `emitLog`, etc.) now accept calls from the current system address as reported by `SequencerRegistry`, not from a fixed address.
 - Transactions that perform multiple value-transferring sub-calls or creates from the same contract now report lower data-size and KV-update usage than they did under Rex4.
   This only affects usage tracking; it does not change execution semantics, state transitions, or the base transaction gas model.
+- Precompile calls in compute-gas-constrained frames now fail-fast with `PrecompileOOG` instead of running and overshooting the budget. Contracts that catch precompile failures see the same `is_ok() == false` signal but may observe the failure earlier in their gas budget.
+- Deposit transactions whose `from` address is empty at the time of validation now require additional intrinsic gas equal to `new_account_storage_gas(caller)` to cover the materialization performed by `pre_execution`.
+- Off-chain integrations that rely on `OracleEnv::on_hint` for telemetry will no longer receive hints from calls with `gas_limit = 0`, and will see hints from calls that exceed the transaction's data-size budget dropped at the EVM boundary.
+  Backends should not assume idempotency of hints already received before such a transaction halts; partial flushes in earlier successful hints are not rolled back.
 
 **KeylessDeploy callers** should be aware that sandbox execution now counts toward the outer transaction's resource budgets.
 A keyless deploy that previously succeeded may now fail if the outer transaction has tight resource limits.
@@ -243,6 +339,8 @@ The compute-gas correction only changes accounting for failed precompile calls, 
 - The KeylessDeploy sandbox accounting change is the most visible behavioral difference.
   The upfront budget capping and intrinsic preflight ensure that a successful sandbox run normally fits inside the parent's remaining resource envelope before state is merged.
   The residual overflow path rejects the outer call without merging sandbox state so no partial deployment survives a parent-level reject.
+- The precompile compute-gas cap, deposit-caller accounting, `CALL_STACK_LIMIT` depth gate, and oracle hint admission/metering are REX5-only. Rex4 and earlier preserve the pre-fix semantics byte-for-byte so that replay of historical blocks continues to produce identical state roots and receipts.
+- The zero-copy selector probe for `AccessControl`, `LimitControl`, and the selector-prefix of `KeylessDeploy` is applied uniformly across all specs (their admission decisions are bit-identical to the historical `abi_decode` path; the difference is host-side allocation, which is not consensus-visible).
 - Rex5 is the current unstable spec under active development; its semantics may still change before network activation.
 
 ## References

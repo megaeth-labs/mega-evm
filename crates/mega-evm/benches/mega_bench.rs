@@ -549,6 +549,13 @@ fn bench_system_contract(c: &mut Criterion) {
     let remaining_gas_selector: [u8; 4] = [0xde, 0x85, 0xee, 0xf5];
     let empty_contract_code = Bytes::from_static(&[STOP]);
 
+    // REX5 is included so the `frame_init` hot path additions (CALL_STACK_LIMIT
+    // depth guard + zero-copy `peek_selector`) are measured against REX4 as the
+    // pre-fix baseline. Both specs go through the same interceptor dispatch on
+    // CALL/STATICCALL to a system contract, so the delta isolates the new logic.
+    const SYSTEM_CONTRACT_SPECS: &[(&str, MegaSpecId)] =
+        &[("rex4", MegaSpecId::REX4), ("rex5", MegaSpecId::REX5)];
+
     // Single call benchmarks
     {
         let access_control_code =
@@ -558,26 +565,30 @@ fn bench_system_contract(c: &mut Criterion) {
         let regular_call_code = make_staticcall_bytecode(SECONDARY, [0x00, 0x00, 0x00, 0x00]);
 
         let mut group = c.benchmark_group("system_contract_single");
-        let spec = MegaSpecId::REX4;
-        let spec_name = "rex4";
-
-        group.bench_function(format!("{spec_name}/access_control"), |b| {
-            b.iter(|| {
-                execute(spec, make_db(access_control_code.clone()), 10_000_000_000, Bytes::new())
-            })
-        });
-        group.bench_function(format!("{spec_name}/limit_control"), |b| {
-            b.iter(|| {
-                execute(spec, make_db(limit_control_code.clone()), 10_000_000_000, Bytes::new())
-            })
-        });
-        group.bench_function(format!("{spec_name}/regular_contract"), |b| {
-            b.iter(|| {
-                let db = make_db(regular_call_code.clone())
-                    .account_code(SECONDARY, empty_contract_code.clone());
-                execute(spec, db, 10_000_000_000, Bytes::new())
-            })
-        });
+        for &(spec_name, spec) in SYSTEM_CONTRACT_SPECS {
+            group.bench_function(format!("{spec_name}/access_control"), |b| {
+                b.iter(|| {
+                    execute(
+                        spec,
+                        make_db(access_control_code.clone()),
+                        10_000_000_000,
+                        Bytes::new(),
+                    )
+                })
+            });
+            group.bench_function(format!("{spec_name}/limit_control"), |b| {
+                b.iter(|| {
+                    execute(spec, make_db(limit_control_code.clone()), 10_000_000_000, Bytes::new())
+                })
+            });
+            group.bench_function(format!("{spec_name}/regular_contract"), |b| {
+                b.iter(|| {
+                    let db = make_db(regular_call_code.clone())
+                        .account_code(SECONDARY, empty_contract_code.clone());
+                    execute(spec, db, 10_000_000_000, Bytes::new())
+                })
+            });
+        }
         group.finish();
     }
 
@@ -592,26 +603,30 @@ fn bench_system_contract(c: &mut Criterion) {
             make_repeated_staticcall_bytecode(SECONDARY, [0x00, 0x00, 0x00, 0x00], n);
 
         let mut group = c.benchmark_group("system_contract_100x");
-        let spec = MegaSpecId::REX4;
-        let spec_name = "rex4";
-
-        group.bench_function(format!("{spec_name}/access_control"), |b| {
-            b.iter(|| {
-                execute(spec, make_db(access_control_code.clone()), 10_000_000_000, Bytes::new())
-            })
-        });
-        group.bench_function(format!("{spec_name}/limit_control"), |b| {
-            b.iter(|| {
-                execute(spec, make_db(limit_control_code.clone()), 10_000_000_000, Bytes::new())
-            })
-        });
-        group.bench_function(format!("{spec_name}/regular_contract"), |b| {
-            b.iter(|| {
-                let db = make_db(regular_call_code.clone())
-                    .account_code(SECONDARY, empty_contract_code.clone());
-                execute(spec, db, 10_000_000_000, Bytes::new())
-            })
-        });
+        for &(spec_name, spec) in SYSTEM_CONTRACT_SPECS {
+            group.bench_function(format!("{spec_name}/access_control"), |b| {
+                b.iter(|| {
+                    execute(
+                        spec,
+                        make_db(access_control_code.clone()),
+                        10_000_000_000,
+                        Bytes::new(),
+                    )
+                })
+            });
+            group.bench_function(format!("{spec_name}/limit_control"), |b| {
+                b.iter(|| {
+                    execute(spec, make_db(limit_control_code.clone()), 10_000_000_000, Bytes::new())
+                })
+            });
+            group.bench_function(format!("{spec_name}/regular_contract"), |b| {
+                b.iter(|| {
+                    let db = make_db(regular_call_code.clone())
+                        .account_code(SECONDARY, empty_contract_code.clone());
+                    execute(spec, db, 10_000_000_000, Bytes::new())
+                })
+            });
+        }
         group.finish();
     }
 }
