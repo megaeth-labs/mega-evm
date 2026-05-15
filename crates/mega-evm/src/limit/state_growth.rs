@@ -268,7 +268,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
                 if call_inputs.transfers_value() {
                     // REX5+: use non-delegating inspection to get the authority's own state.
                     let to_account = if self.spec.is_enabled(MegaSpecId::REX5) {
-                        journal.inspect_account(call_inputs.target_address)?
+                        journal.inspect_account(call_inputs.target_address, false)?
                     } else {
                         journal.inspect_account_delegated(self.spec, call_inputs.target_address)?
                     };

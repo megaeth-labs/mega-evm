@@ -1182,7 +1182,7 @@ pub mod storage_gas_ext {
                 let to = to.into_address();
                 let mega_spec = context.host.spec_id();
                 let Ok(to_account) = (if mega_spec.is_enabled(MegaSpecId::REX5) {
-                    context.host.inspect_account(to)
+                    context.host.inspect_account(to, false)
                 } else {
                     context.host.inspect_account_delegated(mega_spec, to)
                 }) else {
@@ -1252,7 +1252,7 @@ pub mod storage_gas_ext {
         // must have been warmed when the current frame begins).
         // REX5+: use non-delegating inspection to get the authority's own state.
         let Ok(creator) = (if spec.is_enabled(MegaSpecId::REX5) {
-            context.host.inspect_account(creator_address)
+            context.host.inspect_account(creator_address, false)
         } else {
             context.host.inspect_account_delegated(spec, creator_address)
         }) else {
@@ -1469,7 +1469,7 @@ pub mod storage_gas_ext {
         let target = target.into_address();
 
         // Use non-delegating inspection (REX5+)
-        let Ok(target_account) = context.host.inspect_account(target) else {
+        let Ok(target_account) = context.host.inspect_account(target, false) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
@@ -1477,7 +1477,7 @@ pub mod storage_gas_ext {
 
         // Check if caller has balance (value will be transferred to beneficiary)
         let caller = context.interpreter.input.target_address();
-        let Ok(caller_account) = context.host.inspect_account(caller) else {
+        let Ok(caller_account) = context.host.inspect_account(caller, false) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };

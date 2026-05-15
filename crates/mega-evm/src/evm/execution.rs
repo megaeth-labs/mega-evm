@@ -119,13 +119,17 @@ where
                     // access list. The journal cache still lets consecutive in-block system
                     // txs observe committed nonce bumps.
                     let tx_nonce = tx.nonce();
-                    let state_account = ctx.journal_mut().inspect_account(system_address).map_err(
-                        |e| -> ERROR {
+                    // EIP-3607 reads `info.code`; pass `load_code = true` so the
+                    // `code_by_hash` is paid here rather than silently bypassing the
+                    // guard against a lazy-code DB.
+                    let state_account = ctx
+                        .journal_mut()
+                        .inspect_account(system_address, true)
+                        .map_err(|e| -> ERROR {
                             FromStringError::from_string(format!(
                                 "Mega system transaction state read failed: {e:?}"
                             ))
-                        },
-                    )?;
+                        })?;
                     validate_account_nonce_and_code(
                         &mut state_account.info,
                         tx_nonce,
@@ -550,7 +554,7 @@ where
                     // for the actual deployment. Pre-REX5 keeps `tx.nonce()`.
                     let nonce = if is_rex5_enabled {
                         ctx.journal_mut()
-                            .inspect_account(caller)
+                            .inspect_account(caller, false)
                             .map_err(|e| {
                                 Self::Error::from_string(format!(
                                     "Failed to inspect caller account for CREATE storage gas: {e:?}",

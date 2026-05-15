@@ -98,8 +98,8 @@ fn apply_sandbox_state_journaled_inner<DB: AlloyDatabase>(
     for (address, sandbox_account) in &sandbox_state {
         // Ensure the account is loaded into the parent journal cache without warming it.
         // Sandbox state merge must preserve the parent's own observable coldness-dependent gas
-        // semantics.
-        journal.inspect_account(*address).map_err(|e| {
+        // semantics. `load_code = false` — this path doesn't read `info.code`.
+        journal.inspect_account(*address, false).map_err(|e| {
             error!(
                 error = %e,
                 address = ?address,
