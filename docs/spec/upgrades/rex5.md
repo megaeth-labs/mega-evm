@@ -129,6 +129,7 @@ The discardable-on-revert mechanic is unchanged: charges recorded inside a child
 
 - On error paths, compute gas is recorded as `output.gas.limit()` (the full forwarded amount), matching the EVM gas actually consumed.
 - On success and revert paths, compute gas continues to use `output.gas.spent()`.
+- **Exception (Mega fixed-cost precompiles).** When the failed precompile is a Mega-overridden fixed-cost precompile and the wrapper's `gas_limit < fixed_cost` pre-check has passed (so upstream verification or computation ran), the recorded compute gas is the fixed cost, not the forwarded `output.gas.limit()`. Today this exception applies only to KZG point evaluation (`0x0a`, fixed cost `KZG_POINT_EVALUATION_GAS_COST = 100_000`). EVM-gas burn on the same path is unchanged: the call still halts with `PrecompileError` and the parent loses the forwarded amount.
 
 ### 9. EIP-7702 Authority State-Growth Tracking
 

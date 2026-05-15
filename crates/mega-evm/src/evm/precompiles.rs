@@ -82,24 +82,30 @@ pub fn mini_rex() -> &'static Precompiles {
 
 /// Customized KZG point evaluation precompile module.
 pub mod kzg_point_evaluation {
-    use revm::precompile::{PrecompileError, PrecompileWithAddress};
+    use revm::{
+        precompile::{PrecompileError, PrecompileWithAddress},
+        primitives::Address,
+    };
+
+    /// Address of the KZG point evaluation precompile (re-export of the upstream
+    /// constant). Local re-export so call-sites can refer to `GAS_COST` and
+    /// `ADDRESS` through the same module path.
+    pub const ADDRESS: Address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
     /// Gas cost for the KZG point evaluation precompile.
     pub const GAS_COST: u64 = 100_000;
 
     /// KZG point evaluation precompile. This is the modified version of the original precompile
     /// with a custom gas cost.
-    pub const KZG_POINT_EVALUATION: PrecompileWithAddress = PrecompileWithAddress(
-        revm::precompile::kzg_point_evaluation::ADDRESS,
-        |input, gas_limit| {
+    pub const KZG_POINT_EVALUATION: PrecompileWithAddress =
+        PrecompileWithAddress(ADDRESS, |input, gas_limit| {
             if gas_limit < GAS_COST {
                 return Err(PrecompileError::OutOfGas);
             }
             let mut output = revm::precompile::kzg_point_evaluation::run(input, gas_limit)?;
             output.gas_used = GAS_COST;
             Ok(output)
-        },
-    );
+        });
 }
 
 impl<CTX> PrecompileProvider<CTX> for MegaPrecompiles
@@ -208,12 +214,32 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                 normalized.record_refund(refunded);
                 output.gas = normalized;
             }
-            // On error paths revm doesn't call `record_cost`, so `spent()` is 0,
-            // but the parent permanently loses the forwarded amount. Record `limit()`
-            // there so compute-gas matches the EVM-gas burn.
+            // Compute-gas recording on REX5+:
+            //
+            // * Success / revert: revm called `record_cost`, so `spent()` already reflects the
+            //   actually-consumed amount. Use it.
+            // * Fixed-cost precompile that reached past its wrapper gas pre-check (today: KZG with
+            //   `limit() >= GAS_COST`): record the declared fixed cost. revm's `PrecompileError`
+            //   halt still consumes the parent's forwarded `gas_limit` from the EVM-gas meter, so
+            //   compute-gas here is intentionally a separate number from the EVM-gas burn.
+            // * All other error paths (non-KZG, or KZG with `limit() < GAS_COST` meaning the
+            //   wrapper's pre-check itself OOG'd before verification could run): revm did not call
+            //   `record_cost`, so `spent() == 0`. The parent still permanently loses the forwarded
+            //   amount, so record `limit()` to match the EVM-gas burn.
             if is_rex5_enabled {
                 let compute_gas = if output.result.is_ok_or_revert() {
                     output.gas.spent()
+                } else if address == &kzg_point_evaluation::ADDRESS &&
+                    output.gas.limit() >= kzg_point_evaluation::GAS_COST
+                {
+                    // KZG with the wrapper's `gas_limit < GAS_COST` pre-check passed: upstream
+                    // verification ran and returned a non-OOG error
+                    // (`BlobInvalidInputLength` / `BlobMismatchedVersion` /
+                    // `BlobVerifyKzgProofFailed`). Charge the fixed cost regardless of which
+                    // error variant fired. Using the structural predicate
+                    // (`limit() >= GAS_COST`) instead of an error-variant match keeps this arm
+                    // robust against upstream KZG adding new non-OOG variants.
+                    kzg_point_evaluation::GAS_COST
                 } else {
                     output.gas.limit()
                 };
@@ -285,6 +311,22 @@ mod tests {
             input: revm::interpreter::CallInput::Bytes(Bytes::from(input)),
             call_value: Default::default(),
         }
+    }
+
+    /// Mirror of `generate_kzg_test_input()` but with the last byte of the proof
+    /// flipped — structurally valid (192 bytes, matching versioned hash) but
+    /// upstream verification returns `PrecompileError::BlobVerifyKzgProofFailed`.
+    fn generate_invalid_proof_kzg_test_input() -> InputsImpl {
+        let mut inputs = generate_kzg_test_input();
+        let bytes = match inputs.input {
+            revm::interpreter::CallInput::Bytes(b) => b,
+            _ => panic!("expected Bytes"),
+        };
+        let mut buf = bytes.to_vec();
+        let last = buf.len() - 1;
+        buf[last] ^= 0x01;
+        inputs.input = revm::interpreter::CallInput::Bytes(Bytes::from(buf));
+        inputs
     }
 
     #[test]
@@ -491,6 +533,61 @@ mod tests {
         assert_eq!(output.gas.limit(), forwarded_gas);
         assert_eq!(output.gas.remaining(), forwarded_gas - GAS_COST);
         assert_eq!(context.additional_limit.borrow().get_usage().compute_gas, GAS_COST);
+    }
+
+    /// REX5 boundary mirror of `test_kzg_precompile_rex5_cap_at_exact_gas_cost`,
+    /// but with an invalid-proof input so upstream returns
+    /// `BlobVerifyKzgProofFailed`. `tx_compute_gas_limit == GAS_COST` forces the
+    /// outer cap to `effective_gas_limit == GAS_COST`, so the wrapper's
+    /// `gas_limit < GAS_COST` pre-check passes by exactly one, upstream KZG runs
+    /// verification, fails on the flipped proof, and revm constructs the failure
+    /// `Gas` with `Gas::new(effective_gas_limit)` — leaving `output.gas.limit() ==
+    /// GAS_COST` because halt paths skip the success-side normalization to the
+    /// caller's original `gas_limit`. Recorded compute-gas must equal `GAS_COST`.
+    ///
+    /// Lives in the inline unit-test module rather than
+    /// `tests/rex5/precompile_compute_gas.rs` because the integration helper
+    /// cannot reliably hit `remaining == GAS_COST` at the precompile call site:
+    /// opcode-level compute-gas consumed by a wrapper contract's MSTORE / PUSH /
+    /// CALL sequence shifts the actual `remaining` below `tx_compute_gas_limit`
+    /// by a brittle amount. Direct `precompiles_map.run()` bypasses that
+    /// pre-work and gives an exact boundary.
+    #[test]
+    fn test_kzg_precompile_rex5_cap_at_exact_gas_cost_fail() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+        set_tx_compute_gas_limit(&mut context, MegaSpecId::REX5, GAS_COST);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX5).precompiles(),
+        );
+        let inputs = generate_invalid_proof_kzg_test_input();
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+        let forwarded_gas = 500_000u64;
+
+        let result = precompiles_map.run(&mut context, &address, &inputs, true, forwarded_gas);
+        let output = result.expect("run ok").expect("Some output");
+        // Upstream rejects the invalid proof with `BlobVerifyKzgProofFailed` →
+        // `InstructionResult::PrecompileError` (NOT `PrecompileOOG`).
+        assert!(
+            matches!(output.result, InstructionResult::PrecompileError),
+            "expected PrecompileError on invalid-proof at the cap boundary; got {:?}",
+            output.result
+        );
+        // Halt paths skip the success-side normalization, so output.gas keeps revm's
+        // vanilla `Gas::new(effective_gas_limit)`. effective_gas_limit was capped to
+        // exactly GAS_COST, so limit() == GAS_COST. spent() is 0 because revm did not
+        // call record_cost on the error path.
+        assert_eq!(output.gas.limit(), GAS_COST);
+        assert_eq!(output.gas.spent(), 0);
+        // Joint invariant pinned here: result variant (PrecompileError) + limit value
+        // (GAS_COST) + recorded compute-gas (GAS_COST) at the exact boundary where the
+        // fixed-cost arm's `limit() >= GAS_COST` predicate transitions.
+        assert_eq!(
+            context.additional_limit.borrow().get_usage().compute_gas,
+            GAS_COST,
+            "at the exact-cap boundary on a verification failure, the recorded \
+             compute-gas must equal GAS_COST"
+        );
     }
 
     /// End-to-end verification that the REX5+ `Gas` normalization on `PrecompileOOG` does NOT
