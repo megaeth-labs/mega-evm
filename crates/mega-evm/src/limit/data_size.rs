@@ -77,16 +77,12 @@ impl DataSizeTracker {
 
     /// Records discardable data in the current frame.
     fn record_discardable(&mut self, size: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.discardable_usage += size;
-        }
+        self.frame_tracker.add_frame_discardable(size);
     }
 
     /// Records a refund (negative data) in the current frame.
     fn record_refund(&mut self, size: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += size;
-        }
+        self.frame_tracker.add_frame_refund(size);
     }
 }
 
@@ -161,17 +157,17 @@ impl TxRuntimeLimit for DataSizeTracker {
             .map(|item| item.map(|access| access.size() as u64).sum::<u64>())
             .unwrap_or_default();
         size += tx.authorization_list_len() as u64 * AUTHORIZATION_SIZE;
-        self.frame_tracker.tx_mut().persistent_usage += size;
+        self.frame_tracker.add_tx_persistent(size);
 
         // EIP-7702 authority account updates (non-discardable)
         for authorization in tx.authorization_list() {
             if authorization.authority().is_some() {
-                self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+                self.frame_tracker.add_tx_persistent(ACCOUNT_INFO_WRITE_SIZE);
             }
         }
 
         // Caller account update (non-discardable)
-        self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+        self.frame_tracker.add_tx_persistent(ACCOUNT_INFO_WRITE_SIZE);
     }
 
     /// Called when inspector intercepts and skips a call/create.

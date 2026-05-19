@@ -134,10 +134,8 @@ impl ComputeGasTracker {
     ///
     /// Compute gas is always persistent because CPU cycles cannot be undone.
     pub(crate) fn record_gas_used(&mut self, gas: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.persistent_usage += gas;
-        } else {
-            self.frame_tracker.tx_mut().persistent_usage += gas;
+        if !self.frame_tracker.add_frame_persistent(gas) {
+            self.frame_tracker.add_tx_persistent(gas);
         }
     }
 }

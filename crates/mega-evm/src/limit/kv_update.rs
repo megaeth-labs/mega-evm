@@ -47,16 +47,12 @@ impl KVUpdateTracker {
 
     /// Records a discardable KV update in the current frame.
     fn record_discardable(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.discardable_usage += n;
-        }
+        self.frame_tracker.add_frame_discardable(n);
     }
 
     /// Records a KV update refund in the current frame.
     fn record_refund(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += n;
-        }
+        self.frame_tracker.add_frame_refund(n);
     }
 }
 
@@ -124,12 +120,12 @@ impl TxRuntimeLimit for KVUpdateTracker {
         // EIP-7702 authority account updates (non-discardable)
         for authorization in tx.authorization_list() {
             if authorization.authority().is_some() {
-                self.frame_tracker.tx_mut().persistent_usage += 1;
+                self.frame_tracker.add_tx_persistent(1);
             }
         }
 
         // Caller account update (non-discardable)
-        self.frame_tracker.tx_mut().persistent_usage += 1;
+        self.frame_tracker.add_tx_persistent(1);
     }
 
     #[inline]

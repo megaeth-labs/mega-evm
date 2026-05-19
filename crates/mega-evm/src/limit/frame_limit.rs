@@ -49,6 +49,15 @@ pub(crate) struct FrameLimitTracker<I> {
     /// `push_create_frame` and the matching unwind in `pop_frame_unwind_parent`.
     /// Other instantiations do not consult this flag.
     rex5_enabled: bool,
+
+    /// Cached `Σ(persistent_usage + discardable_usage)` across `tx_entry` and every entry on
+    /// `frame_stack`. Maintained incrementally so `net_usage()` is O(1) instead of O(depth)
+    /// per opcode. See `cached_net_usage` for the invariant and `pop_frame` for the revert delta.
+    cached_total_used: u64,
+    /// Cached `Σ refund` across `tx_entry` and every entry on `frame_stack`. Maintained
+    /// together with `cached_total_used` so `net_usage = saturating_sub(used, refund)` is
+    /// a single subtraction.
+    cached_total_refund: u64,
 }
 
 /// Per-frame budget entry on the frame stack.
@@ -97,6 +106,8 @@ impl<I> FrameLimitTracker<I> {
             frame_stack: Vec::new(),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
             rex5_enabled: spec.is_enabled(MegaSpecId::REX5),
+            cached_total_used: 0,
+            cached_total_refund: 0,
         }
     }
 
@@ -111,6 +122,8 @@ impl<I> FrameLimitTracker<I> {
         self.tx_entry.discardable_usage = 0;
         self.tx_entry.refund = 0;
         self.frame_stack.clear();
+        self.cached_total_used = 0;
+        self.cached_total_refund = 0;
     }
 
     /// Returns the remaining budget of the current frame.
@@ -153,21 +166,41 @@ impl<I> FrameLimitTracker<I> {
     ///
     /// On success: `persistent_usage`, `discardable_usage`, and `refund` are all merged.
     /// On failure: only `persistent_usage` is merged; `discardable_usage` and `refund` are dropped.
+    ///
+    /// Cache invariant: every mutation to `persistent_usage` / `discardable_usage` / `refund`
+    /// — whether via the public helpers or via this pop — keeps `cached_total_used` and
+    /// `cached_total_refund` in sync. On revert the child's `discardable_usage` and `refund`
+    /// are subtracted from the cache because they vanish (they are neither kept on the child
+    /// nor merged into the parent).
     pub(crate) fn pop_frame(&mut self, success: bool) -> Option<FrameLimitEntry<I>> {
         let child = self.frame_stack.pop();
         if let Some(child) = &child {
             if let Some(parent) = self.frame_stack.last_mut() {
+                // Persistent usage is always preserved: move from child slot to parent slot.
+                // The cache already counts it once, so no cache update is needed here.
                 parent.persistent_usage += child.persistent_usage;
                 if success {
+                    // Discardable & refund are preserved on success — same total, just relocated
+                    // from child entry to parent entry. Cache stays the same.
                     parent.discardable_usage += child.discardable_usage;
                     parent.refund += child.refund;
+                } else {
+                    // Revert: child's discardable_usage and refund vanish entirely. Subtract them
+                    // from the cache to maintain the `Σ(persistent + discardable) - Σ refund`
+                    // invariant.
+                    self.cached_total_used -= child.discardable_usage;
+                    self.cached_total_refund -= child.refund;
                 }
             } else {
-                // Last frame popped — merge into tx_entry.
+                // Last frame popped — merge into tx_entry. Same cache reasoning as the parent
+                // branch above.
                 self.tx_entry.persistent_usage += child.persistent_usage;
                 if success {
                     self.tx_entry.discardable_usage += child.discardable_usage;
                     self.tx_entry.refund += child.refund;
+                } else {
+                    self.cached_total_used -= child.discardable_usage;
+                    self.cached_total_refund -= child.refund;
                 }
             }
         }
@@ -190,11 +223,6 @@ impl<I> FrameLimitTracker<I> {
         }
     }
 
-    /// Returns a mutable reference to the TX-level entry.
-    pub(crate) fn tx_mut(&mut self) -> &mut FrameLimitEntry<()> {
-        &mut self.tx_entry
-    }
-
     /// Returns a mutable reference to the current (top) frame entry.
     pub(crate) fn frame_mut(&mut self) -> Option<&mut FrameLimitEntry<I>> {
         self.frame_stack.last_mut()
@@ -215,14 +243,61 @@ impl<I> FrameLimitTracker<I> {
 
     /// Returns the total net usage across `tx_entry` and all frames on the stack.
     /// Net usage = Σ(`persistent_usage` + `discardable_usage`) - Σ(refund), clamped to 0.
+    ///
+    /// O(1): served from `cached_total_used` / `cached_total_refund`, which are maintained
+    /// incrementally by `add_tx_persistent`, `add_frame_persistent`, `add_frame_discardable`,
+    /// `add_frame_refund`, and `pop_frame`.
+    #[inline]
     pub(crate) fn net_usage(&self) -> u64 {
-        let mut total_used: u64 = self.tx_entry.used();
-        let mut total_refund: u64 = self.tx_entry.refund;
-        for entry in &self.frame_stack {
-            total_used += entry.used();
-            total_refund += entry.refund;
+        self.cached_total_used.saturating_sub(self.cached_total_refund)
+    }
+
+    /// Adds `n` to `tx_entry.persistent_usage` and keeps the cache in sync.
+    ///
+    /// Used by trackers to record intrinsic / pre-frame usage (e.g. base TX size,
+    /// EIP-7702 authority updates, caller account update). The current frame stack
+    /// may be empty (pre-`frame_init`) or non-empty (`compute_gas`'s fallback when no
+    /// frame exists).
+    #[inline]
+    pub(crate) fn add_tx_persistent(&mut self, n: u64) {
+        self.tx_entry.persistent_usage += n;
+        self.cached_total_used += n;
+    }
+
+    /// Adds `n` to the current top frame's `persistent_usage` and keeps the cache in sync.
+    /// Returns `false` (and does nothing) when the frame stack is empty — callers that
+    /// need a tx-level fallback must check the return value.
+    #[inline]
+    pub(crate) fn add_frame_persistent(&mut self, n: u64) -> bool {
+        match self.frame_stack.last_mut() {
+            Some(entry) => {
+                entry.persistent_usage += n;
+                self.cached_total_used += n;
+                true
+            }
+            None => false,
         }
-        total_used.saturating_sub(total_refund)
+    }
+
+    /// Adds `n` to the current top frame's `discardable_usage` and keeps the cache in sync.
+    /// No-op when the frame stack is empty (discardable usage requires a frame to be
+    /// discardable into; pre-frame usage is always persistent).
+    #[inline]
+    pub(crate) fn add_frame_discardable(&mut self, n: u64) {
+        if let Some(entry) = self.frame_stack.last_mut() {
+            entry.discardable_usage += n;
+            self.cached_total_used += n;
+        }
+    }
+
+    /// Adds `n` to the current top frame's `refund` and keeps the cache in sync.
+    /// No-op when the frame stack is empty.
+    #[inline]
+    pub(crate) fn add_frame_refund(&mut self, n: u64) {
+        if let Some(entry) = self.frame_stack.last_mut() {
+            entry.refund += n;
+            self.cached_total_refund += n;
+        }
     }
 }
 
