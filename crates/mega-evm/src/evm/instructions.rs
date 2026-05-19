@@ -1137,14 +1137,33 @@ pub mod additional_limit_ext {
 /// Extends opcodes with storage gas cost on top of `compute_gas_ext`.
 pub mod storage_gas_ext {
     use super::*;
+    use alloy_primitives::Address;
+
+    /// Address-selector for opcodes where the storage account is the stack `to` address (e.g.
+    /// CALL).
+    fn storage_addr_from_to(_mega_spec: MegaSpecId, _current: Address, to: Address) -> Address {
+        to
+    }
+
+    /// Address-selector for CALLCODE: Rex5+ uses the current frame's address because CALLCODE
+    /// executes borrowed code in the caller's own storage context; pre-Rex5 preserves the frozen
+    /// behavior of metering against the code-source (stack `to`).
+    fn storage_addr_for_callcode(mega_spec: MegaSpecId, current: Address, to: Address) -> Address {
+        if mega_spec.is_enabled(MegaSpecId::REX5) {
+            current
+        } else {
+            to
+        }
+    }
 
     /// Macro to charge storage gas for new account creation before calling the wrapped instruction.
     ///
     /// This macro generates a wrapper function that:
     /// 1. Inspects the target address (stack position 1) and value (stack position 2)
-    /// 2. Checks if the target account is empty and value transfer is non-zero
-    /// 3. Charges storage gas for new account creation if applicable
-    /// 4. Calls the wrapped instruction implementation
+    /// 2. Resolves the storage account address via `$select_addr`
+    /// 3. Checks if the storage account is empty and value transfer is non-zero
+    /// 4. Charges storage gas for new account creation if applicable
+    /// 5. Calls the wrapped instruction implementation
     ///
     /// # Call Opcode Behavior
     ///
@@ -1157,8 +1176,22 @@ pub mod storage_gas_ext {
     /// - `$fn_name`: Name of the generated function
     /// - `$opcode_name`: String name of the opcode (for documentation)
     /// - `$wrapped_fn`: Path to the wrapped instruction implementation
+    /// - `$has_transfer_logic`: `true` if the opcode can transfer value (inspects stack position 2)
+    /// - `$select_addr` (optional): Path to a `fn(MegaSpecId, current: Address, to: Address) ->
+    ///   Address` function that returns the address to check for emptiness and charge
+    ///   `new_account_storage_gas` against. `current` is the current frame's address; `to` is the
+    ///   stack position-1 address. Defaults to [`storage_addr_from_to`].
     macro_rules! wrap_call_with_storage_gas {
         ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr) => {
+            wrap_call_with_storage_gas!(
+                $fn_name,
+                $opcode_name,
+                $wrapped_fn,
+                $has_transfer_logic,
+                storage_addr_from_to
+            );
+        };
+        ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr, $select_addr:path) => {
             #[doc = concat!("`", $opcode_name, "` opcode implementation modified from `revm` with compute gas tracking and dynamically-scaled storage gas costs.")]
             pub fn $fn_name<
                 WIRE: InterpreterTypes<Stack: StackInspectTr>,
@@ -1173,13 +1206,17 @@ pub mod storage_gas_ext {
                 };
                 let to = to.into_address();
                 let mega_spec = context.host.spec_id();
-                let Ok(to_account) = context.host.inspect_account_delegated(mega_spec, to) else {
+                let current_address = context.interpreter.input.target_address();
+                let storage_address = $select_addr(mega_spec, current_address, to);
+                let Ok(storage_account) =
+                    context.host.inspect_account_delegated(mega_spec, storage_address)
+                else {
                     context.interpreter.halt(InstructionResult::FatalExternalError);
                     return;
                 };
-                let is_empty = to_account.state_clear_aware_is_empty(spec);
+                let is_empty = storage_account.state_clear_aware_is_empty(spec);
                 let has_transfer = if $has_transfer_logic {
-                    let Some(value) =context.interpreter.stack.inspect::<2>() else {
+                    let Some(value) = context.interpreter.stack.inspect::<2>() else {
                         context.interpreter.halt(InstructionResult::StackUnderflow);
                         return;
                     };
@@ -1189,7 +1226,9 @@ pub mod storage_gas_ext {
                 };
                 // Charge additional storage gas cost for creating a new account
                 if is_empty && has_transfer {
-                    let Some(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
+                    let Some(new_account_storage_gas) =
+                        context.host.new_account_storage_gas(storage_address)
+                    else {
                         context.interpreter.halt(InstructionResult::FatalExternalError);
                         return;
                     };
@@ -1203,7 +1242,6 @@ pub mod storage_gas_ext {
     }
 
     wrap_call_with_storage_gas!(call, "CALL", compute_gas_ext::call, true);
-    wrap_call_with_storage_gas!(call_code, "CALLCODE", compute_gas_ext::call_code, true);
     wrap_call_with_storage_gas!(
         delegate_call,
         "DELEGATECALL",
@@ -1211,6 +1249,13 @@ pub mod storage_gas_ext {
         false
     );
     wrap_call_with_storage_gas!(static_call, "STATICCALL", compute_gas_ext::static_call, false);
+    wrap_call_with_storage_gas!(
+        call_code,
+        "CALLCODE",
+        compute_gas_ext::call_code,
+        true,
+        storage_addr_for_callcode
+    );
 
     /// `CREATE`/`CREATE2` opcode implementation modified from `revm` with compute gas tracking and
     /// dynamically-scaled storage gas costs.
