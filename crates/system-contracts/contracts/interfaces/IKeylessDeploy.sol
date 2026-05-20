@@ -26,7 +26,9 @@ interface IKeylessDeploy {
     /// @notice Failed to recover signer from signature (invalid signature).
     error InvalidSignature();
 
-    /// @notice The signer does not have enough balance to cover gas + value.
+    /// @notice The signer does not have enough balance to cover the sandbox transaction's
+    ///         pre-execution debit. Pre-Rex5 specs require `gas_limit × gas_price + value`;
+    ///         Rex5+ requires `value` only because the sandbox transaction runs fee-free.
     error InsufficientBalance();
 
     /// @notice The deploy address already has code (contract already exists).
@@ -78,6 +80,22 @@ interface IKeylessDeploy {
     /// @param limit The configured compute gas limit.
     /// @param used The compute gas usage.
     error InsufficientComputeGas(uint64 limit, uint64 used);
+
+    /// @notice The init code of the keyless deployment transaction exceeds the configured
+    ///         maximum initcode size for the current spec.
+    /// @dev REX5+: enforced by the Rust interceptor before the sandbox is constructed, because
+    ///      the deposit-style sandbox bypasses op-revm's `validate_env` (which would otherwise
+    ///      apply the same limit via revm's EIP-3860 check).
+    /// @param size The init code length in bytes.
+    /// @param max The configured maximum init code size (from `cfg().max_initcode_size()`).
+    error InitCodeTooLarge(uint64 size, uint64 max);
+
+    /// @notice The recovered signer of the keyless deployment transaction has non-empty,
+    ///         non-EIP-7702 code in parent state, so it cannot originate transactions per
+    ///         EIP-3607.
+    /// @dev REX5+: enforced by the Rust interceptor because the deposit-style sandbox
+    ///      bypasses op-revm's `validate_account_nonce_and_code` check.
+    error SignerHasCode();
 
     /// @notice Internal sandbox failure (DB I/O, header validation, etc.).
     /// @dev Selector-only: precompile return data is consensus-affecting, so the wire

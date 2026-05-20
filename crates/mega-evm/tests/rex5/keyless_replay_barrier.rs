@@ -304,15 +304,17 @@ fn test_keyless_signer_charge_consumes_replay_barrier_on_runtime_failure() {
     );
     assert!(!decoded.errorData.is_empty(), "errorData must carry the constructor revert payload",);
 
-    // Replay-barrier assertions: signer nonce advanced AND signer balance reduced.
+    // Replay-barrier assertion: signer nonce advanced. Under REX5 the sandbox is fee-free
+    // (deposit-style gas_price = 0), so the signer balance is NOT debited for gas — only
+    // the nonce bump remains as the replay barrier.
     let signer_after = account_info(&mut db, signer);
     assert_eq!(
         signer_after.nonce, 1,
         "signer nonce must advance to 1 after make_create_frame's nonce bump",
     );
-    assert!(
-        signer_after.balance < signer_starting_balance,
-        "signer balance must be reduced by the sandbox gas cost",
+    assert_eq!(
+        signer_after.balance, signer_starting_balance,
+        "REX5 sandbox is fee-free, signer balance must be unchanged (only -value, which is 0 here)",
     );
 
     // Deploy address must not have code (constructor reverted).
@@ -350,9 +352,10 @@ fn test_keyless_successful_deploy_still_charges_and_advances_nonce() {
 
     let signer_after = account_info(&mut db, CREATE2_FACTORY_DEPLOYER);
     assert_eq!(signer_after.nonce, 1, "signer nonce must advance to 1 on successful deploy");
-    assert!(
-        signer_after.balance < signer_starting_balance,
-        "signer balance must be reduced by the sandbox gas cost",
+    assert_eq!(
+        signer_after.balance, signer_starting_balance,
+        "REX5 sandbox is fee-free, signer balance must be unchanged on successful deploy \
+         (value = 0 for canonical CREATE2 factory)",
     );
     assert!(
         has_code(&mut db, CREATE2_FACTORY_CONTRACT),

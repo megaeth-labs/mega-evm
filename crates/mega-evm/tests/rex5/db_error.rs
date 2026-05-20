@@ -98,6 +98,74 @@ fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert() {
     );
 }
 
+/// REX5+ keyless deploy must reject with `InternalError` (selector-only revert) when the
+/// pre-sandbox signer nonce read fails. `get_account_nonce` is the first DB read against
+/// the deploy signer, and its DB-fallback `map_err` is the only place this failure can be
+/// classified before the sandbox is even constructed.
+#[test]
+fn test_keyless_signer_nonce_db_error_maps_to_internal_error_revert() {
+    let mut inner = MemoryDatabase::default();
+    inner.set_account_balance(
+        CREATE2_FACTORY_DEPLOYER,
+        U256::from(1_000_000_000_000_000_000_000u128),
+    );
+    inner.set_account_balance(RELAYER, U256::from(1_000_000_000u64));
+
+    let mut db = ErrorInjectingDatabase::new(inner);
+    // Step 5 of `execute_keyless_deploy_call` reads the signer's nonce via
+    // `get_account_nonce` (journal cache → `journal.database.basic(signer)` fallback).
+    // Fail that fallback path.
+    db.fail_on_account = Some(CREATE2_FACTORY_DEPLOYER);
+
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let call_data = IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: Bytes::from_static(CREATE2_FACTORY_TX),
+        gasLimitOverride: U256::from(10_000_000u64),
+    }
+    .abi_encode();
+
+    let mut context =
+        MegaContext::new(db, MegaSpecId::REX5).with_external_envs(external_envs.into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+
+    let tx = TxEnv {
+        caller: RELAYER,
+        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+        data: call_data.into(),
+        value: U256::ZERO,
+        gas_limit: 30_000_000,
+        gas_price: 0,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let res = alloy_evm::Evm::transact(&mut evm, tx).expect("outer EVM error not expected");
+
+    let revert_output = match res.result {
+        ExecutionResult::Revert { output, .. } => output,
+        other => panic!("expected outer Revert, got {other:?}"),
+    };
+    let decoded = decode_error_result(&revert_output)
+        .expect("revert payload must decode to a known KeylessDeployError");
+    assert!(
+        matches!(decoded, KeylessDeployError::InternalError),
+        "signer nonce DB read failure must surface as InternalError, got {decoded:?}",
+    );
+
+    // Pre-sandbox failure: signer must not be touched, no replay barrier.
+    let signer_after =
+        res.state.get(&CREATE2_FACTORY_DEPLOYER).cloned().map(|acc| acc.info).unwrap_or_default();
+    assert_eq!(
+        signer_after.nonce, 0,
+        "DB error before sandbox must not bump signer nonce (no replay barrier)",
+    );
+}
+
 /// REX5+ system-tx validate must surface a DB failure as `EVMError::Custom`. The
 /// `inspect_account` call on `MEGA_SYSTEM_ADDRESS` happens *before* the deposit
 /// promotion, so a DB blip there must NOT silently let the tx through as a deposit.

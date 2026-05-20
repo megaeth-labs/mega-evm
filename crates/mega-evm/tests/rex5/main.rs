@@ -12,6 +12,7 @@ mod frame_target_updated_dedup;
 mod gas_validation;
 mod interceptor_selector_probe;
 mod keyless_deploy_dispatch_parity;
+mod keyless_fee_free;
 mod keyless_replay_barrier;
 mod oracle_hint_metering;
 mod pre_block_system_calls;

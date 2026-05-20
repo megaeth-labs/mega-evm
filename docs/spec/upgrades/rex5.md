@@ -209,11 +209,18 @@ A transaction that cannot fit its final Mega-side intrinsic or floor gas require
 
 **New behavior (Rex5):**
 
-- `InternalError(string)` becomes `InternalError()` (selector-only). The `message` field is dropped from the wire; root cause is reported off-chain via node logs.
-- A new selector-only error `InvalidTransaction()` is added to the stable validation error set, raised when the sandbox `MegaHandler::validate` rejects the inner transaction before `pre_execution()` runs (typically section 13's final gas check, but structurally any `IsTxError::is_tx_error() == true` outcome).
+- `InternalError(string)` becomes `InternalError()` (selector-only).
+  The `message` field is dropped from the wire; root cause is reported off-chain via node logs.
+- A new selector-only error `InvalidTransaction()` is added to the stable validation error set, raised when the sandbox `MegaHandler::validate` rejects the inner transaction before `pre_execution()` runs (typically section 13's final gas check, but structurally any `IsTxError::is_tx_error() == true` outcome, including op-revm's deposit `catch_error` synthesised halts).
   The outer KeylessDeploy call MUST revert with `InvalidTransaction()` and the signer MUST NOT be charged in this path.
+- A new error `InitCodeTooLarge(uint64 size, uint64 max)` is added.
+  It is raised when the inner transaction's initcode length exceeds `cfg.max_initcode_size()`; the sandbox enforces this because the deposit-style sandbox transaction (see section 23) bypasses op-revm's `validate_env`, where revm's EIP-3860-style size check normally lives.
+  `size` is the actual initcode length; `max` is the configured cap.
+- A new selector-only error `SignerHasCode()` is added.
+  It is raised when the recovered signer's parent-state bytecode is non-empty and is not a valid EIP-7702 delegation designation, unless `cfg.disable_eip3607` is set.
+  This re-enforces EIP-3607 because the deposit-style sandbox transaction bypasses op-revm's `validate_account_nonce_and_code`.
 
-Both errors are selector-only because precompile return data is reachable on-chain via `RETURNDATACOPY` → `SSTORE` → state root, so coupling the wire format to a non-stability upstream `Display` impl would pin consensus to those impls.
+`InvalidTransaction()`, `InternalError()`, and `SignerHasCode()` are selector-only because precompile return data is reachable on-chain via `RETURNDATACOPY` → `SSTORE` → state root, so coupling the wire format to a non-stability upstream `Display` impl would pin consensus to those impls.
 See [keyless-deploy.md](../system-contracts/keyless-deploy.md) for the normative error list.
 
 ### 15. Precompile Compute-Gas Cap
@@ -351,6 +358,77 @@ Pre-Rex5 specs MUST retain the legacy inflation, per-frame compute cap, and burn
 
 - The Rex4 introduction of `STORAGE_CALL_STIPEND` is documented in `docs/spec/upgrades/rex4.md` section 5 and `docs/spec/evm/gas-forwarding.md`.
 - The Rex5 separated-allowance model refines the same stipend semantically without changing the 23,000 grant amount or the value-transfer admission rule.
+
+### 22. KeylessDeploy Sandbox Volatile-Access Footprint Merge
+
+#### Previous behavior
+
+- The KeylessDeploy sandbox created an isolated `VolatileDataAccessTracker`.
+- After sandbox execution, the sandbox's accumulated volatile-access bitmap was discarded along with the sandbox `MegaContext`.
+- The parent transaction's `VolatileDataAccessTracker::get_volatile_data_info()` therefore reported only the volatile-access bits set outside the sandbox, even if the sandbox's constructor code accessed `TIMESTAMP`, `COINBASE`, the Oracle contract, the beneficiary balance, or other volatile data.
+
+#### New behavior
+
+- The sandbox's accumulated `volatile_data_accessed: VolatileDataAccess` bitmap is extracted from the sandbox `MegaContext` before that context is dropped.
+- Immediately after `merge_sandbox_limit_usage` and before the unused-reservation refund (`refund_unused_sandbox_gas`), the sandbox's bitmap is unioned into the parent's `VolatileDataAccessTracker` via `merge_accesses_from_bitmap`.
+- The merge runs on every path where the sandbox actually executed — sandbox success, in-sandbox failure, and the post-merge residual-overflow halt — so the parent transaction's reported footprint reflects what the sandbox accessed regardless of the outer call's final outcome.
+- Only the access bitmap is merged. The detention cap (`compute_gas_limit`), the disable-state pointer (`disable_depth`), and the configured per-spec limits (`block_env_access_limit`, `oracle_access_limit`) are deliberately not merged.
+
+#### Footprint-only semantics — no halt-reason remap
+
+The merge propagates the _footprint_ (which volatile data was accessed) but NOT the detention enforcement state. Specifically, the receiver's `AdditionalLimit.compute_gas.detained_limit` is unchanged by this merge — sandbox-internal `set_compute_gas_limit` calls remain sandbox-internal.
+
+`MegaHandler::execution_result` remaps a generic exceeding-limit halt into a volatile-specific variant (e.g. `VolatileDataAccessOutOfGas`) only when the parent's `compute_gas.is_detained_exceed()` returns true. That state is established by `AdditionalLimit::set_compute_gas_limit`, which is invoked from volatile-aware instruction wrappers during the parent frame's own execution. A sandbox-only volatile access therefore does NOT, by itself, cause the parent's residual-overflow halt to be remapped — it remains the generic `ComputeGasLimitExceeded` variant.
+
+This scoping is intentional. Detention is a frame-local enforcement device; for the keyless-deploy depth==0 invariant the parent has no further work after the sandbox returns, so propagating the detention state would have no observable benefit but would surface as a consensus-visible behavior change in halt reasons. The remap path remains available to any future caller that needs volatile-aware halt classification via the standard `set_compute_gas_limit` API.
+
+### 23. KeylessDeploy Sandbox Outer EVM Gas Debit
+
+#### Previous behavior
+
+- The outer keyless-deploy call's `Gas` counter was debited only the fixed dispatch overhead (`KEYLESS_DEPLOY_OVERHEAD_GAS`, 100K).
+- The sandbox's `gas_used` was reported only inside the ABI-encoded `IKeylessDeploy::keylessDeployReturn` payload; the outer `Gas` was not `record_cost`d with it.
+- Consequence: the outer transaction's receipt `gasUsed` and the block header's `gas_used` field did NOT reflect computation performed inside the sandbox. The multidimensional limits (compute gas, data size, KV updates, state growth) WERE correctly accounted via `merge_usage` after the round-1 sandbox-accounting fix, so block-level multidim caps still bounded sandbox cost; but the legacy EVM-gas channel was blind to it.
+
+#### New behavior
+
+- The sandbox transaction runs under revm's standard message-call gas shape applied to the outer `Gas` counter: pre-debit the capped `gas_limit_override` on entry (`gas.record_cost(gas_limit_override)`), refund the unused portion on exit (`gas.erase_cost(gas_limit_override - sandbox_gas_used)`).
+- Net effect on every sandbox-completion path (`SandboxOutcome::Success` and in-sandbox `SandboxOutcome::Failure`): the outer call's `Gas` counter is debited by exactly `sandbox_gas_used`, the same as if revm had run a normal CALL of that cost.
+- If the sandbox bails before producing a `SandboxOutcome` (validate-reject / internal error), the full reservation is refunded; the upfront `KEYLESS_DEPLOY_OVERHEAD_GAS` and pre-sandbox materialization charges are retained.
+- The inner signer's balance is NOT debited for sandbox gas: the sandbox runs as an OP deposit-like transaction with `gas_price = 0`, so the deposit-path caller balance escrow degenerates to zero (see "Outer-only billing" below).
+  The inner signer only ever loses `value` (zero for canonical Nick's-Method deployers).
+- Result: the outer transaction's receipt `gasUsed` and the block header `gas_used` now reflect actual computation; the legacy EVM-gas channel is consistent with the multidim channel.
+
+**Outer-only billing.** The sandbox transaction runs as an OP deposit-like transaction: `deposit.source_hash` is set to a sandbox-specific marker (`SANDBOX_TX_SOURCE_HASH`), `gas_price` is forced to zero, and `deposit.mint` is held at `None`.
+The source hash makes op-revm treat the tx as a deposit, which disables L1 fee, operator fee, `validate_env` (signature, nonce, configured initcode size limit, chain id, etc.), the caller balance sufficiency check, and `reward_beneficiary` distribution.
+The zero gas price is required because the deposit branch of `validate_against_state_and_deduct_caller` still computes a caller balance escrow of `gas_limit * effective_gas_price + additional_cost`; with `additional_cost = 0` (L1/operator skipped) and `gas_price = 0`, the escrow is zero and the inner signer's balance is left untouched.
+The outer transaction's own fee model is the sole fee source.
+For a normal outer transaction the outer sender pays `(dispatch_overhead + caller_materialization_storage_gas + sandbox_gas_used) * outer_gas_price` via the outer `Gas` counter (a pre-debited reservation that revm-style refunds the unused tail) and the standard EIP-1559 / OP fee split; deposit and system outer transactions inherit their existing fee-free semantics.
+
+**GASPRICE in sandbox.**
+A direct consequence of setting the sandbox tx's `gas_price` to zero is that the `GASPRICE` opcode executed inside the constructor / init code observes `0`, regardless of the gas price encoded in the keyless transaction signature.
+Initcode authors targeting Rex5+ KeylessDeploy MUST assume `GASPRICE == 0` inside the sandbox.
+The canonical Nick's-Method deployers in widespread use (e.g. the Arachnid CREATE2 deployer) do not read `GASPRICE`, so this behavior change has no practical effect on existing deployments.
+The change is consensus-observable but intentional: preserving the signed gas price inside the sandbox would re-introduce the caller balance escrow that fee-free mode exists to eliminate.
+
+**Deposit-style validation handling.** op-revm's deposit `catch_error` swallows a tx-validation failure into `Ok(Halt(FailedDeposit, gas_used = gas_limit))` with a nonce bump applied inside the sandbox journal. `process_sandbox_transact_result` detects the `FailedDeposit` halt reason and remaps it to `KeylessDeployError::InvalidTransaction`, preserving the existing contract that a sandbox validate-reject does NOT consume the Nick's-Method replay barrier: the outer keyless-deploy call surfaces as `Revert`, the sandbox state is discarded (so the `catch_error` nonce bump is never merged into the parent), and the pre-debited `gas_limit_override` reservation is fully refunded to the outer gas counter.
+The upfront `KEYLESS_DEPLOY_OVERHEAD_GAS` and pre-sandbox caller materialization charges remain debited — paying for the dispatch work and the parent-state read that actually occurred, in the same shape as the dispatch overhead.
+
+**Caller materialization accounting.**
+Because the sandbox-internal `validate_against_state_and_deduct_caller` no longer touches the signer under deposit-style fee-free mode, the standard Rex5 deposit-caller storage gas branch in `MegaHandler::validate` is gated off inside the sandbox (`is_inside_sandbox()`).
+The materialization charge is performed instead by `charge_caller_materialization_pre_sandbox`, which runs before the sandbox transaction is constructed and reads the parent journal-visible state (preferring the journal cache, then falling back to the backing database — neither path goes through the sandbox's `SandboxDb` nonce override).
+When the parent-visible signer is empty, the outer `Gas` counter is debited by `new_account_storage_gas(deploy_signer)` and a deposit-caller state-growth event is recorded.
+On retry the parent-visible signer is already non-empty (nonce was bumped by the previous deploy's `make_create_frame`), so the charge does not fire a second time.
+The charge is paid upfront — alongside `KEYLESS_DEPLOY_OVERHEAD_GAS` — and is retained regardless of sandbox outcome: sandbox-validate-reject, in-sandbox revert, and post-merge residual overflow all leave the materialization charge in place, mirroring the upfront dispatch overhead.
+DB read failure and dynamic storage-gas computation failure return `Err(KeylessDeployError::InternalError)`; the sandbox is not started in that case.
+
+**Relayer pricing impact.**
+Pre-Rex5, the relayer's marginal outer-gas cost for invoking KeylessDeploy was `~100K * outer_gas_price` (the dispatch overhead alone).
+Under Rex5 the marginal cost becomes `(~100K + sandbox_gas_used + caller_materialization_storage_gas) * outer_gas_price`, where `caller_materialization_storage_gas` is zero on retries and on warm-bucket signers.
+For compute-heavy keyless deploys this can be a 10–100× increase in the relayer-side gas budget relative to Rex4.
+Relayers MUST size the outer `gas_limit` to cover the worst-case sandbox cost they are willing to underwrite.
+The `gas_limit_override` argument to `keylessDeploy` is already capped to the parent's remaining outer gas under Rex5, so the outer caller has full visibility into the upper bound the sandbox can spend.
+The inner signer no longer needs a pre-funded balance to cover sandbox gas — only enough to cover the optional `value` transfer encoded in the keyless transaction (typically zero for Nick's-Method deployers).
 
 ## Developer Impact
 

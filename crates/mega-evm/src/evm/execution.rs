@@ -7,17 +7,19 @@ use alloy_primitives::{Address, Bytes, TxKind, U256};
 use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
-    OpTransactionError,
+    transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
+    OpHaltReason, OpTransactionError,
 };
 use revm::{
     context::{
         result::{ExecutionResult, FromStringError, InvalidTransaction},
         transaction::{AuthorizationTr, TransactionType},
-        Cfg, ContextTr, FrameStack, JournalTr, Transaction,
+        Cfg, ContextError, ContextTr, FrameStack, JournalTr, LocalContextTr, Transaction,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
         instructions::InstructionProvider,
+        post_execution::output as post_execution_output,
         pre_execution::validate_account_nonce_and_code,
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr, Handler,
         ItemOrResult,
@@ -602,7 +604,12 @@ where
             // `before_tx_start` hooks already record the caller's account-info write
             // unconditionally for every transaction. Only `state_growth` (which has no
             // pre-existing caller-side accounting) and intrinsic gas need the charge.
-            if is_rex5_enabled {
+            // Skip this branch inside sandbox contexts: the sandbox view of `caller`'s nonce
+            // is overridden to 0 by `SandboxDb`, which would mis-classify a previously
+            // materialised signer as empty on retry. The keyless-deploy outer flow charges
+            // caller materialisation explicitly via `charge_caller_materialization_pre_sandbox`
+            // before constructing the sandbox tx, based on the parent journal-visible state.
+            if is_rex5_enabled && !ctx.is_inside_sandbox() {
                 let caller = ctx.tx().caller();
                 let system_address = ctx.system_address;
                 if is_deposit_like_transaction(&ctx.inner.tx, system_address) {
@@ -743,7 +750,30 @@ where
             })
             .flatten();
 
-        let result = self.op.execution_result(evm, result)?;
+        // Deposit-style sandbox txs: bypass op-revm's HaltedDepositPostRegolith conversion so
+        // that a runtime halt surfaces as `Ok(Halt(actual_reason, actual_gas_used))` instead of
+        // being squashed into `FailedDeposit(gas_limit)`. The keyless-deploy outer flow needs
+        // the real halt reason to distinguish runtime halts (which must merge sandbox state and
+        // charge `sandbox_gas_used` against the outer gas counter) from validation-rejects
+        // (which still flow through `catch_error` and produce `FailedDeposit`).
+        let result = if evm.ctx().is_inside_sandbox() &&
+            evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE
+        {
+            match core::mem::replace(evm.ctx().error(), Ok(())) {
+                Err(ContextError::Db(e)) => return Err(e.into()),
+                Err(ContextError::Custom(e)) => return Err(Self::Error::from_string(e)),
+                Ok(_) => (),
+            }
+            let exec_result =
+                post_execution_output(evm.ctx(), result).map_haltreason(OpHaltReason::Base);
+            evm.ctx().journal_mut().commit_tx();
+            evm.ctx().chain_mut().clear_tx_l1_cost();
+            evm.ctx().local_mut().clear();
+            evm.frame_stack().clear();
+            exec_result
+        } else {
+            self.op.execution_result(evm, result)?
+        };
         Ok(result.map_haltreason(|reason| {
             let mut additional_limit = evm.ctx().additional_limit.borrow_mut();
             if additional_limit.is_exceeding_limit_halt(&reason) {

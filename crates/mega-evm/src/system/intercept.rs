@@ -277,7 +277,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
         depth: usize,
     ) -> InterceptResult {
         // Only intercept at top-level and when sandbox is not disabled.
-        if ctx.is_sandbox_disabled() || depth != 0 {
+        if ctx.is_inside_sandbox() || depth != 0 {
             return None;
         }
 
