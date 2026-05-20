@@ -15,13 +15,14 @@ use alloy_evm::{
     block::{BlockExecutor, BlockValidationError, OnStateHook, StateChangeSource},
     Evm, EvmEnv,
 };
-use alloy_hardforks::ForkCondition;
+use alloy_hardforks::{EthereumHardfork, ForkCondition};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, BucketHasher, BucketId, MegaBlockExecutionCtx,
-    MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
-    SequencerRegistryConfig, TestExternalEnvs,
+    test_utils::{ErrorInjectingDatabase, MemoryDatabase},
+    BlockLimits, BucketHasher, BucketId, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
+    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId, SequencerRegistryConfig,
+    TestExternalEnvs,
 };
 use revm::{
     context::BlockEnv,
@@ -33,11 +34,18 @@ const ACTIVATION_BLOCK: u64 = 1000;
 
 /// Bucket that every SALT lookup is routed to under [`SingleBucketHasher`].
 const HEAVY_BUCKET_ID: BucketId = 100_000;
-/// Capacity = 2000 × `MIN_BUCKET_SIZE` (256). Yields a 2000× multiplier, so
-/// each zero→nonzero `SSTORE` charges ≈ 40M of dynamic storage gas. EIP-2935
-/// performs at least one such write per pre-block call, which exceeds revm's
-/// hard-coded 30M system-call gas budget and forces a Halt.
-const HEAVY_BUCKET_CAPACITY: u64 = 512_000;
+/// Capacity = 100,000 × `MIN_BUCKET_SIZE` (256). Yields a 100,000× multiplier,
+/// so each zero→nonzero `SSTORE` charges ≈ 2G of dynamic storage gas. EIP-2935
+/// performs at least one such write per pre-block call, which exceeds the
+/// REX5 `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)` budget for any
+/// reasonable block gas limit and forces a Halt.
+const HEAVY_BUCKET_CAPACITY: u64 = 25_600_000;
+/// Capacity = 5000 × `MIN_BUCKET_SIZE` (256). Yields a 5000× multiplier, so
+/// each zero→nonzero `SSTORE` charges ≈ 100M of dynamic storage gas — above
+/// revm's upstream-fixed 30M default but inside the REX5 block-aware budget
+/// at [`BLOCK_GAS_LIMIT`]. Used to demonstrate that the REX5 gas-limit floor
+/// unlocks pre-block writes that would have OOG'd under the 30M default.
+const MEDIUM_BUCKET_CAPACITY: u64 = 1_280_000;
 const BLOCK_GAS_LIMIT: u64 = 250_000_000;
 
 const BOOTSTRAP_SEQUENCER: Address =
@@ -110,6 +118,11 @@ fn heavy_external_envs() -> TestExternalEnvs<Infallible, SingleBucketHasher> {
         .with_bucket_capacity(HEAVY_BUCKET_ID, HEAVY_BUCKET_CAPACITY)
 }
 
+fn medium_external_envs() -> TestExternalEnvs<Infallible, SingleBucketHasher> {
+    TestExternalEnvs::<Infallible, SingleBucketHasher>::new()
+        .with_bucket_capacity(HEAVY_BUCKET_ID, MEDIUM_BUCKET_CAPACITY)
+}
+
 fn light_external_envs() -> TestExternalEnvs<Infallible, SingleBucketHasher> {
     // Default capacity for the heavy bucket → 1× multiplier, normal gas cost.
     TestExternalEnvs::<Infallible, SingleBucketHasher>::new()
@@ -142,9 +155,9 @@ fn block_ctx() -> MegaBlockExecutionCtx {
 }
 
 /// Heavy SALT makes the EIP-2935 history-storage SSTORE OOG inside the
-/// 30M system-call gas budget. Under REX5+, the block executor must
-/// reject the block, and the failed call's state delta must not reach
-/// the on-state hook.
+/// REX5 `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)` budget. Under
+/// REX5+, the block executor must reject the block, and the failed call's
+/// state delta must not reach the on-state hook.
 #[test]
 fn test_rex5_block_rejected_when_blockhashes_pre_block_call_halts() {
     let mut db = MemoryDatabase::default();
@@ -274,6 +287,68 @@ fn test_pre_rex5_preserves_silent_pre_block_call_failure() {
     );
 }
 
+/// Medium SALT makes each EIP-2935 / EIP-4788 SSTORE cost ≈ 100M of
+/// dynamic storage gas — above revm's upstream-fixed 30M default but
+/// within the REX5 `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)`
+/// budget at [`BLOCK_GAS_LIMIT`]. Asserts the block-aware budget unlocks
+/// pre-block writes that would have OOG'd under the upstream default,
+/// so both pre-block calls succeed and reach the on-state hook.
+#[test]
+fn test_rex5_block_aware_budget_accepts_pre_block_call_above_30m() {
+    let mut db = MemoryDatabase::default();
+    install_eip2935_history_storage(&mut db);
+    install_eip4788_beacon_roots(&mut db);
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(medium_external_envs());
+    let block_executor_factory = MegaBlockExecutorFactory::new(
+        rex5_chain_spec(),
+        evm_factory,
+        OpAlloyReceiptBuilder::default(),
+    );
+    let mut executor = block_executor_factory.create_executor(
+        &mut state,
+        block_ctx(),
+        create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
+    );
+
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+
+    executor
+        .apply_pre_execution_changes()
+        .expect("REX5 block-aware budget must accept pre-block SSTORE costs above the 30M floor");
+
+    let recorded = events.lock().unwrap();
+    let saw_block_hashes = recorded.iter().any(|s| {
+        matches!(
+            s,
+            StateChangeSource::PreBlock(
+                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
+            )
+        )
+    });
+    let saw_beacon_root = recorded.iter().any(|s| {
+        matches!(
+            s,
+            StateChangeSource::PreBlock(
+                alloy_evm::block::StateChangePreBlockSource::BeaconRootContract
+            )
+        )
+    });
+    assert!(
+        saw_block_hashes,
+        "EIP-2935 pre-block call must succeed at ≈100M cost under the block-aware \
+         REX5 budget; sources: {recorded:?}",
+    );
+    assert!(
+        saw_beacon_root,
+        "EIP-4788 pre-block call must succeed at ≈100M cost under the block-aware \
+         REX5 budget; sources: {recorded:?}",
+    );
+}
+
 /// Successful pre-block system calls under REX5 commit normally and
 /// reach the on-state hook.
 #[test]
@@ -369,5 +444,269 @@ fn test_rex5_genesis_block_pre_block_call_skip_unaffected() {
     executor.apply_pre_execution_changes().expect(
         "Genesis block must skip pre-block system calls (helpers return None) and the \
          REX5 check must be a no-op on this path",
+    );
+}
+
+/// Prague inactive: `transact_blockhashes_contract_call` returns `Ok(None)`
+/// without firing the EIP-2935 system call. The on-state hook should record
+/// the EIP-4788 beacon-roots delta (Cancun stays active) but never observe
+/// a `BlockHashesContract` event.
+#[test]
+fn test_prague_inactive_skips_blockhashes_pre_block_call() {
+    let mut db = MemoryDatabase::default();
+    install_eip2935_history_storage(&mut db);
+    install_eip4788_beacon_roots(&mut db);
+    let mut state = State::builder().with_database(&mut db).build();
+
+    // Start from the REX5 spec but override Prague to `Never` so the EIP-2935
+    // helper takes its `is_prague_active_at_timestamp == false` early return.
+    let chain_spec = rex5_chain_spec().with(EthereumHardfork::Prague, ForkCondition::Never);
+
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(light_external_envs());
+    let block_executor_factory =
+        MegaBlockExecutorFactory::new(chain_spec, evm_factory, OpAlloyReceiptBuilder::default());
+    let mut executor = block_executor_factory.create_executor(
+        &mut state,
+        block_ctx(),
+        create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
+    );
+
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+
+    executor
+        .apply_pre_execution_changes()
+        .expect("Prague-inactive helper must skip silently, not error the block");
+
+    let recorded = events.lock().unwrap();
+    let saw_block_hashes = recorded.iter().any(|s| {
+        matches!(
+            s,
+            StateChangeSource::PreBlock(
+                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
+            )
+        )
+    });
+    assert!(
+        !saw_block_hashes,
+        "Prague-inactive helper must NOT enter the witness path; sources: {recorded:?}",
+    );
+}
+
+/// Cancun inactive: `transact_beacon_root_contract_call` returns `Ok(None)`
+/// without firing the EIP-4788 system call. Symmetric to the Prague test.
+#[test]
+fn test_cancun_inactive_skips_beacon_root_pre_block_call() {
+    let mut db = MemoryDatabase::default();
+    install_eip2935_history_storage(&mut db);
+    install_eip4788_beacon_roots(&mut db);
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let chain_spec = rex5_chain_spec().with(EthereumHardfork::Cancun, ForkCondition::Never);
+
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(light_external_envs());
+    let block_executor_factory =
+        MegaBlockExecutorFactory::new(chain_spec, evm_factory, OpAlloyReceiptBuilder::default());
+    let mut executor = block_executor_factory.create_executor(
+        &mut state,
+        block_ctx(),
+        create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
+    );
+
+    let recorder = RecordingStateHook::default();
+    let events = recorder.events.clone();
+    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+
+    executor
+        .apply_pre_execution_changes()
+        .expect("Cancun-inactive helper must skip silently, not error the block");
+
+    let recorded = events.lock().unwrap();
+    let saw_beacon_root = recorded.iter().any(|s| {
+        matches!(
+            s,
+            StateChangeSource::PreBlock(
+                alloy_evm::block::StateChangePreBlockSource::BeaconRootContract
+            )
+        )
+    });
+    assert!(
+        !saw_beacon_root,
+        "Cancun-inactive helper must NOT enter the witness path; sources: {recorded:?}",
+    );
+}
+
+/// Non-genesis block with `parent_beacon_block_root = None`:
+/// `transact_beacon_root_contract_call` rejects with
+/// `BlockValidationError::MissingParentBeaconBlockRoot`. EIP-2935 fires
+/// successfully first (light SALT) so the failure path is the beacon helper.
+#[test]
+fn test_missing_parent_beacon_block_root_rejects_block() {
+    let mut db = MemoryDatabase::default();
+    install_eip2935_history_storage(&mut db);
+    install_eip4788_beacon_roots(&mut db);
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(light_external_envs());
+    let block_executor_factory = MegaBlockExecutorFactory::new(
+        rex5_chain_spec(),
+        evm_factory,
+        OpAlloyReceiptBuilder::default(),
+    );
+
+    // Same block as block_ctx() but with parent_beacon_block_root = None.
+    let ctx_missing = MegaBlockExecutionCtx::new(
+        B256::from([0x29; 32]),
+        None,
+        Bytes::new(),
+        BlockLimits::no_limits(),
+    );
+    let mut executor = block_executor_factory.create_executor(
+        &mut state,
+        ctx_missing,
+        create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
+    );
+
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("missing parent_beacon_block_root at a non-genesis block must reject");
+    let validation_err = match &err {
+        alloy_evm::block::BlockExecutionError::Validation(v) => v,
+        other => panic!("Expected Validation error, got: {other:?}"),
+    };
+    assert!(
+        matches!(validation_err, BlockValidationError::MissingParentBeaconBlockRoot),
+        "Expected MissingParentBeaconBlockRoot, got: {validation_err:?}",
+    );
+}
+
+/// Genesis block (`block.number == 0`) with a non-zero `parent_beacon_block_root`:
+/// `transact_beacon_root_contract_call` rejects with
+/// `BlockValidationError::CancunGenesisParentBeaconBlockRootNotZero`. EIP-2935
+/// returns `Ok(None)` early on genesis, so the failure is from the beacon helper.
+#[test]
+fn test_genesis_non_zero_parent_beacon_block_root_rejects_block() {
+    let mut db = MemoryDatabase::default();
+    install_eip2935_history_storage(&mut db);
+    install_eip4788_beacon_roots(&mut db);
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(light_external_envs());
+    let block_executor_factory = MegaBlockExecutorFactory::new(
+        rex5_chain_spec(),
+        evm_factory,
+        OpAlloyReceiptBuilder::default(),
+    );
+
+    // Genesis context with a non-zero parent_beacon_block_root.
+    let genesis_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::from([0x47; 32])),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+    );
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::REX5;
+    let block_env = BlockEnv {
+        number: U256::ZERO,
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: BLOCK_GAS_LIMIT,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+
+    let mut executor = block_executor_factory.create_executor(&mut state, genesis_ctx, evm_env);
+
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("genesis with non-zero parent_beacon_block_root must reject");
+    let validation_err = match &err {
+        alloy_evm::block::BlockExecutionError::Validation(v) => v,
+        other => panic!("Expected Validation error, got: {other:?}"),
+    };
+    assert!(
+        matches!(
+            validation_err,
+            BlockValidationError::CancunGenesisParentBeaconBlockRootNotZero { .. }
+        ),
+        "Expected CancunGenesisParentBeaconBlockRootNotZero, got: {validation_err:?}",
+    );
+}
+
+/// DB-level error during the EIP-2935 system call: the wrapped database returns
+/// an injected error on the first read of the history-storage contract, so
+/// `transact_system_call` propagates an `EVMError` and the eips.rs helper must
+/// map it to `BlockValidationError::BlockHashContractCall { message: ... }`.
+#[test]
+fn test_blockhashes_pre_block_call_db_error_returns_validation_error() {
+    let mut inner = MemoryDatabase::default();
+    install_eip2935_history_storage(&mut inner);
+    install_eip4788_beacon_roots(&mut inner);
+    let mut db = ErrorInjectingDatabase::new(inner);
+    db.fail_on_account = Some(alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS);
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(light_external_envs());
+    let block_executor_factory = MegaBlockExecutorFactory::new(
+        rex5_chain_spec(),
+        evm_factory,
+        OpAlloyReceiptBuilder::default(),
+    );
+    let mut executor = block_executor_factory.create_executor(
+        &mut state,
+        block_ctx(),
+        create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
+    );
+
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("DB error during EIP-2935 system call must reject the block");
+    let validation_err = match &err {
+        alloy_evm::block::BlockExecutionError::Validation(v) => v,
+        other => panic!("Expected Validation error, got: {other:?}"),
+    };
+    assert!(
+        matches!(validation_err, BlockValidationError::BlockHashContractCall { .. }),
+        "Expected BlockHashContractCall, got: {validation_err:?}",
+    );
+}
+
+/// DB-level error during the EIP-4788 system call: EIP-2935 fires successfully
+/// first (light SALT, history-storage contract reads fine), then the wrapped
+/// database fails on the beacon-roots contract read, so `transact_system_call`
+/// propagates an `EVMError` and the eips.rs helper maps it to
+/// `BlockValidationError::BeaconRootContractCall { message: ... }`.
+#[test]
+fn test_beacon_root_pre_block_call_db_error_returns_validation_error() {
+    let mut inner = MemoryDatabase::default();
+    install_eip2935_history_storage(&mut inner);
+    install_eip4788_beacon_roots(&mut inner);
+    let mut db = ErrorInjectingDatabase::new(inner);
+    db.fail_on_account = Some(alloy_eips::eip4788::BEACON_ROOTS_ADDRESS);
+    let mut state = State::builder().with_database(&mut db).build();
+
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(light_external_envs());
+    let block_executor_factory = MegaBlockExecutorFactory::new(
+        rex5_chain_spec(),
+        evm_factory,
+        OpAlloyReceiptBuilder::default(),
+    );
+    let mut executor = block_executor_factory.create_executor(
+        &mut state,
+        block_ctx(),
+        create_evm_env(MegaSpecId::REX5, BLOCK_GAS_LIMIT),
+    );
+
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("DB error during EIP-4788 system call must reject the block");
+    let validation_err = match &err {
+        alloy_evm::block::BlockExecutionError::Validation(v) => v,
+        other => panic!("Expected Validation error, got: {other:?}"),
+    };
+    assert!(
+        matches!(validation_err, BlockValidationError::BeaconRootContractCall { .. }),
+        "Expected BeaconRootContractCall, got: {validation_err:?}",
     );
 }

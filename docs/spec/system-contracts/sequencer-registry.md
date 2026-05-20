@@ -140,7 +140,7 @@ At most one pending change per role exists at a time; a new schedule overwrites 
 It is called by the execution layer as a pre-block system call when a Rust-side pre-check confirms any role change is due.
 For each role, if pending and due, it updates the current address, appends to the change history, and clears pending state.
 
-The system call is issued with `gas_limit = max(block.gas_limit, 30_000_000)` instead of the upstream-fixed 30M used for EIP-2935 / EIP-4788.
+The system call is issued with `gas_limit = max(block.gas_limit, 30_000_000)` instead of revm's upstream-fixed 30M default, matching the REX5-updated EIP-2935 / EIP-4788 pre-block calls.
 This is required because the slot-rotation cost scales with REX dynamic storage gas (SALT bucket capacity), and a fixed 30M is no longer guaranteed to be sufficient on activation blocks.
 
 ### Two-Step Admin Transfer

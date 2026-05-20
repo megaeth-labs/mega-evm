@@ -332,8 +332,12 @@ mod rex5 {
     /// Returns the instruction table for the `REX5` spec.
     ///
     /// Changes from Rex4:
-    /// - SELFDESTRUCT: `storage_gas_ext::selfdestruct` → `volatile_data_ext::selfdestruct` →
-    ///   `compute_gas_ext::selfdestruct` (charges storage gas for new beneficiary accounts)
+    /// - SELFDESTRUCT: `volatile_data_ext::selfdestruct_rex5` → `storage_gas_ext::selfdestruct` →
+    ///   `compute_gas_ext::selfdestruct`. The new outer wrapper keeps the beneficiary-volatile
+    ///   guard outermost (matching the SSTORE / LOG layering) and slots the new-account storage-gas
+    ///   charge between the guard and the compute layer, so disabled-volatile frames short-circuit
+    ///   ahead of any storage-layer side effects (account inspection, dynamic gas charge,
+    ///   `on_selfdestruct_new_account` record).
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -344,8 +348,9 @@ mod rex5 {
         use revm::bytecode::opcode::*;
         let mut table = rex4::instruction_table::<WIRE, H>();
 
-        // REX5: SELFDESTRUCT charges storage gas for new beneficiary accounts.
-        table[SELFDESTRUCT as usize] = storage_gas_ext::selfdestruct;
+        // REX5: SELFDESTRUCT charges storage gas for new beneficiary accounts,
+        // gated behind the beneficiary-volatile guard.
+        table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct_rex5;
 
         table
     }
@@ -836,7 +841,7 @@ pub mod volatile_data_ext {
         #[inline]
         pub fn $fn_name<
             WIRE: InterpreterTypes<Stack: StackInspectTr>,
-            H: HostExt + ?Sized,
+            H: HostExt + ContextTr + JournalInspectTr + ?Sized,
         >(
             context: InstructionContext<'_, H, WIRE>,
         ) {
@@ -926,6 +931,15 @@ pub mod volatile_data_ext {
     wrap_op_detain_gas_conditional!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
     wrap_op_detain_gas_conditional!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
     wrap_op_detain_gas_conditional!(selfdestruct, "SELFDESTRUCT", compute_gas_ext::selfdestruct);
+
+    // REX5 SELFDESTRUCT outer wrapper: guard outermost, then the
+    // `storage_gas_ext::selfdestruct` layer (new-account storage gas charge),
+    // then `compute_gas_ext::selfdestruct`.
+    wrap_op_detain_gas_conditional!(
+        selfdestruct_rex5,
+        "SELFDESTRUCT",
+        super::storage_gas_ext::selfdestruct
+    );
 
     /// `SELFBALANCE` opcode with compute gas limit enforcement on volatile data access.
     ///
@@ -1549,6 +1563,13 @@ pub mod storage_gas_ext {
     /// - Data size (+40 for account info write)
     /// - KV update (+1)
     /// - State growth (+1)
+    ///
+    /// This wrapper sits between `volatile_data_ext` and `compute_gas_ext` in the
+    /// REX5 SELFDESTRUCT dispatch chain
+    /// (`volatile_data_ext::selfdestruct_rex5` → `storage_gas_ext::selfdestruct`
+    /// → `compute_gas_ext::selfdestruct`), matching the layering used by SSTORE
+    /// and LOG. The beneficiary-volatile guard runs in the outer
+    /// `volatile_data_ext::selfdestruct_rex5` ahead of any side effects below.
     pub fn selfdestruct<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -1594,8 +1615,9 @@ pub mod storage_gas_ext {
             context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
         }
 
-        // Delegate to the volatile_data_ext wrapper (which wraps compute_gas_ext)
-        run_inner_instruction_or_abort!(volatile_data_ext::selfdestruct, context);
+        // Delegate to compute_gas_ext::selfdestruct (the volatile-disabled guard
+        // ran in the outer `volatile_data_ext::selfdestruct_rex5` wrapper).
+        run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
     }
 }
 
