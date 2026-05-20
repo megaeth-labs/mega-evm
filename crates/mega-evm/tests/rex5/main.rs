@@ -3,6 +3,7 @@
 mod apply_pending_changes_gas_budget;
 mod call_too_deep_guard;
 mod callcode_storage_gas;
+mod create2_resize_gas_metering;
 mod create_atomicity;
 mod db_error;
 mod deposit_caller_accounting;
@@ -14,6 +15,7 @@ mod gas_validation;
 mod interceptor_selector_probe;
 mod keyless_deploy_dispatch_parity;
 mod keyless_fee_free;
+mod keyless_gas_cap_postcap_recheck;
 mod keyless_replay_barrier;
 mod oracle_hint_metering;
 mod pre_block_system_calls;

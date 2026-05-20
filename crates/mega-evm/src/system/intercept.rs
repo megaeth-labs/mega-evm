@@ -172,12 +172,6 @@ pub struct OracleHintInterceptor;
 impl OracleHintInterceptor {
     /// The minimum spec required for this interceptor to be active.
     pub const ACTIVATION_SPEC: MegaSpecId = MegaSpecId::REX2;
-
-    /// REX5+ hint metering: bytes attributed to the fixed `bytes32 topic` argument of
-    /// `sendHint`. The topic is a user-controlled value that flows to the off-chain
-    /// oracle backend on every accepted hint alongside the variable-length `data`,
-    /// so it is charged against the TX data-size budget at a fixed 32 bytes per hint.
-    const HINT_TOPIC_BYTES: u64 = 32;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtEnvs>
@@ -213,31 +207,38 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
                 return None;
             }
             let input_bytes = call_inputs.input.bytes(ctx);
-            let Ok(call) = IOracle::sendHintCall::abi_decode(&input_bytes) else {
-                return None;
-            };
 
-            // Meter the hint payload against the TX data-size budget. The hint is a
-            // TX-scoped side-channel into the off-chain oracle backend (not consensus state),
-            // so we record into the TX intrinsic lane — same as calldata.
+            // Meter the materialized payload against the TX data-size budget BEFORE
+            // decoding. The host has already paid the materialization cost; charge the
+            // raw `input_bytes.len()` so a caller cannot force unmetered host work by
+            // appending huge trailing bytes after a valid ABI envelope —
+            // `alloy_sol_types::abi_decode` silently accepts trailing junk (pinned by
+            // `test_alloy_abi_decode_accepts_selector_plus_trailing_bytes_on_zero_arg_calls`
+            // below). This also subsumes the malformed-payload case: bytes are charged
+            // whether or not `abi_decode` later succeeds.
             //
-            // On overflow: do NOT forward the hint, and do NOT synthesize a result. Returning
-            // `None` lets the next `before_frame_init` step (within the same `frame_init`
-            // call) observe the freshly-flipped `has_exceeded_limit` and produce the
-            // canonical TX-level `OutOfGas` halt via `create_exceeded_limit_result`. The
-            // failure shape (and rescued-gas refund) matches every other data-size overflow.
-            //
-            // Bytes counted: `data.len()` (variable, user-controlled) plus the fixed
-            // `HINT_TOPIC_BYTES` for the `bytes32 topic`. Both flow to the off-chain
-            // backend on every accepted hint, so both must be charged. The 20-byte
-            // caller address also flows out but is already covered by the
-            // transaction's intrinsic data-size cost — the caller is EVM call-frame
-            // metadata, not new payload.
-            let bytes_recorded = (call.data.len() as u64) + Self::HINT_TOPIC_BYTES;
-            let within = ctx.additional_limit.borrow_mut().record_oracle_hint_bytes(bytes_recorded);
+            // The hint is a TX-scoped side-channel into the off-chain oracle backend
+            // (not consensus state), so we record into the TX intrinsic lane — same as
+            // calldata. On overflow: do NOT forward the hint, and do NOT synthesize a
+            // result. Returning `None` lets the next `before_frame_init` step observe
+            // the freshly-flipped `has_exceeded_limit` and produce the canonical
+            // TX-level `OutOfGas` halt via `create_exceeded_limit_result`. The failure
+            // shape (and rescued-gas refund) matches every other data-size overflow.
+            let within = ctx
+                .additional_limit
+                .borrow_mut()
+                .record_oracle_hint_bytes(input_bytes.len() as u64);
             if !within {
                 return None;
             }
+
+            // Trailing junk after a valid ABI envelope is silently dropped by
+            // `abi_decode`; a malformed envelope is rejected outright. In either case
+            // we have already charged for the host-side materialization above, so we
+            // just fall through without forwarding on the rejection path.
+            let Ok(call) = IOracle::sendHintCall::abi_decode(&input_bytes) else {
+                return None;
+            };
 
             ctx.oracle_env.borrow().on_hint(call_inputs.caller, call.topic, call.data);
             return None;

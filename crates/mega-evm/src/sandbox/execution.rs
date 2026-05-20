@@ -304,8 +304,23 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // Step 4b: Rex5+ cap of `gas_limit_override` to the outer's remaining gas. Runs after
     // materialization has been debited so the reservation in step 8b only covers the
     // sandbox envelope itself.
+    //
+    // After the cap, re-enforce the signer's "must execute with at least `tx_gas_limit`"
+    // guarantee. The relayer can shrink the outer envelope so that `gas.remaining()`
+    // drops below the keyless `tx_gas_limit`, in which case the cap brings the override
+    // below the signed minimum. Rejecting here with the same `GasLimitTooLow` shape
+    // surfaces the failure cleanly instead of letting the sandbox OOG silently. The
+    // pre-cap check above (Step 4) is retained so a relayer passing
+    // `override < tx_gas_limit` outright still fails before the signer-recovery /
+    // materialization work.
     if ctx.spec.is_enabled(MegaSpecId::REX5) {
         gas_limit_override_u64 = gas_limit_override_u64.min(gas.remaining());
+        if gas_limit_override_u64 < tx_gas_limit {
+            return make_error!(KeylessDeployError::GasLimitTooLow {
+                tx_gas_limit,
+                provided_gas_limit: gas_limit_override_u64,
+            });
+        }
     }
 
     // Step 6: build the sandbox transaction (nonce forced to 0, raw keyless RLP carried

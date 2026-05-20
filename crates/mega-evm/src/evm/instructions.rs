@@ -1311,6 +1311,7 @@ pub mod storage_gas_ext {
 
         // Calculate the created address
         let mut resize_gas: u64 = 0;
+        let is_rex5_enabled = spec.is_enabled(MegaSpecId::REX5);
         let created_address = if IS_CREATE2 {
             let Some(initcode_offset) = context.interpreter.stack.inspect::<1>() else {
                 context.interpreter.halt(InstructionResult::StackUnderflow);
@@ -1320,29 +1321,57 @@ pub mod storage_gas_ext {
                 context.interpreter.halt(InstructionResult::StackUnderflow);
                 return;
             };
+            // REX5+: validate the salt operand before running `resize_memory!` and the
+            // copy / keccak block, so a missing salt halts with `StackUnderflow` without
+            // performing the expensive memory work that the trailing late-recorded
+            // `resize_gas` path would otherwise under-count. Pre-REX5 keeps the original
+            // "resize first, salt last" order for replay parity.
+            let rex5_salt = if is_rex5_enabled {
+                let Some(salt) = context.interpreter.stack.inspect::<3>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return;
+                };
+                Some(salt)
+            } else {
+                None
+            };
             let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
             let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
             // Expand memory before slicing so the read can never go out of bounds. The canonical
             // CREATE2 path called below also calls `resize_memory!`, which is a no-op once memory
-            // is already sized to fit the requested slice. The expansion gas is metered into the
-            // compute gas tracker AFTER the inner CREATE2 returns (see end of function), so it
-            // is accounted in the same gas dimension as the canonical path would have recorded
-            // it (via `compute_gas_ext::create2`'s `gas_before`/`gas_after` window). Recording
-            // late also matches `wrap_op_compute_gas`'s "skip on inner error" semantics: if the
-            // storage-gas charge or inner CREATE2 OOGs the interpreter, the early-return in
-            // `run_inner_instruction_or_abort!` skips recording, just as the canonical path
-            // would have skipped recording on inner failure.
+            // is already sized to fit the requested slice.
+            //
+            // Pre-REX5 records the expansion gas into the compute_gas tracker only AFTER the
+            // inner CREATE2 returns successfully (see end of function); preserved for replay
+            // parity. REX5+ records it immediately below so storage-gas OOG / inner-CREATE2
+            // failure cannot bypass the recording.
             let gas_before_resize = context.interpreter.gas.remaining();
             resize_memory!(context.interpreter, initcode_offset, initcode_len);
             resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
+
+            // REX5+: record resize gas into the compute_gas tracker immediately to align
+            // its timing with revm's EVM-gas debit (already taken inside `resize_memory!`).
+            // Zero `resize_gas` afterwards so the trailing late-record block (kept for
+            // pre-REX5) does not double-count under REX5.
+            if is_rex5_enabled && resize_gas > 0 {
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, resize_gas);
+                resize_gas = 0;
+            }
+
             let code = Bytes::copy_from_slice(
                 context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
             );
             let initcode_hash = keccak256(&code);
 
-            let Some(salt) = context.interpreter.stack.inspect::<3>() else {
-                context.interpreter.halt(InstructionResult::StackUnderflow);
-                return;
+            let salt = if let Some(s) = rex5_salt {
+                s
+            } else {
+                let Some(salt) = context.interpreter.stack.inspect::<3>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return;
+                };
+                salt
             };
 
             creator_address.create2(salt.to_be_bytes(), initcode_hash)
@@ -1377,12 +1406,11 @@ pub mod storage_gas_ext {
             run_inner_instruction_or_abort!(compute_gas_ext::create, context);
         }
 
-        // Record the CREATE2 initcode memory expansion gas as compute gas. We defer the
-        // recording until after the inner CREATE2 returns successfully so that on any
-        // intermediate OOG (storage-gas charge or inner CREATE2 itself) the early-return in
-        // `run_inner_instruction_or_abort!` skips this — matching the historical pattern in
-        // `wrap_op_compute_gas` where the canonical CREATE2's expansion gas was only recorded
-        // when the inner instruction completed without an EVM error.
+        // Pre-REX5 late-record path for the CREATE2 initcode memory-expansion gas.
+        // Preserved verbatim for replay parity: pre-REX5 keeps the original "skip on inner
+        // error" semantics where storage-gas OOG and inner-CREATE2 failure both skip this
+        // recording. REX5+ already recorded `resize_gas` above (and zeroed it), so this
+        // branch is a no-op under REX5.
         if resize_gas > 0 {
             let mut additional_limit = context.host.additional_limit().borrow_mut();
             compute_gas!(context.interpreter, additional_limit, resize_gas);
