@@ -1,5 +1,5 @@
 ---
-description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, KeylessDeploy trailing-bytes rejection and sandbox resource accounting, caller-account update deduplication, precompile compute-gas correction and cap, EIP-7702 metering fixes, SELFDESTRUCT beneficiary accounting, system-tx chain-id and nonce validation, deferred final Mega-side gas validation, KeylessDeploy error ABI refactor, deposit-caller new-account accounting, CALL_STACK_LIMIT depth gate for system contract interceptors, oracle hint admission and metering, and zero-copy interceptor selector probe.
+description: Rex5 network upgrade — SequencerRegistry with dual roles, dynamic system address, Oracle v2.0.0, KeylessDeploy trailing-bytes rejection and sandbox resource accounting, caller-account update deduplication, precompile compute-gas correction and cap, EIP-7702 metering fixes, SELFDESTRUCT beneficiary accounting, system-tx chain-id and nonce validation, deferred final Mega-side gas validation, KeylessDeploy error ABI refactor, deposit-caller new-account accounting, CALL_STACK_LIMIT depth gate for system contract interceptors, oracle hint admission and metering, zero-copy interceptor selector probe, and CALLCODE new-account storage gas metering fix.
 ---
 
 # Rex5 Network Upgrade
@@ -12,7 +12,11 @@ For the full normative definition, see the Rex5 spec in the mega-evm repository.
 Rex5 introduces the `SequencerRegistry` system contract, which tracks two independent roles: the **system address** (Oracle/system-tx authority) and the **sequencer** (mini-block signing key).
 It also upgrades the Oracle contract to v2.0.0 to read its authority from the registry.
 
-Rex5 also corrects a resource-accounting bug where the caller-account update was overcounted whenever a contract performed multiple value-transferring sub-calls or contract creations from the same call frame.
+Rex5 also tightens KeylessDeploy validation by rejecting signed inner transaction encodings with trailing bytes.
+
+Rex5 corrects a resource-accounting bug where the caller-account update was overcounted whenever a contract performed multiple value-transferring sub-calls or contract creations from the same call frame.
+
+Rex5 additionally corrects a `CALLCODE` storage-gas metering bug: new-account storage gas is now charged against the caller's storage context rather than the code-source address.
 
 Rex5 closes additional resource-accounting gaps identified in an external audit.
 The most significant change is that [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox execution now propagates its resource consumption back to the parent transaction, preventing low-cost state bloat via unmetered sandbox work.
@@ -81,7 +85,20 @@ Encodings with trailing data were accepted as long as the leading bytes formed a
 The decoder MUST reject any encoding that contains bytes after the signed RLP payload by reverting with `MalformedEncoding()`.
 This tightens validation so that two distinct byte strings cannot both pass as the "same" inner deployment transaction.
 
-### 6. Caller-Account Update Deduplication (Data Size and KV Updates)
+### 6. CALLCODE New-Account Storage Gas Metering
+
+**Previous behavior (Rex4 and earlier):**
+The storage-gas wrapper for `CALLCODE` charged new-account storage gas against the stack `to` address — i.e. the code-source address.
+For `CALLCODE`, however, execution happens in the caller's account context: the stack `to` only selects which code to load, while the storage / account context remains the caller's.
+Charging new-account storage gas against the code-source address can therefore charge spuriously when the code-source is empty.
+
+**New behavior (Rex5):**
+The new-account emptiness check and the `new_account_storage_gas(...)` charge are performed against the current frame's storage account (`interpreter.input.target_address()` — the caller / executing contract).
+The stack `to` continues to be used solely as the code-source for the underlying `CALLCODE` instruction.
+Pre-Rex5 specs preserve the (frozen) prior behavior for backward compatibility.
+`CALL` semantics are unchanged: the stack `to` is still the value recipient and is the correct address for new-account metering.
+
+### 7. Caller-Account Update Deduplication (Data Size and KV Updates)
 
 **Previous behavior (Rex4 and earlier):**
 When a call frame performed a value-transferring `CALL` / `CALLCODE` or a `CREATE` / `CREATE2`, the implementation charged the _caller_ account update to the child frame's discardable budget.
@@ -435,12 +452,15 @@ The inner signer no longer needs a pre-funded balance to cover sandbox gas — o
 - Contracts that verify mini-block signatures can use `SequencerRegistry.currentSequencer()` to look up the signing authority.
 - Contracts that need historical information can use `systemAddressAt(blockNumber)` or `sequencerAt(blockNumber)`.
 - The Oracle contract's write methods (`setSlot`, `emitLog`, etc.) now accept calls from the current system address as reported by `SequencerRegistry`, not from a fixed address.
+- KeylessDeploy signed inner transaction encodings with trailing bytes now revert with `MalformedEncoding()`.
 - Transactions that perform multiple value-transferring sub-calls or creates from the same contract now report lower data-size and KV-update usage than they did under Rex4.
   This only affects usage tracking; it does not change execution semantics, state transitions, or the base transaction gas model.
 - Precompile calls in compute-gas-constrained frames now fail-fast with `PrecompileOOG` instead of running and overshooting the budget. Contracts that catch precompile failures see the same `is_ok() == false` signal but may observe the failure earlier in their gas budget.
 - Deposit transactions whose `from` address is empty at the time of validation now require additional intrinsic gas equal to `new_account_storage_gas(caller)` to cover the materialization performed by `pre_execution`.
 - Off-chain integrations that rely on `OracleEnv::on_hint` for telemetry will no longer receive hints from calls with `gas_limit = 0`, and will see hints from calls that exceed the transaction's data-size budget dropped at the EVM boundary.
   Backends should not assume idempotency of hints already received before such a transaction halts; partial flushes in earlier successful hints are not rolled back.
+- Value-transferring `CALLCODE` no longer charges new-account storage gas based on the code-source address.
+  Contracts that previously paid spurious new-account storage gas via `CALLCODE` to an empty address see lower gas usage under Rex5.
 
 **KeylessDeploy callers** should be aware that sandbox execution now counts toward the outer transaction's resource budgets.
 A keyless deploy that previously succeeded may now fail if the outer transaction has tight resource limits.
@@ -462,6 +482,7 @@ The compute-gas correction only changes accounting for failed precompile calls, 
 - `SequencerRegistry` does not have an interceptor. It runs normal on-chain bytecode.
 - Both `_currentSystemAddress` and `_currentSequencer` are only updated during pre-block system calls, ensuring block-stability.
 - Changing one role does not affect the other.
+- Rex4 and earlier retain the original KeylessDeploy trailing-bytes behavior unchanged.
 - Rex4 and earlier retain the original caller-account overcounting behavior unchanged.
 - Transactions executed under Rex4 or earlier specs produce identical results before and after the Rex5 code is deployed.
 - The KeylessDeploy sandbox accounting change is the most visible behavioral difference.
@@ -469,6 +490,7 @@ The compute-gas correction only changes accounting for failed precompile calls, 
   The residual overflow path rejects the outer call without merging sandbox state so no partial deployment survives a parent-level reject.
 - The precompile compute-gas cap, deposit-caller accounting, `CALL_STACK_LIMIT` depth gate, and oracle hint admission/metering are REX5-only. Rex4 and earlier preserve the pre-fix semantics byte-for-byte so that replay of historical blocks continues to produce identical state roots and receipts.
 - The zero-copy selector probe for `AccessControl`, `LimitControl`, and the selector-prefix of `KeylessDeploy` is applied uniformly across all specs (their admission decisions are bit-identical to the historical `abi_decode` path; the difference is host-side allocation, which is not consensus-visible).
+- Rex4 and earlier retain the original `CALLCODE` new-account storage gas metering behavior unchanged.
 - Rex5 is the current unstable spec under active development; its semantics may still change before network activation.
 
 ## References

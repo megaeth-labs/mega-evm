@@ -2,6 +2,7 @@
 
 mod apply_pending_changes_gas_budget;
 mod call_too_deep_guard;
+mod callcode_storage_gas;
 mod create_atomicity;
 mod db_error;
 mod deposit_caller_accounting;

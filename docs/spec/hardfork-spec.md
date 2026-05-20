@@ -122,5 +122,6 @@ _See [Rex4 Network Upgrade](upgrades/rex4.md) for full details._
 - **Oracle v2.0.0** — `onlySystemAddress` reads the authority from `SequencerRegistry`. In-place Oracle bytecode upgrades preserve existing storage instead of clearing it.
 - **Caller-account update deduplication** — Fixes overcounting of caller-account data-size and KV updates across multiple value-transferring sub-calls or creates from the same parent frame.
 - **[KeylessDeploy](system-contracts/keyless-deploy.md) trailing-bytes rejection** — RLP encodings with trailing bytes after the signed payload are rejected with `MalformedEncoding()`.
+- **CALLCODE new-account storage gas fix** — New-account storage gas is now charged against the caller's storage context rather than the code-source address.
 
 _See [Rex5 Network Upgrade](upgrades/rex5.md) for full details._
