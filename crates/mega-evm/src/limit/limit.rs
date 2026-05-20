@@ -66,8 +66,9 @@ use super::LimitCheck;
 /// - **State Growth**: Tracks net new accounts + net new storage slots
 ///
 /// Additionally, this struct manages the `STORAGE_CALL_STIPEND` (Rex4+): extra gas granted to
-/// value-transferring `CALL`/`CALLCODE` for storage operations, with a per-frame compute gas
-/// cap and burn-on-return to prevent gas leakage.
+/// value-transferring `CALL`/`CALLCODE` for storage operations. REX5+ tracks the stipend as a
+/// separated internal allowance drained at the `storage_gas_ext` charging sites; REX4 retains
+/// the legacy `gas.limit()` inflation with a per-frame compute gas cap and burn-on-return.
 #[derive(Debug)]
 pub struct AdditionalLimit {
     /// A flag to indicate if the limit has been exceeded. Once set, the current usage values
@@ -362,22 +363,20 @@ impl AdditionalLimit {
         !self.check_limit().exceeded_limit()
     }
 
-    /// Rescues gas from the limit exceeding. This method is used to record the remaining gas of a
-    /// frame after the limit exceeds. Typically, the frame execution will halt consuming all the
-    /// remaining gas, we need to record so that we can give it back to the transaction sender
-    /// afterwards.
+    /// Records the current frame's remaining gas on a TX-level limit exceed so it can be
+    /// refunded to the sender. The storage-stipend tracker decides how `gas.remaining()`
+    /// maps to the refundable balance — see
+    /// `StorageCallStipendTracker::effective_remaining_for_rescue`.
     pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
-        let stipend = self.storage_call_stipend.current_frame_stipend();
-        // A TX-level limit can be exceeded before the current frame is popped, so an active
-        // `STORAGE_CALL_STIPEND` is valid here. Exclude it from the rescued amount so the sender
-        // cannot recover system-granted gas that should be burned.
-        let effective_remaining = if stipend > 0 {
-            let original_limit = gas.limit().saturating_sub(stipend);
-            gas.remaining().min(original_limit)
-        } else {
-            gas.remaining()
-        };
-        self.rescued_gas += effective_remaining;
+        self.rescued_gas += self.storage_call_stipend.effective_remaining_for_rescue(gas);
+    }
+
+    /// Drains up to `amount` from the current frame's storage stipend allowance and
+    /// returns the portion drained. Caller charges the residual via the original site's
+    /// gas-charging macro. Returns 0 pre-REX5 (the legacy path covers storage via
+    /// `gas.limit()` inflation).
+    pub(crate) fn try_consume_storage_stipend(&mut self, amount: u64) -> u64 {
+        self.storage_call_stipend.try_consume(amount)
     }
 
     /// Rescue remaining gas from a frame result if a TX-level additional limit has been

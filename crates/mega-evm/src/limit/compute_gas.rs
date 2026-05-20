@@ -119,9 +119,15 @@ impl ComputeGasTracker {
 
     /// Caps the current (top) frame's compute gas budget.
     ///
-    /// Used by `STORAGE_CALL_STIPEND`: the child's total gas (`gas_limit`) includes the stipend,
-    /// but compute gas must remain bounded at the original `forwarded_gas + CALL_STIPEND`.
-    /// This method tightens the per-frame compute gas limit to enforce that cap.
+    /// Used by the **REX4 legacy** `STORAGE_CALL_STIPEND` path: the child's total gas
+    /// (`gas_limit`) is inflated by `STORAGE_CALL_STIPEND`, but compute gas must remain
+    /// bounded at the original `forwarded_gas + CALL_STIPEND` so the extra storage stipend
+    /// cannot be spent on compute opcodes. This method tightens the per-frame compute gas
+    /// limit to enforce that cap.
+    ///
+    /// REX5+ does not call this method: under the separated-allowance model the child's
+    /// `gas.limit()` is never inflated, so the per-frame compute budget already equals the
+    /// pre-inflation amount naturally.
     pub(crate) fn cap_current_frame_limit(&mut self, cap: u64) {
         if let Some(frame) = self.frame_tracker.frame_mut() {
             frame.limit = frame.limit.min(cap);

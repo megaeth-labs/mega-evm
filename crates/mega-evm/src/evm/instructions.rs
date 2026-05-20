@@ -14,7 +14,7 @@ use revm::{
         instructions::{self, control, utility::IntoAddress},
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
-        resize_memory, FrameInput, Instruction, InstructionContext, InstructionResult,
+        resize_memory, CallScheme, FrameInput, Instruction, InstructionContext, InstructionResult,
         InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
 };
@@ -1199,13 +1199,19 @@ pub mod storage_gas_ext {
                 } else {
                     false
                 };
-                // Charge additional storage gas cost for creating a new account
+                // Charge additional storage gas cost for creating a new account.
+                // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
                 if is_empty && has_transfer {
                     let Some(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
                         context.interpreter.halt(InstructionResult::FatalExternalError);
                         return;
                     };
-                    gas!(context.interpreter, new_account_storage_gas);
+                    let drained = context
+                        .host
+                        .additional_limit()
+                        .borrow_mut()
+                        .try_consume_storage_stipend(new_account_storage_gas);
+                    gas!(context.interpreter, new_account_storage_gas - drained);
                 }
 
                 // Call the original instruction
@@ -1313,7 +1319,13 @@ pub mod storage_gas_ext {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
-        gas!(context.interpreter, create_contract_storage_gas);
+        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+        let drained = context
+            .host
+            .additional_limit()
+            .borrow_mut()
+            .try_consume_storage_stipend(create_contract_storage_gas);
+        gas!(context.interpreter, create_contract_storage_gas - drained);
 
         // Call the original create instruction
         if IS_CREATE2 {
@@ -1360,11 +1372,18 @@ pub mod storage_gas_ext {
         let len = as_usize_or_fail!(context.interpreter, len);
 
         // Charge storage gas cost for log topics and data before instruction execution.
+        // REX5 drains the allowance on the `Some(amount)` arm; the `None` (overflow) arm
+        // is passed through unchanged to preserve the OOG halt.
         let log_storage_cost = {
             let topic_cost = constants::mini_rex::LOG_TOPIC_STORAGE_GAS.checked_mul(N as u64);
             let data_cost = constants::mini_rex::LOG_DATA_STORAGE_GAS.checked_mul(len as u64);
             topic_cost.and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
         };
+        let log_storage_cost = log_storage_cost.map(|amount| {
+            let drained =
+                context.host.additional_limit().borrow_mut().try_consume_storage_stipend(amount);
+            amount - drained
+        });
         gas_or_fail!(context.interpreter, log_storage_cost);
 
         // Execute the original LOG instruction.
@@ -1430,7 +1449,8 @@ pub mod storage_gas_ext {
             return;
         };
 
-        // Charge storage gas cost before the instruction is executed
+        // Charge storage gas cost before the instruction is executed.
+        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
         if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
             let Some(sstore_set_storage_gas) =
                 context.host.sstore_set_storage_gas(target_address, index)
@@ -1438,7 +1458,12 @@ pub mod storage_gas_ext {
                 context.interpreter.halt(InstructionResult::FatalExternalError);
                 return;
             };
-            gas!(context.interpreter, sstore_set_storage_gas);
+            let drained = context
+                .host
+                .additional_limit()
+                .borrow_mut()
+                .try_consume_storage_stipend(sstore_set_storage_gas);
+            gas!(context.interpreter, sstore_set_storage_gas - drained);
         }
 
         // Execute the original SSTORE instruction
@@ -1484,12 +1509,15 @@ pub mod storage_gas_ext {
         let has_value = !caller_account.info.balance.is_zero();
 
         if is_empty && has_value {
-            // Charge storage gas for creating a new account
+            // Charge storage gas for creating a new account.
+            // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
             let Some(cost) = context.host.new_account_storage_gas(target) else {
                 context.interpreter.halt(InstructionResult::FatalExternalError);
                 return;
             };
-            gas!(context.interpreter, cost);
+            let drained =
+                context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
+            gas!(context.interpreter, cost - drained);
 
             // Record resource usage for new beneficiary account
             context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
@@ -1518,10 +1546,26 @@ pub mod compute_gas_ext {
                 run_inner_instruction_or_abort!($original_fn, context);
 
                 let mut gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
-                // Some of the gas may be forwarded to the child call. We need to substract them.
+                // Subtract the gas forwarded to the child. REX5 excludes the revm-side
+                // `CALL_STIPEND` (added by value-transferring CALL/CALLCODE without
+                // deducting from the parent) so parent compute-gas is not under-counted.
+                // Pre-REX5 keeps the legacy raw-`gas_limit` subtraction for replay parity.
                 match context.interpreter.bytecode.action() {
                     Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
-                        gas_used = gas_used.saturating_sub(call_inputs.gas_limit);
+                        let stipend_from_revm = if context
+                            .host
+                            .spec_id()
+                            .is_enabled(MegaSpecId::REX5) &&
+                            matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode) &&
+                            call_inputs.transfers_value()
+                        {
+                            gas::CALL_STIPEND
+                        } else {
+                            0
+                        };
+                        let parent_contributed =
+                            call_inputs.gas_limit.saturating_sub(stipend_from_revm);
+                        gas_used = gas_used.saturating_sub(parent_contributed);
                     }
                     Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
                         gas_used = gas_used.saturating_sub(create_inputs.gas_limit);

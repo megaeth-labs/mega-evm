@@ -303,6 +303,55 @@ For the three affected interceptors, the selector probe produces bit-identical a
 For parameterless methods (`AccessControl`, `LimitControl`), this relies on alloy's `decode_sequence::<()>` returning `Ok(())` for selector plus any trailing bytes; for `KeylessDeploy` both paths still feed the full payload to the same `abi_decode` after the selector matches.
 The alloy behavior is pinned by a CI-time assertion so a future upstream tightening fails before it can break replay determinism on stable specs.
 
+### 20. Value-Transfer CALL/CALLCODE Parent Compute-Gas Attribution
+
+**Previous behavior (Rex4 and earlier):**
+The per-opcode compute-gas wrapper subtracted the child frame's full `call_inputs.gas_limit` from the parent's recorded compute gas, including the standard EVM `CALL_STIPEND` (2,300) that revm adds to value-transferring `CALL` and `CALLCODE` child frames.
+Because `CALL_STIPEND` is gas the EVM grants to the child without deducting it from the parent, subtracting the full `gas_limit` (which includes the stipend) under-counted the parent's contribution by exactly `CALL_STIPEND` per value-transferring `CALL` / `CALLCODE` invocation.
+
+**New behavior (Rex5):**
+For a `NewFrame(FrameInput::Call(call_inputs))` action where `call_inputs.scheme ∈ {Call, CallCode}` and `call_inputs.transfers_value()` is true, a node MUST subtract `call_inputs.gas_limit − CALL_STIPEND` (the parent-contributed forwarded portion) from the parent's recorded compute gas, not the raw `call_inputs.gas_limit`.
+`DelegateCall`, `StaticCall`, and any `CALL` / `CALLCODE` with `value == 0` MUST continue to subtract the raw `call_inputs.gas_limit` — those frames receive no `CALL_STIPEND`.
+`FrameInput::Create` is unaffected; CREATE / CREATE2 have no value-transfer stipend.
+
+Pre-Rex5 specs MUST continue to subtract the raw `call_inputs.gas_limit` for byte-for-byte replay parity of historical blocks.
+The under-counting is intrinsic to the stable-spec behavior and is preserved deliberately.
+
+### 21. `STORAGE_CALL_STIPEND` Separated-Allowance Model
+
+**Previous behavior (Rex4 and earlier):**
+Value-transferring internal `CALL` / `CALLCODE` frames receive `STORAGE_CALL_STIPEND` (23,000) added to the child's `gas_limit` so the callee can pay the Mega 10× storage-gas costs (LOG topics/data, new-account materialization, first-time-write SSTORE, CREATE contract-storage, SELFDESTRUCT beneficiary creation) when the caller forwards little or no gas.
+The extra gas is restricted to storage-gas usage by a post-hoc per-frame compute-gas cap pinned at the pre-stipend gas limit; unused stipend is burned on frame return by clamping the child's `gas.remaining()` to the pre-inflation limit.
+
+Because the per-frame compute cap is enforced after each opcode finishes, a single expensive opcode or precompile invocation in the child can spend stipend gas as compute and have its full cost recorded into the parent's compute-gas counter before the cap triggers the frame-local revert.
+Repeated value-transferring CALLs from the same parent can amplify recorded compute gas beyond what the transaction's compute-gas limit would otherwise allow.
+
+**New behavior (Rex5):**
+`STORAGE_CALL_STIPEND` becomes a per-frame allowance internal to the resource tracker.
+The child's `call_inputs.gas_limit` MUST NOT be inflated by `STORAGE_CALL_STIPEND` on Rex5.
+For each of the five Mega-introduced storage-gas surcharge sites — CALL/CALLCODE empty-account new-account, CREATE/CREATE2 contract-creation, SSTORE first-time-write zero-to-nonzero, LOG topics-and-data, and SELFDESTRUCT empty-beneficiary new-account — a node MUST drain up to `STORAGE_CALL_STIPEND` from the current frame's allowance and charge only the residual `surcharge − drained` against the EVM `gas` object.
+Charging sites that surface `Option<u64>` (LOG) MUST preserve the `None` (overflow) arm unchanged so the existing overflow halt behavior is identical to pre-Rex5.
+
+Because the allowance never enters `gas.limit()`, it cannot be spent on compute opcodes by construction.
+On frame return there is nothing to burn — `gas.remaining()` already reflects only parent-contributed gas — and the rescued-gas path naturally excludes the allowance with no special arithmetic.
+
+The Mega per-frame compute-gas cap (`cap_current_frame_limit`) is unused on Rex5.
+It remains in place under stable specs so the legacy inflation path retains its byte-for-byte behavior, but the Rex5 separated-allowance path bypasses it.
+
+**Scope.** The allowance covers ONLY Mega-introduced storage-gas surcharges, not standard EVM opcode gas.
+A child whose forwarded `gas_limit` plus `CALL_STIPEND` does not cover the standard EVM cost of the opcode it executes (SSTORE base 22,100, CREATE2 frame setup, SELFDESTRUCT base) will OOG normally regardless of the allowance balance.
+The unique case where end-to-end success is achievable at forwarded `gas = 0` is LOG1 with small payloads, because LOG1's standard EVM cost (~750) fits inside the 2,300 `CALL_STIPEND`.
+
+The allowance applies to internal (depth > 0) value-transferring `CALL` / `CALLCODE` only.
+Top-level transactions, DELEGATECALL / STATICCALL, CREATE / CREATE2 (which never grant the value-transfer stipend), and any value-zero CALL do not receive an allowance.
+
+Pre-Rex5 specs MUST retain the legacy inflation, per-frame compute cap, and burn-on-return for byte-for-byte replay parity.
+
+**Cross-reference:**
+
+- The Rex4 introduction of `STORAGE_CALL_STIPEND` is documented in `docs/spec/upgrades/rex4.md` section 5 and `docs/spec/evm/gas-forwarding.md`.
+- The Rex5 separated-allowance model refines the same stipend semantically without changing the 23,000 grant amount or the value-transfer admission rule.
+
 ## Developer Impact
 
 - Contracts that verify mini-block signatures can use `SequencerRegistry.currentSequencer()` to look up the signing authority.
