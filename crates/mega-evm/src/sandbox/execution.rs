@@ -393,43 +393,8 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
 
     // Step 9: Execute sandbox and apply state changes.
     match execute_keyless_deploy_sandbox(ctx, sandbox_tx, sandbox_tx_limits) {
-        Ok(SandboxOutcome::Success { state, result, limit_usage, volatile_accesses }) => {
-            if ctx.spec.is_enabled(MegaSpecId::REX5) {
-                if let Some(halt) = apply_sandbox_post_accounting(
-                    ctx,
-                    &mut gas,
-                    limit_usage,
-                    volatile_accesses,
-                    gas_limit_override_u64,
-                    result.gas_used,
-                    &return_memory_offset,
-                ) {
-                    return halt;
-                }
-            }
-
-            if let Err(e) = apply_sandbox_state(ctx, state, deploy_signer) {
-                return make_error!(e);
-            }
-
-            if result.deploy_address != deploy_address {
-                return make_error!(KeylessDeployError::AddressMismatch);
-            }
-
-            for log in result.logs {
-                ctx.log(log);
-            }
-
-            make_success!(result.gas_used, result.deploy_address)
-        }
-        Ok(SandboxOutcome::Failure { state, error, limit_usage, volatile_accesses }) => {
-            // Only execution-style sandbox failures should reach this branch.
-            let gas_used = match &error {
-                KeylessDeployError::ExecutionReverted { gas_used, .. } |
-                KeylessDeployError::ExecutionHalted { gas_used, .. } |
-                KeylessDeployError::EmptyCodeDeployed { gas_used } => *gas_used,
-                _ => 0,
-            };
+        SandboxOutcome::Completed { state, completion, limit_usage, volatile_accesses } => {
+            let gas_used = completion.gas_used();
 
             if ctx.spec.is_enabled(MegaSpecId::REX5) {
                 if let Some(halt) = apply_sandbox_post_accounting(
@@ -449,16 +414,43 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                 return make_error!(e);
             }
 
-            // Return success-style so the merged sandbox state (signer nonce bump from
-            // `make_create_frame`, plus any sandbox writes the EVM committed) persists;
-            // the outer caller sees the failure reason in `errorData`.
-            make_execution_failure!(gas_used, error)
+            // Dispatch ABI return shape. `Deployed` and `EmptyCode` both forward
+            // constructor logs into the parent receipt (run-to-completion EVM side
+            // effect); `ExecutionFailed` (Revert / Halt) does not, because revm's
+            // own frame accounting already rolled the failed frame's logs back.
+            match completion {
+                SandboxCompletion::Deployed { gas_used, deploy_address: deployed, logs } => {
+                    if deployed != deploy_address {
+                        return make_error!(KeylessDeployError::AddressMismatch);
+                    }
+                    for log in logs {
+                        ctx.log(log);
+                    }
+                    make_success!(gas_used, deployed)
+                }
+                SandboxCompletion::EmptyCode { gas_used, logs } => {
+                    for log in logs {
+                        ctx.log(log);
+                    }
+                    make_execution_failure!(
+                        gas_used,
+                        KeylessDeployError::EmptyCodeDeployed { gas_used }
+                    )
+                }
+                SandboxCompletion::ExecutionFailed { gas_used, error } => {
+                    // Success-style outer return so the merged sandbox state (signer
+                    // nonce bump from `make_create_frame`, plus any committed sandbox
+                    // writes) persists; outer caller sees the failure reason in
+                    // `errorData`.
+                    make_execution_failure!(gas_used, error)
+                }
+            }
         }
-        Err(e) => {
-            // Sandbox bailed before producing a `SandboxOutcome` — typically a
-            // validate-reject (`FailedDeposit` → `InvalidTransaction`) or an internal
-            // error. Refund the full reservation; the materialization charge already
-            // applied upfront is intentionally retained, mirroring the upfront
+        SandboxOutcome::Rejected(e) => {
+            // Sandbox bailed before producing a frame — typically a validate-reject
+            // (`FailedDeposit` → `InvalidTransaction`) or an internal error. Refund
+            // the full reservation; the materialization charge already applied
+            // upfront is intentionally retained, mirroring the upfront
             // `KEYLESS_DEPLOY_OVERHEAD_GAS` charge.
             if ctx.spec.is_enabled(MegaSpecId::REX5) {
                 gas.erase_cost(gas_limit_override_u64);
@@ -498,14 +490,6 @@ fn build_fee_free_sandbox_deposit_tx(
     mega_tx
 }
 
-/// Result of sandbox execution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxResult {
-    gas_used: u64,
-    deploy_address: Address,
-    logs: Vec<Log>,
-}
-
 /// Executes the contract creation in a sandbox environment.
 ///
 /// Uses a type-erased `SandboxDb` to prevent infinite type instantiation.
@@ -519,7 +503,7 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
     ctx: &mut MegaContext<DB, ExtEnvs>,
     sandbox_tx: MegaTransaction,
     sandbox_tx_limits: Option<EvmTxRuntimeLimits>,
-) -> Result<SandboxOutcome, KeylessDeployError> {
+) -> SandboxOutcome {
     let deploy_signer = sandbox_tx.caller();
     let gas_limit = sandbox_tx.gas_limit();
     let gas_price = sandbox_tx.gas_price();
@@ -551,17 +535,17 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
         .with_nonce_override(deploy_signer);
 
     // Check signer balance
-    let signer_account = sandbox_db
-        .basic(deploy_signer)
-        .map_err(|e| {
+    let signer_account = match sandbox_db.basic(deploy_signer) {
+        Ok(info) => info.unwrap_or_default(),
+        Err(e) => {
             error!(
                 error = %e,
                 deploy_signer = ?deploy_signer,
                 "keyless deploy signer balance read failed",
             );
-            KeylessDeployError::InternalError
-        })?
-        .unwrap_or_default();
+            return SandboxOutcome::Rejected(KeylessDeployError::InternalError);
+        }
+    };
 
     // Ensure signer can cover the transfer (and pre-Rex5 also the gas escrow).
     // Rex5+ runs the sandbox as a fee-free deposit-like tx (gas_price=0), so the only
@@ -571,10 +555,13 @@ pub(crate) fn execute_keyless_deploy_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
         value
     } else {
         let gas_cost = U256::from(gas_limit) * U256::from(gas_price);
-        gas_cost.checked_add(value).ok_or(KeylessDeployError::InsufficientBalance)?
+        match gas_cost.checked_add(value) {
+            Some(total) => total,
+            None => return SandboxOutcome::Rejected(KeylessDeployError::InsufficientBalance),
+        }
     };
     if signer_account.balance < total_cost {
-        return Err(KeylessDeployError::InsufficientBalance);
+        return SandboxOutcome::Rejected(KeylessDeployError::InsufficientBalance);
     }
 
     // Execute sandbox - using type-erased SandboxDb prevents infinite type instantiation.
@@ -602,45 +589,120 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     sandbox_tx_limits: Option<EvmTxRuntimeLimits>,
     block: BlockEnv,
     chain: L1BlockInfo,
-) -> Result<SandboxOutcome, KeylessDeployError> {
+) -> SandboxOutcome {
     let sandbox_ctx = match sandbox_tx_limits {
         Some(limits) => sandbox_ctx.with_tx_runtime_limits(limits),
         None => sandbox_ctx,
     };
     let sandbox_ctx = sandbox_ctx.with_block(block).with_chain(chain).with_inside_sandbox(true);
+    let is_rex5_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX5);
     let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
     let result = sandbox_evm.transact_raw(sandbox_tx);
     let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
     let volatile_accesses =
         sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
-    process_sandbox_transact_result(result, limit_usage, volatile_accesses)
+    process_sandbox_transact_result(result, limit_usage, volatile_accesses, is_rex5_enabled)
 }
 
-/// Outcome of sandbox execution, including state for merging on failure.
+/// Outcome of sandbox execution.
+///
+/// Splits the two questions the caller actually has to answer separately:
+///
+/// - **`Completed` vs `Rejected`** — did the sandbox EVM run far enough to produce merge-able side
+///   effects (state / resource usage / volatile-access footprint / logs)? `Rejected` means the
+///   sandbox bailed before producing a frame (validate-reject or internal error); nothing should be
+///   applied to the parent context.
+/// - **`SandboxCompletion::{Deployed, EmptyCode, ExecutionFailed}`** — when the sandbox did
+///   complete, what wire shape should the outer caller report?
+///
+/// Logs naturally live on the completion variants where the EVM ran to a
+/// non-reverted exit (`Deployed` and `EmptyCode`). `ExecutionFailed` covers
+/// Revert / Halt — revm's own frame accounting already rolled those logs back,
+/// so there is nothing to forward.
 #[derive(Debug)]
 pub enum SandboxOutcome {
-    /// Successful execution with the resulting state and return data.
-    Success {
+    /// Sandbox EVM ran to a frame exit (success, empty-code success, revert, or
+    /// halt). State, resource usage, and volatile-access footprint are
+    /// merge-able into the parent context.
+    Completed {
         /// Sandbox state to merge into the parent context.
         state: EvmState,
-        /// Execution result details.
-        result: SandboxResult,
+        /// Wire-shape dispatch for what the outer caller should report.
+        completion: SandboxCompletion,
         /// Resource usage from the sandbox's additional limit trackers.
         limit_usage: LimitUsage,
         /// Volatile-access footprint to merge into the parent after sandbox return.
         volatile_accesses: VolatileDataAccess,
     },
-    /// Failed execution with the resulting state and error.
-    Failure {
-        /// Sandbox state to merge into the parent context.
-        state: EvmState,
-        /// Error returned by sandbox execution.
+    /// Sandbox bailed before producing a frame (validate-reject `InvalidTransaction`
+    /// or `InternalError`). No state, resource usage, or volatile-access footprint
+    /// applies — the outer caller must refund the full pre-debited reservation.
+    Rejected(KeylessDeployError),
+}
+
+/// Wire-shape dispatch for a completed sandbox execution.
+///
+/// `Deployed` and `EmptyCode` both surface as success-shape outer returns: the
+/// outer caller forwards their logs into the parent receipt before encoding the
+/// ABI response. `EmptyCodeDeployed` is an ABI-layer "deploy did not stick"
+/// signal — it is *not* an EVM execution failure. Pre-REX5 collapses
+/// `EmptyCode` into `ExecutionFailed { error: EmptyCodeDeployed }` so logs are
+/// dropped, preserving the frozen replay behavior.
+///
+/// `ExecutionFailed` covers Revert / Halt. revm rolled the frame's logs back
+/// inside the sandbox; there is nothing to forward to the parent.
+#[derive(Debug)]
+pub enum SandboxCompletion {
+    /// Inner CREATE succeeded with non-empty runtime bytecode.
+    Deployed {
+        /// Gas consumed by the sandbox EVM execution.
+        gas_used: u64,
+        /// Address at which the contract was deployed.
+        deploy_address: Address,
+        /// Logs emitted by the constructor; forwarded into the parent receipt.
+        logs: Vec<Log>,
+    },
+    /// Inner CREATE succeeded but returned empty runtime bytecode.
+    ///
+    /// REX5+ only. Pre-REX5 routes empty-code through `ExecutionFailed` with
+    /// `EmptyCodeDeployed` so logs are dropped, preserving the frozen replay
+    /// behavior.
+    EmptyCode {
+        /// Gas consumed by the sandbox EVM execution.
+        gas_used: u64,
+        /// Logs emitted by the constructor; forwarded into the parent receipt
+        /// per the keyless-deploy spec's "merged state includes ... logs when
+        /// applicable" rule.
+        logs: Vec<Log>,
+    },
+    /// Sandbox EVM execution did not result in a successful deploy reachable
+    /// by the parent.
+    ///
+    /// Covers two cases that share an ABI wire shape but have different
+    /// underlying reasons for not forwarding logs:
+    /// - `ExecutionResult::Revert` and `ExecutionResult::Halt` — revm already rolled the failed
+    ///   frame's logs back inside the sandbox; nothing exists to forward.
+    /// - Pre-REX5 `EmptyCodeDeployed` — the constructor ran successfully and emitted logs, but
+    ///   pre-REX5 deliberately drops them at this layer for replay parity. REX5+ uses
+    ///   [`SandboxCompletion::EmptyCode`] to forward them instead.
+    ExecutionFailed {
+        /// Gas consumed by the sandbox EVM execution before the failure.
+        gas_used: u64,
+        /// ABI-encoded failure reason.
         error: KeylessDeployError,
-        /// Resource usage from the sandbox's additional limit trackers.
-        limit_usage: LimitUsage,
-        /// Volatile-access footprint to merge into the parent after sandbox return.
-        volatile_accesses: VolatileDataAccess,
     },
+}
+
+impl SandboxCompletion {
+    /// Returns the gas consumed by the sandbox EVM. Used by the outer caller to
+    /// compute the unused reservation to refund.
+    pub(crate) fn gas_used(&self) -> u64 {
+        match self {
+            Self::Deployed { gas_used, .. } |
+            Self::EmptyCode { gas_used, .. } |
+            Self::ExecutionFailed { gas_used, .. } => *gas_used,
+        }
+    }
 }
 
 /// Processes the result of sandbox EVM execution into a [`SandboxOutcome`].
@@ -651,46 +713,67 @@ pub enum SandboxOutcome {
 /// so relayer-side decoders can tell them apart:
 /// - `InvalidTransaction` when `IsTxError::is_tx_error()` returns `true`.
 /// - `InternalError` for everything else (DB I/O, header validation, `EVMError::Custom`).
+///
+/// `is_rex5_enabled` gates the empty-code branch: REX5+ produces
+/// [`SandboxCompletion::EmptyCode`] (which forwards the constructor's emitted logs into
+/// the parent receipt per the keyless-deploy spec), pre-REX5 collapses to
+/// [`SandboxCompletion::ExecutionFailed`] with `EmptyCodeDeployed` so logs are dropped
+/// for replay parity.
 fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
     result: Result<ResultAndState<MegaHaltReason>, E>,
     limit_usage: LimitUsage,
     volatile_accesses: VolatileDataAccess,
-) -> Result<SandboxOutcome, KeylessDeployError> {
+    is_rex5_enabled: bool,
+) -> SandboxOutcome {
+    let completed = |state, completion| SandboxOutcome::Completed {
+        state,
+        completion,
+        limit_usage,
+        volatile_accesses,
+    };
+
     match result {
         Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
             ExecutionResult::Success { gas_used, output, logs, .. } => {
-                if let revm::context::result::Output::Create(bytecode, Some(created_addr)) = output
-                {
-                    // Empty deployed bytecode is treated as a sandbox failure so the deploy
-                    // address never gets a barrier installed for an empty contract. Without
-                    // this check the same signed keyless tx could be charged on every
-                    // submission while leaving the deploy slot re-usable.
-                    if bytecode.is_empty() {
-                        return Ok(SandboxOutcome::Failure {
-                            state: sandbox_state,
-                            error: KeylessDeployError::EmptyCodeDeployed { gas_used },
-                            limit_usage,
-                            volatile_accesses,
-                        });
+                let revm::context::result::Output::Create(bytecode, Some(created_addr)) = output
+                else {
+                    // Contract creation didn't return an address — should never happen
+                    // (the sandbox tx always asks for `TxKind::Create`), but we return
+                    // a Rejected outcome instead of panicking to avoid crashing the node.
+                    return SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated);
+                };
+                if bytecode.is_empty() {
+                    // REX5+: surface as `EmptyCode` so the outer caller forwards the
+                    // constructor's logs into the parent receipt before returning
+                    // success-style `EmptyCodeDeployed` errorData. Pre-REX5 collapses
+                    // back to `ExecutionFailed { EmptyCodeDeployed }` so logs are
+                    // dropped, preserving the frozen replay behavior.
+                    if is_rex5_enabled {
+                        return completed(
+                            sandbox_state,
+                            SandboxCompletion::EmptyCode { gas_used, logs },
+                        );
                     }
-                    Ok(SandboxOutcome::Success {
-                        state: sandbox_state,
-                        result: SandboxResult { deploy_address: created_addr, gas_used, logs },
-                        limit_usage,
-                        volatile_accesses,
-                    })
-                } else {
-                    // Contract creation didn't return an address - should never happen
-                    // but we return an error instead of panicking to avoid crashing the node
-                    Err(KeylessDeployError::NoContractCreated)
+                    return completed(
+                        sandbox_state,
+                        SandboxCompletion::ExecutionFailed {
+                            gas_used,
+                            error: KeylessDeployError::EmptyCodeDeployed { gas_used },
+                        },
+                    );
                 }
+                completed(
+                    sandbox_state,
+                    SandboxCompletion::Deployed { gas_used, deploy_address: created_addr, logs },
+                )
             }
-            ExecutionResult::Revert { gas_used, output } => Ok(SandboxOutcome::Failure {
-                state: sandbox_state,
-                error: KeylessDeployError::ExecutionReverted { gas_used, output },
-                limit_usage,
-                volatile_accesses,
-            }),
+            ExecutionResult::Revert { gas_used, output } => completed(
+                sandbox_state,
+                SandboxCompletion::ExecutionFailed {
+                    gas_used,
+                    error: KeylessDeployError::ExecutionReverted { gas_used, output },
+                },
+            ),
             ExecutionResult::Halt { gas_used, reason } => {
                 // `FailedDeposit` on this path means op-revm's deposit `catch_error` wrapped a
                 // sandbox tx-validation failure into a synthetic halt. Runtime halts under the
@@ -698,11 +781,10 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
                 // and surface here with their real halt reason instead, so they fall through to
                 // the normal `ExecutionHalted` failure branch and consume the Nick's-Method
                 // replay barrier as expected. Validation rejects must NOT consume the barrier,
-                // so we drop the discarded sandbox state by returning Err and surface the
-                // outer call as `InvalidTransaction`.
+                // so we drop the discarded sandbox state and surface as Rejected.
                 if matches!(reason, MegaHaltReason::Base(op_revm::OpHaltReason::FailedDeposit)) {
                     warn!(gas_used, "keyless deploy sandbox failed deposit (validation-reject)",);
-                    return Err(KeylessDeployError::InvalidTransaction);
+                    return SandboxOutcome::Rejected(KeylessDeployError::InvalidTransaction);
                 }
                 // The halt `reason` is dropped on the ABI wire (the Solidity error
                 // carries only `gasUsed`) and `decode_error_result` synthesizes a
@@ -713,12 +795,13 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
                     gas_used,
                     "keyless deploy sandbox halted",
                 );
-                Ok(SandboxOutcome::Failure {
-                    state: sandbox_state,
-                    error: KeylessDeployError::ExecutionHalted { gas_used, reason },
-                    limit_usage,
-                    volatile_accesses,
-                })
+                completed(
+                    sandbox_state,
+                    SandboxCompletion::ExecutionFailed {
+                        gas_used,
+                        error: KeylessDeployError::ExecutionHalted { gas_used, reason },
+                    },
+                )
             }
         },
         // Split tx-validation rejections (selector `InvalidTransaction`) from genuine
@@ -729,14 +812,14 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
                 error = %e,
                 "keyless deploy sandbox transaction rejected during validation",
             );
-            Err(KeylessDeployError::InvalidTransaction)
+            SandboxOutcome::Rejected(KeylessDeployError::InvalidTransaction)
         }
         Err(e) => {
             error!(
                 error = %e,
                 "keyless deploy sandbox failed with internal error",
             );
-            Err(KeylessDeployError::InternalError)
+            SandboxOutcome::Rejected(KeylessDeployError::InternalError)
         }
     }
 }
@@ -755,9 +838,10 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
 ///
 /// `reservation` is the amount pre-debited from the outer `gas` before the
 /// sandbox ran (step 8b in `execute_keyless_deploy_call`); `sandbox_gas_used` is
-/// the amount the sandbox actually consumed (`SandboxOutcome::Success/Failure`'s
-/// `gas_used` field). Their difference is the unused reservation that must be
-/// returned to the outer frame — mirroring revm's standard CALL semantics.
+/// the amount the sandbox actually consumed (read from
+/// [`SandboxCompletion::gas_used`]). Their difference is the unused reservation
+/// that must be returned to the outer frame — mirroring revm's standard CALL
+/// semantics.
 ///
 /// Caller-side spec gating keeps this path Rex5-only.
 fn apply_sandbox_post_accounting<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
@@ -1046,10 +1130,11 @@ mod tests {
     use super::*;
     use revm::context::result::Output;
 
-    /// Test error type that lets us drive `process_sandbox_transact_result`'s `Err` arms
-    /// directly without standing up a full sandbox EVM. The two arms differ only by
-    /// `IsTxError::is_tx_error()`, so a single struct with a configurable flag covers
-    /// both selector mappings.
+    /// Test error type that lets us drive `process_sandbox_transact_result`'s
+    /// `Err` arms (which map to `SandboxOutcome::Rejected`) directly without
+    /// standing up a full sandbox EVM. The two arms differ only by
+    /// `IsTxError::is_tx_error()`, so a single struct with a configurable flag
+    /// covers both selector mappings.
     struct FakeTxErr {
         is_tx: bool,
         msg: &'static str,
@@ -1087,8 +1172,12 @@ mod tests {
             result,
             LimitUsage::default(),
             VolatileDataAccess::empty(),
+            true,
         );
-        assert!(matches!(out, Err(KeylessDeployError::NoContractCreated)), "unexpected: {out:?}");
+        assert!(
+            matches!(out, SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated)),
+            "unexpected: {out:?}",
+        );
     }
 
     /// `Output::Create(_, None)` — Create succeeded but revm did not return an address.
@@ -1109,8 +1198,12 @@ mod tests {
             result,
             LimitUsage::default(),
             VolatileDataAccess::empty(),
+            true,
         );
-        assert!(matches!(out, Err(KeylessDeployError::NoContractCreated)), "unexpected: {out:?}");
+        assert!(
+            matches!(out, SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated)),
+            "unexpected: {out:?}",
+        );
     }
 
     /// `transact_raw` error where `is_tx_error()` is `false` (DB I/O, header validation,
@@ -1125,8 +1218,12 @@ mod tests {
             result,
             LimitUsage::default(),
             VolatileDataAccess::empty(),
+            true,
         );
-        assert!(matches!(out, Err(KeylessDeployError::InternalError)), "unexpected: {out:?}");
+        assert!(
+            matches!(out, SandboxOutcome::Rejected(KeylessDeployError::InternalError)),
+            "unexpected: {out:?}",
+        );
     }
 
     /// Mirror of the above for `is_tx_error() == true`: MUST map to
@@ -1139,8 +1236,12 @@ mod tests {
             result,
             LimitUsage::default(),
             VolatileDataAccess::empty(),
+            true,
         );
-        assert!(matches!(out, Err(KeylessDeployError::InvalidTransaction)), "unexpected: {out:?}");
+        assert!(
+            matches!(out, SandboxOutcome::Rejected(KeylessDeployError::InvalidTransaction)),
+            "unexpected: {out:?}",
+        );
     }
 
     /// `get_account_nonce`: cache miss path on a failing DB MUST map the underlying

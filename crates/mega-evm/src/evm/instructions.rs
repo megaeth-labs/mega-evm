@@ -17,6 +17,7 @@ use revm::{
         resize_memory, CallScheme, FrameInput, Instruction, InstructionContext, InstructionResult,
         InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
+    primitives::KECCAK_EMPTY,
 };
 
 /// `MegaInstructions` is the instruction table for `MegaETH`.
@@ -1349,34 +1350,47 @@ pub mod storage_gas_ext {
             } else {
                 None
             };
-            let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
-            let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
-            // Expand memory before slicing so the read can never go out of bounds. The canonical
-            // CREATE2 path called below also calls `resize_memory!`, which is a no-op once memory
-            // is already sized to fit the requested slice.
-            //
-            // Pre-REX5 records the expansion gas into the compute_gas tracker only AFTER the
-            // inner CREATE2 returns successfully (see end of function); preserved for replay
-            // parity. REX5+ records it immediately below so storage-gas OOG / inner-CREATE2
-            // failure cannot bypass the recording.
-            let gas_before_resize = context.interpreter.gas.remaining();
-            resize_memory!(context.interpreter, initcode_offset, initcode_len);
-            resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
 
-            // REX5+: record resize gas into the compute_gas tracker immediately to align
-            // its timing with revm's EVM-gas debit (already taken inside `resize_memory!`).
-            // Zero `resize_gas` afterwards so the trailing late-record block (kept for
-            // pre-REX5) does not double-count under REX5.
-            if is_rex5_enabled && resize_gas > 0 {
-                let mut additional_limit = context.host.additional_limit().borrow_mut();
-                compute_gas!(context.interpreter, additional_limit, resize_gas);
-                resize_gas = 0;
-            }
+            // REX5+: when `initcode_len == 0`, mirror canonical revm CREATE2 — ignore
+            // the offset entirely (no conversion, no memory expansion, no slice, no
+            // keccak) and use `KECCAK_EMPTY` as the initcode hash. Observing offset on
+            // `len == 0` would (a) halt a valid `len=0, offset=U256::MAX` CREATE2
+            // inside `as_usize_or_fail!`, and (b) over-charge memory-expansion EVM gas
+            // + `resize_gas` compute gas for `len=0, offset=large_finite`.
+            // Pre-REX5 keeps the "observe offset, resize, slice, hash" sequence
+            // verbatim for replay parity.
+            let initcode_hash = if is_rex5_enabled && initcode_len.is_zero() {
+                KECCAK_EMPTY
+            } else {
+                let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
+                let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
+                // Expand memory before slicing so the read can never go out of bounds. The
+                // canonical CREATE2 path called below also calls `resize_memory!`, which is
+                // a no-op once memory is already sized to fit the requested slice.
+                //
+                // Pre-REX5 records the expansion gas into the compute_gas tracker only
+                // AFTER the inner CREATE2 returns successfully (see end of function);
+                // preserved for replay parity. REX5+ records it immediately below so
+                // storage-gas OOG / inner-CREATE2 failure cannot bypass the recording.
+                let gas_before_resize = context.interpreter.gas.remaining();
+                resize_memory!(context.interpreter, initcode_offset, initcode_len);
+                resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
 
-            let code = Bytes::copy_from_slice(
-                context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
-            );
-            let initcode_hash = keccak256(&code);
+                // REX5+: record resize gas into the compute_gas tracker immediately to
+                // align its timing with revm's EVM-gas debit (already taken inside
+                // `resize_memory!`). Zero `resize_gas` afterwards so the trailing
+                // late-record block (kept for pre-REX5) does not double-count under REX5.
+                if is_rex5_enabled && resize_gas > 0 {
+                    let mut additional_limit = context.host.additional_limit().borrow_mut();
+                    compute_gas!(context.interpreter, additional_limit, resize_gas);
+                    resize_gas = 0;
+                }
+
+                let code = Bytes::copy_from_slice(
+                    context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
+                );
+                keccak256(&code)
+            };
 
             let salt = if let Some(s) = rex5_salt {
                 s
