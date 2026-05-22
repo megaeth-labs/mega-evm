@@ -67,3 +67,7 @@ harness = false
 [[bench]]
 name = "ctt"
 harness = false
+
+[[bench]]
+name = "attack_replay"
+harness = false
