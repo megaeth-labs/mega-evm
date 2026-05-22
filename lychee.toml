@@ -8,8 +8,9 @@ offline = true
 # Resolve relative links from the GitBook root
 root_dir = "docs"
 
-# Check anchor fragments (#section-name)
-include_fragments = true
+# Check anchor fragments (#section-name).
+# lychee >=0.24 changed this from bool to enum ("full", "anchors", "none").
+include_fragments = "full"
 
 # Skip these URL patterns (regex)
 exclude = [

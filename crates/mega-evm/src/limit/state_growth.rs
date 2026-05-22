@@ -123,17 +123,13 @@ impl StateGrowthTracker {
 
     /// Records positive state growth in the current frame.
     fn record_growth(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            // For state growth, all growth in the current transaction is discardable on revert.
-            entry.discardable_usage += n;
-        }
+        // For state growth, all growth in the current transaction is discardable on revert.
+        self.frame_tracker.add_frame_discardable(n);
     }
 
     /// Records a refund (negative growth) in the current frame.
     fn record_refund(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += n;
-        }
+        self.frame_tracker.add_frame_refund(n);
     }
 }
 
