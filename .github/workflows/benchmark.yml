@@ -208,7 +208,7 @@ jobs:
             for (const group of groupNames) {
               const rows = groups[group];
               const base = rows[BASELINE_ROW];
-              if (!base) continue; // skip groups without a revm baseline
+              if (base === undefined) continue; // skip groups without a revm baseline
               const ordered = ROW_ORDER.filter((r) => rows[r] != null);
               const extras = Object.keys(rows).filter((r) => !ROW_ORDER.includes(r)).sort();
               const list = ordered.concat(extras);
