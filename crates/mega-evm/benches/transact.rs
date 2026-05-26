@@ -1,20 +1,29 @@
 //! Benchmarks for the `ExecuteEvm::transact()` interface.
 //!
-//! This benchmark suite measures the performance of transaction execution through
-//! the `ExecuteEvm::transact()` interface, comparing performance across different
-//! EVM specifications (EQUIVALENCE vs `MINI_REX`).
+//! Each workload runs against four vanilla baselines (`revm_pinned`,
+//! `revm_latest`, `op_revm_pinned`, `op_revm_latest`) and three mega specs
+//! (`EQUIVALENCE`, `MINI_REX`, `REX4`) so a single bench produces a
+//! cross-row gap table.
 #![allow(missing_docs)]
 
-use alloy_evm::Database;
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
 use revm::{
     context::{result::ResultAndState, tx::TxEnvBuilder},
-    database::{CacheDB, EmptyDB},
     primitives::{keccak256, B256},
     ExecuteEvm,
 };
+
+#[path = "common/baseline_adapters.rs"]
+mod common;
+use common::{add_baseline_rows, CallParams, LatestDbBuilder};
+
+const SPEC_IDS: &[(&str, MegaSpecId)] = &[
+    ("equivalence", MegaSpecId::EQUIVALENCE),
+    ("mini_rex", MegaSpecId::MINI_REX),
+    ("rex4", MegaSpecId::REX4),
+];
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CALLEE: Address = address!("0000000000000000000000000000000000100001");
@@ -34,13 +43,13 @@ fn erc20_balance_slot(address: Address, mapping_slot: u8) -> B256 {
     keccak256(data)
 }
 
-/// Helper function to create and execute a transaction.
-fn execute_transaction<DB: Database>(
+/// Execute a single `transact()` through `MegaEvm` at the given spec, mirroring
+/// the parameters used by the shared baseline adapters so all 7 rows in a
+/// group execute the same logical transaction.
+fn execute_mega(
     spec: MegaSpecId,
-    db: DB,
-    caller: Address,
-    callee: Address,
-    value: U256,
+    db: MemoryDatabase,
+    params: &CallParams,
 ) -> ResultAndState<mega_evm::MegaHaltReason> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
@@ -48,34 +57,33 @@ fn execute_transaction<DB: Database>(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let tx = TxEnvBuilder::new().caller(caller).call(callee).value(value).build_fill();
+    let tx = TxEnvBuilder::new()
+        .caller(params.caller)
+        .call(params.target)
+        .gas_limit(params.gas_limit)
+        .value(params.value)
+        .data(params.data.clone())
+        .build_fill();
     let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(alloy_primitives::Bytes::new());
+    mega_tx.enveloped_tx = Some(Bytes::new());
 
-    evm.transact(mega_tx).expect("transaction should succeed")
+    let r = evm.transact(mega_tx).expect("mega transact");
+    assert!(r.result.is_success(), "mega transact should succeed: {:?}", r.result);
+    r
 }
 
-/// Helper to benchmark both specs with a database setup function.
-fn bench_both_specs<DB, F>(
+/// Register the 3 mega spec rows for a group.
+fn add_mega_rows<FP>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    db_setup: F,
+    params: &CallParams,
+    make_pinned_db: &FP,
 ) where
-    DB: Database + 'static,
-    F: Fn() -> DB + 'static,
+    FP: Fn() -> MemoryDatabase,
 {
-    for (name, spec) in
-        [("equivalence", MegaSpecId::EQUIVALENCE), ("mini_rex", MegaSpecId::MINI_REX)]
-    {
+    for &(name, spec) in SPEC_IDS {
         group.bench_function(name, |b| {
             b.iter(|| {
-                let db = db_setup();
-                let result = execute_transaction(
-                    black_box(spec),
-                    black_box(db),
-                    black_box(CALLER),
-                    black_box(CALLEE),
-                    black_box(U256::ZERO),
-                );
+                let result = execute_mega(black_box(spec), make_pinned_db(), params);
                 black_box(result)
             })
         });
@@ -85,53 +93,36 @@ fn bench_both_specs<DB, F>(
 /// Benchmark empty transaction (call with no value or data).
 fn bench_empty_transaction(c: &mut Criterion) {
     let mut group = c.benchmark_group("empty_transaction");
-    bench_both_specs(&mut group, CacheDB::<EmptyDB>::default);
+    let params =
+        CallParams { caller: CALLER, target: CALLEE, value: U256::ZERO, ..Default::default() };
+    let make_pinned = MemoryDatabase::default;
+    let make_latest = || LatestDbBuilder::new().build();
+    add_baseline_rows(&mut group, &params, &make_pinned, &make_latest);
+    add_mega_rows(&mut group, &params, &make_pinned);
     group.finish();
 }
 
 /// Benchmark simple ether transfer between existing accounts.
 fn bench_simple_ether_transfer(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_ether_transfer");
-    bench_both_specs(&mut group, || {
+    let caller_balance = U256::from(1000);
+    let callee_balance = U256::from(100);
+    let params =
+        CallParams { caller: CALLER, target: CALLEE, value: U256::ZERO, ..Default::default() };
+    let make_pinned = || {
         MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(1000))
-            .account_balance(CALLEE, U256::from(100))
-    });
+            .account_balance(CALLER, caller_balance)
+            .account_balance(CALLEE, callee_balance)
+    };
+    let make_latest = || {
+        LatestDbBuilder::new()
+            .account_balance(CALLER, caller_balance)
+            .account_balance(CALLEE, callee_balance)
+            .build()
+    };
+    add_baseline_rows(&mut group, &params, &make_pinned, &make_latest);
+    add_mega_rows(&mut group, &params, &make_pinned);
     group.finish();
-}
-
-/// Helper to execute WETH9 transfer for a given spec.
-fn execute_weth9_transfer(
-    spec: MegaSpecId,
-    calldata: &Bytes,
-) -> ResultAndState<mega_evm::MegaHaltReason> {
-    // Set up WETH9 contract with 1000 WETH balance for CALLER
-    let caller_balance = U256::from(1000) * U256::from(10).pow(U256::from(18));
-    let balance_slot = erc20_balance_slot(CALLER, 3); // WETH9 uses slot 3 for balances
-
-    let db = MemoryDatabase::default()
-        .account_code(WETH9_ADDRESS, WETH9_RUNTIME_CODE)
-        .account_storage(WETH9_ADDRESS, balance_slot.into(), caller_balance)
-        .account_balance(CALLER, U256::from(10).pow(U256::from(18))); // 1 ETH for gas
-
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-
-    let tx =
-        TxEnvBuilder::new().caller(CALLER).call(WETH9_ADDRESS).data(calldata.clone()).build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-
-    let result = evm.transact(mega_tx).expect("transaction should succeed");
-
-    // Assert transaction executed successfully
-    assert!(result.result.is_success(), "WETH9 transfer should succeed");
-
-    result
 }
 
 /// Benchmark WETH9 ERC20 transfer.
@@ -141,26 +132,37 @@ fn bench_weth9_transfer(c: &mut Criterion) {
     // Transfer amount: 100 WETH
     let transfer_amount = U256::from(100) * U256::from(10).pow(U256::from(18));
 
-    // Encode transfer(address,uint256) call
-    // Function selector: 0xa9059cbb
+    // Encode transfer(address,uint256) call. Function selector: 0xa9059cbb.
     let mut calldata = Vec::with_capacity(68);
-    calldata.extend_from_slice(&[0xa9, 0x05, 0x9c, 0xbb]); // transfer selector
-    calldata.extend_from_slice(&[0u8; 12]); // padding for address
-    calldata.extend_from_slice(CALLEE.as_slice()); // recipient address
-    calldata.extend_from_slice(&transfer_amount.to_be_bytes::<32>()); // amount
+    calldata.extend_from_slice(&[0xa9, 0x05, 0x9c, 0xbb]);
+    calldata.extend_from_slice(&[0u8; 12]);
+    calldata.extend_from_slice(CALLEE.as_slice());
+    calldata.extend_from_slice(&transfer_amount.to_be_bytes::<32>());
     let calldata = Bytes::from(calldata);
 
-    for (name, spec) in
-        [("equivalence", MegaSpecId::EQUIVALENCE), ("mini_rex", MegaSpecId::MINI_REX)]
-    {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let result = execute_weth9_transfer(black_box(spec), black_box(&calldata));
-                black_box(result)
-            })
-        });
-    }
+    let caller_weth_balance = U256::from(1000) * U256::from(10).pow(U256::from(18));
+    let caller_gas_balance = U256::from(10).pow(U256::from(18));
+    let balance_slot: U256 = erc20_balance_slot(CALLER, 3).into();
 
+    let make_pinned = || {
+        MemoryDatabase::default()
+            .account_code(WETH9_ADDRESS, WETH9_RUNTIME_CODE)
+            .account_storage(WETH9_ADDRESS, balance_slot, caller_weth_balance)
+            .account_balance(CALLER, caller_gas_balance)
+    };
+    let make_latest = || {
+        LatestDbBuilder::new()
+            .account_code(WETH9_ADDRESS, WETH9_RUNTIME_CODE)
+            .account_storage(WETH9_ADDRESS, balance_slot, caller_weth_balance)
+            .account_balance(CALLER, caller_gas_balance)
+            .build()
+    };
+
+    let params =
+        CallParams { caller: CALLER, target: WETH9_ADDRESS, data: calldata, ..Default::default() };
+
+    add_baseline_rows(&mut group, &params, &make_pinned, &make_latest);
+    add_mega_rows(&mut group, &params, &make_pinned);
     group.finish();
 }
 

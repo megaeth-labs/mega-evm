@@ -30,6 +30,10 @@ use revm::{
     ExecuteEvm,
 };
 
+#[path = "common/baseline_adapters.rs"]
+mod common;
+use common::{add_baseline_rows, add_baseline_rows_suffixed, CallParams, LatestDbBuilder};
+
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 const SECONDARY: Address = address!("0000000000000000000000000000000000100003");
@@ -92,6 +96,22 @@ fn make_db(bytecode: Bytes) -> MemoryDatabase {
     MemoryDatabase::default()
         .account_code(CONTRACT, bytecode)
         .account_balance(CALLER, U256::from(10).pow(U256::from(18)))
+}
+
+/// Latest-stack equivalent of `make_db`, used by the `*_latest` baseline rows.
+fn make_latest_db(
+    bytecode: Bytes,
+) -> revm_latest::database::CacheDB<revm_latest::database::EmptyDB> {
+    LatestDbBuilder::new()
+        .account_code(CONTRACT, bytecode)
+        .account_balance(CALLER, U256::from(10).pow(U256::from(18)))
+        .build()
+}
+
+/// Standard `CallParams` for benches that just run a contract at `CONTRACT`
+/// from `CALLER` with empty calldata under a 10 G gas limit.
+fn standard_params() -> CallParams {
+    CallParams { caller: CALLER, target: CONTRACT, gas_limit: 10_000_000_000, ..Default::default() }
 }
 
 //
@@ -250,29 +270,25 @@ fn generate_log4_bytecode(iterations: usize, data_size: usize) -> Bytes {
 }
 
 fn bench_log_opcodes(c: &mut Criterion) {
-    let log0_32 = generate_log0_bytecode(LOG_ITERATIONS, 32);
-    let log0_256 = generate_log0_bytecode(LOG_ITERATIONS, 256);
-    let log2_32 = generate_log2_bytecode(LOG_ITERATIONS, 32);
-    let log4_32 = generate_log4_bytecode(LOG_ITERATIONS, 32);
-    let log4_256 = generate_log4_bytecode(LOG_ITERATIONS, 256);
+    let variants: &[(&str, Bytes)] = &[
+        ("log0_32b", generate_log0_bytecode(LOG_ITERATIONS, 32)),
+        ("log0_256b", generate_log0_bytecode(LOG_ITERATIONS, 256)),
+        ("log2_32b", generate_log2_bytecode(LOG_ITERATIONS, 32)),
+        ("log4_32b", generate_log4_bytecode(LOG_ITERATIONS, 32)),
+        ("log4_256b", generate_log4_bytecode(LOG_ITERATIONS, 256)),
+    ];
 
     let mut group = c.benchmark_group("log_opcodes");
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(format!("{spec_name}/log0_32b"), |b| {
-            b.iter(|| execute(spec, make_db(log0_32.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/log0_256b"), |b| {
-            b.iter(|| execute(spec, make_db(log0_256.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/log2_32b"), |b| {
-            b.iter(|| execute(spec, make_db(log2_32.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/log4_32b"), |b| {
-            b.iter(|| execute(spec, make_db(log4_32.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/log4_256b"), |b| {
-            b.iter(|| execute(spec, make_db(log4_256.clone()), 10_000_000_000, Bytes::new()))
-        });
+    let params = standard_params();
+    for (variant, bytecode) in variants {
+        let make_pinned = || make_db(bytecode.clone());
+        let make_latest = || make_latest_db(bytecode.clone());
+        add_baseline_rows_suffixed(&mut group, variant, &params, &make_pinned, &make_latest);
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/{variant}"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
     }
     group.finish();
 }
@@ -316,21 +332,23 @@ fn generate_sstore_sload_bytecode(iterations: usize) -> Bytes {
 }
 
 fn bench_sstore(c: &mut Criterion) {
-    let sstore_only = generate_sstore_bytecode(SSTORE_ITERATIONS);
-    let sload_only = generate_sload_bytecode(SSTORE_ITERATIONS);
-    let mixed = generate_sstore_sload_bytecode(SSTORE_ITERATIONS);
+    let variants: &[(&str, Bytes)] = &[
+        ("sstore_100", generate_sstore_bytecode(SSTORE_ITERATIONS)),
+        ("sload_100", generate_sload_bytecode(SSTORE_ITERATIONS)),
+        ("sstore_sload_100", generate_sstore_sload_bytecode(SSTORE_ITERATIONS)),
+    ];
 
     let mut group = c.benchmark_group("sstore_heavy");
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(format!("{spec_name}/sstore_100"), |b| {
-            b.iter(|| execute(spec, make_db(sstore_only.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/sload_100"), |b| {
-            b.iter(|| execute(spec, make_db(sload_only.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/sstore_sload_100"), |b| {
-            b.iter(|| execute(spec, make_db(mixed.clone()), 10_000_000_000, Bytes::new()))
-        });
+    let params = standard_params();
+    for (variant, bytecode) in variants {
+        let make_pinned = || make_db(bytecode.clone());
+        let make_latest = || make_latest_db(bytecode.clone());
+        add_baseline_rows_suffixed(&mut group, variant, &params, &make_pinned, &make_latest);
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/{variant}"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
     }
     group.finish();
 }
@@ -391,19 +409,22 @@ fn make_create2_bytecode(n_deploys: usize) -> Bytes {
 }
 
 fn bench_create_deploy(c: &mut Criterion) {
-    let create_10 = make_create_bytecode(10);
-    let create2_10 = make_create2_bytecode(10);
+    let variants: &[(&str, Bytes)] =
+        &[("create_10", make_create_bytecode(10)), ("create2_10", make_create2_bytecode(10))];
 
     let mut group = c.benchmark_group("create_deploy");
     group.sample_size(10);
 
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(format!("{spec_name}/create_10"), |b| {
-            b.iter(|| execute(spec, make_db(create_10.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/create2_10"), |b| {
-            b.iter(|| execute(spec, make_db(create2_10.clone()), 10_000_000_000, Bytes::new()))
-        });
+    let params = standard_params();
+    for (variant, bytecode) in variants {
+        let make_pinned = || make_db(bytecode.clone());
+        let make_latest = || make_latest_db(bytecode.clone());
+        add_baseline_rows_suffixed(&mut group, variant, &params, &make_pinned, &make_latest);
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/{variant}"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
     }
     group.finish();
 }
@@ -481,18 +502,49 @@ fn bench_call_value_empty_account(c: &mut Criterion) {
     let call_empty = make_call_with_value(empty_target, 50);
 
     let mut group = c.benchmark_group("call_value_empty_account");
+    let params = standard_params();
 
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(format!("{spec_name}/existing_account_50"), |b| {
-            b.iter(|| {
-                let db =
-                    make_db(call_existing.clone()).account_balance(existing_target, U256::from(1));
-                execute(spec, db, 10_000_000_000, Bytes::new())
-            })
-        });
-        group.bench_function(format!("{spec_name}/empty_account_50"), |b| {
-            b.iter(|| execute(spec, make_db(call_empty.clone()), 10_000_000_000, Bytes::new()))
-        });
+    // Variant: existing target has a balance; CALL hits an existing account.
+    {
+        let make_pinned =
+            || make_db(call_existing.clone()).account_balance(existing_target, U256::from(1));
+        let make_latest = || {
+            LatestDbBuilder::new()
+                .account_code(CONTRACT, call_existing.clone())
+                .account_balance(CALLER, U256::from(10).pow(U256::from(18)))
+                .account_balance(existing_target, U256::from(1))
+                .build()
+        };
+        add_baseline_rows_suffixed(
+            &mut group,
+            "existing_account_50",
+            &params,
+            &make_pinned,
+            &make_latest,
+        );
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/existing_account_50"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
+    }
+
+    // Variant: empty target — CALL with value triggers account creation gas.
+    {
+        let make_pinned = || make_db(call_empty.clone());
+        let make_latest = || make_latest_db(call_empty.clone());
+        add_baseline_rows_suffixed(
+            &mut group,
+            "empty_account_50",
+            &params,
+            &make_pinned,
+            &make_latest,
+        );
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/empty_account_50"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
     }
     group.finish();
 }
@@ -733,9 +785,13 @@ fn bench_mixed_workload(c: &mut Criterion) {
     let bytecode = generate_mixed_workload_bytecode();
 
     let mut group = c.benchmark_group("mixed_workload");
+    let params = standard_params();
+    let make_pinned = || make_db(bytecode.clone());
+    let make_latest = || make_latest_db(bytecode.clone());
+    add_baseline_rows(&mut group, &params, &make_pinned, &make_latest);
     for &(spec_name, spec) in SPEC_IDS {
         group.bench_function(spec_name, |b| {
-            b.iter(|| execute(spec, make_db(bytecode.clone()), 10_000_000_000, Bytes::new()))
+            b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
         });
     }
     group.finish();

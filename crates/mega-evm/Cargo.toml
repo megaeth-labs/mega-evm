@@ -42,11 +42,18 @@ serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
+# Enable criterion's HTML reports (per-group violin plots + top-level summary
+# under `target/criterion/report/`). The workspace pins `default-features = false`,
+# so we have to opt into `plotters` (SVG rendering) and `cargo_bench_support`
+# (preserved from default) alongside `html_reports`.
+criterion = { workspace = true, features = ["html_reports", "plotters", "cargo_bench_support"] }
 hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
+op_revm_latest = { package = "op-revm", version = "20.0.0", default-features = false, features = ["dev", "serde", "std"] }
 rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors = { workspace = true, features = ["std"] }
+# Pin to the revm version `op_revm_latest` depends on so both `_latest` baselines share one revm tree.
+revm_latest = { package = "revm", version = "38.0.0", default-features = false, features = ["dev", "serde", "std"] }
 serde_json.workspace = true
 sha2.workspace = true
 
