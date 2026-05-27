@@ -125,6 +125,22 @@ fn build_callcode_transfer_contract(to: Address) -> Bytes {
         .build()
 }
 
+/// Builds bytecode for a contract that does `CALL(gas=forwarded_gas`, to, value=1 wei, ...).
+/// This is used when the child needs more compute gas than a plain transfer stipend provides.
+fn build_value_call_contract(to: Address, forwarded_gas: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(1_u64) // value = 1 wei
+        .push_address(to)
+        .push_number(forwarded_gas)
+        .append(CALL)
+        .append(STOP)
+        .build()
+}
+
 /// Builds bytecode for a contract that CALLs a system contract with value and 4 bytes calldata.
 /// This exercises the `frame_init` interception path, which uses `push_empty_frame()`.
 fn build_value_call_with_selector(to: Address, selector: [u8; 4]) -> Bytes {
@@ -204,6 +220,15 @@ fn build_log2_receiver() -> Bytes {
         .append(LOG2)
         .append(STOP)
         .build()
+}
+
+/// Appends approximately `target_gas` worth of compute gas burn via repeated PUSH1/POP pairs.
+fn append_burn_gas(mut builder: BytecodeBuilder, target_gas: u64) -> BytecodeBuilder {
+    let iterations = target_gas / 5;
+    for _ in 0..iterations {
+        builder = builder.push_number(0_u8).append(POP);
+    }
+    builder
 }
 
 /// Sets up a database with CALLER having enough ETH and the given contracts deployed.
@@ -852,4 +877,40 @@ fn test_stipend_burned_on_eoa_value_transfer() {
         gas_used > 50_000,
         "gas_used {gas_used} is too low — STORAGE_CALL_STIPEND may have leaked on EOA transfer"
     );
+}
+
+/// If a value-transferring child frame with an active `STORAGE_CALL_STIPEND` hits a TX-level
+/// detained compute gas limit, `rescue_gas` must cap the refund at the pre-stipend limit instead
+/// of panicking in debug builds.
+#[test]
+fn test_stipend_with_tx_level_detention_exceed_does_not_panic() {
+    let sender_code = build_value_call_contract(RECEIVER, 100_000);
+    let receiver_code =
+        append_burn_gas(BytecodeBuilder::default().append(TIMESTAMP).append(POP), 20_000)
+            .append(STOP)
+            .build();
+    let mut db = setup_db(&[(SENDER_CONTRACT, sender_code), (RECEIVER, receiver_code)]);
+
+    let tx = default_tx();
+    let limits = EvmTxRuntimeLimits::no_limits()
+        .with_tx_compute_gas_limit(1_000_000)
+        .with_block_env_access_compute_gas_limit(10_000);
+    let result = transact_with_limits(MegaSpecId::REX4, &mut db, tx, limits).unwrap();
+
+    match &result.result {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::VolatileDataAccessOutOfGas { limit, .. },
+            gas_used,
+        } => {
+            assert!(
+                *limit <= 1_000_000,
+                "detained limit should stay within the tx compute gas limit, got {limit}"
+            );
+            assert!(
+                *gas_used < 200_000,
+                "gas_used should reflect rescued gas rather than the full child gas limit, got {gas_used}"
+            );
+        }
+        other => panic!("expected VolatileDataAccessOutOfGas, got {other:?}"),
+    }
 }

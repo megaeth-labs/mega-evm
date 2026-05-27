@@ -7,14 +7,13 @@ use mega_evm::{
     constants::{self, rex::*},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, SaltEnv, TestExternalEnvs,
+    MegaTransactionError, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2},
     context::{result::ResultAndState, TxEnv},
     primitives::Address,
 };
-use salt::constant::MIN_BUCKET_SIZE;
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const CALLEE: Address = address!("1000000000000000000000000000000000000001");

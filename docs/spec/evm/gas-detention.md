@@ -165,6 +165,13 @@ Allowing a less restrictive later trigger to relax an earlier cap would make det
 The purpose of detention is to bound the remainder of execution after volatile access.
 If the cap were scoped only to the triggering call frame, contracts could evade the limit by returning to a parent frame and continuing computation there.
 
+## Security Considerations
+
+**If detention is call-frame-scoped rather than transaction-scoped**, a contract can trigger volatile access inside a child call frame, revert the frame, and resume unbounded execution in the parent — entirely bypassing detention.
+Transaction-level scoping is essential to preserve the invariant that compute gas after any volatile access is bounded.
+
+**If detention applied in a call frame that later reverts is reversed**, an attacker can trigger volatile access inside a frame it then reverts to escape the detention cap for the rest of the transaction.
+
 ## Spec History
 
 Gas detention semantics evolved across specs:

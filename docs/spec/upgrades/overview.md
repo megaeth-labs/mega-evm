@@ -1,5 +1,5 @@
 ---
-description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex4 with activation dates and behavioral deltas.
+description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex5 with activation dates and behavioral deltas.
 ---
 
 # Overview
@@ -106,12 +106,16 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, [storage gas stipend](../glossary.md#storage-gas-stipend), MegaAccessControl, MegaLimitControl, sandbox environment inheritance.
 
+### [Rex5](rex5.md) _(unstable)_
+
+[SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection.
+
 ## How to Read These Pages
 
 Each upgrade page follows a consistent structure:
 
 - **Summary** — What changed and why
 - **What Changed** — Previous vs new behavior for each change
-- **Developer Impact** — What you need to care about
+- **Developer Impact** — What contract authors and integrators need to know
 - **Safety and Compatibility** — Backward-compatibility boundaries and failure-mode differences
 - **References** — Links to the normative spec and related documentation

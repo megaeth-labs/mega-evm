@@ -42,5 +42,5 @@ mega-evme run 0x41 --block.coinbase 0x1111111111111111111111111111111111111111
 
 The block environment affects opcodes like `NUMBER`, `TIMESTAMP`, `COINBASE`, `BASEFEE`, `DIFFICULTY` / `PREVRANDAO`, and `BLOBBASEFEE`.
 
-In MegaETH specs (MiniRex and above), accessing block environment fields triggers [gas detention](https://megaeth-labs.github.io/mega-evm/spec/evm/gas-detention.html) — the remaining compute gas is capped to reduce parallel execution conflicts.
+In MegaETH specs (MiniRex and above), accessing block environment fields triggers [gas detention](../../spec/evm/gas-detention.md) — the remaining compute gas is capped to reduce parallel execution conflicts.
 This is normal MegaETH behavior and is reflected in `mega-evme` execution.

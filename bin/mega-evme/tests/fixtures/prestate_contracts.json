@@ -1,0 +1,16 @@
+{
+  "0x0000000000000000000000000000000000c00001": {
+    "balance": "0x0",
+    "nonce": "0x0",
+    "code": "0x5f5ffd",
+    "codeHash": "0x2451445de446d278512ff1eedde6f7cdfd6a01b16d0a0de35d2f60e96e15280f",
+    "storage": {}
+  },
+  "0x0000000000000000000000000000000000c00002": {
+    "balance": "0x0",
+    "nonce": "0x0",
+    "code": "0x5b600056",
+    "codeHash": "0x6e2fbd89d498da8e2419f09dbc06a84ae3f5b9c73961a65c9272efecb85b5ee4",
+    "storage": {}
+  }
+}

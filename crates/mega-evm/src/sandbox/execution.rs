@@ -187,7 +187,7 @@ pub fn execute_keyless_deploy_call<DB: alloy_evm::Database, ExtEnvs: ExternalEnv
     }
 
     // Step 3: Decode the keyless transaction
-    let keyless_tx = match decode_keyless_tx(tx_bytes) {
+    let keyless_tx = match decode_keyless_tx(tx_bytes, ctx.spec) {
         Ok(tx) => tx,
         Err(e) => return make_error!(e),
     };

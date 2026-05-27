@@ -9,7 +9,7 @@ Analyze the current PR diff to determine whether documentation under `docs/` nee
 
 ## Context
 
-This skill runs in CI on pull requests that modify source code under `crates/mega-evm/src/` or `crates/system-contracts/`.
+This skill runs in CI on pull requests that modify source code under `crates/mega-evm/src/`, `crates/system-contracts/`, or `bin/mega-evme/src/`.
 It checks whether the code changes affect documented behavior and whether the PR already includes corresponding doc updates.
 
 The documentation in `docs/` is the formal MegaETH specification.
@@ -33,6 +33,11 @@ Use this mapping to identify which doc pages are potentially affected by code ch
 | `crates/mega-evm/src/system/` | System contract integration, call interception | `docs/spec/system-contracts/*.md` |
 | `crates/mega-evm/src/external/` | SALT environment, oracle environment, dynamic gas cost | `docs/spec/evm/dual-gas-model.md`, `docs/spec/system-contracts/oracle.md` |
 | `crates/system-contracts/contracts/` | Solidity system contract sources | `docs/spec/system-contracts/*.md` |
+| `bin/mega-evme/src/cmd.rs` | CLI command dispatch, top-level commands | `docs/mega-evme/overview.md` |
+| `bin/mega-evme/src/run/` | Bytecode execution command | `docs/mega-evme/commands/run.md` |
+| `bin/mega-evme/src/tx/` | Transaction execution command | `docs/mega-evme/commands/tx.md` |
+| `bin/mega-evme/src/replay/` | Historical transaction replay | `docs/mega-evme/commands/replay.md` |
+| `bin/mega-evme/src/common/` | Shared CLI args, state loading, tracing, tx parsing | `docs/mega-evme/configuration/*.md`, `docs/mega-evme/tracing/*.md` |
 
 ### Agent and Skill Files
 
@@ -48,6 +53,7 @@ These files contain code paths, constant names, system contract tables, and spec
 | `crates/mega-evm/src/constants.rs` | `AGENTS.md` (Key Concepts sections referencing constant names) |
 | `crates/mega-evm/src/system/` | `AGENTS.md` (System Contracts section), `.claude/skills/doc-impact-check/SKILL.md` and `.claude/skills/doc-freshness/SKILL.md` (code-to-doc mapping tables) |
 | `crates/mega-evm/src/limit/` (new tracker) | `AGENTS.md` (Multidimensional Resource Limits section) |
+| `bin/mega-evme/src/` (new/renamed modules) | `bin/mega-evme/AGENTS.md` (STRUCTURE section) |
 | `docs/` (new pages added to SUMMARY.md) | `.claude/skills/doc-impact-check/SKILL.md` and `.claude/skills/doc-freshness/SKILL.md` (code-to-doc mapping tables need new entries) |
 
 ## Workflow

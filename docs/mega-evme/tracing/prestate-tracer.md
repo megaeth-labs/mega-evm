@@ -108,7 +108,7 @@ Capture pre-state:
 ```bash
 # Capture pre-state for a WETH.balanceOf call
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0x70a08231000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266 \
@@ -121,7 +121,7 @@ Capture state diff (before/after):
 ```bash
 # WETH.deposit() modifies balances — diff mode shows the change
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0xd0e30db0 \

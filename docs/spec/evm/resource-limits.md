@@ -144,6 +144,16 @@ Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains und
 If a child call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 The parent call frame MAY continue execution.
 
+The top-level call frame's budget MUST equal the transaction limit minus any intrinsic resource usage already recorded before the first frame begins.
+Each resource dimension deducts only the intrinsic items relevant to it:
+
+- **Data size** — base transaction data (110 bytes), calldata byte length, access-list entry sizes, EIP-7702 authorization records, and the caller account update.
+- **KV updates** — EIP-7702 authority account updates and the caller account update.
+- **State growth** — no intrinsic deduction.
+- **Compute gas** — standard EVM transaction intrinsic gas (not enumerated here; see EIP-2028 and related specs).
+
+This deduction ensures that intrinsic costs reduce the budget available to the first call frame, preventing transactions from front-loading intrinsic usage to escape per-frame limits.
+
 ## Constants
 
 | Constant                   | Value       | Description                                     |
@@ -177,9 +187,14 @@ Allowing the first over-limit transaction to be included maximizes block utiliza
 Cumulative block compute gas is already indirectly constrained by the block gas limit.
 The stable protocol therefore does not need a second independent block-level compute gas ceiling.
 
+## Security Considerations
+
+**If a transaction that exceeds a runtime limit is excluded from the block rather than included as failed**, an attacker can force the sequencer to execute expensive but failing transactions at no cost — the sender never pays because the transaction is dropped.
+Including failed transactions ensures the sender always pays for consumed resources.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced compute gas, data size, and KV update limits, with transaction-level data and KV limits set to 25% of the corresponding block limits.
 - [Rex](../upgrades/rex.md) changed the stable runtime transaction-level limits to `TX_COMPUTE_GAS_LIMIT = 200,000,000`, `TX_DATA_LIMIT = 13,107,200`, `TX_KV_UPDATE_LIMIT = 500,000`, and introduced state-growth limits.
 - [Rex3](../upgrades/rex3.md) retained the stable resource-limit set.
-- [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets.
+- [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource costs (always deducted before execution) are now reflected in the top-level frame budget before it is forwarded to child frames.

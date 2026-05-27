@@ -47,18 +47,19 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 | `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based) |
 | `state-test`            | `crates/state-test`       | Ethereum state test runner                                   |
 | `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)           |
+| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                       |
 
 ## Architecture
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4`
+Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5`
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _At present, all specs are stable. There is no unstable spec._
+  - _`REX5` is the current unstable spec under active development._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
   - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
@@ -167,6 +168,7 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 | Keyless Deploy           | `...0003`      | Deterministic contract deployment via Nick's Method |
 | MegaAccessControl        | `...0004`      | Access control (disableVolatileDataAccess)          |
 | MegaLimitControl         | `...0005`      | Limit query/control (currently remainingComputeGas) |
+| SequencerRegistry        | `...0006`      | System address and sequencer role registry          |
 
 Key design aspects:
 
@@ -209,7 +211,7 @@ When adding a new per-frame gas mechanism, verify that all three paths handle it
 
 ## Test Organization (`crates/mega-evm/tests/`)
 
-Tests are organized by spec: `equivalence/`, `mini_rex/` (11 modules), `rex/`, `rex2/`, and `block_executor/`.
+Tests are organized by spec: `equivalence/`, `mini_rex/` (12 modules), `rex/`, `rex2/`, `rex3/`, `rex4/`, `rex5/`, and `block_executor/`.
 Each module tests specific features of that spec.
 
 ## Version Control
@@ -264,6 +266,12 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Always test logic changes.**
   Any logic change or modification to mega-evm should be equipped with tests if there is no specific reason of not adding tests.
   The agent should always consider accompanying tests or suggest to add additional tests.
+- **Add benchmarks for performance-sensitive changes.**
+  Changes on the EVM execution hot path must be accompanied by benchmarks.
+  This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.
+- **Always run benchmarks locally before committing.**
+  New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
+  Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
@@ -273,17 +281,31 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Never change what an existing spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
+- **Override `HardforkParams::validate()` for every new params type.**
+  The default implementation accepts any value silently.
+  Override it with field-level invariant checks (e.g., non-zero addresses) so that `with_params()` panics loudly at chain-config load time rather than allowing the error to surface at the first block where the fork activates.
+- **Pre-block helpers must return state, not commit directly.**
+  Any helper participating in `pre_execution_changes` (system contract deploys, pre-block system calls, etc.) MUST return `Option<EvmState>` and never call `db.commit(...)` directly.
+  Full convention: `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.
 - **Define value-transfer policy explicitly for system contract interceptors.**
   For read-only or control methods, reject calls with non-zero `transfer_value` in the interceptor.
   If a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
 - **Do not intercept unknown selectors for system contracts.**
   Unknown selectors should fall through to on-chain bytecode and revert with a stable custom error such as `NotIntercepted()`.
+- **Only `CALL` and `STATICCALL` reach interceptor dispatch.**
+  `CALLCODE` and `DELEGATECALL` are rejected by the call-scheme guard in `frame_init` before any interceptor is consulted.
+  Do not expect these schemes to trigger system contract interception.
 - **System contract interceptor tests must cover boundary behaviors.**
   Include tests for normal intercepted path, non-zero value behavior, unknown selector fallback, and CALL vs DELEGATECALL/CALLCODE interception boundaries.
 - **Respect `no_std` in `mega-evm` crate.**
   Do not use `std::` directly.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;` then `use std::{vec::Vec, ...};`.
   Use `core::` for items like `fmt`, `cell`, `convert`.
+- **All execution logic must be deterministic and architecture-independent.**
+  Code that affects EVM execution results, gas computation, state transitions, or consensus-critical hashing must produce identical output regardless of target architecture, endianness, or pointer width.
+  Never use `mem::transmute`, native-endian byte conversions, or platform-dependent operations in consensus paths.
+  Use explicit little-endian (`from_le_bytes`/`to_le_bytes`) or big-endian conversions instead.
+  When vendoring external code, audit for hidden platform dependencies (e.g., `zerocopy::transmute!` is native-endian).
 - **`cargo sort` is enforced in CI.**
   Dependencies in `Cargo.toml` must follow the grouped-by-family convention with comment headers (`# alloy`, `# revm`, `# megaeth`, `# misc`) and be sorted alphabetically within each group.
 - **Use `default-features = false` for new workspace dependencies.**
@@ -300,6 +322,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Also update this `AGENTS.md` when relevant (e.g., unstable spec marker, spec progression list, system contract table).
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.
+- **Run Prettier on docs before committing.**
+  `docs/` markdown files are checked by Prettier in CI (`prettier --check 'docs/**/*.md'`).
+  After editing any `docs/` file, run `npx prettier --write 'docs/**/*.md'` to fix formatting.
 
 ## Documentation Conventions (`docs/`)
 

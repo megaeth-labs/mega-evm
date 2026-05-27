@@ -1,11 +1,13 @@
 //! State management for mega-evme with optional RPC forking support
 
-use std::{path::PathBuf, str::FromStr};
+use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use alloy_network::Network;
 use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
-use alloy_provider::{DynProvider, Provider};
+use alloy_provider::Provider;
 use clap::Parser;
+use op_alloy_network::Optimism;
+
 use mega_evm::revm::{
     database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
     primitives::HashMap,
@@ -14,7 +16,7 @@ use mega_evm::revm::{
 };
 use tracing::{debug, info, trace};
 
-use super::{EvmeError, Result};
+use super::{EvmeError, Result, RpcCacheStore};
 
 /// Pre-execution state configuration arguments
 #[derive(Parser, Debug, Clone)]
@@ -28,10 +30,6 @@ pub struct PreStateArgs {
     /// block is used. Only used if `fork` is true.
     #[arg(long = "fork.block")]
     pub fork_block: Option<u64>,
-
-    /// RPC URL to use for the fork. Only used if `fork` is true.
-    #[arg(long = "fork.rpc", default_value = "http://localhost:8545", env = "RPC_URL")]
-    pub fork_rpc: String,
 
     /// JSON file with prestate (genesis) config. This overrides the state in the
     /// forked remote state (if applicable).
@@ -273,64 +271,42 @@ impl PreStateArgs {
         Ok(prestate)
     }
 
-    /// Create a new provider for the network if forking is enabled
-    pub fn create_provider<N>(&self) -> Result<Option<DynProvider<N>>>
-    where
-        N: alloy_network::Network + Sized,
-    {
-        if self.fork {
-            debug!(rpc_url = %self.fork_rpc, "Forking state from RPC");
-            let url = self.fork_rpc.parse().map_err(|e| {
-                EvmeError::Other(format!("Invalid RPC URL '{}': {}", self.fork_rpc, e))
-            })?;
-            let provider = alloy_provider::ProviderBuilder::new()
-                .disable_recommended_fillers()
-                .network::<N>()
-                .connect_http(url);
-            Ok(Some(DynProvider::new(provider)))
-        } else {
-            debug!("No forking state specified");
-            Ok(None)
-        }
-    }
-
-    /// Creates the initial state for execution. This provides a Evm database based on the prestate
-    /// and remote forked chain.
-    pub async fn create_initial_state<N>(
+    /// Build the initial execution state and the clean-exit RPC cache store.
+    ///
+    /// Fork mode (`self.fork == true`) builds a forked state at `self.fork_block` via
+    /// `rpc_args.build_provider()` and returns the caller-owned [`RpcCacheStore`] for
+    /// persist-on-exit. Non-fork mode builds an empty local state, ignores `rpc_args`,
+    /// and returns a no-op store. Either way the call site persists unconditionally.
+    pub async fn create_initial_state(
         &self,
         sender: &Address,
-    ) -> Result<EvmeState<N, DynProvider<N>>>
-    where
-        N: alloy_network::Network,
-    {
-        let provider = self.create_provider()?;
-
-        // Load prestate
+        rpc_args: &super::RpcArgs,
+    ) -> Result<(EvmeState<Optimism, super::OpProvider>, RpcCacheStore)> {
         let prestate = self.load_prestate(sender)?;
-
-        // Parse block hashes
         let block_hashes = self.parse_block_hashes()?;
 
-        // Create the appropriate state based on whether provider is provided
-        if let Some(provider) = provider {
+        if self.fork {
             debug!("Creating forked state");
-            EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await
+            if rpc_args.rpc_url.is_none() {
+                return Err(EvmeError::InvalidInput("'--fork' requires '--rpc <URL>'".to_string()));
+            }
+            if rpc_args.capture_file.is_some() || rpc_args.replay_file.is_some() {
+                return Err(EvmeError::InvalidInput(
+                    "'--rpc.capture-file' and '--rpc.replay-file' are not supported with '--fork' \
+                     in this version"
+                        .to_string(),
+                ));
+            }
+            let super::BuildProviderOutput { provider, cache_store, .. } =
+                rpc_args.build_provider().await?;
+            let state =
+                EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await?;
+            Ok((state, cache_store))
         } else {
             debug!("Creating local state");
-            Ok(EvmeState::new_empty(prestate, block_hashes))
+            Ok((EvmeState::new_empty(prestate, block_hashes), RpcCacheStore::noop()))
         }
     }
-}
-
-/// Dumps [`EvmState`] as JSON string.
-pub fn convert_evm_state_to_json(evm_state: &EvmState) -> Result<String> {
-    let account_states = evm_state
-        .iter()
-        .map(|(address, account)| (address, AccountState::from_account(account.clone())))
-        .collect::<HashMap<_, _>>();
-    let state_json = serde_json::to_string_pretty(&account_states)
-        .map_err(|e| EvmeError::ExecutionError(format!("Failed to serialize state: {}", e)))?;
-    Ok(state_json)
 }
 
 /// State dump configuration arguments
@@ -347,13 +323,13 @@ pub struct StateDumpArgs {
 }
 
 impl StateDumpArgs {
-    /// Serializes [`EvmState`] as JSON string.
+    /// Serializes [`EvmState`] as JSON string with deterministic key ordering.
     pub fn serialize_evm_state(&self, evm_state: &EvmState) -> Result<String> {
         trace!(evm_state = ?evm_state, "Serializing EVM state");
-        let account_states = evm_state
+        let account_states: BTreeMap<_, _> = evm_state
             .iter()
             .map(|(address, account)| (address, AccountState::from_account(account.clone())))
-            .collect::<HashMap<_, _>>();
+            .collect();
         let state_json = serde_json::to_string_pretty(&account_states)
             .map_err(|e| EvmeError::ExecutionError(format!("Failed to serialize state: {}", e)))?;
         Ok(state_json)
@@ -369,14 +345,12 @@ impl StateDumpArgs {
         println!("=== State Dump ===");
         if let Some(ref output_file) = self.dump_output_file {
             debug!(output_file = ?output_file, "Writing dumped state to file");
-            // Write state to file
             std::fs::write(output_file, state_json).map_err(|e| {
                 EvmeError::ExecutionError(format!("Failed to write state to file: {}", e))
             })?;
             println!("State dump written to: {}", output_file.display());
         } else {
             debug!("Printing dumped state to console");
-            // Print state to console
             println!("{}", state_json);
         }
 
@@ -399,21 +373,38 @@ pub struct AccountState {
     /// Code hash
     /// B256 already uses hex format with 0x prefix (always 32 bytes)
     pub code_hash: Option<B256>,
-    /// Storage slots (uses quantity format for keys and values)
-    pub storage: Option<HashMap<U256, U256>>,
+    /// Storage slots (sorted by key for deterministic output)
+    pub storage: Option<BTreeMap<U256, U256>>,
 }
 
 impl AccountState {
     /// Creates a new [`AccountState`] from [`Account`].
+    ///
+    /// When `AccountInfo.code` is `Some`, `code_hash` is recomputed from the actual
+    /// bytes (guards against stale hashes from direct `info.code` assignment).
+    /// When `code` is `None` (lazy-loaded, e.g. forked accounts whose bytecode hasn't
+    /// been fetched), the original `code_hash` is preserved so the account is not
+    /// silently downgraded to an EOA.
     pub fn from_account(account: Account) -> Self {
-        let AccountInfo { balance, nonce, code_hash, code } = account.info;
-        let code = code.map(|c| c.original_byte_slice().to_vec()).unwrap_or_default().into();
-        let storage =
+        let (code, code_hash) = match &account.info.code {
+            Some(bytecode) => {
+                let bytes: Bytes = bytecode.original_byte_slice().to_vec().into();
+                let hash = if bytes.is_empty() {
+                    B256::from(alloy_primitives::KECCAK256_EMPTY)
+                } else {
+                    alloy_primitives::keccak256(&bytes)
+                };
+                (Some(bytes), hash)
+            }
+            // Code not materialized (lazy loading) — preserve original hash.
+            None => (None, account.info.code_hash),
+        };
+        let storage: BTreeMap<U256, U256> =
             account.storage.into_iter().map(|(slot, value)| (slot, value.present_value)).collect();
         Self {
-            balance: Some(balance),
-            nonce: Some(nonce),
-            code: Some(code),
+            balance: Some(account.info.balance),
+            nonce: Some(account.info.nonce),
+            code,
             code_hash: Some(code_hash),
             storage: Some(storage),
         }
@@ -544,7 +535,7 @@ where
     /// Set the code for an account.
     pub fn set_account_code(&mut self, address: Address, code: Bytecode) {
         self.code_map.insert(code.hash_slow(), code.clone());
-        self.prestate.entry(address).or_default().info.code = Some(code);
+        self.prestate.entry(address).or_default().info.set_code(code);
     }
 
     /// Set the storage for an account.
@@ -559,14 +550,18 @@ where
     /// Deploys system contracts based on the given spec.
     pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
         use mega_evm::{
-            MegaSpecId, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+            MegaSpecId, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
+            HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
+            KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
             ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_REX2,
+            ORACLE_CONTRACT_CODE_REX5, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
         };
 
-        // MiniRex+: Oracle Contract (v1.0.0 or v1.1.0 based on Rex2)
+        // MiniRex+: Oracle Contract (v1.0.0, v1.1.0, or v2.0.0 based on hardfork)
         if spec >= MegaSpecId::MINI_REX {
-            let code = if spec >= MegaSpecId::REX2 {
+            let code = if spec >= MegaSpecId::REX5 {
+                ORACLE_CONTRACT_CODE_REX5
+            } else if spec >= MegaSpecId::REX2 {
                 ORACLE_CONTRACT_CODE_REX2
             } else {
                 ORACLE_CONTRACT_CODE
@@ -585,6 +580,24 @@ where
         // Rex2+: Keyless Deploy Contract
         if spec >= MegaSpecId::REX2 {
             self.set_account_code(KEYLESS_DEPLOY_ADDRESS, Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
+        }
+
+        // Rex4+: Access Control Contract
+        if spec >= MegaSpecId::REX4 {
+            self.set_account_code(ACCESS_CONTROL_ADDRESS, Bytecode::new_raw(ACCESS_CONTROL_CODE));
+        }
+
+        // Rex4+: Limit Control Contract
+        if spec >= MegaSpecId::REX4 {
+            self.set_account_code(LIMIT_CONTROL_ADDRESS, Bytecode::new_raw(LIMIT_CONTROL_CODE));
+        }
+
+        // Rex5+: SequencerRegistry Contract
+        if spec >= MegaSpecId::REX5 {
+            self.set_account_code(
+                SEQUENCER_REGISTRY_ADDRESS,
+                Bytecode::new_raw(SEQUENCER_REGISTRY_CODE),
+            );
         }
     }
 }
@@ -795,6 +808,7 @@ where
     ) -> std::result::Result<Bytecode, Self::Error> {
         // Check code_map first (for prestate accounts)
         if let Some(code) = self.code_map.get(&code_hash) {
+            trace!(code_hash = %code_hash, code = ?code, "Loaded code by hash from prestate");
             return Ok(code.clone());
         }
 
@@ -822,6 +836,7 @@ where
         // Check storage overrides first
         if let Some(account) = self.prestate.get(&address) {
             if let Some(slot) = account.storage.get(&index) {
+                trace!(address = %address, index = %index, slot = %slot.present_value, "Loaded storage from prestate");
                 return Ok(slot.present_value);
             }
         }

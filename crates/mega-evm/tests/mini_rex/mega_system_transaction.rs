@@ -6,7 +6,7 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    is_deposit_like_transaction, is_mega_system_transaction,
+    is_deposit_like_transaction, is_mega_system_transaction_with,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
@@ -115,12 +115,12 @@ fn test_utility_functions() {
         ..Default::default()
     };
 
-    assert!(is_mega_system_transaction(&mega_system_tx));
-    assert!(!is_mega_system_transaction(&regular_tx));
+    assert!(is_mega_system_transaction_with(&mega_system_tx, MEGA_SYSTEM_ADDRESS));
+    assert!(!is_mega_system_transaction_with(&regular_tx, MEGA_SYSTEM_ADDRESS));
 
     // Test is_deposit_like_transaction
-    assert!(is_deposit_like_transaction(&mega_system_tx));
-    assert!(!is_deposit_like_transaction(&regular_tx));
+    assert!(is_deposit_like_transaction(&mega_system_tx, MEGA_SYSTEM_ADDRESS));
+    assert!(!is_deposit_like_transaction(&regular_tx, MEGA_SYSTEM_ADDRESS));
 }
 
 /// Tests that mega system transactions execute successfully and behave as deposit-like
@@ -269,7 +269,7 @@ fn test_mega_system_transaction_sets_source_hash() {
     };
 
     // The transaction should be detected as from mega system address
-    assert!(is_mega_system_transaction(&tx));
+    assert!(is_mega_system_transaction_with(&tx, MEGA_SYSTEM_ADDRESS));
 
     // Set the transaction in the context
     evm.ctx().set_tx(tx);
@@ -312,10 +312,10 @@ fn test_deposit_transaction_behavior_preserved() {
 
     // Should be detected as deposit-like
     assert!(deposit_tx.tx_type() == DEPOSIT_TRANSACTION_TYPE);
-    assert!(is_deposit_like_transaction(&deposit_tx));
+    assert!(is_deposit_like_transaction(&deposit_tx, MEGA_SYSTEM_ADDRESS));
 
     // But should NOT be detected as mega system address transaction
-    assert!(!is_mega_system_transaction(&deposit_tx));
+    assert!(!is_mega_system_transaction_with(&deposit_tx, MEGA_SYSTEM_ADDRESS));
 }
 
 /// Tests that mega system transactions do not deduct gas fees from the system address balance.

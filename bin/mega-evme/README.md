@@ -25,12 +25,20 @@ A command-line tool for executing and debugging EVM bytecode, similar to go-ethe
 
 ## Installation
 
-```bash
-# Build from source
-cargo build --release -p mega-evme
+Install from crates.io:
 
+```bash
+cargo install mega-evme --locked
+```
+
+Or build from source:
+
+```bash
+cargo build --release -p mega-evme
 # The binary will be at target/release/mega-evme
 ```
+
+The `--locked` flag ensures the exact tested dependency versions are used.
 
 ## Commands
 

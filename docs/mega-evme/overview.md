@@ -41,7 +41,7 @@ Fork remote state and call a contract:
 ```bash
 # Call WETH.name() on MegaETH mainnet
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0x06fdde03

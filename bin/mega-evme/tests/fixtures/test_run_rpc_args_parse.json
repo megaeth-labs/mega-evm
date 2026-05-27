@@ -1,0 +1,17 @@
+{
+  "description": "RpcArgs flag surface regression: parses cache/retry flags on the run command without --fork",
+  "args": [
+    "run",
+    "0x604260005260206000f3",
+    "--rpc.cache-size", "100",
+    "--rpc.max-retries", "3",
+    "--rpc.backoff-ms", "500",
+    "--rpc.rate-limit", "660"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 60018,
+    "output": "0x0000000000000000000000000000000000000000000000000000000000000042",
+    "logs_count": 0
+  }
+}

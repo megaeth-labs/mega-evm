@@ -33,10 +33,9 @@ use revm::{
 };
 
 use crate::{
-    constants, dispatch_system_contract_interceptors, is_mega_system_transaction,
-    sent_from_mega_system_address, ExternalEnvTypes, HostExt, MegaContext, MegaEvm, MegaHaltReason,
-    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_ADDRESS,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    constants, dispatch_system_contract_interceptors, is_mega_system_transaction_with,
+    sent_from_system_address, ExternalEnvTypes, HostExt, MegaContext, MegaEvm, MegaHaltReason,
+    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -74,12 +73,13 @@ where
         let ctx = evm.ctx_mut();
         if ctx.spec.is_enabled(MegaSpecId::MINI_REX) {
             // Check if this is a mega system address transaction
+            let system_address = ctx.system_address;
             let tx = &mut ctx.inner.tx;
-            if sent_from_mega_system_address(tx) {
+            if sent_from_system_address(tx, system_address) {
                 // Modify the transaction to make it appear as a deposit transaction
                 // This will cause the OpHandler to automatically bypass signature validation,
                 // nonce verification, and fee deduction during validation
-                if !is_mega_system_transaction(tx) {
+                if !is_mega_system_transaction_with(tx, system_address) {
                     return Err(FromStringError::from_string(
                         "Mega system transaction callee is not in the whitelist".to_string(),
                     ));
@@ -600,7 +600,7 @@ where
                     CallScheme::CallCode | CallScheme::DelegateCall => false,
                 };
                 // Mega system address is exempted from volatile data access enforcement.
-                if detect_oracle && call_inputs.caller != MEGA_SYSTEM_ADDRESS {
+                if detect_oracle && call_inputs.caller != self.ctx().system_address {
                     let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
                     let mut tracker = volatile_data_tracker.borrow_mut();
                     if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
@@ -637,17 +637,25 @@ where
         // Short-circuiting paths return Some(FrameResult).
         // These synthetic results skip `AdditionalLimit::before_frame_init`; we only push an
         // empty tracking frame to keep the additional-limit stacks aligned.
+        //
+        // Only `CALL` and `STATICCALL` enter interceptor dispatch. `CALLCODE` and
+        // `DELEGATECALL` execute in the caller's state context, so intercepting them
+        // would apply system-contract logic in the wrong state context — the scheme
+        // guard enforces this policy explicitly rather than relying on upstream
+        // call-frame semantics to keep `target_address` distinct.
         if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-            if let Some(result) =
-                dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
-            {
-                // Push an empty frame to keep the limit tracker stack balanced:
-                // `frame_return_result` / `last_frame_result` will pop a frame, but
-                // `after_frame_init` (which normally pushes) was skipped.
-                if is_mini_rex_enabled {
-                    additional_limit.borrow_mut().push_empty_frame();
+            if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) {
+                if let Some(result) =
+                    dispatch_system_contract_interceptors(self.ctx(), call_inputs, frame_init.depth)
+                {
+                    // Push an empty frame to keep the limit tracker stack balanced:
+                    // `frame_return_result` / `last_frame_result` will pop a frame, but
+                    // `after_frame_init` (which normally pushes) was skipped.
+                    if is_mini_rex_enabled {
+                        additional_limit.borrow_mut().push_empty_frame();
+                    }
+                    return Ok(FrameInitResult::Result(result));
                 }
-                return Ok(FrameInitResult::Result(result));
             }
         }
 

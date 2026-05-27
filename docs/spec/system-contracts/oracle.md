@@ -21,8 +21,8 @@ The Oracle system contract MUST exist at `ORACLE_CONTRACT_ADDRESS`.
 
 ### Bytecode
 
-The Oracle constructor takes `MEGA_SYSTEM_ADDRESS` as an immutable parameter.
 A node MUST deploy the bytecode version corresponding to the active spec.
+Versions 1.0.0 and 1.1.0 take `MEGA_SYSTEM_ADDRESS` as a constructor `immutable`.
 
 #### Version 1.0.0
 
@@ -47,6 +47,21 @@ Deployed bytecode:
 ```
 0x608060405234801561000f575f5ffd5b50600436106100b9575f3560e01c806366cdf82f116100725780638d4909dc116100585780638d4909dc146101c8578063a21e2d69146101db578063fbc0d035146101fb575f5ffd5b806366cdf82f146101955780637eba7ba6146101a8575f5ffd5b8063138f5ec5116100a2578063138f5ec514610123578063348a0cdc1461013657806354fd4d5014610156575f5ffd5b806301caec13146100bd5780630dc9b5da146100d2575b5f5ffd5b6100d06100cb3660046105db565b61020e565b005b6100f97f000000000000000000000000a887dcb9d5f39ef79272801d05abdf707cfbbd1d81565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020015b60405180910390f35b6100d0610131366004610647565b61028a565b61014961014436600461068f565b6102d4565b60405161011a919061071a565b604080518082018252600581527f312e312e300000000000000000000000000000000000000000000000000000006020820152905161011a919061079b565b6100d06101a33660046107b4565b505050565b6101ba6101b636600461082b565b5490565b60405190815260200161011a565b6100d06101d63660046107b4565b61044b565b6101ee6101e936600461068f565b61045e565b60405161011a9190610842565b6100d0610209366004610884565b6104d4565b828114610256576040517f5b7232fa00000000000000000000000000000000000000000000000000000000815260048101849052602481018290526044015b60405180910390fd5b8382845f5b81811015610278576020810283810135908501355560010161025b565b505050506102846104e3565b50505050565b805f5b818110156102ca576102c2858585848181106102ab576102ab6108a4565b90506020028101906102bd91906108d1565b610554565b60010161028d565b50506101a36104e3565b60608167ffffffffffffffff8111156102ef576102ef610932565b60405190808252806020026020018201604052801561032257816020015b606081526020019060019003908161030d5790505b5090505f5b82811015610444575f8030868685818110610344576103446108a4565b905060200281019061035691906108d1565b60405161036492919061095f565b5f60405180830381855af49150503d805f811461039c576040519150601f19603f3d011682016040523d82523d5f602084013e6103a1565b606091505b50915091508161041c578051156103ba57805181602001fd5b6040517f08c379a000000000000000000000000000000000000000000000000000000000815260206004820152601660248201527f4d756c746963616c6c3a2063616c6c206661696c656400000000000000000000604482015260640161024d565b8084848151811061042f5761042f6108a4565b60209081029190910101525050600101610327565b5092915050565b610456838383610554565b6101a36104e3565b60608167ffffffffffffffff81111561047957610479610932565b6040519080825280602002602001820160405280156104a2578160200160208202803683370190505b5090506020810183835f5b818110156104ca57602081028381013554908501526001016104ad565b5050505092915050565b8082556104df6104e3565b5050565b3373ffffffffffffffffffffffffffffffffffffffff7f000000000000000000000000a887dcb9d5f39ef79272801d05abdf707cfbbd1d1614610552576040517f5e742c5a00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b565b827fda678492695e6a825d786c2375f7fdf3c1dc012451c61c1804227f499b0fc53e838360405161058692919061096e565b60405180910390a2505050565b5f5f83601f8401126105a3575f5ffd5b50813567ffffffffffffffff8111156105ba575f5ffd5b6020830191508360208260051b85010111156105d4575f5ffd5b9250929050565b5f5f5f5f604085870312156105ee575f5ffd5b843567ffffffffffffffff811115610604575f5ffd5b61061087828801610593565b909550935050602085013567ffffffffffffffff81111561062f575f5ffd5b61063b87828801610593565b95989497509550505050565b5f5f5f60408486031215610659575f5ffd5b83359250602084013567ffffffffffffffff811115610676575f5ffd5b61068286828701610593565b9497909650939450505050565b5f5f602083850312156106a0575f5ffd5b823567ffffffffffffffff8111156106b6575f5ffd5b6106c285828601610593565b90969095509350505050565b5f81518084528060208401602086015e5f6020828601015260207fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0601f83011685010191505092915050565b5f602082016020835280845180835260408501915060408160051b8601019250602086015f5b8281101561078f577fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffc087860301845261077a8583516106ce565b94506020938401939190910190600101610740565b50929695505050505050565b602081525f6107ad60208301846106ce565b9392505050565b5f5f5f604084860312156107c6575f5ffd5b83359250602084013567ffffffffffffffff8111156107e3575f5ffd5b8401601f810186136107f3575f5ffd5b803567ffffffffffffffff811115610809575f5ffd5b86602082840101111561081a575f5ffd5b939660209190910195509293505050565b5f6020828403121561083b575f5ffd5b5035919050565b602080825282518282018190525f918401906040840190835b8181101561087957835183526020938401939092019160010161085b565b509095945050505050565b5f5f60408385031215610895575f5ffd5b50508035926020909101359150565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52603260045260245ffd5b5f5f83357fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe1843603018112610904575f5ffd5b83018035915067ffffffffffffffff82111561091e575f5ffd5b6020019150368190038213156105d4575f5ffd5b7f4e487b71000000000000000000000000000000000000000000000000000000005f52604160045260245ffd5b818382375f9101908152919050565b60208152816020820152818360408301375f818301604090810191909152601f9092017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe016010191905056fea164736f6c634300081e000a
 ```
+
+<details>
+<summary>Rex5 (unstable): Oracle v2.0.0 — dynamic system-address authority</summary>
+
+#### Version 2.0.0
+
+Since: [Rex5](../upgrades/rex5.md)
+
+The `onlySystemAddress` modifier MUST read the authorized address from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) instead of a constructor `immutable`.
+This enables system address change without redeploying the Oracle contract.
+All other functionality is preserved from v1.1.0.
+
+Code hash: `0x71a65239db8d0f1bb765fad36e34f57600420d103a4401ef7555bd50b229dc55`
+
+</details>
 
 ### Public Read Interface
 
@@ -75,10 +90,24 @@ interface IOracle {
 }
 ```
 
-The methods above MUST be callable only by `MEGA_SYSTEM_ADDRESS`.
+The methods above MUST be callable only by [`MEGA_SYSTEM_ADDRESS`](system-tx.md).
 Calls from any other sender MUST revert with `NotSystemAddress()`.
 
 For `setSlots`, if the `slots` and `values` array lengths differ, the call MUST revert with `InvalidLength(uint256 slotsLength, uint256 valuesLength)`.
+
+#### Authorization Check Ordering
+
+For `setSlot`, `setSlots`, `emitLog`, and `emitLogs`, the function body — including all `SSTORE` operations and `LOG` emissions — MUST execute before the caller authorization check.
+On an unauthorized call, the body MUST run to completion (consuming gas for all operations it performs — `SSTORE` writes, `LOG` emissions, and any loop iterations), and the call MUST then revert with `NotSystemAddress()`.
+The revert MUST roll back all storage writes and log emissions performed by the body, leaving no observable state change at the transaction boundary if the surrounding transaction does not catch the revert.
+
+Authorization for `setSlots` is checked after the array-length equality check.
+If the lengths differ, the call MUST revert with `InvalidLength(uint256, uint256)` before any `SSTORE` runs and before the authorization check.
+
+{% hint style="info" %}
+**Design intent.** Running the body before the authorization check makes the would-be storage writes and log emissions visible to off-chain EVM inspectors and trace consumers, even when the call ultimately reverts.
+This is intentional and is part of the observable behavior of the Oracle contract.
+{% endhint %}
 
 ### Auxiliary Interface
 
@@ -144,6 +173,21 @@ The following gas and detention rules MUST apply:
 Pre-[Rex2](../upgrades/rex2.md), the deployed Oracle bytecode does not include `sendHint`.
 From [Rex2](../upgrades/rex2.md) onward, the stable Oracle bytecode includes `sendHint`.
 
+**Upgrade storage semantics.**
+When the Oracle account's bytecode is upgraded, the fate of existing Oracle storage is consensus-critical.
+
+Each bytecode upgrade MUST mark the Oracle account as newly created.
+This clears any storage accumulated under the previous bytecode version.
+Canonical mainnet state reflects this: Oracle storage present at the Rex2 activation boundary was cleared by the Rex2 upgrade.
+
+<details>
+<summary>Rex5 (unstable): Bytecode upgrades preserve existing Oracle storage</summary>
+
+A bytecode upgrade MUST NOT mark the Oracle account as newly created.
+Existing Oracle storage MUST be preserved across the upgrade.
+
+</details>
+
 ## Constants
 
 | Constant                  | Value                                        | Description                           |
@@ -169,8 +213,31 @@ The sequencer's frontrunning system transaction ensures that the lazily served v
 Hint forwarding depends on external backend behavior that cannot be expressed by on-chain bytecode alone.
 The no-op Solidity body provides a stable interface, while the [call interception](interception.md) mechanism supplies the protocol-level side effect.
 
+**Why run the restricted-write body before the authorization check?**
+The authorization check is intentionally placed after the function body so that off-chain EVM inspectors observe the would-be storage writes and log emissions even when the call reverts.
+This preserves trace visibility for simulators that exercise the Oracle's write paths from non-system callers, at the cost of allowing unauthorized callers to perform unbounded body work that is rolled back on revert.
+The trade-off and its consequences are spelled out in [Security Considerations](#security-considerations).
+
+## Security Considerations
+
+**Block gas consumption by unauthorized callers.**
+Because the body of `setSlot`, `setSlots`, `emitLog`, and `emitLogs` runs before the authorization check, an unauthorized caller MAY supply arbitrarily large input arrays to `setSlots` or `emitLogs` and cause the body to iterate and `SSTORE` (or emit `LOG`) up to the caller's gas allowance before the call reverts.
+The unauthorized caller pays the full gas cost of this work, but the gas consumed counts against the block's gas budget.
+This is not differentiable from any other unbounded-loop gas-burn pattern reachable from ordinary EVM bytecode, so it does not imply a contract change.
+A node implementation that gates the `SSTORE` or `LOG` operations on authorization first would produce gas accounting that disagrees with the canonical Oracle bytecode and MUST NOT be used.
+
+**Execution trace semantics for trace consumers.**
+A trace produced by `debug_traceTransaction` or any equivalent inspector for an Oracle write call MAY contain `SSTORE` and `LOG` operations even when the surrounding call reverts.
+A consumer that infers permanent state changes from raw trace operations alone MUST NOT treat such operations as committed without first checking the final transaction status: if the transaction reverts, all `SSTORE`s and `LOG`s in its trace MUST be discarded.
+A consumer that fails to filter by transaction status MAY misattribute Oracle slot updates to unauthorized callers and corrupt downstream indexing or replay state.
+
+**Invariants preserved.**
+The Oracle's restricted-write methods preserve the invariant that, at the transaction boundary, no Oracle storage slot is modified and no `Log` event is emitted by an unauthorized caller.
+Per-frame trace visibility of the would-be writes is informative only and MUST NOT be interpreted as a state change.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced the Oracle contract.
 - [Rex2](../upgrades/rex2.md) added the `sendHint` entry point to the deployed Oracle bytecode.
 - [Rex3](../upgrades/rex3.md) changed oracle detention to SLOAD-based triggering and raised the oracle detention cap to 20M.
+- [Rex5](../upgrades/rex5.md) replaced the constructor `immutable` authority with a dynamic read from `SequencerRegistry.currentSystemAddress()` (Oracle v2.0.0).

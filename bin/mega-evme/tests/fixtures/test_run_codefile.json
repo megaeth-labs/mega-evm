@@ -1,0 +1,10 @@
+{
+  "description": "Read bytecode from a hex file (--codefile)",
+  "args": ["run", "--codefile", "{fixtures}/test_bytecode.hex"],
+  "expected": {
+    "success": true,
+    "gas_used": 60018,
+    "output": "0x0000000000000000000000000000000000000000000000000000000000000042",
+    "logs_count": 0
+  }
+}

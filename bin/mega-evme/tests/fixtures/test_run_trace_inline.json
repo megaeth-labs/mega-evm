@@ -1,0 +1,87 @@
+{
+  "description": "--json --trace includes opcode trace in JSON (PUSH1 0x42, MSTORE, RETURN)",
+  "args": ["run", "--trace", "--tracer", "opcode", "0x604260005260206000f3"],
+  "expected": {
+    "success": true,
+    "gas_used": 60018,
+    "output": "0x0000000000000000000000000000000000000000000000000000000000000042",
+    "logs_count": 0,
+    "trace": {
+      "failed": false,
+      "gas": 60018,
+      "returnValue": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "structLogs": [
+        {
+          "pc": 0,
+          "op": "PUSH1",
+          "gas": 9940000,
+          "gasCost": 3,
+          "depth": 1,
+          "stack": [],
+          "memory": []
+        },
+        {
+          "pc": 2,
+          "op": "PUSH1",
+          "gas": 9939997,
+          "gasCost": 3,
+          "depth": 1,
+          "stack": [
+            "0x42"
+          ],
+          "memory": []
+        },
+        {
+          "pc": 4,
+          "op": "MSTORE",
+          "gas": 9939994,
+          "gasCost": 6,
+          "depth": 1,
+          "stack": [
+            "0x42",
+            "0x0"
+          ],
+          "memory": []
+        },
+        {
+          "pc": 5,
+          "op": "PUSH1",
+          "gas": 9939988,
+          "gasCost": 3,
+          "depth": 1,
+          "stack": [],
+          "memory": [
+            "0000000000000000000000000000000000000000000000000000000000000042"
+          ]
+        },
+        {
+          "pc": 7,
+          "op": "PUSH1",
+          "gas": 9939985,
+          "gasCost": 3,
+          "depth": 1,
+          "stack": [
+            "0x20"
+          ],
+          "memory": [
+            "0000000000000000000000000000000000000000000000000000000000000042"
+          ]
+        },
+        {
+          "pc": 9,
+          "op": "RETURN",
+          "gas": 9939982,
+          "gasCost": 0,
+          "depth": 1,
+          "stack": [
+            "0x20",
+            "0x0"
+          ],
+          "memory": [
+            "0000000000000000000000000000000000000000000000000000000000000042"
+          ]
+        }
+      ]
+    }
+  }
+}

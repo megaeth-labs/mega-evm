@@ -110,10 +110,15 @@ The following contributions MUST be tracked within call frames and MUST be disca
 | Account update (CREATE/CREATE2)  | `ACCOUNT_UPDATE_DATA_SIZE`          | Successful account creation path         |
 | Deployed bytecode                | `code.len()`                        | Successful `CREATE` or `CREATE2`         |
 
+<details>
+<summary>Rex5 (unstable): Caller account update deduplication for data-size tracking</summary>
+
 #### Account Update Deduplication
 
 Within a single call frame, a node MUST count a given account update at most once for data-size tracking.
-If the same account is updated multiple times within the same call frame, subsequent updates in that call frame MUST NOT add additional `ACCOUNT_UPDATE_DATA_SIZE` bytes.
+If the same account is updated multiple times within the same call frame — including the caller account across multiple value-transferring sub-calls or creates — subsequent updates in that call frame MUST NOT add additional `ACCOUNT_UPDATE_DATA_SIZE` bytes.
+
+</details>
 
 ### KV Updates
 
@@ -141,10 +146,15 @@ The following contributions MUST be tracked within call frames and MUST be disca
 | CREATE/CREATE2   | `1` or `2` | Created account plus caller update if caller not yet counted in the current call frame |
 | CALL with value  | `1` or `2` | Callee update plus caller update if caller not yet counted in the current call frame   |
 
+<details>
+<summary>Rex5 (unstable): Caller account update deduplication for KV-update tracking</summary>
+
 #### Account Update Deduplication
 
 Within a single call frame, a node MUST deduplicate caller account updates for KV-update tracking in the same way it does for data-size tracking.
 When a CALL with value or CREATE occurs, the caller's update MUST be counted only if it has not already been counted in the current call frame.
+
+</details>
 
 ### State Growth
 
@@ -208,8 +218,13 @@ Deduplication prevents artificial inflation of data-size and KV-update counts fr
 During execution, a transaction may first create new state and later remove it.
 Allowing the counter to go negative during intermediate steps keeps the accounting locally composable across nested call frames, while clamping the final reported value prevents negative net state growth from being treated as a meaningful resource credit.
 
+## Security Considerations
+
+**If compute gas were made revertible** (scoped to call frames like data size and KV updates), an attacker could execute and revert expensive subcalls repeatedly within a single transaction, consuming negligible apparent compute gas while imposing real execution cost on nodes.
+
 ## Spec History
 
 This page describes the current accounting behavior.
 
 - [Rex4](../upgrades/rex4.md) — introduced per-call-frame runtime budgets for all four resource dimensions.
+- [Rex5](../upgrades/rex5.md) (**unstable**) — corrected caller-account update deduplication: pre-Rex5, the caller's `ACCOUNT_UPDATE_DATA_SIZE` (data size) and KV-update count were re-charged on every value-transferring sub-call or create from the same parent frame because the `target_updated` flag was never set after the first charge; Rex5 marks the flag after the first charge so subsequent operations from the same parent frame do not re-count the caller account.

@@ -50,14 +50,19 @@ pub fn transact_deploy_limit_control_contract<DB: Database>(
     }
 
     // Update account with target bytecode.
+    let account_existed = acc.account_info().is_some();
     let mut acc_info = acc.account_info().unwrap_or_default();
     acc_info.code_hash = LIMIT_CONTROL_CODE_HASH;
     acc_info.code = Some(Bytecode::new_raw(LIMIT_CONTROL_CODE));
 
-    // Convert back and mark as touched/created.
+    // Convert back and mark as touched.
+    // Only mark it as created when the account did not previously exist; an in-place
+    // bytecode upgrade of an existing account must not clear its storage.
     let mut revm_acc: revm::state::Account = acc_info.into();
     revm_acc.mark_touch();
-    revm_acc.mark_created();
+    if !account_existed {
+        revm_acc.mark_created();
+    }
 
     Ok(Some(EvmState::from_iter([(LIMIT_CONTROL_ADDRESS, revm_acc)])))
 }
@@ -169,7 +174,10 @@ mod tests {
 
         assert_eq!(account.info.code_hash, LIMIT_CONTROL_CODE_HASH);
         assert_eq!(account.info.code.as_ref().unwrap().original_bytes(), LIMIT_CONTROL_CODE);
-        assert!(account.is_created());
         assert!(account.is_touched());
+        assert!(
+            !account.is_created(),
+            "in-place bytecode update of an existing account must not mark it as created"
+        );
     }
 }

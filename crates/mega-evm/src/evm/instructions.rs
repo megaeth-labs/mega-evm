@@ -14,8 +14,8 @@ use revm::{
         instructions::{self, control, utility::IntoAddress},
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
-        FrameInput, Instruction, InstructionContext, InstructionResult, InstructionTable,
-        InterpreterAction, InterpreterTypes, SStoreResult, Stack,
+        resize_memory, FrameInput, Instruction, InstructionContext, InstructionResult,
+        InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
 };
 
@@ -182,6 +182,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
+            MegaSpecId::REX5 => EthInstructions::new(rex5::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
         };
         Self { spec, inner: instruction_table }
     }
@@ -319,6 +323,23 @@ mod rex4 {
         table[SELFBALANCE as usize] = volatile_data_ext::selfbalance;
 
         table
+    }
+}
+
+mod rex5 {
+    use super::*;
+
+    /// Returns the instruction table for the `REX5` spec.
+    ///
+    /// Changes from Rex4: none yet.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        rex4::instruction_table::<WIRE, H>()
     }
 }
 
@@ -1116,14 +1137,33 @@ pub mod additional_limit_ext {
 /// Extends opcodes with storage gas cost on top of `compute_gas_ext`.
 pub mod storage_gas_ext {
     use super::*;
+    use alloy_primitives::Address;
+
+    /// Address-selector for opcodes where the storage account is the stack `to` address (e.g.
+    /// CALL).
+    fn storage_addr_from_to(_mega_spec: MegaSpecId, _current: Address, to: Address) -> Address {
+        to
+    }
+
+    /// Address-selector for CALLCODE: Rex5+ uses the current frame's address because CALLCODE
+    /// executes borrowed code in the caller's own storage context; pre-Rex5 preserves the frozen
+    /// behavior of metering against the code-source (stack `to`).
+    fn storage_addr_for_callcode(mega_spec: MegaSpecId, current: Address, to: Address) -> Address {
+        if mega_spec.is_enabled(MegaSpecId::REX5) {
+            current
+        } else {
+            to
+        }
+    }
 
     /// Macro to charge storage gas for new account creation before calling the wrapped instruction.
     ///
     /// This macro generates a wrapper function that:
     /// 1. Inspects the target address (stack position 1) and value (stack position 2)
-    /// 2. Checks if the target account is empty and value transfer is non-zero
-    /// 3. Charges storage gas for new account creation if applicable
-    /// 4. Calls the wrapped instruction implementation
+    /// 2. Resolves the storage account address via `$select_addr`
+    /// 3. Checks if the storage account is empty and value transfer is non-zero
+    /// 4. Charges storage gas for new account creation if applicable
+    /// 5. Calls the wrapped instruction implementation
     ///
     /// # Call Opcode Behavior
     ///
@@ -1136,8 +1176,22 @@ pub mod storage_gas_ext {
     /// - `$fn_name`: Name of the generated function
     /// - `$opcode_name`: String name of the opcode (for documentation)
     /// - `$wrapped_fn`: Path to the wrapped instruction implementation
+    /// - `$has_transfer_logic`: `true` if the opcode can transfer value (inspects stack position 2)
+    /// - `$select_addr` (optional): Path to a `fn(MegaSpecId, current: Address, to: Address) ->
+    ///   Address` function that returns the address to check for emptiness and charge
+    ///   `new_account_storage_gas` against. `current` is the current frame's address; `to` is the
+    ///   stack position-1 address. Defaults to [`storage_addr_from_to`].
     macro_rules! wrap_call_with_storage_gas {
         ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr) => {
+            wrap_call_with_storage_gas!(
+                $fn_name,
+                $opcode_name,
+                $wrapped_fn,
+                $has_transfer_logic,
+                storage_addr_from_to
+            );
+        };
+        ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr, $select_addr:path) => {
             #[doc = concat!("`", $opcode_name, "` opcode implementation modified from `revm` with compute gas tracking and dynamically-scaled storage gas costs.")]
             pub fn $fn_name<
                 WIRE: InterpreterTypes<Stack: StackInspectTr>,
@@ -1152,13 +1206,17 @@ pub mod storage_gas_ext {
                 };
                 let to = to.into_address();
                 let mega_spec = context.host.spec_id();
-                let Ok(to_account) = context.host.inspect_account_delegated(mega_spec, to) else {
+                let current_address = context.interpreter.input.target_address();
+                let storage_address = $select_addr(mega_spec, current_address, to);
+                let Ok(storage_account) =
+                    context.host.inspect_account_delegated(mega_spec, storage_address)
+                else {
                     context.interpreter.halt(InstructionResult::FatalExternalError);
                     return;
                 };
-                let is_empty = to_account.state_clear_aware_is_empty(spec);
+                let is_empty = storage_account.state_clear_aware_is_empty(spec);
                 let has_transfer = if $has_transfer_logic {
-                    let Some(value) =context.interpreter.stack.inspect::<2>() else {
+                    let Some(value) = context.interpreter.stack.inspect::<2>() else {
                         context.interpreter.halt(InstructionResult::StackUnderflow);
                         return;
                     };
@@ -1168,7 +1226,9 @@ pub mod storage_gas_ext {
                 };
                 // Charge additional storage gas cost for creating a new account
                 if is_empty && has_transfer {
-                    let Some(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
+                    let Some(new_account_storage_gas) =
+                        context.host.new_account_storage_gas(storage_address)
+                    else {
                         context.interpreter.halt(InstructionResult::FatalExternalError);
                         return;
                     };
@@ -1182,7 +1242,6 @@ pub mod storage_gas_ext {
     }
 
     wrap_call_with_storage_gas!(call, "CALL", compute_gas_ext::call, true);
-    wrap_call_with_storage_gas!(call_code, "CALLCODE", compute_gas_ext::call_code, true);
     wrap_call_with_storage_gas!(
         delegate_call,
         "DELEGATECALL",
@@ -1190,6 +1249,13 @@ pub mod storage_gas_ext {
         false
     );
     wrap_call_with_storage_gas!(static_call, "STATICCALL", compute_gas_ext::static_call, false);
+    wrap_call_with_storage_gas!(
+        call_code,
+        "CALLCODE",
+        compute_gas_ext::call_code,
+        true,
+        storage_addr_for_callcode
+    );
 
     /// `CREATE`/`CREATE2` opcode implementation modified from `revm` with compute gas tracking and
     /// dynamically-scaled storage gas costs.
@@ -1223,6 +1289,7 @@ pub mod storage_gas_ext {
         };
 
         // Calculate the created address
+        let mut resize_gas: u64 = 0;
         let created_address = if IS_CREATE2 {
             let Some(initcode_offset) = context.interpreter.stack.inspect::<1>() else {
                 context.interpreter.halt(InstructionResult::StackUnderflow);
@@ -1234,6 +1301,19 @@ pub mod storage_gas_ext {
             };
             let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
             let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
+            // Expand memory before slicing so the read can never go out of bounds. The canonical
+            // CREATE2 path called below also calls `resize_memory!`, which is a no-op once memory
+            // is already sized to fit the requested slice. The expansion gas is metered into the
+            // compute gas tracker AFTER the inner CREATE2 returns (see end of function), so it
+            // is accounted in the same gas dimension as the canonical path would have recorded
+            // it (via `compute_gas_ext::create2`'s `gas_before`/`gas_after` window). Recording
+            // late also matches `wrap_op_compute_gas`'s "skip on inner error" semantics: if the
+            // storage-gas charge or inner CREATE2 OOGs the interpreter, the early-return in
+            // `run_inner_instruction_or_abort!` skips recording, just as the canonical path
+            // would have skipped recording on inner failure.
+            let gas_before_resize = context.interpreter.gas.remaining();
+            resize_memory!(context.interpreter, initcode_offset, initcode_len);
+            resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
             let code = Bytes::copy_from_slice(
                 context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
             );
@@ -1268,6 +1348,17 @@ pub mod storage_gas_ext {
             run_inner_instruction_or_abort!(compute_gas_ext::create2, context);
         } else {
             run_inner_instruction_or_abort!(compute_gas_ext::create, context);
+        }
+
+        // Record the CREATE2 initcode memory expansion gas as compute gas. We defer the
+        // recording until after the inner CREATE2 returns successfully so that on any
+        // intermediate OOG (storage-gas charge or inner CREATE2 itself) the early-return in
+        // `run_inner_instruction_or_abort!` skips this — matching the historical pattern in
+        // `wrap_op_compute_gas` where the canonical CREATE2's expansion gas was only recorded
+        // when the inner instruction completed without an EVM error.
+        if resize_gas > 0 {
+            let mut additional_limit = context.host.additional_limit().borrow_mut();
+            compute_gas!(context.interpreter, additional_limit, resize_gas);
         }
     }
 

@@ -1,0 +1,11 @@
+{
+  "description": "CREATE mode deploys contract, returns runtime bytecode and contract address",
+  "args": ["run", "--create", "true", "0x60fe60005360016000f3"],
+  "expected": {
+    "success": true,
+    "gas_used": 103716,
+    "output": "0xfe",
+    "contract_address": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
+    "logs_count": 0
+  }
+}

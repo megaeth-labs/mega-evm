@@ -1,4 +1,4 @@
-//! Transaction type definitions for the `mega-evme` tool.
+//! Transaction type definitions for the `mega-t8n` tool.
 
 use alloy_consensus::{Signed, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
 use alloy_primitives::{Signature, TxKind};
@@ -12,7 +12,7 @@ use mega_evm::{
 
 /// Error type for transaction conversion failures
 #[derive(Debug, thiserror::Error)]
-pub enum TransactionConversionError {
+pub(crate) enum TransactionConversionError {
     /// Unsupported transaction type
     #[error("Unsupported transaction type: {0}")]
     UnsupportedType(u8),
@@ -30,7 +30,7 @@ pub enum TransactionConversionError {
 /// Transaction data for t8n (individual signed transaction)
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Transaction {
+pub(crate) struct Transaction {
     /// Transaction type (0=Legacy, 1=EIP-2930, 2=EIP-1559, 3=EIP-4844, 4=EIP-7702)
     #[serde(rename = "type", default, with = "alloy_serde::quantity::opt")]
     pub tx_type: Option<u8>,
@@ -79,7 +79,7 @@ pub struct Transaction {
 
 impl Transaction {
     /// Converts this transaction into a `MegaTxEnvelope`
-    pub fn to_envelope(&self) -> Result<MegaTxEnvelope, TransactionConversionError> {
+    pub(crate) fn to_envelope(&self) -> Result<MegaTxEnvelope, TransactionConversionError> {
         // Convert v, r, s to Signature
         let signature = self.to_signature()?;
 

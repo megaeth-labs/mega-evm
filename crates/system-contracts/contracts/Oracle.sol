@@ -3,14 +3,20 @@ pragma solidity ^0.8.0;
 
 import {ISemver} from "./interfaces/ISemver.sol";
 import {IOracle} from "./interfaces/IOracle.sol";
+import {ISequencerRegistry} from "./interfaces/ISequencerRegistry.sol";
 
 /// @title Oracle
 /// @author MegaETH
 /// @notice Oracle provides a simple interface to directly read and set storage slots.
+/// @dev v2.0.0 reads the authorized system address from SequencerRegistry instead of
+///      using a constructor immutable. This enables system address change without redeploying
+///      the Oracle contract.
 contract Oracle is ISemver, IOracle {
-    /// @notice The address authorized to modify oracle data.
-    /// @dev Only this address can call setter functions.
-    address public immutable MEGA_SYSTEM_ADDRESS;
+    /// @notice The SequencerRegistry contract used to look up the current system address.
+    /// @dev Using `constant` (not `immutable`) because mega-evm deploys system contracts
+    ///      by directly replacing deployed bytecode without running constructors.
+    ISequencerRegistry public constant SEQUENCER_REGISTRY =
+        ISequencerRegistry(0x6342000000000000000000000000000000000006);
 
     /// @notice Thrown when a non-system address attempts to call a restricted function.
     error NotSystemAddress();
@@ -25,31 +31,25 @@ contract Oracle is ISemver, IOracle {
     /// @param data Arbitrary data to include in the log.
     event Log(bytes32 indexed topic, bytes data);
 
-    /// @notice Restricts function access to the system address only.
-    /// @dev Reverts with NotSystemAddress if caller is not MEGA_SYSTEM_ADDRESS.
+    /// @notice Restricts function access to the current system address only.
+    /// @dev Reads the current system address from SequencerRegistry at call time.
+    ///      The check is placed after _; to facilitate off-chain simulation —
+    ///      EVM inspector will be able to see the execution trace even if the sender check fails.
     modifier onlySystemAddress() {
         _;
-        // This check is placed after the _; to facilitate off-chain simulation.
-        // EVM inspector will be able to see the execution trace even if the sender is not the system address.
         _onlySystemAddress();
     }
 
-    /// @notice Checks if the caller is the system address.
-    /// @dev Reverts with NotSystemAddress if caller is not MEGA_SYSTEM_ADDRESS.
+    /// @notice Checks if the caller is the current system address.
+    /// @dev Reverts with NotSystemAddress if caller is not the current system address from registry.
     function _onlySystemAddress() internal view {
-        if (msg.sender != MEGA_SYSTEM_ADDRESS) revert NotSystemAddress();
+        if (msg.sender != SEQUENCER_REGISTRY.currentSystemAddress()) revert NotSystemAddress();
     }
 
     /// @notice Returns the semantic version of this contract.
     /// @return version string in semver format.
     function version() external pure returns (string memory) {
-        return "1.1.0";
-    }
-
-    /// @notice Initializes the Oracle contract with the system address.
-    /// @param _megaSystemAddress The address authorized to modify oracle data.
-    constructor(address _megaSystemAddress) {
-        MEGA_SYSTEM_ADDRESS = _megaSystemAddress;
+        return "2.0.0";
     }
 
     /// @inheritdoc IOracle
@@ -58,7 +58,6 @@ contract Oracle is ISemver, IOracle {
         for (uint256 i = 0; i < data.length;) {
             (bool success, bytes memory result) = address(this).delegatecall(data[i]);
             if (!success) {
-                // Bubble up the revert reason
                 if (result.length > 0) {
                     assembly {
                         revert(add(32, result), mload(result))
@@ -84,7 +83,6 @@ contract Oracle is ISemver, IOracle {
 
     /// @inheritdoc IOracle
     function emitLogs(bytes32 topic, bytes[] calldata dataVector) external onlySystemAddress {
-        // Gas optimized loop: avoid redundant SLOADs and function calls.
         uint256 len = dataVector.length;
         for (uint256 i = 0; i < len;) {
             _emitLog(topic, dataVector[i]);

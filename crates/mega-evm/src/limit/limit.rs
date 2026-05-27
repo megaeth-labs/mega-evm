@@ -317,10 +317,9 @@ impl AdditionalLimit {
     /// afterwards.
     pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
         let stipend = self.storage_call_stipend.current_frame_stipend();
-        debug_assert_eq!(
-            stipend, 0,
-            "rescue_gas called with active stipend {stipend} — inflated gas would leak"
-        );
+        // A TX-level limit can be exceeded before the current frame is popped, so an active
+        // `STORAGE_CALL_STIPEND` is valid here. Exclude it from the rescued amount so the sender
+        // cannot recover system-granted gas that should be burned.
         let effective_remaining = if stipend > 0 {
             let original_limit = gas.limit().saturating_sub(stipend);
             gas.remaining().min(original_limit)

@@ -17,12 +17,12 @@ use mega_evm::{
         state::EvmState,
         ExecuteEvm, InspectEvm,
     },
-    MegaContext, MegaEvm, MegaHaltReason, MegaTransaction, TestExternalEnvs,
+    MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use tracing::{debug, info, trace};
 
-use super::{EvmeError, EvmeState};
+use super::{EvmeError, EvmeExternalEnvs, EvmeState};
 
 /// Tracer type for execution analysis
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -215,7 +215,7 @@ impl TraceArgs {
     /// Execute transaction with optional tracing
     pub fn execute_transaction<N, P>(
         &self,
-        evm_context: MegaContext<&mut EvmeState<N, P>, TestExternalEnvs>,
+        evm_context: MegaContext<&mut EvmeState<N, P>, EvmeExternalEnvs>,
         tx: MegaTransaction,
     ) -> Result<(ExecutionResult<MegaHaltReason>, EvmState, Option<String>), EvmeError>
     where

@@ -1,0 +1,10 @@
+{
+  "description": "REVERT with empty data",
+  "args": ["run", "0x5f5ffd"],
+  "expected": {
+    "success": false,
+    "gas_used": 60004,
+    "logs_count": 0,
+    "revert_reason": "(empty)"
+  }
+}

@@ -10,12 +10,25 @@ These transactions provide protocol-level maintenance access to whitelisted syst
 
 ## Motivation
 
-MegaETH needs a protocol-native mechanism for sequencer-managed maintenance operations such as updating Oracle state.
+MegaETH needs a protocol-native mechanism for protocol-managed maintenance operations such as updating Oracle state.
 Those operations must execute with special fee and validation semantics while remaining part of the verifiable execution model.
 
 Mega System Transactions provide that mechanism.
 
 ## Specification
+
+### Resolution
+
+`MEGA_SYSTEM_ADDRESS` is the authorized system-transaction sender for the current block.
+It is the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (see [Constants](#constants)).
+
+<details>
+<summary>Rex5 (unstable): Dynamic system address resolution</summary>
+
+`MEGA_SYSTEM_ADDRESS` MUST be resolved per block from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) after all pre-block changes are committed.
+The fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` is replaced by this dynamic resolution; the fixed-constant rule does not apply in Rex5 and later.
+
+</details>
 
 ### Identification
 
@@ -67,7 +80,22 @@ Giving them distinct execution treatment makes that behavior explicit.
 Whitelisted target contracts must be able to distinguish protocol-maintenance calls from ordinary user calls.
 Preserving the caller identity provides that signal without introducing a separate call context type.
 
+## Security Considerations
+
+**The no-fee/no-nonce exemption MUST apply exclusively to addresses in `MEGA_SYSTEM_TX_WHITELIST`.**
+If the whitelist check were absent or misconfigured, any legacy transaction from `MEGA_SYSTEM_ADDRESS` could bypass gas fees and nonce validation for arbitrary targets, enabling cost-free state manipulation across the entire chain.
+
+**Adding an address to `MEGA_SYSTEM_TX_WHITELIST` is a consensus-critical change.**
+Any modification to the stable whitelist changes which transactions receive privileged processing.
+Such changes MUST be gated by a spec upgrade to ensure all nodes agree on the new whitelist contents at the same activation point.
+
+**CREATE transactions from `MEGA_SYSTEM_ADDRESS` MUST NOT receive privileged processing.**
+Allowing fee-exempt contract creation would let `MEGA_SYSTEM_ADDRESS` deploy arbitrary code at no cost, which is outside the intended maintenance scope.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced Mega System Transactions and the `MEGA_SYSTEM_ADDRESS` mechanism.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable semantics.
+- [Rex5](../upgrades/rex5.md) (**unstable**) dynamized the system address: it is no longer a compile-time constant but is resolved per block from `SequencerRegistry._currentSystemAddress`.
+  Pre-REX5 blocks continue to use the legacy `MEGA_SYSTEM_ADDRESS` constant.
+  The system transaction identification logic and whitelist are unchanged.

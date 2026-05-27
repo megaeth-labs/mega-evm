@@ -27,6 +27,7 @@ impl EvmTxRuntimeLimits {
             MegaSpecId::REX | MegaSpecId::REX1 | MegaSpecId::REX2 => Self::rex(),
             MegaSpecId::REX3 => Self::rex3(),
             MegaSpecId::REX4 => Self::rex4(),
+            MegaSpecId::REX5 => Self::rex5(),
         }
     }
 
@@ -87,6 +88,13 @@ impl EvmTxRuntimeLimits {
     /// Per-frame state growth budgets are handled by `FrameLimitTracker`.
     fn rex4() -> Self {
         Self::rex3()
+    }
+
+    /// Limits for the `REX5` spec.
+    ///
+    /// Currently identical to Rex4 limits.
+    fn rex5() -> Self {
+        Self::rex4()
     }
 }
 

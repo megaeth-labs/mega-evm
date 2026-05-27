@@ -1,7 +1,7 @@
 //! System transaction for the `MegaETH` EVM.
 //!
-//! The mega system transaction is a special transaction used by the sequencer to do state
-//! maintenance with minimal side effects:
+//! The mega system transaction is a special protocol-maintenance transaction with minimal
+//! side effects:
 //! - no transaction fee (no L2 gas fee, no L1 data fee, no base fee, etc.), thus no state change to
 //!   the block beneficiary or any fee vaults.
 //! - system address's nonce still bumps as normal transactions
@@ -18,7 +18,7 @@ use crate::{types::MegaTransaction, ORACLE_CONTRACT_ADDRESS};
 /// Normal transactions sent from this address are processed as deposit transactions,
 /// bypassing signature validation, nonce verification, and fee deduction.
 ///
-/// The mega system address is held by the sequencer and can only call whitelisted addresses.
+/// It can only call whitelisted addresses.
 pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The whitelist of addresses that are allowed to be called by the `MegaETH` system address.
@@ -29,16 +29,16 @@ pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[ORACLE_CONTRACT_ADDRESS];
 pub const MEGA_SYSTEM_TRANSACTION_SOURCE_HASH: B256 =
     b256!("852c082c0faff590c6300c2c34815d1f79882552fa95ba413cd5aeb1dba84957");
 
-/// Checks if a transaction is sent from the `MEGA_SYSTEM_ADDRESS`.
-pub fn sent_from_mega_system_address(tx: &MegaTransaction) -> bool {
-    tx.caller() == MEGA_SYSTEM_ADDRESS
+/// Checks if a transaction is sent from the given system address.
+pub fn sent_from_system_address(tx: &MegaTransaction, system_address: Address) -> bool {
+    tx.caller() == system_address
 }
 
-/// Checks if a transaction is a mega system transaction.
-/// A mega system transaction is a legacy transaction that is submitted by the `MEGA_SYSTEM_ADDRESS`
+/// Checks if a transaction is a mega system transaction using the given system address.
+/// A mega system transaction is a legacy transaction that is submitted by the system address
 /// and calls a whitelisted address in `MEGA_SYSTEM_TX_WHITELIST`.
-pub fn is_mega_system_transaction(tx: &MegaTransaction) -> bool {
-    check_if_mega_system_transaction(tx.caller(), tx.tx_type(), tx.kind())
+pub fn is_mega_system_transaction_with(tx: &MegaTransaction, system_address: Address) -> bool {
+    check_if_mega_system_transaction(tx.caller(), tx.tx_type(), tx.kind(), system_address)
 }
 
 /// Checks if a transaction is a mega system transaction.
@@ -48,12 +48,18 @@ pub fn is_mega_system_transaction(tx: &MegaTransaction) -> bool {
 /// * `tx_signer` - The signer of the transaction
 /// * `tx_type` - The type of the transaction
 /// * `tx_kind` - The kind of the transaction
+/// * `system_address` - The current system address for this block
 ///
 /// # Returns
 ///
 /// Returns `true` if the transaction is a mega system transaction, `false` otherwise.
-pub fn check_if_mega_system_transaction(tx_signer: Address, tx_type: u8, tx_kind: TxKind) -> bool {
-    if tx_type == 0x0 && tx_signer == MEGA_SYSTEM_ADDRESS {
+pub fn check_if_mega_system_transaction(
+    tx_signer: Address,
+    tx_type: u8,
+    tx_kind: TxKind,
+    system_address: Address,
+) -> bool {
+    if tx_type == 0x0 && tx_signer == system_address {
         // a mega system transaction must be a legacy transaction
         match tx_kind {
             TxKind::Create => false,
@@ -76,12 +82,12 @@ pub fn check_if_mega_system_transaction(tx_signer: Address, tx_type: u8, tx_kind
 /// # Returns
 ///
 /// Returns `true` if the transaction should be processed as deposit-like, `false` otherwise.
-pub fn is_deposit_like_transaction(tx: &MegaTransaction) -> bool {
+pub fn is_deposit_like_transaction(tx: &MegaTransaction, system_address: Address) -> bool {
     // Check if it's an actual deposit transaction
     if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
         return true;
     }
 
     // Check if it's from the mega system address
-    is_mega_system_transaction(tx)
+    is_mega_system_transaction_with(tx, system_address)
 }
