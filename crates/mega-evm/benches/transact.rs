@@ -60,7 +60,7 @@ fn execute_mega(
     r
 }
 
-/// Register the 3 mega spec rows for a group.
+/// Register the mega spec rows for a group.
 fn add_mega_rows<FP>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     params: &CallParams,

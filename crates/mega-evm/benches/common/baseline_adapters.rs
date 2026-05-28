@@ -8,13 +8,12 @@
 //! mod common;
 //! ```
 //!
-//! Because each criterion bench target compiles as its own binary, this
-//! module gets compiled once per target. The adapter set is small enough
-//! that the overhead is negligible.
+//! Each criterion bench target compiles as its own binary, so this module
+//! gets compiled once per target.
 //!
-//! `_latest` aliases come from cargo `package` rename in `Cargo.toml`; both
-//! `_latest` adapters share one revm tree (revm 38 + op-revm 20) because
-//! op-revm 20 transitively depends on revm 38.
+//! `_latest` aliases come from a cargo `package` rename in `Cargo.toml`. Both
+//! `_latest` adapters share one revm tree because the chosen `op-revm` version
+//! already pulls the chosen `revm` version transitively.
 
 #![allow(dead_code)] // each bench target picks the subset of adapters it needs
 #![allow(unreachable_pub)] // included via `#[path = "..."]`, so `pub` items appear unreachable in lint terms
@@ -46,16 +45,16 @@ use revm_latest::{
     Context as ContextLatest, ExecuteEvm as _, MainBuilder as _, MainContext as _,
 };
 
-/// Mega specs benchmarked alongside the 4 vanilla baselines. All three bench
-/// files use the same set so a single `cargo bench` produces comparable rows.
+/// Mega specs benchmarked alongside the vanilla baselines. Shared so every
+/// bench file produces the same set of mega rows.
 pub const SPEC_IDS: &[(&str, MegaSpecId)] = &[
     ("equivalence", MegaSpecId::EQUIVALENCE),
     ("mini_rex", MegaSpecId::MINI_REX),
     ("rex4", MegaSpecId::REX4),
 ];
 
-/// Build a `MegaEvm` with the operator-fee scalar and constant zeroed so the
-/// rows are comparable across the 7 implementations.
+/// Build a `MegaEvm` with the operator-fee scalar and constant zeroed so its
+/// rows are comparable against the vanilla baselines.
 pub fn make_mega_evm(
     db: MemoryDatabase,
     spec: MegaSpecId,
@@ -76,9 +75,8 @@ pub fn build_mega_tx(tx: TxEnv) -> MegaTransaction {
     mega_tx
 }
 
-/// Parameters describing a single `transact()` call. Used by every adapter to
-/// avoid a long positional signature and to let callers fill only what they
-/// need via `..Default::default()`.
+/// Parameters describing a single `transact()` call. Shared by every adapter so
+/// callers fill only the fields they need.
 #[derive(Clone)]
 pub struct CallParams {
     pub caller: Address,
@@ -228,7 +226,7 @@ impl LatestDbBuilder {
 /// Register the 4 baseline rows on a criterion group, sharing the same
 /// per-iteration seed inputs.
 ///
-/// `make_pinned_db` feeds both `*_pinned` adapters (they share revm 27's
+/// `make_pinned_db` feeds both `*_pinned` adapters (they share the pinned-revm
 /// `Database` trait); `make_latest_db` feeds both `*_latest` adapters.
 pub fn add_baseline_rows<FP, FL>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
@@ -244,7 +242,7 @@ pub fn add_baseline_rows<FP, FL>(
 
 /// Same as [`add_baseline_rows`] but appends a `/variant` suffix to each row
 /// name. Used by benches that organise rows as `<spec_or_baseline>/<variant>`
-/// (e.g. `revm_pinned/log0_32b`) so all 7 implementations share a single
+/// (e.g. `revm_pinned/log0_32b`) so every implementation shares a single
 /// variant axis.
 pub fn add_baseline_rows_suffixed<FP, FL>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,

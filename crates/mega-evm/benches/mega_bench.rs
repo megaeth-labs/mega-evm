@@ -5,7 +5,8 @@
 //! - **`gas_detention_computation`**: Impact of gas detention on subsequent heavy computation
 //! - **`log_opcodes`**: LOG0-LOG4 with dual gas model (compute + storage gas)
 //! - **`sstore_heavy`**: SSTORE-intensive workloads triggering resource limit tracking
-//! - **`system_contract_interception`**: System contract call interception overhead
+//! - **`system_contract_single` / `system_contract_100x`**: System contract call interception
+//!   overhead
 //! - **`delegatecall_system_contract`**: DELEGATECALL vs CALL to system contracts
 //! - **`oracle_sload`**: Oracle forced-cold SLOAD vs regular SLOAD
 //! - **`create_deploy`**: CREATE/CREATE2 contract deployment with resource tracking
@@ -69,7 +70,7 @@ fn execute_any_result(spec: MegaSpecId, db: MemoryDatabase, gas_limit: u64) {
     black_box(r);
 }
 
-/// Helper to make a database with contract bytecode and funded caller.
+/// Make a database with contract bytecode and a funded caller.
 fn make_db(bytecode: Bytes) -> MemoryDatabase {
     MemoryDatabase::default()
         .account_code(CONTRACT, bytecode)
@@ -346,16 +347,13 @@ fn bench_sstore(c: &mut Criterion) {
 /// Build bytecode that deploys a minimal contract via CREATE.
 /// The init code stores a small runtime bytecode and returns it.
 fn make_create_bytecode(n_deploys: usize) -> Bytes {
-    // Init code: PUSH1 0x00 PUSH1 0x00 RETURN (deploys empty contract)
-    // Encoded as: 60 00 60 00 f3
+    // Init code that deploys an empty contract: PUSH1 0x00 PUSH1 0x00 RETURN.
     let init_code: [u8; 5] = [0x60, 0x00, 0x60, 0x00, 0xf3];
 
     let mut builder = BytecodeBuilder::default();
-    // Store init code in memory
     builder = builder.mstore(0, init_code);
 
     for _ in 0..n_deploys {
-        // CREATE(value=0, offset=0, size=5)
         builder = builder
             .push_number(5u64) // size of init code
             .push_number(0u64) // memory offset
@@ -374,7 +372,6 @@ fn make_create2_bytecode(n_deploys: usize) -> Bytes {
     builder = builder.mstore(0, init_code);
 
     for i in 0..n_deploys {
-        // CREATE2(value=0, offset=0, size=5, salt=i)
         builder = builder
             .push_number(i as u64) // salt (different each time)
             .push_number(5u64) // size

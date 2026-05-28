@@ -54,9 +54,8 @@ use revm_latest::{
     MainBuilder as _, MainContext as _,
 };
 
-// Shared baseline adapters (revm_pinned / revm_latest / op_revm_pinned /
-// op_revm_latest) live in benches/common/baseline_adapters.rs so other bench
-// files can pull them in via the same `#[path = ...]` declaration.
+// Shared baseline adapters live alongside this file under `common/`; the other
+// bench files include them via the same `#[path = ...]` declaration.
 #[path = "common/baseline_adapters.rs"]
 mod common;
 use common::{
@@ -269,10 +268,10 @@ fn make_subcall_bytecode(target: Address) -> Bytes {
     Bytes::from(code)
 }
 
-/// Helper to benchmark a subcall variant across the 4 baselines and mega specs.
+/// Benchmark one subcall variant across the 4 baselines and mega specs.
 ///
-/// `pinned_db_setup` is used by `MegaEvm` rows AND by both `*_pinned` baselines
-/// (they all share the pinned revm `Database` trait). `latest_db_setup` produces
+/// `pinned_db_setup` feeds the `MegaEvm` rows and both `*_pinned` baselines
+/// (they share the pinned-revm `Database` trait); `latest_db_setup` produces
 /// the latest-version `CacheDB` for both `*_latest` rows.
 fn bench_subcall_variant(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,

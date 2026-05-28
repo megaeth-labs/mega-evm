@@ -42,10 +42,6 @@ serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-# Enable criterion's HTML reports (per-group violin plots + top-level summary
-# under `target/criterion/report/`). The workspace pins `default-features = false`,
-# so we have to opt into `plotters` (SVG rendering) and `cargo_bench_support`
-# (preserved from default) alongside `html_reports`.
 criterion = { workspace = true, features = ["html_reports", "plotters", "cargo_bench_support"] }
 hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
