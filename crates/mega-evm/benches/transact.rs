@@ -8,7 +8,7 @@
 
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
+use mega_evm::{test_utils::MemoryDatabase, MegaSpecId};
 use revm::{
     context::{result::ResultAndState, tx::TxEnvBuilder},
     primitives::{keccak256, B256},
@@ -17,13 +17,9 @@ use revm::{
 
 #[path = "common/baseline_adapters.rs"]
 mod common;
-use common::{add_baseline_rows, CallParams, LatestDbBuilder};
-
-const SPEC_IDS: &[(&str, MegaSpecId)] = &[
-    ("equivalence", MegaSpecId::EQUIVALENCE),
-    ("mini_rex", MegaSpecId::MINI_REX),
-    ("rex4", MegaSpecId::REX4),
-];
+use common::{
+    add_baseline_rows, build_mega_tx, make_mega_evm, CallParams, LatestDbBuilder, SPEC_IDS,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CALLEE: Address = address!("0000000000000000000000000000000000100001");
@@ -51,12 +47,7 @@ fn execute_mega(
     db: MemoryDatabase,
     params: &CallParams,
 ) -> ResultAndState<mega_evm::MegaHaltReason> {
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
+    let mut evm = make_mega_evm(db, spec);
     let tx = TxEnvBuilder::new()
         .caller(params.caller)
         .call(params.target)
@@ -64,10 +55,7 @@ fn execute_mega(
         .value(params.value)
         .data(params.data.clone())
         .build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-
-    let r = evm.transact(mega_tx).expect("mega transact");
+    let r = evm.transact(build_mega_tx(tx)).expect("mega transact");
     assert!(r.result.is_success(), "mega transact should succeed: {:?}", r.result);
     r
 }

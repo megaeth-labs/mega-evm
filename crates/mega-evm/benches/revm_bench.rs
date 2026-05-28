@@ -22,28 +22,20 @@
 //!
 //! New workloads must avoid touching mega-evm's per-tx resource limits
 //! (compute gas / data size / KV updates / state growth) under any spec, or the
-//! `mega_*` row will halt early and the baseline comparison will be skewed.
+//! `mega_*` row would halt early and skew the baseline comparison.
 //! Likewise, both revm versions must be able to execute the workload with their
 //! respective default hardforks — if the latest stack diverges (e.g. moves to
 //! Prague gas schedule), the `*_latest` rows have to pin spec explicitly.
 
 #![allow(missing_docs)]
 
+// `bench_transfer_multi` holds an EVM instance and runs 1000 transactions per
+// iteration — too custom to fit into the single-shot `transact_call_*`
+// adapters, so it inlines the pinned/latest revm + op-revm setup here.
+
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
-use revm::{bytecode::opcode, context::tx::TxEnvBuilder, ExecuteEvm};
-
-// Shared baseline adapters (revm_pinned / revm_latest / op_revm_pinned /
-// op_revm_latest) live in benches/common/baseline_adapters.rs so other bench
-// files can pull them in via the same `#[path = ...]` declaration.
-#[path = "common/baseline_adapters.rs"]
-mod common;
-use common::{add_baseline_rows, CallParams, LatestDbBuilder};
-
-// Imports below are only needed by the inline transfer_multi loop, which holds
-// an EVM instance and runs 1000 transactions per iteration — too custom to fit
-// into the single-shot `transact_call_*` adapters.
+use mega_evm::{test_utils::MemoryDatabase, MegaSpecId};
 use op_revm::{
     DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned,
     OpTransaction as OpTransactionPinned,
@@ -53,8 +45,8 @@ use op_revm_latest::{
     OpTransaction as OpTransactionLatest,
 };
 use revm::{
-    database::EmptyDB as EmptyDBPinned, Context as ContextPinned, MainBuilder as _,
-    MainContext as _,
+    bytecode::opcode, context::tx::TxEnvBuilder, database::EmptyDB as EmptyDBPinned,
+    Context as ContextPinned, ExecuteEvm, MainBuilder as _, MainContext as _,
 };
 use revm_latest::{
     context::tx::TxEnvBuilder as TxEnvBuilderLatest, database::EmptyDB as EmptyDBLatest,
@@ -62,18 +54,20 @@ use revm_latest::{
     MainBuilder as _, MainContext as _,
 };
 
+// Shared baseline adapters (revm_pinned / revm_latest / op_revm_pinned /
+// op_revm_latest) live in benches/common/baseline_adapters.rs so other bench
+// files can pull them in via the same `#[path = ...]` declaration.
+#[path = "common/baseline_adapters.rs"]
+mod common;
+use common::{
+    add_baseline_rows, build_mega_tx, make_mega_evm, CallParams, LatestDbBuilder, SPEC_IDS,
+};
+
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 
 const SUBCALL_TARGET_A: Address = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 const SUBCALL_TARGET_B: Address = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-
-/// Specs to benchmark against.
-const SPEC_IDS: &[(&str, MegaSpecId)] = &[
-    ("equivalence", MegaSpecId::EQUIVALENCE),
-    ("mini_rex", MegaSpecId::MINI_REX),
-    ("rex4", MegaSpecId::REX4),
-];
 
 //
 // ============================================================================
@@ -83,23 +77,14 @@ const SPEC_IDS: &[(&str, MegaSpecId)] = &[
 
 /// Execute a call to CONTRACT with the given spec, gas limit, and calldata.
 fn transact_call(spec: MegaSpecId, db: MemoryDatabase, gas_limit: u64, data: Bytes) {
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-
+    let mut evm = make_mega_evm(db, spec);
     let tx = TxEnvBuilder::new()
         .caller(CALLER)
         .call(CONTRACT)
         .gas_limit(gas_limit)
         .data(data)
         .build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-
-    let r = evm.transact(mega_tx).expect("transaction should succeed");
+    let r = evm.transact(build_mega_tx(tx)).expect("transaction should succeed");
     assert!(r.result.is_success(), "transaction should succeed: {:?}", r.result);
     black_box(r);
 }
@@ -307,21 +292,13 @@ fn bench_subcall_variant(
     for &(name, spec) in SPEC_IDS {
         group.bench_function(name, |b| {
             b.iter(|| {
-                let db = pinned_db_setup();
-                let mut context = MegaContext::new(db, spec);
-                context.modify_chain(|chain| {
-                    chain.operator_fee_scalar = Some(U256::from(0));
-                    chain.operator_fee_constant = Some(U256::from(0));
-                });
-                let mut evm = MegaEvm::new(context);
+                let mut evm = make_mega_evm(pinned_db_setup(), spec);
                 let tx = TxEnvBuilder::new()
                     .caller(CALLER)
                     .call(CONTRACT)
                     .gas_limit(SUBCALL_GAS_LIMIT)
                     .build_fill();
-                let mut mega_tx = MegaTransaction::new(tx);
-                mega_tx.enveloped_tx = Some(Bytes::new());
-                let r = evm.transact(mega_tx).expect("should succeed");
+                let r = evm.transact(build_mega_tx(tx)).expect("should succeed");
                 assert!(r.result.is_success(), "subcall should succeed");
                 black_box(r)
             })
@@ -552,15 +529,7 @@ fn bench_transfer_multi(c: &mut Criterion) {
         let targets = targets.clone();
         group.bench_function(name, |b| {
             b.iter(|| {
-                let db = make_pinned_db();
-
-                let mut context = MegaContext::new(db, spec);
-                context.modify_chain(|chain| {
-                    chain.operator_fee_scalar = Some(U256::from(0));
-                    chain.operator_fee_constant = Some(U256::from(0));
-                });
-                let mut evm = MegaEvm::new(context);
-
+                let mut evm = make_mega_evm(make_pinned_db(), spec);
                 for target in &targets {
                     let tx = TxEnvBuilder::new()
                         .caller(CALLER)
@@ -568,9 +537,7 @@ fn bench_transfer_multi(c: &mut Criterion) {
                         .value(U256::from(1))
                         .gas_limit(100_000)
                         .build_fill();
-                    let mut mega_tx = MegaTransaction::new(tx);
-                    mega_tx.enveloped_tx = Some(Bytes::new());
-                    let r = evm.transact(mega_tx).expect("transfer should succeed");
+                    let r = evm.transact(build_mega_tx(tx)).expect("transfer should succeed");
                     black_box(&r);
                 }
             })

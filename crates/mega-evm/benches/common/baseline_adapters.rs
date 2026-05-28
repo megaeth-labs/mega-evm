@@ -21,7 +21,11 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use criterion::black_box;
-use mega_evm::test_utils::MemoryDatabase;
+use mega_evm::{
+    revm::{context::TxEnv, inspector::NoOpInspector},
+    test_utils::MemoryDatabase,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+};
 use op_revm::{
     DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned,
     OpTransaction as OpTransactionPinned,
@@ -41,6 +45,36 @@ use revm_latest::{
     primitives::hardfork::SpecId as SpecIdLatest,
     Context as ContextLatest, ExecuteEvm as _, MainBuilder as _, MainContext as _,
 };
+
+/// Mega specs benchmarked alongside the 4 vanilla baselines. All three bench
+/// files use the same set so a single `cargo bench` produces comparable rows.
+pub const SPEC_IDS: &[(&str, MegaSpecId)] = &[
+    ("equivalence", MegaSpecId::EQUIVALENCE),
+    ("mini_rex", MegaSpecId::MINI_REX),
+    ("rex4", MegaSpecId::REX4),
+];
+
+/// Build a `MegaEvm` with the operator-fee scalar and constant zeroed so the
+/// rows are comparable across the 7 implementations.
+pub fn make_mega_evm(
+    db: MemoryDatabase,
+    spec: MegaSpecId,
+) -> MegaEvm<MemoryDatabase, NoOpInspector, EmptyExternalEnv> {
+    let mut context = MegaContext::new(db, spec);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+    MegaEvm::new(context)
+}
+
+/// Wrap a `TxEnv` into a `MegaTransaction` with an empty envelope, matching
+/// what the production tx-pool would attach.
+pub fn build_mega_tx(tx: TxEnv) -> MegaTransaction {
+    let mut mega_tx = MegaTransaction::new(tx);
+    mega_tx.enveloped_tx = Some(Bytes::new());
+    mega_tx
+}
 
 /// Parameters describing a single `transact()` call. Used by every adapter to
 /// avoid a long positional signature and to let callers fill only what they
@@ -66,7 +100,7 @@ impl Default for CallParams {
     }
 }
 
-/// Vanilla `revm` at the version mega-evm currently pins (27.1.0).
+/// Vanilla `revm` at the version mega-evm currently pins.
 pub fn transact_call_revm_pinned(db: MemoryDatabase, p: &CallParams) {
     let mut evm = ContextPinned::mainnet().with_db(db).build_mainnet();
     let tx = TxEnvBuilder::new()
@@ -81,7 +115,7 @@ pub fn transact_call_revm_pinned(db: MemoryDatabase, p: &CallParams) {
     black_box(r);
 }
 
-/// `op-revm` at the pinned version (8.1.0), operator fee = 0.
+/// `op-revm` at the version mega-evm currently pins, operator fee = 0.
 pub fn transact_call_op_revm_pinned(db: MemoryDatabase, p: &CallParams) {
     let mut ctx = <OpContextPinned<EmptyDBPinned>>::op().with_db(db);
     ctx.modify_chain(|chain| {
@@ -103,7 +137,7 @@ pub fn transact_call_op_revm_pinned(db: MemoryDatabase, p: &CallParams) {
     black_box(r);
 }
 
-/// Vanilla `revm` at the latest crates.io version (revm 38).
+/// Vanilla `revm` at the latest crates.io release.
 ///
 /// Spec is pinned to Cancun so the workload's multi-gigagas `gas_limit` does
 /// not trip the EIP-7825 `tx_gas_limit_cap` (2^24) that `MainContext::mainnet()`
@@ -125,7 +159,12 @@ pub fn transact_call_revm_latest(db: CacheDBLatest<EmptyDBLatest>, p: &CallParam
     black_box(r);
 }
 
-/// `op-revm` at the latest crates.io version (20.0.0), operator fee = 0.
+/// `op-revm` at the latest crates.io release, operator fee = 0.
+///
+/// No spec pin: op-revm defaults to Isthmus, which does not carry EIP-7825's
+/// `tx_gas_limit_cap`, so the multi-gigagas `gas_limit` workloads pass. If a
+/// future op-revm release inherits a tx gas cap, pin the spec here the same
+/// way `transact_call_revm_latest` does.
 pub fn transact_call_op_revm_latest(db: CacheDBLatest<EmptyDBLatest>, p: &CallParams) {
     let mut ctx = <OpContextLatest<EmptyDBLatest>>::op().with_db(db);
     ctx.modify_chain(|chain| {

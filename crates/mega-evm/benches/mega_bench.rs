@@ -19,7 +19,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{
@@ -32,18 +32,14 @@ use revm::{
 
 #[path = "common/baseline_adapters.rs"]
 mod common;
-use common::{add_baseline_rows, add_baseline_rows_suffixed, CallParams, LatestDbBuilder};
+use common::{
+    add_baseline_rows, add_baseline_rows_suffixed, build_mega_tx, make_mega_evm, CallParams,
+    LatestDbBuilder, SPEC_IDS,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 const SECONDARY: Address = address!("0000000000000000000000000000000000100003");
-
-/// Specs to benchmark against.
-const SPEC_IDS: &[(&str, MegaSpecId)] = &[
-    ("equivalence", MegaSpecId::EQUIVALENCE),
-    ("mini_rex", MegaSpecId::MINI_REX),
-    ("rex4", MegaSpecId::REX4),
-];
 
 //
 // ============================================================================
@@ -53,41 +49,23 @@ const SPEC_IDS: &[(&str, MegaSpecId)] = &[
 
 /// Execute bytecode as a contract call with the given spec and gas limit.
 fn execute(spec: MegaSpecId, db: MemoryDatabase, gas_limit: u64, data: Bytes) {
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-
+    let mut evm = make_mega_evm(db, spec);
     let tx = TxEnvBuilder::new()
         .caller(CALLER)
         .call(CONTRACT)
         .gas_limit(gas_limit)
         .data(data)
         .build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-
-    let r = evm.transact(mega_tx).expect("transaction should succeed");
+    let r = evm.transact(build_mega_tx(tx)).expect("transaction should succeed");
     assert!(r.result.is_success(), "transaction should succeed: {:?}", r.result);
     black_box(r);
 }
 
 /// Execute bytecode, allowing non-success results (e.g., for SELFDESTRUCT in disabled specs).
 fn execute_any_result(spec: MegaSpecId, db: MemoryDatabase, gas_limit: u64) {
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-
+    let mut evm = make_mega_evm(db, spec);
     let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(gas_limit).build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-
-    let r = evm.transact(mega_tx).expect("transaction should not error");
+    let r = evm.transact(build_mega_tx(tx)).expect("transaction should not error");
     black_box(r);
 }
 
@@ -733,20 +711,13 @@ fn bench_oracle_sload(c: &mut Criterion) {
                 let db = MemoryDatabase::default()
                     .account_code(ORACLE_ADDRESS, sload_bytecode.clone())
                     .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
-                let mut context = MegaContext::new(db, spec);
-                context.modify_chain(|chain| {
-                    chain.operator_fee_scalar = Some(U256::from(0));
-                    chain.operator_fee_constant = Some(U256::from(0));
-                });
-                let mut evm = MegaEvm::new(context);
+                let mut evm = make_mega_evm(db, spec);
                 let tx = TxEnvBuilder::new()
                     .caller(CALLER)
                     .call(ORACLE_ADDRESS)
                     .gas_limit(10_000_000_000)
                     .build_fill();
-                let mut mega_tx = MegaTransaction::new(tx);
-                mega_tx.enveloped_tx = Some(Bytes::new());
-                let r = evm.transact(mega_tx).expect("should succeed");
+                let r = evm.transact(build_mega_tx(tx)).expect("should succeed");
                 assert!(r.result.is_success(), "oracle sload should succeed: {:?}", r.result);
                 black_box(r);
             })
