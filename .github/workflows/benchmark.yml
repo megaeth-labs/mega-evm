@@ -259,7 +259,7 @@ jobs:
               const sign = delta > 0 ? '+' : '';
               comparisons.push({
                 delta,
-                row: `| ${name} | ${bUs} us | ${fUs} us | ${sign}${delta.toFixed(1)}% | ${icon} |`,
+                row: `| ${name} | ${bUs} µs | ${fUs} µs | ${sign}${delta.toFixed(1)}% | ${icon} |`,
               });
             }
 
