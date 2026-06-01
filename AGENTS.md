@@ -108,7 +108,7 @@ Consequently:
 MegaETH separates EVM gas into two independent dimensions tracked during execution:
 
 - **Compute gas**: Measures pure computational cost.
-  Every opcode's gas consumption is recorded via wrapped instructions (`compute_gas_ext` in `evm/instructions.rs`).
+  Every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` — `compute_gas_ext::*` for plain opcodes and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) — both invoking the shared `record_storage_compute_gas!` primitive after the opcode body completes.
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).

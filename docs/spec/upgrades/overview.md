@@ -1,5 +1,5 @@
 ---
-description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex5 with activation dates and behavioral deltas.
+description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex6 with activation dates and behavioral deltas.
 ---
 
 # Overview
@@ -109,6 +109,11 @@ Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas deten
 ### [Rex5](rex5.md)
 
 [SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection and sandbox resource accounting, precompile [compute gas](../glossary.md#compute-gas) correction, EIP-7702 [state growth](../evm/resource-accounting.md#state-growth) tracking, non-delegating metering inspection, SELFDESTRUCT beneficiary accounting.
+
+### [Rex6](rex6.md)
+
+Unstable; not yet activated.
+Unified per-opcode [gas metering order](../evm/dual-gas-model.md#gas-metering-order): every storage-affecting opcode charges storage gas before its body and records [compute gas](../glossary.md#compute-gas) exactly once after the body completes, folding the `CREATE2` memory-expansion gas into that single recording.
 
 ## How to Read These Pages
 

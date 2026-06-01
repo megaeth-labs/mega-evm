@@ -56,16 +56,22 @@ fn execute_transaction<DB: Database>(
 }
 
 /// Helper to benchmark both specs with a database setup function.
-fn bench_both_specs<DB, F>(
+fn bench_specs<DB, F>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     db_setup: F,
 ) where
     DB: Database + 'static,
     F: Fn() -> DB + 'static,
 {
-    for (name, spec) in
-        [("equivalence", MegaSpecId::EQUIVALENCE), ("mini_rex", MegaSpecId::MINI_REX)]
-    {
+    for (name, spec) in [
+        ("equivalence", MegaSpecId::EQUIVALENCE),
+        ("mini_rex", MegaSpecId::MINI_REX),
+        // REX5 vs REX6 isolates the cost of the unified gas-metering order: REX6 routes the
+        // storage-affecting opcodes (SSTORE, CALL, etc.) through the canonical
+        // charge-storage / run-body / record-compute-once path.
+        ("rex5", MegaSpecId::REX5),
+        ("rex6", MegaSpecId::REX6),
+    ] {
         group.bench_function(name, |b| {
             b.iter(|| {
                 let db = db_setup();
@@ -85,14 +91,14 @@ fn bench_both_specs<DB, F>(
 /// Benchmark empty transaction (call with no value or data).
 fn bench_empty_transaction(c: &mut Criterion) {
     let mut group = c.benchmark_group("empty_transaction");
-    bench_both_specs(&mut group, CacheDB::<EmptyDB>::default);
+    bench_specs(&mut group, CacheDB::<EmptyDB>::default);
     group.finish();
 }
 
 /// Benchmark simple ether transfer between existing accounts.
 fn bench_simple_ether_transfer(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_ether_transfer");
-    bench_both_specs(&mut group, || {
+    bench_specs(&mut group, || {
         MemoryDatabase::default()
             .account_balance(CALLER, U256::from(1000))
             .account_balance(CALLEE, U256::from(100))
@@ -150,9 +156,15 @@ fn bench_weth9_transfer(c: &mut Criterion) {
     calldata.extend_from_slice(&transfer_amount.to_be_bytes::<32>()); // amount
     let calldata = Bytes::from(calldata);
 
-    for (name, spec) in
-        [("equivalence", MegaSpecId::EQUIVALENCE), ("mini_rex", MegaSpecId::MINI_REX)]
-    {
+    for (name, spec) in [
+        ("equivalence", MegaSpecId::EQUIVALENCE),
+        ("mini_rex", MegaSpecId::MINI_REX),
+        // REX5 vs REX6 isolates the cost of the unified gas-metering order: REX6 routes the
+        // storage-affecting opcodes (SSTORE, CALL, etc.) through the canonical
+        // charge-storage / run-body / record-compute-once path.
+        ("rex5", MegaSpecId::REX5),
+        ("rex6", MegaSpecId::REX6),
+    ] {
         group.bench_function(name, |b| {
             b.iter(|| {
                 let result = execute_weth9_transfer(black_box(spec), black_box(&calldata));
