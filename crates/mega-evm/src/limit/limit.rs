@@ -418,16 +418,44 @@ impl AdditionalLimit {
         self.check_limit();
     }
 
-    /// Records REX5 EIP-7702 authority accounts that are net-new state entries.
+    /// Records REX5 EIP-7702 authority accounts that are net-new state entries — the state-growth
+    /// dimension only. Data size and KV updates for REX5 are charged upfront in `before_tx_start`
+    /// for every authorization with a recoverable authority, independent of application.
     ///
-    /// Called during pre-execution after the journal has loaded each valid authority account and
-    /// before revm writes the delegation bytecode. This cannot live in `before_tx_start()`
-    /// because the net-new check needs DB/journal state.
+    /// Runs in pre-execution after the authorization scan identifies net-new authorities and
+    /// before revm writes the delegation bytecode; the net-new check needs DB / journal state,
+    /// so this cannot live in `before_tx_start`.
     ///
-    /// This also runs `check_limit()` to latch any TX-level overflow into `has_exceeded_limit`,
-    /// which is then turned into the normal execution failure at the next frame boundary.
-    pub(crate) fn on_eip7702_authority_creations(&mut self, amount: u64) {
+    /// REX6+ replaces this with the per-applied-authority hook
+    /// [`AdditionalLimit::on_rex6_eip7702_authority_applied`], which records all three resource
+    /// dimensions in a single call.
+    ///
+    /// Latches any TX-level overflow into `has_exceeded_limit` via `check_limit`; the next frame
+    /// boundary surfaces it as the normal execution failure.
+    pub(crate) fn on_rex5_eip7702_authority_creations(&mut self, amount: u64) {
         self.state_growth.record_authority_creations(amount);
+        self.check_limit();
+    }
+
+    /// Records the resource footprint of a single *applied* EIP-7702 authorization — one that
+    /// passed the chain-id / `u64::MAX`-nonce / recoverable-authority / code gates and therefore
+    /// writes the authority account — as TX-level persistent usage across all three dimensions.
+    ///
+    /// Every applied authorization writes the authority account (delegation code + nonce bump),
+    /// so it always costs data size (+40) and a KV update (+1). A net-new authority account
+    /// additionally counts as state growth (+1) — the caller passes `creates_authority` for that.
+    /// The matching dynamic SALT account-creation gas is folded into `initial_gas` by the caller.
+    ///
+    /// REX5 splits the same accounting into two paths: data size / KV charged unconditionally in
+    /// `before_tx_start` (covers skipped authorizations too), and state growth via
+    /// [`AdditionalLimit::on_rex5_eip7702_authority_creations`]. REX6 consolidates them so only
+    /// applied authorizations pay.
+    pub(crate) fn on_rex6_eip7702_authority_applied(&mut self, creates_authority: bool) {
+        self.data_size.record_persistent_account_write();
+        self.kv_update.record_persistent_account_update();
+        if creates_authority {
+            self.state_growth.record_authority_creations(1);
+        }
         self.check_limit();
     }
 

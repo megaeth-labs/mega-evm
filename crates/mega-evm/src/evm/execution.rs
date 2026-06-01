@@ -173,6 +173,15 @@ where
     }
 }
 
+/// One EIP-7702 authorization that would actually apply, as determined by the read-only
+/// pre-application scan in [`MegaHandler::scan_applied_eip7702_authorizations`].
+struct AppliedAuthorization {
+    /// The recovered authority account the authorization delegates.
+    authority: Address,
+    /// `true` if applying the authorization materializes an account that does not yet exist.
+    creates_authority: bool,
+}
+
 impl<DB, EVM, ERROR, FRAME, ExtEnvs> MegaHandler<EVM, ERROR, FRAME>
 where
     DB: Database,
@@ -193,79 +202,168 @@ where
         })
     }
 
+    /// Read-only scan of a transaction's EIP-7702 authorization list, mirroring revm's auth-list
+    /// application order: the chain-id / `u64::MAX`-nonce / non-empty-non-7702-code gates, the
+    /// per-authority account-nonce match, and the sequential simulated-nonce tracking for repeated
+    /// authorities. Returns the authorizations that would actually apply; it does not mutate
+    /// delegation bytecode (revm's `apply_eip7702_auth_list` does that later). This is the single
+    /// shared source of the gating logic for the REX5 state-growth pass and the REX6 consolidated
+    /// accounting, so the two cannot drift.
+    ///
+    /// `caller_nonce_already_bumped` selects the caller-nonce baseline: for a call tx,
+    /// `validate_against_state_and_deduct_caller` bumps the caller's nonce by 1 before
+    /// `apply_eip7702_auth_list` checks it. A scan running after that bump (REX5, in
+    /// `pre_execution`) passes `true`; one running before it (REX6, in `validate`) passes `false`,
+    /// so a self-authorization (`authority == caller`) is compared against `caller.nonce + 1` and
+    /// matches the real application. Each net-new authority appears at most once (the simulated
+    /// nonce dedupes repeats), so callers may treat the `creates_authority` entries as a set.
+    fn scan_applied_eip7702_authorizations(
+        &self,
+        evm: &mut EVM,
+        caller_nonce_already_bumped: bool,
+    ) -> Result<Vec<AppliedAuthorization>, ERROR> {
+        let ctx = evm.ctx_mut();
+        let chain_id = ctx.cfg().chain_id;
+        let (tx, journal) = ctx.tx_journal_mut();
+        let caller = tx.caller();
+        let mut simulated_authorities = Vec::<(Address, u64)>::new();
+        let mut applied = Vec::new();
+        for authorization in tx.authorization_list() {
+            let auth_chain_id = authorization.chain_id();
+            if !auth_chain_id.is_zero() && auth_chain_id != U256::from(chain_id) {
+                continue;
+            }
+            if authorization.nonce() == u64::MAX {
+                continue;
+            }
+            let Some(authority) = authorization.authority() else {
+                continue;
+            };
+
+            let (authority_nonce, creates_authority) = if let Some(nonce) =
+                Self::simulated_authority_nonce(&simulated_authorities, authority)
+            {
+                (nonce, false)
+            } else {
+                // No-warm read: this scan is a pre-flight count and must not change the
+                // access list. Authority warming is owned by revm's authorization application;
+                // `inspect_account` keeps that boundary clean.
+                let authority_acc = journal.inspect_account(authority, true)?;
+                if let Some(bytecode) = &authority_acc.info.code {
+                    if !bytecode.is_empty() && !bytecode.is_eip7702() {
+                        continue;
+                    }
+                }
+                // Mirror the call tx caller's own nonce bump for a self-authorization, unless this
+                // scan already runs after that bump. Type-4 txs are always calls (a missing `to`
+                // is rejected at validation as `Eip7702CannotBeCreate`), so no `is_call` guard is
+                // needed — the authorization list is non-empty only for calls.
+                let effective_nonce = if !caller_nonce_already_bumped && authority == caller {
+                    authority_acc.info.nonce.saturating_add(1)
+                } else {
+                    authority_acc.info.nonce
+                };
+                (
+                    effective_nonce,
+                    authority_acc.is_empty() &&
+                        authority_acc.is_loaded_as_not_existing_not_touched(),
+                )
+            };
+
+            if authorization.nonce() != authority_nonce {
+                continue;
+            }
+
+            applied.push(AppliedAuthorization { authority, creates_authority });
+            let next_nonce = authority_nonce.saturating_add(1);
+            if let Some((_, nonce)) = simulated_authorities
+                .iter_mut()
+                .find(|(simulated_authority, _)| *simulated_authority == authority)
+            {
+                *nonce = next_nonce;
+            } else {
+                simulated_authorities.push((authority, next_nonce));
+            }
+        }
+        Ok(applied)
+    }
+
     /// Records REX5 state growth for EIP-7702 authorizations that create authority accounts.
     ///
-    /// The scan mirrors revm's auth-list validation order but stops before mutating delegation
-    /// bytecode. `before_tx_start()` cannot do this because it has no journal/DB access.
-    /// Any overflow is latched into `AdditionalLimit::has_exceeded_limit` and converted into the
-    /// normal execution failure when the first frame is initialized.
+    /// Runs in `pre_execution` (after the caller nonce bump) and charges only the state-growth
+    /// dimension; overflow is latched into `AdditionalLimit::has_exceeded_limit` and surfaced as
+    /// the normal execution failure at the first frame. The caller gates this to the REX5-only
+    /// path (REX5 on, REX6 off, type-4 tx); REX6+ accounts for every per-authorization effect in
+    /// the consolidated `validate`-time scan (`record_rex6_eip7702_authority_accounting`) instead.
     #[inline]
-    fn record_eip7702_authority_state_growth(&self, evm: &mut EVM) -> Result<(), ERROR> {
-        let ctx = evm.ctx_mut();
-        if !ctx.spec.is_enabled(MegaSpecId::REX5) || ctx.tx().tx_type() != TransactionType::Eip7702
-        {
-            return Ok(());
-        }
-
-        let chain_id = ctx.cfg().chain_id;
-        let authority_creations = {
-            let (tx, journal) = ctx.tx_journal_mut();
-            let mut authority_creations = 0;
-            let mut simulated_authorities = Vec::<(Address, u64)>::new();
-            for authorization in tx.authorization_list() {
-                let auth_chain_id = authorization.chain_id();
-                if !auth_chain_id.is_zero() && auth_chain_id != U256::from(chain_id) {
-                    continue;
-                }
-                if authorization.nonce() == u64::MAX {
-                    continue;
-                }
-                let Some(authority) = authorization.authority() else {
-                    continue;
-                };
-
-                let (authority_nonce, creates_authority) = if let Some(nonce) =
-                    Self::simulated_authority_nonce(&simulated_authorities, authority)
-                {
-                    (nonce, false)
-                } else {
-                    let authority_acc = journal.load_account_code(authority)?;
-                    if let Some(bytecode) = &authority_acc.info.code {
-                        if !bytecode.is_empty() && !bytecode.is_eip7702() {
-                            continue;
-                        }
-                    }
-                    (
-                        authority_acc.info.nonce,
-                        authority_acc.is_empty() &&
-                            authority_acc.is_loaded_as_not_existing_not_touched(),
-                    )
-                };
-
-                if authorization.nonce() != authority_nonce {
-                    continue;
-                }
-
-                if creates_authority {
-                    authority_creations += 1;
-                }
-                let next_nonce = authority_nonce.saturating_add(1);
-                if let Some((_, nonce)) = simulated_authorities
-                    .iter_mut()
-                    .find(|(simulated_authority, _)| *simulated_authority == authority)
-                {
-                    *nonce = next_nonce;
-                } else {
-                    simulated_authorities.push((authority, next_nonce));
-                }
-            }
-            authority_creations
-        };
+    fn record_rex5_eip7702_authority_state_growth(&self, evm: &mut EVM) -> Result<(), ERROR> {
+        // Pre-execution pass runs after the caller nonce bump.
+        let applied = self.scan_applied_eip7702_authorizations(evm, true)?;
+        let authority_creations =
+            applied.iter().filter(|auth| auth.creates_authority).count() as u64;
         if authority_creations > 0 {
-            ctx.additional_limit.borrow_mut().on_eip7702_authority_creations(authority_creations);
+            evm.ctx_mut()
+                .additional_limit
+                .borrow_mut()
+                .on_rex5_eip7702_authority_creations(authority_creations);
         }
 
         Ok(())
+    }
+
+    /// REX6 consolidated EIP-7702 authorization accounting.
+    ///
+    /// Runs in `validate`, before the gas-limit check and fee affordability, and is the single
+    /// source of truth for per-authorization effects — replacing the pre-REX6 split between the
+    /// ungated `before_tx_start` DataSize/KV charges and the pre-execution state-growth scan:
+    /// - charges data size +40 / KV +1 for every *applied* authority (one that passed the chain-id
+    ///   / nonce / code gates), not every recoverable one;
+    /// - charges state growth +1 for each *net-new* authority and returns its address so the caller
+    ///   can add the dynamic SALT account-creation gas to `initial_gas`;
+    /// - marks beneficiary detention when an applied authority is the block beneficiary.
+    ///
+    /// Returns the net-new authority addresses; the caller uses them both to charge SALT gas and
+    /// to avoid double-charging an auth-materialized value-transfer recipient. The caller gates
+    /// this to REX6 type-4 transactions; pre-REX6 keeps the old split frozen.
+    #[inline]
+    fn record_rex6_eip7702_authority_accounting(
+        &self,
+        evm: &mut EVM,
+    ) -> Result<Vec<Address>, ERROR> {
+        // Runs in validate, before the caller nonce bump.
+        let applied = self.scan_applied_eip7702_authorizations(evm, false)?;
+
+        // Record per-applied-authority resources + beneficiary detention. Dynamic SALT gas is
+        // charged by the caller from `materialized` (the net-new authorities).
+        let ctx = evm.ctx_mut();
+        let beneficiary = ctx.inner.block.beneficiary;
+        let mut materialized = Vec::new();
+        let mut beneficiary_applied = false;
+        for auth in applied {
+            ctx.additional_limit
+                .borrow_mut()
+                .on_rex6_eip7702_authority_applied(auth.creates_authority);
+            if auth.creates_authority {
+                // The scanner yields each net-new authority once, so `materialized` stays a set.
+                debug_assert!(!materialized.contains(&auth.authority));
+                materialized.push(auth.authority);
+            }
+            if auth.authority == beneficiary {
+                beneficiary_applied = true;
+            }
+        }
+
+        // An applied authority that is the block beneficiary mutates beneficiary state, so mark
+        // it and re-derive the REX4 beneficiary detention cap — the cap set at `on_new_tx`
+        // predates this scan and would otherwise miss the authority-side access.
+        if beneficiary_applied {
+            ctx.check_and_mark_beneficiary_balance_access(&beneficiary);
+            if let Some(limit) = ctx.volatile_data_tracker.borrow().get_compute_gas_limit() {
+                ctx.additional_limit.borrow_mut().set_compute_gas_limit(limit);
+            }
+        }
+
+        Ok(materialized)
     }
 }
 
@@ -450,7 +548,17 @@ where
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
         self.validate_against_state_and_deduct_caller(evm)?;
         self.load_accounts(evm)?;
-        self.record_eip7702_authority_state_growth(evm)?;
+        // REX5-only state-growth scan: REX6+ consolidates every per-authorization effect into the
+        // validate-time `record_rex6_eip7702_authority_accounting` instead.
+        let record_rex5_state_growth = {
+            let ctx = evm.ctx();
+            ctx.spec.is_enabled(MegaSpecId::REX5) &&
+                !ctx.spec.is_enabled(MegaSpecId::REX6) &&
+                ctx.tx().tx_type() == TransactionType::Eip7702
+        };
+        if record_rex5_state_growth {
+            self.record_rex5_eip7702_authority_state_growth(evm)?;
+        }
         self.apply_eip7702_auth_list(evm)
     }
 
@@ -499,6 +607,21 @@ where
     fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
         self.validate_env(evm)?;
         let mut initial_and_floor_gas = self.validate_initial_tx_gas(evm)?;
+
+        // REX6 only (gated on type-4 tx + REX6 spec): consolidated EIP-7702 authorization
+        // accounting. Records the per-applied-authority DataSize/KV/StateGrowth + beneficiary
+        // detention, and returns the net-new authority addresses so the caller folds the dynamic
+        // SALT account-creation gas into `initial_gas` before the gas-limit / fee-affordability
+        // check. Pre-REX6 / non-EIP-7702 produces `Vec::new()` and the SALT-gas loop is a no-op.
+        let record_rex6_accounting = {
+            let ctx = evm.ctx();
+            ctx.spec.is_enabled(MegaSpecId::REX6) && ctx.tx().tx_type() == TransactionType::Eip7702
+        };
+        let materialized_authorities = if record_rex6_accounting {
+            self.record_rex6_eip7702_authority_accounting(evm)?
+        } else {
+            Vec::new()
+        };
 
         let ctx = evm.ctx_mut();
         let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX);
@@ -581,7 +704,11 @@ where
                 }
                 TxKind::Call(address) => {
                     let new_account = !ctx.tx().value().is_zero() &&
-                        ctx.db_mut().basic(address)?.is_none_or(|acc| acc.is_empty());
+                        ctx.journal_mut().inspect_account(address, false)?.info.is_empty() &&
+                        // If an applied EIP-7702 authorization materializes this recipient, its
+                        // creation gas is charged via the authority SALT gas below — don't
+                        // double-charge the value-transfer new-account gas for the same account.
+                        !materialized_authorities.contains(&address);
                     let storage_gas =
                         if new_account { ctx.new_account_storage_gas(address) } else { Some(0) };
                     (address, storage_gas)
@@ -592,6 +719,19 @@ where
                     format!("Failed to get storage gas for callee address: {callee_address}",);
                 Self::Error::from_string(err_str)
             })?;
+
+            // REX6: dynamic SALT account-creation gas for each net-new EIP-7702 authority,
+            // folded into initial_gas so it is enforced against gas_limit / fee affordability.
+            // `materialized_authorities` is empty pre-REX6, so this is a no-op on stable specs.
+            for authority in &materialized_authorities {
+                let authority_storage_gas =
+                    ctx.new_account_storage_gas(*authority).ok_or_else(|| {
+                        Self::Error::from_string(format!(
+                            "Failed to get storage gas for EIP-7702 authority: {authority}",
+                        ))
+                    })?;
+                initial_and_floor_gas.initial_gas += authority_storage_gas;
+            }
 
             // REX5+: charge dynamic new-account storage gas for a deposit-driven caller
             // materialisation (either `tx.mint() > 0` balance increment or pre-execution
@@ -614,7 +754,7 @@ where
                 let system_address = ctx.system_address;
                 if is_deposit_like_transaction(&ctx.inner.tx, system_address) {
                     let caller_is_empty =
-                        ctx.db_mut().basic(caller)?.is_none_or(|acc| acc.is_empty());
+                        ctx.journal_mut().inspect_account(caller, false)?.info.is_empty();
                     if caller_is_empty {
                         // Self-call corner: if the deposit is a `TxKind::Call(caller)` with
                         // non-zero `value` AND the same empty caller as callee, the existing

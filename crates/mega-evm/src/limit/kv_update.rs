@@ -34,6 +34,7 @@ use crate::{MegaSpecId, MegaTransaction};
 #[derive(Debug, Clone)]
 pub(crate) struct KVUpdateTracker {
     rex4_enabled: bool,
+    rex6_enabled: bool,
     frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
@@ -41,6 +42,7 @@ impl KVUpdateTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
+            rex6_enabled: spec.is_enabled(MegaSpecId::REX6),
             frame_tracker: FrameLimitTracker::new(spec, tx_limit),
         }
     }
@@ -65,6 +67,14 @@ impl KVUpdateTracker {
     /// creating a new beneficiary account.
     pub(crate) fn record_account_update(&mut self) {
         self.record_discardable(1);
+    }
+
+    /// Records a single account update as TX-level persistent (non-discardable) KV usage.
+    ///
+    /// Used by the REX6 EIP-7702 authorization scan, which runs in `validate` before any frame
+    /// exists, so the charge cannot go through the frame-scoped `record_account_update`.
+    pub(crate) fn record_persistent_account_update(&mut self) {
+        self.frame_tracker.tx_mut().persistent_usage += 1;
     }
 
     /// Merges external persistent usage into the TX-level entry.
@@ -149,10 +159,16 @@ impl TxRuntimeLimit for KVUpdateTracker {
     ///
     /// All recorded as pre-frame (non-discardable) since no frame exists yet.
     fn before_tx_start(&mut self, tx: &MegaTransaction) {
-        // EIP-7702 authority account updates (non-discardable)
-        for authorization in tx.authorization_list() {
-            if authorization.authority().is_some() {
-                self.frame_tracker.tx_mut().persistent_usage += 1;
+        // EIP-7702 authority account updates (non-discardable).
+        //
+        // Pre-REX6: charged here for every recoverable authority, including ones that fail the
+        // application gates. REX6+ moves this into the journal-aware authorization scan in
+        // `validate` so only *applied* authorities are charged; skip here.
+        if !self.rex6_enabled {
+            for authorization in tx.authorization_list() {
+                if authorization.authority().is_some() {
+                    self.frame_tracker.tx_mut().persistent_usage += 1;
+                }
             }
         }
 

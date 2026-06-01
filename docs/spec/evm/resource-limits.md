@@ -155,6 +155,24 @@ Each resource dimension deducts only the pre-frame items relevant to it:
 
 These deductions ensure that pre-frame costs reduce the budget available to the first call frame, preventing transactions from front-loading pre-frame usage to escape per-frame limits.
 
+<details>
+<summary>Rex6 (unstable): EIP-7702 authority accounting moves to validation and adds dynamic SALT account-creation gas</summary>
+
+#### Authority State Growth Resolution
+
+Pre-Rex6, the state-growth contribution of EIP-7702 authorizations that create previously non-existent authority accounts is resolved during pre-execution, after the caller nonce bump.
+
+Under Rex6, a node MUST resolve this contribution during transaction validation, before the gas-limit and fee-affordability checks.
+The set of authorities and the per-authority effects are derived from the same applied-authorization scan that drives the data-size and KV-update narrowing in [Resource Accounting](resource-accounting.md).
+
+#### Dynamic Authority Account-Creation Gas
+
+Under Rex6, for each _applied_ EIP-7702 authorization that materializes a previously non-existent authority account, a node MUST charge dynamic new-account storage gas for that authority using the same SALT bucket pricing as other new-account materialization paths.
+This charge MUST be folded into the transaction's intrinsic gas so that it is deducted before the first call frame and enforced against the gas limit and fee affordability.
+A node MUST NOT charge this new-account gas twice when a value-transferring call materializes the same account that an applied authorization materializes.
+
+</details>
+
 ## Constants
 
 | Constant                   | Value       | Description                                     |
@@ -199,3 +217,5 @@ Including failed transactions ensures the sender always pays for consumed resour
 - [Rex](../upgrades/rex.md) changed the stable runtime transaction-level limits to `TX_COMPUTE_GAS_LIMIT = 200,000,000`, `TX_DATA_LIMIT = 13,107,200`, `TX_KV_UPDATE_LIMIT = 500,000`, and introduced state-growth limits.
 - [Rex3](../upgrades/rex3.md) retained the stable resource-limit set.
 - [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource costs (always deducted before execution) are now reflected in the top-level frame budget before it is forwarded to child frames.
+- Rex5 (**unstable**) — added EIP-7702 authority state-growth tracking for net-new authority accounts, resolved during pre-execution.
+- Rex6 (**unstable**) — moved EIP-7702 authority state-growth resolution from pre-execution to validation, and added dynamic SALT account-creation gas for each net-new applied authority to the pre-frame intrinsic gas deduction.

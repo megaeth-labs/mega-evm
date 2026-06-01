@@ -72,6 +72,15 @@ A node MUST apply beneficiary gas detention with cap `BENEFICIARY_DETENTION_CAP`
 
 `SELFDESTRUCT` targeting the beneficiary MUST also trigger beneficiary gas detention.
 
+<details>
+<summary>Rex6 (unstable): applied EIP-7702 authority equal to the beneficiary triggers detention</summary>
+
+Under Rex6, a node MUST apply beneficiary gas detention when an _applied_ EIP-7702 authorization — one that passes the chain-id, nonce, and code application gates and therefore writes the authority account — has an authority address equal to the block beneficiary.
+Applying such an authorization mutates beneficiary state (nonce and delegation code), so the node MUST mark beneficiary access and re-derive the effective compute-gas detention cap during transaction validation, even though no opcode in the list above was executed.
+A skipped authorization whose authority equals the beneficiary MUST NOT trigger detention.
+
+</details>
+
 #### Oracle Access
 
 A node MUST apply oracle gas detention with cap `ORACLE_DETENTION_CAP` when a transaction performs `SLOAD` against the storage of the [oracle contract](../system-contracts/oracle.md).
@@ -181,3 +190,4 @@ Gas detention semantics evolved across specs:
 - [Rex1](../upgrades/rex1.md) — reset detained compute gas limit between transactions in the same block
 - [Rex3](../upgrades/rex3.md) — raised oracle cap to 20M and changed oracle detection from CALL-based to SLOAD-based
 - [Rex4](../upgrades/rex4.md) — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior
+- Rex6 (**unstable**) — adds a beneficiary-detention trigger for an applied EIP-7702 authorization whose authority equals the block beneficiary

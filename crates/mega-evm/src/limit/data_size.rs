@@ -60,6 +60,7 @@ pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAG
 pub(crate) struct DataSizeTracker {
     rex4_enabled: bool,
     rex5_enabled: bool,
+    rex6_enabled: bool,
     frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
@@ -68,6 +69,7 @@ impl DataSizeTracker {
         Self {
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
             rex5_enabled: spec.is_enabled(MegaSpecId::REX5),
+            rex6_enabled: spec.is_enabled(MegaSpecId::REX6),
             frame_tracker: FrameLimitTracker::new(spec, tx_limit),
         }
     }
@@ -107,6 +109,14 @@ impl DataSizeTracker {
     /// creating a new beneficiary account.
     pub(crate) fn record_account_write(&mut self) {
         self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+    }
+
+    /// Records an account info write (40 bytes) as TX-level persistent (non-discardable) data.
+    ///
+    /// Used by the REX6 EIP-7702 authorization scan, which runs in `validate` before any frame
+    /// exists, so the charge cannot go through the frame-scoped `record_account_write`.
+    pub(crate) fn record_persistent_account_write(&mut self) {
+        self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
     }
 
     /// Merges external persistent usage into the TX-level entry.
@@ -209,10 +219,17 @@ impl TxRuntimeLimit for DataSizeTracker {
         size += tx.authorization_list_len() as u64 * AUTHORIZATION_SIZE;
         self.frame_tracker.tx_mut().persistent_usage += size;
 
-        // EIP-7702 authority account updates (non-discardable)
-        for authorization in tx.authorization_list() {
-            if authorization.authority().is_some() {
-                self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+        // EIP-7702 authority account updates (non-discardable).
+        //
+        // Pre-REX6: charged here for every authorization with a recoverable authority, even ones
+        // that fail the chain-id / nonce / code application gates and never write the account.
+        // REX6+ moves this charge into the journal-aware authorization scan in `validate` so only
+        // *applied* authorities are charged; skip it here.
+        if !self.rex6_enabled {
+            for authorization in tx.authorization_list() {
+                if authorization.authority().is_some() {
+                    self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+                }
             }
         }
 

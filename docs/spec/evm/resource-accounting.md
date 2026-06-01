@@ -120,6 +120,21 @@ If the same account is updated multiple times within the same call frame — inc
 
 </details>
 
+<details>
+<summary>Rex6 (unstable): EIP-7702 authority account updates narrowed to applied authorizations</summary>
+
+#### Applied-Authorization Narrowing for Data Size
+
+Pre-Rex6, a node counts one `ACCOUNT_UPDATE_DATA_SIZE` authority account update for every authorization whose authority address is recoverable, including authorizations that are later skipped by the chain-id, nonce, or code application gates.
+
+Under Rex6, a node MUST count the `ACCOUNT_UPDATE_DATA_SIZE` authority account update only for an _applied_ authorization — one that passes all application gates and therefore writes the authority account.
+A node MUST NOT count a skipped authorization toward `authority_update_count`.
+The per-record `AUTHORIZATION_DATA_SIZE × authorization_count` contribution is unchanged and still counts every authorization in the list.
+
+When multiple authorizations target the same authority, a node MUST evaluate them sequentially against the authority nonce and MUST count each applied authorization independently.
+
+</details>
+
 ### KV Updates
 
 #### Definition
@@ -153,6 +168,19 @@ The following contributions MUST be tracked within call frames and MUST be disca
 
 Within a single call frame, a node MUST deduplicate caller account updates for KV-update tracking in the same way it does for data-size tracking.
 When a CALL with value or CREATE occurs, the caller's update MUST be counted only if it has not already been counted in the current call frame.
+
+</details>
+
+<details>
+<summary>Rex6 (unstable): EIP-7702 authority updates narrowed to applied authorizations</summary>
+
+#### Applied-Authorization Narrowing for KV Updates
+
+Pre-Rex6, a node counts one authority KV update for every authorization with a recoverable authority, including authorizations that are skipped by the application gates.
+
+Under Rex6, a node MUST count one authority KV update only for each _applied_ authorization — one that passes the chain-id, nonce, and code gates and writes the authority account — mirroring the data-size narrowing above.
+A node MUST NOT count a skipped authorization.
+When multiple authorizations target the same authority, each applied authorization MUST be counted independently.
 
 </details>
 
@@ -228,3 +256,4 @@ This page describes the current accounting behavior.
 
 - [Rex4](../upgrades/rex4.md) — introduced per-call-frame runtime budgets for all four resource dimensions.
 - [Rex5](../upgrades/rex5.md) (**unstable**) — corrected caller-account update deduplication: pre-Rex5, the caller's `ACCOUNT_UPDATE_DATA_SIZE` (data size) and KV-update count were re-charged on every value-transferring sub-call or create from the same parent frame because the `target_updated` flag was never set after the first charge; Rex5 marks the flag after the first charge so subsequent operations from the same parent frame do not re-count the caller account.
+- Rex6 (**unstable**) — narrowed the EIP-7702 authority data-size and KV-update charges from every recoverable authorization to only _applied_ authorizations: pre-Rex6, the `ACCOUNT_UPDATE_DATA_SIZE` and KV update were charged for every authorization with a recoverable authority, including ones later skipped by the chain-id, nonce, or code application gates; Rex6 charges them only for authorizations that pass all gates and write the authority account.
