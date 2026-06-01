@@ -2,11 +2,8 @@
 //! files to compare mega-evm against vanilla revm and op-revm at both the
 //! pinned (currently depended) and latest crates.io versions.
 //!
-//! Each bench file pulls this in with:
-//! ```ignore
-//! #[path = "common/baseline_adapters.rs"]
-//! mod common;
-//! ```
+//! Each bench file pulls this in with a plain `mod common;` (resolved via the
+//! standard `common/mod.rs` sibling-folder lookup).
 //!
 //! Each criterion bench target compiles as its own binary, so this module
 //! gets compiled once per target.
@@ -16,7 +13,7 @@
 //! already pulls the chosen `revm` version transitively.
 
 #![allow(dead_code)] // each bench target picks the subset of adapters it needs
-#![allow(unreachable_pub)] // included via `#[path = "..."]`, so `pub` items appear unreachable in lint terms
+#![allow(unreachable_pub)] // included as a shared bench module, so `pub` items appear unreachable in lint terms
 
 use alloy_primitives::{Address, Bytes, U256};
 use criterion::black_box;

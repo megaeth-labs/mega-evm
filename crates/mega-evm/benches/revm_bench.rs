@@ -55,8 +55,7 @@ use revm_latest::{
 };
 
 // Shared baseline adapters live alongside this file under `common/`; the other
-// bench files include them via the same `#[path = ...]` declaration.
-#[path = "common/baseline_adapters.rs"]
+// bench files include them via the same plain `mod common;` declaration.
 mod common;
 use common::{
     add_baseline_rows, build_mega_tx, make_mega_evm, CallParams, LatestDbBuilder, SPEC_IDS,
@@ -446,6 +445,8 @@ fn bench_transfer_multi(c: &mut Criterion) {
 
     group.bench_function("revm_latest", |b| {
         b.iter(|| {
+            // Pin Cancun for parity with `transact_call_revm_latest`: keeps the
+            // default Osaka spec's EIP-7825 `tx_gas_limit_cap` out of the picture.
             let mut evm = ContextLatest::mainnet()
                 .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecIdLatest::CANCUN))
                 .with_db(make_latest_db())
@@ -537,6 +538,7 @@ fn bench_transfer_multi(c: &mut Criterion) {
                         .gas_limit(100_000)
                         .build_fill();
                     let r = evm.transact(build_mega_tx(tx)).expect("transfer should succeed");
+                    assert!(r.result.is_success(), "mega transfer should succeed: {:?}", r.result);
                     black_box(&r);
                 }
             })

@@ -31,7 +31,6 @@ use revm::{
     ExecuteEvm,
 };
 
-#[path = "common/baseline_adapters.rs"]
 mod common;
 use common::{
     add_baseline_rows, add_baseline_rows_suffixed, build_mega_tx, make_mega_evm, CallParams,

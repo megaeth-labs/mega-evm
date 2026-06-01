@@ -45,11 +45,11 @@ thiserror.workspace = true
 criterion = { workspace = true, features = ["html_reports", "plotters", "cargo_bench_support"] }
 hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
-op_revm_latest = { package = "op-revm", version = "20.0.0", default-features = false, features = ["dev", "serde", "std"] }
+op-revm-latest = { package = "op-revm", version = "20.0.0", default-features = false, features = ["dev", "serde", "std"] }
 rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors = { workspace = true, features = ["std"] }
-# Pin to the revm version `op_revm_latest` depends on so both `_latest` baselines share one revm tree.
-revm_latest = { package = "revm", version = "38.0.0", default-features = false, features = ["dev", "serde", "std"] }
+# Pin to the revm version `op-revm-latest` depends on so both `_latest` baselines share one revm tree.
+revm-latest = { package = "revm", version = "38.0.0", default-features = false, features = ["dev", "serde", "std"] }
 serde_json.workspace = true
 sha2.workspace = true
 
