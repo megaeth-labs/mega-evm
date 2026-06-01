@@ -59,6 +59,10 @@ std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
 test-utils = []
 
 [[bench]]
+name = "attack_replay"
+harness = false
+
+[[bench]]
 name = "block_bench"
 harness = false
 

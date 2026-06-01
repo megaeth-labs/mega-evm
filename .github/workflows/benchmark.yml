@@ -19,7 +19,11 @@ jobs:
   benchmark:
     name: Criterion performance check
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Cold compile of revm 27 + revm 38 + op-revm 8 + op-revm 20 plus running
+    # 6 bench targets twice (feature + baseline checkout) exceeded 60 min the
+    # first time. setup-rust-toolchain's cache shrinks subsequent runs, but the
+    # first run on a new branch and after dep churn still needs more room.
+    timeout-minutes: 120
     if: >-
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request &&
@@ -156,10 +160,83 @@ jobs:
               return;
             }
 
+            // ----------------------------------------------------------------
+            // Baseline gap section (within HEAD commit):
+            // for every group containing `revm_pinned`, show how each later
+            // row scales relative to it. Answers "how far is mega from
+            // vanilla revm on this workload, right now" — orthogonal to the
+            // PR-base vs PR-head regression table below.
+            // ----------------------------------------------------------------
+            function formatTime(ns) {
+              if (ns >= 1_000_000) return (ns / 1_000_000).toFixed(2) + ' ms';
+              if (ns >= 1_000) return (ns / 1_000).toFixed(2) + ' µs';
+              return ns.toFixed(0) + ' ns';
+            }
+
+            const BASELINE_ROW = 'revm_pinned';
+            const ROW_ORDER = [
+              'revm_pinned',
+              'revm_latest',
+              'op_revm_pinned',
+              'op_revm_latest',
+              'equivalence',
+              'mini_rex',
+              'rex',
+              'rex1',
+              'rex2',
+              'rex3',
+              'rex4',
+              'rex5',
+            ];
+
+            // Criterion's --output-format bencher emits names like
+            // "snailtracer/revm_pinned" (group/row). Group can itself contain
+            // a `/` (e.g. block_executor_mixed_txs/rex4/10_txs), so treat the
+            // *last* segment as the row and everything before as the group.
+            const groups = {};
+            for (const [fullName, data] of Object.entries(feature)) {
+              const slash = fullName.lastIndexOf('/');
+              if (slash <= 0) continue;
+              const group = fullName.slice(0, slash);
+              const row = fullName.slice(slash + 1);
+              if (!groups[group]) groups[group] = {};
+              groups[group][row] = data.ns;
+            }
+
+            let baselineGap = '';
+            const groupNames = Object.keys(groups).sort();
+            for (const group of groupNames) {
+              const rows = groups[group];
+              const base = rows[BASELINE_ROW];
+              if (base === undefined) continue; // skip groups without a revm baseline
+              const ordered = ROW_ORDER.filter((r) => rows[r] != null);
+              const extras = Object.keys(rows).filter((r) => !ROW_ORDER.includes(r)).sort();
+              const list = ordered.concat(extras);
+
+              baselineGap += `\n### \`${group}\`\n\n`;
+              baselineGap += '| spec | time | × vs `revm_pinned` |\n';
+              baselineGap += '|------|------|--------------------|\n';
+              for (const row of list) {
+                const ns = rows[row];
+                const ratio = ns / base;
+                const ratioStr = ratio.toFixed(2) + '×';
+                const marker = row === BASELINE_ROW ? ' (baseline)' : '';
+                baselineGap += `| \`${row}\` | ${formatTime(ns)} | ${ratioStr}${marker} |\n`;
+              }
+            }
+
             let body = '## Criterion Benchmark Comparison\n\n';
             const featureSha = '${{ steps.baseline.outputs.feature_sha }}';
             body += `> Comparing [\`baseline\`](${context.payload.repository.html_url}/commit/${{ steps.baseline.outputs.commit }})`;
             body += ` → [\`feature\`](${context.payload.repository.html_url}/commit/${featureSha})\n\n`;
+
+            if (baselineGap) {
+              body += '### Baseline gap (HEAD only — how far is each EVM layer from `revm_pinned`)\n';
+              body += '\n_`rex4` is the current production spec — that\'s the row to read for "user-visible mega gap". The other rows are diagnostic: they show which layer adds cost._\n';
+              body += baselineGap;
+              body += '\n---\n\n';
+              body += '### PR-base → PR-head regression check\n\n';
+            }
 
             let regressions = 0;
             let warnings = 0;
@@ -182,7 +259,7 @@ jobs:
               const sign = delta > 0 ? '+' : '';
               comparisons.push({
                 delta,
-                row: `| ${name} | ${bUs} us | ${fUs} us | ${sign}${delta.toFixed(1)}% | ${icon} |`,
+                row: `| ${name} | ${bUs} µs | ${fUs} µs | ${sign}${delta.toFixed(1)}% | ${icon} |`,
               });
             }
 
