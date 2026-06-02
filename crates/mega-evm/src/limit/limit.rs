@@ -71,10 +71,19 @@ use super::LimitCheck;
 /// the legacy `gas.limit()` inflation with a per-frame compute gas cap and burn-on-return.
 #[derive(Debug)]
 pub struct AdditionalLimit {
-    /// A flag to indicate if the limit has been exceeded. Once set, the current usage values
-    /// in individual trackers may not be reliable because subsequent frames will be reverted
-    /// and their discardable usage will be dropped.
-    pub has_exceeded_limit: LimitCheck,
+    /// Carries the tx's current limit-check verdict.
+    ///
+    /// Once stamped to a non-[`LimitCheck::WithinLimit`] value, the sub-tracker pass in
+    /// [`check_limit`](Self::check_limit) is bypassed and individual tracker usage values may
+    /// no longer be reliable (subsequent frames revert and their discardable usage is dropped).
+    /// Legitimate writers: [`check_limit`](Self::check_limit) (latches `ExceedsLimit`),
+    /// [`mark_exempt`](Self::mark_exempt) (stamps `Exempt`),
+    /// [`reset`](Self::reset) (clears to `WithinLimit`), and
+    /// [`before_frame_return_result`](Self::before_frame_return_result) (absorbs a frame-local
+    /// `ExceedsLimit` back to `WithinLimit`). Everything else reads via
+    /// [`check_limit`](Self::check_limit) or
+    /// [`exceeded_limit`](LimitCheck::exceeded_limit) / [`is_exempt`](LimitCheck::is_exempt).
+    pub(crate) has_exceeded_limit: LimitCheck,
 
     /// The total remaining gas after the limit exceeds.
     pub rescued_gas: u64,
@@ -166,6 +175,39 @@ impl AdditionalLimit {
         self.data_size.reset();
         self.kv_update.reset();
         self.storage_call_stipend.reset();
+    }
+
+    /// Test-only setter for [`has_exceeded_limit`](Self::has_exceeded_limit). Bypasses every
+    /// invariant maintained by the normal write paths (sticky `Exempt`, sub-tracker latching,
+    /// frame-local absorb). Integration tests use this to construct specific pre-latched states
+    /// — production code must not.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn set_has_exceeded_limit_for_test(&mut self, state: LimitCheck) {
+        self.has_exceeded_limit = state;
+    }
+
+    /// Marks the current transaction as exempt from `MegaETH` per-tx resource metering by stamping
+    /// `has_exceeded_limit = LimitCheck::Exempt`. REX6+ uses this for system-originated
+    /// transactions (see [`crate::is_system_originated`]); cleared by [`reset`](Self::reset).
+    ///
+    /// `Exempt` is sticky: [`check_limit`](Self::check_limit) short-circuits on it, so no later
+    /// sub-tracker overflow can latch over it, and every direct read of `has_exceeded_limit`
+    /// observes the exemption as "not exceeded" via
+    /// [`exceeded_limit`](LimitCheck::exceeded_limit). The host storage-gas charging sites
+    /// additionally consult [`is_exempt`](LimitCheck::is_exempt) to charge the SALT-unscaled
+    /// cost, since SALT-scaled storage gas is charged to interpreter gas and is not tracked here.
+    ///
+    /// `current_call_remaining_*` queries (compute gas, data size, KV updates, state growth) still
+    /// report `limit − usage` against the configured limit while exempt, but the limit is not
+    /// enforced — so a caller that uses these values to make admission or sizing decisions for an
+    /// exempt tx will get a number that is not load-bearing. Today's consumers
+    /// (`MegaLimitControl.remainingComputeGas`, the `KeylessDeploy` sandbox sub-limits, oracle
+    /// hint precompile) are unreachable from a system-originated tx; revisit this if a future
+    /// system contract joins the mega whitelist and would consult them.
+    #[inline]
+    pub(crate) fn mark_exempt(&mut self) {
+        self.has_exceeded_limit = LimitCheck::Exempt;
     }
 
     /// Gets the usage of the additional limits.
@@ -302,8 +344,14 @@ impl AdditionalLimit {
     /// and which specific limit was exceeded if any.
     #[inline]
     pub fn check_limit(&mut self) -> LimitCheck {
-        // short circuit if the limit has already been exceeded
-        if self.has_exceeded_limit.exceeded_limit() {
+        // Sticky short-circuit: `Exempt` (REX6+ system-originated tx; usage is still accumulated
+        // by individual trackers for `get_usage` and block-level accounting, only the halt
+        // decision is suppressed) and already-latched `ExceedsLimit` both bypass the sub-tracker
+        // pass. For `Exempt` this also neutralizes gas detention (which runs through
+        // `compute_gas.check_limit()` below), so protocol-mandated execution can never halt on
+        // metering — e.g. when SALT buckets grow. The standard EVM `gas_limit` remains the
+        // runaway guard.
+        if !self.has_exceeded_limit.within_limit() {
             return self.has_exceeded_limit;
         }
 
@@ -611,7 +659,9 @@ impl AdditionalLimit {
 
         if let InterpreterAction::Return(interpreter_result) = action {
             if frame.data.is_create() {
-                // if the limit has already been exceeded, return early
+                // Fast-path: a TX-level limit was latched earlier; pick it up without re-running
+                // sub-tracker checks. Under `Exempt`, the predicate is false, so the exemption
+                // passes through unchanged.
                 if self.has_exceeded_limit.exceeded_limit() {
                     let output = self.has_exceeded_limit.revert_data();
                     mark_interpreter_result_as_exceeding_limit(
@@ -622,8 +672,8 @@ impl AdditionalLimit {
                     return;
                 }
 
-                // if the limit has been exceeded, we mark the interpreter result as
-                // exceeding the limit
+                // The sub-tracker `after_frame_run` calls above may have recorded new usage; run
+                // a fresh check to catch overflow first detected at this frame end.
                 if self.check_limit().exceeded_limit() {
                     let output = self.has_exceeded_limit.revert_data();
                     mark_interpreter_result_as_exceeding_limit(
@@ -849,5 +899,73 @@ pub(crate) fn mark_frame_result_as_exceeding_limit(
                 output,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod metering_exemption_tests {
+    use super::*;
+
+    /// Tiny per-dimension limits so a single recording trivially exceeds them.
+    fn tiny_limits() -> EvmTxRuntimeLimits {
+        EvmTxRuntimeLimits {
+            tx_data_size_limit: 1,
+            tx_kv_updates_limit: 1,
+            tx_compute_gas_limit: 1,
+            tx_state_growth_limit: 1,
+            block_env_access_compute_gas_limit: u64::MAX,
+            oracle_access_compute_gas_limit: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn test_metering_enforced_when_not_exempt() {
+        // Default (non-exempt): halted once compute gas exceeds the (tiny) limit. The REX6 ×
+        // system-origin gate that would stamp `Exempt` lives in `MegaContext::on_new_tx`; here we
+        // exercise the tracker directly.
+        let mut al = AdditionalLimit::new(MegaSpecId::REX6, tiny_limits());
+        assert!(!al.record_compute_gas(1_000_000), "non-exempt tx must report exceeded limit");
+        assert!(al.check_limit().exceeded_limit());
+    }
+
+    #[test]
+    fn test_metering_bypassed_when_exempt() {
+        // When the system-tx exemption is stamped, `check_limit` short-circuits on the sticky
+        // `Exempt` state, covering the four dimensions *and* gas detention, so the same
+        // over-limit usage never halts. Usage is still recorded (only the halt decision is
+        // suppressed).
+        let mut al = AdditionalLimit::new(MegaSpecId::REX6, tiny_limits());
+        al.mark_exempt();
+        assert!(al.record_compute_gas(1_000_000), "exempt tx must not report exceeded limit");
+        assert!(!al.check_limit().exceeded_limit());
+        assert!(al.check_limit().is_exempt(), "check_limit must surface the sticky Exempt state");
+        assert!(al.get_usage().compute_gas >= 1_000_000, "usage is still accumulated while exempt");
+    }
+
+    #[test]
+    fn test_detained_compute_gas_does_not_halt_when_exempt() {
+        // Gas detention lowers the detained compute-gas limit; enforcement runs through the same
+        // `check_limit` chokepoint, so the exemption neutralizes detention too.
+        let mut al =
+            AdditionalLimit::new(MegaSpecId::REX6, EvmTxRuntimeLimits::from_spec(MegaSpecId::REX6));
+        al.mark_exempt();
+        al.set_compute_gas_limit(1); // detain hard
+        assert!(al.record_compute_gas(10_000_000), "exempt tx must ignore gas detention");
+        assert!(!al.check_limit().exceeded_limit());
+    }
+
+    #[test]
+    fn test_reset_clears_exempt() {
+        // The sticky `Exempt` state must not leak to the next transaction reusing the same tracker.
+        let mut al = AdditionalLimit::new(MegaSpecId::REX6, tiny_limits());
+        al.mark_exempt();
+        assert!(al.has_exceeded_limit.is_exempt());
+        al.reset();
+        assert!(!al.has_exceeded_limit.is_exempt(), "reset must clear the sticky Exempt state");
+        assert!(
+            al.has_exceeded_limit.within_limit(),
+            "reset must restore the WithinLimit baseline"
+        );
+        assert!(!al.record_compute_gas(1_000_000), "after reset, metering is enforced again");
     }
 }

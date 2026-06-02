@@ -164,12 +164,12 @@ fn test_rex5_exceeded_tx_limit_wins_over_call_too_deep() {
     // `before_tx_start` without depending on its internal API.
     let mut additional =
         AdditionalLimit::new(MegaSpecId::REX5, EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5));
-    additional.has_exceeded_limit = LimitCheck::ExceedsLimit {
+    additional.set_has_exceeded_limit_for_test(LimitCheck::ExceedsLimit {
         kind: LimitKind::KVUpdate,
         limit: 0,
         used: 1,
         frame_local: false,
-    };
+    });
     context.additional_limit = Rc::new(RefCell::new(additional));
 
     let mut evm = MegaEvm::new(context);

@@ -265,6 +265,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn sstore_set_storage_gas(&mut self, address: Address, key: U256) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
+        // System-tx exemption (REX6+ `LimitCheck::Exempt` stamp): charge un-scaled (min-bucket)
+        // storage gas so the write never depends on SALT bucket capacity and can never OOG as
+        // buckets grow. This path also avoids querying the SALT env.
+        if self.additional_limit.borrow().has_exceeded_limit.is_exempt() {
+            return Some(self.dynamic_storage_gas_cost.borrow().sstore_set_gas_unscaled());
+        }
         let result = self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(address, key);
         result
             .map_err(|e| {
@@ -276,6 +282,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn new_account_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
+        if self.additional_limit.borrow().has_exceeded_limit.is_exempt() {
+            return Some(self.dynamic_storage_gas_cost.borrow().new_account_gas_unscaled());
+        }
         let result = self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(address);
         result
             .map_err(|e| {
@@ -287,6 +296,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn create_contract_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
+        if self.additional_limit.borrow().has_exceeded_limit.is_exempt() {
+            return Some(self.dynamic_storage_gas_cost.borrow().create_contract_gas_unscaled());
+        }
         let result = self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(address);
         result
             .map_err(|e| {

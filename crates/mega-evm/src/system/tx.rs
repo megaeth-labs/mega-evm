@@ -98,3 +98,116 @@ pub fn is_deposit_like_transaction(tx: &MegaTransaction, system_address: Address
     // Check if it's from the mega system address
     is_mega_system_transaction_with(tx, system_address)
 }
+
+/// Checks if a transaction is *system-originated*: produced by the protocol itself or by the
+/// sequencer acting as the system address, as opposed to any user transaction.
+///
+/// A transaction is system-originated when either:
+/// - its caller is the EIP-2935 / EIP-4788 system address (`0xff..fe`), which is how mega-evm's own
+///   pre-block system calls (block-hash, beacon-root, `SequencerRegistry`) are issued; or
+/// - it is a mega system transaction: a legacy transaction from `system_address` calling a
+///   whitelisted contract (see [`is_mega_system_transaction_with`]).
+///
+/// Neither branch can be produced by a user: `0xff..fe` has no key and is only ever set as
+/// caller by the protocol's own pre-block helpers, and matching `system_address` requires the
+/// protocol's deposit-injection path. In particular this deliberately does **not** match an
+/// arbitrary user deposit transaction (`DEPOSIT_TRANSACTION_TYPE`), unlike
+/// [`is_deposit_like_transaction`].
+///
+/// REX6+ uses this to exempt system-originated execution from `MegaETH`'s per-transaction resource
+/// metering (SALT-scaled storage gas, the four `AdditionalLimit` dimensions, and gas detention),
+/// so protocol-mandated state changes can never fail due to metering — e.g. when SALT buckets
+/// grow. The standard EVM `gas_limit` still bounds the work as a runaway guard.
+///
+/// The exemption is evaluated in `MegaContext::on_new_tx`, which runs *after* `before_run` has
+/// already deposit-promoted a mega system tx (stamping [`MEGA_SYSTEM_TRANSACTION_SOURCE_HASH`] and
+/// flipping `tx_type()` to a deposit). The source-hash branch below therefore carries the match for
+/// promoted txs; the `is_mega_system_transaction_with` branch covers the pre-promotion shape for
+/// any other caller. Both the source hash and the system-address+whitelist gate are protocol-set,
+/// so a user deposit (different source hash, non-system caller) is never matched — unlike
+/// [`is_deposit_like_transaction`].
+pub fn is_system_originated(tx: &MegaTransaction, system_address: Address) -> bool {
+    // Internal pre-block system calls (EIP-2935 / EIP-4788 / SequencerRegistry) use `0xff..fe` and
+    // run via `run_system_call`, so they are never deposit-promoted.
+    tx.caller() == alloy_eips::eip4788::SYSTEM_ADDRESS ||
+        // A mega system tx that `before_run` has already promoted to a deposit.
+        tx.deposit.source_hash == MEGA_SYSTEM_TRANSACTION_SOURCE_HASH ||
+        // A mega system tx in its original (pre-promotion) legacy shape.
+        is_mega_system_transaction_with(tx, system_address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::TxKind;
+
+    const EIP_SYSTEM_ADDRESS: Address = alloy_eips::eip4788::SYSTEM_ADDRESS;
+    const USER: Address = address!("0000000000000000000000000000000000009999");
+    const NON_WHITELIST: Address = address!("00000000000000000000000000000000000000ab");
+
+    /// Builds a legacy (type 0x0) call transaction with the given caller and callee.
+    fn legacy_call_tx(caller: Address, to: Address) -> MegaTransaction {
+        let mut tx = MegaTransaction::default();
+        tx.base.tx_type = 0;
+        tx.base.caller = caller;
+        tx.base.kind = TxKind::Call(to);
+        tx
+    }
+
+    #[test]
+    fn test_is_system_originated_matches_eip_system_address_caller() {
+        // The protocol's own pre-block system calls (EIP-2935 / EIP-4788 / SequencerRegistry)
+        // use `0xff..fe` as caller; it matches regardless of the resolved system address or target.
+        let tx = legacy_call_tx(EIP_SYSTEM_ADDRESS, USER);
+        assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
+        assert!(is_system_originated(&tx, USER));
+    }
+
+    #[test]
+    fn test_is_system_originated_matches_mega_system_tx() {
+        // Sequencer mega system tx: legacy tx from the system address to a whitelisted contract.
+        let tx = legacy_call_tx(MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS);
+        assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
+    }
+
+    #[test]
+    fn test_is_system_originated_rejects_system_caller_to_non_whitelist() {
+        // System address calling a non-whitelisted contract is not a mega system tx.
+        let tx = legacy_call_tx(MEGA_SYSTEM_ADDRESS, NON_WHITELIST);
+        assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
+    }
+
+    #[test]
+    fn test_is_system_originated_matches_promoted_mega_system_tx() {
+        // `before_run` promotes a mega system tx to a deposit (stamping the source hash and
+        // flipping `tx_type()`) *before* `on_new_tx` evaluates the exemption. The promoted shape
+        // must still be recognized as system-originated.
+        let mut tx = legacy_call_tx(MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS);
+        tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+        assert_eq!(tx.tx_type(), DEPOSIT_TRANSACTION_TYPE, "promotion flips tx_type to deposit");
+        assert!(
+            !is_mega_system_transaction_with(&tx, MEGA_SYSTEM_ADDRESS),
+            "the legacy-typed check no longer matches after promotion",
+        );
+        assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS), "but the source-hash branch does");
+    }
+
+    #[test]
+    fn test_is_system_originated_rejects_user_tx() {
+        let tx = legacy_call_tx(USER, ORACLE_CONTRACT_ADDRESS);
+        assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
+    }
+
+    #[test]
+    fn test_is_system_originated_rejects_user_deposit_tx() {
+        // Anti-bypass: a user deposit transaction (non-system caller) must NOT be treated as
+        // system-originated, even though `is_deposit_like_transaction` classifies any deposit as
+        // deposit-like. Otherwise a user could craft a deposit to escape SALT-scaled storage gas.
+        let mut tx = legacy_call_tx(USER, ORACLE_CONTRACT_ADDRESS);
+        // A non-zero deposit source hash makes `tx_type()` report `DEPOSIT_TRANSACTION_TYPE`.
+        tx.deposit.source_hash = B256::repeat_byte(0x11);
+        assert_eq!(tx.tx_type(), DEPOSIT_TRANSACTION_TYPE);
+        assert!(is_deposit_like_transaction(&tx, MEGA_SYSTEM_ADDRESS));
+        assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
+    }
+}

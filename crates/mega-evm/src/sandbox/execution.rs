@@ -1006,7 +1006,9 @@ fn sandbox_intrinsic_overflow_error(
         LimitCheck::ExceedsLimit { kind, limit, used, .. } => {
             Some(KeylessDeployError::ParentBudgetExceeded { kind, limit, used })
         }
-        LimitCheck::WithinLimit => None,
+        // `intrinsic_check_for_tx` builds a fresh trial tracker that never has `Exempt` stamped,
+        // so only the two real outcomes are reachable here.
+        LimitCheck::WithinLimit | LimitCheck::Exempt => None,
     }
 }
 

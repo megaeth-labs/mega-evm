@@ -58,7 +58,13 @@ impl LimitKind {
     }
 }
 
-/// Result of a limit check, indicating whether any resource limit has been exceeded.
+/// Result of a limit check.
+///
+/// Carries three semantically distinct states: limits passed; a limit was exceeded (with
+/// metadata for the halt path); or per-tx metering is exempt (REX6+ system-originated tx —
+/// see [`crate::is_system_originated`]). The `Exempt` state is **sticky**: once `AdditionalLimit`
+/// stores it in `has_exceeded_limit`, `check_limit` short-circuits and the sub-tracker checks
+/// are skipped, so no later overflow can overwrite it.
 #[derive(Debug, Default, Clone, Copy)]
 pub enum LimitCheck {
     /// All limits are within their configured thresholds.
@@ -76,19 +82,37 @@ pub enum LimitCheck {
         /// vs a TX-level limit (must propagate to halt the transaction).
         frame_local: bool,
     },
+    /// Per-tx metering is exempt: REX6+ system-originated tx (see
+    /// [`crate::is_system_originated`]). Behaves as not-exceeded for halt decisions; sticky as
+    /// described on the enum. Sub-tracker `check_limit` impls never produce this variant —
+    /// only `AdditionalLimit::has_exceeded_limit` carries it, set via
+    /// [`AdditionalLimit::mark_exempt`](super::AdditionalLimit::mark_exempt).
+    Exempt,
 }
 
 impl LimitCheck {
-    /// Returns `true` if any limit has been exceeded.
+    /// Returns `true` if a resource limit has been exceeded.
+    ///
+    /// `Exempt` returns `false`: per-tx metering is suppressed, so the halt path must not fire.
     #[inline]
     pub const fn exceeded_limit(&self) -> bool {
-        !matches!(self, Self::WithinLimit)
+        matches!(self, Self::ExceedsLimit { .. })
     }
 
-    /// Returns `true` if all limits are within their configured thresholds.
+    /// Returns `true` strictly when no limit check has been performed yet or the last check passed.
+    ///
+    /// `Exempt` returns `false`: it is a distinct sticky state, not a "passed" result. Callers
+    /// that just want to gate the halt path should use [`exceeded_limit`](Self::exceeded_limit)
+    /// (its negation), not this predicate.
     #[inline]
     pub const fn within_limit(&self) -> bool {
         matches!(self, Self::WithinLimit)
+    }
+
+    /// Returns `true` when per-tx metering is suppressed for the current transaction.
+    #[inline]
+    pub const fn is_exempt(&self) -> bool {
+        matches!(self, Self::Exempt)
     }
 
     /// Returns whether this is a frame-local exceed.
@@ -99,18 +123,20 @@ impl LimitCheck {
 
     /// Returns ABI-encoded revert data for a frame-local limit exceed.
     ///
-    /// Encodes as `MegaLimitExceeded(uint8 kind, uint64 limit)`.
-    /// Returns empty bytes if within limit.
+    /// Encodes as `MegaLimitExceeded(uint8 kind, uint64 limit)`. Returns empty bytes for
+    /// `WithinLimit` and `Exempt` (neither produces a frame-local revert).
     pub fn revert_data(&self) -> Bytes {
         match self {
             Self::ExceedsLimit { kind, limit, .. } => {
                 MegaLimitExceeded { kind: kind.as_u8(), limit: *limit }.abi_encode().into()
             }
-            Self::WithinLimit => Bytes::new(),
+            Self::WithinLimit | Self::Exempt => Bytes::new(),
         }
     }
 
-    /// Returns the [`MegaHaltReason`] if the limit has been exceeded, otherwise returns `None`.
+    /// Returns the [`MegaHaltReason`] if a limit has been exceeded.
+    ///
+    /// `WithinLimit` and `Exempt` both return `None`: neither halts the transaction.
     pub fn maybe_halt_reason(&self) -> Option<MegaHaltReason> {
         match self {
             Self::ExceedsLimit { kind: LimitKind::DataSize, limit, used, .. } => {
@@ -125,7 +151,26 @@ impl LimitCheck {
             Self::ExceedsLimit { kind: LimitKind::StateGrowth, limit, used, .. } => {
                 Some(MegaHaltReason::StateGrowthLimitExceeded { limit: *limit, actual: *used })
             }
-            Self::WithinLimit => None,
+            Self::WithinLimit | Self::Exempt => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the predicate truth-table for the `Exempt` variant so a future change that flips one
+    /// predicate (e.g., reverting `exceeded_limit` to `!matches!(WithinLimit)`) is caught here
+    /// rather than silently re-enabling halts for exempt txs.
+    #[test]
+    fn test_limit_check_exempt_predicate_truth_table() {
+        let exempt = LimitCheck::Exempt;
+        assert!(!exempt.exceeded_limit());
+        assert!(!exempt.within_limit());
+        assert!(exempt.is_exempt());
+        assert!(!exempt.is_frame_local());
+        assert!(exempt.revert_data().is_empty());
+        assert!(exempt.maybe_halt_reason().is_none());
     }
 }

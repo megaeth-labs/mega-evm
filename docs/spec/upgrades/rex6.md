@@ -1,5 +1,5 @@
 ---
-description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), plus EIP-7702 authorization accounting consolidated into validation, per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, and beneficiary gas detention triggered when an applied authority equals the block beneficiary.
+description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, and system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow.
 ---
 
 # Rex6 Network Upgrade
@@ -14,10 +14,11 @@ Its semantics may still change before network activation.
 
 ## Summary
 
-Rex6 bundles two consensus-visible changes to gas and resource accounting:
+Rex6 bundles three consensus-visible changes to gas and resource accounting:
 
 1. **Unified per-opcode gas metering order.** Rex6 defines a single, canonical order in which every storage-affecting opcode charges [storage gas](../glossary.md#storage-gas) and records [compute gas](../glossary.md#compute-gas), and brings `CREATE2` under it.
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
+3. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
 
 ### Unified Gas Metering Order
 
@@ -43,8 +44,19 @@ Charges are now narrowed to authorizations that actually pass the chain-id, nonc
 Rex6 also moves authority state-growth resolution from pre-execution to validation, before the gas-limit and fee-affordability checks.
 This lets the dynamic SALT account-creation gas for net-new authorities be folded into intrinsic gas and enforced against `gas_limit` and the sender's available balance before the sender is debited or the caller nonce is bumped, mirroring the existing per-`tx.kind` new-account storage-gas treatment.
 
+### System-Originated Transaction Exemption
+
+Before Rex6, protocol-mandated execution — the pre-block system calls ([EIP-2935](https://eips.ethereum.org/EIPS/eip-2935) block-hash, [EIP-4788](https://eips.ethereum.org/EIPS/eip-4788) beacon-root, and `SequencerRegistry.applyPendingChanges()`) and the sequencer's mega system transactions (such as oracle updates) — was metered exactly like a user transaction.
+In particular, their storage writes were charged [SALT-scaled storage gas](../evm/resource-accounting.md) out of the transaction gas limit.
+Because the SALT bucket multiplier grows without an upper bound, a sufficiently large bucket would make a single storage write exceed any fixed gas limit, causing the system call to run out of gas.
+For the pre-block calls this rejects the entire block; for sequencer system transactions it fails an operation the sequencer assumes always succeeds.
+The result is a protocol-level failure driven purely by how full the state has become.
+
+Rex6 removes this failure mode: a system-originated transaction charges its storage writes at the **minimum bucket capacity** (so the cost no longer depends on the bucket), and the four [resource-limit dimensions](../evm/resource-accounting.md) plus [gas detention](../evm/gas-detention.md) are not enforced against it.
+The standard EVM `gas_limit` still bounds the work as a runaway guard.
+
 All consensus-visible changes are gated on the Rex6 spec.
-Pre-Rex6 specs retain their existing metering order and per-authorization accounting unchanged.
+Pre-Rex6 specs retain their existing metering order, per-authorization accounting, and full metering of system transactions unchanged.
 
 ## What Changed
 
@@ -156,6 +168,42 @@ The node MUST mark beneficiary access in the volatile-data tracker during the va
 
 A skipped authorization whose authority equals the beneficiary MUST NOT trigger detention; only an applied authorization mutates beneficiary state.
 
+### System-Originated Transaction Exemption
+
+#### Previous behavior (Rex5 and earlier)
+
+Protocol-mandated transactions were metered exactly like user transactions.
+Their storage writes were charged SALT-scaled storage gas out of the transaction gas limit, the four resource-limit dimensions and gas detention were enforced against them, and a sufficiently large SALT bucket could push a single mandatory storage write out of gas — rejecting the block (pre-block system calls) or failing an operation the sequencer assumes always succeeds (mega system transactions).
+
+#### New behavior (Rex6)
+
+A transaction is **system-originated** when either:
+
+- its caller is the EIP-2935 / EIP-4788 system address `0xfffffffffffffffffffffffffffffffffffffffe`, which is how the protocol issues its pre-block system calls; or
+- it is a mega system transaction — a transaction from the current system address to a whitelisted system contract, recognized before or after its deposit promotion.
+
+This deliberately excludes ordinary user deposit transactions, which remain fully metered.
+
+Under Rex6, for a system-originated transaction:
+
+- **Storage gas** (`SSTORE` of a zero→non-zero slot, new-account creation, and contract creation) is charged at the minimum bucket capacity (multiplier `1`).
+  For the Rex-family storage-gas formula this is `0` additional storage gas, leaving only the standard EVM cost.
+- The **data-size**, **KV-update**, **compute-gas**, and **state-growth** per-transaction limits are not enforced.
+- **Gas detention** (the volatile-data-access compute-gas cap) is not enforced.
+
+Resource **usage is still recorded** for these transactions; only the per-transaction halt decision is suppressed.
+The standard EVM `gas_limit` — for the pre-block system calls, floored at the historical 30,000,000 — remains the only bound that can halt the transaction.
+
+#### Why this is safe
+
+The exempted dimensions either cannot grow unboundedly from external state or are bounded by the protocol:
+
+- Only SALT-scaled storage gas is driven by an external, unbounded input (bucket capacity); charging it at the minimum capacity makes a system call's cost deterministic and independent of how full the state is.
+- The four resource-limit dimensions are counts (bytes, slots, accounts) that the protocol controls by construction for its own transactions.
+- The standard `gas_limit` continues to bound total work, so a buggy or runaway system contract still cannot consume unbounded resources.
+
+User transactions are unaffected: they remain subject to SALT-scaled storage gas, all four resource-limit dimensions, and gas detention, preserving the anti-state-bloat purpose of SALT pricing.
+
 ## Developer Impact
 
 For transactions that succeed, the unified metering order does not change `gas_used` or the compute gas a `CREATE2` records.
@@ -173,6 +221,8 @@ A transaction whose recipient is also materialized by one of its applied EIP-770
 A transaction that applies an authorization whose authority is the block beneficiary is now subject to beneficiary gas detention, which caps the compute-gas budget available to the transaction's call frames.
 Transactions targeting a known beneficiary as an authority should plan their compute footprint accordingly.
 
+System-originated transactions are not user-constructible, so the exemption does not change any user-facing transaction outcome; it only removes a SALT-driven failure mode from protocol-mandated execution.
+
 ## Safety and Compatibility
 
 All consensus-visible changes in Rex6 are gated on `MegaSpecId::REX6`.
@@ -188,14 +238,16 @@ For EIP-7702 authorization accounting, pre-Rex6 specs retain their existing per-
 The journal-aware scan that drives Rex6 accounting also serves as the implementation of the pre-Rex6 state-growth scan; the shared scanner is parameterized on whether the caller nonce has already been bumped at the call site (pre-Rex6 runs after the bump in pre-execution, Rex6 runs before the bump in validate).
 This sharing is byte-for-byte equivalent to the prior standalone REX5 scanner for the state-growth counts it produces.
 
+For the system-originated transaction exemption, pre-Rex6 specs continue to meter every transaction — including the protocol's own — identically; the exemption applies only when `MegaSpecId::REX6` is active.
+
 Rex6 is the current unstable spec under active development; its semantics may still change before network activation.
 
 ## References
 
 - [Dual Gas Model](../evm/dual-gas-model.md) — compute gas, storage gas, and the canonical metering order.
-- [Resource Accounting](../evm/resource-accounting.md) — EIP-7702 authority data-size and KV-update narrowing.
-- [Resource Limits](../evm/resource-limits.md) — the compute gas limit enforced after each opcode records its compute gas; authority state-growth resolution and dynamic SALT account-creation gas.
-- [Gas Detention](../evm/gas-detention.md) — beneficiary detention trigger on applied authority.
+- [Resource Accounting](../evm/resource-accounting.md) — EIP-7702 authority data-size and KV-update narrowing; SALT-scaled storage gas.
+- [Resource Limits](../evm/resource-limits.md) — the compute gas limit enforced after each opcode records its compute gas; authority state-growth resolution and dynamic SALT account-creation gas; the four resource-limit dimensions exempted for system transactions.
+- [Gas Detention](../evm/gas-detention.md) — beneficiary detention trigger on applied authority; the volatile-data compute-gas cap exempted for system transactions.
 - [Hardforks and Specs](../hardfork-spec.md) — spec progression and backward-compatibility model.
 - [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) — Set Code transaction type.
 - [Compute gas](../glossary.md#compute-gas)
