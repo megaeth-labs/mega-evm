@@ -86,6 +86,15 @@ impl DataSizeTracker {
         }
     }
 
+    /// Records discardable usage into the PARENT frame (one below the top). Used for a
+    /// child-CREATE's creator-side account-info write, whose on-chain effect (the creator
+    /// nonce bump) is undone only by the parent's revert, not the child's.
+    fn record_parent_discardable(&mut self, size: u64) {
+        if let Some(parent) = self.frame_tracker.parent_frame_mut() {
+            parent.discardable_usage += size;
+        }
+    }
+
     /// Records a refund (negative data) in the current frame.
     fn record_refund(&mut self, size: u64) {
         if let Some(entry) = self.frame_tracker.frame_mut() {
@@ -101,6 +110,12 @@ impl DataSizeTracker {
     /// — rather than the current frame's discardable usage.
     pub(crate) fn record_oracle_hint_bytes(&mut self, len: u64) {
         self.frame_tracker.tx_mut().persistent_usage += len;
+    }
+
+    /// Whether REX6 is active for this transaction. Exposes the spec flag the tracker already
+    /// stores so the coordinator can gate REX6-only behavior without holding a duplicate flag.
+    pub(crate) fn rex6_enabled(&self) -> bool {
+        self.rex6_enabled
     }
 
     /// Records an account info write (40 bytes) as discardable data in the current frame.
@@ -276,8 +291,16 @@ impl TxRuntimeLimit for DataSizeTracker {
             FrameInput::Create(_) => {
                 let parent_needs_update = self.frame_tracker.push_create_frame();
                 if parent_needs_update {
-                    // Parent's account info update goes to child's discardable.
-                    self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    if self.rex6_enabled {
+                        // The creator's nonce bump survives the child's revert (revm bumps it
+                        // before the create checkpoint), so charge it to the parent frame —
+                        // see `FrameLimitTracker::parent_frame_mut`.
+                        self.record_parent_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    } else {
+                        // Pre-REX6: the creator nonce-bump charge is bundled into the child frame's
+                        // discardable lane (frozen behavior).
+                        self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    }
                 }
             }
             FrameInput::Empty => unreachable!(),

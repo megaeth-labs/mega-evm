@@ -200,6 +200,24 @@ impl<I> FrameLimitTracker<I> {
         self.frame_stack.last_mut()
     }
 
+    /// Returns the parent frame entry (the frame directly beneath the current top), or `None`
+    /// when the current frame is top-level.
+    ///
+    /// Used by REX6 CREATE accounting to charge the creator's nonce-bump account-info write to
+    /// the parent (creator) frame instead of the child (created) frame. revm increments the
+    /// creator's nonce *before* it takes the create checkpoint, so the nonce bump survives the
+    /// created contract's revert and is undone only if the creator's own frame reverts.
+    /// Recording the charge on the parent's discardable lane matches that lifetime: it is kept
+    /// when the child reverts and dropped only with the parent.
+    ///
+    /// This is the opposite of a value-transferring CALL, whose balance moves *are* rolled back
+    /// when the callee reverts — those are correctly charged to the child's discardable lane.
+    pub(crate) fn parent_frame_mut(&mut self) -> Option<&mut FrameLimitEntry<I>> {
+        // The current frame is the top of the stack; the parent is the frame directly beneath
+        // it. `None` when the current frame is top-level (no parent).
+        self.frame_stack.split_last_mut().and_then(|(_current, below)| below.last_mut())
+    }
+
     /// Returns whether there is at least one active frame on the stack.
     pub(crate) fn has_active_frame(&self) -> bool {
         !self.frame_stack.is_empty()

@@ -54,6 +54,15 @@ impl KVUpdateTracker {
         }
     }
 
+    /// Records discardable usage into the PARENT frame (one below the top). Used for a
+    /// child-CREATE's creator-side account-info write, whose on-chain effect (the creator
+    /// nonce bump) is undone only by the parent's revert, not the child's.
+    fn record_parent_discardable(&mut self, n: u64) {
+        if let Some(parent) = self.frame_tracker.parent_frame_mut() {
+            parent.discardable_usage += n;
+        }
+    }
+
     /// Records a KV update refund in the current frame.
     fn record_refund(&mut self, n: u64) {
         if let Some(entry) = self.frame_tracker.frame_mut() {
@@ -211,8 +220,16 @@ impl TxRuntimeLimit for KVUpdateTracker {
             FrameInput::Create(_) => {
                 let parent_needs_update = self.frame_tracker.push_create_frame();
                 if parent_needs_update {
-                    // Parent's account info update goes to child's discardable.
-                    self.record_discardable(1);
+                    if self.rex6_enabled {
+                        // The creator's nonce bump survives the child's revert (revm bumps it
+                        // before the create checkpoint), so charge it to the parent frame —
+                        // see `FrameLimitTracker::parent_frame_mut`.
+                        self.record_parent_discardable(1);
+                    } else {
+                        // Pre-REX6: the creator nonce-bump charge is bundled into the child frame's
+                        // discardable lane (frozen behavior).
+                        self.record_discardable(1);
+                    }
                 }
             }
             FrameInput::Empty => unreachable!(),

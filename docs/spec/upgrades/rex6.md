@@ -1,5 +1,5 @@
 ---
-description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, post-execution fee-reward account materializations counted toward resource accounting, and system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow.
+description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, CREATE-frame resource accounting corrected (failed-CREATE results no longer rewritten into a limit revert, creator nonce-bump booked to the parent frame, and CREATE state growth recorded only for net-new addresses), post-execution fee-reward account materializations counted toward resource accounting, and system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow.
 ---
 
 # Rex6 Network Upgrade
@@ -14,12 +14,13 @@ Its semantics may still change before network activation.
 
 ## Summary
 
-Rex6 bundles four consensus-visible changes to gas and resource accounting:
+Rex6 bundles five consensus-visible changes to gas and resource accounting:
 
 1. **Unified per-opcode gas metering order.** Rex6 defines a single, canonical order in which every storage-affecting opcode charges [storage gas](../glossary.md#storage-gas) and records [compute gas](../glossary.md#compute-gas), and brings `CREATE2` under it.
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
-3. **Post-execution fee-reward accounting.** Rex6 counts account materializations performed by the post-execution beneficiary fee-reward step toward resource accounting, closing a window in which they escaped it.
-4. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
+3. **CREATE-frame resource accounting.** Rex6 stops rewriting an already-failed `CREATE` result into a limit `Revert`, and corrects the creator nonce-bump and net-new state-growth accounting on the `CREATE` frame.
+4. **Post-execution fee-reward accounting.** Rex6 counts account materializations performed by the post-execution beneficiary fee-reward step toward resource accounting, closing a window in which they escaped it.
+5. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
 
 ### Unified Gas Metering Order
 
@@ -45,6 +46,16 @@ Charges are now narrowed to authorizations that actually pass the chain-id, nonc
 Rex6 also moves authority state-growth resolution from pre-execution to validation, before the gas-limit and fee-affordability checks.
 This lets the dynamic SALT account-creation gas for net-new authorities be folded into intrinsic gas and enforced against `gas_limit` and the sender's available balance before the sender is debited or the caller nonce is bumped, mirroring the existing per-`tx.kind` new-account storage-gas treatment.
 
+### CREATE-Frame Resource Accounting
+
+Rex6 corrects three independent accounting errors on the `CREATE` frame lifecycle:
+
+- **Failed-`CREATE` result is no longer rewritten (M-47).** Pre-Rex6, a nested `CREATE` that halts with `OutOfGas` on the code-deposit storage charge had its result rewritten into the frame-local limit `Revert`. Because `Revert` returns the child's unused gas to the caller while `OutOfGas` burns it, an attacker could loop large-code `CREATE`s to dodge the code-deposit burn, and the observable failure class flipped from `OutOfGas` to `Revert`. Rex6 leaves an already-failed `CREATE` result unchanged.
+- **Creator nonce-bump write booked to the parent frame (M-16).** The creator's nonce-bump account-info write is recorded in the parent frame's discardable lane (matching revm's nonce-bump revert semantics), instead of the child frame's, so it is no longer dropped when the child `CREATE` reverts.
+- **`CREATE` state growth is conditional (M-29).** A `CREATE` records `+1` state growth only when the created address is net-new (empty), mirroring the value-transfer Call arm, instead of unconditionally.
+
+Of the three, M-47 is the substantive fix; M-16 (under-count) and M-29 (over-count) are accounting-completeness corrections in the conservative direction.
+
 ### Post-Execution Fee-Reward Accounting
 
 op-revm credits fee recipients (the priority-fee beneficiary and the base-fee / operator fee vaults) in a post-execution step that runs _after_ MegaETH's `AdditionalLimit` resource trackers are finalized for the transaction.
@@ -64,7 +75,7 @@ Rex6 removes this failure mode: a system-originated transaction charges its stor
 The standard EVM `gas_limit` still bounds the work as a runaway guard.
 
 All consensus-visible changes are gated on the Rex6 spec.
-Pre-Rex6 specs retain their existing metering order, per-authorization accounting, post-execution fee-reward accounting, and full metering of system transactions unchanged.
+Pre-Rex6 specs retain their existing metering order, per-authorization accounting, CREATE-frame accounting, post-execution fee-reward accounting, and full metering of system transactions unchanged.
 
 ## What Changed
 
