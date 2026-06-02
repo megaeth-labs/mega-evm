@@ -6,6 +6,7 @@ use alloy_evm::{precompiles::PrecompilesMap, Database};
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use delegate::delegate;
 use op_revm::{
+    constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
     handler::{IsTxError, OpHandler},
     transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
     OpHaltReason, OpTransactionError,
@@ -14,7 +15,7 @@ use revm::{
     context::{
         result::{ExecutionResult, FromStringError, InvalidTransaction},
         transaction::{AuthorizationTr, TransactionType},
-        Cfg, ContextError, ContextTr, FrameStack, JournalTr, LocalContextTr, Transaction,
+        Block, Cfg, ContextError, ContextTr, FrameStack, JournalTr, LocalContextTr, Transaction,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult},
@@ -39,9 +40,9 @@ use revm::{
 
 use crate::{
     constants, dispatch_system_contract_interceptors, is_deposit_like_transaction,
-    is_mega_system_transaction_with, sent_from_system_address, ExternalEnvTypes, HostExt,
-    JournalInspectTr, MegaContext, MegaEvm, MegaHaltReason, MegaInstructions, MegaSpecId,
-    MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    is_mega_system_transaction_with, limit::ACCOUNT_INFO_WRITE_SIZE, sent_from_system_address,
+    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaEvm, MegaHaltReason,
+    MegaInstructions, MegaSpecId, MegaTransactionError, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 
 /// Revm handler for `MegaETH`. It internally wraps the [`op_revm::handler::OpHandler`] and inherits
@@ -171,6 +172,14 @@ where
         }
         Ok(None)
     }
+}
+
+/// A fee recipient's pre-reward state, captured before delegating to op-revm so the
+/// post-reward diff can tell whether the credit changed or materialised the account.
+struct FeeRecipientSnapshot {
+    address: Address,
+    balance: U256,
+    was_empty: bool,
 }
 
 /// One EIP-7702 authorization that would actually apply, as determined by the read-only
@@ -309,6 +318,52 @@ where
         }
 
         Ok(())
+    }
+
+    /// Side-effect-free read of a fee recipient's balance and emptiness.
+    ///
+    /// Uses `inspect_account` (no warming) so reading the recipients to account the
+    /// post-execution reward does not perturb gas or the access list.
+    fn fee_recipient_balance_and_emptiness(
+        evm: &mut EVM,
+        address: Address,
+    ) -> Result<(U256, bool), ERROR> {
+        let info = &evm
+            .ctx_mut()
+            .journal_mut()
+            .inspect_account(address, false)
+            .map_err(|e| {
+                ERROR::from_string(format!(
+                    "Failed to inspect fee recipient {address} for REX6 reward accounting: {e:?}",
+                ))
+            })?
+            .info;
+        Ok((info.balance, info.is_empty()))
+    }
+
+    /// Snapshots the distinct accounts op-revm credits in the post-execution reward path,
+    /// each with its pre-reward balance and emptiness.
+    ///
+    /// The set is the block beneficiary plus the L1 / base-fee / operator fee vaults.
+    /// It is deduplicated because the block beneficiary may coincide with a fee vault, and
+    /// op-revm would otherwise issue two `balance_incr`s to the same on-chain account — which
+    /// is still a single account write.
+    fn snapshot_fee_recipients(evm: &mut EVM) -> Result<Vec<FeeRecipientSnapshot>, ERROR> {
+        let recipients = [
+            evm.ctx().block().beneficiary(),
+            L1_FEE_RECIPIENT,
+            BASE_FEE_RECIPIENT,
+            OPERATOR_FEE_RECIPIENT,
+        ];
+        let mut snapshots: Vec<FeeRecipientSnapshot> = Vec::with_capacity(recipients.len());
+        for address in recipients {
+            if snapshots.iter().any(|snapshot| snapshot.address == address) {
+                continue;
+            }
+            let (balance, was_empty) = Self::fee_recipient_balance_and_emptiness(evm, address)?;
+            snapshots.push(FeeRecipientSnapshot { address, balance, was_empty });
+        }
+        Ok(snapshots)
     }
 
     /// REX6 consolidated EIP-7702 authorization accounting.
@@ -839,10 +894,41 @@ where
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
         if evm.ctx().disable_beneficiary {
-            Ok(())
-        } else {
-            self.op.reward_beneficiary(evm, exec_result)
+            return Ok(());
         }
+
+        // Pre-REX6: frozen. Delegate unchanged so stable-spec replay is byte-for-byte —
+        // the post-execution fee-reward materialisations remain unaccounted exactly as
+        // historical REX5-and-earlier blocks recorded them.
+        if !evm.ctx().spec.is_enabled(MegaSpecId::REX6) {
+            return self.op.reward_beneficiary(evm, exec_result);
+        }
+
+        // REX6: op-revm credits the beneficiary + fee vaults HERE, after `last_frame_result`
+        // finalised the trackers — so these writes escape DataSize / KV / StateGrowth unless
+        // accounted now. Deposit / keyless-sandbox txs credit nothing (op-revm early-returns),
+        // so the diff naturally records nothing for them.
+        let snapshots = Self::snapshot_fee_recipients(evm)?;
+
+        self.op.reward_beneficiary(evm, exec_result)?;
+
+        for snapshot in snapshots {
+            let (balance, now_empty) =
+                Self::fee_recipient_balance_and_emptiness(evm, snapshot.address)?;
+            if balance == snapshot.balance {
+                continue;
+            }
+            // One account-info write = 40 bytes DataSize + 1 KV update; a newly materialised
+            // account also counts as +1 StateGrowth. TX-persistent lane (frames are gone).
+            let mut limit = evm.ctx().additional_limit.borrow_mut();
+            limit.data_size.merge_persistent_usage(ACCOUNT_INFO_WRITE_SIZE);
+            limit.kv_update.merge_persistent_usage(1);
+            if snapshot.was_empty && !now_empty {
+                limit.state_growth.merge_persistent_usage(1);
+            }
+        }
+
+        Ok(())
     }
 
     fn last_frame_result(

@@ -1,5 +1,5 @@
 ---
-description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, and system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow.
+description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, post-execution fee-reward account materializations counted toward resource accounting, and system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow.
 ---
 
 # Rex6 Network Upgrade
@@ -14,11 +14,12 @@ Its semantics may still change before network activation.
 
 ## Summary
 
-Rex6 bundles three consensus-visible changes to gas and resource accounting:
+Rex6 bundles four consensus-visible changes to gas and resource accounting:
 
 1. **Unified per-opcode gas metering order.** Rex6 defines a single, canonical order in which every storage-affecting opcode charges [storage gas](../glossary.md#storage-gas) and records [compute gas](../glossary.md#compute-gas), and brings `CREATE2` under it.
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
-3. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
+3. **Post-execution fee-reward accounting.** Rex6 counts account materializations performed by the post-execution beneficiary fee-reward step toward resource accounting, closing a window in which they escaped it.
+4. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
 
 ### Unified Gas Metering Order
 
@@ -44,6 +45,13 @@ Charges are now narrowed to authorizations that actually pass the chain-id, nonc
 Rex6 also moves authority state-growth resolution from pre-execution to validation, before the gas-limit and fee-affordability checks.
 This lets the dynamic SALT account-creation gas for net-new authorities be folded into intrinsic gas and enforced against `gas_limit` and the sender's available balance before the sender is debited or the caller nonce is bumped, mirroring the existing per-`tx.kind` new-account storage-gas treatment.
 
+### Post-Execution Fee-Reward Accounting
+
+op-revm credits fee recipients (the priority-fee beneficiary and the base-fee / operator fee vaults) in a post-execution step that runs _after_ MegaETH's `AdditionalLimit` resource trackers are finalized for the transaction.
+Pre-Rex6, an account that this step materializes for the first time — a previously non-existent fee recipient — was never counted toward [resource accounting](../evm/resource-accounting.md), because the trackers had already been read out.
+
+Rex6 accounts for these post-execution materializations: a fee recipient that the reward step creates is counted toward state growth and account-update accounting, the same as any other new account. The deposit-mint half of this gap was already closed in Rex5; Rex6 covers the remaining non-deposit fee-credit paths.
+
 ### System-Originated Transaction Exemption
 
 Before Rex6, protocol-mandated execution — the pre-block system calls ([EIP-2935](https://eips.ethereum.org/EIPS/eip-2935) block-hash, [EIP-4788](https://eips.ethereum.org/EIPS/eip-4788) beacon-root, and `SequencerRegistry.applyPendingChanges()`) and the sequencer's mega system transactions (such as oracle updates) — was metered exactly like a user transaction.
@@ -56,7 +64,7 @@ Rex6 removes this failure mode: a system-originated transaction charges its stor
 The standard EVM `gas_limit` still bounds the work as a runaway guard.
 
 All consensus-visible changes are gated on the Rex6 spec.
-Pre-Rex6 specs retain their existing metering order, per-authorization accounting, and full metering of system transactions unchanged.
+Pre-Rex6 specs retain their existing metering order, per-authorization accounting, post-execution fee-reward accounting, and full metering of system transactions unchanged.
 
 ## What Changed
 
