@@ -2,6 +2,9 @@
 //! files to compare mega-evm against vanilla revm and op-revm at both the
 //! pinned (currently depended) and latest crates.io versions.
 //!
+//! Every vanilla baseline is pinned to the Cancun hardfork so each row differs
+//! from the others only by crate and version, not by fork.
+//!
 //! Each bench file pulls this in with a plain `mod common;` (resolved via the
 //! standard `common/mod.rs` sibling-folder lookup).
 //!
@@ -23,16 +26,17 @@ use mega_evm::{
     EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use op_revm::{
-    DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned,
+    DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned, OpSpecId as OpSpecIdPinned,
     OpTransaction as OpTransactionPinned,
 };
 use op_revm_latest::{
-    DefaultOp as _, OpBuilder as _, OpContext as OpContextLatest,
+    DefaultOp as _, OpBuilder as _, OpContext as OpContextLatest, OpSpecId as OpSpecIdLatest,
     OpTransaction as OpTransactionLatest,
 };
 use revm::{
-    context::tx::TxEnvBuilder, database::EmptyDB as EmptyDBPinned, Context as ContextPinned,
-    ExecuteEvm, MainBuilder as _, MainContext as _,
+    context::tx::TxEnvBuilder, database::EmptyDB as EmptyDBPinned,
+    primitives::hardfork::SpecId as SpecIdPinned, Context as ContextPinned, ExecuteEvm,
+    MainBuilder as _, MainContext as _,
 };
 use revm_latest::{
     bytecode::Bytecode as BytecodeLatest,
@@ -96,8 +100,15 @@ impl Default for CallParams {
 }
 
 /// Vanilla `revm` at the version mega-evm currently pins.
+///
+/// Spec pinned to Cancun so this row sits on the same hardfork as the other
+/// baselines (see `transact_call_revm_latest`); the pinned mainnet default is
+/// otherwise a later fork.
 pub fn transact_call_revm_pinned(db: MemoryDatabase, p: &CallParams) {
-    let mut evm = ContextPinned::mainnet().with_db(db).build_mainnet();
+    let mut evm = ContextPinned::mainnet()
+        .modify_cfg_chained(|cfg| cfg.spec = SpecIdPinned::CANCUN)
+        .with_db(db)
+        .build_mainnet();
     let tx = TxEnvBuilder::new()
         .caller(p.caller)
         .call(p.target)
@@ -111,8 +122,13 @@ pub fn transact_call_revm_pinned(db: MemoryDatabase, p: &CallParams) {
 }
 
 /// `op-revm` at the version mega-evm currently pins, operator fee = 0.
+///
+/// Pinned to Holocene (eth Cancun) to match the other baselines: `DefaultOp::op()`
+/// hard-codes `OpSpecId::BEDROCK` (eth Merge) regardless of the enum default, so
+/// without this the op row would sit on a different hardfork than the revm rows.
 pub fn transact_call_op_revm_pinned(db: MemoryDatabase, p: &CallParams) {
     let mut ctx = <OpContextPinned<EmptyDBPinned>>::op().with_db(db);
+    ctx.modify_cfg(|cfg| cfg.spec = OpSpecIdPinned::HOLOCENE);
     ctx.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
@@ -134,9 +150,11 @@ pub fn transact_call_op_revm_pinned(db: MemoryDatabase, p: &CallParams) {
 
 /// Vanilla `revm` at the latest crates.io release.
 ///
-/// Spec is pinned to Cancun so the workload's multi-gigagas `gas_limit` does
-/// not trip the EIP-7825 `tx_gas_limit_cap` (2^24) that `MainContext::mainnet()`
-/// inherits from its default Osaka spec.
+/// Spec pinned to Cancun for two reasons: it keeps this row on the same
+/// hardfork as the other baselines, and it avoids the EIP-7825
+/// `tx_gas_limit_cap` (2^24) that `MainContext::mainnet()` would otherwise
+/// inherit from its default Osaka spec and that the multi-gigagas `gas_limit`
+/// workloads would trip.
 pub fn transact_call_revm_latest(db: CacheDBLatest<EmptyDBLatest>, p: &CallParams) {
     let mut evm = ContextLatest::mainnet()
         .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecIdLatest::CANCUN))
@@ -156,12 +174,14 @@ pub fn transact_call_revm_latest(db: CacheDBLatest<EmptyDBLatest>, p: &CallParam
 
 /// `op-revm` at the latest crates.io release, operator fee = 0.
 ///
-/// No spec pin: op-revm defaults to Isthmus, which does not carry EIP-7825's
-/// `tx_gas_limit_cap`, so the multi-gigagas `gas_limit` workloads pass. If a
-/// future op-revm release inherits a tx gas cap, pin the spec here the same
-/// way `transact_call_revm_latest` does.
+/// Pinned to Holocene (eth Cancun) to match the other baselines: `DefaultOp::op()`
+/// hard-codes `OpSpecId::BEDROCK` (eth Merge) regardless of the enum default, so
+/// without this the op row would sit on a different hardfork than the revm rows.
+/// Holocene (eth Cancun) also predates the EIP-7825 `tx_gas_limit_cap`, so the
+/// multi-gigagas `gas_limit` workloads pass.
 pub fn transact_call_op_revm_latest(db: CacheDBLatest<EmptyDBLatest>, p: &CallParams) {
     let mut ctx = <OpContextLatest<EmptyDBLatest>>::op().with_db(db);
+    ctx.modify_cfg(|cfg| cfg.spec = OpSpecIdLatest::HOLOCENE);
     ctx.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
