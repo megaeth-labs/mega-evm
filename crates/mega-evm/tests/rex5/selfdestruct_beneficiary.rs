@@ -310,10 +310,10 @@ fn test_rex5_selfdestruct_to_beneficiary_with_volatile_disabled_short_circuits()
 }
 
 /// Rex5: SELFDESTRUCT to the block beneficiary when volatile access is NOT disabled.
-/// The outer `volatile_data_ext::selfdestruct_rex5` guard's `target == beneficiary`
-/// arm short-circuits the AND on the second operand (`volatile_access_disabled()`
-/// returns false), so the guard does NOT fire and the call falls through to the
-/// storage layer. With CONTRACT holding balance and the beneficiary empty, the
+/// The outer `volatile_data_ext::selfdestruct_with_beneficiary_guard` guard's
+/// `target == beneficiary` arm short-circuits the AND on the second operand
+/// (`volatile_access_disabled()` returns false), so the guard does NOT fire and the call falls
+/// through to the storage layer. With CONTRACT holding balance and the beneficiary empty, the
 /// storage layer charges new-account gas and records `on_selfdestruct_new_account`.
 ///
 /// Covers the `target == beneficiary && !volatile_disabled` branch of the macro-

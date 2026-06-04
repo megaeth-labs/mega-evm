@@ -826,6 +826,18 @@ impl AdditionalLimit {
         self.kv_update.record_account_update();
         self.state_growth.record_growth(1);
     }
+
+    /// Records resource usage when SELFDESTRUCT transfers balance to an existing
+    /// beneficiary account (REX6+).
+    ///
+    /// Charges data size (+40 for account info write) and KV update (+1). The target
+    /// already exists, so no `StateGrowth` is recorded. SELFDESTRUCT does not push a call
+    /// frame, so the `target_updated` dedup path in `FrameLimitTracker` never sees the
+    /// balance write to an existing target — hence this dedicated hook.
+    pub(crate) fn on_selfdestruct_existing_account(&mut self) {
+        self.data_size.record_account_write();
+        self.kv_update.record_account_update();
+    }
 }
 
 /// Creates a `FrameResult` indicating that the limit is exceeded.

@@ -141,8 +141,9 @@ use revm::{
 ///   - DELEGATECALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext`
 ///   - CALLCODE: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext`
 /// - **REX5** (extends REX4):
-///   - SELFDESTRUCT: `volatile_data_ext::selfdestruct_rex5` → `storage_gas_ext::selfdestruct`
-///     (new-account storage gas, beneficiary-volatile guard outermost)
+///   - SELFDESTRUCT: `volatile_data_ext::selfdestruct_with_beneficiary_guard` →
+///     `storage_gas_ext::selfdestruct` (new-account storage gas, beneficiary-volatile guard
+///     outermost)
 /// - **REX6** (extends REX5): unifies the per-opcode gas-metering order. The table wiring is
 ///   unchanged. Storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT)
 ///   all follow a canonical order: charge storage gas → run the raw opcode body → record compute
@@ -349,11 +350,12 @@ mod rex5 {
     /// Returns the instruction table for the `REX5` spec.
     ///
     /// Changes from Rex4:
-    /// - SELFDESTRUCT: `volatile_data_ext::selfdestruct_rex5` → `storage_gas_ext::selfdestruct`.
-    ///   The new outer wrapper keeps the beneficiary-volatile guard outermost (matching the SSTORE
-    ///   / LOG layering) and slots the new-account storage-gas charge between the guard and the
-    ///   inner opcode, so disabled-volatile frames short-circuit ahead of any storage-layer side
-    ///   effects (account inspection, dynamic gas charge, `on_selfdestruct_new_account` record).
+    /// - SELFDESTRUCT: `volatile_data_ext::selfdestruct_with_beneficiary_guard` →
+    ///   `storage_gas_ext::selfdestruct`. The outer wrapper keeps the beneficiary-volatile guard
+    ///   outermost (matching the SSTORE / LOG layering) and slots the new-account storage-gas
+    ///   charge between the guard and the inner opcode, so disabled-volatile frames short-circuit
+    ///   ahead of any storage-layer side effects (account inspection, dynamic gas charge,
+    ///   `on_selfdestruct_new_account` record).
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -366,7 +368,7 @@ mod rex5 {
 
         // REX5: SELFDESTRUCT charges storage gas for new beneficiary accounts,
         // gated behind the beneficiary-volatile guard.
-        table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct_rex5;
+        table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct_with_beneficiary_guard;
 
         table
     }
@@ -377,14 +379,18 @@ mod rex6 {
 
     /// Returns the instruction table for the `REX6` spec.
     ///
-    /// Changes from Rex5: the instruction *table* is unchanged (same handler functions as Rex5),
-    /// but the storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT)
-    /// dispatch internally on `spec.is_enabled(MegaSpecId::REX6)` to a unified canonical
-    /// gas-metering order: each opcode charges storage gas, runs its body, then records compute gas
-    /// exactly once (via [`record_storage_compute_gas!`]) after the body completes, with the
-    /// storage gas excluded. This is behavior-preserving for every opcode except CREATE2, whose
-    /// memory-expansion gas is now folded into the single recording instead of being recorded
-    /// separately (see `storage_gas_ext::create_rex6`).
+    /// Changes from Rex5: the instruction *table* is unchanged (same handler functions as Rex5).
+    /// Every Rex6 behavior difference is expressed as internal `spec.is_enabled(MegaSpecId::REX6)`
+    /// dispatch inside the shared handlers, never as a swapped table entry:
+    /// - the storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT)
+    ///   charge storage gas, run their body, then record compute gas exactly once (via
+    ///   [`record_storage_compute_gas!`]) with the storage gas excluded;
+    /// - `storage_gas_ext::selfdestruct` additionally records existing-target balance-update
+    ///   accounting, and its outer volatile wrapper
+    ///   (`volatile_data_ext::selfdestruct_with_beneficiary_guard`) additionally guards the
+    ///   executing contract (source) against the beneficiary;
+    /// - the CALL-family volatile wrappers, on the `disableVolatileDataAccess` path, resolve the
+    ///   stack target's one-hop EIP-7702 delegate before the beneficiary comparison.
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -1048,14 +1054,66 @@ pub mod volatile_data_ext {
     wrap_op_detain_gas_conditional!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
     wrap_op_detain_gas_conditional!(selfdestruct, "SELFDESTRUCT", compute_gas_ext::selfdestruct);
 
-    // REX5 SELFDESTRUCT outer wrapper: guard outermost, then the
-    // `storage_gas_ext::selfdestruct` layer (new-account storage gas charge),
-    // then `compute_gas_ext::selfdestruct`.
-    wrap_op_detain_gas_conditional!(
-        selfdestruct_rex5,
-        "SELFDESTRUCT",
-        super::storage_gas_ext::selfdestruct
-    );
+    /// REX5+ SELFDESTRUCT outer wrapper: beneficiary volatile-access guard ahead of the
+    /// `storage_gas_ext::selfdestruct` layer (which under REX6 also records the existing-target
+    /// balance-update accounting), then the compute-gas-limit application.
+    ///
+    /// This is the conditional-volatile shape of [`wrap_op_detain_gas_conditional`] (it cannot be
+    /// macro-generated because of the extra REX6 source check below): when volatile access is
+    /// disabled and the stack target is the beneficiary, revert before any storage-layer side
+    /// effect. REX6 additionally guards the executing contract (the *source*, whose balance is read
+    /// and zeroed): REX5 inspected only the stack target, so when the source itself was the
+    /// beneficiary its state was still observed without `disableVolatileDataAccess` rejecting.
+    /// The source check is REX6-gated, leaving REX5 byte-for-byte frozen. When volatile access is
+    /// *enabled*, the beneficiary is already balance-marked before its own code runs (it is reached
+    /// as the tx recipient or a CALL target, both of which mark it), so detention engages without a
+    /// SELFDESTRUCT-specific hook.
+    #[inline]
+    pub fn selfdestruct_with_beneficiary_guard<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        if context.host.volatile_access_disabled() {
+            let beneficiary = context.host.beneficiary_address();
+            // Confirm the SELFDESTRUCT has a target operand first: a stack-underflow SELFDESTRUCT
+            // must keep revm's `StackUnderflow` halt and not be pre-empted by a beneficiary revert.
+            // The guards apply only once the opcode actually acts on a target.
+            if let Some(addr_word) = context.interpreter.stack.inspect::<0>() {
+                let target: Address = addr_word.into_address();
+                // REX6: the executing contract (source) reading and zeroing its own balance is
+                // itself a beneficiary observation. Frozen off pre-REX6, where only the stack
+                // target below was guarded.
+                if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
+                    context.interpreter.input.target_address() == beneficiary
+                {
+                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                        InstructionResult::Revert,
+                        volatile_data_access_disabled_revert_data(
+                            VolatileDataAccessType::Beneficiary,
+                        ),
+                        context.interpreter.gas,
+                    ));
+                    return;
+                }
+                // All specs: the stack target (the value-transfer destination).
+                if target == beneficiary {
+                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                        InstructionResult::Revert,
+                        volatile_data_access_disabled_revert_data(
+                            VolatileDataAccessType::Beneficiary,
+                        ),
+                        context.interpreter.gas,
+                    ));
+                    return;
+                }
+            }
+        }
+
+        run_inner_instruction_or_abort!(super::storage_gas_ext::selfdestruct, context);
+        apply_compute_gas_limit!(context);
+    }
 
     /// `SELFBALANCE` opcode with compute gas limit enforcement on volatile data access.
     ///
@@ -1114,12 +1172,15 @@ pub mod volatile_data_ext {
     ///
     /// These opcodes (CALL, STATICCALL, DELEGATECALL, CALLCODE) are volatile only when
     /// targeting the block beneficiary address.
-    /// The handler:
-    /// 1. Peeks the target address from the stack (position 1) without consuming it.
-    /// 2. If the target is the beneficiary and volatile access is disabled, reverts immediately
-    ///    **before** executing the opcode to avoid polluting the tracker via
-    ///    `load_account_delegated`.
-    /// 3. Otherwise delegates to the existing `forward_gas_ext` handler.
+    ///
+    /// When volatile access is disabled, the handler peeks the stack target (position 1) and
+    /// reverts **before** executing the opcode if the target is the beneficiary — avoiding tracker
+    /// pollution via `load_account_delegated`. Under REX6 it compares the target's one-hop EIP-7702
+    /// delegate so a call to a delegator pointing at the beneficiary is also caught; that
+    /// resolution (a DB read) is gated behind the disabled check so it stays off the enabled
+    /// path, where the raw call proceeds and `load_account_delegated` marks the resolved
+    /// delegate instead. `<=` REX5 compares the raw stack operand (frozen). Otherwise it
+    /// delegates to the existing `forward_gas_ext` handler.
     macro_rules! wrap_call_volatile_check {
     ($fn_name:ident, $opcode_name:expr, $inner_fn:path) => {
         #[doc = concat!("`", $opcode_name, "` opcode with volatile data access disabled check for beneficiary.")]
@@ -1130,22 +1191,44 @@ pub mod volatile_data_ext {
         >(
             context: InstructionContext<'_, H, WIRE>,
         ) {
-            // Peek the target address from the stack (position 1 for CALL-like opcodes:
-            // stack layout is [gas_limit, to, ...]).
-            // Rex4+: If targeting the beneficiary while volatile access is disabled, revert
-            // before executing the opcode to avoid polluting the tracker.
-            if let Some(addr_word) = context.interpreter.stack.inspect::<1>() {
-                let target: Address = addr_word.into_address();
-                let beneficiary = context.host.beneficiary_address();
-                if target == beneficiary && context.host.volatile_access_disabled() {
-                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                        InstructionResult::Revert,
-                        volatile_data_access_disabled_revert_data(
-                            VolatileDataAccessType::Beneficiary,
-                        ),
-                        context.interpreter.gas,
-                    ));
-                    return;
+            // Rex4+: If targeting the beneficiary while volatile access is disabled, revert before
+            // executing the opcode to avoid polluting the tracker. Only this disabled path can
+            // revert and only it needs the EIP-7702 delegate resolved, so the resolve (a DB read)
+            // is gated behind the disabled check to keep it off the common (enabled) hot path —
+            // enabled-access detention is marked by `load_account_delegated` during the CALL on the
+            // resolved delegate.
+            if context.host.volatile_access_disabled() {
+                // Peek the target address from the stack (position 1 for CALL-like opcodes:
+                // stack layout is [gas_limit, to, ...]).
+                if let Some(addr_word) = context.interpreter.stack.inspect::<1>() {
+                    let target: Address = addr_word.into_address();
+                    let beneficiary = context.host.beneficiary_address();
+                    let spec = context.host.spec_id();
+                    // The raw target already being the beneficiary observes beneficiary state
+                    // regardless of where it itself delegates, so check it first — `||` short-circuits
+                    // so no EIP-7702 delegate is resolved (and no DB read happens) in that case.
+                    // REX6 otherwise resolves the delegate one hop so a CALL to a delegator `A` whose
+                    // code points at `B == beneficiary` is also caught; <= REX5 compares the raw
+                    // operand (frozen). The resolve is best-effort: a DB error (e.g. the delegate's
+                    // code failing to load) falls back to the raw target WITHOUT stashing a
+                    // `ctx.error`, so a malformed CALL that underflows before it ever runs the target
+                    // keeps its `StackUnderflow` rather than surfacing a spurious DB error from this
+                    // precheck. The opcode's real execution path reads the account again and owns
+                    // surfacing any genuine failure.
+                    if target == beneficiary ||
+                        (spec.is_enabled(MegaSpecId::REX6) &&
+                            context.host.best_effort_resolve_eip7702_delegate_address(target) ==
+                                beneficiary)
+                    {
+                        context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                            InstructionResult::Revert,
+                            volatile_data_access_disabled_revert_data(
+                                VolatileDataAccessType::Beneficiary,
+                            ),
+                            context.interpreter.gas,
+                        ));
+                        return;
+                    }
                 }
             }
 
@@ -1832,10 +1915,15 @@ pub mod storage_gas_ext {
     /// - State growth (+1)
     ///
     /// This wrapper is the inner layer of the REX5 SELFDESTRUCT dispatch chain
-    /// (`volatile_data_ext::selfdestruct_rex5` → `storage_gas_ext::selfdestruct`),
-    /// matching the layering used by SSTORE and LOG. The beneficiary-volatile
-    /// guard runs in the outer `volatile_data_ext::selfdestruct_rex5` ahead of
-    /// any side effects below.
+    /// (`volatile_data_ext::selfdestruct_with_beneficiary_guard` →
+    /// `storage_gas_ext::selfdestruct`), matching the layering used by SSTORE and LOG.
+    /// The beneficiary-volatile guard runs in the outer
+    /// `volatile_data_ext::selfdestruct_with_beneficiary_guard` ahead of any side effects below.
+    ///
+    /// REX6 additionally records the `DataSize` +40 / KV +1 of a balance credit to an existing
+    /// *distinct* beneficiary — the account-info write the frame-init / `target_updated` path never
+    /// sees — via the REX6-gated arm below; pre-REX6 records nothing for an existing target. The
+    /// rest of the body, and all ≤REX5 behavior, is unchanged.
     pub fn selfdestruct<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -1885,6 +1973,19 @@ pub mod storage_gas_ext {
             // Record resource usage for new beneficiary account
             context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
             charged
+        } else if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
+            has_value &&
+            caller != target
+        {
+            // REX6: a balance credit to an existing *distinct* beneficiary performs an account-info
+            // write the frame-init / `target_updated` path never sees — record DataSize +40 / KV +1
+            // (no `StateGrowth`, the account already exists; no storage gas, the bucket is paid).
+            // SELFDESTRUCT to self (`caller == target`) is an EIP-6780 balance no-op on a
+            // non-same-tx-created account (and a burn-to-self on a same-tx-created one) — neither
+            // is a distinct-target credit, so record nothing. Pre-REX6 records nothing
+            // for any existing target.
+            context.host.additional_limit().borrow_mut().on_selfdestruct_existing_account();
+            0
         } else {
             0
         };
@@ -1893,7 +1994,7 @@ pub mod storage_gas_ext {
         // metering order). Byte-equivalent to the pre-REX6 `compute_gas_ext::selfdestruct`
         // layering on REX5 because nothing between `gas_before` and the storage charge above
         // consumes EVM gas. The beneficiary-volatile guard ran in the outer
-        // `volatile_data_ext::selfdestruct_rex5` wrapper.
+        // `volatile_data_ext::selfdestruct_with_beneficiary_guard` wrapper.
         run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
         record_storage_compute_gas!(context, gas_before, storage_charged);
     }

@@ -38,6 +38,18 @@ impl MemoryDatabase {
         self
     }
 
+    /// Installs an account whose code is *lazy*: `basic()` returns `code: None` with `code_hash`
+    /// set, so loading the code requires a `code_by_hash` call. Mirrors production reth's
+    /// `StateProviderDatabase::basic`, which defers code loading. Lets a code-load failure be
+    /// exercised independently of `basic()`.
+    pub fn account_lazy_code(mut self, address: Address, code_hash: B256) -> Self {
+        let account_info = self.db.load_account(address).unwrap();
+        account_info.info.code = None;
+        account_info.info.code_hash = code_hash;
+        account_info.account_state = AccountState::None;
+        self
+    }
+
     /// Sets the balance for an account in the database.
     pub fn set_account_balance(&mut self, address: Address, balance: U256) {
         let account_info = self.db.load_account(address).unwrap();
@@ -130,12 +142,16 @@ pub struct ErrorInjectingDatabase {
     pub fail_on_account: Option<Address>,
     /// When set, `storage()` calls for this (address, key) return an error.
     pub fail_on_storage: Option<(Address, StorageKey)>,
+    /// When set, `code_by_hash()` calls for this hash return an error. Lets a code load fail
+    /// independently of `basic()` (mirrors a node missing a contract's code), to exercise the
+    /// `load_code = true` inspect paths in isolation.
+    pub fail_on_code_by_hash: Option<B256>,
 }
 
 impl ErrorInjectingDatabase {
     /// Creates a new `ErrorInjectingDatabase` wrapping the given [`MemoryDatabase`].
     pub fn new(inner: MemoryDatabase) -> Self {
-        Self { inner, fail_on_account: None, fail_on_storage: None }
+        Self { inner, fail_on_account: None, fail_on_storage: None, fail_on_code_by_hash: None }
     }
 }
 
@@ -150,6 +166,9 @@ impl revm::Database for ErrorInjectingDatabase {
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        if self.fail_on_code_by_hash == Some(code_hash) {
+            return Err(InjectedDbError(format!("injected code_by_hash() error for {code_hash}")));
+        }
         self.inner.code_by_hash(code_hash).map_err(|e| match e {})
     }
 

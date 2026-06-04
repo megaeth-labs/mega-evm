@@ -1,5 +1,5 @@
 ---
-description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, CREATE-frame resource accounting corrected (failed-CREATE results no longer rewritten into a limit revert, creator nonce-bump booked to the parent frame, and CREATE state growth recorded only for net-new addresses), KeylessDeploy sandbox hardened (outer sender's unused gas rescued on a transaction-level compute-gas halt, and a self-destructing constructor reported as an empty-code deployment), post-execution fee-reward account materializations counted toward resource accounting, system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow, and two smaller resource-accounting corrections (a per-log data-size base so an empty log is no longer free in the data-size lane, and forwarded gas returned to the parent frame when a CALL or CREATE halts on the compute-gas limit).
+description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, CREATE-frame resource accounting corrected (creator nonce-bump booked to the parent frame and CREATE state growth recorded only for net-new addresses), KeylessDeploy sandbox hardened (outer sender's unused gas rescued on a transaction-level compute-gas halt, and a self-destructing constructor reported as an empty-code deployment), post-execution fee-reward account materializations counted toward resource accounting, beneficiary detention and disableVolatileDataAccess coverage extended to source-side SELFDESTRUCT and EIP-7702-delegated CALLs (with existing-target SELFDESTRUCT balance credits counted toward resource accounting), system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow, and two smaller resource-accounting corrections (a per-log data-size base so an empty log is no longer free in the data-size lane, and forwarded gas returned to the parent frame when a CALL or CREATE halts on the compute-gas limit).
 ---
 
 # Rex6 Network Upgrade
@@ -14,7 +14,7 @@ Its semantics may still change before network activation.
 
 ## Summary
 
-Rex6 bundles seven consensus-visible changes to gas and resource accounting:
+Rex6 bundles eight consensus-visible changes to gas and resource accounting:
 
 1. **Unified per-opcode gas metering order.** Rex6 defines a single, canonical order in which every storage-affecting opcode charges [storage gas](../glossary.md#storage-gas) and records [compute gas](../glossary.md#compute-gas), and brings `CREATE2` under it.
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
@@ -22,7 +22,8 @@ Rex6 bundles seven consensus-visible changes to gas and resource accounting:
 4. **KeylessDeploy sandbox hardening.** Rex6 rescues the outer sender's unused gas when a keyless-deploy dispatch hits the transaction-level compute-gas limit, and reports a keyless deploy whose constructor self-destructs as an empty-code deployment rather than a success.
 5. **Post-execution fee-reward accounting.** Rex6 counts account materializations performed by the post-execution beneficiary fee-reward step toward resource accounting, closing a window in which they escaped it.
 6. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
-7. **Additional resource-accounting corrections.** Rex6 charges a per-log base cost so empty logs are no longer free in the data-size lane, and returns forwarded gas to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
+7. **Beneficiary detention / volatile-access coverage.** Rex6 brings two cases under beneficiary detention and `disableVolatileDataAccess` that earlier specs missed — a `SELFDESTRUCT` whose executing contract is the block beneficiary, and a `CALL` whose EIP-7702 delegate is the block beneficiary — and counts a `SELFDESTRUCT` balance credit to an already-existing beneficiary toward resource accounting.
+8. **Additional resource-accounting corrections.** Rex6 charges a per-log base cost so empty logs are no longer free in the data-size lane, and returns forwarded gas to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
 
 ### Unified Gas Metering Order
 
@@ -82,6 +83,14 @@ The result is a protocol-level failure driven purely by how full the state has b
 Rex6 removes this failure mode: a system-originated transaction charges its storage writes at the **minimum bucket capacity** (so the cost no longer depends on the bucket), and the four [resource-limit dimensions](../evm/resource-accounting.md) plus [gas detention](../evm/gas-detention.md) are not enforced against it.
 The standard EVM `gas_limit` still bounds the work as a runaway guard.
 
+### Beneficiary Detention and Volatile-Access Coverage
+
+Beneficiary gas detention and the `disableVolatileDataAccess` guard exist so a contract cannot observe the block beneficiary's volatile balance without paying for it. Earlier specs applied them to only part of the surface. Rex6 closes two gaps and corrects one related `SELFDESTRUCT` accounting omission:
+
+- **Source-side `SELFDESTRUCT`.** A `SELFDESTRUCT` reads and zeroes its executing contract's balance. When that contract is the block beneficiary, the operation observes beneficiary state, so under `disableVolatileDataAccess` it now reverts and otherwise engages detention. Earlier specs compared only the `SELFDESTRUCT` stack target to the beneficiary. The check applies only once the operation has a target operand, so a stack-underflow `SELFDESTRUCT` keeps its `StackUnderflow` halt.
+- **EIP-7702-delegated `CALL`.** Loading an account whose [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) delegate is the block beneficiary reads the beneficiary's account. Rex6 resolves the delegate one hop before the beneficiary comparison for `CALL`, `CALLCODE`, `DELEGATECALL`, and `STATICCALL`, so a call to such a delegator reverts under `disableVolatileDataAccess` and engages detention; earlier specs compared the raw stack operand.
+- **Existing-target `SELFDESTRUCT` accounting.** A `SELFDESTRUCT` that credits its balance to an already-existing beneficiary performs an account-info write the frame-initialization accounting path never sees. Rex6 records it toward [data-size and KV-update accounting](../evm/resource-accounting.md) (no state growth — the account already exists). A `SELFDESTRUCT` to the executing contract itself is an [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) balance no-op and records nothing.
+
 ### Additional Resource-Accounting Corrections
 
 Rex6 closes two smaller accounting gaps:
@@ -90,7 +99,7 @@ Rex6 closes two smaller accounting gaps:
 - **Forwarded gas returned on a compute-limit halt.** When a `CALL` or `CREATE` records its compute gas (step 4 of the unified metering order) and exceeds the [compute-gas limit](../evm/resource-limits.md), the opcode halts and its pending child frame is discarded before it runs. Pre-Rex6, the gas already forwarded to that child was not returned to the parent frame, inflating the transaction's `gas_used` by the forwarded amount. Rex6 returns the forwarded gas to the parent before halting, so `gas_used` reflects only the gas actually consumed.
 
 All consensus-visible changes are gated on the Rex6 spec.
-Pre-Rex6 specs retain their existing metering order, per-authorization accounting, CREATE-frame accounting, KeylessDeploy sandbox behavior, post-execution fee-reward accounting, full metering of system transactions, log data-size, and forwarded-gas handling on a compute-limit halt unchanged.
+Pre-Rex6 specs retain their existing metering order, per-authorization accounting, CREATE-frame accounting, KeylessDeploy sandbox behavior, post-execution fee-reward accounting, beneficiary-detention and volatile-access coverage, full metering of system transactions, log data-size, and forwarded-gas handling on a compute-limit halt unchanged.
 
 ## What Changed
 

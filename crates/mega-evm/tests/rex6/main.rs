@@ -4,6 +4,7 @@
 //!   account-creation gas for net-new authorities, and DataSize/KV charged only for *applied*
 //!   authorities (not every recoverable one).
 
+mod beneficiary_detention;
 mod common;
 mod create2_metering_order;
 mod create_frame_accounting;

@@ -190,6 +190,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
 
     fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>> {
         self.check_and_mark_beneficiary_balance_access(&address);
+        // Rex6+: also mark the EIP-7702 delegate of `address` if any, so a CALL whose
+        // target delegates to the beneficiary triggers detention even though the raw stack
+        // operand doesn't match. The Rex4 path only marked the raw input. A resolve DB error
+        // falls back to the raw address (no delegate mark) — the `load_account_delegated` below
+        // remains responsible for surfacing the failure.
+        if self.spec.is_enabled(MegaSpecId::REX6) {
+            let resolved = self.best_effort_resolve_eip7702_delegate_address(address);
+            if resolved != address {
+                self.check_and_mark_beneficiary_balance_access(&resolved);
+            }
+        }
         self.inner.load_account_delegated(address)
     }
 
@@ -248,6 +259,18 @@ pub trait HostExt: Host {
     /// Returns the block beneficiary address without triggering volatile data tracking.
     /// Used by instruction handlers to pre-check whether an opcode targets the beneficiary.
     fn beneficiary_address(&self) -> Address;
+
+    /// Resolves the EIP-7702 delegate of `address` one hop on a best-effort basis, returning
+    /// `address` itself when there is no delegate or when the resolve hits a DB error.
+    ///
+    /// Unlike [`JournalInspectTr::resolve_eip7702_delegate_address`], a DB failure here is NOT
+    /// stashed in `self.error()`. This is for prechecks and side-marks (the beneficiary-volatile
+    /// guard, the detention side-mark) that compare the delegate against a known address and must
+    /// never turn a transaction into an error on their own — e.g. a malformed CALL that underflows
+    /// before it ever runs the target must keep its `StackUnderflow`, not a spurious DB error from
+    /// eagerly loading a delegate's code it never needs. The opcode's real execution path reads the
+    /// account again and owns surfacing any genuine DB error.
+    fn best_effort_resolve_eip7702_delegate_address(&mut self, address: Address) -> Address;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
@@ -322,10 +345,42 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     fn beneficiary_address(&self) -> Address {
         self.inner.block.beneficiary
     }
+
+    #[inline]
+    fn best_effort_resolve_eip7702_delegate_address(&mut self, address: Address) -> Address {
+        // Resolve through the journal directly so a DB error propagates as `Err` here (and is
+        // discarded) rather than being stashed into `self.error()` by
+        // `MegaContext::inspect_account`.
+        let spec = self.spec;
+        self.inner
+            .journaled_state
+            .resolve_eip7702_delegate_address(spec, address)
+            .unwrap_or(address)
+    }
 }
 
 /// Trait to inspect the journal's internal state without marking any accounts or storage slots as
 /// warm.
+///
+/// # EIP-7702 address semantics
+///
+/// Address handling is intentionally split by call-site purpose. The guiding rule: follow the
+/// delegate ONLY to (1) execute the delegate's code and (2) decide whether an operand observes the
+/// block beneficiary's state. Everything that *attributes* balance / nonce / storage / state-growth
+/// / data-size uses the ORIGINAL address — a delegated account's state is its own, not the
+/// delegate's. Before adding a new 7702-touching call site, find its row in this table and use the
+/// listed address; do not re-derive the raw-vs-delegate decision ad-hoc.
+///
+/// | Purpose | Address | Mechanism | Spec gate |
+/// | --- | --- | --- | --- |
+/// | Code / execution target | delegate | revm's `load_account_delegated` (not these primitives) | revm-owned |
+/// | Storage / SALT / state-growth / account-write accounting | original | `inspect_account` | REX5+ original; pre-REX5 followed the delegate (frozen) |
+/// | CALL-family beneficiary / volatile-access check | delegate | `resolve_eip7702_delegate_address` | REX6+ only; `<=` REX5 compares the raw operand (frozen) |
+/// | Validate-time authorization accounting | original authority | `inspect_account` with `load_code = true` (EIP-7702 / EIP-3607 detection) | scan-wide |
+///
+/// `inspect_account_delegated` follows the delegate; it backs the frozen pre-REX5 accounting path
+/// and any caller that genuinely needs the delegate's account. New accounting call sites should use
+/// `inspect_account` (original address), not this.
 ///
 /// To improve performance, when journal does not have the account or storage slot, it will be
 /// loaded from the database and cached in the journal.
@@ -386,6 +441,32 @@ pub trait JournalInspectTr {
         address: Address,
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, Self::DBError>;
+
+    /// Resolve the EIP-7702 delegate of `address` one hop and return the target address.
+    ///
+    /// Returns `address` itself when the account is not EIP-7702-delegated. Hydrates `info.code`
+    /// on REX5+ so EIP-7702 detection works against lazy-code databases (mirrors
+    /// `inspect_account_delegated`'s rule for stable-spec freeze).
+    ///
+    /// Callers gate this on REX6 (the only place it is used). EIP-7702 does not exist on earlier
+    /// specs, so an account there simply has no delegate code and resolves to `address` — no
+    /// pre-REX4 special case is needed.
+    ///
+    /// Useful for instruction-wrapper checks that need to compare the effective code-running
+    /// address against a known target (e.g., the block beneficiary) before delegating to revm.
+    fn resolve_eip7702_delegate_address(
+        &mut self,
+        spec: MegaSpecId,
+        address: Address,
+    ) -> Result<Address, Self::DBError> {
+        let load_code = spec.is_enabled(MegaSpecId::REX5);
+        let account = self.inspect_account(address, load_code)?;
+        let delegate = account.info.code.as_ref().and_then(|code| match code {
+            Bytecode::Eip7702(c) => Some(c.address()),
+            _ => None,
+        });
+        Ok(delegate.unwrap_or(address))
+    }
 }
 
 /// Load an account into the journal cache without following EIP-7702 delegation
