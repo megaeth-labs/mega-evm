@@ -105,6 +105,10 @@ impl Workload {
 
     /// Opt out of the per-tx `is_success()` assertion. Use for scenarios where
     /// halting is the expected outcome under at least one benchmarked spec.
+    ///
+    /// The relaxed check accepts *any* non-success result — a revert as well as
+    /// a halt — not only halts; the name reflects the intended use rather than a
+    /// revert-vs-halt distinction.
     pub fn allow_halt(mut self) -> Self {
         self.assert_success = false;
         self
