@@ -22,6 +22,8 @@ pub(crate) struct Outcome {
     pub(crate) result: ExecutionResult<MegaHaltReason>,
     /// Post-tx compute-gas tracker reading (`get_usage().compute_gas`).
     pub(crate) compute_gas: u64,
+    /// Post-tx data-size tracker reading (`get_usage().data_size`).
+    pub(crate) data_size: u64,
     /// Receipt `gas_used` (combined compute + storage EVM gas).
     pub(crate) gas_used: u64,
 }
@@ -51,9 +53,14 @@ pub(crate) fn transact(
     let mut evm = MegaEvm::new(context);
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
-    let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
+    let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     let gas_used = result.result.gas_used();
-    Outcome { result: result.result, compute_gas, gas_used }
+    Outcome {
+        result: result.result,
+        compute_gas: usage.compute_gas,
+        data_size: usage.data_size,
+        gas_used,
+    }
 }
 
 /// Runs [`transact`] with the spec's default runtime limits.

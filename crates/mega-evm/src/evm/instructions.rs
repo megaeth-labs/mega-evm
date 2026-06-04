@@ -457,7 +457,9 @@ macro_rules! record_storage_compute_gas {
         // Exclude gas forwarded to a child frame. REX5+ excludes the revm-side `CALL_STIPEND`
         // (added by value-transferring CALL/CALLCODE without deducting from the parent) so the
         // parent's compute gas is not under-counted; pre-REX5 subtracts the full child gas limit
-        // for replay parity.
+        // for replay parity. `forwarded_child_gas` records that deducted amount so the abort path
+        // below can return it to the parent.
+        let mut forwarded_child_gas: u64 = 0;
         match $context.interpreter.bytecode.action() {
             Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
                 let stipend_from_revm = if $context.host.spec_id().is_enabled(MegaSpecId::REX5) &&
@@ -469,16 +471,32 @@ macro_rules! record_storage_compute_gas {
                     0
                 };
                 let parent_contributed = call_inputs.gas_limit.saturating_sub(stipend_from_revm);
+                forwarded_child_gas = parent_contributed;
                 gas_used = gas_used.saturating_sub(parent_contributed);
             }
             Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
+                forwarded_child_gas = create_inputs.gas_limit;
                 gas_used = gas_used.saturating_sub(create_inputs.gas_limit);
             }
             _ => {}
         }
-        let mut additional_limit = $context.host.additional_limit().borrow_mut();
-        if !additional_limit.record_compute_gas(gas_used) {
-            $context.interpreter.halt(additional_limit.exceeding_instruction_result());
+        // On a compute-limit halt the pending child `NewFrame` is discarded (the child never runs),
+        // but revm already deducted the forwarded gas and the outer `forward_gas_ext` erase is
+        // skipped on this abort path. REX6+: return that gas to the parent before halting.
+        let is_rex6 = $context.host.spec_id().is_enabled(MegaSpecId::REX6);
+        let exceeding_result = {
+            let mut additional_limit = $context.host.additional_limit().borrow_mut();
+            if additional_limit.record_compute_gas(gas_used) {
+                None
+            } else {
+                Some(additional_limit.exceeding_instruction_result())
+            }
+        };
+        if let Some(result) = exceeding_result {
+            if is_rex6 {
+                $context.interpreter.gas.erase_cost(forwarded_child_gas);
+            }
+            $context.interpreter.halt(result);
             return;
         }
     }};

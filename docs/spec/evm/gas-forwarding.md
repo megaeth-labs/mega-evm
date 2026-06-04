@@ -88,3 +88,4 @@ The 63/64 rule inherited from Ethereum was designed for much lower gas budgets; 
 - [MiniRex](../upgrades/minirex.md) introduced the 98/100 rule for `CALL`, `CREATE`, and `CREATE2` only.
 - [Rex](../upgrades/rex.md) extended the rule to all CALL-like opcodes.
 - [Rex4](../upgrades/rex4.md) — added storage-gas stipend for value-transferring `CALL` and `CALLCODE`.
+- [Rex6](../upgrades/rex6.md) (**unstable**) — returns forwarded gas to the parent when a `CALL` or `CREATE` halts on the compute-gas limit: pre-Rex6, when the opcode recorded its compute gas and exceeded the limit, the pending child frame was discarded but the gas already forwarded to it was not returned, inflating `gas_used`; Rex6 returns the forwarded gas to the parent before halting.

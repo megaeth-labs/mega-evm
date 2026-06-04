@@ -10,6 +10,7 @@ mod create_frame_accounting;
 mod eip7702_authority_accounting;
 mod error_paths;
 mod fee_reward_accounting;
+mod frame_local_accounting;
 mod keyless_sandbox_hardening;
 mod metering_order_parity;
 mod system_tx_metering_exemption;

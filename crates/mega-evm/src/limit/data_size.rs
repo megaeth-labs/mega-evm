@@ -30,6 +30,9 @@ pub const SALT_VALUE_DELTA_STORAGE_SLOT_SIZE: u64 = 32;
 pub const ACCOUNT_INFO_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_ACCOUNT_INFO_SIZE;
 /// The originated data size for writing a storage slot.
 pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAGE_SLOT_SIZE;
+/// REX6+ per-log base overhead: one value unit (`LOG_TOPIC_SIZE`) for the address every receipt log
+/// carries, so an empty `LOG0` is not free in the `data_size` lane.
+pub const LOG_BASE_SIZE: u64 = 32;
 
 /// A tracker for the total data size (in bytes) generated from transaction execution.
 ///
@@ -377,9 +380,10 @@ impl TxRuntimeLimit for DataSizeTracker {
 
     /// Hook called when a log is emitted.
     ///
-    /// Records: (`num_topics` * 32 bytes) + `data_size` as discardable.
+    /// Records `LOG_BASE_SIZE` (REX6+ only) + `num_topics * 32` + `data_size` as discardable.
     fn after_log(&mut self, num_topics: u64, data_size: u64) {
-        let size = num_topics * LOG_TOPIC_SIZE + data_size;
+        let base = if self.rex6_enabled { LOG_BASE_SIZE } else { 0 };
+        let size = base + num_topics * LOG_TOPIC_SIZE + data_size;
         self.record_discardable(size);
     }
 }
