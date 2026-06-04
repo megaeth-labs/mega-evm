@@ -14,7 +14,7 @@ Its semantics may still change before network activation.
 
 ## Summary
 
-Rex6 bundles eight consensus-visible changes to gas and resource accounting:
+Rex6 bundles nine consensus-visible changes to gas and resource accounting:
 
 1. **Unified per-opcode gas metering order.** Rex6 defines a single, canonical order in which every storage-affecting opcode charges [storage gas](../glossary.md#storage-gas) and records [compute gas](../glossary.md#compute-gas), and brings `CREATE2` under it.
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
@@ -24,6 +24,7 @@ Rex6 bundles eight consensus-visible changes to gas and resource accounting:
 6. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
 7. **Beneficiary detention / volatile-access coverage.** Rex6 brings two cases under beneficiary detention and `disableVolatileDataAccess` that earlier specs missed — a `SELFDESTRUCT` whose executing contract is the block beneficiary, and a `CALL` whose EIP-7702 delegate is the block beneficiary — and counts a `SELFDESTRUCT` balance credit to an already-existing beneficiary toward resource accounting.
 8. **Additional resource-accounting corrections.** Rex6 charges a per-log base cost so empty logs are no longer free in the data-size lane, and returns forwarded gas to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
+9. **Value self-transfer account-info dedup.** Rex6 records a value transfer whose target equals the caller as a single account-info write on the data-size and KV-update limiter lanes instead of two.
 
 ### Unified Gas Metering Order
 
@@ -98,8 +99,16 @@ Rex6 closes two smaller accounting gaps:
 - **Per-log data-size base.** MegaETH's [data-size resource lane](../evm/resource-accounting.md) charges each emitted log by its topic and data bytes. Pre-Rex6, the log address — which every receipt log entry persists regardless of topic count or data length — was not counted, so an empty `LOG0` (no topics, no data) contributed zero data size while still producing a receipt entry. Rex6 charges a fixed per-log base of one 32-byte value unit for the log address, in addition to the topic and data bytes, so the data-size limit bounds receipt growth from logs.
 - **Forwarded gas returned on a compute-limit halt.** When a `CALL` or `CREATE` records its compute gas (step 4 of the unified metering order) and exceeds the [compute-gas limit](../evm/resource-limits.md), the opcode halts and its pending child frame is discarded before it runs. Pre-Rex6, the gas already forwarded to that child was not returned to the parent frame, inflating the transaction's `gas_used` by the forwarded amount. Rex6 returns the forwarded gas to the parent before halting, so `gas_used` reflects only the gas actually consumed.
 
+### Value Self-Transfer Account-Info Dedup
+
+A value transfer whose target equals the caller touches a single account.
+The per-call resource accounting on the [data-size and KV-update limiter lanes](../evm/resource-accounting.md) records a caller-side account-info write (or, at the top level, a transaction-start caller record) and a target-side account-info write.
+When the target equals the caller these refer to the same account, so pre-Rex6 recorded it twice, inflating the block-level data-size and KV-update usage that gates later transactions in the block (an over-count — it never under-charges).
+Rex6 suppresses the redundant target-side write whenever the call's target equals its caller, so the account is counted exactly once.
+Non-self transfers (`A -> B`) and zero-value calls are unchanged.
+
 All consensus-visible changes are gated on the Rex6 spec.
-Pre-Rex6 specs retain their existing metering order, per-authorization accounting, CREATE-frame accounting, KeylessDeploy sandbox behavior, post-execution fee-reward accounting, beneficiary-detention and volatile-access coverage, full metering of system transactions, log data-size, and forwarded-gas handling on a compute-limit halt unchanged.
+Pre-Rex6 specs retain their existing metering order, per-authorization accounting, CREATE-frame accounting, KeylessDeploy sandbox behavior, post-execution fee-reward accounting, beneficiary-detention and volatile-access coverage, full metering of system transactions, log data-size, forwarded-gas handling on a compute-limit halt, and the value self-transfer account-info double-count unchanged.
 
 ## What Changed
 

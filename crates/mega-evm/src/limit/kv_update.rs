@@ -213,8 +213,14 @@ impl TxRuntimeLimit for KVUpdateTracker {
                         // Parent's account info update goes to child's discardable.
                         self.record_discardable(1);
                     }
-                    // Record target account info update in child's discardable.
-                    self.record_discardable(1);
+                    // A value transfer to the caller itself touches a single account, already
+                    // accounted by the caller-side write above (or, at the top level, by the
+                    // transaction-start caller record). Recording the target side again would
+                    // double-count that one account, so skip it under REX6.
+                    if !(self.rex6_enabled && call_inputs.target_address == call_inputs.caller) {
+                        // Record target account info update in child's discardable.
+                        self.record_discardable(1);
+                    }
                 }
             }
             FrameInput::Create(_) => {

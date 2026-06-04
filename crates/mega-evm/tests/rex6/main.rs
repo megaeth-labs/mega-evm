@@ -14,4 +14,5 @@ mod fee_reward_accounting;
 mod frame_local_accounting;
 mod keyless_sandbox_hardening;
 mod metering_order_parity;
+mod self_transfer_account_dedup;
 mod system_tx_metering_exemption;
