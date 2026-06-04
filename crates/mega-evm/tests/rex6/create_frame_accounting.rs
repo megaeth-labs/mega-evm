@@ -14,10 +14,9 @@ use mega_evm::{
     EmptyExternalEnv, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
     MegaTransaction, ACCOUNT_INFO_WRITE_SIZE,
 };
-use op_revm::OpHaltReason;
 use revm::{
     context::{
-        result::{ExecutionResult, HaltReason, OutOfGasError, ResultAndState},
+        result::{ExecutionResult, ResultAndState},
         BlockEnv, ContextSetters, TxEnv,
     },
     handler::EvmTr,
@@ -218,29 +217,22 @@ fn run_create_with_limits(
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError")
 }
 
-/// REX6: a CREATE whose Mega code-deposit-storage charge runs `OutOfGas` must keep that failure
-/// (a burned halt), even when the frame's data-size budget is simultaneously exceeded.
+/// A CREATE whose Mega code-deposit-storage charge runs out of gas while the frame's data-size
+/// budget is simultaneously exceeded is absorbed into the frame-local `Revert` and its unspent
+/// child gas is returned to the caller — identically on REX6 and pre-REX6. The frame-local absorb
+/// treats an already-failed CREATE the same as a successful-but-over-limit one, so REX5 and REX6
+/// produce the same result class and the same `gas_used` (no spec divergence on this path).
 ///
-/// Setup: the constructor RETURNs an 8_000-byte runtime blob. The Mega code-deposit-storage
-/// charge (`CODEDEPOSIT_STORAGE_GAS` per byte) far exceeds the 400_000-gas frame budget, so the
-/// frame returns `OutOfGas`. At the same time the runtime blob's data-size accounting overshoots
-/// the tiny `tx_data_size_limit` (2000 bytes), so the frame-local data-size limit is also
-/// exceeded — the exact edge where the limit machinery would otherwise rewrite the result.
-///
-/// Pre-REX6 (buggy): the frame-local absorb in the limit hook unconditionally rewrites the
-/// already-`OutOfGas` CREATE result to `Revert`, reversing the failure class and refunding the
-/// child gas to the caller (`gas_used` collapses to the constructor cost). REX6 keeps the
-/// `OutOfGas` halt and burns the full frame gas.
-///
-/// The divergence is observed directly: REX6 halts (`OutOfGas`) burning all `gas`, while REX5
-/// reverts and refunds, so `gas_used(REX6) > gas_used(REX5)`.
+/// Setup: the constructor RETURNs an 8_000-byte runtime blob. The Mega code-deposit-storage charge
+/// (`CODEDEPOSIT_STORAGE_GAS` per byte) far exceeds the 400_000-gas frame budget, so the frame
+/// returns `OutOfGas`. At the same time the runtime blob overshoots the tiny `tx_data_size_limit`
+/// (2000 bytes), so the frame-local data-size limit is also exceeded — the exact edge where the
+/// absorb fires.
 #[test]
-fn test_rex6_create_oog_not_rewritten_to_revert() {
-    // Runtime blob large enough that the Mega code-deposit-storage charge cannot fit in `GAS`,
-    // and large enough to overshoot DATA_SIZE_LIMIT so the frame-local data-size limit also trips.
+fn test_rex6_create_oog_over_limit_matches_rex5_frozen() {
+    // Runtime blob large enough that the code-deposit-storage charge cannot fit in `GAS`, and
+    // large enough to overshoot DATA_SIZE_LIMIT so the frame-local data-size limit also trips.
     const CODE_LEN: u32 = 8_000;
-    // Tx data-size budget far below the runtime blob size: the frame-local data-size limit is
-    // exceeded when the deployed code size is recorded.
     const DATA_SIZE_LIMIT: u64 = 2_000;
     // Frame gas budget far below the code-deposit-storage charge (CODE_LEN * 10_000), so the
     // charge runs OutOfGas; large enough for the constructor + intrinsic to run first.
@@ -249,34 +241,23 @@ fn test_rex6_create_oog_not_rewritten_to_revert() {
     let r5 = run_create_with_limits(MegaSpecId::REX5, DATA_SIZE_LIMIT, CODE_LEN, GAS);
     let r6 = run_create_with_limits(MegaSpecId::REX6, DATA_SIZE_LIMIT, CODE_LEN, GAS);
 
-    // REX5 (frozen, buggy): the OutOfGas is clobbered to Revert; child gas is refunded.
+    // Both specs absorb the failed CREATE into the frame-local Revert.
     assert!(
         matches!(r5.result, ExecutionResult::Revert { .. }),
-        "REX5 keeps the legacy limit-Revert clobber of the OutOfGas CREATE: {:?}",
+        "REX5 absorbs the OutOfGas CREATE into a frame-local Revert: {:?}",
         r5.result,
     );
-
-    // REX6 (fixed): the code-deposit-storage OutOfGas stands as a burned halt.
-    // Assert the specific reason is OutOfGas(Basic) — the halt class produced by the
-    // code-deposit-storage gas charge running out of gas mid-execution.
     assert!(
-        matches!(
-            r6.result,
-            ExecutionResult::Halt {
-                reason: MegaHaltReason::Base(OpHaltReason::Base(HaltReason::OutOfGas(
-                    OutOfGasError::Basic
-                ))),
-                ..
-            }
-        ),
-        "REX6 must keep the failed CREATE result (OutOfGas::Basic halt), not rewrite it to Revert: {:?}",
+        matches!(r6.result, ExecutionResult::Revert { .. }),
+        "REX6 absorbs the OutOfGas CREATE into a frame-local Revert identically to REX5: {:?}",
         r6.result,
     );
 
-    // The burn-vs-refund divergence: REX6 burns the full frame gas, REX5 refunds it.
-    assert!(
-        r6.result.gas_used() > r5.result.gas_used(),
-        "REX6 must burn the OutOfGas frame gas while REX5 refunds the clobbered-Revert gas \
+    // Same result class → same returned gas; no REX6 burn-vs-refund divergence on this path.
+    assert_eq!(
+        r6.result.gas_used(),
+        r5.result.gas_used(),
+        "REX6 must return the absorbed CREATE's gas identically to REX5 \
          (rex5_gas_used={}, rex6_gas_used={})",
         r5.result.gas_used(),
         r6.result.gas_used(),

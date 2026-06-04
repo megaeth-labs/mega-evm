@@ -115,12 +115,6 @@ impl DataSizeTracker {
         self.frame_tracker.tx_mut().persistent_usage += len;
     }
 
-    /// Whether REX6 is active for this transaction. Exposes the spec flag the tracker already
-    /// stores so the coordinator can gate REX6-only behavior without holding a duplicate flag.
-    pub(crate) fn rex6_enabled(&self) -> bool {
-        self.rex6_enabled
-    }
-
     /// Records an account info write (40 bytes) as discardable data in the current frame.
     ///
     /// Used by SELFDESTRUCT beneficiary metering (REX5+) to charge data size for

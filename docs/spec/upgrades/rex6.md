@@ -18,7 +18,7 @@ Rex6 bundles seven consensus-visible changes to gas and resource accounting:
 
 1. **Unified per-opcode gas metering order.** Rex6 defines a single, canonical order in which every storage-affecting opcode charges [storage gas](../glossary.md#storage-gas) and records [compute gas](../glossary.md#compute-gas), and brings `CREATE2` under it.
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
-3. **CREATE-frame resource accounting.** Rex6 stops rewriting an already-failed `CREATE` result into a limit `Revert`, and corrects the creator nonce-bump and net-new state-growth accounting on the `CREATE` frame.
+3. **CREATE-frame resource accounting.** Rex6 corrects the creator nonce-bump and net-new state-growth accounting on the `CREATE` frame.
 4. **KeylessDeploy sandbox hardening.** Rex6 rescues the outer sender's unused gas when a keyless-deploy dispatch hits the transaction-level compute-gas limit, and reports a keyless deploy whose constructor self-destructs as an empty-code deployment rather than a success.
 5. **Post-execution fee-reward accounting.** Rex6 counts account materializations performed by the post-execution beneficiary fee-reward step toward resource accounting, closing a window in which they escaped it.
 6. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
@@ -50,13 +50,12 @@ This lets the dynamic SALT account-creation gas for net-new authorities be folde
 
 ### CREATE-Frame Resource Accounting
 
-Rex6 corrects three independent accounting errors on the `CREATE` frame lifecycle:
+Rex6 corrects two independent accounting errors on the `CREATE` frame lifecycle:
 
-- **Failed-`CREATE` result is no longer rewritten.** Pre-Rex6, a nested `CREATE` that halts with `OutOfGas` on the code-deposit storage charge had its result rewritten into the frame-local limit `Revert`. Because `Revert` returns the child's unused gas to the caller while `OutOfGas` burns it, an attacker could loop large-code `CREATE`s to dodge the code-deposit burn, and the observable failure class flipped from `OutOfGas` to `Revert`. Rex6 leaves an already-failed `CREATE` result unchanged.
 - **Creator nonce-bump write booked to the parent frame.** The creator's nonce-bump account-info write is recorded in the parent frame's discardable lane (matching revm's nonce-bump revert semantics), instead of the child frame's, so it is no longer dropped when the child `CREATE` reverts.
 - **`CREATE` state growth is conditional.** A `CREATE` records `+1` state growth only when the created address is net-new (empty), mirroring the value-transfer Call arm, instead of unconditionally.
 
-Of the three, the failed-`CREATE` rewrite is the substantive fix; the parent-frame nonce-bump booking (under-count) and the conditional `CREATE` state growth (over-count) are accounting-completeness corrections in the conservative direction.
+Both are accounting-completeness corrections in the conservative direction — an under-count and an over-count respectively.
 
 ### KeylessDeploy Sandbox Hardening
 

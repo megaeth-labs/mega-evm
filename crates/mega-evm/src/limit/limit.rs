@@ -659,14 +659,6 @@ impl AdditionalLimit {
 
         if let InterpreterAction::Return(interpreter_result) = action {
             if frame.data.is_create() {
-                // REX6: never rewrite an already-failed CREATE result into the limit-exceed Revert.
-                // A code-deposit-storage OutOfGas must keep its burn — rewriting it to Revert
-                // reverses the failure class and refunds gas that should stay burned. Pre-REX6
-                // keeps the unconditional rewrite (frozen for replay parity).
-                if self.data_size.rex6_enabled() && !interpreter_result.result.is_ok() {
-                    return;
-                }
-
                 // Fast-path: a TX-level limit was latched earlier; pick it up without re-running
                 // sub-tracker checks. Under `Exempt`, the predicate is false, so the exemption
                 // passes through unchanged.
@@ -732,16 +724,8 @@ impl AdditionalLimit {
                         o.result.output = output;
                     }
                     FrameResult::Create(o) => {
-                        // REX6: never rewrite an already-failed CREATE result into the
-                        // frame-local Revert. A code-deposit-storage OutOfGas must keep its
-                        // burn — rewriting it to Revert reverses the failure class and refunds
-                        // gas that should stay burned. The exceed flag is still cleared above so
-                        // the frame's own failure (not the limit) is what propagates. Pre-REX6
-                        // keeps the unconditional rewrite (frozen for replay parity).
-                        if !self.data_size.rex6_enabled() || o.result.result.is_ok() {
-                            o.result.result = InstructionResult::Revert;
-                            o.result.output = output;
-                        }
+                        o.result.result = InstructionResult::Revert;
+                        o.result.output = output;
                     }
                 }
             } else {
