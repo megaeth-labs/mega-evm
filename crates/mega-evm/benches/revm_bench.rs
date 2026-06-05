@@ -23,9 +23,9 @@
 //! New workloads must avoid touching mega-evm's per-tx resource limits
 //! (compute gas / data size / KV updates / state growth) under any spec, or the
 //! `mega_*` row would halt early and skew the baseline comparison.
-//! Likewise, both revm versions must be able to execute the workload with their
-//! respective default hardforks — if the latest stack diverges (e.g. moves to
-//! Prague gas schedule), the `*_latest` rows have to pin spec explicitly.
+//! Likewise, every vanilla baseline is pinned to a Cancun-equivalent fork
+//! (`revm` rows to Cancun, `op-revm` rows to Holocene) in `common::subject`, so
+//! a new workload must execute successfully under Cancun semantics on every row.
 
 #![allow(missing_docs)]
 
