@@ -215,7 +215,7 @@ impl Subject for Mega {
                 mega_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(mega_tx).expect("mega transact");
                 let success = r.result.is_success();
-                black_box(&r);
+                black_box(r);
                 success
             },
         );
@@ -250,7 +250,7 @@ impl Subject for RevmPinned {
             |evm, tx| {
                 let r = evm.transact(pinned_tx_env(tx)).expect("revm_pinned transact");
                 let success = r.result.is_success();
-                black_box(&r);
+                black_box(r);
                 success
             },
         );
@@ -278,7 +278,7 @@ impl Subject for RevmLatest {
             |evm, tx| {
                 let r = evm.transact(latest_tx_env(tx)).expect("revm_latest transact");
                 let success = r.result.is_success();
-                black_box(&r);
+                black_box(r);
                 success
             },
         );
@@ -310,7 +310,7 @@ impl Subject for OpRevmPinned {
                 op_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(op_tx).expect("op_revm_pinned transact");
                 let success = r.result.is_success();
-                black_box(&r);
+                black_box(r);
                 success
             },
         );
@@ -342,7 +342,7 @@ impl Subject for OpRevmLatest {
                 op_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(op_tx).expect("op_revm_latest transact");
                 let success = r.result.is_success();
-                black_box(&r);
+                black_box(r);
                 success
             },
         );
