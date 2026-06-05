@@ -37,10 +37,13 @@ use sha2::{Digest, Sha256 as Sha256Hash};
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 
-/// Specification IDs to benchmark against
+/// Specification IDs to benchmark against. REX5 is included so the precompile
+/// hot path (compute-gas cap + Gas normalization in `PrecompilesMap::run`) is
+/// measured against the pre-REX5 baseline.
 const SPEC_IDS: &[(&str, MegaSpecId)] = &[
     // ("equivalence", MegaSpecId::EQUIVALENCE),
     ("mini_rex", MegaSpecId::MINI_REX),
+    ("rex5", MegaSpecId::REX5),
 ];
 
 //

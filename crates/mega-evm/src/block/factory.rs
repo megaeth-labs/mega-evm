@@ -166,6 +166,14 @@ where
         DB: Database + 'a,
         I: Inspector<<Self::EvmFactory as alloy_evm::EvmFactory>::Context<&'a mut State<DB>>> + 'a,
     {
+        // Synchronize EVM tx runtime limits with the block context's BlockLimits.
+        // This mirrors the inherent factory paths above which apply this
+        // unconditionally on every spec since introduction. Without this, the
+        // trait impl path silently ran against whatever limits the caller did
+        // or did not pre-apply via with_tx_runtime_limits, leaving an asymmetry
+        // between the inherent and trait construction routes.
+        let runtime_limits = ctx.block_limits.to_evm_tx_runtime_limits();
+        let evm = evm.with_tx_runtime_limits(runtime_limits);
         MegaBlockExecutor::new(evm, ctx, &self.hardforks, &self.receipt_builder)
     }
 }

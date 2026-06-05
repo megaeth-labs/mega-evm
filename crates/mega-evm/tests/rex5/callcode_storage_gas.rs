@@ -28,12 +28,28 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, STOP},
     context::{result::ResultAndState, TxEnv},
+    database::AccountState,
+    state::Bytecode,
 };
 
 const CALLER: Address = address!("2000000000000000000000000000000000000001");
 const CALLEE: Address = address!("1000000000000000000000000000000000000001");
 /// An address that is not present in the database — i.e. an empty account.
 const EMPTY_TARGET: Address = address!("3000000000000000000000000000000000000001");
+/// Address that `CALLEE` 7702-delegates to in the combined-fix regression test;
+/// holds the actual CALLCODE-emitting runtime bytecode.
+const DELEGATE: Address = address!("4000000000000000000000000000000000000001");
+
+/// Writes an EIP-7702 designator (`0xef0100 || delegate_to`) into `address`,
+/// mirroring what revm's `apply_eip7702_auth_list` does for Type 4 transactions.
+fn set_eip7702_delegation(db: &mut MemoryDatabase, address: Address, delegate_to: Address) {
+    let bytecode = Bytecode::new_eip7702(delegate_to);
+    let code_hash = bytecode.hash_slow();
+    let account = db.load_account(address).unwrap();
+    account.info.code = Some(bytecode);
+    account.info.code_hash = code_hash;
+    account.account_state = AccountState::None;
+}
 
 /// Builds bytecode that performs `CALLCODE(gas=GAS, target, value=1, args=[], ret=[])`
 /// followed by `STOP`. The CALL stipend covers gas inside the (empty-code) callee.
@@ -135,6 +151,75 @@ fn test_rex5_callcode_to_empty_no_new_account_storage_gas() {
     assert_eq!(
         gas_mult10, gas_mult1,
         "Rex5 CALLCODE must not charge new-account storage gas based on the code-source bucket",
+    );
+}
+
+// ============================================================================
+// CALLCODE: Rex5 fix combined with EIP-7702 non-delegating inspection
+// ============================================================================
+
+/// Regression test for the combined Rex5 fix surface where CALLCODE meters
+/// new-account storage gas against the **caller** (current frame) using
+/// non-delegating account inspection.
+///
+/// Setup: the transaction targets `CALLEE`, which carries an EIP-7702 designator
+/// pointing at `DELEGATE`. Revm follows the designator and runs `DELEGATE`'s
+/// CALLCODE-emitting bytecode inside `CALLEE`'s frame, so the in-frame CALLCODE
+/// sees `current = CALLEE` (an authority that holds designator code, hence
+/// non-empty) and `to = EMPTY_TARGET` (empty).
+///
+/// Under the merged Rex5 path:
+/// - `storage_address = current = CALLEE` (per `storage_addr_for_callcode`)
+/// - `inspect_account(CALLEE, false)` returns the authority's own record (designator code,
+///   non-empty), so the new-account premium never fires.
+///
+/// Gas usage must therefore be invariant under both the authority's bucket
+/// multiplier and the code-source's bucket multiplier. The test catches:
+/// - the CALLCODE selector regressing to `storage_addr_from_to` (the code-source multiplier would
+///   start affecting gas), and
+/// - the Rex5 gate being removed (Rex4's frozen behavior would charge against the code-source).
+#[test]
+fn test_rex5_callcode_from_eip7702_authority_no_storage_gas() {
+    let bytecode = callcode_bytecode(EMPTY_TARGET);
+
+    let run = |authority_multiplier: u64, target_multiplier: u64| -> u64 {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+            .account_balance(CALLEE, U256::from(1_000_000_000u64))
+            .account_code(DELEGATE, bytecode.clone());
+        set_eip7702_delegation(&mut db, CALLEE, DELEGATE);
+
+        let authority_bucket = TestExternalEnvs::<Infallible>::bucket_id_for_account(CALLEE);
+        let target_bucket = TestExternalEnvs::<Infallible>::bucket_id_for_account(EMPTY_TARGET);
+        let external_envs = TestExternalEnvs::new()
+            .with_bucket_capacity(authority_bucket, MIN_BUCKET_SIZE as u64 * authority_multiplier)
+            .with_bucket_capacity(target_bucket, MIN_BUCKET_SIZE as u64 * target_multiplier);
+
+        let result = transact(
+            MegaSpecId::REX5,
+            &mut db,
+            &external_envs,
+            CALLER,
+            CALLEE,
+            U256::ZERO,
+            10_000_000,
+        )
+        .expect("transaction must succeed");
+        assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
+        result.result.gas_used()
+    };
+
+    let gas_baseline = run(1, 1);
+    let gas_high_authority = run(10, 1);
+    let gas_high_target = run(1, 10);
+
+    assert_eq!(
+        gas_high_authority, gas_baseline,
+        "authority bucket multiplier must not affect gas — no new-account charge fires against the authority",
+    );
+    assert_eq!(
+        gas_high_target, gas_baseline,
+        "code-source bucket multiplier must not affect gas — Rex5 CALLCODE meters against the caller, not the code-source",
     );
 }
 

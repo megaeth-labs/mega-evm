@@ -1,6 +1,6 @@
 ---
 description: MegaETH system contract registry — addresses, whitelisting rules, and protocol-level execution constraints.
-spec: Rex4
+spec: Rex5
 ---
 
 # System Contracts
@@ -33,8 +33,6 @@ A node MUST recognize the following contracts as system contracts:
 | [MegaAccessControl](mega-access-control.md)             | `MEGA_ACCESS_CONTROL_ADDRESS`      | [Rex4](../upgrades/rex4.md)       | Volatile-data access control               |
 | [MegaLimitControl](mega-limit-control.md)               | `MEGA_LIMIT_CONTROL_ADDRESS`       | [Rex4](../upgrades/rex4.md)       | Query remaining compute-gas budget         |
 | [SequencerRegistry](sequencer-registry.md)              | `SEQUENCER_REGISTRY_ADDRESS`       | [Rex5](../upgrades/rex5.md)       | System address and sequencer role registry |
-
-> **Unstable** — Rex5 entries (`SequencerRegistry`, Oracle v2.0.0) are under active development and may change before network activation.
 
 ### Deployment Semantics
 

@@ -6,8 +6,9 @@ use revm::{
     context::result::{HaltReason, OutOfGasError},
     handler::{EthFrame, FrameResult, ItemOrResult},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, CreateOutcome,
-        FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult, SStoreResult,
+        gas::calculate_initial_tx_gas_for_tx, interpreter::EthInterpreter,
+        interpreter_action::FrameInit, CallOutcome, CreateOutcome, FrameInput, Gas,
+        InstructionResult, InterpreterAction, InterpreterResult, SStoreResult,
     },
 };
 
@@ -36,7 +37,8 @@ use super::LimitCheck;
 /// - **Data size / KV update**: TX-level fallthrough is active in all specs. In Rex4+ it catches
 ///   intrinsic overflow (when the frame stack is empty) and serves as a safety net behind the
 ///   per-frame check.
-/// - **State growth**: TX-level check applies in pre-Rex4 specs only (no intrinsic usage).
+/// - **State growth**: TX-level fallthrough catches Rex5 pre-frame authority usage and serves as a
+///   safety net behind the per-frame check.
 ///
 /// ## Per-Frame Enforcement (Rex4+)
 ///
@@ -64,8 +66,9 @@ use super::LimitCheck;
 /// - **State Growth**: Tracks net new accounts + net new storage slots
 ///
 /// Additionally, this struct manages the `STORAGE_CALL_STIPEND` (Rex4+): extra gas granted to
-/// value-transferring `CALL`/`CALLCODE` for storage operations, with a per-frame compute gas
-/// cap and burn-on-return to prevent gas leakage.
+/// value-transferring `CALL`/`CALLCODE` for storage operations. REX5+ tracks the stipend as a
+/// separated internal allowance drained at the `storage_gas_ext` charging sites; REX4 retains
+/// the legacy `gas.limit()` inflation with a per-frame compute gas cap and burn-on-return.
 #[derive(Debug)]
 pub struct AdditionalLimit {
     /// A flag to indicate if the limit has been exceeded. Once set, the current usage values
@@ -176,6 +179,37 @@ impl AdditionalLimit {
         }
     }
 
+    /// Checks whether the Rex5 sandbox's TX-level pre-frame intrinsic usage fits inside
+    /// `limits`.
+    ///
+    /// Runs a trial `AdditionalLimit` through the same entry points production uses —
+    /// `before_tx_start` (data size / KV updates) and `record_compute_gas(initial_gas)`
+    /// (intrinsic compute gas, via `MegaHandler::validate`) — then returns its `check_limit()`
+    /// result. Reusing production logic keeps tracker changes and dimension-priority ordering
+    /// in sync automatically. Consumed by the `KeylessDeploy` preflight.
+    ///
+    /// Any future TX-level persistent usage recorded before the first frame through a different
+    /// path MUST be added here too when it can be computed from the transaction alone. DB-dependent
+    /// contributions, such as REX5 EIP-7702 net-new authority state growth, are recorded during
+    /// pre-execution once the journal is available. Missing additions do not fail open — the
+    /// `KeylessDeploy` post-merge overflow check still catches residual overflow — but the failure
+    /// mode degrades from the preflight fast-path (pre-sandbox revert with `ParentBudgetExceeded`)
+    /// to an outer `OutOfGas` halt after sandbox setup has already run.
+    pub(crate) fn intrinsic_check_for_tx(
+        spec: MegaSpecId,
+        tx: &MegaTransaction,
+        limits: EvmTxRuntimeLimits,
+    ) -> LimitCheck {
+        debug_assert!(spec.is_enabled(MegaSpecId::REX5));
+        let mut trial = Self::new(spec, limits);
+        trial.before_tx_start(tx);
+
+        let initial_and_floor_gas = calculate_initial_tx_gas_for_tx(tx, spec.into_eth_spec());
+        trial.record_compute_gas(initial_and_floor_gas.initial_gas);
+
+        trial.check_limit()
+    }
+
     /// Pushes an empty frame to all trackers so `before_frame_return_result` can pop
     /// them to keep stacks aligned with the EVM's call stack.
     ///
@@ -208,6 +242,24 @@ impl AdditionalLimit {
     #[inline]
     pub fn current_call_remaining_compute_gas(&self) -> u64 {
         self.compute_gas.current_call_remaining()
+    }
+
+    /// Returns the remaining data size budget for the current call frame.
+    #[inline]
+    pub fn current_call_remaining_data_size(&self) -> u64 {
+        self.data_size.current_call_remaining()
+    }
+
+    /// Returns the remaining KV update budget for the current call frame.
+    #[inline]
+    pub fn current_call_remaining_kv_updates(&self) -> u64 {
+        self.kv_update.current_call_remaining()
+    }
+
+    /// Returns the remaining state growth budget for the current call frame.
+    #[inline]
+    pub fn current_call_remaining_state_growth(&self) -> u64 {
+        self.state_growth.current_call_remaining()
     }
 
     /// Returns the detained compute gas limit (independent of the natural TX limit).
@@ -311,22 +363,20 @@ impl AdditionalLimit {
         !self.check_limit().exceeded_limit()
     }
 
-    /// Rescues gas from the limit exceeding. This method is used to record the remaining gas of a
-    /// frame after the limit exceeds. Typically, the frame execution will halt consuming all the
-    /// remaining gas, we need to record so that we can give it back to the transaction sender
-    /// afterwards.
+    /// Records the current frame's remaining gas on a TX-level limit exceed so it can be
+    /// refunded to the sender. The storage-stipend tracker decides how `gas.remaining()`
+    /// maps to the refundable balance — see
+    /// `StorageCallStipendTracker::effective_remaining_for_rescue`.
     pub(crate) fn rescue_gas(&mut self, gas: &Gas) {
-        let stipend = self.storage_call_stipend.current_frame_stipend();
-        // A TX-level limit can be exceeded before the current frame is popped, so an active
-        // `STORAGE_CALL_STIPEND` is valid here. Exclude it from the rescued amount so the sender
-        // cannot recover system-granted gas that should be burned.
-        let effective_remaining = if stipend > 0 {
-            let original_limit = gas.limit().saturating_sub(stipend);
-            gas.remaining().min(original_limit)
-        } else {
-            gas.remaining()
-        };
-        self.rescued_gas += effective_remaining;
+        self.rescued_gas += self.storage_call_stipend.effective_remaining_for_rescue(gas);
+    }
+
+    /// Drains up to `amount` from the current frame's storage stipend allowance and
+    /// returns the portion drained. Caller charges the residual via the original site's
+    /// gas-charging macro. Returns 0 pre-REX5 (the legacy path covers storage via
+    /// `gas.limit()` inflation).
+    pub(crate) fn try_consume_storage_stipend(&mut self, amount: u64) -> u64 {
+        self.storage_call_stipend.try_consume(amount)
     }
 
     /// Rescue remaining gas from a frame result if a TX-level additional limit has been
@@ -344,20 +394,40 @@ impl AdditionalLimit {
 
     /// Hook called when a new transaction starts.
     ///
-    /// Records intrinsic resource usage (calldata size, access lists, caller account
-    /// update, etc.) and checks TX-level limits. If intrinsic usage already exceeds
-    /// a configured limit, sets `has_exceeded_limit` so that the subsequent
-    /// `frame_result_if_exceeding_limit()` or `before_frame_init()` call produces a
-    /// normal execution failure (Halt), keeping the failure on the standard
+    /// Records transaction-only intrinsic resource usage that can be computed from the
+    /// transaction itself (calldata size, access lists, EIP-7702 authority account update
+    /// footprint, caller account update, etc.) and checks TX-level limits.
+    ///
+    /// DB-dependent pre-frame usage is recorded later once the journal is available.
+    /// In particular, REX5 EIP-7702 net-new authority state growth is accounted during
+    /// pre-execution rather than here because `before_tx_start()` cannot tell whether an
+    /// authority account already exists.
+    ///
+    /// If the recorded usage already exceeds a configured limit, sets `has_exceeded_limit`
+    /// so that the subsequent `frame_result_if_exceeding_limit()` or `before_frame_init()`
+    /// call produces a normal execution failure (Halt), keeping the failure on the standard
     /// additional-limit path.
     ///
-    /// Intrinsic overflow detection works through each tracker's own `check_limit()`,
-    /// which includes a TX-level fallthrough that catches `tx_usage > tx_limit` even
-    /// when the frame stack is empty (before the first frame is pushed).
+    /// Intrinsic overflow detection works through each tracker's own `check_limit()`, which
+    /// includes a TX-level fallthrough that catches `tx_usage > tx_limit` even when the frame
+    /// stack is empty (before the first frame is pushed).
     pub(crate) fn before_tx_start(&mut self, tx: &MegaTransaction) {
         self.state_growth.before_tx_start(tx);
         self.data_size.before_tx_start(tx);
         self.kv_update.before_tx_start(tx);
+        self.check_limit();
+    }
+
+    /// Records REX5 EIP-7702 authority accounts that are net-new state entries.
+    ///
+    /// Called during pre-execution after the journal has loaded each valid authority account and
+    /// before revm writes the delegation bytecode. This cannot live in `before_tx_start()`
+    /// because the net-new check needs DB/journal state.
+    ///
+    /// This also runs `check_limit()` to latch any TX-level overflow into `has_exceeded_limit`,
+    /// which is then turned into the normal execution failure at the next frame boundary.
+    pub(crate) fn on_eip7702_authority_creations(&mut self, amount: u64) {
+        self.state_growth.record_authority_creations(amount);
         self.check_limit();
     }
 
@@ -594,6 +664,17 @@ impl AdditionalLimit {
         }
     }
 
+    /// Merges resource usage from a sandbox execution into this tracker.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox resource consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_usage(&mut self, usage: LimitUsage) {
+        self.compute_gas.merge_persistent_usage(usage.compute_gas);
+        self.data_size.merge_persistent_usage(usage.data_size);
+        self.kv_update.merge_persistent_usage(usage.kv_updates);
+        self.state_growth.merge_persistent_usage(usage.state_growth);
+    }
+
     /// Hook called when an orginally zero storage slot is written non-zero value for the first time
     /// in the transaction. Returns `false` if the limit has been exceeded.
     pub(crate) fn on_sstore(
@@ -606,6 +687,39 @@ impl AdditionalLimit {
         self.data_size.after_sstore(target_address, slot, store_result);
         self.kv_update.after_sstore(target_address, slot, store_result);
 
+        !self.check_limit().exceeded_limit()
+    }
+
+    /// REX5+: record that the current transaction's caller account is being materialised
+    /// by deposit pre-execution (mint balance increment, nonce bump, or both).
+    ///
+    /// Routes a `+1` to `state_growth`'s TX intrinsic lane only. Does **not** touch
+    /// `data_size` or `kv_update`: their `before_tx_start` hooks already record the
+    /// caller's account-info write unconditionally for every transaction (protocol-level
+    /// definition: one caller account-info write per tx). Adding a second record here
+    /// would double-count.
+    ///
+    /// Must be called exactly once per deposit-like transaction, only when the caller
+    /// account is empty at validation time (before `OpHandler::pre_execution` runs).
+    pub(crate) fn record_deposit_caller_creation(&mut self) {
+        self.state_growth.record_deposit_caller_creation();
+        let _ = self.check_limit();
+    }
+
+    /// REX5+: meter an oracle-hint payload against the TX data-size budget.
+    ///
+    /// Records `len` bytes into the TX intrinsic data-size lane (same lane as calldata) and
+    /// runs `check_limit()` so `has_exceeded_limit` is flipped to a TX-level exceed if the
+    /// recording overflows.
+    ///
+    /// Returns `true` if the recording stayed within the limit, `false` otherwise.
+    ///
+    /// **Caller contract**: on `false`, do NOT synthesize a result. Return `None` from the
+    /// interceptor and let the next `frame_init` step (`before_frame_init` →
+    /// `create_exceeded_limit_result`) produce the canonical TX-level `OutOfGas` halt with
+    /// rescued gas. This keeps the failure shape identical to any other data-size overflow.
+    pub(crate) fn record_oracle_hint_bytes(&mut self, len: u64) -> bool {
+        self.data_size.record_oracle_hint_bytes(len);
         !self.check_limit().exceeded_limit()
     }
 
@@ -623,6 +737,16 @@ impl AdditionalLimit {
     /// The caller is responsible for computing the total refund before calling this.
     pub(crate) fn on_selfdestruct(&mut self, refund: u64) {
         self.state_growth.after_selfdestruct(refund);
+    }
+
+    /// Records resource usage when SELFDESTRUCT creates a new beneficiary account (REX5+).
+    ///
+    /// Charges data size (+40 for account info write), KV update (+1), and state growth (+1).
+    pub(crate) fn on_selfdestruct_new_account(&mut self) {
+        // Account info write: same as DataSizeTracker's ACCOUNT_INFO_WRITE_SIZE (40 bytes)
+        self.data_size.record_account_write();
+        self.kv_update.record_account_update();
+        self.state_growth.record_growth(1);
     }
 }
 
