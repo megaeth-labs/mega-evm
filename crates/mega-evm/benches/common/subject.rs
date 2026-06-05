@@ -1,12 +1,13 @@
 //! Benchmark subjects: one per EVM stack being compared.
 //!
 //! A [`Subject`] turns a backend-agnostic [`Workload`] into a concrete run on
-//! its own stack — building the database, constructing the EVM, executing every
-//! transaction on one reused instance, and asserting success (unless the
-//! workload opts out). Each subject absorbs its own quirks: every vanilla
-//! baseline is pinned to the Cancun hardfork so its row differs from the others
-//! only by crate and version (not by fork), the op rows additionally zero the
-//! operator fee, and the mega rows wrap each tx in a `MegaTransaction` envelope.
+//! its own stack. The shared loop/assert/measure skeleton lives once in
+//! [`run_workload`]; each subject only supplies how to *build* its EVM and how
+//! to *execute* one tx, so the success assertion can never drift between stacks.
+//!
+//! What makes the vanilla rows comparable — the target hardfork and the
+//! operator-fee zero-out — is defined once in the "Comparability baseline"
+//! section below, not repeated per stack.
 //!
 //! `_latest` types come from a cargo `package` rename in `Cargo.toml`. Both
 //! `_latest` subjects share one revm tree because the chosen `op-revm` version
@@ -40,16 +41,82 @@ use revm_latest::{
     Context as ContextLatest, ExecuteEvm as _, MainBuilder as _, MainContext as _,
 };
 
-use super::workload::{Account, Workload};
+use super::workload::{Account, TxSpec, Workload};
+
+//
+// ============================================================================
+// Comparability baseline — single source of truth for what makes the vanilla
+// rows comparable. Change a value here and every baseline moves together; CI's
+// baseline-gap table assumes the rows all sit on one fork.
+// ============================================================================
+//
+
+/// Target hardfork for the vanilla `revm` rows. Cancun keeps every baseline on
+/// one fork and predates EIP-7825's `tx_gas_limit_cap` (2^24), so the
+/// multi-gigagas `gas_limit` workloads are not truncated. (`revm_latest`'s
+/// `MainContext::mainnet()` would otherwise default to Osaka and trip the cap.)
+const REVM_FORK: SpecIdPinned = SpecIdPinned::CANCUN;
+const REVM_FORK_LATEST: SpecIdLatest = SpecIdLatest::CANCUN;
+
+/// Target hardfork for the op rows. Holocene maps to eth Cancun, matching the
+/// `revm` rows above. Needed because `DefaultOp::op()` hard-codes `BEDROCK`
+/// (eth Merge) regardless of the enum default — without this the op rows would
+/// sit on a different fork and the op-vs-revm gap would reflect a hardfork
+/// difference rather than a version one.
+const OP_FORK: OpSpecIdPinned = OpSpecIdPinned::HOLOCENE;
+const OP_FORK_LATEST: OpSpecIdLatest = OpSpecIdLatest::HOLOCENE;
+
+/// Zero the operator fee so the op and mega rows are comparable to the revm
+/// rows, which carry no such fee. A macro rather than a fn: the three `chain`
+/// types come from distinct crates (op-revm pinned/latest, mega-evm) and share
+/// no common trait — only the field names line up.
+macro_rules! zero_operator_fee {
+    ($chain:expr) => {{
+        $chain.operator_fee_scalar = Some(U256::ZERO);
+        $chain.operator_fee_constant = Some(U256::ZERO);
+    }};
+}
+
+//
+// ============================================================================
+// Subject trait + shared run skeleton.
+// ============================================================================
+//
 
 /// One row of a criterion group — a specific EVM stack at a specific config.
 pub trait Subject {
     /// Row name as it appears in the criterion group (e.g. `revm_pinned`).
     fn name(&self) -> &str;
-    /// Build a fresh DB from the workload's accounts, construct the EVM, run
-    /// every tx on one reused instance, and (unless the workload opts out)
-    /// assert each succeeds.
+    /// Build a fresh DB + EVM from the workload, run every tx on that one
+    /// reused instance, and (unless the workload opts out) assert each
+    /// succeeds. Implementations delegate to [`run_workload`].
     fn run(&self, workload: &Workload);
+}
+
+/// The one place the per-tx loop, success assertion, and `black_box` live.
+///
+/// `build` constructs the (stack-specific) EVM once; `exec` runs a single tx
+/// and returns its `is_success()`. Keeping the skeleton here means the success
+/// check can never drift or be forgotten on one stack — the bug that the old
+/// per-stack `run` bodies were prone to. The generic `E` is inferred from
+/// `build`, so no stack has to spell out its verbose revm `Evm<…>` type.
+///
+/// On failure the panic names the row and tx index; the concrete result is not
+/// surfaced because `exec` has already abstracted away the stack's distinct
+/// `ExecutionResult` type (it `black_box`es the result for the optimizer).
+fn run_workload<E>(
+    name: &str,
+    workload: &Workload,
+    build: impl FnOnce() -> E,
+    exec: impl Fn(&mut E, &TxSpec) -> bool,
+) {
+    let mut evm = build();
+    for (i, tx) in workload.txs.iter().enumerate() {
+        let success = exec(&mut evm, tx);
+        if workload.assert_success {
+            assert!(success, "{name} tx #{i} should succeed");
+        }
+    }
 }
 
 //
@@ -90,10 +157,10 @@ fn build_latest_db(accounts: &[Account]) -> CacheDBLatest<EmptyDBLatest> {
     builder.build()
 }
 
-/// Translate a [`TxSpec`](super::workload::TxSpec) into a pinned-revm `TxEnv`,
-/// used by the `revm_pinned`, `op_revm_pinned`, and `mega_*` subjects (mega-evm
-/// re-exports the same pinned revm crate).
-fn pinned_tx_env(tx: &super::workload::TxSpec) -> TxEnv {
+/// Translate a [`TxSpec`] into a pinned-revm `TxEnv`, used by the `revm_pinned`,
+/// `op_revm_pinned`, and `mega_*` subjects (mega-evm re-exports the same pinned
+/// revm crate).
+fn pinned_tx_env(tx: &TxSpec) -> TxEnv {
     TxEnvBuilder::new()
         .caller(tx.caller)
         .call(tx.target)
@@ -103,8 +170,8 @@ fn pinned_tx_env(tx: &super::workload::TxSpec) -> TxEnv {
         .build_fill()
 }
 
-/// Translate a [`TxSpec`](super::workload::TxSpec) into a latest-revm `TxEnv`.
-fn latest_tx_env(tx: &super::workload::TxSpec) -> TxEnvLatest {
+/// Translate a [`TxSpec`] into a latest-revm `TxEnv`.
+fn latest_tx_env(tx: &TxSpec) -> TxEnvLatest {
     TxEnvBuilderLatest::new()
         .caller(tx.caller)
         .call(tx.target)
@@ -132,37 +199,37 @@ impl Subject for Mega {
     }
 
     fn run(&self, workload: &Workload) {
-        // Operator fee scalar/constant zeroed so the mega rows stay comparable
-        // against the vanilla baselines.
-        let mut context = MegaContext::new(build_pinned_db(&workload.accounts), self.spec);
-        context.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        let mut evm = MegaEvm::<_, NoOpInspector, EmptyExternalEnv>::new(context);
-        for tx in &workload.txs {
-            // Wrap into a `MegaTransaction` with an empty envelope, matching
-            // what the production tx-pool would attach.
-            let mut mega_tx = MegaTransaction::new(pinned_tx_env(tx));
-            mega_tx.enveloped_tx = Some(Bytes::new());
-            let r = evm.transact(mega_tx).expect("mega transact");
-            assert_result(workload, self.name, r.result.is_success(), &r.result);
-            black_box(&r);
-        }
+        let spec = self.spec;
+        run_workload(
+            self.name,
+            workload,
+            || {
+                let mut context = MegaContext::new(build_pinned_db(&workload.accounts), spec);
+                context.modify_chain(|chain| zero_operator_fee!(chain));
+                MegaEvm::<_, NoOpInspector, EmptyExternalEnv>::new(context)
+            },
+            |evm, tx| {
+                // Wrap into a `MegaTransaction` with an empty envelope, matching
+                // what the production tx-pool would attach.
+                let mut mega_tx = MegaTransaction::new(pinned_tx_env(tx));
+                mega_tx.enveloped_tx = Some(Bytes::new());
+                let r = evm.transact(mega_tx).expect("mega transact");
+                let success = r.result.is_success();
+                black_box(&r);
+                success
+            },
+        );
     }
 }
 
 //
 // ============================================================================
-// Baseline subjects.
+// Baseline subjects. Fork pins and the operator-fee zero-out come from the
+// Comparability baseline section above.
 // ============================================================================
 //
 
-/// Vanilla `revm` at the version mega-evm currently pins.
-///
-/// Spec pinned to Cancun so its row sits on the same hardfork as the other
-/// baselines (see [`RevmLatest`]); the pinned mainnet default is otherwise a
-/// later fork.
+/// Vanilla `revm` at the version mega-evm currently pins (fork: [`REVM_FORK`]).
 pub struct RevmPinned;
 
 impl Subject for RevmPinned {
@@ -171,25 +238,26 @@ impl Subject for RevmPinned {
     }
 
     fn run(&self, workload: &Workload) {
-        let mut evm = ContextPinned::mainnet()
-            .modify_cfg_chained(|cfg| cfg.spec = SpecIdPinned::CANCUN)
-            .with_db(build_pinned_db(&workload.accounts))
-            .build_mainnet();
-        for tx in &workload.txs {
-            let r = evm.transact(pinned_tx_env(tx)).expect("revm_pinned transact");
-            assert_result(workload, "revm_pinned", r.result.is_success(), &r.result);
-            black_box(&r);
-        }
+        run_workload(
+            self.name(),
+            workload,
+            || {
+                ContextPinned::mainnet()
+                    .modify_cfg_chained(|cfg| cfg.spec = REVM_FORK)
+                    .with_db(build_pinned_db(&workload.accounts))
+                    .build_mainnet()
+            },
+            |evm, tx| {
+                let r = evm.transact(pinned_tx_env(tx)).expect("revm_pinned transact");
+                let success = r.result.is_success();
+                black_box(&r);
+                success
+            },
+        );
     }
 }
 
-/// Vanilla `revm` at the latest crates.io release.
-///
-/// Spec pinned to Cancun for two reasons: it keeps this row on the same
-/// hardfork as the other baselines, and it avoids the EIP-7825
-/// `tx_gas_limit_cap` (2^24) that `MainContext::mainnet()` would otherwise
-/// inherit from its default Osaka spec and that the multi-gigagas `gas_limit`
-/// workloads would trip.
+/// Vanilla `revm` at the latest crates.io release (fork: [`REVM_FORK_LATEST`]).
 pub struct RevmLatest;
 
 impl Subject for RevmLatest {
@@ -198,23 +266,27 @@ impl Subject for RevmLatest {
     }
 
     fn run(&self, workload: &Workload) {
-        let mut evm = ContextLatest::mainnet()
-            .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecIdLatest::CANCUN))
-            .with_db(build_latest_db(&workload.accounts))
-            .build_mainnet();
-        for tx in &workload.txs {
-            let r = evm.transact(latest_tx_env(tx)).expect("revm_latest transact");
-            assert_result(workload, "revm_latest", r.result.is_success(), &r.result);
-            black_box(&r);
-        }
+        run_workload(
+            self.name(),
+            workload,
+            || {
+                ContextLatest::mainnet()
+                    .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(REVM_FORK_LATEST))
+                    .with_db(build_latest_db(&workload.accounts))
+                    .build_mainnet()
+            },
+            |evm, tx| {
+                let r = evm.transact(latest_tx_env(tx)).expect("revm_latest transact");
+                let success = r.result.is_success();
+                black_box(&r);
+                success
+            },
+        );
     }
 }
 
-/// `op-revm` at the version mega-evm currently pins, operator fee = 0.
-///
-/// Pinned to Holocene (eth Cancun) to match the other baselines: `DefaultOp::op()`
-/// hard-codes `OpSpecId::BEDROCK` (eth Merge) regardless of the enum default, so
-/// without this the op row would sit on a different hardfork than the revm rows.
+/// `op-revm` at the version mega-evm currently pins (fork: [`OP_FORK`],
+/// operator fee = 0).
 pub struct OpRevmPinned;
 
 impl Subject for OpRevmPinned {
@@ -223,31 +295,30 @@ impl Subject for OpRevmPinned {
     }
 
     fn run(&self, workload: &Workload) {
-        let mut ctx =
-            <OpContextPinned<EmptyDBPinned>>::op().with_db(build_pinned_db(&workload.accounts));
-        ctx.modify_cfg(|cfg| cfg.spec = OpSpecIdPinned::HOLOCENE);
-        ctx.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        let mut evm = ctx.build_op();
-        for tx in &workload.txs {
-            let mut op_tx = OpTransactionPinned::new(pinned_tx_env(tx));
-            op_tx.enveloped_tx = Some(Bytes::new());
-            let r = evm.transact(op_tx).expect("op_revm_pinned transact");
-            assert_result(workload, "op_revm_pinned", r.result.is_success(), &r.result);
-            black_box(&r);
-        }
+        run_workload(
+            self.name(),
+            workload,
+            || {
+                let mut ctx = <OpContextPinned<EmptyDBPinned>>::op()
+                    .with_db(build_pinned_db(&workload.accounts));
+                ctx.modify_cfg(|cfg| cfg.spec = OP_FORK);
+                ctx.modify_chain(|chain| zero_operator_fee!(chain));
+                ctx.build_op()
+            },
+            |evm, tx| {
+                let mut op_tx = OpTransactionPinned::new(pinned_tx_env(tx));
+                op_tx.enveloped_tx = Some(Bytes::new());
+                let r = evm.transact(op_tx).expect("op_revm_pinned transact");
+                let success = r.result.is_success();
+                black_box(&r);
+                success
+            },
+        );
     }
 }
 
-/// `op-revm` at the latest crates.io release, operator fee = 0.
-///
-/// Pinned to Holocene (eth Cancun) to match the other baselines: `DefaultOp::op()`
-/// hard-codes `OpSpecId::BEDROCK` (eth Merge) regardless of the enum default, so
-/// without this the op row would sit on a different hardfork than the revm rows.
-/// Holocene (eth Cancun) also predates the EIP-7825 `tx_gas_limit_cap`, so the
-/// multi-gigagas `gas_limit` workloads pass.
+/// `op-revm` at the latest crates.io release (fork: [`OP_FORK_LATEST`],
+/// operator fee = 0).
 pub struct OpRevmLatest;
 
 impl Subject for OpRevmLatest {
@@ -256,36 +327,25 @@ impl Subject for OpRevmLatest {
     }
 
     fn run(&self, workload: &Workload) {
-        let mut ctx =
-            <OpContextLatest<EmptyDBLatest>>::op().with_db(build_latest_db(&workload.accounts));
-        ctx.modify_cfg(|cfg| cfg.spec = OpSpecIdLatest::HOLOCENE);
-        ctx.modify_chain(|chain| {
-            chain.operator_fee_scalar = Some(U256::ZERO);
-            chain.operator_fee_constant = Some(U256::ZERO);
-        });
-        let mut evm = ctx.build_op();
-        for tx in &workload.txs {
-            let mut op_tx = OpTransactionLatest::new(latest_tx_env(tx));
-            op_tx.enveloped_tx = Some(Bytes::new());
-            let r = evm.transact(op_tx).expect("op_revm_latest transact");
-            assert_result(workload, "op_revm_latest", r.result.is_success(), &r.result);
-            black_box(&r);
-        }
-    }
-}
-
-/// Assert tx success unless the workload opted out of the check.
-///
-/// `expect()` on `transact()` only catches internal errors; a transaction that
-/// halts (out-of-gas, a per-tx resource limit exceeded under a mega spec, …)
-/// returns `Ok` with `is_success() == false`. Asserting here keeps the bench
-/// from silently measuring partially-halted runs that are incomparable across
-/// rows. `is_success()` is read at the call site because the pinned and latest
-/// stacks return distinct `ExecutionResult` types from separate crate versions;
-/// `result` is taken as `impl Debug` only for the failure message.
-fn assert_result(workload: &Workload, row: &str, success: bool, result: &impl core::fmt::Debug) {
-    if workload.assert_success {
-        assert!(success, "{row} should succeed: {result:?}");
+        run_workload(
+            self.name(),
+            workload,
+            || {
+                let mut ctx = <OpContextLatest<EmptyDBLatest>>::op()
+                    .with_db(build_latest_db(&workload.accounts));
+                ctx.modify_cfg(|cfg| cfg.spec = OP_FORK_LATEST);
+                ctx.modify_chain(|chain| zero_operator_fee!(chain));
+                ctx.build_op()
+            },
+            |evm, tx| {
+                let mut op_tx = OpTransactionLatest::new(latest_tx_env(tx));
+                op_tx.enveloped_tx = Some(Bytes::new());
+                let r = evm.transact(op_tx).expect("op_revm_latest transact");
+                let success = r.result.is_success();
+                black_box(&r);
+                success
+            },
+        );
     }
 }
 
