@@ -5,7 +5,8 @@
 //! - **`gas_detention_computation`**: Impact of gas detention on subsequent heavy computation
 //! - **`log_opcodes`**: LOG0-LOG4 with dual gas model (compute + storage gas)
 //! - **`sstore_heavy`**: SSTORE-intensive workloads triggering resource limit tracking
-//! - **`system_contract_interception`**: System contract call interception overhead
+//! - **`system_contract_single` / `system_contract_100x`**: System contract call interception
+//!   overhead
 //! - **`delegatecall_system_contract`**: DELEGATECALL vs CALL to system contracts
 //! - **`oracle_sload`**: Oracle forced-cold SLOAD vs regular SLOAD
 //! - **`create_deploy`**: CREATE/CREATE2 contract deployment with resource tracking
@@ -19,7 +20,7 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{
@@ -30,16 +31,15 @@ use revm::{
     ExecuteEvm,
 };
 
+mod common;
+use common::{
+    add_baseline_rows, add_baseline_rows_suffixed, build_mega_tx, make_mega_evm, CallParams,
+    LatestDbBuilder, SPEC_IDS,
+};
+
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 const SECONDARY: Address = address!("0000000000000000000000000000000000100003");
-
-/// Specs to benchmark against.
-const SPEC_IDS: &[(&str, MegaSpecId)] = &[
-    ("equivalence", MegaSpecId::EQUIVALENCE),
-    ("mini_rex", MegaSpecId::MINI_REX),
-    ("rex4", MegaSpecId::REX4),
-];
 
 //
 // ============================================================================
@@ -49,49 +49,47 @@ const SPEC_IDS: &[(&str, MegaSpecId)] = &[
 
 /// Execute bytecode as a contract call with the given spec and gas limit.
 fn execute(spec: MegaSpecId, db: MemoryDatabase, gas_limit: u64, data: Bytes) {
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-
+    let mut evm = make_mega_evm(db, spec);
     let tx = TxEnvBuilder::new()
         .caller(CALLER)
         .call(CONTRACT)
         .gas_limit(gas_limit)
         .data(data)
         .build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-
-    let r = evm.transact(mega_tx).expect("transaction should succeed");
+    let r = evm.transact(build_mega_tx(tx)).expect("transaction should succeed");
     assert!(r.result.is_success(), "transaction should succeed: {:?}", r.result);
     black_box(r);
 }
 
 /// Execute bytecode, allowing non-success results (e.g., for SELFDESTRUCT in disabled specs).
 fn execute_any_result(spec: MegaSpecId, db: MemoryDatabase, gas_limit: u64) {
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-
+    let mut evm = make_mega_evm(db, spec);
     let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(gas_limit).build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-
-    let r = evm.transact(mega_tx).expect("transaction should not error");
+    let r = evm.transact(build_mega_tx(tx)).expect("transaction should not error");
     black_box(r);
 }
 
-/// Helper to make a database with contract bytecode and funded caller.
+/// Make a database with contract bytecode and a funded caller.
 fn make_db(bytecode: Bytes) -> MemoryDatabase {
     MemoryDatabase::default()
         .account_code(CONTRACT, bytecode)
         .account_balance(CALLER, U256::from(10).pow(U256::from(18)))
+}
+
+/// Latest-stack equivalent of `make_db`, used by the `*_latest` baseline rows.
+fn make_latest_db(
+    bytecode: Bytes,
+) -> revm_latest::database::CacheDB<revm_latest::database::EmptyDB> {
+    LatestDbBuilder::new()
+        .account_code(CONTRACT, bytecode)
+        .account_balance(CALLER, U256::from(10).pow(U256::from(18)))
+        .build()
+}
+
+/// Standard `CallParams` for benches that just run a contract at `CONTRACT`
+/// from `CALLER` with empty calldata under a 10 G gas limit.
+fn standard_params() -> CallParams {
+    CallParams { caller: CALLER, target: CONTRACT, gas_limit: 10_000_000_000, ..Default::default() }
 }
 
 //
@@ -250,29 +248,25 @@ fn generate_log4_bytecode(iterations: usize, data_size: usize) -> Bytes {
 }
 
 fn bench_log_opcodes(c: &mut Criterion) {
-    let log0_32 = generate_log0_bytecode(LOG_ITERATIONS, 32);
-    let log0_256 = generate_log0_bytecode(LOG_ITERATIONS, 256);
-    let log2_32 = generate_log2_bytecode(LOG_ITERATIONS, 32);
-    let log4_32 = generate_log4_bytecode(LOG_ITERATIONS, 32);
-    let log4_256 = generate_log4_bytecode(LOG_ITERATIONS, 256);
+    let variants: &[(&str, Bytes)] = &[
+        ("log0_32b", generate_log0_bytecode(LOG_ITERATIONS, 32)),
+        ("log0_256b", generate_log0_bytecode(LOG_ITERATIONS, 256)),
+        ("log2_32b", generate_log2_bytecode(LOG_ITERATIONS, 32)),
+        ("log4_32b", generate_log4_bytecode(LOG_ITERATIONS, 32)),
+        ("log4_256b", generate_log4_bytecode(LOG_ITERATIONS, 256)),
+    ];
 
     let mut group = c.benchmark_group("log_opcodes");
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(format!("{spec_name}/log0_32b"), |b| {
-            b.iter(|| execute(spec, make_db(log0_32.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/log0_256b"), |b| {
-            b.iter(|| execute(spec, make_db(log0_256.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/log2_32b"), |b| {
-            b.iter(|| execute(spec, make_db(log2_32.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/log4_32b"), |b| {
-            b.iter(|| execute(spec, make_db(log4_32.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/log4_256b"), |b| {
-            b.iter(|| execute(spec, make_db(log4_256.clone()), 10_000_000_000, Bytes::new()))
-        });
+    let params = standard_params();
+    for (variant, bytecode) in variants {
+        let make_pinned = || make_db(bytecode.clone());
+        let make_latest = || make_latest_db(bytecode.clone());
+        add_baseline_rows_suffixed(&mut group, variant, &params, &make_pinned, &make_latest);
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/{variant}"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
     }
     group.finish();
 }
@@ -316,21 +310,23 @@ fn generate_sstore_sload_bytecode(iterations: usize) -> Bytes {
 }
 
 fn bench_sstore(c: &mut Criterion) {
-    let sstore_only = generate_sstore_bytecode(SSTORE_ITERATIONS);
-    let sload_only = generate_sload_bytecode(SSTORE_ITERATIONS);
-    let mixed = generate_sstore_sload_bytecode(SSTORE_ITERATIONS);
+    let variants: &[(&str, Bytes)] = &[
+        ("sstore_100", generate_sstore_bytecode(SSTORE_ITERATIONS)),
+        ("sload_100", generate_sload_bytecode(SSTORE_ITERATIONS)),
+        ("sstore_sload_100", generate_sstore_sload_bytecode(SSTORE_ITERATIONS)),
+    ];
 
     let mut group = c.benchmark_group("sstore_heavy");
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(format!("{spec_name}/sstore_100"), |b| {
-            b.iter(|| execute(spec, make_db(sstore_only.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/sload_100"), |b| {
-            b.iter(|| execute(spec, make_db(sload_only.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/sstore_sload_100"), |b| {
-            b.iter(|| execute(spec, make_db(mixed.clone()), 10_000_000_000, Bytes::new()))
-        });
+    let params = standard_params();
+    for (variant, bytecode) in variants {
+        let make_pinned = || make_db(bytecode.clone());
+        let make_latest = || make_latest_db(bytecode.clone());
+        add_baseline_rows_suffixed(&mut group, variant, &params, &make_pinned, &make_latest);
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/{variant}"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
     }
     group.finish();
 }
@@ -350,16 +346,13 @@ fn bench_sstore(c: &mut Criterion) {
 /// Build bytecode that deploys a minimal contract via CREATE.
 /// The init code stores a small runtime bytecode and returns it.
 fn make_create_bytecode(n_deploys: usize) -> Bytes {
-    // Init code: PUSH1 0x00 PUSH1 0x00 RETURN (deploys empty contract)
-    // Encoded as: 60 00 60 00 f3
+    // Init code that deploys an empty contract: PUSH1 0x00 PUSH1 0x00 RETURN.
     let init_code: [u8; 5] = [0x60, 0x00, 0x60, 0x00, 0xf3];
 
     let mut builder = BytecodeBuilder::default();
-    // Store init code in memory
     builder = builder.mstore(0, init_code);
 
     for _ in 0..n_deploys {
-        // CREATE(value=0, offset=0, size=5)
         builder = builder
             .push_number(5u64) // size of init code
             .push_number(0u64) // memory offset
@@ -378,7 +371,6 @@ fn make_create2_bytecode(n_deploys: usize) -> Bytes {
     builder = builder.mstore(0, init_code);
 
     for i in 0..n_deploys {
-        // CREATE2(value=0, offset=0, size=5, salt=i)
         builder = builder
             .push_number(i as u64) // salt (different each time)
             .push_number(5u64) // size
@@ -391,19 +383,22 @@ fn make_create2_bytecode(n_deploys: usize) -> Bytes {
 }
 
 fn bench_create_deploy(c: &mut Criterion) {
-    let create_10 = make_create_bytecode(10);
-    let create2_10 = make_create2_bytecode(10);
+    let variants: &[(&str, Bytes)] =
+        &[("create_10", make_create_bytecode(10)), ("create2_10", make_create2_bytecode(10))];
 
     let mut group = c.benchmark_group("create_deploy");
     group.sample_size(10);
 
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(format!("{spec_name}/create_10"), |b| {
-            b.iter(|| execute(spec, make_db(create_10.clone()), 10_000_000_000, Bytes::new()))
-        });
-        group.bench_function(format!("{spec_name}/create2_10"), |b| {
-            b.iter(|| execute(spec, make_db(create2_10.clone()), 10_000_000_000, Bytes::new()))
-        });
+    let params = standard_params();
+    for (variant, bytecode) in variants {
+        let make_pinned = || make_db(bytecode.clone());
+        let make_latest = || make_latest_db(bytecode.clone());
+        add_baseline_rows_suffixed(&mut group, variant, &params, &make_pinned, &make_latest);
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/{variant}"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
     }
     group.finish();
 }
@@ -481,18 +476,49 @@ fn bench_call_value_empty_account(c: &mut Criterion) {
     let call_empty = make_call_with_value(empty_target, 50);
 
     let mut group = c.benchmark_group("call_value_empty_account");
+    let params = standard_params();
 
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(format!("{spec_name}/existing_account_50"), |b| {
-            b.iter(|| {
-                let db =
-                    make_db(call_existing.clone()).account_balance(existing_target, U256::from(1));
-                execute(spec, db, 10_000_000_000, Bytes::new())
-            })
-        });
-        group.bench_function(format!("{spec_name}/empty_account_50"), |b| {
-            b.iter(|| execute(spec, make_db(call_empty.clone()), 10_000_000_000, Bytes::new()))
-        });
+    // Variant: existing target has a balance; CALL hits an existing account.
+    {
+        let make_pinned =
+            || make_db(call_existing.clone()).account_balance(existing_target, U256::from(1));
+        let make_latest = || {
+            LatestDbBuilder::new()
+                .account_code(CONTRACT, call_existing.clone())
+                .account_balance(CALLER, U256::from(10).pow(U256::from(18)))
+                .account_balance(existing_target, U256::from(1))
+                .build()
+        };
+        add_baseline_rows_suffixed(
+            &mut group,
+            "existing_account_50",
+            &params,
+            &make_pinned,
+            &make_latest,
+        );
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/existing_account_50"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
+    }
+
+    // Variant: empty target — CALL with value triggers account creation gas.
+    {
+        let make_pinned = || make_db(call_empty.clone());
+        let make_latest = || make_latest_db(call_empty.clone());
+        add_baseline_rows_suffixed(
+            &mut group,
+            "empty_account_50",
+            &params,
+            &make_pinned,
+            &make_latest,
+        );
+        for &(spec_name, spec) in SPEC_IDS {
+            group.bench_function(format!("{spec_name}/empty_account_50"), |b| {
+                b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
+            });
+        }
     }
     group.finish();
 }
@@ -681,20 +707,13 @@ fn bench_oracle_sload(c: &mut Criterion) {
                 let db = MemoryDatabase::default()
                     .account_code(ORACLE_ADDRESS, sload_bytecode.clone())
                     .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
-                let mut context = MegaContext::new(db, spec);
-                context.modify_chain(|chain| {
-                    chain.operator_fee_scalar = Some(U256::from(0));
-                    chain.operator_fee_constant = Some(U256::from(0));
-                });
-                let mut evm = MegaEvm::new(context);
+                let mut evm = make_mega_evm(db, spec);
                 let tx = TxEnvBuilder::new()
                     .caller(CALLER)
                     .call(ORACLE_ADDRESS)
                     .gas_limit(10_000_000_000)
                     .build_fill();
-                let mut mega_tx = MegaTransaction::new(tx);
-                mega_tx.enveloped_tx = Some(Bytes::new());
-                let r = evm.transact(mega_tx).expect("should succeed");
+                let r = evm.transact(build_mega_tx(tx)).expect("should succeed");
                 assert!(r.result.is_success(), "oracle sload should succeed: {:?}", r.result);
                 black_box(r);
             })
@@ -733,9 +752,13 @@ fn bench_mixed_workload(c: &mut Criterion) {
     let bytecode = generate_mixed_workload_bytecode();
 
     let mut group = c.benchmark_group("mixed_workload");
+    let params = standard_params();
+    let make_pinned = || make_db(bytecode.clone());
+    let make_latest = || make_latest_db(bytecode.clone());
+    add_baseline_rows(&mut group, &params, &make_pinned, &make_latest);
     for &(spec_name, spec) in SPEC_IDS {
         group.bench_function(spec_name, |b| {
-            b.iter(|| execute(spec, make_db(bytecode.clone()), 10_000_000_000, Bytes::new()))
+            b.iter(|| execute(spec, make_pinned(), 10_000_000_000, Bytes::new()))
         });
     }
     group.finish();
