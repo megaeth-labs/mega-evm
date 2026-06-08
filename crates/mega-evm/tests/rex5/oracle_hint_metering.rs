@@ -22,7 +22,7 @@ use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
+    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::*,
@@ -116,6 +116,41 @@ fn run_with_oracle(
     (envelope.result, external_envs.recorded_hints(), data_size)
 }
 
+/// Runs a TX that directly targets the Oracle contract with `calldata`.
+fn run_direct_oracle_tx(
+    spec: MegaSpecId,
+    calldata: Bytes,
+    data_size_limit: u64,
+) -> (ExecutionResult<mega_evm::MegaHaltReason>, Vec<mega_evm::RecordedHint>, u64) {
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10_000_000))
+        .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2);
+    let mut context = MegaContext::new(&mut db, spec)
+        .with_external_envs((&external_envs).into())
+        .with_tx_runtime_limits(
+            EvmTxRuntimeLimits::from_spec(spec).with_tx_data_size_limit(data_size_limit),
+        );
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(ORACLE_CONTRACT_ADDRESS)
+        .data(calldata)
+        .gas_limit(100_000_000)
+        .build_fill();
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+    let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
+    use revm::handler::EvmTr;
+    let data_size = evm.ctx_ref().additional_limit.borrow().get_usage().data_size;
+    (envelope.result, external_envs.recorded_hints(), data_size)
+}
+
 const TOPIC: B256 = B256::ZERO;
 
 /// REX5 invariant 1: a CALL to `sendHint` with `gas_limit = 0` must NOT forward the
@@ -168,6 +203,27 @@ fn test_rex5_non_zero_gas_send_hint_forwards() {
     assert_eq!(hints[0].data.len(), 128, "forwarded data length must match");
     // Sanity: the hint payload was counted into the TX data-size lane.
     assert!(data_size >= 128, "hint payload ({}) must contribute to data_size", data_size);
+}
+
+/// REX5 direct-to-Oracle transactions intentionally pay for the calldata twice in
+/// `data_size`: once as normal intrinsic transaction calldata, and once as the Oracle
+/// hint side-channel payload forwarded to the off-chain backend.
+#[test]
+fn test_rex5_direct_oracle_send_hint_charges_intrinsic_and_hint_payload() {
+    let calldata = sendHintCall { topic: TOPIC, data: Bytes::from(vec![0u8; 128]) }.abi_encode();
+    let calldata_len = calldata.len() as u64;
+
+    let (result, hints, data_size) =
+        run_direct_oracle_tx(MegaSpecId::REX5, Bytes::from(calldata), u64::MAX);
+
+    assert!(result.is_success());
+    assert_eq!(hints.len(), 1, "direct Oracle sendHint must still forward");
+    assert_eq!(hints[0].from, CALLER, "direct hint sender must be the tx caller");
+    assert_eq!(
+        data_size,
+        BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE + calldata_len + calldata_len,
+        "direct Oracle sendHint must include intrinsic tx calldata plus hint-side-channel bytes",
+    );
 }
 
 /// REX5 invariant 3: when the hint payload pushes `data_size_used` past the TX
