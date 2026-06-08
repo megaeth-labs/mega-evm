@@ -343,6 +343,20 @@ fn check_evm_execution(
     Ok(())
 }
 
+/// Sets the per-spec maximum blobs per transaction on the config.
+///
+/// Single source of truth shared by [`execute_test_suite`] and single-unit
+/// execution so the validation and dump paths stay byte-identical.
+fn configure_max_blobs(cfg: &mut CfgEnv<MegaSpecId>) {
+    if cfg.spec.into_eth_spec().is_enabled_in(SpecId::OSAKA) {
+        cfg.set_max_blobs_per_tx(6);
+    } else if cfg.spec.into_eth_spec().is_enabled_in(SpecId::PRAGUE) {
+        cfg.set_max_blobs_per_tx(9);
+    } else {
+        cfg.set_max_blobs_per_tx(6);
+    }
+}
+
 /// Execute a single test suite file containing multiple tests
 ///
 /// # Arguments
@@ -389,15 +403,7 @@ pub fn execute_test_suite(
             }
 
             cfg.spec = spec_name.to_spec_id();
-
-            // Configure max blobs per spec
-            if cfg.spec.into_eth_spec().is_enabled_in(SpecId::OSAKA) {
-                cfg.set_max_blobs_per_tx(6);
-            } else if cfg.spec.into_eth_spec().is_enabled_in(SpecId::PRAGUE) {
-                cfg.set_max_blobs_per_tx(9);
-            } else {
-                cfg.set_max_blobs_per_tx(6);
-            }
+            configure_max_blobs(&mut cfg);
 
             // Setup block environment for this spec
             let block = unit.block_env(&cfg);
@@ -554,15 +560,7 @@ fn run_unit_once(
     cfg.chain_id =
         unit.env.current_chain_id.unwrap_or_else(|| U256::from(6342)).try_into().unwrap_or(6342);
     cfg.spec = spec.to_spec_id();
-
-    // Match execute_test_suite's per-spec blob configuration.
-    if cfg.spec.into_eth_spec().is_enabled_in(SpecId::OSAKA) {
-        cfg.set_max_blobs_per_tx(6);
-    } else if cfg.spec.into_eth_spec().is_enabled_in(SpecId::PRAGUE) {
-        cfg.set_max_blobs_per_tx(9);
-    } else {
-        cfg.set_max_blobs_per_tx(6);
-    }
+    configure_max_blobs(&mut cfg);
 
     let block = unit.block_env(&cfg);
     let tx = tx_env_at(unit, TxPartIndices { data: 0, gas: 0, value: 0 }).map_err(|e| match e {
