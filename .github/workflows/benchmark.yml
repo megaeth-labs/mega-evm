@@ -16,14 +16,13 @@ permissions:
   pull-requests: write
 
 jobs:
-  benchmark:
-    name: Criterion performance check
+  # Resolve the exact commits ONCE, up front. Every bench job then checks out
+  # these fixed SHAs, so a push to the PR while the run is queued/in-flight
+  # cannot make different jobs measure different code (or mislabel the result).
+  prepare:
+    name: Resolve commits
     runs-on: ubuntu-24.04
-    # Cold compile of revm 27 + revm 38 + op-revm 8 + op-revm 20 plus running
-    # 6 bench targets twice (feature + baseline checkout) exceeded 60 min the
-    # first time. setup-rust-toolchain's cache shrinks subsequent runs, but the
-    # first run on a new branch and after dep churn still needs more room.
-    timeout-minutes: 120
+    timeout-minutes: 10
     if: >-
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request &&
@@ -32,19 +31,34 @@ jobs:
          github.event.comment.author_association == 'COLLABORATOR' ||
          github.event.comment.author_association == 'OWNER')
       )
+    outputs:
+      feature_sha: ${{ steps.resolve.outputs.feature_sha }}
+      baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
+      compare: ${{ steps.resolve.outputs.compare }}
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 0
 
-      - name: Checkout PR branch
+      - name: Checkout PR head
         if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout ${{ github.event.issue.number }}
+
+      - name: Resolve commits
+        id: resolve
         run: |
-          gh pr checkout ${{ github.event.issue.number }}
-          git submodule update --init --recursive
+          echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            BASELINE=$(git merge-base HEAD origin/main)
+            echo "baseline_sha=$BASELINE" >> "$GITHUB_OUTPUT"
+            echo "compare=true" >> "$GITHUB_OUTPUT"
+            echo "Feature: $(git rev-parse HEAD)  Baseline: $BASELINE"
+          else
+            echo "baseline_sha=" >> "$GITHUB_OUTPUT"
+            echo "compare=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: React to comment
         if: github.event_name == 'issue_comment'
@@ -58,72 +72,91 @@ jobs:
               content: 'rocket'
             });
 
+  # One job per bench target. Each job runs the feature AND the baseline pass
+  # for its target back-to-back on the SAME runner, so the raw ns/iter compared
+  # in the regression table comes from identical hardware. Jobs run in parallel
+  # across targets, so wall-clock is ~one target's feature+baseline, not the
+  # whole suite twice.
+  bench:
+    name: Bench ${{ matrix.target }}
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [revm_bench, mega_bench, block_bench, transact, comp_cost, ctt]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # Same-repo PR heads are already in `origin` after the full-depth fetch,
+      # but fork PRs are not — `gh pr checkout` adds the fork remote and fetches
+      # the head so the pinned `feature_sha` below is resolvable.
+      - name: Fetch PR head
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout ${{ github.event.issue.number }}
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      # Run feature benchmarks (current branch)
-      - name: Run feature benchmarks
-        env:
-          BENCH_TARGETS: revm_bench mega_bench block_bench transact comp_cost ctt
+      - name: Run feature benchmark
         run: |
-          : > feature_output.txt
-          for bench in $BENCH_TARGETS; do
-            cargo bench -p mega-evm --bench "$bench" -- --output-format bencher | tee -a feature_output.txt
-          done
-
-      # On /benchmark comment: also run baseline benchmarks for comparison
-      - name: Determine baseline commit
-        if: github.event_name == 'issue_comment'
-        id: baseline
-        run: |
-          echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          BASELINE=$(git merge-base HEAD origin/main)
-          echo "commit=$BASELINE" >> "$GITHUB_OUTPUT"
-          echo "Baseline commit: $BASELINE"
-
-      - name: Run baseline benchmarks
-        if: github.event_name == 'issue_comment'
-        env:
-          BENCH_TARGETS: revm_bench mega_bench block_bench transact comp_cost ctt
-        run: |
-          git checkout ${{ steps.baseline.outputs.commit }}
-          trap 'git checkout -' EXIT
+          git checkout --quiet ${{ needs.prepare.outputs.feature_sha }}
           git submodule update --init --recursive
-          AVAILABLE_BENCHES=$(python3 - <<'PY'
-          bench_names = []
-          in_bench = False
+          cargo bench -p mega-evm --bench ${{ matrix.target }} -- --output-format bencher \
+            | tee "feature_${{ matrix.target }}.txt"
 
-          with open("crates/mega-evm/Cargo.toml", encoding="utf-8") as f:
-              for line in f:
-                  stripped = line.strip()
-                  if stripped == "[[bench]]":
-                      in_bench = True
-                      continue
-                  if stripped.startswith("[") and stripped != "[[bench]]":
-                      in_bench = False
-                  if in_bench and stripped.startswith("name = "):
-                      name = stripped.split("=", 1)[1].strip().strip('"')
-                      bench_names.append(name)
-                      in_bench = False
+      - name: Run baseline benchmark
+        if: needs.prepare.outputs.compare == 'true'
+        run: |
+          git checkout --quiet ${{ needs.prepare.outputs.baseline_sha }}
+          git submodule update --init --recursive
+          if grep -q 'name = "${{ matrix.target }}"' crates/mega-evm/Cargo.toml; then
+            cargo bench -p mega-evm --bench ${{ matrix.target }} -- --output-format bencher \
+              | tee "baseline_${{ matrix.target }}.txt"
+          else
+            echo "Skipping baseline benchmark '${{ matrix.target }}' (not present at baseline commit)"
+          fi
 
-          for name in bench_names:
-              print(name)
-          PY
-          )
-          : > baseline_output.txt
-          for bench in $BENCH_TARGETS; do
-            if printf '%s\n' "$AVAILABLE_BENCHES" | grep -qx "$bench"; then
-              cargo bench -p mega-evm --bench "$bench" -- --output-format bencher | tee -a baseline_output.txt
-            else
-              echo "Skipping baseline benchmark '$bench' (not present at baseline commit)"
-            fi
-          done
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-output-${{ matrix.target }}
+          path: |
+            feature_${{ matrix.target }}.txt
+            baseline_${{ matrix.target }}.txt
+          if-no-files-found: ignore
+
+  # Join all per-target outputs and post the comparison comment. Cheap (no
+  # compile, no benches) so it gets a short budget.
+  compare:
+    name: Compare and comment on PR
+    needs: [prepare, bench]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: needs.prepare.outputs.compare == 'true'
+    steps:
+      - name: Download all bench results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-output-*
+          merge-multiple: true
+
+      - name: Aggregate per-target outputs
+        run: |
+          cat feature_*.txt > feature_output.txt 2>/dev/null || : > feature_output.txt
+          cat baseline_*.txt > baseline_output.txt 2>/dev/null || : > baseline_output.txt
 
       - name: Compare and comment on PR
-        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
@@ -226,13 +259,15 @@ jobs:
             }
 
             let body = '## Criterion Benchmark Comparison\n\n';
-            const featureSha = '${{ steps.baseline.outputs.feature_sha }}';
-            body += `> Comparing [\`baseline\`](${context.payload.repository.html_url}/commit/${{ steps.baseline.outputs.commit }})`;
+            const featureSha = '${{ needs.prepare.outputs.feature_sha }}';
+            const baselineSha = '${{ needs.prepare.outputs.baseline_sha }}';
+            body += `> Comparing [\`baseline\`](${context.payload.repository.html_url}/commit/${baselineSha})`;
             body += ` → [\`feature\`](${context.payload.repository.html_url}/commit/${featureSha})\n\n`;
+            body += '> Each target\'s feature and baseline rows are measured back-to-back on the same runner; raw ns are comparable within a target, not across targets.\n\n';
 
             if (baselineGap) {
               body += '### Baseline gap (HEAD only — how far is each EVM layer from `revm_pinned`)\n';
-              body += '\n_`rex4` is the current production spec — that\'s the row to read for "user-visible mega gap". The other rows are diagnostic: they show which layer adds cost._\n';
+              body += '\n_`rex4` is the current production spec — that\'s the row to read for "user-visible mega gap". `rex5` is the latest spec under active development. The other rows are diagnostic: they show which layer adds cost._\n';
               body += baselineGap;
               body += '\n---\n\n';
               body += '### PR-base → PR-head regression check\n\n';
@@ -300,7 +335,7 @@ jobs:
               body: body
             });
 
-      - name: Upload results
+      - name: Upload combined results
         if: always()
         uses: actions/upload-artifact@v4
         with:
