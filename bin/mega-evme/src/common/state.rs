@@ -550,49 +550,22 @@ where
     /// Deploys system contracts based on the given spec.
     pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
         use mega_evm::{
-            MegaSpecId, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
-            KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
-            ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_REX2,
-            ORACLE_CONTRACT_CODE_REX5, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+            flat_system_contract_specs, MegaSpecId, SEQUENCER_REGISTRY_ADDRESS,
+            SEQUENCER_REGISTRY_CODE,
         };
 
-        // MiniRex+: Oracle Contract (v1.0.0, v1.1.0, or v2.0.0 based on hardfork)
-        if spec >= MegaSpecId::MINI_REX {
-            let code = if spec >= MegaSpecId::REX5 {
-                ORACLE_CONTRACT_CODE_REX5
-            } else if spec >= MegaSpecId::REX2 {
-                ORACLE_CONTRACT_CODE_REX2
-            } else {
-                ORACLE_CONTRACT_CODE
-            };
-            self.set_account_code(ORACLE_CONTRACT_ADDRESS, Bytecode::new_raw(code));
+        // Flat predeploys (Oracle, high-precision timestamp Oracle, KeylessDeploy,
+        // MegaAccessControl, MegaLimitControl) come from the canonical registry shared
+        // with the block executor. mega-evme runs with a fixed spec, so activations are
+        // resolved via a `FixedHardfork` at timestamp 0, and the bytecode is applied as a
+        // raw state patch (no witness / storage seeding needed for local execution).
+        for contract in flat_system_contract_specs(super::FixedHardfork::new(spec), 0) {
+            self.set_account_code(contract.address, Bytecode::new_raw(contract.code));
         }
 
-        // MiniRex+: High Precision Timestamp Oracle
-        if spec >= MegaSpecId::MINI_REX {
-            self.set_account_code(
-                HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-                Bytecode::new_raw(HIGH_PRECISION_TIMESTAMP_ORACLE_CODE),
-            );
-        }
-
-        // Rex2+: Keyless Deploy Contract
-        if spec >= MegaSpecId::REX2 {
-            self.set_account_code(KEYLESS_DEPLOY_ADDRESS, Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
-        }
-
-        // Rex4+: Access Control Contract
-        if spec >= MegaSpecId::REX4 {
-            self.set_account_code(ACCESS_CONTROL_ADDRESS, Bytecode::new_raw(ACCESS_CONTROL_CODE));
-        }
-
-        // Rex4+: Limit Control Contract
-        if spec >= MegaSpecId::REX4 {
-            self.set_account_code(LIMIT_CONTROL_ADDRESS, Bytecode::new_raw(LIMIT_CONTROL_CODE));
-        }
-
-        // Rex5+: SequencerRegistry Contract
+        // Rex5+: SequencerRegistry. Only the bytecode is installed here — a local run has
+        // no chain-config sequencer/admin to seed (the registry's storage is otherwise
+        // read from forked state).
         if spec >= MegaSpecId::REX5 {
             self.set_account_code(
                 SEQUENCER_REGISTRY_ADDRESS,

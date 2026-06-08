@@ -26,13 +26,10 @@ use revm::{
 };
 
 use crate::{
-    block::eips, is_apply_pending_changes_due, resolve_system_address,
-    transact_apply_pending_changes, transact_deploy_access_control_contract,
-    transact_deploy_high_precision_timestamp_oracle, transact_deploy_keyless_deploy_contract,
-    transact_deploy_limit_control_contract, transact_deploy_oracle_contract,
-    transact_deploy_sequencer_registry, BlockLimiter, BlockMegaTransactionOutcome, BucketId,
-    MegaBlockExecutionCtx, MegaHardforks, MegaSystemCallOutcome, MegaTransaction,
-    MegaTransactionExt, MegaTransactionOutcome,
+    block::eips, flat_system_contract_specs, is_apply_pending_changes_due, resolve_system_address,
+    transact_apply_pending_changes, transact_deploy, transact_deploy_sequencer_registry,
+    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
+    MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -230,64 +227,13 @@ where
         // already activated and the create2 deployer is already deployed, so we can safely assume
         // that `ensure_create2_deployer` function will never be called.
 
-        // MiniRex hardfork: oracle contract
-        let result_and_state =
-            transact_deploy_oracle_contract(&self.hardforks, block_timestamp, self.evm.db_mut())
-                .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
-            outcomes.push(MegaSystemCallOutcome {
-                // We tentatively use `StateChangeSource::Transaction(0)` as state change source as
-                // there is no specific source defined for this oracle contract in alloy. This may
-                // change in the future.
-                source: StateChangeSource::Transaction(0),
-                state,
-            });
-        }
-
-        // MiniRex hardfork: high precision timestamp oracle contract
-        let result_and_state = transact_deploy_high_precision_timestamp_oracle(
-            &self.hardforks,
-            block_timestamp,
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
-            outcomes
-                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
-        }
-
-        // Rex2 hardfork: keyless deploy contract
-        let result_and_state = transact_deploy_keyless_deploy_contract(
-            &self.hardforks,
-            block_timestamp,
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
-            outcomes
-                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
-        }
-
-        // Rex4 hardfork: access control contract
-        let result_and_state = transact_deploy_access_control_contract(
-            &self.hardforks,
-            block_timestamp,
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
-            outcomes
-                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
-        }
-
-        // Rex4 hardfork: MegaLimitControl contract
-        let result_and_state = transact_deploy_limit_control_contract(
-            &self.hardforks,
-            block_timestamp,
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
+        // Flat system contracts (Oracle, high-precision timestamp Oracle, KeylessDeploy,
+        // MegaAccessControl, MegaLimitControl) share one deploy path via the canonical
+        // registry. We tentatively use `StateChangeSource::Transaction(0)` as the state
+        // change source, as alloy defines no specific source for these predeploys.
+        for spec in flat_system_contract_specs(&self.hardforks, block_timestamp) {
+            let state =
+                transact_deploy(self.evm.db_mut(), &spec).map_err(BlockExecutionError::other)?;
             outcomes
                 .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
         }

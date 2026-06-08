@@ -3,12 +3,9 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, bytes, Address, Bytes, B256};
-use revm::{
-    database::State,
-    state::{Account, Bytecode, EvmState},
-};
+use revm::{database::State, state::EvmState};
 
-use crate::MegaHardforks;
+use crate::{MegaHardforks, SystemContractSpec};
 
 /// The address of the oracle system contract.
 pub const ORACLE_CONTRACT_ADDRESS: Address = address!("0x6342000000000000000000000000000000000001");
@@ -65,39 +62,14 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
         (ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH)
     };
 
-    // Load the oracle contract account from the cache
-    let acc = db.load_cache_account(ORACLE_CONTRACT_ADDRESS)?;
-
-    // If the contract is already deployed with the correct code, return early
-    let existing_info = acc.account_info();
-    if let Some(account_info) = &existing_info {
-        if account_info.code_hash == target_code_hash {
-            // Although we do not need to update the account, we need to mark it as read
-            return Ok(Some(EvmState::from_iter([(
-                ORACLE_CONTRACT_ADDRESS,
-                Account { info: account_info.clone(), ..Default::default() },
-            )])));
-        }
-    }
-
-    // Update the account info with the contract code
-    let account_existed = existing_info.is_some();
-    let mut acc_info = existing_info.unwrap_or_default();
-    acc_info.code_hash = target_code_hash;
-    acc_info.code = Some(Bytecode::new_raw(target_code));
-
-    // Convert the cache account back into a revm account and mark it as touched.
     // Starting from Rex5 we stop marking the account as created on in-place bytecode upgrades so
     // that the existing Oracle storage is preserved across the upgrade. Pre-Rex5 the old behaviour
     // is preserved to maintain canonical mainnet state at the Rex2 activation boundary (where
     // mainnet had non-zero DB-backed Oracle storage that was cleared by the old code).
-    let mut revm_acc: revm::state::Account = acc_info.into();
-    revm_acc.mark_touch();
-    if !account_existed || !hardforks.is_rex_5_active_at_timestamp(block_timestamp) {
-        revm_acc.mark_created();
-    }
-
-    Ok(Some(EvmState::from_iter([(ORACLE_CONTRACT_ADDRESS, revm_acc)])))
+    let force_create_on_upgrade = !hardforks.is_rex_5_active_at_timestamp(block_timestamp);
+    let spec = SystemContractSpec::new(ORACLE_CONTRACT_ADDRESS, target_code, target_code_hash)
+        .with_force_create_on_upgrade(force_create_on_upgrade);
+    Ok(Some(crate::transact_deploy(db, &spec)?))
 }
 
 /// The address of the high precision timestamp oracle contract.
@@ -124,37 +96,12 @@ pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
         return Ok(None);
     }
 
-    // Load the high precision timestamp oracle contract account from the cache
-    let acc = db.load_cache_account(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS)?;
-
-    // If the contract is already deployed, return early
-    let existing_info = acc.account_info();
-    if let Some(account_info) = &existing_info {
-        if account_info.code_hash == HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH {
-            // Although we do not need to update the account, we need to mark it as read
-            return Ok(Some(EvmState::from_iter([(
-                HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-                Account { info: account_info.clone(), ..Default::default() },
-            )])));
-        }
-    }
-
-    // Update the account info with the contract code
-    let account_existed = existing_info.is_some();
-    let mut acc_info = existing_info.unwrap_or_default();
-    acc_info.code_hash = HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH;
-    acc_info.code = Some(Bytecode::new_raw(HIGH_PRECISION_TIMESTAMP_ORACLE_CODE));
-
-    // Convert the cache account back into a revm account and mark it as touched.
-    // Only mark it as created when the account did not previously exist; an in-place
-    // bytecode upgrade of an existing account must not clear its storage.
-    let mut revm_acc: revm::state::Account = acc_info.into();
-    revm_acc.mark_touch();
-    if !account_existed {
-        revm_acc.mark_created();
-    }
-
-    Ok(Some(EvmState::from_iter([(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, revm_acc)])))
+    let spec = SystemContractSpec::new(
+        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
+        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
+    );
+    Ok(Some(crate::transact_deploy(db, &spec)?))
 }
 
 #[cfg(test)]
@@ -163,7 +110,10 @@ mod tests {
 
     use super::*;
     use alloy_primitives::keccak256;
-    use revm::{database::InMemoryDB, state::AccountInfo};
+    use revm::{
+        database::InMemoryDB,
+        state::{AccountInfo, Bytecode},
+    };
 
     #[test]
     fn test_oracle_contract_code_hash_matches() {
