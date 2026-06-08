@@ -229,8 +229,9 @@ The outer KeylessDeploy call MUST revert with `InvalidTransaction()`, and the si
 It MUST be returned when the recovered signer's parent-state bytecode is non-empty and is not a valid EIP-7702 delegation designation, unless EIP-3607 enforcement is disabled by node configuration.
 This enforces the EIP-3607 caller-with-code rule, keeping the keyless-deploy validation surface aligned with the canonical transaction validation path.
 
-`InvalidTransaction()`, `InternalError()`, and `SignerHasCode()` are selector-only because return data is reachable on-chain through `RETURNDATACOPY` into storage and the state root.
-Encoding free-form error text into the wire payload would pin consensus to non-stable error wording.
+`InvalidTransaction()`, `InternalError()`, and `SignerHasCode()` are selector-only so the top-level KeylessDeploy error ABI stays stable and does not depend on upstream internal error text.
+The KeylessDeploy interceptor is active only at call depth 0; calls from contracts are not intercepted and MUST revert through the on-chain `NotIntercepted()` path, so sandbox validation/internal-error returndata is not observable by an inner caller's `RETURNDATASIZE` or `RETURNDATACOPY` instructions.
+This top-level returndata can affect RPC responses, traces, relayer decoders, and exact-output replay tooling, but it is not included in transaction receipts and cannot be copied into contract storage through KeylessDeploy's intercepted path.
 
 ## Constants
 
