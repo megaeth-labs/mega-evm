@@ -11,9 +11,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
+# Least privilege by default: only the jobs that post to the PR get write, and
+# the job that compiles + runs untrusted PR code (`bench`) gets read-only — so a
+# malicious PR run with `/benchmark` has no write-scoped token to abuse.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   # Resolve the exact commits ONCE, up front. Every bench job then checks out
@@ -23,6 +25,10 @@ jobs:
     name: Resolve commits
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # Reacts to the triggering comment; does not execute PR code.
+    permissions:
+      contents: read
+      pull-requests: write
     if: >-
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request &&
@@ -82,6 +88,12 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # This job compiles and runs untrusted PR code — keep it read-only so there
+    # is no write-scoped token to exfiltrate. `pull-requests: read` lets
+    # `gh pr checkout` resolve the (fork) PR head.
+    permissions:
+      contents: read
+      pull-requests: read
     strategy:
       fail-fast: false
       matrix:
@@ -144,6 +156,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     if: needs.prepare.outputs.compare == 'true'
+    # Posts the comparison comment; consumes only artifacts, never PR code.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Download all bench results
         uses: actions/download-artifact@v4
