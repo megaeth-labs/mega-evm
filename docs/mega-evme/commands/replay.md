@@ -104,14 +104,20 @@ The fixture captures everything needed to deterministically re-execute the targe
 - `post` — the expected result for the executed spec: state-root and logs-root, plus explicit `megaGasUsed` and `megaStatus` expectations that produce readable diffs on mismatch.
 
 The `post` expectation is computed by the `state-test` runner itself — the exact code path that later validates the fixture — so a dumped fixture is self-consistent by construction.
-Before writing, the dump cross-checks the gas, status, and output of the isolated execution against the full replay and refuses to write a fixture that does not reproduce them.
+
+**Fidelity gate.** Before building the fixture, the dump fetches the transaction's on-chain receipt and requires the local replay to reproduce its `gasUsed` exactly.
+A mismatch aborts the dump (no file is written) with a clear error — this catches a wrong spec or hardfork config, which self-validation alone cannot, because the fixture is validated under the same spec it was dumped with.
+It then additionally cross-checks the isolated execution against the full replay (gas, status, output), so the recorded `megaGasUsed` equals the real on-chain gas.
 
 `--dump-fixture` cannot be combined with transaction overrides, and deposit transactions are not supported.
-It pairs naturally with `--rpc.replay-file` to regenerate fixtures offline.
+Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.
 
 ```bash
-# Capture once, then dump a self-validating fixture offline:
-mega-evme replay --rpc https://mainnet.megaeth.com/rpc --rpc.capture-file ./cap.json 0xabc123...
+# Online: fetch + dump in one shot (records the receipt into the capture file):
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
+  --rpc.capture-file ./cap.json --dump-fixture ./fixtures/0xabc123.json 0xabc123...
+
+# Offline: re-dump reproducibly from the capture (receipt already captured):
 mega-evme replay --rpc.replay-file ./cap.json --dump-fixture ./fixtures/0xabc123.json 0xabc123...
 
 # Validate the fixture (and detect any gas/status/result drift):
@@ -127,7 +133,7 @@ state-test ./fixtures/0xabc123.json
 Re-execute the target transaction `N` times and report `min` / `median` / `mean` time and throughput in millions of gas per second (Mgas/s).
 
 Only the target transaction's EVM `transact` call is timed — RPC fetch, preceding transactions, and post-state root computation are excluded.
-Before timing, the isolated execution is cross-checked against the full replay's gas and status, so the measurement always reflects the real transaction.
+The same on-chain fidelity gate as `--dump-fixture` applies first (the replay must reproduce the receipt's `gasUsed`), so the measurement always reflects the real transaction.
 With `--json`, the statistics are emitted as a `bench` object for machine consumption (e.g. an ABBA baseline-vs-feature comparison).
 
 Pair with `--rpc.replay-file` for stable, offline measurements.

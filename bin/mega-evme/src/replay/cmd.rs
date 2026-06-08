@@ -19,6 +19,7 @@ use mega_evm::{
 };
 use tracing::{debug, info, trace, warn};
 
+use alloy_network::ReceiptResponse;
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
@@ -339,6 +340,22 @@ impl Cmd {
             oracle_storage: external_envs.oracle_storage(),
         });
 
+        // Fidelity anchor: the gas the transaction actually used on-chain. A
+        // fixture / benchmark is only meaningful if the local replay reproduces
+        // this exactly — a mismatch means a wrong spec or hardfork config, which
+        // self-validation alone cannot catch. Fetched here (before the executor
+        // borrows the database) so it is captured by `--rpc.capture-file`.
+        let onchain_gas = if need_fixture {
+            let receipt = provider
+                .get_transaction_receipt(self.tx_hash)
+                .await
+                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
+                .ok_or(ReplayError::TransactionNotFound(self.tx_hash))?;
+            Some(receipt.gas_used())
+        } else {
+            None
+        };
+
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             &hardforks,
@@ -475,6 +492,7 @@ impl Cmd {
                 exec_result.gas_used(),
                 actual_status,
                 exec_result.output().cloned(),
+                onchain_gas.expect("need_fixture implies onchain_gas was fetched"),
             )?)
         } else {
             None

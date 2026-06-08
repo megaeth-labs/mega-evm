@@ -83,6 +83,7 @@ pub(crate) fn build_draft<DB>(
     actual_gas: u64,
     actual_status: String,
     actual_output: Option<Bytes>,
+    onchain_gas: u64,
 ) -> Result<FixtureDraft>
 where
     DB: DatabaseRef,
@@ -93,6 +94,19 @@ where
         return Err(ReplayError::Other(
             "--dump-fixture does not support deposit transactions".to_string(),
         ));
+    }
+
+    // Fidelity gate: the local replay must reproduce the gas the transaction
+    // actually used on-chain. A mismatch means the replay executed under the
+    // wrong spec / hardfork config for this chain and block — self-validation
+    // cannot catch this, because the fixture is validated under the same spec it
+    // was dumped with. Refuse to build a fixture that does not match the chain.
+    if actual_gas != onchain_gas {
+        return Err(ReplayError::Other(format!(
+            "replay gas {actual_gas} != on-chain receipt gas {onchain_gas}: the local \
+             replay does not reproduce on-chain execution (likely a wrong spec or \
+             hardfork config for chain {chain_id} at this block)"
+        )));
     }
 
     let pre = build_pre_state(db, evm_state)?;
