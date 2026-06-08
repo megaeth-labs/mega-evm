@@ -42,26 +42,29 @@ jobs:
       baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
       compare: ${{ steps.resolve.outputs.compare }}
     steps:
+      # Checks out the BASE repo's default branch only (trusted code). The PR
+      # head is never checked out here — we fetch its commit object and read the
+      # SHA off the commit graph, so this write-privileged job never materializes
+      # untrusted PR code in its working tree.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Checkout PR head
-        if: github.event_name == 'issue_comment'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr checkout ${{ github.event.issue.number }}
-
       - name: Resolve commits
         id: resolve
         run: |
-          echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            BASELINE=$(git merge-base HEAD origin/main)
+            # GitHub maintains refs/pull/<n>/head in the base repo even for fork
+            # PRs; fetch just that commit object (no checkout, no working tree).
+            git fetch --no-tags origin "pull/${{ github.event.issue.number }}/head"
+            FEATURE=$(git rev-parse FETCH_HEAD)
+            BASELINE=$(git merge-base "$FEATURE" origin/main)
+            echo "feature_sha=$FEATURE" >> "$GITHUB_OUTPUT"
             echo "baseline_sha=$BASELINE" >> "$GITHUB_OUTPUT"
             echo "compare=true" >> "$GITHUB_OUTPUT"
-            echo "Feature: $(git rev-parse HEAD)  Baseline: $BASELINE"
+            echo "Feature: $FEATURE  Baseline: $BASELINE"
           else
+            echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
             echo "baseline_sha=" >> "$GITHUB_OUTPUT"
             echo "compare=false" >> "$GITHUB_OUTPUT"
           fi
