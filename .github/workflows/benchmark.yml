@@ -42,43 +42,44 @@ jobs:
       baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
       compare: ${{ steps.resolve.outputs.compare }}
     steps:
-      # Checks out the BASE repo's default branch only (trusted code). The PR
-      # head is never checked out here — we fetch its commit object and read the
-      # SHA off the commit graph, so this write-privileged job never materializes
-      # untrusted PR code in its working tree.
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Resolve commits
+      # Resolve the feature/baseline commits via the API ONLY — no checkout and
+      # no fetch of the PR ref. This write-privileged job therefore never brings
+      # untrusted PR code (or even a PR-controlled ref) into the workspace; the
+      # actual PR code is only ever materialized in the read-only `bench` job.
+      - name: Resolve commits and react
         id: resolve
-        run: |
-          if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            # GitHub maintains refs/pull/<n>/head in the base repo even for fork
-            # PRs; fetch just that commit object (no checkout, no working tree).
-            git fetch --no-tags origin "pull/${{ github.event.issue.number }}/head"
-            FEATURE=$(git rev-parse FETCH_HEAD)
-            BASELINE=$(git merge-base "$FEATURE" origin/main)
-            echo "feature_sha=$FEATURE" >> "$GITHUB_OUTPUT"
-            echo "baseline_sha=$BASELINE" >> "$GITHUB_OUTPUT"
-            echo "compare=true" >> "$GITHUB_OUTPUT"
-            echo "Feature: $FEATURE  Baseline: $BASELINE"
-          else
-            echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "baseline_sha=" >> "$GITHUB_OUTPUT"
-            echo "compare=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: React to comment
-        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
-            github.rest.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+            if (context.eventName !== 'issue_comment') {
+              // schedule / workflow_dispatch: benchmark the checked-out ref,
+              // no baseline comparison.
+              core.setOutput('feature_sha', context.sha);
+              core.setOutput('baseline_sha', '');
+              core.setOutput('compare', 'false');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.issue.number;
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number });
+            const featureSha = pr.data.head.sha;
+            // GitHub's compare endpoint returns the merge-base of the PR base
+            // branch and the PR head — same commit `git merge-base` would pick.
+            const cmp = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${pr.data.base.ref}...${featureSha}`,
+            });
+            const baselineSha = cmp.data.merge_base_commit.sha;
+            core.setOutput('feature_sha', featureSha);
+            core.setOutput('baseline_sha', baselineSha);
+            core.setOutput('compare', 'true');
+            core.info(`Feature: ${featureSha}  Baseline: ${baselineSha}`);
+            await github.rest.reactions.createForIssueComment({
+              owner,
+              repo,
               comment_id: context.payload.comment.id,
-              content: 'rocket'
+              content: 'rocket',
             });
 
   # One job per bench target. Each job runs the feature AND the baseline pass
