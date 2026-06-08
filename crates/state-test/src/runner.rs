@@ -1,7 +1,9 @@
 #![allow(missing_docs)]
 
 use crate::{
-    types::{SpecName, Test, TestSuite, TestUnit},
+    types::{
+        tx_env_at, SpecName, Test, TestError as TxBuildError, TestSuite, TestUnit, TxPartIndices,
+    },
     utils::{compute_test_roots, TestValidationResult},
 };
 use alloy_primitives::{address, U256};
@@ -20,7 +22,8 @@ use mega_evm::{
         primitives::{hardfork::SpecId, Bytes, B256},
         ExecuteCommitEvm,
     },
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
+    AHashBucketHasher, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError,
 };
 use serde_json::json;
 use std::{
@@ -54,6 +57,10 @@ pub enum TestErrorKind {
     LogsRootMismatch { got: B256, expected: B256 },
     #[error("state root mismatch: got {got}, expected {expected}")]
     StateRootMismatch { got: B256, expected: B256 },
+    #[error("gas used mismatch: got {got}, expected {expected}")]
+    GasUsedMismatch { got: u64, expected: u64 },
+    #[error("status mismatch: got {got:?}, expected {expected:?}")]
+    StatusMismatch { got: String, expected: String },
     #[error("unknown private key: {0:?}")]
     UnknownPrivateKey(B256),
     #[error("unexpected exception: got {got_exception:?}, expected {expected_exception:?}")]
@@ -68,6 +75,8 @@ pub enum TestErrorKind {
     InvalidPath,
     #[error("no JSON test files found in path")]
     NoJsonFiles,
+    #[error("fixture execution error: {0}")]
+    FixtureError(String),
 }
 
 /// Find all JSON test files in the given path
@@ -140,6 +149,7 @@ struct DebugContext<'a> {
     name: &'a str,
     path: &'a str,
     index: usize,
+    unit: &'a TestUnit,
     test: &'a Test,
     cfg: &'a CfgEnv<MegaSpecId>,
     block: &'a BlockEnv,
@@ -224,6 +234,44 @@ fn validate_output(
     Ok(())
 }
 
+/// Canonical status string for an execution result, matching the values
+/// emitted into a dumped fixture's `megaStatus` field.
+fn execution_status(result: &ExecutionResult<MegaHaltReason>) -> &'static str {
+    match result {
+        ExecutionResult::Success { .. } => "success",
+        ExecutionResult::Revert { .. } => "revert",
+        ExecutionResult::Halt { .. } => "halt",
+    }
+}
+
+/// Validate the MegaETH-specific explicit expectations (`megaGasUsed`,
+/// `megaStatus`) when present.
+///
+/// These produce readable, targeted diffs for replay-derived fixtures. They are
+/// in addition to — not a replacement for — the state-root / logs-root backstop,
+/// and are skipped entirely for pure-Ethereum tests that omit the fields.
+fn validate_mega_expectations(
+    test: &Test,
+    actual_result: &ExecutionResult<MegaHaltReason>,
+) -> Result<(), TestErrorKind> {
+    if let Some(expected) = test.mega_gas_used {
+        let got = actual_result.gas_used();
+        if got != expected {
+            return Err(TestErrorKind::GasUsedMismatch { got, expected });
+        }
+    }
+    if let Some(expected) = &test.mega_status {
+        let got = execution_status(actual_result);
+        if got != expected {
+            return Err(TestErrorKind::StatusMismatch {
+                got: got.to_string(),
+                expected: expected.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn check_evm_execution(
     test: &Test,
     expected_output: Option<&Bytes>,
@@ -266,6 +314,11 @@ fn check_evm_execution(
     // Validate output if execution succeeded
     if let Ok(result) = exec_result {
         validate_output(expected_output, result).inspect_err(|e| {
+            print_json(Some(e));
+        })?;
+
+        // MegaETH explicit expectations (replay fixtures): readable gas/status diff.
+        validate_mega_expectations(test, result).inspect_err(|e| {
             print_json(Some(e));
         })?;
     }
@@ -389,6 +442,7 @@ pub fn execute_test_suite(
                         name: &name,
                         path: &path,
                         index,
+                        unit: &unit,
                         test,
                         cfg: &cfg,
                         block: &block,
@@ -405,6 +459,17 @@ pub fn execute_test_suite(
     Ok(())
 }
 
+/// Build the `MegaETH` external environment for a test unit, reproducing the
+/// recorded SALT bucket capacities and oracle storage. Falls back to an empty
+/// environment for pure-Ethereum tests, which omit the `megaEnv` field.
+///
+/// Uses [`AHashBucketHasher`] so that bucket IDs match those recorded during
+/// `mega-evme replay` — a different hasher would map keys to different buckets
+/// and reproduce different gas.
+fn external_envs_for(unit: &TestUnit) -> mega_evm::TestExternalEnvs<Infallible, AHashBucketHasher> {
+    unit.mega_env.clone().unwrap_or_default().to_external_envs::<AHashBucketHasher>()
+}
+
 fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErrorKind> {
     // Prepare state
     let mut cache = ctx.cache_state.clone();
@@ -415,7 +480,8 @@ fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErro
     let evm_context = MegaContext::default()
         .with_db(&mut state)
         .with_cfg(ctx.cfg.clone())
-        .with_block(ctx.block.clone());
+        .with_block(ctx.block.clone())
+        .with_external_envs(external_envs_for(ctx.unit).into());
     let mut tx = MegaTransaction::new(ctx.tx.clone());
     tx.enveloped_tx = Some(Bytes::default());
 
@@ -450,6 +516,119 @@ fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErro
     )
 }
 
+/// Canonical post-execution outcome of running a single [`TestUnit`].
+///
+/// Returned by [`execute_unit_collect`] and used by `mega-evme --dump-fixture`
+/// to fill a fixture's `post` expectation. Because dump and validation share
+/// this exact execution + root-computation path, a fixture written from these
+/// values is self-consistent: re-running it through [`execute_test_suite`]
+/// reproduces the same roots.
+#[derive(Debug, Clone)]
+pub struct ExecutedUnit {
+    /// Post-state trie root over the unit's account closure.
+    pub state_root: B256,
+    /// RLP hash of the emitted logs.
+    pub logs_root: B256,
+    /// Total gas used by the transaction.
+    pub gas_used: u64,
+    /// Execution status: `"success"`, `"revert"`, or `"halt"`.
+    pub status: String,
+    /// Transaction output bytes, if any.
+    pub output: Option<Bytes>,
+}
+
+/// Execute a single [`TestUnit`] at transaction index 0 for the given spec, in
+/// isolation, timing only the EVM `transact` call.
+///
+/// This runs the same `MegaEVM` pipeline as [`execute_test_suite`] — including the
+/// reproduced external environment and the Optimism `BaseFeeVault` pruning. When
+/// `compute_roots` is set, the post-state / logs roots are computed (outside the
+/// timed region); otherwise they are skipped for leaner repeated benchmarking.
+fn run_unit_once(
+    unit: &TestUnit,
+    spec: &SpecName,
+    compute_roots: bool,
+) -> Result<(Duration, ExecutionResult<MegaHaltReason>, Option<TestValidationResult>), TestErrorKind>
+{
+    let mut cfg = CfgEnv::default();
+    cfg.chain_id =
+        unit.env.current_chain_id.unwrap_or_else(|| U256::from(6342)).try_into().unwrap_or(6342);
+    cfg.spec = spec.to_spec_id();
+
+    // Match execute_test_suite's per-spec blob configuration.
+    if cfg.spec.into_eth_spec().is_enabled_in(SpecId::OSAKA) {
+        cfg.set_max_blobs_per_tx(6);
+    } else if cfg.spec.into_eth_spec().is_enabled_in(SpecId::PRAGUE) {
+        cfg.set_max_blobs_per_tx(9);
+    } else {
+        cfg.set_max_blobs_per_tx(6);
+    }
+
+    let block = unit.block_env(&cfg);
+    let tx = tx_env_at(unit, TxPartIndices { data: 0, gas: 0, value: 0 }).map_err(|e| match e {
+        TxBuildError::UnknownPrivateKey(k) => TestErrorKind::UnknownPrivateKey(k),
+        other => TestErrorKind::FixtureError(other.to_string()),
+    })?;
+
+    let mut cache = unit.state();
+    cache.set_state_clear_flag(cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let mut state =
+        database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+
+    let evm_context = MegaContext::default()
+        .with_db(&mut state)
+        .with_cfg(cfg.clone())
+        .with_block(block)
+        .with_external_envs(external_envs_for(unit).into());
+    let mut megatx = MegaTransaction::new(tx);
+    megatx.enveloped_tx = Some(Bytes::default());
+
+    let mut evm = MegaEvm::new(evm_context);
+    let timer = Instant::now();
+    let exec_result = evm.transact_commit(megatx);
+    let elapsed = timer.elapsed();
+
+    let db = evm.into_inner().ctx.into_inner().journaled_state.database;
+    prune_base_fee_vault_changes(db);
+    let validation = compute_roots.then(|| compute_test_roots(&exec_result, db));
+
+    let result = exec_result.map_err(|e| TestErrorKind::FixtureError(e.to_string()))?;
+    Ok((elapsed, result, validation))
+}
+
+/// Execute a single [`TestUnit`] at transaction index 0 for the given spec and
+/// collect its canonical post-execution roots, gas, status, and output.
+///
+/// Returns the computed values instead of comparing them against an expectation;
+/// it is the dump-time counterpart to validation.
+pub fn execute_unit_collect(
+    unit: &TestUnit,
+    spec: &SpecName,
+) -> Result<ExecutedUnit, TestErrorKind> {
+    let (_elapsed, result, validation) = run_unit_once(unit, spec, true)?;
+    let validation = validation.expect("roots requested");
+    Ok(ExecutedUnit {
+        state_root: validation.state_root,
+        logs_root: validation.logs_root,
+        gas_used: result.gas_used(),
+        status: execution_status(&result).to_string(),
+        output: result.output().cloned(),
+    })
+}
+
+/// Execute a single [`TestUnit`] at transaction index 0 once, returning the time
+/// spent in the EVM `transact` call together with the gas used and status.
+///
+/// Used by `mega-evme replay --bench-runs` to measure EVM throughput in
+/// isolation (excluding RPC fetch, preceding transactions, and root computation).
+pub fn time_unit_execution(
+    unit: &TestUnit,
+    spec: &SpecName,
+) -> Result<(Duration, u64, String), TestErrorKind> {
+    let (elapsed, result, _validation) = run_unit_once(unit, spec, false)?;
+    Ok((elapsed, result.gas_used(), execution_status(&result).to_string()))
+}
+
 fn prune_base_fee_vault_changes(db: &mut State<EmptyDB>) {
     let base_fee_vault = address!("0x4200000000000000000000000000000000000019");
     db.cache.accounts.remove(&base_fee_vault);
@@ -467,7 +646,8 @@ fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
     let evm_context = MegaContext::default()
         .with_db(&mut state)
         .with_cfg(ctx.cfg.clone())
-        .with_block(ctx.block.clone());
+        .with_block(ctx.block.clone())
+        .with_external_envs(external_envs_for(ctx.unit).into());
     let mut tx = MegaTransaction::new(ctx.tx.clone());
     tx.enveloped_tx = Some(Bytes::default());
     let mut evm = MegaEvm::new(evm_context)
@@ -648,5 +828,86 @@ pub fn run(
             }
         }
         Err(thread_errors.swap_remove(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mega_evm::revm::context::result::{Output, SuccessReason};
+    use serde_json::json;
+
+    fn success(gas_used: u64) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Success {
+            reason: SuccessReason::Stop,
+            gas_used,
+            gas_refunded: 0,
+            logs: vec![],
+            output: Output::Call(Bytes::new()),
+        }
+    }
+
+    fn revert(gas_used: u64) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Revert { gas_used, output: Bytes::new() }
+    }
+
+    fn test_with_mega(mega_gas_used: Option<u64>, mega_status: Option<&str>) -> Test {
+        let mut value = json!({
+            "indexes": { "data": 0, "gas": 0, "value": 0 },
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "logs": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        });
+        if let Some(gas) = mega_gas_used {
+            value["megaGasUsed"] = json!(gas);
+        }
+        if let Some(status) = mega_status {
+            value["megaStatus"] = json!(status);
+        }
+        serde_json::from_value(value).expect("valid Test json")
+    }
+
+    #[test]
+    fn test_execution_status_strings() {
+        assert_eq!(execution_status(&success(21_000)), "success");
+        assert_eq!(execution_status(&revert(21_000)), "revert");
+    }
+
+    #[test]
+    fn test_mega_expectations_pass_when_matching() {
+        let test = test_with_mega(Some(21_000), Some("success"));
+        assert!(validate_mega_expectations(&test, &success(21_000)).is_ok());
+    }
+
+    #[test]
+    fn test_mega_expectations_absent_fields_skip() {
+        // Pure-Ethereum test: no mega expectations → never fails on gas/status.
+        let test = test_with_mega(None, None);
+        assert!(validate_mega_expectations(&test, &success(99_999)).is_ok());
+    }
+
+    #[test]
+    fn test_mega_expectations_gas_mismatch() {
+        let test = test_with_mega(Some(21_000), None);
+        let err = validate_mega_expectations(&test, &success(21_042)).unwrap_err();
+        match err {
+            TestErrorKind::GasUsedMismatch { got, expected } => {
+                assert_eq!(got, 21_042);
+                assert_eq!(expected, 21_000);
+            }
+            other => panic!("expected GasUsedMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mega_expectations_status_mismatch() {
+        let test = test_with_mega(None, Some("success"));
+        let err = validate_mega_expectations(&test, &revert(21_000)).unwrap_err();
+        match err {
+            TestErrorKind::StatusMismatch { got, expected } => {
+                assert_eq!(got, "revert");
+                assert_eq!(expected, "success");
+            }
+            other => panic!("expected StatusMismatch, got {other:?}"),
+        }
     }
 }

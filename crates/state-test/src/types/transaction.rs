@@ -95,7 +95,7 @@ impl TransactionParts {
 }
 
 /// Transaction part indices.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TxPartIndices {
     /// Index into the data array

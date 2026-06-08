@@ -1,8 +1,8 @@
 use mega_evm::MegaSpecId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Ethereum specification names
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Hash)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 pub enum SpecName {
     /// Frontier hardfork (Ethereum launch, July 2015)
     Frontier,
@@ -52,6 +52,20 @@ pub enum SpecName {
     Osaka, // SKIPPED
     /// `MegaETH` `MiniRex` hardfork
     MiniRex,
+    /// `MegaETH` `Equivalence` spec (Ethereum-equivalent baseline)
+    Equivalence,
+    /// `MegaETH` `Rex` spec
+    Rex,
+    /// `MegaETH` `Rex1` spec
+    Rex1,
+    /// `MegaETH` `Rex2` spec
+    Rex2,
+    /// `MegaETH` `Rex3` spec
+    Rex3,
+    /// `MegaETH` `Rex4` spec
+    Rex4,
+    /// `MegaETH` `Rex5` spec
+    Rex5,
     /// Unknown or unsupported specification
     #[serde(other)]
     Unknown,
@@ -64,8 +78,33 @@ impl SpecName {
     pub fn to_spec_id(&self) -> MegaSpecId {
         match self {
             Self::MiniRex => MegaSpecId::MINI_REX,
+            Self::Rex => MegaSpecId::REX,
+            Self::Rex1 => MegaSpecId::REX1,
+            Self::Rex2 => MegaSpecId::REX2,
+            Self::Rex3 => MegaSpecId::REX3,
+            Self::Rex4 => MegaSpecId::REX4,
+            Self::Rex5 => MegaSpecId::REX5,
             Self::Unknown => panic!("Unknown spec"),
+            // All Ethereum specs (and `Equivalence`) map to the equivalent baseline.
             _ => MegaSpecId::EQUIVALENCE,
+        }
+    }
+
+    /// Returns the [`SpecName`] corresponding to a [`MegaSpecId`].
+    ///
+    /// Used when dumping a replay fixture so the `post` map is keyed by the spec
+    /// the transaction actually executed under.
+    pub fn from_mega_spec(spec: MegaSpecId) -> Self {
+        match spec {
+            MegaSpecId::MINI_REX => Self::MiniRex,
+            MegaSpecId::EQUIVALENCE => Self::Equivalence,
+            MegaSpecId::REX => Self::Rex,
+            MegaSpecId::REX1 => Self::Rex1,
+            MegaSpecId::REX2 => Self::Rex2,
+            MegaSpecId::REX3 => Self::Rex3,
+            MegaSpecId::REX4 => Self::Rex4,
+            MegaSpecId::REX5 => Self::Rex5,
+            _ => Self::Unknown,
         }
     }
 }

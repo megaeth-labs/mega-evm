@@ -1,8 +1,8 @@
 use mega_evm::{revm::primitives::eip4844, MegaSpecId};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-use super::{AccountInfo, Env, SpecName, Test, TransactionParts};
+use super::{AccountInfo, Env, MegaEnv, SpecName, Test, TransactionParts};
 use mega_evm::revm::{
     context::{block::BlockEnv, cfg::CfgEnv},
     context_interface::block::calc_excess_blob_gas,
@@ -15,7 +15,7 @@ use mega_evm::revm::{
 };
 
 /// Single test unit struct
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 //#[serde(deny_unknown_fields)]
 // field config
 pub struct TestUnit {
@@ -57,8 +57,16 @@ pub struct TestUnit {
     /// Optional field containing the expected return data from the transaction.
     /// This is typically used for testing contract calls that return specific
     /// values or for CREATE operations that return deployed contract addresses.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub out: Option<Bytes>,
+
+    /// `MegaETH` external-environment inputs (SALT bucket capacities, oracle
+    /// storage) required to deterministically reproduce a `MegaETH` transaction.
+    ///
+    /// Absent for pure-Ethereum tests, which run against the empty external
+    /// environment.
+    #[serde(default, rename = "megaEnv", skip_serializing_if = "Option::is_none")]
+    pub mega_env: Option<MegaEnv>,
     //pub config
 }
 

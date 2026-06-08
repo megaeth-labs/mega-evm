@@ -86,6 +86,61 @@ Replay the captured transaction fully offline:
 mega-evme replay --rpc.replay-file ./fixtures/tx.json 0xabc123...
 ```
 
+## Self-Validating Fixture Dump
+
+`--dump-fixture <FILE>` turns a single replay into a self-validating regression fixture.
+The fixture is written in the same EEST state-test schema that the `state-test` runner consumes (`TestUnit { env, pre, transaction, post, out }`), so re-running it through `state-test` re-executes the transaction and checks the result — no RPC access required.
+
+### `--dump-fixture <FILE>`
+
+Dump a self-validating fixture for the replayed transaction to `<FILE>`.
+
+The fixture captures everything needed to deterministically re-execute the target transaction in isolation:
+
+- `pre` — the pre-state read closure (every account and storage slot the transaction touched), with their pre-transaction values.
+- `env` — the block environment (number, timestamp, coinbase, base fee, gas limit, prevrandao, excess blob gas).
+- `transaction` — the target transaction.
+- `megaEnv` — a MegaETH-specific extension carrying the SALT bucket capacities and oracle storage in effect, so dynamic storage-gas pricing reproduces exactly. Pure-Ethereum fixtures omit this field.
+- `post` — the expected result for the executed spec: state-root and logs-root, plus explicit `megaGasUsed` and `megaStatus` expectations that produce readable diffs on mismatch.
+
+The `post` expectation is computed by the `state-test` runner itself — the exact code path that later validates the fixture — so a dumped fixture is self-consistent by construction.
+Before writing, the dump cross-checks the gas, status, and output of the isolated execution against the full replay and refuses to write a fixture that does not reproduce them.
+
+`--dump-fixture` cannot be combined with transaction overrides, and deposit transactions are not supported.
+It pairs naturally with `--rpc.replay-file` to regenerate fixtures offline.
+
+```bash
+# Capture once, then dump a self-validating fixture offline:
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --rpc.capture-file ./cap.json 0xabc123...
+mega-evme replay --rpc.replay-file ./cap.json --dump-fixture ./fixtures/0xabc123.json 0xabc123...
+
+# Validate the fixture (and detect any gas/status/result drift):
+state-test ./fixtures/0xabc123.json
+```
+
+## Throughput Benchmark
+
+`--bench-runs <N>` measures EVM throughput by re-executing the target transaction in isolation and reporting timing statistics.
+
+### `--bench-runs <N>`
+
+Re-execute the target transaction `N` times and report `min` / `median` / `mean` time and throughput in millions of gas per second (Mgas/s).
+
+Only the target transaction's EVM `transact` call is timed — RPC fetch, preceding transactions, and post-state root computation are excluded.
+Before timing, the isolated execution is cross-checked against the full replay's gas and status, so the measurement always reflects the real transaction.
+With `--json`, the statistics are emitted as a `bench` object for machine consumption (e.g. an ABBA baseline-vs-feature comparison).
+
+Pair with `--rpc.replay-file` for stable, offline measurements.
+`--bench-runs` cannot be combined with transaction overrides.
+
+### `--bench-warmup <W>`
+
+Number of warmup iterations to run and discard before timing (default `3`).
+
+```bash
+mega-evme replay --rpc.replay-file ./cap.json --bench-runs 20 --json 0xabc123...
+```
+
 ## Spec Auto-Detection
 
 The EVM spec controls which opcodes, gas rules, and MegaETH-specific behaviors are active during execution.
@@ -137,6 +192,10 @@ See the linked pages for full details.
   See [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry).
 - **Tracing** — Emit execution traces (call traces, opcode traces, gas profiles, etc.).
   See [Tracing Overview](../tracing/overview.md).
+- **Fixture dump** — Write a self-validating EEST state-test fixture via `--dump-fixture`.
+  See [Self-Validating Fixture Dump](#self-validating-fixture-dump) above.
+- **Throughput benchmark** — Measure EVM throughput via `--bench-runs` / `--bench-warmup`.
+  See [Throughput Benchmark](#throughput-benchmark) above.
 
 ## Examples
 

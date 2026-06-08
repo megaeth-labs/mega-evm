@@ -16,7 +16,7 @@ name = "state-test"
 path = "src/main.rs"
 
 [dependencies]
-mega-evm = { workspace = true, features = ["default"] }
+mega-evm = { workspace = true, features = ["default", "test-utils"] }
 
 # alloy
 alloy-eips = { workspace = true, features = ["serde"] }

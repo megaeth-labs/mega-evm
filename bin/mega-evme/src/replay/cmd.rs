@@ -67,6 +67,31 @@ pub struct Cmd {
     /// Output format configuration
     #[command(flatten)]
     pub output_args: run::OutputArgs,
+
+    /// Dump a self-validating EEST state-test fixture for the replayed
+    /// transaction to the given file.
+    ///
+    /// The fixture captures the pre-state read closure, block environment,
+    /// transaction, and `MegaETH` external environment, and records `post`
+    /// expectations (state/logs roots, gas, status) computed by the state-test
+    /// runner. Re-running the file through `state-test` self-validates the
+    /// replay. Incompatible with transaction overrides.
+    #[arg(long = "dump-fixture", value_name = "FILE")]
+    pub dump_fixture: Option<std::path::PathBuf>,
+
+    /// Benchmark EVM throughput by re-executing the target transaction in
+    /// isolation this many times and reporting min/median/mean time and Mgas/s.
+    ///
+    /// Measures only the target transaction's EVM `transact` call (excludes RPC
+    /// fetch and preceding transactions). Pair with `--rpc.replay-file` for
+    /// stable, offline measurements. Incompatible with transaction overrides.
+    #[arg(long = "bench-runs", value_name = "N", default_value_t = 0)]
+    pub bench_runs: u32,
+
+    /// Number of warmup iterations to run (and discard) before timing, when
+    /// `--bench-runs` is set.
+    #[arg(long = "bench-warmup", value_name = "W", default_value_t = 3)]
+    pub bench_warmup: u32,
 }
 
 /// Resolved provider and associated metadata from `--rpc` / `--rpc.capture-file` /
@@ -87,6 +112,8 @@ pub(super) struct ReplayOutcome {
     pub original_tx: Transaction,
     /// The transaction receipt
     pub receipt: OpTxReceipt,
+    /// Self-validating fixture draft, present iff `--dump-fixture` was given.
+    pub fixture: Option<super::fixture::FixtureDraft>,
 }
 
 /// Intermediate context fetched from RPC before execution.
@@ -106,6 +133,19 @@ impl Cmd {
         let (external_envs, env_snapshot) = self.resolve_external_envs(&pctx)?;
         let result = self.execute(&pctx.provider, &rctx, external_envs).await?;
         self.output_results(&result)?;
+        // Benchmark EVM throughput before the draft is consumed by the dump.
+        if self.bench_runs > 0 {
+            if let Some(draft) = &result.fixture {
+                let stats = draft.run_bench(self.bench_runs, self.bench_warmup)?;
+                self.print_bench_stats(&stats);
+            }
+        }
+        // Write the self-validating fixture (re-executes the isolated unit through
+        // state-test and cross-checks it against the replay before writing).
+        if let (Some(path), Some(draft)) = (&self.dump_fixture, result.fixture) {
+            super::fixture::finalize_and_write(draft, path)?;
+            info!(path = %path.display(), "Wrote self-validating fixture");
+        }
         // Hand the effective external-env snapshot to the store before the final
         // persist; no-op unless this is a fixture-capture store.
         if let Some(snapshot) = env_snapshot {
@@ -290,6 +330,15 @@ impl Cmd {
         trace!(?block_env, "Block environment built");
         let mut evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
 
+        // Snapshot the effective external environment before it is moved into the
+        // factory, so a `--dump-fixture` / `--bench-runs` run can build a fixture
+        // unit that reproduces the replay in isolation.
+        let need_fixture = self.dump_fixture.is_some() || self.bench_runs > 0;
+        let dump_mega_env = need_fixture.then(|| state_test::types::MegaEnv {
+            bucket_capacities: external_envs.bucket_capacities(),
+            oracle_storage: external_envs.oracle_storage(),
+        });
+
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             &hardforks,
@@ -311,6 +360,10 @@ impl Cmd {
             evm_env.cfg_env.spec = spec;
             block_limits = block_limits.with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
         }
+
+        // The spec the target transaction will execute under (after any override),
+        // captured before `evm_env` is moved into the executor.
+        let executed_spec = evm_env.cfg_env.spec;
 
         let block_ctx = MegaBlockExecutionCtx::new(
             ctx.parent_block.hash(),
@@ -355,6 +408,14 @@ impl Cmd {
         // Execute target transaction
         info!("Executing target transaction");
         if self.tx_override_args.has_overrides() {
+            if self.dump_fixture.is_some() || self.bench_runs > 0 {
+                return Err(ReplayError::Other(
+                    "--dump-fixture / --bench-runs cannot be combined with transaction \
+                     overrides (the isolated execution would not represent the on-chain \
+                     transaction)"
+                        .to_string(),
+                ));
+            }
             info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
         }
         let wrapped_tx = self.tx_override_args.wrap(ctx.target_tx.as_recovered())?;
@@ -393,6 +454,31 @@ impl Cmd {
                 block_executor.evm().db_ref(),
             )
         });
+
+        // Build the self-validating fixture draft while the database still reflects
+        // the pre-target-transaction state (preceding txs committed, target not yet).
+        let fixture = if let Some(mega_env) = dump_mega_env {
+            let actual_status = match &exec_result {
+                ExecutionResult::Success { .. } => "success",
+                ExecutionResult::Revert { .. } => "revert",
+                ExecutionResult::Halt { .. } => "halt",
+            }
+            .to_string();
+            Some(super::fixture::build_draft(
+                block_executor.evm().db_ref(),
+                &evm_state,
+                ctx.chain_id,
+                executed_spec,
+                &ctx.block,
+                &ctx.target_tx,
+                mega_env,
+                exec_result.gas_used(),
+                actual_status,
+                exec_result.output().cloned(),
+            )?)
+        } else {
+            None
+        };
 
         let gas_used = block_executor
             .commit_transaction_outcome(outcome)
@@ -435,6 +521,7 @@ impl Cmd {
             },
             original_tx: ctx.target_tx.clone(),
             receipt,
+            fixture,
         })
     }
 
@@ -469,6 +556,30 @@ impl Cmd {
             }
         }
         Ok(())
+    }
+
+    /// Print throughput benchmark statistics as JSON (`--json`) or text.
+    fn print_bench_stats(&self, stats: &super::fixture::BenchStats) {
+        if self.output_args.json {
+            let value = serde_json::json!({
+                "bench": {
+                    "runs": stats.runs,
+                    "gasUsed": stats.gas_used,
+                    "minNs": stats.min.as_nanos(),
+                    "medianNs": stats.median.as_nanos(),
+                    "meanNs": stats.mean.as_nanos(),
+                    "mgasPerSec": stats.mgas_per_sec(),
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&value).expect("serialize bench stats"));
+        } else {
+            println!("\nBenchmark ({} runs, target transaction only):", stats.runs);
+            println!("  gas used : {}", stats.gas_used);
+            println!("  min      : {:?}", stats.min);
+            println!("  median   : {:?}", stats.median);
+            println!("  mean     : {:?}", stats.mean);
+            println!("  Mgas/s   : {:.2}", stats.mgas_per_sec());
+        }
     }
 }
 
