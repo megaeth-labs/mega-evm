@@ -1,6 +1,6 @@
 ---
 description: MegaAccessControl system contract — proactive volatile data access restriction for call subtrees.
-spec: Rex4
+spec: Rex5
 ---
 
 # MegaAccessControl

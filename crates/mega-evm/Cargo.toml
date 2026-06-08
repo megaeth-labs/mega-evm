@@ -40,6 +40,7 @@ derive_more.workspace = true
 once_cell.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports", "plotters", "cargo_bench_support"] }

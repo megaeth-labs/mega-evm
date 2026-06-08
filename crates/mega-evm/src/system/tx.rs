@@ -29,6 +29,13 @@ pub const MEGA_SYSTEM_TX_WHITELIST: &[Address] = &[ORACLE_CONTRACT_ADDRESS];
 pub const MEGA_SYSTEM_TRANSACTION_SOURCE_HASH: B256 =
     b256!("852c082c0faff590c6300c2c34815d1f79882552fa95ba413cd5aeb1dba84957");
 
+/// The source hash of the `MegaETH` keyless-deploy sandbox transaction. Used to set the
+/// `source_hash` field of the op deposit info so the sandbox tx is treated as a deposit-like
+/// transaction (bypasses L1/operator fee, validation, fee distribution). The value is
+/// `keccak256("MEGA_SANDBOX_TRANSACTION")`.
+pub const SANDBOX_TX_SOURCE_HASH: B256 =
+    b256!("3bc757a39ecb6dc5b5e5715352016c2b6fd38968a78cc57e878d9be249bc62f4");
+
 /// Checks if a transaction is sent from the given system address.
 pub fn sent_from_system_address(tx: &MegaTransaction, system_address: Address) -> bool {
     tx.caller() == system_address

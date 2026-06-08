@@ -1,18 +1,15 @@
 //! Error types for sandbox execution.
 
-#[cfg(not(feature = "std"))]
-use alloc as std;
-use std::string::String;
-
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
 use mega_system_contracts::keyless_deploy::IKeylessDeploy;
 
-use crate::MegaHaltReason;
+use crate::{LimitKind, MegaHaltReason};
 
 /// Error types for keyless deployment operations.
 ///
-/// These map directly to the Solidity errors defined in `IKeylessDeploy`.
+/// Most variants map directly to Solidity errors defined in `IKeylessDeploy`.
+/// Internal-only variants are mapped at the ABI boundary by `encode_error_result`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeylessDeployError {
     /// The transaction data is malformed (invalid RLP encoding)
@@ -30,7 +27,9 @@ pub enum KeylessDeployError {
     NoEtherTransfer,
     /// Failed to recover signer from signature (invalid signature)
     InvalidSignature,
-    /// The signer does not have enough balance to cover gas + value
+    /// The signer does not have enough balance to cover the sandbox tx's pre-execution
+    /// debit: `gas_limit × gas_price + value` on pre-Rex5 specs, `value` only on Rex5+
+    /// (where the sandbox tx is fee-free and only the `value` transfer needs funding).
     InsufficientBalance,
     /// The deploy address already has code (contract already exists)
     ContractAlreadyExists,
@@ -52,6 +51,21 @@ pub enum KeylessDeployError {
         gas_used: u64,
         /// The reason
         reason: MegaHaltReason,
+    },
+    /// Rex5 preflight rejected the call: the parent's remaining TX-level budget for some
+    /// dimension is smaller than the sandbox's known pre-frame intrinsic usage, so the
+    /// sandbox is guaranteed to fail internally and is not started.
+    ///
+    /// Returned as a Revert (like other validation errors) since no sandbox execution
+    /// has started and no signer state needs to persist.
+    ParentBudgetExceeded {
+        /// The dimension whose parent remaining is too small.
+        kind: LimitKind,
+        /// The parent's remaining limit for that dimension, i.e. the cap the sandbox
+        /// would have been given.
+        limit: u64,
+        /// The sandbox's known pre-frame intrinsic usage for that dimension.
+        used: u64,
     },
     /// Contract creation succeeded but returned empty bytecode
     EmptyCodeDeployed {
@@ -76,8 +90,32 @@ pub enum KeylessDeployError {
         /// The actual compute gas usage
         used: u64,
     },
-    /// Internal error during sandbox execution
-    InternalError(String),
+    /// The keyless transaction's init code exceeds the configured maximum init code size.
+    ///
+    /// Rex5+ only: the sandbox runs as an OP deposit-like transaction which bypasses
+    /// op-revm's `validate_env` (where revm's EIP-3860 size check lives), so the sandbox
+    /// must re-enforce the limit itself against `cfg().max_initcode_size()`.
+    InitCodeTooLarge {
+        /// The init code length in bytes.
+        size: u64,
+        /// The configured max init code size.
+        max: u64,
+    },
+    /// The recovered signer has non-empty, non-EIP-7702 bytecode in parent state.
+    ///
+    /// Rex5+ only: the deposit-style sandbox bypasses op-revm's EIP-3607 check (which
+    /// normally lives in `validate_account_nonce_and_code`), so the sandbox enforces it
+    /// itself before constructing the sandbox transaction.
+    SignerHasCode,
+    /// Internal sandbox failure (DB I/O, header validation, etc.).
+    /// Selector-only — precompile return data is consensus-affecting, so the wire must
+    /// not pin consensus to upstream revm/op-revm `Display` impls.
+    InternalError,
+    /// Sandbox rejected the inner transaction as a tx-validation error
+    /// (`IsTxError::is_tx_error() == true`). A dedicated selector lets relayer-side
+    /// decoders distinguish this from a genuine internal failure. Selector-only for the
+    /// same consensus-decoupling reason as `InternalError`.
+    InvalidTransaction,
     /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner
     /// calls)
     NotIntercepted,
@@ -119,6 +157,11 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         KeylessDeployError::ExecutionHalted { gas_used, .. } => {
             IKeylessDeploy::ExecutionHalted { gasUsed: gas_used }.abi_encode().into()
         }
+        KeylessDeployError::ParentBudgetExceeded { kind, limit, used } => {
+            IKeylessDeploy::ParentBudgetExceeded { kind: kind.as_u8(), limit, used }
+                .abi_encode()
+                .into()
+        }
         KeylessDeployError::EmptyCodeDeployed { gas_used } => {
             IKeylessDeploy::EmptyCodeDeployed { gasUsed: gas_used }.abi_encode().into()
         }
@@ -139,8 +182,13 @@ pub fn encode_error_result(error: KeylessDeployError) -> Bytes {
         KeylessDeployError::InsufficientComputeGas { limit, used } => {
             IKeylessDeploy::InsufficientComputeGas { limit, used }.abi_encode().into()
         }
-        KeylessDeployError::InternalError(message) => {
-            IKeylessDeploy::InternalError { message }.abi_encode().into()
+        KeylessDeployError::InitCodeTooLarge { size, max } => {
+            IKeylessDeploy::InitCodeTooLarge { size, max }.abi_encode().into()
+        }
+        KeylessDeployError::SignerHasCode => IKeylessDeploy::SignerHasCode {}.abi_encode().into(),
+        KeylessDeployError::InternalError => IKeylessDeploy::InternalError {}.abi_encode().into(),
+        KeylessDeployError::InvalidTransaction => {
+            IKeylessDeploy::InvalidTransaction {}.abi_encode().into()
         }
         KeylessDeployError::NotIntercepted => IKeylessDeploy::NotIntercepted {}.abi_encode().into(),
     }
@@ -197,6 +245,13 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
             )),
         });
     }
+    if let Ok(e) = IKeylessDeploy::ParentBudgetExceeded::abi_decode(output) {
+        return Some(KeylessDeployError::ParentBudgetExceeded {
+            kind: LimitKind::from_u8(e.kind)?,
+            limit: e.limit,
+            used: e.used,
+        });
+    }
     if let Ok(e) = IKeylessDeploy::EmptyCodeDeployed::abi_decode(output) {
         return Some(KeylessDeployError::EmptyCodeDeployed { gas_used: e.gasUsed });
     }
@@ -212,11 +267,67 @@ pub fn decode_error_result(output: &[u8]) -> Option<KeylessDeployError> {
             provided_gas_limit: e.providedGasLimit,
         });
     }
-    if let Ok(e) = IKeylessDeploy::InternalError::abi_decode(output) {
-        return Some(KeylessDeployError::InternalError(e.message));
+    if let Ok(e) = IKeylessDeploy::InitCodeTooLarge::abi_decode(output) {
+        return Some(KeylessDeployError::InitCodeTooLarge { size: e.size, max: e.max });
+    }
+    if IKeylessDeploy::SignerHasCode::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::SignerHasCode);
+    }
+    if IKeylessDeploy::InvalidTransaction::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::InvalidTransaction);
+    }
+    if IKeylessDeploy::InternalError::abi_decode(output).is_ok() {
+        return Some(KeylessDeployError::InternalError);
     }
     if IKeylessDeploy::NotIntercepted::abi_decode(output).is_ok() {
         return Some(KeylessDeployError::NotIntercepted);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `InternalError` and `InvalidTransaction` carry no payload on the wire, so a
+    /// roundtrip MUST produce the same variant. Pinned because both selectors are
+    /// reachable on-chain via `RETURNDATACOPY` and any divergence between
+    /// `encode_error_result` and `decode_error_result` would break consensus.
+    #[test]
+    fn test_internal_error_roundtrip_is_selector_only() {
+        let encoded = encode_error_result(KeylessDeployError::InternalError);
+        // Selector-only: the encoded form is exactly the 4-byte Solidity selector.
+        assert_eq!(encoded.len(), 4, "InternalError must be selector-only");
+        assert!(matches!(decode_error_result(&encoded), Some(KeylessDeployError::InternalError)));
+    }
+
+    #[test]
+    fn test_invalid_transaction_roundtrip_is_selector_only() {
+        let encoded = encode_error_result(KeylessDeployError::InvalidTransaction);
+        assert_eq!(encoded.len(), 4, "InvalidTransaction must be selector-only");
+        assert!(matches!(
+            decode_error_result(&encoded),
+            Some(KeylessDeployError::InvalidTransaction)
+        ));
+    }
+
+    /// `InitCodeTooLarge { size, max }` is a consensus-visible ABI selector. Pinning the
+    /// round-trip catches any drift between the Solidity error definition and the Rust
+    /// encode/decode (e.g. forgotten arm in `encode_error_result` or `decode_error_result`,
+    /// or accidental field reordering).
+    #[test]
+    fn test_init_code_too_large_roundtrip_preserves_size_and_max() {
+        let original = KeylessDeployError::InitCodeTooLarge { size: 600_000, max: 548_864 };
+        let encoded = encode_error_result(original.clone());
+        let decoded = decode_error_result(&encoded).expect("must decode");
+        assert_eq!(decoded, original);
+    }
+
+    /// `SignerHasCode` is selector-only; pinning the round-trip catches arm drift.
+    #[test]
+    fn test_signer_has_code_roundtrip_is_selector_only() {
+        let encoded = encode_error_result(KeylessDeployError::SignerHasCode);
+        assert_eq!(encoded.len(), 4, "SignerHasCode must be selector-only");
+        assert!(matches!(decode_error_result(&encoded), Some(KeylessDeployError::SignerHasCode)));
+    }
 }
