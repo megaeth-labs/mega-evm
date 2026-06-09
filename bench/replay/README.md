@@ -33,11 +33,10 @@ produces:
 ```
 
 Because the fixture is self-contained, the source of the workload does not
-matter — a real mined transaction, a `debug_traceCall` + `prestateTracer`
-snapshot, or a hand-crafted case all become the same kind of JSON. `mega-evme
-replay --bench-runs` and `state-test --bench` time the *same* execution (both
-call `time_unit_execution` on the unit); the corpus simply stores the unit as a
-committed fixture and times it with `state-test --bench`.
+matter — a real mined transaction (`mega-evme replay --dump-fixture`), a
+`debug_traceCall` + `prestateTracer` snapshot, or a hand-crafted case all become
+the same kind of JSON. The corpus stores each as a committed fixture and times
+it with `state-test --bench`.
 
 ## How it works
 
@@ -117,9 +116,9 @@ correctness test automatically — no extra wiring.
 Verify with `python3 bench/replay/run.py --bin pr=target/release` (bench) and
 `cargo test -p state-test --test replay_corpus` (correctness).
 
-> To benchmark a single transaction ad-hoc without adding a corpus case, use
-> `mega-evme replay --rpc.replay-file <capture> --bench-runs N --json <tx>`
-> directly — it times the same execution and prints the same `bench` shape.
+> To benchmark a single transaction ad-hoc, dump it
+> (`mega-evme replay --dump-fixture /tmp/x.json <tx>`) and time it
+> (`state-test --bench /tmp/x.json`) — no manifest entry needed.
 
 ## CI
 

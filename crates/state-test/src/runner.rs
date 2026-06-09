@@ -624,8 +624,8 @@ pub fn execute_unit_collect(
 /// Execute a single [`TestUnit`] at transaction index 0 once, returning the time
 /// spent in the EVM `transact` call together with the gas used and status.
 ///
-/// Used by `mega-evme replay --bench-runs` to measure EVM throughput in
-/// isolation (excluding RPC fetch, preceding transactions, and root computation).
+/// The primitive behind [`bench_test_suite`] / `state-test --bench`: it measures
+/// EVM throughput in isolation (excluding root computation).
 pub fn time_unit_execution(
     unit: &TestUnit,
     spec: &SpecName,

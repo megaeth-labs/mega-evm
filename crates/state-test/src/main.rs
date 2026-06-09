@@ -117,12 +117,6 @@ impl Cmd {
         Ok(())
     }
 
-    /// Benchmark every fixture under the given paths and print the results as JSON.
-    ///
-    /// A single benchmarked unit prints one object `{ gas_used, success, bench }`
-    /// — the same shape `mega-evme replay --bench-runs --json` emits — so the
-    /// replay-bench driver parses captured-tx and fixture cases identically.
-    /// Multiple units print a JSON array of `{ name, ... }` objects.
     /// Parse `--bench-spec` into a [`SpecName`], if given.
     fn resolve_spec(&self) -> Result<Option<SpecName>, TestError> {
         self.bench_spec
@@ -156,6 +150,11 @@ impl Cmd {
         Ok(())
     }
 
+    /// Benchmark every fixture under the given paths and print the results as JSON.
+    ///
+    /// A single benchmarked unit prints one object `{ gas_used, success, bench }`;
+    /// multiple units print a JSON array of `{ name, ... }` objects. The
+    /// replay-bench driver (`bench/replay/run.py`) consumes this output.
     fn run_bench(&self) -> Result<(), TestError> {
         let spec_override = self.resolve_spec()?;
 

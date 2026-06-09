@@ -76,26 +76,11 @@ pub struct Cmd {
     /// transaction, and `MegaETH` external environment, and records `post`
     /// expectations (state/logs roots, gas, status) computed by the state-test
     /// runner. Re-running the file through `state-test` self-validates the
-    /// replay. The dump is rejected unless the local replay reproduces the
-    /// on-chain receipt's gas and success status. Incompatible with transaction
-    /// overrides and `--override.spec`.
+    /// replay, and `state-test --bench` benchmarks it. The dump is rejected
+    /// unless the local replay reproduces the on-chain receipt's gas and success
+    /// status. Incompatible with transaction overrides and `--override.spec`.
     #[arg(long = "dump-fixture", value_name = "FILE")]
     pub dump_fixture: Option<std::path::PathBuf>,
-
-    /// Benchmark EVM throughput by re-executing the target transaction in
-    /// isolation this many times and reporting min/median/mean time and Mgas/s.
-    ///
-    /// Measures only the target transaction's EVM `transact` call (excludes RPC
-    /// fetch and preceding transactions). Pair with `--rpc.replay-file` for
-    /// stable, offline measurements. Incompatible with transaction overrides and
-    /// `--override.spec`.
-    #[arg(long = "bench-runs", value_name = "N", default_value_t = 0)]
-    pub bench_runs: u32,
-
-    /// Number of warmup iterations to run (and discard) before timing, when
-    /// `--bench-runs` is set.
-    #[arg(long = "bench-warmup", value_name = "W", default_value_t = 3)]
-    pub bench_warmup: u32,
 }
 
 /// Resolved provider and associated metadata from `--rpc` / `--rpc.capture-file` /
@@ -130,23 +115,22 @@ impl Cmd {
     /// Replay a historical transaction.
     pub async fn run(&self) -> Result<()> {
         // Pure input validation — reject before any network/state work. A dumped
-        // fixture or benchmark must represent the on-chain transaction, so it can
-        // neither apply transaction overrides nor force a spec: both would make the
-        // recorded execution a what-if, not the on-chain one.
-        if self.dump_fixture.is_some() || self.bench_runs > 0 {
+        // fixture must represent the on-chain transaction, so it can neither apply
+        // transaction overrides nor force a spec: both would make the recorded
+        // execution a what-if, not the on-chain one.
+        if self.dump_fixture.is_some() {
             if self.tx_override_args.has_overrides() {
                 return Err(ReplayError::Other(
-                    "--dump-fixture / --bench-runs cannot be combined with transaction \
-                     overrides (the isolated execution would not represent the on-chain \
-                     transaction)"
+                    "--dump-fixture cannot be combined with transaction overrides (the \
+                     isolated execution would not represent the on-chain transaction)"
                         .to_string(),
                 ));
             }
             if self.spec_override.is_some() {
                 return Err(ReplayError::Other(
-                    "--dump-fixture / --bench-runs cannot be combined with --override.spec \
-                     (the fixture must record the spec auto-detected for the on-chain block, \
-                     not a manually forced one)"
+                    "--dump-fixture cannot be combined with --override.spec (the fixture \
+                     must record the spec auto-detected for the on-chain block, not a \
+                     manually forced one)"
                         .to_string(),
                 ));
             }
@@ -156,17 +140,7 @@ impl Cmd {
         let rctx = self.fetch_replay_context(&pctx.provider, pctx.chain_id).await?;
         let (external_envs, env_snapshot) = self.resolve_external_envs(&pctx)?;
         let result = self.execute(&pctx.provider, &rctx, external_envs).await?;
-        // Benchmark before rendering so `--json` output stays a single JSON
-        // document (the stats are folded into the summary object).
-        let bench = if self.bench_runs > 0 {
-            match &result.fixture {
-                Some(draft) => Some(draft.run_bench(self.bench_runs, self.bench_warmup)?),
-                None => None,
-            }
-        } else {
-            None
-        };
-        self.output_results(&result, bench.as_ref())?;
+        self.output_results(&result)?;
         // Write the self-validating fixture (re-executes the isolated unit through
         // state-test and cross-checks it against the replay before writing).
         if let (Some(path), Some(draft)) = (&self.dump_fixture, result.fixture) {
@@ -357,7 +331,7 @@ impl Cmd {
         trace!(?block_env, "Block environment built");
         let mut evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
 
-        // For `--dump-fixture` / `--bench-runs`, snapshot the two inputs a fixture
+        // For `--dump-fixture`, snapshot the two inputs a fixture
         // needs before the external env is moved into the factory: the effective
         // MegaETH external environment, and the on-chain receipt gas used as the
         // fidelity anchor. They live or die together (kept in one `Option`), so the
@@ -368,7 +342,7 @@ impl Cmd {
         // meaningful if the local replay reproduces the receipt's gas and success
         // status — a mismatch means a wrong spec or hardfork config, which
         // self-validation alone cannot catch.
-        let fixture_inputs = if self.dump_fixture.is_some() || self.bench_runs > 0 {
+        let fixture_inputs = if self.dump_fixture.is_some() {
             // Sort the accessed buckets/oracle slots so the dumped fixture is
             // byte-reproducible: these come from hash-map iteration, whose order
             // is otherwise non-deterministic across runs (noisy diffs, and an
@@ -459,7 +433,7 @@ impl Cmd {
         }
 
         // Execute target transaction. Override-incompatibility with
-        // --dump-fixture/--bench-runs is validated up front in `run()`.
+        // --dump-fixture is validated up front in `run()`.
         info!("Executing target transaction");
         if self.tx_override_args.has_overrides() {
             info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
@@ -561,15 +535,7 @@ impl Cmd {
     }
 
     /// Print execution results as JSON (`--json`) or human-readable text.
-    ///
-    /// When benchmark `stats` are present they are included in the same output:
-    /// under a `bench` field of the single JSON object (so `--json` stdout stays
-    /// one parseable document), or as an appended block in text mode.
-    fn output_results(
-        &self,
-        result: &ReplayOutcome,
-        bench: Option<&super::fixture::BenchStats>,
-    ) -> Result<()> {
+    fn output_results(&self, result: &ReplayOutcome) -> Result<()> {
         trace!("Writing output results");
         if self.output_args.json {
             let mut summary = ExecutionSummary::from_result(
@@ -579,13 +545,9 @@ impl Cmd {
             summary.fill_trace_and_dump(&result.outcome, &self.trace_args, &self.dump_args)?;
             summary.receipt =
                 Some(serde_json::to_value(&result.receipt).expect("failed to serialize receipt"));
-            let mut value = serde_json::to_value(&summary).expect("failed to serialize output");
-            if let Some(stats) = bench {
-                value["bench"] = bench_json(stats);
-            }
             println!(
                 "{}",
-                serde_json::to_string_pretty(&value).expect("failed to serialize output")
+                serde_json::to_string_pretty(&summary).expect("failed to serialize output")
             );
         } else {
             print_execution_summary(
@@ -601,35 +563,9 @@ impl Cmd {
             if self.dump_args.dump {
                 self.dump_args.dump_evm_state(&result.outcome.state)?;
             }
-            if let Some(stats) = bench {
-                print_bench_text(stats);
-            }
         }
         Ok(())
     }
-}
-
-/// Throughput benchmark statistics as a JSON object (folded into the replay
-/// summary under a `bench` field).
-fn bench_json(stats: &super::fixture::BenchStats) -> serde_json::Value {
-    serde_json::json!({
-        "runs": stats.runs,
-        "gasUsed": stats.gas_used,
-        "minNs": stats.min.as_nanos(),
-        "medianNs": stats.median.as_nanos(),
-        "meanNs": stats.mean.as_nanos(),
-        "mgasPerSec": stats.mgas_per_sec(),
-    })
-}
-
-/// Print throughput benchmark statistics as a human-readable block.
-fn print_bench_text(stats: &super::fixture::BenchStats) {
-    println!("\nBenchmark ({} runs, target transaction only):", stats.runs);
-    println!("  gas used : {}", stats.gas_used);
-    println!("  min      : {:?}", stats.min);
-    println!("  median   : {:?}", stats.median);
-    println!("  mean     : {:?}", stats.mean);
-    println!("  Mgas/s   : {:.2}", stats.mgas_per_sec());
 }
 
 /// Build a [`BlockEnv`] from the RPC block header.

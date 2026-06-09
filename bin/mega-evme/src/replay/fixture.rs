@@ -15,7 +15,7 @@
 //! write a fixture that does not reproduce them (e.g. an incomplete pre-state
 //! closure or an unsupported transaction shape).
 
-use std::{collections::BTreeMap, fmt::Display, time::Duration};
+use std::{collections::BTreeMap, fmt::Display};
 
 use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_eips::Typed2718 as _;
@@ -33,7 +33,7 @@ use mega_evm::{
 use op_alloy_consensus::OpTxEnvelope;
 use op_alloy_rpc_types::Transaction;
 use state_test::{
-    runner::{execute_unit_collect, execution_status, time_unit_execution},
+    runner::{execute_unit_collect, execution_status},
     types::{AccountInfo, Env, MegaEnv, SpecName, Test, TestSuite, TestUnit, TransactionParts},
 };
 
@@ -205,75 +205,6 @@ pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) ->
         .map_err(|e| ReplayError::Other(format!("failed to serialize fixture: {e}")))?;
     std::fs::write(path, json)
         .map_err(|e| ReplayError::Other(format!("failed to write fixture {}: {e}", path.display())))
-}
-
-/// Throughput statistics from a `--bench-runs` measurement.
-pub(crate) struct BenchStats {
-    /// Number of timed iterations.
-    pub runs: u32,
-    /// Gas used by the (identical) target transaction.
-    pub gas_used: u64,
-    /// Fastest observed iteration.
-    pub min: Duration,
-    /// Median iteration time.
-    pub median: Duration,
-    /// Mean iteration time.
-    pub mean: Duration,
-}
-
-impl BenchStats {
-    /// Throughput in millions of gas per second, computed from the median time.
-    pub(crate) fn mgas_per_sec(&self) -> f64 {
-        let secs = self.median.as_secs_f64();
-        if secs > 0.0 {
-            self.gas_used as f64 / secs / 1.0e6
-        } else {
-            f64::INFINITY
-        }
-    }
-}
-
-impl FixtureDraft {
-    /// Measure EVM throughput by re-executing the target transaction in isolation.
-    ///
-    /// First verifies that the isolated execution reproduces the replay's gas and
-    /// status (so the measurement reflects the real transaction), then runs
-    /// `warmup` discarded iterations followed by `runs` timed iterations.
-    pub(crate) fn run_bench(&self, runs: u32, warmup: u32) -> Result<BenchStats> {
-        if runs == 0 {
-            return Err(ReplayError::Other("bench requires at least one run".to_string()));
-        }
-
-        let executed = execute_unit_collect(&self.unit, &self.spec)
-            .map_err(|e| ReplayError::Other(format!("bench self-execution failed: {e}")))?;
-        if executed.gas_used != self.actual_gas || executed.status != self.actual_status {
-            return Err(ReplayError::Other(format!(
-                "bench not reproducible: isolated ({}, {:?}) != replay ({}, {:?})",
-                executed.gas_used, executed.status, self.actual_gas, self.actual_status
-            )));
-        }
-
-        for _ in 0..warmup {
-            time_unit_execution(&self.unit, &self.spec)
-                .map_err(|e| ReplayError::Other(format!("bench warmup failed: {e}")))?;
-        }
-
-        let mut durations = Vec::with_capacity(runs.max(1) as usize);
-        let mut gas_used = executed.gas_used;
-        for _ in 0..runs {
-            let (elapsed, gas, _status) = time_unit_execution(&self.unit, &self.spec)
-                .map_err(|e| ReplayError::Other(format!("bench run failed: {e}")))?;
-            durations.push(elapsed);
-            gas_used = gas;
-        }
-
-        durations.sort_unstable();
-        let min = durations[0];
-        let median = durations[durations.len() / 2];
-        let sum: Duration = durations.iter().sum();
-        let mean = sum / durations.len() as u32;
-        Ok(BenchStats { runs, gas_used, min, median, mean })
-    }
 }
 
 /// Read the pre-execution values of every account in the target transaction's

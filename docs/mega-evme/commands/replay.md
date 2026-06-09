@@ -126,28 +126,14 @@ state-test ./fixtures/0xabc123.json
 
 ## Throughput Benchmark
 
-`--bench-runs <N>` measures EVM throughput by re-executing the target transaction in isolation and reporting timing statistics.
-
-### `--bench-runs <N>`
-
-Re-execute the target transaction `N` times and report `min` / `median` / `mean` time and throughput in millions of gas per second (Mgas/s).
-
-Only the target transaction's EVM `transact` call is timed — RPC fetch, preceding transactions, and post-state root computation are excluded.
-The same on-chain fidelity gate as `--dump-fixture` applies first (the replay must reproduce the receipt's `gasUsed` and status), so the measurement always reflects the real transaction.
-With `--json`, the statistics are folded into the replay summary as a `bench` field of the single JSON object, for machine consumption (e.g. an ABBA baseline-vs-feature comparison).
-
-Pair with `--rpc.replay-file` for stable, offline measurements.
-`--bench-runs` cannot be combined with transaction overrides or `--override.spec`.
-
-A committed corpus of characteristic transactions and a base-vs-PR comparison driver build on this flag to track real-transaction throughput across changes; see `bench/replay/` and the `replay-bench` CI workflow.
-
-### `--bench-warmup <W>`
-
-Number of warmup iterations to run and discard before timing (default `3`).
+To benchmark a replayed transaction, dump it to a fixture and time the fixture with the `state-test` runner — there is no `replay`-side benchmark flag:
 
 ```bash
-mega-evme replay --rpc.replay-file ./cap.json --bench-runs 20 --json 0xabc123...
+mega-evme replay --rpc <url> --dump-fixture /tmp/tx.json 0xabc123...
+state-test --bench /tmp/tx.json
 ```
+
+`state-test --bench` reports `min` / `median` / `mean` time and throughput (Mgas/s), timing only the EVM `transact` call. A committed corpus of characteristic transactions and a base-vs-PR comparison driver build on this to track real-transaction throughput across changes; see `bench/replay/` and the `replay-bench` CI workflow.
 
 ## Spec Auto-Detection
 
@@ -202,7 +188,7 @@ See the linked pages for full details.
   See [Tracing Overview](../tracing/overview.md).
 - **Fixture dump** — Write a self-validating EEST state-test fixture via `--dump-fixture`.
   See [Self-Validating Fixture Dump](#self-validating-fixture-dump) above.
-- **Throughput benchmark** — Measure EVM throughput via `--bench-runs` / `--bench-warmup`.
+- **Throughput benchmark** — Dump a fixture (`--dump-fixture`) and time it with `state-test --bench`.
   See [Throughput Benchmark](#throughput-benchmark) above.
 
 ## Examples
