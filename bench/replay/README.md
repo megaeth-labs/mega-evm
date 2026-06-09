@@ -1,13 +1,16 @@
-# Replay throughput benchmark
+# Replay corpus & throughput benchmark
 
-Measures how fast `mega-evm` executes **characteristic MegaETH workloads**, and
-compares a PR against its merge-base so a change that speeds up or slows down
-real-transaction execution is visible.
+`fixtures/` is a single corpus of characteristic MegaETH workloads, used two ways:
 
-This is the real-workload counterpart to the synthetic Criterion suite
-(`crates/mega-evm/benches/`, run by `.github/workflows/benchmark.yml`). Criterion
-answers _"how far is mega from vanilla revm on a crafted workload"_; this answers
-_"did this change make characteristic workloads faster or slower"_.
+- **Correctness** — `crates/state-test/tests/replay_corpus.rs` re-executes each
+  fixture and checks its recorded post-state (state/logs root, gas, status) on
+  **every PR** (via `cargo test`). A change that alters execution turns this red.
+- **Performance** — `run.py` times each fixture and compares a PR against its
+  merge-base (`.github/workflows/replay-bench.yml`, on demand), so a speed-up or
+  slow-down on real workloads is visible. This is the real-workload counterpart
+  to the synthetic Criterion suite (`crates/mega-evm/benches/`).
+
+Keeping one corpus means a fixture added for either purpose serves both.
 
 ## The unit: a self-contained fixture
 
@@ -59,16 +62,18 @@ committed fixture and times it with `state-test --bench`.
 
 ## Corpus
 
-`manifest.json` lists the cases — each chosen for a distinct workload shape
+`manifest.json` lists the bench cases — each chosen for a distinct workload shape
 (system-contract interception, plain compute, log-heavy metering, heavy
 multi-call, limit-tracker stress). Every case records `expected_gas`; the driver
 fails if a binary runs it with different gas (that would mean different work is
 being timed). A case names its `spec` explicitly only when its fixture carries an
 empty `post`; otherwise the spec is taken from the fixture's `post` key.
 
+The correctness test (`replay_corpus.rs`) globs `fixtures/` directly, so a
+fixture with a populated `post` (every real-transaction case) is also validated.
 `fixtures/attack_deploy.json` is a mainnet attack contract deployment (#299)
 converted from a `prestateTracer` snapshot — a non-on-chain, 142M-gas
-limit-tracker stress case, tracked through the very same path.
+limit-tracker stress case; it carries an empty `post`, so it is bench-only.
 
 ## Running locally
 
@@ -100,7 +105,11 @@ snapshot or a hand-crafted scenario), produce the `TestUnit` JSON directly
 (`env` + `pre` + `transaction` + an empty `post: {}`), then add an entry that
 also names the `"spec"` to run under.
 
-Verify with `python3 bench/replay/run.py --bin pr=target/release`.
+A dumped (mined-transaction) fixture carries a populated `post`, so it is also
+picked up by the per-PR correctness test automatically — no extra wiring.
+
+Verify with `python3 bench/replay/run.py --bin pr=target/release` (bench) and
+`cargo test -p state-test --test replay_corpus` (correctness).
 
 > To benchmark a single transaction ad-hoc without adding a corpus case, use
 > `mega-evme replay --rpc.replay-file <capture> --bench-runs N --json <tx>`
@@ -108,9 +117,11 @@ Verify with `python3 bench/replay/run.py --bin pr=target/release`.
 
 ## CI
 
-`.github/workflows/replay-bench.yml` runs weekly, on manual dispatch, and on a
-member `/benchmark-replay` PR comment. It builds the PR and merge-base binaries,
-runs the driver, and posts the comparison table (job summary + PR comment).
+- **Correctness** runs on every PR: `cargo test` (`build-and-test.yml`) executes
+  `replay_corpus.rs`, which validates the recorded post-state of every fixture.
+- **Performance** runs on demand: `replay-bench.yml` (weekly / manual dispatch /
+  member `/benchmark-replay` PR comment) builds the PR and merge-base binaries,
+  runs the driver, and posts the comparison table (job summary + PR comment).
 
 Timing on shared runners is noisy for sub-10µs cases; read the larger cases and
 the overall trend across the corpus for real signal.

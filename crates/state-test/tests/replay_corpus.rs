@@ -1,18 +1,21 @@
-//! Offline correctness guard over the committed replay-fixture corpus.
+//! Offline correctness guard over the shared replay corpus (`bench/replay/`).
 //!
-//! Each fixture under `tests/fixtures/replay/` is a self-validating EEST state
-//! test produced by `mega-evme replay --dump-fixture` from a real `MegaETH`
-//! transaction (its gas and success status were checked against the on-chain
-//! receipt at dump time). Re-running them through the state-test runner re-executes each
-//! transaction in isolation and checks the recorded state root, logs root, gas,
-//! and status — with no RPC access, so it is deterministic in CI.
+//! The fixtures under `bench/replay/fixtures/` are a single corpus used two
+//! ways: this test validates their recorded post-state (every PR), and the
+//! replay-throughput benchmark (`bench/replay/run.py`) times them (on demand).
+//! Each is a self-contained EEST state test — most produced by `mega-evme
+//! replay --dump-fixture` from a real `MegaETH` transaction (gas and status
+//! checked against the on-chain receipt at dump time) — so re-executing them in
+//! isolation checks the state root, logs root, gas, and status with no RPC,
+//! deterministically in CI. A bench-only fixture (e.g. `attack_deploy`) carries
+//! an empty `post` and is exercised here but only asserted by the benchmark.
 //!
 //! A failure here means a code change altered execution for the covered spec
 //! (gas, result, or post-state). To extend coverage, dump more fixtures:
 //!
 //! ```bash
 //! mega-evme replay --rpc <archive-url> \
-//!   --dump-fixture crates/state-test/tests/fixtures/replay/<name>.json <tx-hash>
+//!   --dump-fixture bench/replay/fixtures/<name>.json <tx-hash>
 //! ```
 
 use std::{
@@ -24,7 +27,7 @@ use state_test::runner::{execute_test_suite, find_all_json_tests};
 
 #[test]
 fn test_replay_corpus_self_validates() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/replay");
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/replay/fixtures");
     let fixtures = find_all_json_tests(std::path::Path::new(dir));
 
     assert!(!fixtures.is_empty(), "replay corpus is empty at {dir}");
