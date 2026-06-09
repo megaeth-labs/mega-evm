@@ -36,6 +36,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # The comment-reaction endpoint needs Issues write (a PR comment is an
+      # issue comment); the reaction is also wrapped non-fatally below.
+      issues: write
     if: >-
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request &&
@@ -77,12 +80,18 @@ jobs:
             core.setOutput('baseline_sha', cmp.data.merge_base_commit.sha);
             core.setOutput('compare', 'true');
             core.info(`Feature: ${featureSha}  Baseline: ${cmp.data.merge_base_commit.sha}`);
-            await github.rest.reactions.createForIssueComment({
-              owner,
-              repo,
-              comment_id: context.payload.comment.id,
-              content: 'rocket',
-            });
+            // Cosmetic acknowledgement — never let it fail the run (and so block
+            // the benchmark) if the token lacks the reaction permission.
+            try {
+              await github.rest.reactions.createForIssueComment({
+                owner,
+                repo,
+                comment_id: context.payload.comment.id,
+                content: 'rocket',
+              });
+            } catch (e) {
+              core.warning(`Could not react to the comment: ${e.message}`);
+            }
 
   # Compiles and runs untrusted PR code (the PR's state-test binary + driver +
   # corpus), so it is read-only: there is no write-scoped token to exfiltrate.

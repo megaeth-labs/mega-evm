@@ -478,15 +478,32 @@ impl Cmd {
         // Build the self-validating fixture draft while the database still reflects
         // the pre-target-transaction state (preceding txs committed, target not yet).
         let fixture = match fixture_inputs {
-            Some((mega_env, anchor)) => Some(super::fixture::build_draft(
-                block_executor.evm().db_ref(),
-                &evm_state,
-                ctx.chain_id,
-                executed_spec,
-                &ctx.block,
-                &ctx.target_tx,
-                super::fixture::FixtureInputs { mega_env, result: &exec_result, anchor },
-            )?),
+            Some((mega_env, anchor)) => {
+                // A dumped fixture cannot faithfully reproduce BLOCKHASH: the
+                // state-test runner does not seed block hashes, so the isolated
+                // re-execution would read default hashes instead of the ones this
+                // replay observed. If the transaction actually read any block hash,
+                // refuse to dump rather than write a fixture that self-validates
+                // against the wrong roots.
+                let accessed_block_hashes = block_executor.get_accessed_block_hashes();
+                if !accessed_block_hashes.is_empty() {
+                    return Err(ReplayError::Other(format!(
+                        "--dump-fixture does not support transactions that read block \
+                         hashes (BLOCKHASH): {} block hash(es) were accessed and the \
+                         fixture cannot faithfully reproduce them",
+                        accessed_block_hashes.len()
+                    )));
+                }
+                Some(super::fixture::build_draft(
+                    block_executor.evm().db_ref(),
+                    &evm_state,
+                    ctx.chain_id,
+                    executed_spec,
+                    &ctx.block,
+                    &ctx.target_tx,
+                    super::fixture::FixtureInputs { mega_env, result: &exec_result, anchor },
+                )?)
+            }
             None => None,
         };
 

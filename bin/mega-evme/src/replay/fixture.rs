@@ -121,9 +121,13 @@ where
     // and success status. A mismatch means the replay executed under the wrong
     // spec / hardfork config for this chain and block; self-validation cannot
     // catch this, because the fixture is validated under the same spec it was
-    // dumped with. Refuse to build a fixture that does not match the chain. (Gas
-    // already implies log fidelity — LOG opcodes are metered, so differing logs
-    // would change gas — so logs are not compared separately.)
+    // dumped with. Refuse to build a fixture that does not match the chain.
+    //
+    // Logs are not compared against the receipt here: for a deterministic replay
+    // with identical pre-state and transaction the emitted logs cannot differ, and
+    // the logs root is independently pinned by `finalize_and_write` (it re-executes
+    // the isolated fixture and records the resulting logs root into `post`, which
+    // the corpus then validates) — that re-execution, not gas, is the real guarantee.
     let anchor = &inputs.anchor;
     if actual_gas != anchor.gas_used {
         return Err(ReplayError::Other(format!(
