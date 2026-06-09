@@ -139,6 +139,8 @@ With `--json`, the statistics are folded into the replay summary as a `bench` fi
 Pair with `--rpc.replay-file` for stable, offline measurements.
 `--bench-runs` cannot be combined with transaction overrides or `--override.spec`.
 
+A committed corpus of characteristic transactions and a base-vs-PR comparison driver build on this flag to track real-transaction throughput across changes; see `bench/replay/` and the `replay-bench` CI workflow.
+
 ### `--bench-warmup <W>`
 
 Number of warmup iterations to run and discard before timing (default `3`).

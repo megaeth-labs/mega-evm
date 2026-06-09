@@ -1,0 +1,39 @@
+{
+  "description": "Characteristic real MegaETH mainnet transactions, captured offline (RPC responses + on-chain receipt), for the replay-throughput benchmark. Each case replays one transaction in isolation; see run.py and README.md.",
+  "default_runs": 50,
+  "default_warmup": 5,
+  "cases": [
+    {
+      "name": "system_call",
+      "category": "system-contract",
+      "capture": "captures/system_call.cache.json",
+      "tx": "0x722a6878f48952f3906045547c18270a060e8415be534046719002fa096d9299",
+      "expected_gas": 81740,
+      "note": "Call into a 0x6342… system contract — exercises interceptor dispatch and volatile-data/oracle paths."
+    },
+    {
+      "name": "medium_call",
+      "category": "plain-call",
+      "capture": "captures/medium_call.cache.json",
+      "tx": "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000",
+      "expected_gas": 75514,
+      "note": "Medium contract call with no logs — baseline compute + a few SLOAD/SSTORE."
+    },
+    {
+      "name": "log_heavy",
+      "category": "logs",
+      "capture": "captures/log_heavy.cache.json",
+      "tx": "0x25db2df776d9192861893742b32bd5621a0a50ae911134dd862cad6fb11ebb76",
+      "expected_gas": 456913,
+      "note": "12 logs — exercises LOG opcodes and the dual (compute + storage) gas metering on topics/data."
+    },
+    {
+      "name": "large_defi",
+      "category": "heavy",
+      "capture": "captures/large_defi.cache.json",
+      "tx": "0xb9fb1e85540f9f63e9bbc2c365cb4ed84ecfb6bf23ad39705ee2947d3d2179d6",
+      "expected_gas": 600700,
+      "note": "Large multi-call DeFi transaction — deep call stack, many storage writes, the heaviest case."
+    }
+  ]
+}

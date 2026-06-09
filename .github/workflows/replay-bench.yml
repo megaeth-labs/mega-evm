@@ -1,0 +1,144 @@
+name: Replay Throughput Benchmark
+
+# Replays a corpus of real, characteristic MegaETH mainnet transactions
+# (committed offline captures) through `mega-evme replay --bench-runs` and
+# compares PR throughput against the merge-base, so a change that slows down (or
+# speeds up) real-transaction execution is visible on the PR.
+#
+# This is the real-transaction counterpart to the synthetic Criterion suite in
+# benchmark.yml. Like that workflow it is opt-in (weekly + manual + a member
+# `/benchmark-replay` comment) because timing on shared runners is noisy.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Weekly Monday 3am UTC (after the Criterion job)
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  replay-bench:
+    name: Replay throughput check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    if: >-
+      github.event_name != 'issue_comment' || (
+        github.event.issue.pull_request &&
+        contains(github.event.comment.body, '/benchmark-replay') &&
+        (github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR' ||
+         github.event.comment.author_association == 'OWNER')
+      )
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Checkout PR branch
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr checkout ${{ github.event.issue.number }}
+          git submodule update --init --recursive
+
+      - name: React to comment
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      # The PR's driver + corpus drive the whole run; only the binary under test
+      # changes between PR-head and baseline. Build PR-head first and stash it.
+      - name: Build PR binary
+        run: |
+          cargo build --release -p mega-evme
+          cp target/release/mega-evme /tmp/mega-evme-pr
+
+      - name: Determine baseline commit
+        id: baseline
+        run: |
+          echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git merge-base HEAD origin/main)" >> "$GITHUB_OUTPUT"
+
+      # Build the baseline binary from the merge-base, but keep the PR checkout's
+      # driver + corpus (restored by the trap) for the actual run.
+      - name: Build baseline binary
+        run: |
+          git checkout ${{ steps.baseline.outputs.commit }}
+          trap 'git checkout -' EXIT
+          git submodule update --init --recursive
+          cargo build --release -p mega-evme
+          cp target/release/mega-evme /tmp/mega-evme-base
+
+      # The replay-bench capability is itself introduced by a PR; if the baseline
+      # predates it, `--bench-runs` is unknown there — fall back to measuring the
+      # PR binary alone instead of failing.
+      - name: Run replay benchmark
+        run: |
+          BINS=(--bin "pr=/tmp/mega-evme-pr")
+          if /tmp/mega-evme-base replay --help 2>/dev/null | grep -q -- '--bench-runs'; then
+            BINS=(--bin "base=/tmp/mega-evme-base" --bin "pr=/tmp/mega-evme-pr")
+            echo "Baseline supports replay bench — comparing."
+          else
+            echo "Baseline predates the replay bench — measuring PR binary only."
+          fi
+          python3 bench/replay/run.py "${BINS[@]}" \
+            --rounds 7 --threshold-pct 7 \
+            --markdown-out /tmp/replay-bench.md \
+            --json-out /tmp/replay-bench.json
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f /tmp/replay-bench.md ]; then
+            {
+              cat /tmp/replay-bench.md
+              echo
+              echo "> Comparing \`baseline\` (${{ steps.baseline.outputs.commit }}) → \`feature\` (${{ steps.baseline.outputs.feature_sha }})."
+              echo "> Sub-10µs cases are noisy on shared runners; read the larger cases (and the trend across cases) for real signal."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Comment on PR
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('/tmp/replay-bench.md')) return;
+            const table = fs.readFileSync('/tmp/replay-bench.md', 'utf8');
+            const base = '${{ steps.baseline.outputs.commit }}';
+            const head = '${{ steps.baseline.outputs.feature_sha }}';
+            const repo = context.payload.repository.html_url;
+            const body =
+              table +
+              `\n\n> Comparing [\`baseline\`](${repo}/commit/${base}) → [\`feature\`](${repo}/commit/${head}).` +
+              `\n> Sub-10µs cases are noisy on shared runners; read the larger cases and the overall trend.`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
