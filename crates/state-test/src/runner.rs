@@ -752,6 +752,68 @@ pub fn bench_test_suite(
     Ok(results)
 }
 
+/// Compute and write the `post` expectation for every unit in a fixture file,
+/// in place — the offline analog of `--dump-fixture`'s post-fill step, for a
+/// fixture that has no `post` yet (a hand-built or `prestateTracer`-snapshot
+/// case). It re-uses the same `execute_unit_collect` + [`Test::for_dump`] the
+/// dump path uses, so the result is a self-validating fixture that
+/// [`execute_test_suite`] checks like any other. Returns the number of units
+/// filled.
+///
+/// `spec_override` selects the spec to execute/record under; when `None`, the
+/// unit's single existing `post` spec is used (so a fixture with an empty `post`
+/// must pass a spec).
+pub fn fill_test_suite(path: &Path, spec_override: Option<SpecName>) -> Result<usize, TestError> {
+    let path_str = path.to_string_lossy().into_owned();
+    let fixture_err = |msg: String| TestError {
+        name: "fill".to_string(),
+        path: path_str.clone(),
+        kind: TestErrorKind::FixtureError(msg),
+    };
+
+    let s = std::fs::read_to_string(path).map_err(|e| fixture_err(format!("read: {e}")))?;
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path_str.clone(),
+        kind: e.into(),
+    })?;
+
+    let mut filled = std::collections::BTreeMap::new();
+    for (name, mut unit) in suite.0 {
+        let spec = match spec_override {
+            Some(s) => s,
+            None => {
+                let mut specs = unit.post.keys();
+                match (specs.next(), specs.next()) {
+                    (Some(s), None) => *s,
+                    _ => {
+                        return Err(fixture_err(format!(
+                            "unit {name} has no single post spec; pass --bench-spec to fill"
+                        )))
+                    }
+                }
+            }
+        };
+        let executed = execute_unit_collect(&unit, &spec)
+            .map_err(|e| fixture_err(format!("execute {name}: {e}")))?;
+        unit.out = executed.output.clone();
+        let test = Test::for_dump(
+            executed.state_root,
+            executed.logs_root,
+            executed.gas_used,
+            executed.status,
+        );
+        unit.post = std::collections::BTreeMap::from([(spec, vec![test])]);
+        filled.insert(name, unit);
+    }
+
+    let count = filled.len();
+    let json = serde_json::to_string_pretty(&TestSuite(filled))
+        .map_err(|e| fixture_err(format!("serialize: {e}")))?;
+    std::fs::write(path, json).map_err(|e| fixture_err(format!("write: {e}")))?;
+    Ok(count)
+}
+
 fn prune_base_fee_vault_changes(db: &mut State<EmptyDB>) {
     let base_fee_vault = address!("0x4200000000000000000000000000000000000019");
     db.cache.accounts.remove(&base_fee_vault);

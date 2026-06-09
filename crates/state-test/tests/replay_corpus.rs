@@ -7,8 +7,9 @@
 //! replay --dump-fixture` from a real `MegaETH` transaction (gas and status
 //! checked against the on-chain receipt at dump time) — so re-executing them in
 //! isolation checks the state root, logs root, gas, and status with no RPC,
-//! deterministically in CI. A bench-only fixture (e.g. `attack_deploy`) carries
-//! an empty `post` and is exercised here but only asserted by the benchmark.
+//! deterministically in CI. Fixtures without an on-chain origin (e.g. the
+//! `attack_deploy` prestate snapshot) have their `post` filled offline with
+//! `state-test --fill`, so they are validated here just like the dumped ones.
 //!
 //! A failure here means a code change altered execution for the covered spec
 //! (gas, result, or post-state). To extend coverage, dump more fixtures:

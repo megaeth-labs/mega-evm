@@ -5,7 +5,10 @@
 
 use clap::Parser;
 use state_test::{
-    runner::{bench_test_suite, find_all_json_tests, run, TestError, TestErrorKind, UnitBench},
+    runner::{
+        bench_test_suite, fill_test_suite, find_all_json_tests, run, TestError, TestErrorKind,
+        UnitBench,
+    },
     types::SpecName,
 };
 use std::{path::PathBuf, str::FromStr};
@@ -68,14 +71,24 @@ pub struct Cmd {
     /// Discarded warmup iterations before timing when `--bench` is set.
     #[arg(long, default_value_t = 5)]
     bench_warmup: u32,
-    /// Spec to benchmark under (default: the fixture's single `post` spec).
+    /// Spec to benchmark / fill under (default: the fixture's single `post` spec).
     #[arg(long, value_name = "SPEC")]
     bench_spec: Option<String>,
+    /// Compute and write each fixture's `post` expectation in place.
+    ///
+    /// The offline analog of `--dump-fixture`'s post-fill: makes a fixture that
+    /// has no `post` (a hand-built or prestate-snapshot case) self-validating.
+    /// Use `--bench-spec` to choose the spec when the fixture has no `post` yet.
+    #[arg(long)]
+    fill: bool,
 }
 
 impl Cmd {
     /// Runs `statetest` command.
     pub fn run(&self) -> Result<(), TestError> {
+        if self.fill {
+            return self.run_fill();
+        }
         if self.bench {
             return self.run_bench();
         }
@@ -110,18 +123,41 @@ impl Cmd {
     /// — the same shape `mega-evme replay --bench-runs --json` emits — so the
     /// replay-bench driver parses captured-tx and fixture cases identically.
     /// Multiple units print a JSON array of `{ name, ... }` objects.
-    fn run_bench(&self) -> Result<(), TestError> {
-        let spec_override = self
-            .bench_spec
+    /// Parse `--bench-spec` into a [`SpecName`], if given.
+    fn resolve_spec(&self) -> Result<Option<SpecName>, TestError> {
+        self.bench_spec
             .as_deref()
             .map(|s| {
                 MegaSpecId::from_str(s).map(SpecName::from_mega_spec).map_err(|e| TestError {
-                    name: "bench".to_string(),
+                    name: "spec".to_string(),
                     path: s.to_string(),
                     kind: TestErrorKind::FixtureError(format!("invalid --bench-spec {s:?}: {e:?}")),
                 })
             })
-            .transpose()?;
+            .transpose()
+    }
+
+    /// Fill every fixture's `post` expectation in place (see `--fill`).
+    fn run_fill(&self) -> Result<(), TestError> {
+        let spec_override = self.resolve_spec()?;
+        for path in &self.paths {
+            if !path.exists() {
+                return Err(TestError {
+                    name: "Path validation".to_string(),
+                    path: path.display().to_string(),
+                    kind: TestErrorKind::InvalidPath,
+                });
+            }
+            for file in find_all_json_tests(path) {
+                let n = fill_test_suite(&file, spec_override)?;
+                println!("Filled post for {n} unit(s) in {}", file.display());
+            }
+        }
+        Ok(())
+    }
+
+    fn run_bench(&self) -> Result<(), TestError> {
+        let spec_override = self.resolve_spec()?;
 
         let mut all: Vec<UnitBench> = Vec::new();
         for path in &self.paths {

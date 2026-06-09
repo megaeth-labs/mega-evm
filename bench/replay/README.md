@@ -69,11 +69,11 @@ fails if a binary runs it with different gas (that would mean different work is
 being timed). A case names its `spec` explicitly only when its fixture carries an
 empty `post`; otherwise the spec is taken from the fixture's `post` key.
 
-The correctness test (`replay_corpus.rs`) globs `fixtures/` directly, so a
-fixture with a populated `post` (every real-transaction case) is also validated.
-`fixtures/attack_deploy.json` is a mainnet attack contract deployment (#299)
-converted from a `prestateTracer` snapshot — a non-on-chain, 142M-gas
-limit-tracker stress case; it carries an empty `post`, so it is bench-only.
+The correctness test (`replay_corpus.rs`) globs `fixtures/` directly, so every
+fixture with a populated `post` is validated. `fixtures/attack_deploy.json` is a
+mainnet attack contract deployment (#299) converted from a `prestateTracer`
+snapshot — a non-on-chain, 142M-gas limit-tracker stress case; its `post` was
+filled offline with `state-test --fill`, so it too is validated and benched.
 
 ## Running locally
 
@@ -102,11 +102,17 @@ then add a `manifest.json` entry with `"type": "fixture"`, the `fixture` path,
 
 For a **non-on-chain workload** (an attack/edge case from a `prestateTracer`
 snapshot or a hand-crafted scenario), produce the `TestUnit` JSON directly
-(`env` + `pre` + `transaction` + an empty `post: {}`), then add an entry that
-also names the `"spec"` to run under.
+(`env` + `pre` + `transaction` + an empty `post: {}`), then fill its `post` so it
+is validated too:
 
-A dumped (mined-transaction) fixture carries a populated `post`, so it is also
-picked up by the per-PR correctness test automatically — no extra wiring.
+```bash
+state-test --fill --bench-spec <SPEC> bench/replay/fixtures/<name>.json
+```
+
+Add the `manifest.json` entry as above (no `spec` needed once `post` is filled).
+
+Both kinds end up with a populated `post`, so they are picked up by the per-PR
+correctness test automatically — no extra wiring.
 
 Verify with `python3 bench/replay/run.py --bin pr=target/release` (bench) and
 `cargo test -p state-test --test replay_corpus` (correctness).
