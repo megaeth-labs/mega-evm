@@ -49,7 +49,9 @@ use super::error::KeylessDeployError;
 ///
 /// # Returns
 /// - `Ok(Signed<TxLegacy>)` if the transaction is valid
-/// - `Err(KeylessDeployError::InvalidTransaction(...))` if validation fails
+/// - `Err(KeylessDeployError::MalformedEncoding)` on invalid RLP or trailing bytes (REX5+)
+/// - `Err(KeylessDeployError::NotContractCreation)` if `to` is not empty
+/// - `Err(KeylessDeployError::NotPreEIP155)` if a chain id is present
 pub fn decode_keyless_tx(
     rlp_bytes: &[u8],
     spec: MegaSpecId,

@@ -466,7 +466,6 @@ fn bench_system_contract(c: &mut Criterion) {
     let limit_control_addr: Address = address!("6342000000000000000000000000000000000005");
     let remaining_gas_selector: [u8; 4] = [0xde, 0x85, 0xee, 0xf5];
     let empty_contract_code = Bytes::from_static(&[STOP]);
-    let rex4: &[(&str, MegaSpecId)] = &[("rex4", MegaSpecId::REX4)];
 
     // A `CONTRACT` that STATICCALLs `SECONDARY` (a regular contract), used as
     // the non-system-contract baseline for the interception comparison.
@@ -481,12 +480,19 @@ fn bench_system_contract(c: &mut Criterion) {
         )
     };
 
+    // REX5 is included so the `frame_init` hot path additions (CALL_STACK_LIMIT
+    // depth guard + zero-copy `peek_selector`) are measured against REX4 as the
+    // pre-fix baseline. Both specs go through the same interceptor dispatch on
+    // CALL/STATICCALL to a system contract, so the delta isolates the new logic.
+    const SYSTEM_CONTRACT_SPECS: &[(&str, MegaSpecId)] =
+        &[("rex4", MegaSpecId::REX4), ("rex5", MegaSpecId::REX5)];
+
     // Single call benchmarks
     {
         let mut group = c.benchmark_group("system_contract_single");
         register_mega_specs_suffixed(
             &mut group,
-            rex4,
+            SYSTEM_CONTRACT_SPECS,
             "access_control",
             &mega_contract_workload(make_staticcall_bytecode(
                 access_control_addr,
@@ -495,7 +501,7 @@ fn bench_system_contract(c: &mut Criterion) {
         );
         register_mega_specs_suffixed(
             &mut group,
-            rex4,
+            SYSTEM_CONTRACT_SPECS,
             "limit_control",
             &mega_contract_workload(make_staticcall_bytecode(
                 limit_control_addr,
@@ -504,7 +510,7 @@ fn bench_system_contract(c: &mut Criterion) {
         );
         register_mega_specs_suffixed(
             &mut group,
-            rex4,
+            SYSTEM_CONTRACT_SPECS,
             "regular_contract",
             &regular_workload(make_staticcall_bytecode(SECONDARY, [0x00, 0x00, 0x00, 0x00])),
         );
@@ -517,7 +523,7 @@ fn bench_system_contract(c: &mut Criterion) {
         let mut group = c.benchmark_group("system_contract_100x");
         register_mega_specs_suffixed(
             &mut group,
-            rex4,
+            SYSTEM_CONTRACT_SPECS,
             "access_control",
             &mega_contract_workload(make_repeated_staticcall_bytecode(
                 access_control_addr,
@@ -527,7 +533,7 @@ fn bench_system_contract(c: &mut Criterion) {
         );
         register_mega_specs_suffixed(
             &mut group,
-            rex4,
+            SYSTEM_CONTRACT_SPECS,
             "limit_control",
             &mega_contract_workload(make_repeated_staticcall_bytecode(
                 limit_control_addr,
@@ -537,7 +543,7 @@ fn bench_system_contract(c: &mut Criterion) {
         );
         register_mega_specs_suffixed(
             &mut group,
-            rex4,
+            SYSTEM_CONTRACT_SPECS,
             "regular_contract",
             &regular_workload(make_repeated_staticcall_bytecode(
                 SECONDARY,

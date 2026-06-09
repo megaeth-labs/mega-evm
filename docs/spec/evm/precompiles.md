@@ -1,6 +1,6 @@
 ---
 description: MegaETH precompile gas overrides — KZG Point Evaluation and ModExp cost schedules diverging from standard Ethereum.
-spec: Rex4
+spec: Rex5
 ---
 
 # Precompiles
@@ -44,3 +44,5 @@ This page has no security considerations.
 
 - [MiniRex](../upgrades/minirex.md) introduced the stable KZG Point Evaluation and ModExp overrides.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable overrides.
+- [Rex4](../upgrades/rex4.md) retains the same stable overrides; no change to KZG or ModExp pricing.
+- [Rex5](../upgrades/rex5.md) refines the KZG error-path compute-gas recording.

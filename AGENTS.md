@@ -59,8 +59,8 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _`REX5` is the current unstable spec under active development._
-    When a new spec is introduced, this line should be updated to indicate the unstable spec.
+  - _All specs through `REX5` are currently stable (frozen); there is no unstable spec under active development at this time._
+    When a future unstable spec is introduced, it must be the latest one, and this line should be updated to name it as the current unstable spec.
   - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Multiple hardforks can map to one spec.
@@ -147,12 +147,12 @@ Detained gas is effectively refunded — users only pay for actual computation p
 #### Storage Gas Stipend (Rex4+)
 
 MegaETH's 10× storage gas multiplier on LOG opcodes causes even `LOG1` to cost 4,500 gas, exceeding the EVM's `CALL_STIPEND` of 2,300.
-Rex4 introduces `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`.
-The stipend inflates the child's total gas but a per-frame compute gas cap keeps the extra gas usable only for storage-gas-heavy operations (LOG topic/data costs).
-Unused stipend is burned on return — the caller never recovers it.
+Rex4 introduced `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`; Rex5 reworked it into a separated allowance, so the tracker is dual-mode.
+Under Rex5 the stipend is a per-frame allowance that does NOT inflate the child's `gas_limit`: it is drawn only at MegaETH's storage-gas surcharge sites (LOG topic/data, new-account materialization, first-time-write SSTORE, contract-creation storage, SELFDESTRUCT beneficiary creation), is structurally unspendable on compute, and is neither returned to the caller nor rescued for the sender — nothing is burned because nothing ever enters the frame's gas limit.
+Under Rex4 (legacy mode) the stipend instead inflates the child's `gas_limit`, a per-frame compute gas cap keeps the extra gas usable only for storage-gas-heavy operations, and unused stipend is burned on return.
 
 The stipend lifecycle is managed by `StorageCallStipendTracker` (`limit/storage_call_stipend.rs`), which maintains a per-frame stack aligned with the EVM call stack.
-The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for `cap_current_frame_limit`).
+The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for the Rex4 legacy-mode per-frame cap).
 
 The storage gas stipend is subject to the general gas leakage pitfalls described below.
 

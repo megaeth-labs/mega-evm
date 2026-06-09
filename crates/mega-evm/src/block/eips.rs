@@ -6,13 +6,16 @@ use alloy_evm::{
     block::{BlockExecutionError, BlockValidationError},
     Evm,
 };
-use alloy_hardforks::EthereumHardforks;
 use alloy_primitives::{Address, B256, U256};
 use revm::{
     context_interface::result::ResultAndState,
     database::State,
     state::{Account, EvmState},
-    Database,
+    Database, Inspector,
+};
+
+use crate::{
+    block::hardfork::MegaHardforks, ExternalEnvTypes, MegaContext, MegaEvm, MegaHaltReason,
 };
 
 /// Applies the pre-block call to the [EIP-2935] blockhashes contract, using the given block,
@@ -26,14 +29,27 @@ use revm::{
 /// Returns `None` if Prague is not active or the block is the genesis block, otherwise returns the
 /// result of the call.
 ///
+/// Rex5+: the system call is issued with `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)`
+/// (matching `SequencerRegistry` pre-block helpers) instead of revm's upstream-fixed 30M
+/// default. The EIP-2935 history-storage write cost depends on Rex5 dynamic storage gas, so
+/// the 30M default is no longer guaranteed to be enough on high-SALT-bucket blocks.
+/// Pre-Rex5 keeps the original `transact_system_call` (30M) path for replay parity.
+///
 /// [EIP-2935]: https://eips.ethereum.org/EIPS/eip-2935
 #[inline]
-pub(crate) fn transact_blockhashes_contract_call<Halt>(
-    spec: impl EthereumHardforks,
+pub(crate) fn transact_blockhashes_contract_call<H, DB, INSP, ExtEnvs>(
+    spec: H,
     parent_block_hash: B256,
-    evm: &mut impl Evm<HaltReason = Halt>,
-) -> Result<Option<ResultAndState<Halt>>, BlockExecutionError> {
-    if !spec.is_prague_active_at_timestamp(evm.block().timestamp.saturating_to()) {
+    evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
+) -> Result<Option<ResultAndState<MegaHaltReason>>, BlockExecutionError>
+where
+    H: MegaHardforks,
+    DB: alloy_evm::Database,
+    ExtEnvs: ExternalEnvTypes,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+{
+    let block_timestamp: u64 = evm.block().timestamp.saturating_to();
+    if !spec.is_prague_active_at_timestamp(block_timestamp) {
         return Ok(None);
     }
 
@@ -43,18 +59,29 @@ pub(crate) fn transact_blockhashes_contract_call<Halt>(
         return Ok(None);
     }
 
-    let res = match evm.transact_system_call(
-        alloy_eips::eip4788::SYSTEM_ADDRESS,
-        alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
-        parent_block_hash.0.into(),
-    ) {
-        Ok(res) => res,
-        Err(e) => {
-            return Err(BlockValidationError::BlockHashContractCall { message: e.to_string() }.into())
-        }
+    let res = if spec.is_rex_5_active_at_timestamp(block_timestamp) {
+        let gas_limit =
+            evm.block().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
+        evm.transact_system_call_with_gas_limit(
+            alloy_eips::eip4788::SYSTEM_ADDRESS,
+            alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+            parent_block_hash.0.into(),
+            gas_limit,
+        )
+    } else {
+        evm.transact_system_call(
+            alloy_eips::eip4788::SYSTEM_ADDRESS,
+            alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+            parent_block_hash.0.into(),
+        )
     };
 
-    Ok(Some(res))
+    match res {
+        Ok(res) => Ok(Some(res)),
+        Err(e) => {
+            Err(BlockValidationError::BlockHashContractCall { message: e.to_string() }.into())
+        }
+    }
 }
 
 /// Applies the pre-block call to the [EIP-4788] beacon block root contract, using the given block,
@@ -65,14 +92,24 @@ pub(crate) fn transact_blockhashes_contract_call<Halt>(
 /// Returns `None` if Cancun is not active or the block is the genesis block, otherwise returns the
 /// result of the call.
 ///
+/// Rex5+: see [`transact_blockhashes_contract_call`] for the gas-limit override rationale —
+/// the beacon-root SSTORE shares the same dynamic-storage-gas exposure.
+///
 /// [EIP-4788]: https://eips.ethereum.org/EIPS/eip-4788
 #[inline]
-pub(crate) fn transact_beacon_root_contract_call<Halt>(
-    spec: impl EthereumHardforks,
+pub(crate) fn transact_beacon_root_contract_call<H, DB, INSP, ExtEnvs>(
+    spec: H,
     parent_beacon_block_root: Option<B256>,
-    evm: &mut impl Evm<HaltReason = Halt>,
-) -> Result<Option<ResultAndState<Halt>>, BlockExecutionError> {
-    if !spec.is_cancun_active_at_timestamp(evm.block().timestamp.saturating_to()) {
+    evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
+) -> Result<Option<ResultAndState<MegaHaltReason>>, BlockExecutionError>
+where
+    H: MegaHardforks,
+    DB: alloy_evm::Database,
+    ExtEnvs: ExternalEnvTypes,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+{
+    let block_timestamp: u64 = evm.block().timestamp.saturating_to();
+    if !spec.is_cancun_active_at_timestamp(block_timestamp) {
         return Ok(None);
     }
 
@@ -91,22 +128,31 @@ pub(crate) fn transact_beacon_root_contract_call<Halt>(
         return Ok(None);
     }
 
-    let res = match evm.transact_system_call(
-        alloy_eips::eip4788::SYSTEM_ADDRESS,
-        alloy_eips::eip4788::BEACON_ROOTS_ADDRESS,
-        parent_beacon_block_root.0.into(),
-    ) {
-        Ok(res) => res,
-        Err(e) => {
-            return Err(BlockValidationError::BeaconRootContractCall {
-                parent_beacon_block_root: Box::new(parent_beacon_block_root),
-                message: e.to_string(),
-            }
-            .into())
-        }
+    let res = if spec.is_rex_5_active_at_timestamp(block_timestamp) {
+        let gas_limit =
+            evm.block().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
+        evm.transact_system_call_with_gas_limit(
+            alloy_eips::eip4788::SYSTEM_ADDRESS,
+            alloy_eips::eip4788::BEACON_ROOTS_ADDRESS,
+            parent_beacon_block_root.0.into(),
+            gas_limit,
+        )
+    } else {
+        evm.transact_system_call(
+            alloy_eips::eip4788::SYSTEM_ADDRESS,
+            alloy_eips::eip4788::BEACON_ROOTS_ADDRESS,
+            parent_beacon_block_root.0.into(),
+        )
     };
 
-    Ok(Some(res))
+    match res {
+        Ok(res) => Ok(Some(res)),
+        Err(e) => Err(BlockValidationError::BeaconRootContractCall {
+            parent_beacon_block_root: Box::new(parent_beacon_block_root),
+            message: e.to_string(),
+        }
+        .into()),
+    }
 }
 
 /// Transacts the balance increments and returns the post evm state. Note that the changes are not

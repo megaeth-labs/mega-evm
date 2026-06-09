@@ -14,9 +14,10 @@ use revm::{
         instructions::{self, control, utility::IntoAddress},
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
-        resize_memory, FrameInput, Instruction, InstructionContext, InstructionResult,
+        resize_memory, CallScheme, FrameInput, Instruction, InstructionContext, InstructionResult,
         InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
+    primitives::KECCAK_EMPTY,
 };
 
 /// `MegaInstructions` is the instruction table for `MegaETH`.
@@ -331,7 +332,13 @@ mod rex5 {
 
     /// Returns the instruction table for the `REX5` spec.
     ///
-    /// Changes from Rex4: none yet.
+    /// Changes from Rex4:
+    /// - SELFDESTRUCT: `volatile_data_ext::selfdestruct_rex5` → `storage_gas_ext::selfdestruct` →
+    ///   `compute_gas_ext::selfdestruct`. The new outer wrapper keeps the beneficiary-volatile
+    ///   guard outermost (matching the SSTORE / LOG layering) and slots the new-account storage-gas
+    ///   charge between the guard and the compute layer, so disabled-volatile frames short-circuit
+    ///   ahead of any storage-layer side effects (account inspection, dynamic gas charge,
+    ///   `on_selfdestruct_new_account` record).
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -339,7 +346,14 @@ mod rex5 {
     where
         WIRE::Stack: StackInspectTr,
     {
-        rex4::instruction_table::<WIRE, H>()
+        use revm::bytecode::opcode::*;
+        let mut table = rex4::instruction_table::<WIRE, H>();
+
+        // REX5: SELFDESTRUCT charges storage gas for new beneficiary accounts,
+        // gated behind the beneficiary-volatile guard.
+        table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct_rex5;
+
+        table
     }
 }
 
@@ -828,7 +842,7 @@ pub mod volatile_data_ext {
         #[inline]
         pub fn $fn_name<
             WIRE: InterpreterTypes<Stack: StackInspectTr>,
-            H: HostExt + ?Sized,
+            H: HostExt + ContextTr + JournalInspectTr + ?Sized,
         >(
             context: InstructionContext<'_, H, WIRE>,
         ) {
@@ -918,6 +932,15 @@ pub mod volatile_data_ext {
     wrap_op_detain_gas_conditional!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
     wrap_op_detain_gas_conditional!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
     wrap_op_detain_gas_conditional!(selfdestruct, "SELFDESTRUCT", compute_gas_ext::selfdestruct);
+
+    // REX5 SELFDESTRUCT outer wrapper: guard outermost, then the
+    // `storage_gas_ext::selfdestruct` layer (new-account storage gas charge),
+    // then `compute_gas_ext::selfdestruct`.
+    wrap_op_detain_gas_conditional!(
+        selfdestruct_rex5,
+        "SELFDESTRUCT",
+        super::storage_gas_ext::selfdestruct
+    );
 
     /// `SELFBALANCE` opcode with compute gas limit enforcement on volatile data access.
     ///
@@ -1208,9 +1231,11 @@ pub mod storage_gas_ext {
                 let mega_spec = context.host.spec_id();
                 let current_address = context.interpreter.input.target_address();
                 let storage_address = $select_addr(mega_spec, current_address, to);
-                let Ok(storage_account) =
+                let Ok(storage_account) = (if mega_spec.is_enabled(MegaSpecId::REX5) {
+                    context.host.inspect_account(storage_address, false)
+                } else {
                     context.host.inspect_account_delegated(mega_spec, storage_address)
-                else {
+                }) else {
                     context.interpreter.halt(InstructionResult::FatalExternalError);
                     return;
                 };
@@ -1224,7 +1249,8 @@ pub mod storage_gas_ext {
                 } else {
                     false
                 };
-                // Charge additional storage gas cost for creating a new account
+                // Charge additional storage gas cost for creating a new account.
+                // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
                 if is_empty && has_transfer {
                     let Some(new_account_storage_gas) =
                         context.host.new_account_storage_gas(storage_address)
@@ -1232,7 +1258,12 @@ pub mod storage_gas_ext {
                         context.interpreter.halt(InstructionResult::FatalExternalError);
                         return;
                     };
-                    gas!(context.interpreter, new_account_storage_gas);
+                    let drained = context
+                        .host
+                        .additional_limit()
+                        .borrow_mut()
+                        .try_consume_storage_stipend(new_account_storage_gas);
+                    gas!(context.interpreter, new_account_storage_gas - drained);
                 }
 
                 // Call the original instruction
@@ -1283,13 +1314,19 @@ pub mod storage_gas_ext {
         let creator_address = context.interpreter.input.target_address();
         // Load the creator account without marking it warm (it is already warm since the creator
         // must have been warmed when the current frame begins).
-        let Ok(creator) = context.host.inspect_account_delegated(spec, creator_address) else {
+        // REX5+: use non-delegating inspection to get the authority's own state.
+        let Ok(creator) = (if spec.is_enabled(MegaSpecId::REX5) {
+            context.host.inspect_account(creator_address, false)
+        } else {
+            context.host.inspect_account_delegated(spec, creator_address)
+        }) else {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
 
         // Calculate the created address
         let mut resize_gas: u64 = 0;
+        let is_rex5_enabled = spec.is_enabled(MegaSpecId::REX5);
         let created_address = if IS_CREATE2 {
             let Some(initcode_offset) = context.interpreter.stack.inspect::<1>() else {
                 context.interpreter.halt(InstructionResult::StackUnderflow);
@@ -1299,29 +1336,70 @@ pub mod storage_gas_ext {
                 context.interpreter.halt(InstructionResult::StackUnderflow);
                 return;
             };
-            let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
-            let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
-            // Expand memory before slicing so the read can never go out of bounds. The canonical
-            // CREATE2 path called below also calls `resize_memory!`, which is a no-op once memory
-            // is already sized to fit the requested slice. The expansion gas is metered into the
-            // compute gas tracker AFTER the inner CREATE2 returns (see end of function), so it
-            // is accounted in the same gas dimension as the canonical path would have recorded
-            // it (via `compute_gas_ext::create2`'s `gas_before`/`gas_after` window). Recording
-            // late also matches `wrap_op_compute_gas`'s "skip on inner error" semantics: if the
-            // storage-gas charge or inner CREATE2 OOGs the interpreter, the early-return in
-            // `run_inner_instruction_or_abort!` skips recording, just as the canonical path
-            // would have skipped recording on inner failure.
-            let gas_before_resize = context.interpreter.gas.remaining();
-            resize_memory!(context.interpreter, initcode_offset, initcode_len);
-            resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
-            let code = Bytes::copy_from_slice(
-                context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
-            );
-            let initcode_hash = keccak256(&code);
+            // REX5+: validate the salt operand before running `resize_memory!` and the
+            // copy / keccak block, so a missing salt halts with `StackUnderflow` without
+            // performing the expensive memory work that the trailing late-recorded
+            // `resize_gas` path would otherwise under-count. Pre-REX5 keeps the original
+            // "resize first, salt last" order for replay parity.
+            let rex5_salt = if is_rex5_enabled {
+                let Some(salt) = context.interpreter.stack.inspect::<3>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return;
+                };
+                Some(salt)
+            } else {
+                None
+            };
 
-            let Some(salt) = context.interpreter.stack.inspect::<3>() else {
-                context.interpreter.halt(InstructionResult::StackUnderflow);
-                return;
+            // REX5+: when `initcode_len == 0`, mirror canonical revm CREATE2 — ignore
+            // the offset entirely (no conversion, no memory expansion, no slice, no
+            // keccak) and use `KECCAK_EMPTY` as the initcode hash. Observing offset on
+            // `len == 0` would (a) halt a valid `len=0, offset=U256::MAX` CREATE2
+            // inside `as_usize_or_fail!`, and (b) over-charge memory-expansion EVM gas
+            // + `resize_gas` compute gas for `len=0, offset=large_finite`.
+            // Pre-REX5 keeps the "observe offset, resize, slice, hash" sequence
+            // verbatim for replay parity.
+            let initcode_hash = if is_rex5_enabled && initcode_len.is_zero() {
+                KECCAK_EMPTY
+            } else {
+                let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
+                let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
+                // Expand memory before slicing so the read can never go out of bounds. The
+                // canonical CREATE2 path called below also calls `resize_memory!`, which is
+                // a no-op once memory is already sized to fit the requested slice.
+                //
+                // Pre-REX5 records the expansion gas into the compute_gas tracker only
+                // AFTER the inner CREATE2 returns successfully (see end of function);
+                // preserved for replay parity. REX5+ records it immediately below so
+                // storage-gas OOG / inner-CREATE2 failure cannot bypass the recording.
+                let gas_before_resize = context.interpreter.gas.remaining();
+                resize_memory!(context.interpreter, initcode_offset, initcode_len);
+                resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
+
+                // REX5+: record resize gas into the compute_gas tracker immediately to
+                // align its timing with revm's EVM-gas debit (already taken inside
+                // `resize_memory!`). Zero `resize_gas` afterwards so the trailing
+                // late-record block (kept for pre-REX5) does not double-count under REX5.
+                if is_rex5_enabled && resize_gas > 0 {
+                    let mut additional_limit = context.host.additional_limit().borrow_mut();
+                    compute_gas!(context.interpreter, additional_limit, resize_gas);
+                    resize_gas = 0;
+                }
+
+                let code = Bytes::copy_from_slice(
+                    context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
+                );
+                keccak256(&code)
+            };
+
+            let salt = if let Some(s) = rex5_salt {
+                s
+            } else {
+                let Some(salt) = context.interpreter.stack.inspect::<3>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return;
+                };
+                salt
             };
 
             creator_address.create2(salt.to_be_bytes(), initcode_hash)
@@ -1341,7 +1419,13 @@ pub mod storage_gas_ext {
             context.interpreter.halt(InstructionResult::FatalExternalError);
             return;
         };
-        gas!(context.interpreter, create_contract_storage_gas);
+        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+        let drained = context
+            .host
+            .additional_limit()
+            .borrow_mut()
+            .try_consume_storage_stipend(create_contract_storage_gas);
+        gas!(context.interpreter, create_contract_storage_gas - drained);
 
         // Call the original create instruction
         if IS_CREATE2 {
@@ -1350,12 +1434,11 @@ pub mod storage_gas_ext {
             run_inner_instruction_or_abort!(compute_gas_ext::create, context);
         }
 
-        // Record the CREATE2 initcode memory expansion gas as compute gas. We defer the
-        // recording until after the inner CREATE2 returns successfully so that on any
-        // intermediate OOG (storage-gas charge or inner CREATE2 itself) the early-return in
-        // `run_inner_instruction_or_abort!` skips this — matching the historical pattern in
-        // `wrap_op_compute_gas` where the canonical CREATE2's expansion gas was only recorded
-        // when the inner instruction completed without an EVM error.
+        // Pre-REX5 late-record path for the CREATE2 initcode memory-expansion gas.
+        // Preserved verbatim for replay parity: pre-REX5 keeps the original "skip on inner
+        // error" semantics where storage-gas OOG and inner-CREATE2 failure both skip this
+        // recording. REX5+ already recorded `resize_gas` above (and zeroed it), so this
+        // branch is a no-op under REX5.
         if resize_gas > 0 {
             let mut additional_limit = context.host.additional_limit().borrow_mut();
             compute_gas!(context.interpreter, additional_limit, resize_gas);
@@ -1388,11 +1471,18 @@ pub mod storage_gas_ext {
         let len = as_usize_or_fail!(context.interpreter, len);
 
         // Charge storage gas cost for log topics and data before instruction execution.
+        // REX5 drains the allowance on the `Some(amount)` arm; the `None` (overflow) arm
+        // is passed through unchanged to preserve the OOG halt.
         let log_storage_cost = {
             let topic_cost = constants::mini_rex::LOG_TOPIC_STORAGE_GAS.checked_mul(N as u64);
             let data_cost = constants::mini_rex::LOG_DATA_STORAGE_GAS.checked_mul(len as u64);
             topic_cost.and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
         };
+        let log_storage_cost = log_storage_cost.map(|amount| {
+            let drained =
+                context.host.additional_limit().borrow_mut().try_consume_storage_stipend(amount);
+            amount - drained
+        });
         gas_or_fail!(context.interpreter, log_storage_cost);
 
         // Execute the original LOG instruction.
@@ -1458,7 +1548,8 @@ pub mod storage_gas_ext {
             return;
         };
 
-        // Charge storage gas cost before the instruction is executed
+        // Charge storage gas cost before the instruction is executed.
+        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
         if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
             let Some(sstore_set_storage_gas) =
                 context.host.sstore_set_storage_gas(target_address, index)
@@ -1466,11 +1557,81 @@ pub mod storage_gas_ext {
                 context.interpreter.halt(InstructionResult::FatalExternalError);
                 return;
             };
-            gas!(context.interpreter, sstore_set_storage_gas);
+            let drained = context
+                .host
+                .additional_limit()
+                .borrow_mut()
+                .try_consume_storage_stipend(sstore_set_storage_gas);
+            gas!(context.interpreter, sstore_set_storage_gas - drained);
         }
 
         // Execute the original SSTORE instruction
         run_inner_instruction_or_abort!(compute_gas_ext::sstore, context);
+    }
+
+    /// `SELFDESTRUCT` opcode implementation with storage gas metering for
+    /// new beneficiary account creation (REX5+).
+    ///
+    /// When SELFDESTRUCT sends remaining balance to an empty beneficiary, charges:
+    /// - Storage gas for new account creation (dynamic bucket-based cost)
+    /// - Data size (+40 for account info write)
+    /// - KV update (+1)
+    /// - State growth (+1)
+    ///
+    /// This wrapper sits between `volatile_data_ext` and `compute_gas_ext` in the
+    /// REX5 SELFDESTRUCT dispatch chain
+    /// (`volatile_data_ext::selfdestruct_rex5` → `storage_gas_ext::selfdestruct`
+    /// → `compute_gas_ext::selfdestruct`), matching the layering used by SSTORE
+    /// and LOG. The beneficiary-volatile guard runs in the outer
+    /// `volatile_data_ext::selfdestruct_rex5` ahead of any side effects below.
+    pub fn selfdestruct<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let eth_spec = context.interpreter.runtime_flag.spec_id();
+
+        // Peek beneficiary address from stack (SELFDESTRUCT uses stack position 0)
+        let Some(target) = context.interpreter.stack.inspect::<0>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let target = target.into_address();
+
+        // Use non-delegating inspection (REX5+)
+        let Ok(target_account) = context.host.inspect_account(target, false) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let is_empty = target_account.state_clear_aware_is_empty(eth_spec);
+
+        // Check if caller has balance (value will be transferred to beneficiary)
+        let caller = context.interpreter.input.target_address();
+        let Ok(caller_account) = context.host.inspect_account(caller, false) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        let has_value = !caller_account.info.balance.is_zero();
+
+        if is_empty && has_value {
+            // Charge storage gas for creating a new account.
+            // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+            let Some(cost) = context.host.new_account_storage_gas(target) else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            let drained =
+                context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
+            gas!(context.interpreter, cost - drained);
+
+            // Record resource usage for new beneficiary account
+            context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
+        }
+
+        // Delegate to compute_gas_ext::selfdestruct (the volatile-disabled guard
+        // ran in the outer `volatile_data_ext::selfdestruct_rex5` wrapper).
+        run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
     }
 }
 
@@ -1492,10 +1653,26 @@ pub mod compute_gas_ext {
                 run_inner_instruction_or_abort!($original_fn, context);
 
                 let mut gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
-                // Some of the gas may be forwarded to the child call. We need to substract them.
+                // Subtract the gas forwarded to the child. REX5 excludes the revm-side
+                // `CALL_STIPEND` (added by value-transferring CALL/CALLCODE without
+                // deducting from the parent) so parent compute-gas is not under-counted.
+                // Pre-REX5 keeps the legacy raw-`gas_limit` subtraction for replay parity.
                 match context.interpreter.bytecode.action() {
                     Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
-                        gas_used = gas_used.saturating_sub(call_inputs.gas_limit);
+                        let stipend_from_revm = if context
+                            .host
+                            .spec_id()
+                            .is_enabled(MegaSpecId::REX5) &&
+                            matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode) &&
+                            call_inputs.transfers_value()
+                        {
+                            gas::CALL_STIPEND
+                        } else {
+                            0
+                        };
+                        let parent_contributed =
+                            call_inputs.gas_limit.saturating_sub(stipend_from_revm);
+                        gas_used = gas_used.saturating_sub(parent_contributed);
                     }
                     Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
                         gas_used = gas_used.saturating_sub(create_inputs.gas_limit);

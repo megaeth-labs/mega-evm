@@ -1,6 +1,6 @@
 ---
 description: Mega system transactions — sender/recipient identification rules, whitelisted contracts, and execution bypass semantics.
-spec: Rex4
+spec: Rex5
 ---
 
 # Mega System Transactions
@@ -20,15 +20,8 @@ Mega System Transactions provide that mechanism.
 ### Resolution
 
 `MEGA_SYSTEM_ADDRESS` is the authorized system-transaction sender for the current block.
-It is the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (see [Constants](#constants)).
-
-<details>
-<summary>Rex5 (unstable): Dynamic system address resolution</summary>
-
-`MEGA_SYSTEM_ADDRESS` MUST be resolved per block from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) after all pre-block changes are committed.
-The fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` is replaced by this dynamic resolution; the fixed-constant rule does not apply in Rex5 and later.
-
-</details>
+A node MUST resolve it per block from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) after all pre-block changes are committed.
+The fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` is the genesis seed value for this address (see [Constants](#constants)); subsequent rotations are reflected by the registry value.
 
 ### Identification
 
@@ -58,6 +51,15 @@ Although nonce validation is bypassed, the sender nonce MUST still increment aft
 
 Mega System Transactions MUST NOT cause state changes to the block beneficiary or fee vaults.
 
+Before applying the special semantics above, a node MUST validate the transaction's chain id, nonce, and sender-code status against the same canonical rules that ordinary transactions follow:
+
+- The transaction's chain id MUST be present and MUST equal the node's configured chain id, unless the chain-id check is disabled by node configuration.
+- The transaction's nonce MUST equal the current account nonce of `MEGA_SYSTEM_ADDRESS`, unless the nonce check is disabled by node configuration.
+- If `MEGA_SYSTEM_ADDRESS` carries code, the EIP-3607 sender-has-code rule applies, unless EIP-3607 enforcement is disabled by node configuration.
+
+A transaction failing any of these checks MUST be rejected with the corresponding canonical invalid-transaction error (missing chain id, invalid chain id, nonce too low, nonce too high, or caller-has-code rejection) before any state mutation, signature bypass, or fee bypass takes effect.
+The remaining bypasses (signature, gas-fee charging, balance) MUST still apply once these checks pass.
+
 ### Scope
 
 This page specifies the execution semantics of Mega System Transactions.
@@ -80,6 +82,12 @@ Giving them distinct execution treatment makes that behavior explicit.
 Whitelisted target contracts must be able to distinguish protocol-maintenance calls from ordinary user calls.
 Preserving the caller identity provides that signal without introducing a separate call context type.
 
+**Why restore the chain-id, nonce, and EIP-3607 checks?**
+Earlier specs bypassed all four canonical pre-checks via OP-style deposit promotion.
+OP deposits can do this because L1 derivation and per-deposit source-hash uniqueness provide replay protection at a higher layer.
+MegaETH system transactions have neither, so the canonical chain-id, nonce, and sender-code checks are restored to guard against replay and cross-chain misuse.
+The configuration toggles for these checks are honored so that the system-transaction validation path stays symmetric with the ordinary user-transaction validation path for debugging, state-test, and replay tooling.
+
 ## Security Considerations
 
 **The no-fee/no-nonce exemption MUST apply exclusively to addresses in `MEGA_SYSTEM_TX_WHITELIST`.**
@@ -96,6 +104,6 @@ Allowing fee-exempt contract creation would let `MEGA_SYSTEM_ADDRESS` deploy arb
 
 - [MiniRex](../upgrades/minirex.md) introduced Mega System Transactions and the `MEGA_SYSTEM_ADDRESS` mechanism.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable semantics.
-- [Rex5](../upgrades/rex5.md) (**unstable**) dynamized the system address: it is no longer a compile-time constant but is resolved per block from `SequencerRegistry._currentSystemAddress`.
-  Pre-REX5 blocks continue to use the legacy `MEGA_SYSTEM_ADDRESS` constant.
+- [Rex5](../upgrades/rex5.md) dynamized the system address — it is no longer a compile-time constant but is resolved per block from `SequencerRegistry.currentSystemAddress()` — and restored the canonical chain-id, nonce, and EIP-3607 sender-code checks that earlier specs bypassed via deposit promotion.
+  Blocks before Rex5 continue to use the legacy `MEGA_SYSTEM_ADDRESS` constant and the deposit-promotion bypasses.
   The system transaction identification logic and whitelist are unchanged.
