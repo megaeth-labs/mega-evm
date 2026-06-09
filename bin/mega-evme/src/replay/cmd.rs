@@ -147,14 +147,17 @@ impl Cmd {
         let rctx = self.fetch_replay_context(&pctx.provider, pctx.chain_id).await?;
         let (external_envs, env_snapshot) = self.resolve_external_envs(&pctx)?;
         let result = self.execute(&pctx.provider, &rctx, external_envs).await?;
-        self.output_results(&result)?;
-        // Benchmark EVM throughput before the draft is consumed by the dump.
-        if self.bench_runs > 0 {
-            if let Some(draft) = &result.fixture {
-                let stats = draft.run_bench(self.bench_runs, self.bench_warmup)?;
-                self.print_bench_stats(&stats);
+        // Benchmark before rendering so `--json` output stays a single JSON
+        // document (the stats are folded into the summary object).
+        let bench = if self.bench_runs > 0 {
+            match &result.fixture {
+                Some(draft) => Some(draft.run_bench(self.bench_runs, self.bench_warmup)?),
+                None => None,
             }
-        }
+        } else {
+            None
+        };
+        self.output_results(&result, bench.as_ref())?;
         // Write the self-validating fixture (re-executes the isolated unit through
         // state-test and cross-checks it against the replay before writing).
         if let (Some(path), Some(draft)) = (&self.dump_fixture, result.fixture) {
@@ -541,7 +544,15 @@ impl Cmd {
     }
 
     /// Print execution results as JSON (`--json`) or human-readable text.
-    fn output_results(&self, result: &ReplayOutcome) -> Result<()> {
+    ///
+    /// When benchmark `stats` are present they are included in the same output:
+    /// under a `bench` field of the single JSON object (so `--json` stdout stays
+    /// one parseable document), or as an appended block in text mode.
+    fn output_results(
+        &self,
+        result: &ReplayOutcome,
+        bench: Option<&super::fixture::BenchStats>,
+    ) -> Result<()> {
         trace!("Writing output results");
         if self.output_args.json {
             let mut summary = ExecutionSummary::from_result(
@@ -551,9 +562,13 @@ impl Cmd {
             summary.fill_trace_and_dump(&result.outcome, &self.trace_args, &self.dump_args)?;
             summary.receipt =
                 Some(serde_json::to_value(&result.receipt).expect("failed to serialize receipt"));
+            let mut value = serde_json::to_value(&summary).expect("failed to serialize output");
+            if let Some(stats) = bench {
+                value["bench"] = bench_json(stats);
+            }
             println!(
                 "{}",
-                serde_json::to_string_pretty(&summary).expect("failed to serialize output")
+                serde_json::to_string_pretty(&value).expect("failed to serialize output")
             );
         } else {
             print_execution_summary(
@@ -569,33 +584,35 @@ impl Cmd {
             if self.dump_args.dump {
                 self.dump_args.dump_evm_state(&result.outcome.state)?;
             }
+            if let Some(stats) = bench {
+                print_bench_text(stats);
+            }
         }
         Ok(())
     }
+}
 
-    /// Print throughput benchmark statistics as JSON (`--json`) or text.
-    fn print_bench_stats(&self, stats: &super::fixture::BenchStats) {
-        if self.output_args.json {
-            let value = serde_json::json!({
-                "bench": {
-                    "runs": stats.runs,
-                    "gasUsed": stats.gas_used,
-                    "minNs": stats.min.as_nanos(),
-                    "medianNs": stats.median.as_nanos(),
-                    "meanNs": stats.mean.as_nanos(),
-                    "mgasPerSec": stats.mgas_per_sec(),
-                }
-            });
-            println!("{}", serde_json::to_string_pretty(&value).expect("serialize bench stats"));
-        } else {
-            println!("\nBenchmark ({} runs, target transaction only):", stats.runs);
-            println!("  gas used : {}", stats.gas_used);
-            println!("  min      : {:?}", stats.min);
-            println!("  median   : {:?}", stats.median);
-            println!("  mean     : {:?}", stats.mean);
-            println!("  Mgas/s   : {:.2}", stats.mgas_per_sec());
-        }
-    }
+/// Throughput benchmark statistics as a JSON object (folded into the replay
+/// summary under a `bench` field).
+fn bench_json(stats: &super::fixture::BenchStats) -> serde_json::Value {
+    serde_json::json!({
+        "runs": stats.runs,
+        "gasUsed": stats.gas_used,
+        "minNs": stats.min.as_nanos(),
+        "medianNs": stats.median.as_nanos(),
+        "meanNs": stats.mean.as_nanos(),
+        "mgasPerSec": stats.mgas_per_sec(),
+    })
+}
+
+/// Print throughput benchmark statistics as a human-readable block.
+fn print_bench_text(stats: &super::fixture::BenchStats) {
+    println!("\nBenchmark ({} runs, target transaction only):", stats.runs);
+    println!("  gas used : {}", stats.gas_used);
+    println!("  min      : {:?}", stats.min);
+    println!("  median   : {:?}", stats.median);
+    println!("  mean     : {:?}", stats.mean);
+    println!("  Mgas/s   : {:.2}", stats.mgas_per_sec());
 }
 
 /// Build a [`BlockEnv`] from the RPC block header.
