@@ -11,9 +11,9 @@ isolation and checks those expectations — **no RPC access**, so it is
 deterministic and runs in CI.
 
 At dump time the tool enforces an on-chain fidelity gate: the local replay must
-reproduce the transaction's `gasUsed` from its on-chain receipt exactly, or the
-fixture is not written. So every fixture here is faithful to mainnet by
-construction.
+reproduce the transaction's gas and success status from its on-chain receipt
+exactly, or the fixture is not written. So every fixture here is faithful to
+mainnet by construction.
 
 ## What CI does with these
 

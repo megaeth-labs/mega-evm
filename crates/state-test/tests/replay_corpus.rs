@@ -2,8 +2,8 @@
 //!
 //! Each fixture under `tests/fixtures/replay/` is a self-validating EEST state
 //! test produced by `mega-evme replay --dump-fixture` from a real `MegaETH`
-//! transaction (its `gasUsed` was checked against the on-chain receipt at dump
-//! time). Re-running them through the state-test runner re-executes each
+//! transaction (its gas and success status were checked against the on-chain
+//! receipt at dump time). Re-running them through the state-test runner re-executes each
 //! transaction in isolation and checks the recorded state root, logs root, gas,
 //! and status — with no RPC access, so it is deterministic in CI.
 //!

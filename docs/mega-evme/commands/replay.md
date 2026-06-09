@@ -105,11 +105,11 @@ The fixture captures everything needed to deterministically re-execute the targe
 
 The `post` expectation is computed by the `state-test` runner itself — the exact code path that later validates the fixture — so a dumped fixture is self-consistent by construction.
 
-**Fidelity gate.** Before building the fixture, the dump fetches the transaction's on-chain receipt and requires the local replay to reproduce its `gasUsed` exactly.
+**Fidelity gate.** Before building the fixture, the dump fetches the transaction's on-chain receipt and requires the local replay to reproduce the receipt's `gasUsed` and success status exactly (gas already implies log fidelity, since `LOG` opcodes are metered).
 A mismatch aborts the dump (no file is written) with a clear error — this catches a wrong spec or hardfork config, which self-validation alone cannot, because the fixture is validated under the same spec it was dumped with.
 It then additionally cross-checks the isolated execution against the full replay (gas, status, output), so the recorded `megaGasUsed` equals the real on-chain gas.
 
-`--dump-fixture` cannot be combined with transaction overrides, and deposit transactions are not supported.
+`--dump-fixture` cannot be combined with transaction overrides or `--override.spec` (a forced spec would record a what-if, not the on-chain transaction), and deposit transactions are not supported.
 Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.
 
 ```bash
@@ -133,11 +133,11 @@ state-test ./fixtures/0xabc123.json
 Re-execute the target transaction `N` times and report `min` / `median` / `mean` time and throughput in millions of gas per second (Mgas/s).
 
 Only the target transaction's EVM `transact` call is timed — RPC fetch, preceding transactions, and post-state root computation are excluded.
-The same on-chain fidelity gate as `--dump-fixture` applies first (the replay must reproduce the receipt's `gasUsed`), so the measurement always reflects the real transaction.
-With `--json`, the statistics are emitted as a `bench` object for machine consumption (e.g. an ABBA baseline-vs-feature comparison).
+The same on-chain fidelity gate as `--dump-fixture` applies first (the replay must reproduce the receipt's `gasUsed` and status), so the measurement always reflects the real transaction.
+With `--json`, the statistics are folded into the replay summary as a `bench` field of the single JSON object, for machine consumption (e.g. an ABBA baseline-vs-feature comparison).
 
 Pair with `--rpc.replay-file` for stable, offline measurements.
-`--bench-runs` cannot be combined with transaction overrides.
+`--bench-runs` cannot be combined with transaction overrides or `--override.spec`.
 
 ### `--bench-warmup <W>`
 

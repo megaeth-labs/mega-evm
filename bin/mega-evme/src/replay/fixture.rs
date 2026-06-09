@@ -43,9 +43,18 @@ use state_test::{
 
 use super::{ReplayError, Result};
 
+/// The on-chain receipt values a dumped fixture is anchored to: a replay that
+/// does not reproduce all of these did not reproduce the on-chain transaction.
+pub(crate) struct OnchainAnchor {
+    /// Gas the transaction used on-chain.
+    pub gas_used: u64,
+    /// Whether the transaction succeeded on-chain.
+    pub success: bool,
+}
+
 /// The fixture-specific inputs gathered during a replay: the `MegaETH` external
-/// environment snapshot, the target transaction's execution result, and the gas
-/// it used on-chain (from its receipt).
+/// environment snapshot, the target transaction's execution result, and the
+/// on-chain receipt it is anchored to.
 ///
 /// Bundling these keeps the fixture's gas, status, and output derived from a
 /// single `ExecutionResult` — there is no second place that recomputes the
@@ -55,8 +64,8 @@ pub(crate) struct FixtureInputs<'a> {
     pub mega_env: MegaEnv,
     /// The target transaction's execution result from the full replay.
     pub result: &'a ExecutionResult<MegaHaltReason>,
-    /// Gas the transaction used on-chain (from its receipt) — the fidelity anchor.
-    pub onchain_gas: u64,
+    /// The on-chain receipt this replay is checked against — the fidelity anchor.
+    pub anchor: OnchainAnchor,
 }
 
 /// Deposit transaction type byte (EIP-2718 `0x7e`). Deposit transactions carry
@@ -112,17 +121,28 @@ where
     let actual_status = execution_status(inputs.result).to_string();
     let actual_output = inputs.result.output().cloned();
 
-    // Fidelity gate: the local replay must reproduce the gas the transaction
-    // actually used on-chain. A mismatch means the replay executed under the
-    // wrong spec / hardfork config for this chain and block — self-validation
-    // cannot catch this, because the fixture is validated under the same spec it
-    // was dumped with. Refuse to build a fixture that does not match the chain.
-    if actual_gas != inputs.onchain_gas {
+    // Fidelity gate: the local replay must reproduce the on-chain receipt's gas
+    // and success status. A mismatch means the replay executed under the wrong
+    // spec / hardfork config for this chain and block; self-validation cannot
+    // catch this, because the fixture is validated under the same spec it was
+    // dumped with. Refuse to build a fixture that does not match the chain. (Gas
+    // already implies log fidelity — LOG opcodes are metered, so differing logs
+    // would change gas — so logs are not compared separately.)
+    let anchor = &inputs.anchor;
+    if actual_gas != anchor.gas_used {
         return Err(ReplayError::Other(format!(
-            "replay gas {actual_gas} != on-chain receipt gas {}: the local \
-             replay does not reproduce on-chain execution (likely a wrong spec or \
-             hardfork config for chain {chain_id} at this block)",
-            inputs.onchain_gas
+            "replay gas {actual_gas} != on-chain receipt gas {}: the local replay does \
+             not reproduce on-chain execution (likely a wrong spec or hardfork config \
+             for chain {chain_id} at this block)",
+            anchor.gas_used
+        )));
+    }
+    if inputs.result.is_success() != anchor.success {
+        return Err(ReplayError::Other(format!(
+            "replay status (success={}) != on-chain receipt status (success={}): the \
+             local replay does not reproduce on-chain execution for chain {chain_id}",
+            inputs.result.is_success(),
+            anchor.success
         )));
     }
 

@@ -76,7 +76,9 @@ pub struct Cmd {
     /// transaction, and `MegaETH` external environment, and records `post`
     /// expectations (state/logs roots, gas, status) computed by the state-test
     /// runner. Re-running the file through `state-test` self-validates the
-    /// replay. Incompatible with transaction overrides.
+    /// replay. The dump is rejected unless the local replay reproduces the
+    /// on-chain receipt's gas and success status. Incompatible with transaction
+    /// overrides and `--override.spec`.
     #[arg(long = "dump-fixture", value_name = "FILE")]
     pub dump_fixture: Option<std::path::PathBuf>,
 
@@ -85,7 +87,8 @@ pub struct Cmd {
     ///
     /// Measures only the target transaction's EVM `transact` call (excludes RPC
     /// fetch and preceding transactions). Pair with `--rpc.replay-file` for
-    /// stable, offline measurements. Incompatible with transaction overrides.
+    /// stable, offline measurements. Incompatible with transaction overrides and
+    /// `--override.spec`.
     #[arg(long = "bench-runs", value_name = "N", default_value_t = 0)]
     pub bench_runs: u32,
 
@@ -130,17 +133,26 @@ impl Cmd {
     /// Replay a historical transaction.
     pub async fn run(&self) -> Result<()> {
         // Pure input validation — reject before any network/state work. A dumped
-        // fixture or benchmark must represent the on-chain transaction, so it
-        // cannot also apply transaction overrides.
-        if (self.dump_fixture.is_some() || self.bench_runs > 0) &&
-            self.tx_override_args.has_overrides()
-        {
-            return Err(ReplayError::Other(
-                "--dump-fixture / --bench-runs cannot be combined with transaction \
-                 overrides (the isolated execution would not represent the on-chain \
-                 transaction)"
-                    .to_string(),
-            ));
+        // fixture or benchmark must represent the on-chain transaction, so it can
+        // neither apply transaction overrides nor force a spec: both would make the
+        // recorded execution a what-if, not the on-chain one.
+        if self.dump_fixture.is_some() || self.bench_runs > 0 {
+            if self.tx_override_args.has_overrides() {
+                return Err(ReplayError::Other(
+                    "--dump-fixture / --bench-runs cannot be combined with transaction \
+                     overrides (the isolated execution would not represent the on-chain \
+                     transaction)"
+                        .to_string(),
+                ));
+            }
+            if self.spec_override.is_some() {
+                return Err(ReplayError::Other(
+                    "--dump-fixture / --bench-runs cannot be combined with --override.spec \
+                     (the fixture must record the spec auto-detected for the on-chain block, \
+                     not a manually forced one)"
+                        .to_string(),
+                ));
+            }
         }
 
         let mut pctx = self.resolve_provider().await?;
@@ -356,9 +368,9 @@ impl Cmd {
         //
         // The receipt is fetched here (before the executor borrows the database) so
         // it is captured by `--rpc.capture-file`. A fixture/benchmark is only
-        // meaningful if the local replay reproduces this gas exactly — a mismatch
-        // means a wrong spec or hardfork config, which self-validation alone cannot
-        // catch.
+        // meaningful if the local replay reproduces the receipt's gas and success
+        // status — a mismatch means a wrong spec or hardfork config, which
+        // self-validation alone cannot catch.
         let fixture_inputs = if self.dump_fixture.is_some() || self.bench_runs > 0 {
             let mega_env = state_test::types::MegaEnv {
                 bucket_capacities: external_envs.bucket_capacities(),
@@ -369,7 +381,11 @@ impl Cmd {
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
                 .ok_or(ReplayError::TransactionNotFound(self.tx_hash))?;
-            Some((mega_env, receipt.gas_used()))
+            let anchor = super::fixture::OnchainAnchor {
+                gas_used: receipt.gas_used(),
+                success: receipt.inner.status(),
+            };
+            Some((mega_env, anchor))
         } else {
             None
         };
@@ -486,14 +502,14 @@ impl Cmd {
         // Build the self-validating fixture draft while the database still reflects
         // the pre-target-transaction state (preceding txs committed, target not yet).
         let fixture = match fixture_inputs {
-            Some((mega_env, onchain_gas)) => Some(super::fixture::build_draft(
+            Some((mega_env, anchor)) => Some(super::fixture::build_draft(
                 block_executor.evm().db_ref(),
                 &evm_state,
                 ctx.chain_id,
                 executed_spec,
                 &ctx.block,
                 &ctx.target_tx,
-                super::fixture::FixtureInputs { mega_env, result: &exec_result, onchain_gas },
+                super::fixture::FixtureInputs { mega_env, result: &exec_result, anchor },
             )?),
             None => None,
         };
