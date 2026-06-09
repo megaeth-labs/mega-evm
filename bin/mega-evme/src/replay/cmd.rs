@@ -129,6 +129,20 @@ struct ReplayContext {
 impl Cmd {
     /// Replay a historical transaction.
     pub async fn run(&self) -> Result<()> {
+        // Pure input validation — reject before any network/state work. A dumped
+        // fixture or benchmark must represent the on-chain transaction, so it
+        // cannot also apply transaction overrides.
+        if (self.dump_fixture.is_some() || self.bench_runs > 0) &&
+            self.tx_override_args.has_overrides()
+        {
+            return Err(ReplayError::Other(
+                "--dump-fixture / --bench-runs cannot be combined with transaction \
+                 overrides (the isolated execution would not represent the on-chain \
+                 transaction)"
+                    .to_string(),
+            ));
+        }
+
         let mut pctx = self.resolve_provider().await?;
         let rctx = self.fetch_replay_context(&pctx.provider, pctx.chain_id).await?;
         let (external_envs, env_snapshot) = self.resolve_external_envs(&pctx)?;
@@ -331,27 +345,28 @@ impl Cmd {
         trace!(?block_env, "Block environment built");
         let mut evm_env = EvmEnv::new(chain_args.create_cfg_env()?, block_env);
 
-        // Snapshot the effective external environment before it is moved into the
-        // factory, so a `--dump-fixture` / `--bench-runs` run can build a fixture
-        // unit that reproduces the replay in isolation.
-        let need_fixture = self.dump_fixture.is_some() || self.bench_runs > 0;
-        let dump_mega_env = need_fixture.then(|| state_test::types::MegaEnv {
-            bucket_capacities: external_envs.bucket_capacities(),
-            oracle_storage: external_envs.oracle_storage(),
-        });
-
-        // Fidelity anchor: the gas the transaction actually used on-chain. A
-        // fixture / benchmark is only meaningful if the local replay reproduces
-        // this exactly — a mismatch means a wrong spec or hardfork config, which
-        // self-validation alone cannot catch. Fetched here (before the executor
-        // borrows the database) so it is captured by `--rpc.capture-file`.
-        let onchain_gas = if need_fixture {
+        // For `--dump-fixture` / `--bench-runs`, snapshot the two inputs a fixture
+        // needs before the external env is moved into the factory: the effective
+        // MegaETH external environment, and the on-chain receipt gas used as the
+        // fidelity anchor. They live or die together (kept in one `Option`), so the
+        // fixture builder never has to assume one without the other.
+        //
+        // The receipt is fetched here (before the executor borrows the database) so
+        // it is captured by `--rpc.capture-file`. A fixture/benchmark is only
+        // meaningful if the local replay reproduces this gas exactly — a mismatch
+        // means a wrong spec or hardfork config, which self-validation alone cannot
+        // catch.
+        let fixture_inputs = if self.dump_fixture.is_some() || self.bench_runs > 0 {
+            let mega_env = state_test::types::MegaEnv {
+                bucket_capacities: external_envs.bucket_capacities(),
+                oracle_storage: external_envs.oracle_storage(),
+            };
             let receipt = provider
                 .get_transaction_receipt(self.tx_hash)
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
                 .ok_or(ReplayError::TransactionNotFound(self.tx_hash))?;
-            Some(receipt.gas_used())
+            Some((mega_env, receipt.gas_used()))
         } else {
             None
         };
@@ -422,17 +437,10 @@ impl Cmd {
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
         }
 
-        // Execute target transaction
+        // Execute target transaction. Override-incompatibility with
+        // --dump-fixture/--bench-runs is validated up front in `run()`.
         info!("Executing target transaction");
         if self.tx_override_args.has_overrides() {
-            if self.dump_fixture.is_some() || self.bench_runs > 0 {
-                return Err(ReplayError::Other(
-                    "--dump-fixture / --bench-runs cannot be combined with transaction \
-                     overrides (the isolated execution would not represent the on-chain \
-                     transaction)"
-                        .to_string(),
-                ));
-            }
             info!(overrides = ?self.tx_override_args, "Applying transaction overrides");
         }
         let wrapped_tx = self.tx_override_args.wrap(ctx.target_tx.as_recovered())?;
@@ -474,28 +482,17 @@ impl Cmd {
 
         // Build the self-validating fixture draft while the database still reflects
         // the pre-target-transaction state (preceding txs committed, target not yet).
-        let fixture = if let Some(mega_env) = dump_mega_env {
-            let actual_status = match &exec_result {
-                ExecutionResult::Success { .. } => "success",
-                ExecutionResult::Revert { .. } => "revert",
-                ExecutionResult::Halt { .. } => "halt",
-            }
-            .to_string();
-            Some(super::fixture::build_draft(
+        let fixture = match fixture_inputs {
+            Some((mega_env, onchain_gas)) => Some(super::fixture::build_draft(
                 block_executor.evm().db_ref(),
                 &evm_state,
                 ctx.chain_id,
                 executed_spec,
                 &ctx.block,
                 &ctx.target_tx,
-                mega_env,
-                exec_result.gas_used(),
-                actual_status,
-                exec_result.output().cloned(),
-                onchain_gas.expect("need_fixture implies onchain_gas was fetched"),
-            )?)
-        } else {
-            None
+                super::fixture::FixtureInputs { mega_env, result: &exec_result, onchain_gas },
+            )?),
+            None => None,
         };
 
         let gas_used = block_executor

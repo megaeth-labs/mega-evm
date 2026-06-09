@@ -234,9 +234,13 @@ fn validate_output(
     Ok(())
 }
 
-/// Canonical status string for an execution result, matching the values
-/// emitted into a dumped fixture's `megaStatus` field.
-fn execution_status(result: &ExecutionResult<MegaHaltReason>) -> &'static str {
+/// Canonical status string for an execution result: `"success"`, `"revert"`, or
+/// `"halt"`.
+///
+/// Single source shared by validation (`megaStatus` checks) and by
+/// `mega-evme --dump-fixture` so the dumped status and the validated status can
+/// never disagree.
+pub fn execution_status(result: &ExecutionResult<MegaHaltReason>) -> &'static str {
     match result {
         ExecutionResult::Success { .. } => "success",
         ExecutionResult::Revert { .. } => "revert",

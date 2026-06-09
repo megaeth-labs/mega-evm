@@ -27,20 +27,37 @@ use alloy_primitives::KECCAK256_EMPTY;
 use alloy_rpc_types_eth::Block;
 use mega_evm::{
     revm::{
+        context::result::ExecutionResult,
         primitives::{Address, Bytes, HashMap as RevmHashMap, B256, U256},
         state::EvmState,
         DatabaseRef,
     },
-    MegaSpecId,
+    MegaHaltReason, MegaSpecId,
 };
 use op_alloy_consensus::OpTxEnvelope;
 use op_alloy_rpc_types::Transaction;
 use state_test::{
-    runner::{execute_unit_collect, time_unit_execution},
+    runner::{execute_unit_collect, execution_status, time_unit_execution},
     types::{AccountInfo, Env, MegaEnv, SpecName, Test, TestSuite, TestUnit, TransactionParts},
 };
 
 use super::{ReplayError, Result};
+
+/// The fixture-specific inputs gathered during a replay: the `MegaETH` external
+/// environment snapshot, the target transaction's execution result, and the gas
+/// it used on-chain (from its receipt).
+///
+/// Bundling these keeps the fixture's gas, status, and output derived from a
+/// single `ExecutionResult` — there is no second place that recomputes the
+/// status string, so the dumped and validated values cannot drift.
+pub(crate) struct FixtureInputs<'a> {
+    /// Effective `MegaETH` external environment (SALT buckets, oracle storage).
+    pub mega_env: MegaEnv,
+    /// The target transaction's execution result from the full replay.
+    pub result: &'a ExecutionResult<MegaHaltReason>,
+    /// Gas the transaction used on-chain (from its receipt) — the fidelity anchor.
+    pub onchain_gas: u64,
+}
 
 /// Deposit transaction type byte (EIP-2718 `0x7e`). Deposit transactions carry
 /// MegaETH/Optimism-specific fields (mint, source hash, system flag) that the
@@ -71,7 +88,6 @@ pub(crate) struct FixtureDraft {
 /// `db` must be read at the point *after* preceding transactions have committed
 /// but *before* the target transaction commits, so that the pre-state closure
 /// reflects exactly what the target transaction observed.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_draft<DB>(
     db: &DB,
     evm_state: &EvmState,
@@ -79,11 +95,7 @@ pub(crate) fn build_draft<DB>(
     spec: MegaSpecId,
     block: &Block<Transaction>,
     target_tx: &Transaction,
-    mega_env: MegaEnv,
-    actual_gas: u64,
-    actual_status: String,
-    actual_output: Option<Bytes>,
-    onchain_gas: u64,
+    inputs: FixtureInputs<'_>,
 ) -> Result<FixtureDraft>
 where
     DB: DatabaseRef,
@@ -96,16 +108,21 @@ where
         ));
     }
 
+    let actual_gas = inputs.result.gas_used();
+    let actual_status = execution_status(inputs.result).to_string();
+    let actual_output = inputs.result.output().cloned();
+
     // Fidelity gate: the local replay must reproduce the gas the transaction
     // actually used on-chain. A mismatch means the replay executed under the
     // wrong spec / hardfork config for this chain and block — self-validation
     // cannot catch this, because the fixture is validated under the same spec it
     // was dumped with. Refuse to build a fixture that does not match the chain.
-    if actual_gas != onchain_gas {
+    if actual_gas != inputs.onchain_gas {
         return Err(ReplayError::Other(format!(
-            "replay gas {actual_gas} != on-chain receipt gas {onchain_gas}: the local \
+            "replay gas {actual_gas} != on-chain receipt gas {}: the local \
              replay does not reproduce on-chain execution (likely a wrong spec or \
-             hardfork config for chain {chain_id} at this block)"
+             hardfork config for chain {chain_id} at this block)",
+            inputs.onchain_gas
         )));
     }
 
@@ -126,7 +143,7 @@ where
         post: BTreeMap::new(),
         transaction,
         out: None,
-        mega_env: Some(mega_env),
+        mega_env: Some(inputs.mega_env),
     };
 
     let name = format!("replay_{:#x}", target_tx.inner.inner.tx_hash());
@@ -207,6 +224,10 @@ impl FixtureDraft {
     /// status (so the measurement reflects the real transaction), then runs
     /// `warmup` discarded iterations followed by `runs` timed iterations.
     pub(crate) fn run_bench(&self, runs: u32, warmup: u32) -> Result<BenchStats> {
+        if runs == 0 {
+            return Err(ReplayError::Other("bench requires at least one run".to_string()));
+        }
+
         let executed = execute_unit_collect(&self.unit, &self.spec)
             .map_err(|e| ReplayError::Other(format!("bench self-execution failed: {e}")))?;
         if executed.gas_used != self.actual_gas || executed.status != self.actual_status {
