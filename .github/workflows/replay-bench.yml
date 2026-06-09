@@ -70,11 +70,14 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
 
       # The PR's driver + corpus drive the whole run; only the binary under test
-      # changes between PR-head and baseline. Build PR-head first and stash it.
-      - name: Build PR binary
+      # changes between PR-head and baseline. The driver needs both mega-evme and
+      # state-test (the corpus is fixtures, timed by state-test); stash both per
+      # build into a directory the driver can resolve. Build PR-head first.
+      - name: Build PR binaries
         run: |
-          cargo build --release -p mega-evme
-          cp target/release/mega-evme /tmp/mega-evme-pr
+          cargo build --release -p mega-evme -p state-test
+          mkdir -p /tmp/pr
+          cp target/release/mega-evme target/release/state-test /tmp/pr/
 
       - name: Determine baseline commit
         id: baseline
@@ -82,27 +85,29 @@ jobs:
           echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "commit=$(git merge-base HEAD origin/main)" >> "$GITHUB_OUTPUT"
 
-      # Build the baseline binary from the merge-base, but keep the PR checkout's
+      # Build the baseline binaries from the merge-base, but keep the PR checkout's
       # driver + corpus (restored by the trap) for the actual run.
-      - name: Build baseline binary
+      - name: Build baseline binaries
         run: |
           git checkout ${{ steps.baseline.outputs.commit }}
           trap 'git checkout -' EXIT
           git submodule update --init --recursive
-          cargo build --release -p mega-evme
-          cp target/release/mega-evme /tmp/mega-evme-base
+          cargo build --release -p mega-evme -p state-test
+          mkdir -p /tmp/base
+          cp target/release/mega-evme target/release/state-test /tmp/base/
 
-      # The replay-bench capability is itself introduced by a PR; if the baseline
-      # predates it, `--bench-runs` is unknown there — fall back to measuring the
-      # PR binary alone instead of failing.
+      # The fixture-bench capability is itself introduced by a PR; if the baseline
+      # predates it, `state-test --bench` is unknown there — fall back to measuring
+      # the PR binary alone instead of failing. (Probe with a PR-checkout fixture.)
       - name: Run replay benchmark
         run: |
-          BINS=(--bin "pr=/tmp/mega-evme-pr")
-          if /tmp/mega-evme-base replay --help 2>/dev/null | grep -q -- '--bench-runs'; then
-            BINS=(--bin "base=/tmp/mega-evme-base" --bin "pr=/tmp/mega-evme-pr")
-            echo "Baseline supports replay bench — comparing."
+          BINS=(--bin "pr=/tmp/pr")
+          if /tmp/base/state-test --bench --bench-runs 1 --bench-warmup 0 \
+               bench/replay/fixtures/medium_call.json >/dev/null 2>&1; then
+            BINS=(--bin "base=/tmp/base" --bin "pr=/tmp/pr")
+            echo "Baseline supports fixture bench — comparing."
           else
-            echo "Baseline predates the replay bench — measuring PR binary only."
+            echo "Baseline predates the fixture bench — measuring PR binaries only."
           fi
           python3 bench/replay/run.py "${BINS[@]}" \
             --rounds 7 --threshold-pct 7 \

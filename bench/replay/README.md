@@ -1,103 +1,110 @@
 # Replay throughput benchmark
 
-Measures how fast `mega-evm` executes **real, characteristic MegaETH mainnet
-transactions**, and compares a PR against its merge-base so a change that speeds
-up or slows down real-transaction execution is visible.
+Measures how fast `mega-evm` executes **characteristic MegaETH workloads**, and
+compares a PR against its merge-base so a change that speeds up or slows down
+real-transaction execution is visible.
 
-This is the real-transaction counterpart to the synthetic Criterion suite
+This is the real-workload counterpart to the synthetic Criterion suite
 (`crates/mega-evm/benches/`, run by `.github/workflows/benchmark.yml`). Criterion
 answers _"how far is mega from vanilla revm on a crafted workload"_; this answers
-_"did this change make real transactions faster or slower"_.
+_"did this change make characteristic workloads faster or slower"_.
+
+## The unit: a self-contained fixture
+
+Every case is one **self-contained state-test fixture** (`fixtures/<name>.json`):
+it carries its own pre-state, transaction, block environment, and MegaETH
+external environment, so it replays in isolation with **no RPC and no archive
+node**. The same EEST `TestUnit` shape `mega-evme replay --dump-fixture`
+produces:
+
+```jsonc
+{
+  "<name>": {
+    "env":         { currentNumber, currentTimestamp, currentBaseFee, … },
+    "pre":         { "0x…": { balance, code, nonce, storage }, … },  // the prestate
+    "transaction": { type, sender, to, data, gasLimit, value, … },
+    "megaEnv":     { bucketCapacities, oracleStorage },
+    "post":        { "Rex5": [ { hash, logs, megaGasUsed, megaStatus } ] }
+  }
+}
+```
+
+Because the fixture is self-contained, the source of the workload does not
+matter — a real mined transaction, a `debug_traceCall` + `prestateTracer`
+snapshot, or a hand-crafted case all become the same kind of JSON. `mega-evme
+replay --bench-runs` and `state-test --bench` time the *same* execution (both
+call `time_unit_execution` on the unit); the corpus simply stores the unit as a
+committed fixture and times it with `state-test --bench`.
 
 ## How it works
 
-1. **Record.** Each case is a real transaction captured once, online, into an
-   offline RPC cache that also stores the on-chain receipt:
+1. **Build the fixture.** For a real transaction, dump it once (offline once
+   captured, or straight from RPC):
 
    ```bash
-   mega-evme replay --rpc <url> \
-     --rpc.capture-file bench/replay/captures/<name>.cache.json \
-     --bench-runs 1 <tx-hash>
+   mega-evme replay --rpc <url> --dump-fixture bench/replay/fixtures/<name>.json <tx-hash>
    ```
 
-2. **Replay offline.** The driver replays each captured transaction in isolation
-   with `mega-evme replay --rpc.replay-file <cap> --bench-runs N --json`, which
-   times only the target transaction's EVM `transact` call (no RPC, no preceding
-   transactions) and reports `min`/`median`/`mean` and Mgas/s. Replay reproduces
-   the on-chain gas, so the same work is timed every run.
+   The dump only writes if the local replay reproduces the on-chain receipt's gas
+   and status, so the fixture is faithful by construction. For a non-on-chain
+   workload, produce the same `TestUnit` shape by other means (see below).
+
+2. **Replay offline.** The driver times each fixture's isolated EVM `transact`
+   call with `state-test --bench`, reporting `min`/`median`/`mean` and Mgas/s.
 
 3. **Compare.** With two binaries (base and PR) the driver interleaves them
-   **ABBA** across several rounds so slow machine drift cancels, takes each
-   binary's median, and reports Δ% per transaction. A transaction whose PR median
-   is more than the threshold slower is flagged a regression.
+   **ABBA** across several rounds so machine drift cancels, takes each binary's
+   median, and reports Δ% per case. A case whose PR median is more than the
+   threshold slower is flagged a regression.
 
 ## Corpus
 
-`manifest.json` lists the cases. Each is chosen for a distinct workload shape
+`manifest.json` lists the cases — each chosen for a distinct workload shape
 (system-contract interception, plain compute, log-heavy metering, heavy
 multi-call, limit-tracker stress). Every case records `expected_gas`; the driver
 fails if a binary runs it with different gas (that would mean different work is
-being timed).
+being timed). A case names its `spec` explicitly only when its fixture carries an
+empty `post`; otherwise the spec is taken from the fixture's `post` key.
 
-There are two case types, both deterministic and network-free:
-
-- **`capture`** (default) — a real mined transaction, replayed in block context
-  from a committed RPC capture under `captures/` via `mega-evme replay
-  --bench-runs`.
-- **`fixture`** — a self-contained state-test fixture under `fixtures/`,
-  benchmarked via `state-test --bench`. The fixture carries its own pre-state, so
-  **no RPC and no archive node are needed**: any source that can produce a
-  state-test (EEST) fixture works — a `mega-evme --dump-fixture` replay, a
-  `debug_traceCall` + `prestateTracer` snapshot, or a hand-crafted case. A
-  `fixture` case names the `spec` to run under (the fixture need only carry
-  `env` / `pre` / `transaction`, plus an empty `post: {}`).
-
-  Example: `fixtures/attack_deploy.json` is the mainnet attack contract
-  deployment from the `attack_replay` Criterion bench (#299) — a prestate
-  snapshot, not a mined transaction — converted to a fixture. It reproduces the
-  source's exact 141,927,106 gas under Rex5, so a non-on-chain workload is
-  tracked for regressions through the same driver.
+`fixtures/attack_deploy.json` is a mainnet attack contract deployment (#299)
+converted from a `prestateTracer` snapshot — a non-on-chain, 142M-gas
+limit-tracker stress case, tracked through the very same path.
 
 ## Running locally
 
 ```bash
-cargo build --release -p mega-evme
+cargo build --release -p mega-evme -p state-test
 
-# Measure the current binary:
-python3 bench/replay/run.py --bin pr=target/release/mega-evme
+# Measure the current build:
+python3 bench/replay/run.py --bin pr=target/release
 
-# Compare two binaries (e.g. main vs the working tree):
+# Compare two builds (each --bin is a directory containing mega-evme + state-test,
+# or the path to mega-evme with state-test alongside it):
 python3 bench/replay/run.py \
-  --bin base=/path/to/main/mega-evme \
-  --bin pr=target/release/mega-evme \
+  --bin base=/path/to/main/target/release \
+  --bin pr=target/release \
   --rounds 7 --threshold-pct 7 --fail-on-regression
 ```
 
-Useful flags: `--runs` / `--warmup` (per-invocation iterations), `--rounds`
-(ABBA rounds), `--threshold-pct` (regression cutoff), `--json-out` /
-`--markdown-out`, `--fail-on-regression` (non-zero exit on a flagged regression).
+Useful flags: `--runs` / `--warmup`, `--rounds` (ABBA rounds), `--threshold-pct`,
+`--json-out` / `--markdown-out`, `--fail-on-regression`.
 
 ## Adding a case
 
-A **mined transaction** (`capture` case):
+For a **mined transaction**, dump it (step 1 above) into `fixtures/<name>.json`,
+then add a `manifest.json` entry with `"type": "fixture"`, the `fixture` path,
+`expected_gas`, `category`, and a `note`.
 
-1. Pick a transaction with a workload not already covered.
-2. Capture it (step 1 above) into `captures/<name>.cache.json`.
-3. Add an entry to `manifest.json` with its `tx`, `expected_gas`, `category`, and
-   a `note`.
+For a **non-on-chain workload** (an attack/edge case from a `prestateTracer`
+snapshot or a hand-crafted scenario), produce the `TestUnit` JSON directly
+(`env` + `pre` + `transaction` + an empty `post: {}`), then add an entry that
+also names the `"spec"` to run under.
 
-A **non-on-chain workload** (`fixture` case — e.g. an attack/edge case from a
-`prestateTracer` snapshot or a hand-crafted scenario):
+Verify with `python3 bench/replay/run.py --bin pr=target/release`.
 
-1. Produce a state-test fixture JSON (`env` + `pre` + `transaction` + `post: {}`)
-   into `fixtures/<name>.json`. A `mega-evme replay --dump-fixture` output already
-   has this shape; a `prestateTracer` snapshot maps directly (`prestate` → `pre`,
-   tx fields → `transaction`, block → `env`).
-2. Add an entry with `"type": "fixture"`, `"fixture": "fixtures/<name>.json"`,
-   the `"spec"` to run under, and `expected_gas`.
-
-Verify either with `python3 bench/replay/run.py --bin pr=target/release/mega-evme`
-(the driver finds `state-test` next to `mega-evme`).
+> A `"type": "capture"` case (replay a committed RPC capture via `mega-evme
+> replay`) is still supported by the driver for ad-hoc use, but the committed
+> corpus uses self-contained fixtures so it is uniform and network-free.
 
 ## CI
 
