@@ -1,13 +1,15 @@
 name: Replay Throughput Benchmark
 
 # Replays a corpus of real, characteristic MegaETH mainnet transactions
-# (committed offline captures) through `mega-evme replay --bench-runs` and
-# compares PR throughput against the merge-base, so a change that slows down (or
-# speeds up) real-transaction execution is visible on the PR.
+# (committed self-contained fixtures, timed by `state-test --bench`) and compares
+# PR throughput against the merge-base, so a change that slows down (or speeds
+# up) real-transaction execution is visible on the PR.
 #
 # This is the real-transaction counterpart to the synthetic Criterion suite in
-# benchmark.yml. Like that workflow it is opt-in (weekly + manual + a member
-# `/benchmark-replay` comment) because timing on shared runners is noisy.
+# benchmark.yml, and follows the same hardened structure: the job that compiles
+# and runs untrusted PR code (`bench`) is read-only, and only the jobs that touch
+# the PR (`prepare`, `compare`) get a write-scoped token — so a malicious PR run
+# triggered with `/benchmark-replay` has no write token to abuse.
 
 on:
   schedule:
@@ -22,13 +24,18 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  replay-bench:
-    name: Replay throughput check
+  # Resolve the exact commits ONCE, up front, via the API only — no checkout and
+  # no fetch of the PR ref — so this write-privileged job never brings untrusted
+  # PR code (or even a PR-controlled ref) into the workspace.
+  prepare:
+    name: Resolve commits
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
     if: >-
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request &&
@@ -37,31 +44,68 @@ jobs:
          github.event.comment.author_association == 'COLLABORATOR' ||
          github.event.comment.author_association == 'OWNER')
       )
+    outputs:
+      feature_sha: ${{ steps.resolve.outputs.feature_sha }}
+      baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
+      compare: ${{ steps.resolve.outputs.compare }}
+    steps:
+      - name: Resolve commits and react
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'issue_comment') {
+              // schedule / workflow_dispatch: measure the checked-out ref,
+              // no baseline comparison.
+              core.setOutput('feature_sha', context.sha);
+              core.setOutput('baseline_sha', '');
+              core.setOutput('compare', 'false');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.issue.number;
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number });
+            const featureSha = pr.data.head.sha;
+            // The compare endpoint's merge_base is the commit `git merge-base`
+            // would pick for the PR base branch and head.
+            const cmp = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${pr.data.base.ref}...${featureSha}`,
+            });
+            core.setOutput('feature_sha', featureSha);
+            core.setOutput('baseline_sha', cmp.data.merge_base_commit.sha);
+            core.setOutput('compare', 'true');
+            core.info(`Feature: ${featureSha}  Baseline: ${cmp.data.merge_base_commit.sha}`);
+            await github.rest.reactions.createForIssueComment({
+              owner,
+              repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket',
+            });
+
+  # Compiles and runs untrusted PR code (the PR's state-test binary + driver +
+  # corpus), so it is read-only: there is no write-scoped token to exfiltrate.
+  # `pull-requests: read` lets `gh pr checkout` resolve a fork PR head.
+  bench:
+    name: Replay throughput
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Checkout PR branch
+      - name: Fetch PR head
         if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh pr checkout ${{ github.event.issue.number }}
-          git submodule update --init --recursive
-
-      - name: React to comment
-        if: github.event_name == 'issue_comment'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
-              content: 'rocket'
-            });
+        run: gh pr checkout ${{ github.event.issue.number }}
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -69,73 +113,91 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      # The PR's driver + corpus drive the whole run; only the binary under test
-      # changes between PR-head and baseline. The corpus is self-contained
-      # fixtures timed by state-test, so only that binary is built; stash it per
-      # build into a directory the driver resolves. Build PR-head first.
-      - name: Build PR binary
+      # Only the binary under test changes between feature and baseline; the
+      # driver + corpus always come from the PR-head checkout. Build each binary
+      # at its pinned SHA into its own directory the driver resolves.
+      - name: Build feature binary
         run: |
-          cargo build --release -p state-test
-          mkdir -p /tmp/pr
-          cp target/release/state-test /tmp/pr/
-
-      - name: Determine baseline commit
-        id: baseline
-        run: |
-          echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git merge-base HEAD origin/main)" >> "$GITHUB_OUTPUT"
-
-      # Build the baseline binaries from the merge-base, but keep the PR checkout's
-      # driver + corpus (restored by the trap) for the actual run.
-      - name: Build baseline binary
-        run: |
-          git checkout ${{ steps.baseline.outputs.commit }}
-          trap 'git checkout -' EXIT
+          git checkout --quiet ${{ needs.prepare.outputs.feature_sha }}
           git submodule update --init --recursive
           cargo build --release -p state-test
-          mkdir -p /tmp/base
-          cp target/release/state-test /tmp/base/
+          mkdir -p /tmp/pr && cp target/release/state-test /tmp/pr/
 
-      # The fixture-bench capability is itself introduced by a PR; if the baseline
-      # predates it, `state-test --bench` is unknown there — fall back to measuring
-      # the PR binary alone instead of failing. (Probe with a PR-checkout fixture.)
+      - name: Build baseline binary
+        if: needs.prepare.outputs.compare == 'true'
+        run: |
+          git checkout --quiet ${{ needs.prepare.outputs.baseline_sha }}
+          git submodule update --init --recursive
+          cargo build --release -p state-test
+          mkdir -p /tmp/base && cp target/release/state-test /tmp/base/
+
+      # Restore the PR-head driver + corpus, then run. If the baseline predates
+      # `state-test --bench` (the feature this PR may introduce), fall back to
+      # measuring the feature binary alone instead of failing.
       - name: Run replay benchmark
         run: |
+          git checkout --quiet ${{ needs.prepare.outputs.feature_sha }}
+          git submodule update --init --recursive
           BINS=(--bin "pr=/tmp/pr")
-          if /tmp/base/state-test --bench --bench-runs 1 --bench-warmup 0 \
+          if [ "${{ needs.prepare.outputs.compare }}" = "true" ] && \
+             /tmp/base/state-test --bench --bench-runs 1 --bench-warmup 0 \
                bench/replay/fixtures/medium_call.json >/dev/null 2>&1; then
             BINS=(--bin "base=/tmp/base" --bin "pr=/tmp/pr")
-            echo "Baseline supports fixture bench — comparing."
+            echo "Comparing PR vs baseline."
           else
-            echo "Baseline predates the fixture bench — measuring PR binaries only."
+            echo "Measuring the PR binary only (no baseline, or baseline predates the fixture bench)."
           fi
           python3 bench/replay/run.py "${BINS[@]}" \
             --rounds 7 --threshold-pct 7 \
-            --markdown-out /tmp/replay-bench.md \
-            --json-out /tmp/replay-bench.json
+            --markdown-out replay-bench.md \
+            --json-out replay-bench.json
 
       - name: Write job summary
         if: always()
         run: |
-          if [ -f /tmp/replay-bench.md ]; then
+          if [ -f replay-bench.md ]; then
             {
-              cat /tmp/replay-bench.md
+              cat replay-bench.md
               echo
-              echo "> Comparing \`baseline\` (${{ steps.baseline.outputs.commit }}) → \`feature\` (${{ steps.baseline.outputs.feature_sha }})."
-              echo "> Sub-10µs cases are noisy on shared runners; read the larger cases (and the trend across cases) for real signal."
+              echo "> Comparing \`baseline\` (${{ needs.prepare.outputs.baseline_sha }}) → \`feature\` (${{ needs.prepare.outputs.feature_sha }})."
+              echo "> Sub-10µs cases are noisy on shared runners; read the larger cases and the trend for real signal."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-bench-report
+          path: replay-bench.md
+          if-no-files-found: ignore
+
+  # Posts the comparison comment. Consumes only the report artifact, never PR
+  # code, so it can safely hold a write-scoped token.
+  compare:
+    name: Comment on PR
+    needs: [prepare, bench]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: needs.prepare.outputs.compare == 'true'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download report
+        uses: actions/download-artifact@v4
+        with:
+          name: replay-bench-report
+
       - name: Comment on PR
-        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            if (!fs.existsSync('/tmp/replay-bench.md')) return;
-            const table = fs.readFileSync('/tmp/replay-bench.md', 'utf8');
-            const base = '${{ steps.baseline.outputs.commit }}';
-            const head = '${{ steps.baseline.outputs.feature_sha }}';
+            if (!fs.existsSync('replay-bench.md')) return;
+            const table = fs.readFileSync('replay-bench.md', 'utf8');
+            const base = '${{ needs.prepare.outputs.baseline_sha }}';
+            const head = '${{ needs.prepare.outputs.feature_sha }}';
             const repo = context.payload.repository.html_url;
             const body =
               table +
