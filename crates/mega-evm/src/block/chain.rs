@@ -61,16 +61,9 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// published schedule. Note this does not attach a [`SequencerRegistryConfig`],
 /// matching historical behavior.
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
-    MegaHardforkConfig::new()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::MiniRex1, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::MiniRex2, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex1, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex2, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex3, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
+    // `with_all_activated` sets all MegaHardforks to `Timestamp(0)`; it does not
+    // attach a `SequencerRegistryConfig`, matching historical behavior.
+    MegaHardforkConfig::new().with_all_activated()
 }
 
 /// Returns the canonical hardfork schedule for a chain ID.

@@ -130,67 +130,18 @@ pub fn flat_system_contract_specs(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
 ) -> Vec<SystemContractSpec> {
-    use crate::{
-        ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
-        KEYLESS_DEPLOY_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
-        LIMIT_CONTROL_CODE_HASH, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE,
-        ORACLE_CONTRACT_CODE_HASH, ORACLE_CONTRACT_CODE_HASH_REX2, ORACLE_CONTRACT_CODE_HASH_REX5,
-        ORACLE_CONTRACT_CODE_REX2, ORACLE_CONTRACT_CODE_REX5,
-    };
-
-    let mut specs = Vec::new();
-    let mini_rex = hardforks.is_mini_rex_active_at_timestamp(block_timestamp);
-    let rex2 = hardforks.is_rex_2_active_at_timestamp(block_timestamp);
-    let rex4 = hardforks.is_rex_4_active_at_timestamp(block_timestamp);
-    let rex5 = hardforks.is_rex_5_active_at_timestamp(block_timestamp);
-
-    if mini_rex {
-        // Oracle bytecode is versioned: v1.0.0 (pre-Rex2), v1.1.0 (Rex2+), v2.0.0 (Rex5+).
-        // Pre-Rex5 an in-place upgrade still marks the account created (clearing storage),
-        // preserving canonical mainnet state at the Rex2 boundary.
-        let (code, code_hash) = if rex5 {
-            (ORACLE_CONTRACT_CODE_REX5, ORACLE_CONTRACT_CODE_HASH_REX5)
-        } else if rex2 {
-            (ORACLE_CONTRACT_CODE_REX2, ORACLE_CONTRACT_CODE_HASH_REX2)
-        } else {
-            (ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH)
-        };
-        specs.push(
-            SystemContractSpec::new(ORACLE_CONTRACT_ADDRESS, code, code_hash)
-                .with_force_create_on_upgrade(!rex5),
-        );
-
-        specs.push(SystemContractSpec::new(
-            HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
-        ));
-    }
-
-    if rex2 {
-        specs.push(SystemContractSpec::new(
-            KEYLESS_DEPLOY_ADDRESS,
-            KEYLESS_DEPLOY_CODE,
-            KEYLESS_DEPLOY_CODE_HASH,
-        ));
-    }
-
-    if rex4 {
-        specs.push(SystemContractSpec::new(
-            ACCESS_CONTROL_ADDRESS,
-            ACCESS_CONTROL_CODE,
-            ACCESS_CONTROL_CODE_HASH,
-        ));
-        specs.push(SystemContractSpec::new(
-            LIMIT_CONTROL_ADDRESS,
-            LIMIT_CONTROL_CODE,
-            LIMIT_CONTROL_CODE_HASH,
-        ));
-    }
-
-    specs
+    // Compose the per-contract spec builders (each its own single source of gate
+    // + bytecode-version selection). `None` entries (inactive contracts) drop out.
+    [
+        super::oracle::oracle_spec(&hardforks, block_timestamp),
+        super::oracle::high_precision_timestamp_oracle_spec(&hardforks, block_timestamp),
+        super::keyless_deploy::keyless_deploy_spec(&hardforks, block_timestamp),
+        super::control::access_control_spec(&hardforks, block_timestamp),
+        super::limit_control::limit_control_spec(&hardforks, block_timestamp),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(test)]

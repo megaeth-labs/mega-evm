@@ -50,16 +50,24 @@ pub fn transact_deploy_access_control_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    if !hardforks.is_rex_4_active_at_timestamp(block_timestamp) {
-        return Ok(None);
-    }
+    access_control_spec(&hardforks, block_timestamp)
+        .map(|s| crate::transact_deploy(db, &s))
+        .transpose()
+}
 
-    let spec = SystemContractSpec::new(
-        ACCESS_CONTROL_ADDRESS,
-        ACCESS_CONTROL_CODE,
-        ACCESS_CONTROL_CODE_HASH,
-    );
-    Ok(Some(crate::transact_deploy(db, &spec)?))
+/// Builds the [`SystemContractSpec`] for the access-control contract active at
+/// the given timestamp, or `None` if Rex4 is not yet active.
+pub(crate) fn access_control_spec(
+    hardforks: &impl MegaHardforks,
+    block_timestamp: u64,
+) -> Option<SystemContractSpec> {
+    hardforks.is_rex_4_active_at_timestamp(block_timestamp).then(|| {
+        SystemContractSpec::new(
+            ACCESS_CONTROL_ADDRESS,
+            ACCESS_CONTROL_CODE,
+            ACCESS_CONTROL_CODE_HASH,
+        )
+    })
 }
 
 #[cfg(test)]

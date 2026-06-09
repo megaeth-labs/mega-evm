@@ -48,16 +48,24 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    if !hardforks.is_rex_2_active_at_timestamp(block_timestamp) {
-        return Ok(None);
-    }
+    keyless_deploy_spec(&hardforks, block_timestamp)
+        .map(|s| crate::transact_deploy(db, &s))
+        .transpose()
+}
 
-    let spec = SystemContractSpec::new(
-        KEYLESS_DEPLOY_ADDRESS,
-        KEYLESS_DEPLOY_CODE,
-        KEYLESS_DEPLOY_CODE_HASH,
-    );
-    Ok(Some(crate::transact_deploy(db, &spec)?))
+/// Builds the [`SystemContractSpec`] for the keyless-deploy contract active at
+/// the given timestamp, or `None` if Rex2 is not yet active.
+pub(crate) fn keyless_deploy_spec(
+    hardforks: &impl MegaHardforks,
+    block_timestamp: u64,
+) -> Option<SystemContractSpec> {
+    hardforks.is_rex_2_active_at_timestamp(block_timestamp).then(|| {
+        SystemContractSpec::new(
+            KEYLESS_DEPLOY_ADDRESS,
+            KEYLESS_DEPLOY_CODE,
+            KEYLESS_DEPLOY_CODE_HASH,
+        )
+    })
 }
 
 #[cfg(test)]
