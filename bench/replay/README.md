@@ -33,13 +33,30 @@ _"did this change make real transactions faster or slower"_.
 
 ## Corpus
 
-`manifest.json` lists the cases. Each is one transaction chosen for a distinct
-workload shape (system-contract interception, plain compute, log-heavy metering,
-heavy multi-call). Captures live in `captures/` and are replayed offline, so the
-benchmark is deterministic and needs no network in CI.
+`manifest.json` lists the cases. Each is chosen for a distinct workload shape
+(system-contract interception, plain compute, log-heavy metering, heavy
+multi-call, limit-tracker stress). Every case records `expected_gas`; the driver
+fails if a binary runs it with different gas (that would mean different work is
+being timed).
 
-Every case records `expected_gas`; the driver fails if a binary replays it with
-different gas (that would mean different work is being timed).
+There are two case types, both deterministic and network-free:
+
+- **`capture`** (default) — a real mined transaction, replayed in block context
+  from a committed RPC capture under `captures/` via `mega-evme replay
+  --bench-runs`.
+- **`fixture`** — a self-contained state-test fixture under `fixtures/`,
+  benchmarked via `state-test --bench`. The fixture carries its own pre-state, so
+  **no RPC and no archive node are needed**: any source that can produce a
+  state-test (EEST) fixture works — a `mega-evme --dump-fixture` replay, a
+  `debug_traceCall` + `prestateTracer` snapshot, or a hand-crafted case. A
+  `fixture` case names the `spec` to run under (the fixture need only carry
+  `env` / `pre` / `transaction`, plus an empty `post: {}`).
+
+  Example: `fixtures/attack_deploy.json` is the mainnet attack contract
+  deployment from the `attack_replay` Criterion bench (#299) — a prestate
+  snapshot, not a mined transaction — converted to a fixture. It reproduces the
+  source's exact 141,927,106 gas under Rex5, so a non-on-chain workload is
+  tracked for regressions through the same driver.
 
 ## Running locally
 
@@ -62,11 +79,25 @@ Useful flags: `--runs` / `--warmup` (per-invocation iterations), `--rounds`
 
 ## Adding a case
 
+A **mined transaction** (`capture` case):
+
 1. Pick a transaction with a workload not already covered.
 2. Capture it (step 1 above) into `captures/<name>.cache.json`.
 3. Add an entry to `manifest.json` with its `tx`, `expected_gas`, `category`, and
-   a `note` describing why it is interesting.
-4. Verify: `python3 bench/replay/run.py --bin pr=target/release/mega-evme`.
+   a `note`.
+
+A **non-on-chain workload** (`fixture` case — e.g. an attack/edge case from a
+`prestateTracer` snapshot or a hand-crafted scenario):
+
+1. Produce a state-test fixture JSON (`env` + `pre` + `transaction` + `post: {}`)
+   into `fixtures/<name>.json`. A `mega-evme replay --dump-fixture` output already
+   has this shape; a `prestateTracer` snapshot maps directly (`prestate` → `pre`,
+   tx fields → `transaction`, block → `env`).
+2. Add an entry with `"type": "fixture"`, `"fixture": "fixtures/<name>.json"`,
+   the `"spec"` to run under, and `expected_gas`.
+
+Verify either with `python3 bench/replay/run.py --bin pr=target/release/mega-evme`
+(the driver finds `state-test` next to `mega-evme`).
 
 ## CI
 

@@ -57,33 +57,35 @@ class Measurement:
     gas_used: int
 
 
-def run_case(binary: str, capture: Path, tx: str, runs: int, warmup: int) -> Measurement:
-    """Run one offline replay benchmark and parse its single-document JSON."""
-    cmd = [
-        binary,
-        "replay",
-        "--rpc.replay-file",
-        str(capture),
-        "--bench-runs",
-        str(runs),
-        "--bench-warmup",
-        str(warmup),
-        "--json",
-        tx,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"{binary} replay failed for {tx} (exit {proc.returncode}):\n{proc.stderr.strip()}"
-        )
-    # stdout must be a single JSON document (regression-guarded in the CLI tests).
+@dataclass
+class Tools:
+    """The two binaries a build provides: the replay CLI and the fixture runner."""
+
+    mega_evme: str
+    state_test: str
+
+
+def resolve_tools(path: str) -> Tools:
+    """Resolve the mega-evme and state-test binaries from one ``--bin`` value.
+
+    ``path`` may be a directory containing both binaries, or the path to the
+    ``mega-evme`` binary (``state-test`` is then taken as its sibling). The
+    latter keeps `--bin target/release/mega-evme` working locally.
+    """
+    p = Path(path)
+    if p.is_dir():
+        return Tools(mega_evme=str(p / "mega-evme"), state_test=str(p / "state-test"))
+    return Tools(mega_evme=str(p), state_test=str(p.parent / "state-test"))
+
+
+def _parse_bench(stdout: str, who: str) -> Measurement:
     try:
-        out = json.loads(proc.stdout.strip())
+        out = json.loads(stdout.strip())
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"could not parse bench JSON from {binary} for {tx}: {exc}") from exc
+        raise RuntimeError(f"could not parse bench JSON from {who}: {exc}") from exc
     bench = out.get("bench")
     if bench is None:
-        raise RuntimeError(f"no `bench` field in output from {binary} for {tx}")
+        raise RuntimeError(f"no `bench` field in output from {who}")
     return Measurement(
         median_ns=float(bench["medianNs"]),
         mgas_per_sec=float(bench["mgasPerSec"]),
@@ -91,10 +93,57 @@ def run_case(binary: str, capture: Path, tx: str, runs: int, warmup: int) -> Mea
     )
 
 
+def run_case(tools: Tools, case: dict, manifest_dir: Path, runs: int, warmup: int) -> Measurement:
+    """Benchmark one case and parse its single-document JSON.
+
+    A ``capture`` case (default) replays a real mined transaction offline via
+    ``mega-evme replay``; a ``fixture`` case benchmarks a self-contained
+    state-test fixture (no RPC, any source) via ``state-test --bench``. Both
+    emit the same ``{gas_used, bench:{…}}`` shape.
+    """
+    kind = case.get("type", "capture")
+    if kind == "fixture":
+        fixture = (manifest_dir / case["fixture"]).resolve()
+        cmd = [
+            tools.state_test,
+            "--bench",
+            "--bench-runs",
+            str(runs),
+            "--bench-warmup",
+            str(warmup),
+        ]
+        if case.get("spec"):
+            cmd += ["--bench-spec", case["spec"]]
+        cmd.append(str(fixture))
+    elif kind == "capture":
+        capture = (manifest_dir / case["capture"]).resolve()
+        cmd = [
+            tools.mega_evme,
+            "replay",
+            "--rpc.replay-file",
+            str(capture),
+            "--bench-runs",
+            str(runs),
+            "--bench-warmup",
+            str(warmup),
+            "--json",
+            case["tx"],
+        ]
+    else:
+        raise SystemExit(f"case {case['name']}: unknown type {kind!r} (expected capture|fixture)")
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"{case['name']} failed (exit {proc.returncode}):\n{proc.stderr.strip()}"
+        )
+    return _parse_bench(proc.stdout, case["name"])
+
+
 def measure_abba(
-    binaries: list[tuple[str, str]],
-    capture: Path,
-    tx: str,
+    binaries: list[tuple[str, Tools]],
+    case: dict,
+    manifest_dir: Path,
     runs: int,
     warmup: int,
     rounds: int,
@@ -109,8 +158,8 @@ def measure_abba(
     samples: dict[str, list[Measurement]] = {label: [] for label, _ in binaries}
     for r in range(rounds):
         order = binaries if r % 2 == 0 else list(reversed(binaries))
-        for label, path in order:
-            samples[label].append(run_case(path, capture, tx, runs, warmup))
+        for label, tools in order:
+            samples[label].append(run_case(tools, case, manifest_dir, runs, warmup))
     result: dict[str, Measurement] = {}
     for label, _ in binaries:
         ss = samples[label]
@@ -261,14 +310,12 @@ def main() -> int:
     warmup = args.warmup if args.warmup is not None else manifest.get("default_warmup", 5)
     cases = manifest["cases"]
     labels = [label for label, _ in args.bin]
+    binaries = [(label, resolve_tools(path)) for label, path in args.bin]
     manifest_dir = args.manifest.resolve().parent
 
     results: list[dict[str, Measurement]] = []
     for case in cases:
-        capture = (manifest_dir / case["capture"]).resolve()
-        if not capture.exists():
-            raise SystemExit(f"capture not found for case {case['name']}: {capture}")
-        res = measure_abba(args.bin, capture, case["tx"], runs, warmup, args.rounds)
+        res = measure_abba(binaries, case, manifest_dir, runs, warmup, args.rounds)
         # Sanity: every binary must reproduce the recorded on-chain gas, or the
         # comparison is meaningless (different work being timed).
         for label, m in res.items():

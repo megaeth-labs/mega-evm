@@ -631,6 +631,127 @@ pub fn time_unit_execution(
     Ok((elapsed, result.gas_used(), execution_status(&result).to_string()))
 }
 
+/// Benchmark result for one [`TestUnit`]: the timing distribution plus the gas
+/// and status it executed with.
+#[derive(Debug)]
+pub struct UnitBench {
+    /// Suite key (unit name) the result belongs to.
+    pub name: String,
+    /// Spec the unit was executed under.
+    pub spec: SpecName,
+    /// Gas used by the (identical) execution.
+    pub gas_used: u64,
+    /// Whether the execution succeeded.
+    pub success: bool,
+    /// Number of timed iterations.
+    pub runs: u32,
+    /// Fastest observed iteration.
+    pub min: Duration,
+    /// Median iteration time.
+    pub median: Duration,
+    /// Mean iteration time.
+    pub mean: Duration,
+}
+
+impl UnitBench {
+    /// Throughput in millions of gas per second, from the median time.
+    pub fn mgas_per_sec(&self) -> f64 {
+        let secs = self.median.as_secs_f64();
+        if secs > 0.0 {
+            self.gas_used as f64 / secs / 1.0e6
+        } else {
+            f64::INFINITY
+        }
+    }
+}
+
+/// Benchmark every unit in a fixture file by timing its isolated EVM execution.
+///
+/// The fixture is self-contained (pre-state closure + transaction + block env),
+/// so this needs no RPC and no archive node: any source that can produce a
+/// state-test fixture — a `mega-evme --dump-fixture` replay, a `prestateTracer`
+/// snapshot, or a hand-crafted case — can be benchmarked offline through the
+/// same path used to validate it.
+///
+/// `spec_override` selects the spec to run under; when `None`, the unit's single
+/// `post` spec is used (and a unit with zero or several post specs is an error).
+pub fn bench_test_suite(
+    path: &Path,
+    runs: u32,
+    warmup: u32,
+    spec_override: Option<SpecName>,
+) -> Result<Vec<UnitBench>, TestError> {
+    let path_str = path.to_string_lossy().into_owned();
+    let fixture_err = |msg: String| TestError {
+        name: "bench".to_string(),
+        path: path_str.clone(),
+        kind: TestErrorKind::FixtureError(msg),
+    };
+
+    if runs == 0 {
+        return Err(fixture_err("bench requires at least one run".to_string()));
+    }
+    let s = std::fs::read_to_string(path).map_err(|e| fixture_err(format!("read: {e}")))?;
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path_str.clone(),
+        kind: e.into(),
+    })?;
+
+    let mut results = Vec::new();
+    for (name, unit) in suite.0 {
+        let spec = match spec_override {
+            Some(s) => s,
+            None => {
+                let mut specs = unit.post.keys();
+                match (specs.next(), specs.next()) {
+                    (Some(s), None) => *s,
+                    (Some(_), Some(_)) => {
+                        return Err(fixture_err(format!(
+                            "unit {name} has multiple post specs; pass --bench-spec"
+                        )))
+                    }
+                    (None, _) => {
+                        return Err(fixture_err(format!(
+                            "unit {name} has no post spec; pass --bench-spec"
+                        )))
+                    }
+                }
+            }
+        };
+
+        for _ in 0..warmup {
+            time_unit_execution(&unit, &spec)
+                .map_err(|e| fixture_err(format!("warmup {name}: {e}")))?;
+        }
+        let mut durations = Vec::with_capacity(runs as usize);
+        let mut gas_used = 0u64;
+        let mut status = String::new();
+        for _ in 0..runs {
+            let (elapsed, gas, st) = time_unit_execution(&unit, &spec)
+                .map_err(|e| fixture_err(format!("run {name}: {e}")))?;
+            durations.push(elapsed);
+            gas_used = gas;
+            status = st;
+        }
+        durations.sort_unstable();
+        let median = durations[durations.len() / 2];
+        let min = durations[0];
+        let mean = durations.iter().sum::<Duration>() / durations.len() as u32;
+        results.push(UnitBench {
+            name,
+            spec,
+            gas_used,
+            success: status == "success",
+            runs,
+            min,
+            median,
+            mean,
+        });
+    }
+    Ok(results)
+}
+
 fn prune_base_fee_vault_changes(db: &mut State<EmptyDB>) {
     let base_fee_vault = address!("0x4200000000000000000000000000000000000019");
     db.cache.accounts.remove(&base_fee_vault);

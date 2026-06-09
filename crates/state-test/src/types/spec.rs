@@ -2,7 +2,7 @@ use mega_evm::MegaSpecId;
 use serde::{Deserialize, Serialize};
 
 /// Ethereum specification names
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 pub enum SpecName {
     /// Frontier hardfork (Ethereum launch, July 2015)
     Frontier,
