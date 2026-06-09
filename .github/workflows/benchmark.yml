@@ -101,7 +101,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [revm_bench, mega_bench, block_bench, transact, comp_cost, ctt]
+        target: [revm_bench, mega_bench, block_bench, transact, comp_cost, ctt, attack_replay]
     steps:
       - uses: actions/checkout@v4
         with:
