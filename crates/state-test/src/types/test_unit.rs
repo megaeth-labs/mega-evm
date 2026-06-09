@@ -1,6 +1,6 @@
 use mega_evm::{revm::primitives::eip4844, MegaSpecId};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use super::{AccountInfo, Env, MegaEnv, SpecName, Test, TransactionParts};
 use mega_evm::revm::{
@@ -34,8 +34,9 @@ pub struct TestUnit {
     ///
     /// A mapping of addresses to their account information before the transaction
     /// is executed. This represents the initial state of all accounts involved
-    /// in the test, including their balances, nonces, code, and storage.
-    pub pre: HashMap<Address, AccountInfo>,
+    /// in the test, including their balances, nonces, code, and storage. Ordered
+    /// by address so serialized fixtures are byte-reproducible.
+    pub pre: BTreeMap<Address, AccountInfo>,
 
     /// Post-execution expectations per specification.
     ///
@@ -91,7 +92,11 @@ impl TestUnit {
                 code: Some(bytecode),
                 nonce: info.nonce,
             };
-            cache_state.insert_account_with_storage(*address, acc_info, info.storage.clone());
+            cache_state.insert_account_with_storage(
+                *address,
+                acc_info,
+                info.storage.iter().map(|(k, v)| (*k, *v)).collect(),
+            );
         }
         cache_state
     }

@@ -1,4 +1,6 @@
-use mega_evm::revm::primitives::{Bytes, HashMap, StorageKey, StorageValue, U256};
+use std::collections::BTreeMap;
+
+use mega_evm::revm::primitives::{Bytes, StorageKey, StorageValue, U256};
 use serde::{Deserialize, Serialize};
 
 /// Account information
@@ -12,6 +14,7 @@ pub struct AccountInfo {
     /// Account nonce (transaction count)
     #[serde(with = "alloy_serde::quantity")]
     pub nonce: u64,
-    /// Account storage (key-value pairs)
-    pub storage: HashMap<StorageKey, StorageValue>,
+    /// Account storage (key-value pairs), ordered by slot so serialized fixtures
+    /// are byte-reproducible.
+    pub storage: BTreeMap<StorageKey, StorageValue>,
 }

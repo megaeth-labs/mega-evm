@@ -15,11 +15,7 @@
 //! write a fixture that does not reproduce them (e.g. an incomplete pre-state
 //! closure or an unsupported transaction shape).
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Display,
-    time::Duration,
-};
+use std::{collections::BTreeMap, fmt::Display, time::Duration};
 
 use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_eips::Typed2718 as _;
@@ -28,7 +24,7 @@ use alloy_rpc_types_eth::Block;
 use mega_evm::{
     revm::{
         context::result::ExecutionResult,
-        primitives::{Address, Bytes, HashMap as RevmHashMap, B256, U256},
+        primitives::{Address, Bytes, B256, U256},
         state::EvmState,
         DatabaseRef,
     },
@@ -286,12 +282,12 @@ impl FixtureDraft {
 /// Accounts that did not exist before the transaction (created during execution)
 /// are omitted from `pre`. Storage is recorded as each touched slot's
 /// `original_value`, which is the value the transaction first read.
-fn build_pre_state<DB>(db: &DB, evm_state: &EvmState) -> Result<HashMap<Address, AccountInfo>>
+fn build_pre_state<DB>(db: &DB, evm_state: &EvmState) -> Result<BTreeMap<Address, AccountInfo>>
 where
     DB: DatabaseRef,
     DB::Error: Display,
 {
-    let mut pre = HashMap::with_capacity(evm_state.len());
+    let mut pre = BTreeMap::new();
     for (address, account) in evm_state {
         let Some(info) = db
             .basic_ref(*address)
@@ -304,7 +300,9 @@ where
 
         let code = resolve_code(db, info.code_hash, info.code.as_ref())?;
 
-        let storage: RevmHashMap<U256, U256> = account
+        // BTreeMap (not HashMap) so storage slots serialize in a deterministic
+        // order, keeping the dumped fixture byte-reproducible.
+        let storage: BTreeMap<U256, U256> = account
             .storage
             .iter()
             .filter(|(_, slot)| !slot.original_value.is_zero())

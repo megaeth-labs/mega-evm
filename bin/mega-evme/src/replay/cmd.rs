@@ -372,10 +372,15 @@ impl Cmd {
         // status — a mismatch means a wrong spec or hardfork config, which
         // self-validation alone cannot catch.
         let fixture_inputs = if self.dump_fixture.is_some() || self.bench_runs > 0 {
-            let mega_env = state_test::types::MegaEnv {
-                bucket_capacities: external_envs.bucket_capacities(),
-                oracle_storage: external_envs.oracle_storage(),
-            };
+            // Sort the accessed buckets/oracle slots so the dumped fixture is
+            // byte-reproducible: these come from hash-map iteration, whose order
+            // is otherwise non-deterministic across runs (noisy diffs, and an
+            // online dump would not byte-match an offline re-dump).
+            let mut bucket_capacities = external_envs.bucket_capacities();
+            bucket_capacities.sort_unstable();
+            let mut oracle_storage = external_envs.oracle_storage();
+            oracle_storage.sort_unstable();
+            let mega_env = state_test::types::MegaEnv { bucket_capacities, oracle_storage };
             let receipt = provider
                 .get_transaction_receipt(self.tx_hash)
                 .await

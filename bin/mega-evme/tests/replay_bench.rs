@@ -121,6 +121,44 @@ fn test_replay_dump_fixture_writes_validatable_file() {
     result.unwrap_or_else(|e| panic!("dumped fixture failed to validate: {e}"));
 }
 
+/// Two dumps of the same transaction must be byte-identical. This guards against
+/// non-deterministic serialization (e.g. a hash-map creeping back into the
+/// fixture's pre-state, storage, or megaEnv) — which content-based validation
+/// cannot catch, and which only surfaces across separate process invocations.
+#[test]
+fn test_replay_dump_is_byte_reproducible() {
+    let dump_to = |suffix: &str| {
+        let out = std::env::temp_dir()
+            .join(format!("mega_evme_repro_{}_{suffix}.json", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let output = mega_evme()
+            .args([
+                "replay",
+                "--rpc.replay-file",
+                CACHE,
+                "--dump-fixture",
+                out.to_str().unwrap(),
+                TX,
+            ])
+            .output()
+            .expect("failed to run mega-evme");
+        assert!(
+            output.status.success(),
+            "dump failed.\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(&out).expect("read dumped fixture");
+        let _ = std::fs::remove_file(&out);
+        bytes
+    };
+
+    assert_eq!(
+        dump_to("a"),
+        dump_to("b"),
+        "two dumps of the same transaction must be byte-identical"
+    );
+}
+
 /// `--dump-fixture` must reject `--override.spec` (a forced spec would make the
 /// fixture a what-if, not the on-chain transaction) and write nothing.
 #[test]

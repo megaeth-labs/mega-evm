@@ -360,7 +360,11 @@ impl Cmd {
                 nonce: info.nonce,
             };
 
-            cache_state.insert_account_with_storage(*address, acc_info, info.storage.clone());
+            cache_state.insert_account_with_storage(
+                *address,
+                acc_info,
+                info.storage.iter().map(|(k, v)| (*k, *v)).collect(),
+            );
         }
 
         Ok(State::builder().with_cached_prestate(cache_state).with_bundle_update().build())
