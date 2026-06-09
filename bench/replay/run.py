@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Replay-throughput benchmark driver for mega-evme.
+"""Replay-throughput benchmark driver for mega-evm.
 
-Runs a corpus of real, characteristic MegaETH mainnet transactions through
-``mega-evme replay --bench-runs`` fully offline (replaying from committed RPC
-captures, so it is deterministic and needs no network), and reports per-
-transaction EVM throughput.
+Runs a corpus of characteristic MegaETH workloads through ``state-test --bench``
+fully offline — each case is a self-contained state-test fixture (pre-state +
+tx + env), so the benchmark is deterministic and needs no network — and reports
+per-case EVM throughput.
 
-With a single ``--bin`` it just measures (useful for recording a baseline or a
-quick local check). With two ``--bin`` entries it does an **ABBA-interleaved**
-base-vs-PR comparison: for each transaction the two binaries are run in
-alternating order across several rounds so that slow monotonic drift on the CI
-machine cancels out, then the median of each binary's samples is compared. A
-transaction whose PR median is more than ``--threshold-pct`` slower than base is
-flagged as a regression (and, with ``--fail-on-regression``, fails the run).
+With a single ``--bin`` it just measures (useful for a baseline or a quick local
+check). With two ``--bin`` entries it does an **ABBA-interleaved** base-vs-PR
+comparison: for each case the two binaries are run in alternating order across
+several rounds so that slow monotonic drift on the CI machine cancels out, then
+the median of each binary's samples is compared. A case whose PR median is more
+than ``--threshold-pct`` slower than base is flagged as a regression (and, with
+``--fail-on-regression``, fails the run).
 
-The driver shells out to the binaries and parses the single-document JSON that
-``replay --json --bench-runs`` prints; it has no third-party dependencies.
+The driver shells out to ``state-test`` and parses the single-document JSON it
+prints; it has no third-party dependencies. ``--bin`` is a build directory (or
+the path to a binary in one); the ``state-test`` binary is resolved from it.
 
 Manifest format (JSON)::
 
@@ -26,15 +27,16 @@ Manifest format (JSON)::
         {
           "name": "erc20_transfer",
           "category": "storage+log",
-          "capture": "captures/erc20_transfer.cache.json",
-          "tx": "0x...",
+          "fixture": "fixtures/erc20_transfer.json",
           "expected_gas": 51234,
+          "spec": "Rex5",
           "note": "USDC transfer: 1 log, 2 SSTORE"
         }
       ]
     }
 
-``capture`` paths are resolved relative to the manifest file.
+``spec`` is optional (defaults to the fixture's single ``post`` spec). ``fixture``
+paths are resolved relative to the manifest file.
 """
 
 from __future__ import annotations
@@ -57,35 +59,37 @@ class Measurement:
     gas_used: int
 
 
-@dataclass
-class Tools:
-    """The two binaries a build provides: the replay CLI and the fixture runner."""
+def resolve_state_test(path: str) -> str:
+    """Resolve the ``state-test`` binary from one ``--bin`` value.
 
-    mega_evme: str
-    state_test: str
-
-
-def resolve_tools(path: str) -> Tools:
-    """Resolve the mega-evme and state-test binaries from one ``--bin`` value.
-
-    ``path`` may be a directory containing both binaries, or the path to the
-    ``mega-evme`` binary (``state-test`` is then taken as its sibling). The
-    latter keeps `--bin target/release/mega-evme` working locally.
+    ``path`` may be a build directory containing the binary, or the path to a
+    binary in one (``state-test`` is then taken as a sibling) — so both
+    ``--bin target/release`` and ``--bin target/release/mega-evme`` work.
     """
     p = Path(path)
-    if p.is_dir():
-        return Tools(mega_evme=str(p / "mega-evme"), state_test=str(p / "state-test"))
-    return Tools(mega_evme=str(p), state_test=str(p.parent / "state-test"))
+    return str(p / "state-test") if p.is_dir() else str(p.parent / "state-test")
 
 
-def _parse_bench(stdout: str, who: str) -> Measurement:
+def run_case(state_test: str, case: dict, manifest_dir: Path, runs: int, warmup: int) -> Measurement:
+    """Benchmark one self-contained fixture case via ``state-test --bench``."""
+    fixture = (manifest_dir / case["fixture"]).resolve()
+    cmd = [state_test, "--bench", "--bench-runs", str(runs), "--bench-warmup", str(warmup)]
+    if case.get("spec"):
+        cmd += ["--bench-spec", case["spec"]]
+    cmd.append(str(fixture))
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"{case['name']} failed (exit {proc.returncode}):\n{proc.stderr.strip()}"
+        )
     try:
-        out = json.loads(stdout.strip())
+        out = json.loads(proc.stdout.strip())
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"could not parse bench JSON from {who}: {exc}") from exc
+        raise RuntimeError(f"could not parse bench JSON for {case['name']}: {exc}") from exc
     bench = out.get("bench")
     if bench is None:
-        raise RuntimeError(f"no `bench` field in output from {who}")
+        raise RuntimeError(f"no `bench` field in output for {case['name']}")
     return Measurement(
         median_ns=float(bench["medianNs"]),
         mgas_per_sec=float(bench["mgasPerSec"]),
@@ -93,55 +97,8 @@ def _parse_bench(stdout: str, who: str) -> Measurement:
     )
 
 
-def run_case(tools: Tools, case: dict, manifest_dir: Path, runs: int, warmup: int) -> Measurement:
-    """Benchmark one case and parse its single-document JSON.
-
-    A ``capture`` case (default) replays a real mined transaction offline via
-    ``mega-evme replay``; a ``fixture`` case benchmarks a self-contained
-    state-test fixture (no RPC, any source) via ``state-test --bench``. Both
-    emit the same ``{gas_used, bench:{…}}`` shape.
-    """
-    kind = case.get("type", "capture")
-    if kind == "fixture":
-        fixture = (manifest_dir / case["fixture"]).resolve()
-        cmd = [
-            tools.state_test,
-            "--bench",
-            "--bench-runs",
-            str(runs),
-            "--bench-warmup",
-            str(warmup),
-        ]
-        if case.get("spec"):
-            cmd += ["--bench-spec", case["spec"]]
-        cmd.append(str(fixture))
-    elif kind == "capture":
-        capture = (manifest_dir / case["capture"]).resolve()
-        cmd = [
-            tools.mega_evme,
-            "replay",
-            "--rpc.replay-file",
-            str(capture),
-            "--bench-runs",
-            str(runs),
-            "--bench-warmup",
-            str(warmup),
-            "--json",
-            case["tx"],
-        ]
-    else:
-        raise SystemExit(f"case {case['name']}: unknown type {kind!r} (expected capture|fixture)")
-
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"{case['name']} failed (exit {proc.returncode}):\n{proc.stderr.strip()}"
-        )
-    return _parse_bench(proc.stdout, case["name"])
-
-
 def measure_abba(
-    binaries: list[tuple[str, Tools]],
+    binaries: list[tuple[str, str]],
     case: dict,
     manifest_dir: Path,
     runs: int,
@@ -158,8 +115,8 @@ def measure_abba(
     samples: dict[str, list[Measurement]] = {label: [] for label, _ in binaries}
     for r in range(rounds):
         order = binaries if r % 2 == 0 else list(reversed(binaries))
-        for label, tools in order:
-            samples[label].append(run_case(tools, case, manifest_dir, runs, warmup))
+        for label, state_test in order:
+            samples[label].append(run_case(state_test, case, manifest_dir, runs, warmup))
     result: dict[str, Measurement] = {}
     for label, _ in binaries:
         ss = samples[label]
@@ -310,7 +267,7 @@ def main() -> int:
     warmup = args.warmup if args.warmup is not None else manifest.get("default_warmup", 5)
     cases = manifest["cases"]
     labels = [label for label, _ in args.bin]
-    binaries = [(label, resolve_tools(path)) for label, path in args.bin]
+    binaries = [(label, resolve_state_test(path)) for label, path in args.bin]
     manifest_dir = args.manifest.resolve().parent
 
     results: list[dict[str, Measurement]] = []

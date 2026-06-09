@@ -108,12 +108,9 @@ struct ProviderContext {
 }
 
 /// Replay-specific execution outcome
-#[allow(dead_code)]
 pub(super) struct ReplayOutcome {
     /// Common execution outcome
     pub outcome: EvmeOutcome,
-    /// The original transaction that was replayed
-    pub original_tx: Transaction,
     /// The transaction receipt
     pub receipt: OpTxReceipt,
     /// Self-validating fixture draft, present iff `--dump-fixture` was given.
@@ -558,7 +555,6 @@ impl Cmd {
                 exec_time: duration,
                 trace_data,
             },
-            original_tx: ctx.target_tx.clone(),
             receipt,
             fixture,
         })

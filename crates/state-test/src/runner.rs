@@ -352,6 +352,9 @@ fn check_evm_execution(
 /// Single source of truth shared by [`execute_test_suite`] and single-unit
 /// execution so the validation and dump paths stay byte-identical.
 fn configure_max_blobs(cfg: &mut CfgEnv<MegaSpecId>) {
+    // OSAKA (which implies PRAGUE) caps blobs back at 6, while the PRAGUE-only
+    // window allows 9 — so the OSAKA arm must be checked first and is distinct
+    // from the pre-PRAGUE default of 6 despite the same value.
     if cfg.spec.into_eth_spec().is_enabled_in(SpecId::OSAKA) {
         cfg.set_max_blobs_per_tx(6);
     } else if cfg.spec.into_eth_spec().is_enabled_in(SpecId::PRAGUE) {
@@ -637,8 +640,6 @@ pub fn time_unit_execution(
 pub struct UnitBench {
     /// Suite key (unit name) the result belongs to.
     pub name: String,
-    /// Spec the unit was executed under.
-    pub spec: SpecName,
     /// Gas used by the (identical) execution.
     pub gas_used: u64,
     /// Whether the execution succeeded.
@@ -740,7 +741,6 @@ pub fn bench_test_suite(
         let mean = durations.iter().sum::<Duration>() / durations.len() as u32;
         results.push(UnitBench {
             name,
-            spec,
             gas_used,
             success: status == "success",
             runs,

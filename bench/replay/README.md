@@ -102,9 +102,9 @@ also names the `"spec"` to run under.
 
 Verify with `python3 bench/replay/run.py --bin pr=target/release`.
 
-> A `"type": "capture"` case (replay a committed RPC capture via `mega-evme
-> replay`) is still supported by the driver for ad-hoc use, but the committed
-> corpus uses self-contained fixtures so it is uniform and network-free.
+> To benchmark a single transaction ad-hoc without adding a corpus case, use
+> `mega-evme replay --rpc.replay-file <capture> --bench-runs N --json <tx>`
+> directly — it times the same execution and prints the same `bench` shape.
 
 ## CI
 

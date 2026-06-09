@@ -70,14 +70,14 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
 
       # The PR's driver + corpus drive the whole run; only the binary under test
-      # changes between PR-head and baseline. The driver needs both mega-evme and
-      # state-test (the corpus is fixtures, timed by state-test); stash both per
-      # build into a directory the driver can resolve. Build PR-head first.
-      - name: Build PR binaries
+      # changes between PR-head and baseline. The corpus is self-contained
+      # fixtures timed by state-test, so only that binary is built; stash it per
+      # build into a directory the driver resolves. Build PR-head first.
+      - name: Build PR binary
         run: |
-          cargo build --release -p mega-evme -p state-test
+          cargo build --release -p state-test
           mkdir -p /tmp/pr
-          cp target/release/mega-evme target/release/state-test /tmp/pr/
+          cp target/release/state-test /tmp/pr/
 
       - name: Determine baseline commit
         id: baseline
@@ -87,14 +87,14 @@ jobs:
 
       # Build the baseline binaries from the merge-base, but keep the PR checkout's
       # driver + corpus (restored by the trap) for the actual run.
-      - name: Build baseline binaries
+      - name: Build baseline binary
         run: |
           git checkout ${{ steps.baseline.outputs.commit }}
           trap 'git checkout -' EXIT
           git submodule update --init --recursive
-          cargo build --release -p mega-evme -p state-test
+          cargo build --release -p state-test
           mkdir -p /tmp/base
-          cp target/release/mega-evme target/release/state-test /tmp/base/
+          cp target/release/state-test /tmp/base/
 
       # The fixture-bench capability is itself introduced by a PR; if the baseline
       # predates it, `state-test --bench` is unknown there — fall back to measuring
