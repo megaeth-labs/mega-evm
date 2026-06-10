@@ -1,6 +1,6 @@
 # MegaEVM state test
 
-The `state-test` is a fork of `revme` in the official `revm` repository. 
+The `state-test` CLI is a thin front-end over the `mega-state-test` runner library (`crates/mega-state-test`), which is a fork of `revme` in the official `revm` repository. 
 
 The changes made to run `execution-specification-tests` on MegaEVM is: 
 - `MegaTransaction`'s `enveloped_tx` is always set to `Some(vec![].into())` so that there is no L1 data fee induced. 

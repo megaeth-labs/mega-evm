@@ -16,20 +16,6 @@ use std::{path::PathBuf, str::FromStr};
 use mega_evm::MegaSpecId;
 use serde_json::json;
 
-// Dependencies used by the library
-use alloy_eips as _;
-use alloy_primitives as _;
-use alloy_rlp as _;
-use alloy_serde as _;
-use hash_db as _;
-use indicatif as _;
-use k256 as _;
-use plain_hasher as _;
-use serde as _;
-use thiserror as _;
-use triehash as _;
-use walkdir as _;
-
 /// `statetest` subcommand
 #[derive(Parser, Debug)]
 pub struct Cmd {

@@ -2961,6 +2961,7 @@ dependencies = [
  "dirs",
  "mega-evm",
  "mega-evme",
+ "mega-state-test",
  "op-alloy-consensus",
  "op-alloy-network",
  "op-alloy-rpc-types",
@@ -2969,7 +2970,6 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
- "state-test",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2977,6 +2977,26 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.20",
  "wiremock",
+]
+
+[[package]]
+name = "mega-state-test"
+version = "1.6.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-serde",
+ "hash-db",
+ "indicatif",
+ "k256",
+ "mega-evm",
+ "plain_hasher",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "triehash",
+ "walkdir",
 ]
 
 [[package]]
@@ -2999,9 +3019,9 @@ dependencies = [
  "alloy-serde",
  "clap",
  "mega-evm",
+ "mega-state-test",
  "serde",
  "serde_json",
- "state-test",
  "thiserror",
 ]
 
@@ -5115,21 +5135,10 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "state-test"
 version = "1.6.0"
 dependencies = [
- "alloy-eips",
- "alloy-primitives",
- "alloy-rlp",
- "alloy-serde",
  "clap",
- "hash-db",
- "indicatif",
- "k256",
  "mega-evm",
- "plain_hasher",
- "serde",
+ "mega-state-test",
  "serde_json",
- "thiserror",
- "triehash",
- "walkdir",
 ]
 
 [[package]]

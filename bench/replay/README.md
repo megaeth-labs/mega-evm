@@ -114,7 +114,7 @@ Both kinds end up with a populated `post`, so they are picked up by the per-PR
 correctness test automatically — no extra wiring.
 
 Verify with `python3 bench/replay/run.py --bin pr=target/release` (bench) and
-`cargo test -p state-test --test replay_corpus` (correctness).
+`cargo test -p mega-state-test --test replay_corpus` (correctness).
 
 > To benchmark a single transaction ad-hoc, dump it
 > (`mega-evme replay --dump-fixture /tmp/x.json <tx>`) and time it
