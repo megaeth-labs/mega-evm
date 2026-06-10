@@ -74,6 +74,8 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # PRs opened by the engineer-agent bot (mega-putin) must still be reviewed.
+          allowed_bots: "mega-putin"
           additional_permissions: |
             actions: read
           claude_args: |
@@ -145,6 +147,8 @@ jobs:
         if: steps.filter.outputs.has_source_changes == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # PRs opened by the engineer-agent bot (mega-putin) must still be reviewed.
+          allowed_bots: "mega-putin"
           claude_args: |
             --allowedTools "Read,Glob,Grep,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(ls:*),Bash(tree:*)"
           prompt: |
@@ -197,6 +201,8 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # PRs opened by the engineer-agent bot (mega-putin) must still be reviewed.
+          allowed_bots: "mega-putin"
           claude_args: |
             --allowedTools "Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh api:*),Bash(gh label list:*),Bash(git log:*),Bash(git diff:*),Bash(ls:*)"
           prompt: |
