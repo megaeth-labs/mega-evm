@@ -108,14 +108,14 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # Same-repo PR heads are already in `origin` after the full-depth fetch,
-      # but fork PRs are not — `gh pr checkout` adds the fork remote and fetches
-      # the head so the pinned `feature_sha` below is resolvable.
+      # Fetch the PR head commit by its pull ref, which GitHub keeps in the base
+      # repo for fork PRs and even after the source branch is deleted (merged
+      # PRs) — unlike `gh pr checkout`, which needs the source branch to exist.
+      # `git checkout <feature_sha>` below then resolves against the fetched
+      # commit.
       - name: Fetch PR head
         if: github.event_name == 'issue_comment'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr checkout ${{ github.event.issue.number }}
+        run: git fetch --no-tags origin "pull/${{ github.event.issue.number }}/head"
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
