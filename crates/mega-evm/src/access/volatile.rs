@@ -68,7 +68,7 @@ impl VolatileDataAccess {
         (self.bits() & Self::BLOCK_ENV_MASK).count_ones() as usize
     }
 
-    /// Counts the total number of accessed volatile data types.
+    /// Counts the number of distinct block environment fields accessed.
     /// This is an alias for `count_block_env_accessed` for backward compatibility.
     pub fn count_accessed(self) -> usize {
         self.count_block_env_accessed()
