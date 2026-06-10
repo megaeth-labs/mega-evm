@@ -176,6 +176,8 @@ def build_report(
         if compare:
             base, pr = labels
             b, p = res[base], res[pr]
+            if b.median_ns <= 0:
+                sys.exit(f"case {name}: baseline median is zero; cannot compute a delta")
             delta = (p.median_ns - b.median_ns) / b.median_ns * 100.0
             verdict = classify(delta, threshold)
             regressions += verdict.startswith("🔴")

@@ -343,6 +343,16 @@ impl Cmd {
         // status — a mismatch means a wrong spec or hardfork config, which
         // self-validation alone cannot catch.
         let fixture_inputs = if self.dump_fixture.is_some() {
+            // A pending transaction has no receipt yet, so the fidelity gate cannot
+            // run; fail clearly instead of surfacing the receipt lookup's confusing
+            // `TransactionNotFound`.
+            if ctx.target_tx.block_number.is_none() {
+                return Err(ReplayError::Other(
+                    "--dump-fixture does not support pending transactions: the fidelity \
+                     gate needs the on-chain receipt, which does not exist yet"
+                        .to_string(),
+                ));
+            }
             // Sort the accessed buckets/oracle slots so the dumped fixture is
             // byte-reproducible: these come from hash-map iteration, whose order
             // is otherwise non-deterministic across runs (noisy diffs, and an

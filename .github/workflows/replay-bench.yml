@@ -242,7 +242,7 @@ jobs:
             }
             let table = lines.join('\n');
             if (compare) {
-              table += `\n\n**${summary.cases.length} transactions — ${summary.regressions} regression(s), ${summary.improvements} improvement(s)** (threshold ±${Number(summary.threshold_pct).toFixed(1)}% on median time; ABBA-interleaved).`;
+              table += `\n\n**${summary.cases.length} transactions — ${fmtInt(summary.regressions)} regression(s), ${fmtInt(summary.improvements)} improvement(s)** (threshold ±${Number(summary.threshold_pct).toFixed(1)}% on median time; ABBA-interleaved).`;
             }
             const base = '${{ needs.prepare.outputs.baseline_sha }}';
             const head = '${{ needs.prepare.outputs.feature_sha }}';

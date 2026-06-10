@@ -20,6 +20,24 @@ pub struct MegaEnv {
 }
 
 impl MegaEnv {
+    /// Checks that the recorded values are usable by the runner.
+    ///
+    /// Every bucket capacity must be at least [`mega_evm::MIN_BUCKET_SIZE`]:
+    /// `DynamicGasCost` asserts this at lookup time, so a smaller capacity in a
+    /// hand-edited fixture would abort the process instead of failing the test.
+    pub fn validate(&self) -> Result<(), String> {
+        for &(bucket_id, capacity) in &self.bucket_capacities {
+            if capacity < mega_evm::MIN_BUCKET_SIZE as u64 {
+                return Err(format!(
+                    "megaEnv bucket {bucket_id} capacity {capacity} is below \
+                     MIN_BUCKET_SIZE ({})",
+                    mega_evm::MIN_BUCKET_SIZE
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Build a [`TestExternalEnvs`] that reproduces the recorded SALT bucket
     /// capacities and oracle storage.
     ///

@@ -152,10 +152,34 @@ pub fn tx_env_at(unit: &TestUnit, indexes: TxPartIndices) -> Result<TxEnv, TestE
             .map(|b| u128::try_from(b).expect("max fee less than u128::MAX"))
             .unwrap_or(u128::MAX),
         tx_type: tx_type as u8,
-        gas_limit: unit.transaction.gas_limit[indexes.gas].saturating_to(),
-        data: unit.transaction.data[indexes.data].clone(),
+        gas_limit: unit
+            .transaction
+            .gas_limit
+            .get(indexes.gas)
+            .ok_or(TestError::PartIndexOutOfBounds {
+                part: "gasLimit",
+                index: indexes.gas,
+                len: unit.transaction.gas_limit.len(),
+            })?
+            .saturating_to(),
+        data: unit
+            .transaction
+            .data
+            .get(indexes.data)
+            .ok_or(TestError::PartIndexOutOfBounds {
+                part: "data",
+                index: indexes.data,
+                len: unit.transaction.data.len(),
+            })?
+            .clone(),
         nonce: u64::try_from(unit.transaction.nonce).unwrap(),
-        value: unit.transaction.value[indexes.value],
+        value: *unit.transaction.value.get(indexes.value).ok_or(
+            TestError::PartIndexOutOfBounds {
+                part: "value",
+                index: indexes.value,
+                len: unit.transaction.value.len(),
+            },
+        )?,
         access_list: unit
             .transaction
             .access_lists

@@ -11,7 +11,7 @@ use std::{
 };
 
 use state_test::{
-    runner::{execute_test_suite, execute_unit_collect},
+    runner::{execute_test_suite, execute_unit_collect, fill_test_suite},
     types::{SpecName, Test, TestSuite, TestUnit},
 };
 
@@ -102,6 +102,57 @@ fn test_dumped_fixture_self_validates() {
     let elapsed = Arc::new(Mutex::new(Duration::ZERO));
     execute_test_suite(&path, &elapsed, false, false)
         .expect("dumped fixture should self-validate when re-run");
+}
+
+#[test]
+fn test_fill_computes_post_for_empty_fixture() {
+    // The sample unit ships with an empty `post`; fill must compute one that
+    // then self-validates, leaving no temp file behind.
+    let suite_json = format!("{{\"fill_test\": {}}}", sample_unit_json());
+    let dir = std::env::temp_dir().join("mega_evme_dump_roundtrip");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let path = dir.join("fill_empty.json");
+    std::fs::write(&path, &suite_json).expect("write fixture");
+
+    let n = fill_test_suite(&path, Some(SpecName::Rex5), false).expect("fill");
+    assert_eq!(n, 1);
+    assert!(!path.with_extension("json.tmp").exists(), "temp file must be renamed away");
+
+    let elapsed = Arc::new(Mutex::new(Duration::ZERO));
+    execute_test_suite(&path, &elapsed, false, false).expect("filled fixture self-validates");
+}
+
+#[test]
+fn test_fill_refuses_existing_post_without_force() {
+    let (json, _) = dump_fixture_json();
+    let dir = std::env::temp_dir().join("mega_evme_dump_roundtrip");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let path = dir.join("fill_force.json");
+    std::fs::write(&path, &json).expect("write fixture");
+
+    let err = fill_test_suite(&path, Some(SpecName::Rex5), false)
+        .expect_err("non-empty post must be refused without force");
+    assert!(format!("{err}").contains("--force"), "error should point at --force: {err}");
+    // The refused file is untouched.
+    assert_eq!(std::fs::read_to_string(&path).expect("read back"), json);
+
+    let n = fill_test_suite(&path, Some(SpecName::Rex5), true).expect("fill with force");
+    assert_eq!(n, 1);
+    let elapsed = Arc::new(Mutex::new(Duration::ZERO));
+    execute_test_suite(&path, &elapsed, false, false).expect("refilled fixture self-validates");
+}
+
+#[test]
+fn test_undersized_bucket_capacity_fails_instead_of_panicking() {
+    // A hand-edited capacity below MIN_BUCKET_SIZE must surface as a fixture
+    // error, not abort the process via the DynamicGasCost assert.
+    let bad = sample_unit_json().replace("[[100, 4096]]", "[[100, 1]]");
+    assert_ne!(bad, sample_unit_json(), "capacity replacement applied");
+    let unit: TestUnit = serde_json::from_str(&bad).expect("parse unit");
+
+    let err = execute_unit_collect(&unit, &SpecName::Rex5)
+        .expect_err("undersized capacity must fail execution");
+    assert!(format!("{err}").contains("MIN_BUCKET_SIZE"), "unexpected error: {err}");
 }
 
 #[test]

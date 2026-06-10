@@ -65,8 +65,12 @@ pub struct Cmd {
     /// The offline analog of `--dump-fixture`'s post-fill: makes a fixture that
     /// has no `post` (a hand-built or prestate-snapshot case) self-validating.
     /// Use `--bench-spec` to choose the spec when the fixture has no `post` yet.
-    #[arg(long)]
+    /// Refuses fixtures that already have a `post` unless `--force` is set.
+    #[arg(long, conflicts_with_all = ["bench", "bench_runs", "bench_warmup"])]
     fill: bool,
+    /// Overwrite an existing non-empty `post` when filling with `--fill`.
+    #[arg(long, requires = "fill")]
+    force: bool,
 }
 
 impl Cmd {
@@ -129,7 +133,7 @@ impl Cmd {
                 });
             }
             for file in find_all_json_tests(path) {
-                let n = fill_test_suite(&file, spec_override)?;
+                let n = fill_test_suite(&file, spec_override, self.force)?;
                 println!("Filled post for {n} unit(s) in {}", file.display());
             }
         }

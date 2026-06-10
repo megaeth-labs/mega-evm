@@ -479,8 +479,12 @@ pub fn execute_test_suite(
 /// Uses [`AHashBucketHasher`] so that bucket IDs match those recorded during
 /// `mega-evme replay` — a different hasher would map keys to different buckets
 /// and reproduce different gas.
-fn external_envs_for(unit: &TestUnit) -> mega_evm::TestExternalEnvs<Infallible, AHashBucketHasher> {
-    unit.mega_env.clone().unwrap_or_default().to_external_envs::<AHashBucketHasher>()
+fn external_envs_for(
+    unit: &TestUnit,
+) -> Result<mega_evm::TestExternalEnvs<Infallible, AHashBucketHasher>, TestErrorKind> {
+    let mega_env = unit.mega_env.clone().unwrap_or_default();
+    mega_env.validate().map_err(TestErrorKind::FixtureError)?;
+    Ok(mega_env.to_external_envs::<AHashBucketHasher>())
 }
 
 fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErrorKind> {
@@ -494,7 +498,7 @@ fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErro
         .with_db(&mut state)
         .with_cfg(ctx.cfg.clone())
         .with_block(ctx.block.clone())
-        .with_external_envs(external_envs_for(ctx.unit).into());
+        .with_external_envs(external_envs_for(ctx.unit)?.into());
     let mut tx = MegaTransaction::new(ctx.tx.clone());
     tx.enveloped_tx = Some(Bytes::default());
 
@@ -584,7 +588,7 @@ fn run_unit_once(
         .with_db(&mut state)
         .with_cfg(cfg.clone())
         .with_block(block)
-        .with_external_envs(external_envs_for(unit).into());
+        .with_external_envs(external_envs_for(unit)?.into());
     let mut megatx = MegaTransaction::new(tx);
     megatx.enveloped_tx = Some(Bytes::default());
 
@@ -763,13 +767,31 @@ pub fn bench_test_suite(
 /// `spec_override` selects the spec to execute/record under; when `None`, the
 /// unit's single existing `post` spec is used (so a fixture with an empty `post`
 /// must pass a spec).
-pub fn fill_test_suite(path: &Path, spec_override: Option<SpecName>) -> Result<usize, TestError> {
+///
+/// Filling replaces the unit's entire `post` map (single spec, single index
+/// `{0,0,0}`) with circularly-derived expectations, so a unit that already has a
+/// non-empty `post` is refused unless `force` is set.
+pub fn fill_test_suite(
+    path: &Path,
+    spec_override: Option<SpecName>,
+    force: bool,
+) -> Result<usize, TestError> {
     let path_str = path.to_string_lossy().into_owned();
     let fixture_err = |msg: String| TestError {
         name: "fill".to_string(),
         path: path_str.clone(),
         kind: TestErrorKind::FixtureError(msg),
     };
+
+    // Validation skips these filenames entirely, so a filled fixture here would
+    // never be checked — refuse rather than produce a vacuously-valid file.
+    if skip_test(path) {
+        return Err(fixture_err(
+            "this filename is on the validation skip list; the filled fixture would never \
+             be validated"
+                .to_string(),
+        ));
+    }
 
     let s = std::fs::read_to_string(path).map_err(|e| fixture_err(format!("read: {e}")))?;
     let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
@@ -780,6 +802,11 @@ pub fn fill_test_suite(path: &Path, spec_override: Option<SpecName>) -> Result<u
 
     let mut filled = std::collections::BTreeMap::new();
     for (name, mut unit) in suite.0 {
+        if !force && unit.post.values().any(|tests| !tests.is_empty()) {
+            return Err(fixture_err(format!(
+                "unit {name} already has a post expectation; pass --force to overwrite"
+            )));
+        }
         let spec = match spec_override {
             Some(s) => s,
             None => {
@@ -794,6 +821,14 @@ pub fn fill_test_suite(path: &Path, spec_override: Option<SpecName>) -> Result<u
                 }
             }
         };
+        // Validation skips Constantinople (mirroring upstream revme), so a post
+        // recorded under it would never be checked.
+        if spec == SpecName::Constantinople {
+            return Err(fixture_err(format!(
+                "unit {name}: validation skips Constantinople; a post filled under it \
+                 would never be checked"
+            )));
+        }
         let executed = execute_unit_collect(&unit, &spec)
             .map_err(|e| fixture_err(format!("execute {name}: {e}")))?;
         unit.out = executed.output.clone();
@@ -810,7 +845,11 @@ pub fn fill_test_suite(path: &Path, spec_override: Option<SpecName>) -> Result<u
     let count = filled.len();
     let json = serde_json::to_string_pretty(&TestSuite(filled))
         .map_err(|e| fixture_err(format!("serialize: {e}")))?;
-    std::fs::write(path, json).map_err(|e| fixture_err(format!("write: {e}")))?;
+    // Write to a sibling temp file and rename so an interrupted write cannot
+    // truncate the original fixture.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| fixture_err(format!("write: {e}")))?;
+    std::fs::rename(&tmp, path).map_err(|e| fixture_err(format!("rename: {e}")))?;
     Ok(count)
 }
 
@@ -828,11 +867,16 @@ fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
 
+    // The main run already validated the unit's `megaEnv`, so a failure here is
+    // unreachable; bail out of the debug re-run rather than panic.
+    let Ok(external_envs) = external_envs_for(ctx.unit) else {
+        return;
+    };
     let evm_context = MegaContext::default()
         .with_db(&mut state)
         .with_cfg(ctx.cfg.clone())
         .with_block(ctx.block.clone())
-        .with_external_envs(external_envs_for(ctx.unit).into());
+        .with_external_envs(external_envs.into());
     let mut tx = MegaTransaction::new(ctx.tx.clone());
     tx.enveloped_tx = Some(Bytes::default());
     let mut evm = MegaEvm::new(evm_context)

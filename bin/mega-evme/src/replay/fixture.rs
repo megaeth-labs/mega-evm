@@ -149,9 +149,12 @@ where
     // emit different log payloads (e.g. a preceding-tx divergence that changes a
     // value the target re-emits). The receipt's logs are already fetched, so the
     // comparison is a single root equality. `finalize_and_write` then re-checks the
-    // isolated run's logs root against this same value, closing the L1-data-fee
-    // channel where the isolated run (which zeroes the L1 fee) could diverge from
-    // the full replay while gas, status, and output still match.
+    // isolated run's logs root against this same value, so any gas-, output-, or
+    // log-visible divergence from the zeroed L1 data fee aborts the dump. One
+    // channel stays open by construction: the isolated run's sender balance is
+    // shifted by the zeroed fee, so a contract that stores a balance-derived value
+    // bakes that shifted value into `post` (gas, status, output, and logs all
+    // still match). The fixture still self-validates and reproduces gas exactly.
     let anchor = &inputs.anchor;
     if actual_gas != anchor.gas_used {
         return Err(ReplayError::Other(format!(
@@ -280,8 +283,12 @@ where
             .basic_ref(*address)
             .map_err(|e| ReplayError::Other(format!("pre-state read for {address}: {e}")))?
         else {
-            // Account did not exist before the transaction — it is created during
-            // execution and must not appear in `pre`.
+            // The database reports no account. RPC-backed databases (AlloyDB)
+            // always materialize an account (possibly all-empty), so on a forked
+            // replay this branch never fires and accounts created by the target
+            // transaction enter `pre` as explicit empty accounts — equivalent
+            // under EIP-161 state clearing. A database that can signal
+            // nonexistence omits the account here.
             continue;
         };
 
