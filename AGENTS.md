@@ -41,14 +41,14 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ## Workspace Structure
 
-| Crate                   | Path                      | Purpose                                                      |
-| ----------------------- | ------------------------- | ------------------------------------------------------------ |
-| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                      |
-| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based) |
+| Crate                   | Path                      | Purpose                                                                                     |
+| ----------------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                                                     |
+| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based)                                |
 | `mega-state-test`       | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
-| `state-test`            | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)    |
-| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)           |
-| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                       |
+| `state-test`            | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
+| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)                                          |
+| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
 
 ## Architecture
 
