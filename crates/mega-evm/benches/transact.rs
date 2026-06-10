@@ -7,18 +7,11 @@
 #![allow(missing_docs)]
 
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mega_evm::{test_utils::MemoryDatabase, MegaSpecId};
-use revm::{
-    context::{result::ResultAndState, tx::TxEnvBuilder},
-    primitives::{keccak256, B256},
-    ExecuteEvm,
-};
+use criterion::{criterion_group, criterion_main, Criterion};
+use revm::primitives::{keccak256, B256};
 
 mod common;
-use common::{
-    add_baseline_rows, build_mega_tx, make_mega_evm, CallParams, LatestDbBuilder, SPEC_IDS,
-};
+use common::{register_all, Account, TxSpec, Workload};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CALLEE: Address = address!("0000000000000000000000000000000000100001");
@@ -38,77 +31,27 @@ fn erc20_balance_slot(address: Address, mapping_slot: u8) -> B256 {
     keccak256(data)
 }
 
-/// Execute a single `transact()` through `MegaEvm` at the given spec, mirroring
-/// the parameters used by the shared baseline adapters so all 7 rows in a
-/// group execute the same logical transaction.
-fn execute_mega(
-    spec: MegaSpecId,
-    db: MemoryDatabase,
-    params: &CallParams,
-) -> ResultAndState<mega_evm::MegaHaltReason> {
-    let mut evm = make_mega_evm(db, spec);
-    let tx = TxEnvBuilder::new()
-        .caller(params.caller)
-        .call(params.target)
-        .gas_limit(params.gas_limit)
-        .value(params.value)
-        .data(params.data.clone())
-        .build_fill();
-    let r = evm.transact(build_mega_tx(tx)).expect("mega transact");
-    assert!(r.result.is_success(), "mega transact should succeed: {:?}", r.result);
-    r
-}
-
-/// Register the mega spec rows for a group.
-fn add_mega_rows<FP>(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    params: &CallParams,
-    make_pinned_db: &FP,
-) where
-    FP: Fn() -> MemoryDatabase,
-{
-    for &(name, spec) in SPEC_IDS {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let result = execute_mega(black_box(spec), make_pinned_db(), params);
-                black_box(result)
-            })
-        });
-    }
-}
-
 /// Benchmark empty transaction (call with no value or data).
 fn bench_empty_transaction(c: &mut Criterion) {
     let mut group = c.benchmark_group("empty_transaction");
-    let params =
-        CallParams { caller: CALLER, target: CALLEE, value: U256::ZERO, ..Default::default() };
-    let make_pinned = MemoryDatabase::default;
-    let make_latest = || LatestDbBuilder::new().build();
-    add_baseline_rows(&mut group, &params, &make_pinned, &make_latest);
-    add_mega_rows(&mut group, &params, &make_pinned);
+    // No accounts seeded — caller and callee don't exist (gas price is zero, so
+    // the caller needs no balance), matching the original workload.
+    let workload = Workload::single(vec![], TxSpec::call(CALLER, CALLEE));
+    register_all(&mut group, &workload);
     group.finish();
 }
 
 /// Benchmark simple ether transfer between existing accounts.
 fn bench_simple_ether_transfer(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_ether_transfer");
-    let caller_balance = U256::from(1000);
-    let callee_balance = U256::from(100);
-    let params =
-        CallParams { caller: CALLER, target: CALLEE, value: U256::ZERO, ..Default::default() };
-    let make_pinned = || {
-        MemoryDatabase::default()
-            .account_balance(CALLER, caller_balance)
-            .account_balance(CALLEE, callee_balance)
-    };
-    let make_latest = || {
-        LatestDbBuilder::new()
-            .account_balance(CALLER, caller_balance)
-            .account_balance(CALLEE, callee_balance)
-            .build()
-    };
-    add_baseline_rows(&mut group, &params, &make_pinned, &make_latest);
-    add_mega_rows(&mut group, &params, &make_pinned);
+    let workload = Workload::single(
+        vec![
+            Account::new(CALLER).balance(U256::from(1000)),
+            Account::new(CALLEE).balance(U256::from(100)),
+        ],
+        TxSpec::call(CALLER, CALLEE),
+    );
+    register_all(&mut group, &workload);
     group.finish();
 }
 
@@ -131,25 +74,16 @@ fn bench_weth9_transfer(c: &mut Criterion) {
     let caller_gas_balance = U256::from(10).pow(U256::from(18));
     let balance_slot: U256 = erc20_balance_slot(CALLER, 3).into();
 
-    let make_pinned = || {
-        MemoryDatabase::default()
-            .account_code(WETH9_ADDRESS, WETH9_RUNTIME_CODE)
-            .account_storage(WETH9_ADDRESS, balance_slot, caller_weth_balance)
-            .account_balance(CALLER, caller_gas_balance)
-    };
-    let make_latest = || {
-        LatestDbBuilder::new()
-            .account_code(WETH9_ADDRESS, WETH9_RUNTIME_CODE)
-            .account_storage(WETH9_ADDRESS, balance_slot, caller_weth_balance)
-            .account_balance(CALLER, caller_gas_balance)
-            .build()
-    };
-
-    let params =
-        CallParams { caller: CALLER, target: WETH9_ADDRESS, data: calldata, ..Default::default() };
-
-    add_baseline_rows(&mut group, &params, &make_pinned, &make_latest);
-    add_mega_rows(&mut group, &params, &make_pinned);
+    let workload = Workload::single(
+        vec![
+            Account::new(WETH9_ADDRESS)
+                .code(WETH9_RUNTIME_CODE)
+                .storage(balance_slot, caller_weth_balance),
+            Account::new(CALLER).balance(caller_gas_balance),
+        ],
+        TxSpec::call(CALLER, WETH9_ADDRESS).data(calldata),
+    );
+    register_all(&mut group, &workload);
     group.finish();
 }
 
