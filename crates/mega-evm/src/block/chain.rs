@@ -11,7 +11,7 @@
 use alloy_hardforks::ForkCondition;
 use alloy_primitives::address;
 
-use crate::{MegaHardfork, MegaHardforkConfig, SequencerRegistryConfig};
+use crate::{MegaHardfork, MegaHardforkConfig, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS};
 
 /// `MegaETH` mainnet chain ID.
 pub const MAINNET_CHAIN_ID: u64 = 4326;
@@ -66,12 +66,17 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// All `MegaETH` hardforks activated at genesis.
 ///
 /// Used for unknown chains and local/standalone execution where the chain has no
-/// published schedule. Note this does not attach a [`SequencerRegistryConfig`],
-/// matching historical behavior.
+/// published schedule. Rex5 requires a [`SequencerRegistryConfig`] (block
+/// execution fails pre-block without one), and an unknown chain has no published
+/// roles, so both roles are seeded with [`MEGA_SYSTEM_ADDRESS`] as a
+/// placeholder. The placeholder only matters when bootstrapping a fresh
+/// registry: on a chain whose registry is already deployed, the live roles are
+/// read from the registry's storage.
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
-    // `with_all_activated` sets all MegaHardforks to `Timestamp(0)`; it does not
-    // attach a `SequencerRegistryConfig`, matching historical behavior.
-    MegaHardforkConfig::new().with_all_activated()
+    MegaHardforkConfig::new().with_all_activated().with_params(SequencerRegistryConfig {
+        rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
+        rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
+    })
 }
 
 /// Returns the canonical hardfork schedule for a chain ID.
@@ -120,5 +125,18 @@ mod tests {
         assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(1780459200), MegaSpecId::REX5);
         // Unknown chain: everything active at genesis.
         assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX5);
+    }
+
+    #[test]
+    fn test_unknown_chain_fallback_carries_sequencer_registry_config() {
+        // Rex5 block execution fails pre-block without a SequencerRegistryConfig,
+        // so the all-activated fallback must attach placeholder roles.
+        let hf = hardfork_schedule(999_999);
+        assert_eq!(hf.spec_id(0), MegaSpecId::REX5);
+        let params = hf
+            .fork_params::<SequencerRegistryConfig>()
+            .expect("fallback schedule must carry a SequencerRegistryConfig");
+        assert_eq!(params.rex5_initial_sequencer, MEGA_SYSTEM_ADDRESS);
+        assert_eq!(params.rex5_initial_admin, MEGA_SYSTEM_ADDRESS);
     }
 }

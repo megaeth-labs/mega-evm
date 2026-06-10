@@ -9,7 +9,7 @@ name: Replay Throughput Benchmark
 # benchmark.yml, and follows the same hardened structure: the job that compiles
 # and runs untrusted PR code (`bench`) is read-only, and only the jobs that touch
 # the PR (`prepare`, `compare`) get a write-scoped token — so a malicious PR run
-# triggered with `/benchmark-replay` has no write token to abuse.
+# triggered with `/replay-bench` has no write token to abuse.
 
 on:
   schedule:
@@ -42,7 +42,7 @@ jobs:
     if: >-
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request &&
-        contains(github.event.comment.body, '/benchmark-replay') &&
+        contains(github.event.comment.body, '/replay-bench') &&
         (github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR' ||
          github.event.comment.author_association == 'OWNER')

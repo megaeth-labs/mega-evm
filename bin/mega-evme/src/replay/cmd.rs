@@ -438,6 +438,10 @@ impl Cmd {
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
         }
 
+        // Clear block hash reads accumulated by the preceding transactions so the
+        // fixture gate below sees only the target transaction's BLOCKHASH reads.
+        block_executor.clear_accessed_block_hashes();
+
         // Execute target transaction. Override-incompatibility with
         // --dump-fixture is validated up front in `run()`.
         info!("Executing target transaction");
@@ -488,9 +492,10 @@ impl Cmd {
                 // A dumped fixture cannot faithfully reproduce BLOCKHASH: the
                 // state-test runner does not seed block hashes, so the isolated
                 // re-execution would read default hashes instead of the ones this
-                // replay observed. If the transaction actually read any block hash,
-                // refuse to dump rather than write a fixture that self-validates
-                // against the wrong roots.
+                // replay observed. The access record is cleared after the preceding
+                // transactions, so it holds exactly the target transaction's reads;
+                // if the target read any block hash, refuse to dump rather than
+                // write a fixture that self-validates against the wrong roots.
                 let accessed_block_hashes = block_executor.get_accessed_block_hashes();
                 if !accessed_block_hashes.is_empty() {
                     return Err(ReplayError::Other(format!(

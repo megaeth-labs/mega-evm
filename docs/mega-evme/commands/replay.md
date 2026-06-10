@@ -111,6 +111,8 @@ A mismatch aborts the dump (no file is written) with a clear error — this catc
 It then additionally cross-checks the isolated execution against the full replay (gas, status, output, and logs root), so the recorded `post` equals the real on-chain result — including across the L1 data fee, which the isolated run zeroes but the full replay charges.
 
 `--dump-fixture` cannot be combined with transaction overrides or `--override.spec` (a forced spec would record a what-if, not the on-chain transaction), and deposit transactions are not supported.
+A target transaction that reads a block hash via `BLOCKHASH` is also rejected: fixtures carry no historical block hashes, so the isolated re-execution could not reproduce the values the replay observed.
+Block hash reads by preceding transactions in the same block do not matter — only the target transaction's reads are checked.
 Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.
 
 ```bash

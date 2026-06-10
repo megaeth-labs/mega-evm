@@ -125,7 +125,7 @@ Verify with `python3 bench/replay/run.py --bin pr=target/release` (bench) and
 - **Correctness** runs on every PR: `cargo test` (`build-and-test.yml`) executes
   `replay_corpus.rs`, which validates the recorded post-state of every fixture.
 - **Performance** runs on demand: `replay-bench.yml` (weekly / manual dispatch /
-  member `/benchmark-replay` PR comment) builds the PR and merge-base binaries,
+  member `/replay-bench` PR comment) builds the PR and merge-base binaries,
   runs the driver, and posts the comparison table (job summary + PR comment).
 
 Timing on shared runners is noisy for sub-10µs cases; read the larger cases and

@@ -504,6 +504,18 @@ where
     pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
         self.evm.db().block_hashes.clone()
     }
+
+    /// Clears the recorded block hash accesses.
+    ///
+    /// Block hash reads accumulate in the executor's database across every
+    /// transaction executed so far. Callers that need to attribute BLOCKHASH
+    /// reads to a single transaction (e.g. replay fixture dumping) clear the
+    /// record before executing it. The record is a cache: a cleared hash is
+    /// simply re-fetched from the underlying database on the next access, so
+    /// execution results are unaffected.
+    pub fn clear_accessed_block_hashes(&mut self) {
+        self.evm.db_mut().block_hashes.clear();
+    }
 }
 
 /// Implementation of `alloy_evm::block::BlockExecutor` for `MegaETH` block executor.
