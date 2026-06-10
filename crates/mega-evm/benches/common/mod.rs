@@ -1,293 +1,97 @@
-//! Shared baseline adapters and `CacheDB` builder used by multiple bench
-//! files to compare mega-evm against vanilla revm and op-revm at both the
-//! pinned (currently depended) and latest crates.io versions.
+//! Shared bench harness comparing mega-evm against vanilla revm and op-revm.
 //!
-//! Every vanilla baseline is pinned to the Cancun hardfork so each row differs
-//! from the others only by crate and version, not by fork.
+//! A bench declares a backend-agnostic [`Workload`] (accounts + transactions)
+//! and registers it across a fixed set of [`Subject`](subject::Subject) rows:
+//! the four vanilla baselines (`revm_pinned`, `revm_latest`, `op_revm_pinned`,
+//! `op_revm_latest`) and the mega specs. Every row runs the same scenario, so a
+//! single criterion group yields a comparable gap table.
 //!
-//! Each bench file pulls this in with a plain `mod common;` (resolved via the
-//! standard `common/mod.rs` sibling-folder lookup).
-//!
-//! Each criterion bench target compiles as its own binary, so this module
-//! gets compiled once per target.
-//!
-//! `_latest` aliases come from a cargo `package` rename in `Cargo.toml`. Both
-//! `_latest` adapters share one revm tree because the chosen `op-revm` version
-//! already pulls the chosen `revm` version transitively.
+//! Bench files pull this in with a plain `mod common;` (resolved via the
+//! standard `common/mod.rs` sibling-folder lookup). Each criterion bench target
+//! compiles as its own binary, so this module is compiled once per target.
 
-#![allow(dead_code)] // each bench target picks the subset of adapters it needs
+#![allow(dead_code)] // each bench target uses a subset of the harness
 #![allow(unreachable_pub)] // included as a shared bench module, so `pub` items appear unreachable in lint terms
 
-use alloy_primitives::{Address, Bytes, U256};
-use criterion::black_box;
-use mega_evm::{
-    revm::{context::TxEnv, inspector::NoOpInspector},
-    test_utils::MemoryDatabase,
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-};
-use op_revm::{
-    DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned, OpSpecId as OpSpecIdPinned,
-    OpTransaction as OpTransactionPinned,
-};
-use op_revm_latest::{
-    DefaultOp as _, OpBuilder as _, OpContext as OpContextLatest, OpSpecId as OpSpecIdLatest,
-    OpTransaction as OpTransactionLatest,
-};
-use revm::{
-    context::tx::TxEnvBuilder, database::EmptyDB as EmptyDBPinned,
-    primitives::hardfork::SpecId as SpecIdPinned, Context as ContextPinned, ExecuteEvm,
-    MainBuilder as _, MainContext as _,
-};
-use revm_latest::{
-    bytecode::Bytecode as BytecodeLatest,
-    context::tx::TxEnvBuilder as TxEnvBuilderLatest,
-    database::{CacheDB as CacheDBLatest, EmptyDB as EmptyDBLatest},
-    primitives::hardfork::SpecId as SpecIdLatest,
-    Context as ContextLatest, ExecuteEvm as _, MainBuilder as _, MainContext as _,
-};
+pub mod subject;
+pub mod workload;
 
-/// Mega specs benchmarked alongside the vanilla baselines. Shared so every
-/// bench file produces the same set of mega rows.
+use mega_evm::MegaSpecId;
+use subject::{Mega, OpRevmLatest, OpRevmPinned, RevmLatest, RevmPinned, Subject};
+pub use workload::{Account, TxSpec, Workload};
+
+/// Mega specs registered by [`register_all`] and [`register_mega`]. Shared so
+/// every bench file emits the same mega rows. Benches needing a different set
+/// (single spec, SELFDESTRUCT-relevant specs, …) pass their own list to
+/// [`register_mega_specs`].
 pub const SPEC_IDS: &[(&str, MegaSpecId)] = &[
     ("equivalence", MegaSpecId::EQUIVALENCE),
     ("mini_rex", MegaSpecId::MINI_REX),
     ("rex4", MegaSpecId::REX4),
 ];
 
-/// Build a `MegaEvm` with the operator-fee scalar and constant zeroed so its
-/// rows are comparable against the vanilla baselines.
-pub fn make_mega_evm(
-    db: MemoryDatabase,
-    spec: MegaSpecId,
-) -> MegaEvm<MemoryDatabase, NoOpInspector, EmptyExternalEnv> {
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    MegaEvm::new(context)
+type Group<'a> = criterion::BenchmarkGroup<'a, criterion::measurement::WallTime>;
+
+fn baseline_subjects() -> Vec<Box<dyn Subject>> {
+    vec![Box::new(RevmPinned), Box::new(RevmLatest), Box::new(OpRevmPinned), Box::new(OpRevmLatest)]
 }
 
-/// Wrap a `TxEnv` into a `MegaTransaction` with an empty envelope, matching
-/// what the production tx-pool would attach.
-pub fn build_mega_tx(tx: TxEnv) -> MegaTransaction {
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-    mega_tx
+fn mega_subjects(specs: &[(&'static str, MegaSpecId)]) -> Vec<Box<dyn Subject>> {
+    specs.iter().map(|&(name, spec)| Box::new(Mega { name, spec }) as Box<dyn Subject>).collect()
 }
 
-/// Parameters describing a single `transact()` call. Shared by every adapter so
-/// callers fill only the fields they need.
-#[derive(Clone)]
-pub struct CallParams {
-    pub caller: Address,
-    pub target: Address,
-    pub gas_limit: u64,
-    pub value: U256,
-    pub data: Bytes,
-}
-
-impl Default for CallParams {
-    fn default() -> Self {
-        Self {
-            caller: Address::ZERO,
-            target: Address::ZERO,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: Bytes::new(),
-        }
-    }
-}
-
-/// Vanilla `revm` at the version mega-evm currently pins.
-///
-/// Spec pinned to Cancun so this row sits on the same hardfork as the other
-/// baselines (see `transact_call_revm_latest`); the pinned mainnet default is
-/// otherwise a later fork.
-pub fn transact_call_revm_pinned(db: MemoryDatabase, p: &CallParams) {
-    let mut evm = ContextPinned::mainnet()
-        .modify_cfg_chained(|cfg| cfg.spec = SpecIdPinned::CANCUN)
-        .with_db(db)
-        .build_mainnet();
-    let tx = TxEnvBuilder::new()
-        .caller(p.caller)
-        .call(p.target)
-        .gas_limit(p.gas_limit)
-        .value(p.value)
-        .data(p.data.clone())
-        .build_fill();
-    let r = evm.transact(tx).expect("revm_pinned transact");
-    assert!(r.result.is_success(), "revm_pinned should succeed: {:?}", r.result);
-    black_box(r);
-}
-
-/// `op-revm` at the version mega-evm currently pins, operator fee = 0.
-///
-/// Pinned to Holocene (eth Cancun) to match the other baselines: `DefaultOp::op()`
-/// hard-codes `OpSpecId::BEDROCK` (eth Merge) regardless of the enum default, so
-/// without this the op row would sit on a different hardfork than the revm rows.
-pub fn transact_call_op_revm_pinned(db: MemoryDatabase, p: &CallParams) {
-    let mut ctx = <OpContextPinned<EmptyDBPinned>>::op().with_db(db);
-    ctx.modify_cfg(|cfg| cfg.spec = OpSpecIdPinned::HOLOCENE);
-    ctx.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    let mut evm = ctx.build_op();
-    let tx_env = TxEnvBuilder::new()
-        .caller(p.caller)
-        .call(p.target)
-        .gas_limit(p.gas_limit)
-        .value(p.value)
-        .data(p.data.clone())
-        .build_fill();
-    let mut op_tx = OpTransactionPinned::new(tx_env);
-    op_tx.enveloped_tx = Some(Bytes::new());
-    let r = evm.transact(op_tx).expect("op_revm_pinned transact");
-    assert!(r.result.is_success(), "op_revm_pinned should succeed: {:?}", r.result);
-    black_box(r);
-}
-
-/// Vanilla `revm` at the latest crates.io release.
-///
-/// Spec pinned to Cancun for two reasons: it keeps this row on the same
-/// hardfork as the other baselines, and it avoids the EIP-7825
-/// `tx_gas_limit_cap` (2^24) that `MainContext::mainnet()` would otherwise
-/// inherit from its default Osaka spec and that the multi-gigagas `gas_limit`
-/// workloads would trip.
-pub fn transact_call_revm_latest(db: CacheDBLatest<EmptyDBLatest>, p: &CallParams) {
-    let mut evm = ContextLatest::mainnet()
-        .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecIdLatest::CANCUN))
-        .with_db(db)
-        .build_mainnet();
-    let tx = TxEnvBuilderLatest::new()
-        .caller(p.caller)
-        .call(p.target)
-        .gas_limit(p.gas_limit)
-        .value(p.value)
-        .data(p.data.clone())
-        .build_fill();
-    let r = evm.transact(tx).expect("revm_latest transact");
-    assert!(r.result.is_success(), "revm_latest should succeed: {:?}", r.result);
-    black_box(r);
-}
-
-/// `op-revm` at the latest crates.io release, operator fee = 0.
-///
-/// Pinned to Holocene (eth Cancun) to match the other baselines: `DefaultOp::op()`
-/// hard-codes `OpSpecId::BEDROCK` (eth Merge) regardless of the enum default, so
-/// without this the op row would sit on a different hardfork than the revm rows.
-/// Holocene (eth Cancun) also predates the EIP-7825 `tx_gas_limit_cap`, so the
-/// multi-gigagas `gas_limit` workloads pass.
-pub fn transact_call_op_revm_latest(db: CacheDBLatest<EmptyDBLatest>, p: &CallParams) {
-    let mut ctx = <OpContextLatest<EmptyDBLatest>>::op().with_db(db);
-    ctx.modify_cfg(|cfg| cfg.spec = OpSpecIdLatest::HOLOCENE);
-    ctx.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::ZERO);
-        chain.operator_fee_constant = Some(U256::ZERO);
-    });
-    let mut evm = ctx.build_op();
-    let tx_env = TxEnvBuilderLatest::new()
-        .caller(p.caller)
-        .call(p.target)
-        .gas_limit(p.gas_limit)
-        .value(p.value)
-        .data(p.data.clone())
-        .build_fill();
-    let mut op_tx = OpTransactionLatest::new(tx_env);
-    op_tx.enveloped_tx = Some(Bytes::new());
-    let r = evm.transact(op_tx).expect("op_revm_latest transact");
-    assert!(r.result.is_success(), "op_revm_latest should succeed: {:?}", r.result);
-    black_box(r);
-}
-
-/// Fluent builder for a `CacheDB` from the latest revm stack, mirroring
-/// `MemoryDatabase`'s API so the same per-iteration seed code can produce
-/// parallel DBs for both pinned and latest baselines.
-#[derive(Default)]
-pub struct LatestDbBuilder {
-    db: CacheDBLatest<EmptyDBLatest>,
-}
-
-impl LatestDbBuilder {
-    pub fn new() -> Self {
-        Self { db: CacheDBLatest::new(EmptyDBLatest::default()) }
-    }
-
-    pub fn account_code(mut self, address: Address, code: Bytes) -> Self {
-        let bytecode = BytecodeLatest::new_legacy(code);
-        let code_hash = bytecode.hash_slow();
-        let entry = self.db.cache.accounts.entry(address).or_default();
-        entry.info.code = Some(bytecode);
-        entry.info.code_hash = code_hash;
-        self
-    }
-
-    pub fn account_balance(mut self, address: Address, balance: U256) -> Self {
-        let entry = self.db.cache.accounts.entry(address).or_default();
-        entry.info.balance = balance;
-        self
-    }
-
-    pub fn account_storage(mut self, address: Address, slot: U256, value: U256) -> Self {
-        let entry = self.db.cache.accounts.entry(address).or_default();
-        entry.storage.insert(slot, value);
-        self
-    }
-
-    pub fn build(self) -> CacheDBLatest<EmptyDBLatest> {
-        self.db
-    }
-}
-
-/// Register the 4 baseline rows on a criterion group, sharing the same
-/// per-iteration seed inputs.
-///
-/// `make_pinned_db` feeds both `*_pinned` adapters (they share the pinned-revm
-/// `Database` trait); `make_latest_db` feeds both `*_latest` adapters.
-pub fn add_baseline_rows<FP, FL>(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    params: &CallParams,
-    make_pinned_db: &FP,
-    make_latest_db: &FL,
-) where
-    FP: Fn() -> MemoryDatabase,
-    FL: Fn() -> CacheDBLatest<EmptyDBLatest>,
-{
-    add_baseline_rows_suffixed(group, "", params, make_pinned_db, make_latest_db);
-}
-
-/// Same as [`add_baseline_rows`] but appends a `/variant` suffix to each row
-/// name. Used by benches that organise rows as `<spec_or_baseline>/<variant>`
-/// (e.g. `revm_pinned/log0_32b`) so every implementation shares a single
-/// variant axis.
-pub fn add_baseline_rows_suffixed<FP, FL>(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    variant: &str,
-    params: &CallParams,
-    make_pinned_db: &FP,
-    make_latest_db: &FL,
-) where
-    FP: Fn() -> MemoryDatabase,
-    FL: Fn() -> CacheDBLatest<EmptyDBLatest>,
-{
-    let with = |base: &str| -> String {
-        if variant.is_empty() {
-            base.to_string()
+/// Run each subject as one row of `group`, named `<subject>` or, when `variant`
+/// is non-empty, `<subject>/<variant>` (e.g. `revm_pinned/log0_32b`) so every
+/// row shares a single variant axis.
+fn run_subjects(group: &mut Group<'_>, variant: &str, w: &Workload, subjects: &[Box<dyn Subject>]) {
+    for subject in subjects {
+        let row = if variant.is_empty() {
+            subject.name().to_string()
         } else {
-            format!("{base}/{variant}")
-        }
-    };
-    group.bench_function(with("revm_pinned"), |b| {
-        b.iter(|| transact_call_revm_pinned(make_pinned_db(), params))
-    });
-    group.bench_function(with("revm_latest"), |b| {
-        b.iter(|| transact_call_revm_latest(make_latest_db(), params))
-    });
-    group.bench_function(with("op_revm_pinned"), |b| {
-        b.iter(|| transact_call_op_revm_pinned(make_pinned_db(), params))
-    });
-    group.bench_function(with("op_revm_latest"), |b| {
-        b.iter(|| transact_call_op_revm_latest(make_latest_db(), params))
-    });
+            format!("{}/{variant}", subject.name())
+        };
+        group.bench_function(row, |b| b.iter(|| subject.run(w)));
+    }
+}
+
+/// Register the four baselines plus the [`SPEC_IDS`] mega rows.
+pub fn register_all(group: &mut Group<'_>, w: &Workload) {
+    register_all_suffixed(group, "", w);
+}
+
+/// [`register_all`] with a `/variant` suffix on every row.
+pub fn register_all_suffixed(group: &mut Group<'_>, variant: &str, w: &Workload) {
+    let mut subjects = baseline_subjects();
+    subjects.extend(mega_subjects(SPEC_IDS));
+    run_subjects(group, variant, w, &subjects);
+}
+
+/// Register only the [`SPEC_IDS`] mega rows (no vanilla baselines).
+pub fn register_mega(group: &mut Group<'_>, w: &Workload) {
+    register_mega_suffixed(group, "", w);
+}
+
+/// [`register_mega`] with a `/variant` suffix on every row.
+pub fn register_mega_suffixed(group: &mut Group<'_>, variant: &str, w: &Workload) {
+    run_subjects(group, variant, w, &mega_subjects(SPEC_IDS));
+}
+
+/// Register mega rows for a caller-supplied spec list (e.g. a single spec, or
+/// the SELFDESTRUCT-relevant specs).
+pub fn register_mega_specs(
+    group: &mut Group<'_>,
+    specs: &[(&'static str, MegaSpecId)],
+    w: &Workload,
+) {
+    register_mega_specs_suffixed(group, specs, "", w);
+}
+
+/// [`register_mega_specs`] with a `/variant` suffix on every row.
+pub fn register_mega_specs_suffixed(
+    group: &mut Group<'_>,
+    specs: &[(&'static str, MegaSpecId)],
+    variant: &str,
+    w: &Workload,
+) {
+    run_subjects(group, variant, w, &mega_subjects(specs));
 }
