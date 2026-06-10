@@ -109,6 +109,9 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+          # This job builds and runs untrusted PR code; don't leave a git
+          # credential on disk for that code to pick up.
+          persist-credentials: false
 
       - name: Fetch PR head
         if: github.event_name == 'issue_comment'
@@ -173,12 +176,18 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Upload the machine-readable JSON (not just the rendered markdown): the
+      # trusted compare job re-renders the table from these numbers so it never
+      # posts PR-controlled strings (case names/notes) verbatim. The markdown is
+      # kept only for the job summary above.
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: replay-bench-report
-          path: replay-bench.md
+          path: |
+            replay-bench.json
+            replay-bench.md
           if-no-files-found: ignore
 
   # Posts the comparison comment. Consumes only the report artifact, never PR
@@ -203,8 +212,38 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            if (!fs.existsSync('replay-bench.md')) return;
-            const table = fs.readFileSync('replay-bench.md', 'utf8');
+            // Re-render the table here, in the trusted (write-scoped) job, from the
+            // numbers the bench job computed — never the markdown the PR's driver
+            // emitted. Case name/category come from the PR's manifest, so escape
+            // them; everything else is a number formatted locally.
+            if (!fs.existsSync('replay-bench.json')) return;
+            const summary = JSON.parse(fs.readFileSync('replay-bench.json', 'utf8'));
+            const esc = (s) => String(s ?? '').replace(/\r?\n/g, ' ').replace(/[|`<>\\]/g, '\\$&').slice(0, 80);
+            const fmtNs = (ns) => ns >= 1e6 ? `${(ns / 1e6).toFixed(3)} ms` : ns >= 1e3 ? `${(ns / 1e3).toFixed(2)} µs` : `${Math.round(ns)} ns`;
+            const fmtInt = (n) => Math.round(n).toLocaleString('en-US');
+            const labels = summary.labels || [];
+            const compare = labels.length === 2;
+            const lines = [];
+            if (compare) {
+              const [base, pr] = labels;
+              lines.push(`| transaction | category | gas | \`${esc(base)}\` median | \`${esc(pr)}\` median | Δ time | \`${esc(base)}\` Mgas/s | \`${esc(pr)}\` Mgas/s | verdict |`);
+              lines.push('|---|---|--:|--:|--:|--:|--:|--:|---|');
+              for (const c of summary.cases) {
+                const d = `${c.delta_pct >= 0 ? '+' : ''}${c.delta_pct.toFixed(1)}%`;
+                lines.push(`| ${esc(c.name)} | ${esc(c.category)} | ${fmtInt(c.gas)} | ${fmtNs(c.base_median_ns)} | ${fmtNs(c.pr_median_ns)} | ${d} | ${fmtInt(c.base_mgas_per_sec)} | ${fmtInt(c.pr_mgas_per_sec)} | ${esc(c.verdict)} |`);
+              }
+            } else {
+              const only = labels[0] || 'pr';
+              lines.push(`| transaction | category | gas | \`${esc(only)}\` median | \`${esc(only)}\` Mgas/s |`);
+              lines.push('|---|---|--:|--:|--:|');
+              for (const c of summary.cases) {
+                lines.push(`| ${esc(c.name)} | ${esc(c.category)} | ${fmtInt(c.gas)} | ${fmtNs(c.median_ns)} | ${fmtInt(c.mgas_per_sec)} |`);
+              }
+            }
+            let table = lines.join('\n');
+            if (compare) {
+              table += `\n\n**${summary.cases.length} transactions — ${summary.regressions} regression(s), ${summary.improvements} improvement(s)** (threshold ±${Number(summary.threshold_pct).toFixed(1)}% on median time; ABBA-interleaved).`;
+            }
             const base = '${{ needs.prepare.outputs.baseline_sha }}';
             const head = '${{ needs.prepare.outputs.feature_sha }}';
             const repo = context.payload.repository.html_url;

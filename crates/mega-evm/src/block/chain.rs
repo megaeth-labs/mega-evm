@@ -52,7 +52,15 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
         .with(MegaHardfork::Rex2, ForkCondition::Timestamp(1770116400))
         .with(MegaHardfork::Rex3, ForkCondition::Timestamp(1771380000))
         .with(MegaHardfork::Rex4, ForkCondition::Timestamp(1776400000))
-        .with(MegaHardfork::Rex5, ForkCondition::Never)
+        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(1780459200))
+        // Seeded values read from the on-chain SequencerRegistry (0x6342…0006) at
+        // Rex5 init on testnet: INITIAL_SEQUENCER (slot 5) and the admin (slot 2).
+        // At replay time these only satisfy the activation guard — the live system
+        // address is read from forked registry storage.
+        .with_params(SequencerRegistryConfig {
+            rex5_initial_sequencer: address!("0xB8DB54eBA7Ae650d14F362de461516a4FF1551FC"),
+            rex5_initial_admin: address!("0x1d9BD232C44B39341e670B735c7F423c40426b34"),
+        })
 }
 
 /// All `MegaETH` hardforks activated at genesis.
@@ -96,17 +104,20 @@ mod tests {
     }
 
     #[test]
-    fn test_testnet_does_not_activate_rex5() {
+    fn test_testnet_schedule_resolves_specs_by_timestamp() {
         let hf = testnet_hardforks();
         assert_eq!(hf.spec_id(1776400000), MegaSpecId::REX4);
-        // Far future stays Rex4 — Rex5 is Never on testnet.
-        assert_eq!(hf.spec_id(u64::MAX), MegaSpecId::REX4);
+        // Just before Rex5, still Rex4; at/after Rex5, Rex5.
+        assert_eq!(hf.spec_id(1780459199), MegaSpecId::REX4);
+        assert_eq!(hf.spec_id(1780459200), MegaSpecId::REX5);
+        // Rex5 carries the SequencerRegistryConfig.
+        assert!(hf.fork_params::<SequencerRegistryConfig>().is_some());
     }
 
     #[test]
     fn test_schedule_dispatch_by_chain_id() {
         assert_eq!(hardfork_schedule(MAINNET_CHAIN_ID).spec_id(1780632000), MegaSpecId::REX5);
-        assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(u64::MAX), MegaSpecId::REX4);
+        assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(1780459200), MegaSpecId::REX5);
         // Unknown chain: everything active at genesis.
         assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX5);
     }

@@ -357,9 +357,15 @@ impl Cmd {
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
                 .ok_or(ReplayError::TransactionNotFound(self.tx_hash))?;
+            // RLP-hash the receipt's logs with the same helper the state-test
+            // runner uses for `logsRoot`, so the dump can check the replay's logs
+            // against the chain (the rich RPC logs' `inner` is the consensus log).
+            let receipt_logs: Vec<_> =
+                receipt.inner.logs().iter().map(|log| log.inner.clone()).collect();
             let anchor = super::fixture::OnchainAnchor {
                 gas_used: receipt.gas_used(),
                 success: receipt.inner.status(),
+                logs_root: state_test::utils::log_rlp_hash(&receipt_logs),
             };
             Some((mega_env, anchor))
         } else {

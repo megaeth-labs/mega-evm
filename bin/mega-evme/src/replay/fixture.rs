@@ -46,6 +46,10 @@ pub(crate) struct OnchainAnchor {
     pub gas_used: u64,
     /// Whether the transaction succeeded on-chain.
     pub success: bool,
+    /// RLP-hash of the on-chain receipt's logs (the same `log_rlp_hash` the
+    /// state-test runner records as `logsRoot`), so the replay's logs can be
+    /// checked against the chain, not just its gas and status.
+    pub logs_root: B256,
 }
 
 /// The fixture-specific inputs gathered during a replay: the `MegaETH` external
@@ -69,6 +73,12 @@ pub(crate) struct FixtureInputs<'a> {
 /// EEST schema cannot represent, so they cannot be dumped.
 const DEPOSIT_TX_TYPE: u8 = 0x7e;
 
+/// EIP-7702 set-code transaction type byte (`0x04`). The fixture builder does not
+/// yet serialize the authorization list, so dropping it would silently change
+/// execution (the delegations would not apply). Reject these explicitly rather
+/// than emit a fixture whose isolated run diverges from the chain.
+const EIP7702_TX_TYPE: u8 = 0x04;
+
 /// A fixture built from a replay, awaiting its `post` expectation.
 ///
 /// The `post` map is filled by [`finalize_and_write`] after re-executing the
@@ -84,6 +94,9 @@ pub(crate) struct FixtureDraft {
     actual_status: String,
     /// Output observed during the full replay, cross-checked before writing.
     actual_output: Option<Bytes>,
+    /// Logs root observed during the full replay (already equal to the on-chain
+    /// receipt's logs root), cross-checked against the isolated run before writing.
+    actual_logs_root: B256,
     /// Suite key (transaction hash) under which the unit is stored.
     name: String,
 }
@@ -112,22 +125,33 @@ where
             "--dump-fixture does not support deposit transactions".to_string(),
         ));
     }
+    if envelope.ty() == EIP7702_TX_TYPE {
+        return Err(ReplayError::Other(
+            "--dump-fixture does not support EIP-7702 (set-code) transactions: the \
+             fixture builder does not serialize the authorization list"
+                .to_string(),
+        ));
+    }
 
     let actual_gas = inputs.result.gas_used();
     let actual_status = execution_status(inputs.result).to_string();
     let actual_output = inputs.result.output().cloned();
+    let actual_logs_root = state_test::utils::log_rlp_hash(inputs.result.logs());
 
-    // Fidelity gate: the local replay must reproduce the on-chain receipt's gas
-    // and success status. A mismatch means the replay executed under the wrong
-    // spec / hardfork config for this chain and block; self-validation cannot
-    // catch this, because the fixture is validated under the same spec it was
-    // dumped with. Refuse to build a fixture that does not match the chain.
+    // Fidelity gate: the local replay must reproduce the on-chain receipt's gas,
+    // success status, and logs. A mismatch means the replay executed under the
+    // wrong spec / hardfork config for this chain and block; self-validation
+    // cannot catch this, because the fixture is validated under the same spec it
+    // was dumped with. Refuse to build a fixture that does not match the chain.
     //
-    // Logs are not compared against the receipt here: for a deterministic replay
-    // with identical pre-state and transaction the emitted logs cannot differ, and
-    // the logs root is independently pinned by `finalize_and_write` (it re-executes
-    // the isolated fixture and records the resulting logs root into `post`, which
-    // the corpus then validates) — that re-execution, not gas, is the real guarantee.
+    // Logs are checked, not just inferred from gas: LOG gas depends on topic count
+    // and data length, never content, so two executions can burn identical gas yet
+    // emit different log payloads (e.g. a preceding-tx divergence that changes a
+    // value the target re-emits). The receipt's logs are already fetched, so the
+    // comparison is a single root equality. `finalize_and_write` then re-checks the
+    // isolated run's logs root against this same value, closing the L1-data-fee
+    // channel where the isolated run (which zeroes the L1 fee) could diverge from
+    // the full replay while gas, status, and output still match.
     let anchor = &inputs.anchor;
     if actual_gas != anchor.gas_used {
         return Err(ReplayError::Other(format!(
@@ -143,6 +167,14 @@ where
              local replay does not reproduce on-chain execution for chain {chain_id}",
             inputs.result.is_success(),
             anchor.success
+        )));
+    }
+    if actual_logs_root != anchor.logs_root {
+        return Err(ReplayError::Other(format!(
+            "replay logs root {actual_logs_root} != on-chain receipt logs root {}: the \
+             local replay emits different logs than the chain for chain {chain_id} \
+             (same gas/status, different log contents)",
+            anchor.logs_root
         )));
     }
 
@@ -168,7 +200,15 @@ where
 
     let name = format!("replay_{:#x}", target_tx.inner.inner.tx_hash());
 
-    Ok(FixtureDraft { unit, spec: spec_name, actual_gas, actual_status, actual_output, name })
+    Ok(FixtureDraft {
+        unit,
+        spec: spec_name,
+        actual_gas,
+        actual_status,
+        actual_output,
+        actual_logs_root,
+        name,
+    })
 }
 
 /// Re-execute the isolated unit through `state-test`, cross-check it against the
@@ -196,6 +236,18 @@ pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) ->
         return Err(ReplayError::Other(
             "fixture not reproducible: output differs from replay".to_string(),
         ));
+    }
+    // Unlike gas/status/output, the logs root is sensitive to the L1 data fee: the
+    // full replay charges it (reducing the sender's balance), the isolated run
+    // zeroes it, so a log that reflects the sender's balance can diverge here even
+    // when everything else matches. `actual_logs_root` already equals the on-chain
+    // receipt's logs root, so this also pins the baked `post` logs to the chain.
+    if executed.logs_root != draft.actual_logs_root {
+        return Err(ReplayError::Other(format!(
+            "fixture not reproducible: logs root {} != replay logs root {} \
+             (isolated run diverges from the full replay, e.g. via the L1 data fee)",
+            executed.logs_root, draft.actual_logs_root
+        )));
     }
 
     let mut unit = draft.unit;

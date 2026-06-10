@@ -105,9 +105,10 @@ The fixture captures everything needed to deterministically re-execute the targe
 
 The `post` expectation is computed by the `state-test` runner itself — the exact code path that later validates the fixture — so a dumped fixture is self-consistent by construction.
 
-**Fidelity gate.** Before building the fixture, the dump fetches the transaction's on-chain receipt and requires the local replay to reproduce the receipt's `gasUsed` and success status exactly (gas already implies log fidelity, since `LOG` opcodes are metered).
+**Fidelity gate.** Before building the fixture, the dump fetches the transaction's on-chain receipt and requires the local replay to reproduce the receipt's `gasUsed`, success status, and logs root exactly.
+Logs are compared explicitly rather than inferred from gas: `LOG` gas depends on topic count and data length, never content, so two executions can burn identical gas yet emit different log payloads.
 A mismatch aborts the dump (no file is written) with a clear error — this catches a wrong spec or hardfork config, which self-validation alone cannot, because the fixture is validated under the same spec it was dumped with.
-It then additionally cross-checks the isolated execution against the full replay (gas, status, output), so the recorded `megaGasUsed` equals the real on-chain gas.
+It then additionally cross-checks the isolated execution against the full replay (gas, status, output, and logs root), so the recorded `post` equals the real on-chain result — including across the L1 data fee, which the isolated run zeroes but the full replay charges.
 
 `--dump-fixture` cannot be combined with transaction overrides or `--override.spec` (a forced spec would record a what-if, not the on-chain transaction), and deposit transactions are not supported.
 Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.

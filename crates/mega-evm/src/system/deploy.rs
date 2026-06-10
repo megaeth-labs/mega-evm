@@ -20,7 +20,7 @@
 use alloc as std;
 
 use alloy_evm::Database;
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use revm::{
     database::State,
     state::{Account, Bytecode, EvmState, EvmStorageSlot},
@@ -81,6 +81,16 @@ pub fn transact_deploy<DB: Database>(
     db: &mut State<DB>,
     spec: &SystemContractSpec,
 ) -> Result<EvmState, DB::Error> {
+    // The spec's `code_hash` must be the hash of its `code`. The per-contract
+    // `*_spec` builders derive both from one bytecode constant, so this only
+    // guards against a future hand-built spec installing code under a wrong hash.
+    debug_assert_eq!(
+        keccak256(spec.code.as_ref()),
+        spec.code_hash,
+        "SystemContractSpec code_hash does not match code for {:?}",
+        spec.address
+    );
+
     let acc = db.load_cache_account(spec.address)?;
 
     // Already deployed with the correct code — record the read, change nothing.
