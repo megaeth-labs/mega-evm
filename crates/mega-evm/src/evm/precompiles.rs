@@ -65,7 +65,8 @@ impl MegaPrecompiles {
 
 /// Precompiles for the `REX` spec.
 pub fn rex() -> &'static Precompiles {
-    mini_rex()
+    static INSTANCE: OnceBox<Precompiles> = OnceBox::new();
+    INSTANCE.get_or_init(|| Box::new(mini_rex().clone()))
 }
 
 /// Precompiles for the `MINI_REX` spec.
@@ -272,7 +273,7 @@ mod tests {
     use alloc as std;
     use std::{rc::Rc, vec::Vec};
 
-    use super::{kzg_point_evaluation::GAS_COST, MegaPrecompiles};
+    use super::{kzg_point_evaluation::GAS_COST, mini_rex, rex, MegaPrecompiles};
     use crate::{
         test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId,
     };
@@ -327,6 +328,11 @@ mod tests {
         buf[last] ^= 0x01;
         inputs.input = revm::interpreter::CallInput::Bytes(Bytes::from(buf));
         inputs
+    }
+
+    #[test]
+    fn test_rex_and_mini_rex_precompiles_have_distinct_statics() {
+        assert!(!core::ptr::eq(rex(), mini_rex()));
     }
 
     #[test]
