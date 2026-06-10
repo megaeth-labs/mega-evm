@@ -23,83 +23,24 @@
 //! New workloads must avoid touching mega-evm's per-tx resource limits
 //! (compute gas / data size / KV updates / state growth) under any spec, or the
 //! `mega_*` row would halt early and skew the baseline comparison.
-//! Likewise, both revm versions must be able to execute the workload with their
-//! respective default hardforks — if the latest stack diverges (e.g. moves to
-//! Prague gas schedule), the `*_latest` rows have to pin spec explicitly.
+//! Likewise, every vanilla baseline is pinned to a Cancun-equivalent fork
+//! (`revm` rows to Cancun, `op-revm` rows to Holocene) in `common::subject`, so
+//! a new workload must execute successfully under Cancun semantics on every row.
 
 #![allow(missing_docs)]
 
-// `bench_transfer_multi` holds an EVM instance and runs 1000 transactions per
-// iteration — too custom to fit into the single-shot `transact_call_*`
-// adapters, so it inlines the pinned/latest revm + op-revm setup here.
-
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mega_evm::{test_utils::MemoryDatabase, MegaSpecId};
-use op_revm::{
-    DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned,
-    OpTransaction as OpTransactionPinned,
-};
-use op_revm_latest::{
-    DefaultOp as _, OpBuilder as _, OpContext as OpContextLatest,
-    OpTransaction as OpTransactionLatest,
-};
-use revm::{
-    bytecode::opcode, context::tx::TxEnvBuilder, database::EmptyDB as EmptyDBPinned,
-    Context as ContextPinned, ExecuteEvm, MainBuilder as _, MainContext as _,
-};
-use revm_latest::{
-    context::tx::TxEnvBuilder as TxEnvBuilderLatest, database::EmptyDB as EmptyDBLatest,
-    primitives::hardfork::SpecId as SpecIdLatest, Context as ContextLatest, ExecuteEvm as _,
-    MainBuilder as _, MainContext as _,
-};
+use criterion::{criterion_group, criterion_main, Criterion};
+use revm::bytecode::opcode;
 
-// Shared baseline adapters live alongside this file under `common/`; the other
-// bench files include them via the same plain `mod common;` declaration.
 mod common;
-use common::{
-    add_baseline_rows, build_mega_tx, make_mega_evm, CallParams, LatestDbBuilder, SPEC_IDS,
-};
+use common::{register_all, Account, TxSpec, Workload};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 
 const SUBCALL_TARGET_A: Address = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 const SUBCALL_TARGET_B: Address = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-
-//
-// ============================================================================
-// Common Utility Functions
-// ============================================================================
-//
-
-/// Execute a call to CONTRACT with the given spec, gas limit, and calldata.
-fn transact_call(spec: MegaSpecId, db: MemoryDatabase, gas_limit: u64, data: Bytes) {
-    let mut evm = make_mega_evm(db, spec);
-    let tx = TxEnvBuilder::new()
-        .caller(CALLER)
-        .call(CONTRACT)
-        .gas_limit(gas_limit)
-        .data(data)
-        .build_fill();
-    let r = evm.transact(build_mega_tx(tx)).expect("transaction should succeed");
-    assert!(r.result.is_success(), "transaction should succeed: {:?}", r.result);
-    black_box(r);
-}
-
-/// Build a latest-revm `CacheDB` for the snailtracer / analysis shape:
-/// one contract account holding `code`, and one caller account holding `caller_balance`.
-fn make_latest_db_call(
-    contract: Address,
-    code: Bytes,
-    caller: Address,
-    caller_balance: U256,
-) -> revm_latest::database::CacheDB<EmptyDBLatest> {
-    LatestDbBuilder::new()
-        .account_code(contract, code)
-        .account_balance(caller, caller_balance)
-        .build()
-}
 
 //
 // ============================================================================
@@ -120,30 +61,11 @@ fn bench_snailtracer(c: &mut Criterion) {
     let mut group = c.benchmark_group("snailtracer");
     group.sample_size(10);
 
-    let make_pinned_db = || {
-        MemoryDatabase::default()
-            .account_code(CONTRACT, bytecode.clone())
-            .account_balance(CALLER, caller_balance)
-    };
-    let make_latest_db = || make_latest_db_call(CONTRACT, bytecode.clone(), CALLER, caller_balance);
-
-    let params = CallParams {
-        caller: CALLER,
-        target: CONTRACT,
-        gas_limit: 1_000_000_000,
-        data: calldata.clone(),
-        ..Default::default()
-    };
-    add_baseline_rows(&mut group, &params, &make_pinned_db, &make_latest_db);
-
-    for &(name, spec) in SPEC_IDS {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let db = make_pinned_db();
-                transact_call(black_box(spec), db, 1_000_000_000, calldata.clone());
-            })
-        });
-    }
+    let workload = Workload::single(
+        vec![Account::new(CONTRACT).code(bytecode), Account::new(CALLER).balance(caller_balance)],
+        TxSpec::call(CALLER, CONTRACT).gas_limit(1_000_000_000).data(calldata),
+    );
+    register_all(&mut group, &workload);
     group.finish();
 }
 
@@ -165,30 +87,11 @@ fn bench_analysis(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("analysis");
 
-    let make_pinned_db = || {
-        MemoryDatabase::default()
-            .account_code(CONTRACT, bytecode.clone())
-            .account_balance(CALLER, caller_balance)
-    };
-    let make_latest_db = || make_latest_db_call(CONTRACT, bytecode.clone(), CALLER, caller_balance);
-
-    let params = CallParams {
-        caller: CALLER,
-        target: CONTRACT,
-        gas_limit: 10_000_000_000,
-        data: calldata.clone(),
-        ..Default::default()
-    };
-    add_baseline_rows(&mut group, &params, &make_pinned_db, &make_latest_db);
-
-    for &(name, spec) in SPEC_IDS {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let db = make_pinned_db();
-                transact_call(black_box(spec), db, 10_000_000_000, calldata.clone());
-            })
-        });
-    }
+    let workload = Workload::single(
+        vec![Account::new(CONTRACT).code(bytecode), Account::new(CALLER).balance(caller_balance)],
+        TxSpec::call(CALLER, CONTRACT).gas_limit(10_000_000_000).data(calldata),
+    );
+    register_all(&mut group, &workload);
     group.finish();
 }
 
@@ -267,41 +170,17 @@ fn make_subcall_bytecode(target: Address) -> Bytes {
     Bytes::from(code)
 }
 
-/// Benchmark one subcall variant across the 4 baselines and mega specs.
-///
-/// `pinned_db_setup` feeds the `MegaEvm` rows and both `*_pinned` baselines
-/// (they share the pinned-revm `Database` trait); `latest_db_setup` produces
-/// the latest-version `CacheDB` for both `*_latest` rows.
+/// Benchmark one subcall variant across the 4 baselines and mega specs. The
+/// contract at `CONTRACT` drives the loop, so the tx itself just calls it with
+/// a high gas limit and no value.
 fn bench_subcall_variant(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    pinned_db_setup: impl Fn() -> MemoryDatabase,
-    latest_db_setup: impl Fn() -> revm_latest::database::CacheDB<EmptyDBLatest>,
+    accounts: Vec<Account>,
 ) {
     const SUBCALL_GAS_LIMIT: u64 = 10_000_000_000;
-
-    let params = CallParams {
-        caller: CALLER,
-        target: CONTRACT,
-        gas_limit: SUBCALL_GAS_LIMIT,
-        ..Default::default()
-    };
-    add_baseline_rows(group, &params, &pinned_db_setup, &latest_db_setup);
-
-    for &(name, spec) in SPEC_IDS {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let mut evm = make_mega_evm(pinned_db_setup(), spec);
-                let tx = TxEnvBuilder::new()
-                    .caller(CALLER)
-                    .call(CONTRACT)
-                    .gas_limit(SUBCALL_GAS_LIMIT)
-                    .build_fill();
-                let r = evm.transact(build_mega_tx(tx)).expect("should succeed");
-                assert!(r.result.is_success(), "subcall should succeed");
-                black_box(r)
-            })
-        });
-    }
+    let workload =
+        Workload::single(accounts, TxSpec::call(CALLER, CONTRACT).gas_limit(SUBCALL_GAS_LIMIT));
+    register_all(group, &workload);
 }
 
 fn bench_subcall(c: &mut Criterion) {
@@ -316,19 +195,11 @@ fn bench_subcall(c: &mut Criterion) {
         group.sample_size(10);
         bench_subcall_variant(
             &mut group,
-            || {
-                MemoryDatabase::default()
-                    .account_balance(CALLER, caller_balance)
-                    .account_code(CONTRACT, loop_code.clone())
-                    .account_code(SUBCALL_TARGET_A, stop_code.clone())
-            },
-            || {
-                LatestDbBuilder::new()
-                    .account_balance(CALLER, caller_balance)
-                    .account_code(CONTRACT, loop_code.clone())
-                    .account_code(SUBCALL_TARGET_A, stop_code.clone())
-                    .build()
-            },
+            vec![
+                Account::new(CALLER).balance(caller_balance),
+                Account::new(CONTRACT).code(loop_code),
+                Account::new(SUBCALL_TARGET_A).code(stop_code),
+            ],
         );
         group.finish();
     }
@@ -342,19 +213,11 @@ fn bench_subcall(c: &mut Criterion) {
         group.sample_size(10);
         bench_subcall_variant(
             &mut group,
-            || {
-                MemoryDatabase::default()
-                    .account_balance(CALLER, caller_balance)
-                    .account_code(CONTRACT, loop_code.clone())
-                    .account_code(SUBCALL_TARGET_A, stop_code.clone())
-            },
-            || {
-                LatestDbBuilder::new()
-                    .account_balance(CALLER, caller_balance)
-                    .account_code(CONTRACT, loop_code.clone())
-                    .account_code(SUBCALL_TARGET_A, stop_code.clone())
-                    .build()
-            },
+            vec![
+                Account::new(CALLER).balance(caller_balance),
+                Account::new(CONTRACT).code(loop_code),
+                Account::new(SUBCALL_TARGET_A).code(stop_code),
+            ],
         );
         group.finish();
     }
@@ -369,21 +232,12 @@ fn bench_subcall(c: &mut Criterion) {
         group.sample_size(10);
         bench_subcall_variant(
             &mut group,
-            || {
-                MemoryDatabase::default()
-                    .account_balance(CALLER, caller_balance)
-                    .account_code(CONTRACT, loop_code.clone())
-                    .account_code(SUBCALL_TARGET_A, subcall_code.clone())
-                    .account_code(SUBCALL_TARGET_B, stop_code.clone())
-            },
-            || {
-                LatestDbBuilder::new()
-                    .account_balance(CALLER, caller_balance)
-                    .account_code(CONTRACT, loop_code.clone())
-                    .account_code(SUBCALL_TARGET_A, subcall_code.clone())
-                    .account_code(SUBCALL_TARGET_B, stop_code.clone())
-                    .build()
-            },
+            vec![
+                Account::new(CALLER).balance(caller_balance),
+                Account::new(CONTRACT).code(loop_code),
+                Account::new(SUBCALL_TARGET_A).code(subcall_code),
+                Account::new(SUBCALL_TARGET_B).code(stop_code),
+            ],
         );
         group.finish();
     }
@@ -394,7 +248,8 @@ fn bench_subcall(c: &mut Criterion) {
 // Transfer Multi Benchmark
 // ============================================================================
 //
-// Measures batch transaction execution: 1000 sequential ether transfers.
+// Measures batch transaction execution: 1000 sequential ether transfers run on
+// one reused EVM (a subject loops the workload's tx list internally).
 //
 
 fn bench_transfer_multi(c: &mut Criterion) {
@@ -407,143 +262,16 @@ fn bench_transfer_multi(c: &mut Criterion) {
     let caller_balance = U256::from(3_000_000_000u64);
     let target_balance = U256::from(3_000_000_000u64);
 
-    let make_pinned_db = || {
-        let mut db = MemoryDatabase::default().account_balance(CALLER, caller_balance);
-        for target in &targets {
-            db = db.account_balance(*target, target_balance);
-        }
-        db
-    };
-    let make_latest_db = || {
-        let mut builder = LatestDbBuilder::new().account_balance(CALLER, caller_balance);
-        for target in &targets {
-            builder = builder.account_balance(*target, target_balance);
-        }
-        builder.build()
-    };
+    let mut accounts = vec![Account::new(CALLER).balance(caller_balance)];
+    accounts.extend(targets.iter().map(|t| Account::new(*t).balance(target_balance)));
 
-    group.bench_function("revm_pinned", |b| {
-        b.iter(|| {
-            let mut evm = ContextPinned::mainnet().with_db(make_pinned_db()).build_mainnet();
-            for target in &targets {
-                let tx = TxEnvBuilder::new()
-                    .caller(CALLER)
-                    .call(*target)
-                    .value(U256::from(1))
-                    .gas_limit(100_000)
-                    .build_fill();
-                let r = evm.transact(tx).expect("revm_pinned transfer");
-                assert!(
-                    r.result.is_success(),
-                    "revm_pinned transfer should succeed: {:?}",
-                    r.result
-                );
-                black_box(&r);
-            }
-        })
-    });
+    let txs: Vec<TxSpec> = targets
+        .iter()
+        .map(|t| TxSpec::call(CALLER, *t).value(U256::from(1)).gas_limit(100_000))
+        .collect();
 
-    group.bench_function("revm_latest", |b| {
-        b.iter(|| {
-            // Pin Cancun for parity with `transact_call_revm_latest`: keeps the
-            // default Osaka spec's EIP-7825 `tx_gas_limit_cap` out of the picture.
-            let mut evm = ContextLatest::mainnet()
-                .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecIdLatest::CANCUN))
-                .with_db(make_latest_db())
-                .build_mainnet();
-            for target in &targets {
-                let tx = TxEnvBuilderLatest::new()
-                    .caller(CALLER)
-                    .call(*target)
-                    .value(U256::from(1))
-                    .gas_limit(100_000)
-                    .build_fill();
-                let r = evm.transact(tx).expect("revm_latest transfer");
-                assert!(
-                    r.result.is_success(),
-                    "revm_latest transfer should succeed: {:?}",
-                    r.result
-                );
-                black_box(&r);
-            }
-        })
-    });
-
-    group.bench_function("op_revm_pinned", |b| {
-        b.iter(|| {
-            let mut ctx = <OpContextPinned<EmptyDBPinned>>::op().with_db(make_pinned_db());
-            ctx.modify_chain(|chain| {
-                chain.operator_fee_scalar = Some(U256::ZERO);
-                chain.operator_fee_constant = Some(U256::ZERO);
-            });
-            let mut evm = ctx.build_op();
-            for target in &targets {
-                let tx_env = TxEnvBuilder::new()
-                    .caller(CALLER)
-                    .call(*target)
-                    .value(U256::from(1))
-                    .gas_limit(100_000)
-                    .build_fill();
-                let mut op_tx = OpTransactionPinned::new(tx_env);
-                op_tx.enveloped_tx = Some(Bytes::new());
-                let r = evm.transact(op_tx).expect("op_revm_pinned transfer");
-                assert!(
-                    r.result.is_success(),
-                    "op_revm_pinned transfer should succeed: {:?}",
-                    r.result
-                );
-                black_box(&r);
-            }
-        })
-    });
-
-    group.bench_function("op_revm_latest", |b| {
-        b.iter(|| {
-            let mut ctx = <OpContextLatest<EmptyDBLatest>>::op().with_db(make_latest_db());
-            ctx.modify_chain(|chain| {
-                chain.operator_fee_scalar = Some(U256::ZERO);
-                chain.operator_fee_constant = Some(U256::ZERO);
-            });
-            let mut evm = ctx.build_op();
-            for target in &targets {
-                let tx_env = TxEnvBuilderLatest::new()
-                    .caller(CALLER)
-                    .call(*target)
-                    .value(U256::from(1))
-                    .gas_limit(100_000)
-                    .build_fill();
-                let mut op_tx = OpTransactionLatest::new(tx_env);
-                op_tx.enveloped_tx = Some(Bytes::new());
-                let r = evm.transact(op_tx).expect("op_revm_latest transfer");
-                assert!(
-                    r.result.is_success(),
-                    "op_revm_latest transfer should succeed: {:?}",
-                    r.result
-                );
-                black_box(&r);
-            }
-        })
-    });
-
-    for &(name, spec) in SPEC_IDS {
-        let targets = targets.clone();
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let mut evm = make_mega_evm(make_pinned_db(), spec);
-                for target in &targets {
-                    let tx = TxEnvBuilder::new()
-                        .caller(CALLER)
-                        .call(*target)
-                        .value(U256::from(1))
-                        .gas_limit(100_000)
-                        .build_fill();
-                    let r = evm.transact(build_mega_tx(tx)).expect("transfer should succeed");
-                    assert!(r.result.is_success(), "mega transfer should succeed: {:?}", r.result);
-                    black_box(&r);
-                }
-            })
-        });
-    }
+    let workload = Workload::new(accounts, txs);
+    register_all(&mut group, &workload);
     group.finish();
 }
 
