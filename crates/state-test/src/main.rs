@@ -112,10 +112,23 @@ impl Cmd {
         self.bench_spec
             .as_deref()
             .map(|s| {
-                MegaSpecId::from_str(s).map(SpecName::from_mega_spec).map_err(|e| TestError {
+                MegaSpecId::from_str(s).map(SpecName::from_mega_spec).map_err(|_| TestError {
                     name: "spec".to_string(),
                     path: s.to_string(),
-                    kind: TestErrorKind::FixtureError(format!("invalid --bench-spec {s:?}: {e:?}")),
+                    kind: TestErrorKind::FixtureError(format!(
+                        "invalid --bench-spec {s:?}; expected one of: {}",
+                        [
+                            mega_evm::name::EQUIVALENCE,
+                            mega_evm::name::MINI_REX,
+                            mega_evm::name::REX,
+                            mega_evm::name::REX1,
+                            mega_evm::name::REX2,
+                            mega_evm::name::REX3,
+                            mega_evm::name::REX4,
+                            mega_evm::name::REX5,
+                        ]
+                        .join(", ")
+                    )),
                 })
             })
             .transpose()
