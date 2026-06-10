@@ -1,6 +1,6 @@
 ---
 description: MegaETH precompile gas overrides — KZG Point Evaluation and ModExp cost schedules diverging from standard Ethereum.
-spec: Rex4
+spec: Rex5
 ---
 
 # Precompiles
@@ -17,6 +17,8 @@ The overrides on this page exist to reduce that denial-of-service risk by bringi
 ## Specification
 
 A node MUST inherit the standard precompile set from the Optimism Isthmus / Ethereum Prague baseline except for the following MegaETH-specific overrides.
+A node MUST preserve these MegaETH-specific overrides whenever it refreshes or reselects its internal precompile table.
+If multiple MegaETH specs share the same inherited upstream baseline, an implementation MUST NOT reconstruct the MegaETH precompile table from the upstream baseline identifier alone.
 
 | Precompile           | Address | MegaETH-Specific Behavior                                                             |
 | -------------------- | ------- | ------------------------------------------------------------------------------------- |
@@ -44,3 +46,5 @@ This page has no security considerations.
 
 - [MiniRex](../upgrades/minirex.md) introduced the stable KZG Point Evaluation and ModExp overrides.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable overrides.
+- [Rex4](../upgrades/rex4.md) retains the same stable overrides; no change to KZG or ModExp pricing.
+- [Rex5](../upgrades/rex5.md) refines the KZG error-path compute-gas recording.

@@ -47,15 +47,39 @@ impl KVUpdateTracker {
 
     /// Records a discardable KV update in the current frame.
     fn record_discardable(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.discardable_usage += n;
-        }
+        self.frame_tracker.add_frame_discardable(n);
     }
 
     /// Records a KV update refund in the current frame.
     fn record_refund(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += n;
+        self.frame_tracker.add_frame_refund(n);
+    }
+
+    /// Records a single account update as discardable KV update in the current frame.
+    ///
+    /// Used by SELFDESTRUCT beneficiary metering (REX5+) to charge a KV update for
+    /// creating a new beneficiary account.
+    pub(crate) fn record_account_update(&mut self) {
+        self.record_discardable(1);
+    }
+
+    /// Merges external persistent usage into the TX-level entry.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox KV update consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
+        self.frame_tracker.add_tx_persistent(amount);
+    }
+
+    /// Returns the remaining KV update budget for the current call frame, capped by
+    /// the TX-level remaining.
+    pub(crate) fn current_call_remaining(&self) -> u64 {
+        let tx_remaining =
+            self.frame_tracker.tx_limit().saturating_sub(self.frame_tracker.net_usage());
+        if self.rex4_enabled {
+            self.frame_tracker.current_frame_remaining().min(tx_remaining)
+        } else {
+            tx_remaining
         }
     }
 }
@@ -124,12 +148,12 @@ impl TxRuntimeLimit for KVUpdateTracker {
         // EIP-7702 authority account updates (non-discardable)
         for authorization in tx.authorization_list() {
             if authorization.authority().is_some() {
-                self.frame_tracker.tx_mut().persistent_usage += 1;
+                self.frame_tracker.add_tx_persistent(1);
             }
         }
 
         // Caller account update (non-discardable)
-        self.frame_tracker.tx_mut().persistent_usage += 1;
+        self.frame_tracker.add_tx_persistent(1);
     }
 
     #[inline]

@@ -40,13 +40,17 @@ derive_more.workspace = true
 once_cell.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
+criterion = { workspace = true, features = ["html_reports", "plotters", "cargo_bench_support"] }
 hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
+op-revm-latest = { package = "op-revm", version = "20.0.0", default-features = false, features = ["dev", "serde", "std"] }
 rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors = { workspace = true, features = ["std"] }
+# Pin to the revm version `op-revm-latest` depends on so both `_latest` baselines share one revm tree.
+revm-latest = { package = "revm", version = "38.0.0", default-features = false, features = ["dev", "serde", "std"] }
 serde_json.workspace = true
 sha2.workspace = true
 
@@ -54,6 +58,10 @@ sha2.workspace = true
 default = ["std", "revm/default", "op-revm/default"]
 std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
 test-utils = []
+
+[[bench]]
+name = "attack_replay"
+harness = false
 
 [[bench]]
 name = "block_bench"

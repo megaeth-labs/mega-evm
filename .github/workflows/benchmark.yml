@@ -11,15 +11,24 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
+# Least privilege by default: only the jobs that post to the PR get write, and
+# the job that compiles + runs untrusted PR code (`bench`) gets read-only — so a
+# malicious PR run with `/benchmark` has no write-scoped token to abuse.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  benchmark:
-    name: Criterion performance check
+  # Resolve the exact commits ONCE, up front. Every bench job then checks out
+  # these fixed SHAs, so a push to the PR while the run is queued/in-flight
+  # cannot make different jobs measure different code (or mislabel the result).
+  prepare:
+    name: Resolve commits
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
+    # Reacts to the triggering comment; does not execute PR code.
+    permissions:
+      contents: read
+      pull-requests: write
     if: >-
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request &&
@@ -28,31 +37,85 @@ jobs:
          github.event.comment.author_association == 'COLLABORATOR' ||
          github.event.comment.author_association == 'OWNER')
       )
+    outputs:
+      feature_sha: ${{ steps.resolve.outputs.feature_sha }}
+      baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
+      compare: ${{ steps.resolve.outputs.compare }}
+    steps:
+      # Resolve the feature/baseline commits via the API ONLY — no checkout and
+      # no fetch of the PR ref. This write-privileged job therefore never brings
+      # untrusted PR code (or even a PR-controlled ref) into the workspace; the
+      # actual PR code is only ever materialized in the read-only `bench` job.
+      - name: Resolve commits and react
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'issue_comment') {
+              // schedule / workflow_dispatch: benchmark the checked-out ref,
+              // no baseline comparison.
+              core.setOutput('feature_sha', context.sha);
+              core.setOutput('baseline_sha', '');
+              core.setOutput('compare', 'false');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.issue.number;
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number });
+            const featureSha = pr.data.head.sha;
+            // GitHub's compare endpoint returns the merge-base of the PR base
+            // branch and the PR head — same commit `git merge-base` would pick.
+            const cmp = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${pr.data.base.ref}...${featureSha}`,
+            });
+            const baselineSha = cmp.data.merge_base_commit.sha;
+            core.setOutput('feature_sha', featureSha);
+            core.setOutput('baseline_sha', baselineSha);
+            core.setOutput('compare', 'true');
+            core.info(`Feature: ${featureSha}  Baseline: ${baselineSha}`);
+            await github.rest.reactions.createForIssueComment({
+              owner,
+              repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket',
+            });
+
+  # One job per bench target. Each job runs the feature AND the baseline pass
+  # for its target back-to-back on the SAME runner, so the raw ns/iter compared
+  # in the regression table comes from identical hardware. Jobs run in parallel
+  # across targets, so wall-clock is ~one target's feature+baseline, not the
+  # whole suite twice.
+  bench:
+    name: Bench ${{ matrix.target }}
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # This job compiles and runs untrusted PR code — keep it read-only so there
+    # is no write-scoped token to exfiltrate. `pull-requests: read` lets
+    # `gh pr checkout` resolve the (fork) PR head.
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [revm_bench, mega_bench, block_bench, transact, comp_cost, ctt]
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Checkout PR branch
+      # Fetch the PR head commit by its pull ref, which GitHub keeps in the base
+      # repo for fork PRs and even after the source branch is deleted (merged
+      # PRs) — unlike `gh pr checkout`, which needs the source branch to exist.
+      # `git checkout <feature_sha>` below then resolves against the fetched
+      # commit.
+      - name: Fetch PR head
         if: github.event_name == 'issue_comment'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh pr checkout ${{ github.event.issue.number }}
-          git submodule update --init --recursive
-
-      - name: React to comment
-        if: github.event_name == 'issue_comment'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
-              content: 'rocket'
-            });
+        run: git fetch --no-tags origin "pull/${{ github.event.issue.number }}/head"
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -60,66 +123,60 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      # Run feature benchmarks (current branch)
-      - name: Run feature benchmarks
-        env:
-          BENCH_TARGETS: revm_bench mega_bench block_bench transact comp_cost ctt
+      - name: Run feature benchmark
         run: |
-          : > feature_output.txt
-          for bench in $BENCH_TARGETS; do
-            cargo bench -p mega-evm --bench "$bench" -- --output-format bencher | tee -a feature_output.txt
-          done
-
-      # On /benchmark comment: also run baseline benchmarks for comparison
-      - name: Determine baseline commit
-        if: github.event_name == 'issue_comment'
-        id: baseline
-        run: |
-          echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          BASELINE=$(git merge-base HEAD origin/main)
-          echo "commit=$BASELINE" >> "$GITHUB_OUTPUT"
-          echo "Baseline commit: $BASELINE"
-
-      - name: Run baseline benchmarks
-        if: github.event_name == 'issue_comment'
-        env:
-          BENCH_TARGETS: revm_bench mega_bench block_bench transact comp_cost ctt
-        run: |
-          git checkout ${{ steps.baseline.outputs.commit }}
-          trap 'git checkout -' EXIT
+          git checkout --quiet ${{ needs.prepare.outputs.feature_sha }}
           git submodule update --init --recursive
-          AVAILABLE_BENCHES=$(python3 - <<'PY'
-          bench_names = []
-          in_bench = False
+          cargo bench -p mega-evm --bench ${{ matrix.target }} -- --output-format bencher \
+            | tee "feature_${{ matrix.target }}.txt"
 
-          with open("crates/mega-evm/Cargo.toml", encoding="utf-8") as f:
-              for line in f:
-                  stripped = line.strip()
-                  if stripped == "[[bench]]":
-                      in_bench = True
-                      continue
-                  if stripped.startswith("[") and stripped != "[[bench]]":
-                      in_bench = False
-                  if in_bench and stripped.startswith("name = "):
-                      name = stripped.split("=", 1)[1].strip().strip('"')
-                      bench_names.append(name)
-                      in_bench = False
+      - name: Run baseline benchmark
+        if: needs.prepare.outputs.compare == 'true'
+        run: |
+          git checkout --quiet ${{ needs.prepare.outputs.baseline_sha }}
+          git submodule update --init --recursive
+          if grep -q 'name = "${{ matrix.target }}"' crates/mega-evm/Cargo.toml; then
+            cargo bench -p mega-evm --bench ${{ matrix.target }} -- --output-format bencher \
+              | tee "baseline_${{ matrix.target }}.txt"
+          else
+            echo "Skipping baseline benchmark '${{ matrix.target }}' (not present at baseline commit)"
+          fi
 
-          for name in bench_names:
-              print(name)
-          PY
-          )
-          : > baseline_output.txt
-          for bench in $BENCH_TARGETS; do
-            if printf '%s\n' "$AVAILABLE_BENCHES" | grep -qx "$bench"; then
-              cargo bench -p mega-evm --bench "$bench" -- --output-format bencher | tee -a baseline_output.txt
-            else
-              echo "Skipping baseline benchmark '$bench' (not present at baseline commit)"
-            fi
-          done
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-output-${{ matrix.target }}
+          path: |
+            feature_${{ matrix.target }}.txt
+            baseline_${{ matrix.target }}.txt
+          if-no-files-found: ignore
+
+  # Join all per-target outputs and post the comparison comment. Cheap (no
+  # compile, no benches) so it gets a short budget.
+  compare:
+    name: Compare and comment on PR
+    needs: [prepare, bench]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: needs.prepare.outputs.compare == 'true'
+    # Posts the comparison comment; consumes only artifacts, never PR code.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download all bench results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-output-*
+          merge-multiple: true
+
+      - name: Aggregate per-target outputs
+        run: |
+          cat feature_*.txt > feature_output.txt 2>/dev/null || : > feature_output.txt
+          cat baseline_*.txt > baseline_output.txt 2>/dev/null || : > baseline_output.txt
 
       - name: Compare and comment on PR
-        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
@@ -156,10 +213,85 @@ jobs:
               return;
             }
 
+            // ----------------------------------------------------------------
+            // Baseline gap section (within HEAD commit):
+            // for every group containing `revm_pinned`, show how each later
+            // row scales relative to it. Answers "how far is mega from
+            // vanilla revm on this workload, right now" — orthogonal to the
+            // PR-base vs PR-head regression table below.
+            // ----------------------------------------------------------------
+            function formatTime(ns) {
+              if (ns >= 1_000_000) return (ns / 1_000_000).toFixed(2) + ' ms';
+              if (ns >= 1_000) return (ns / 1_000).toFixed(2) + ' µs';
+              return ns.toFixed(0) + ' ns';
+            }
+
+            const BASELINE_ROW = 'revm_pinned';
+            const ROW_ORDER = [
+              'revm_pinned',
+              'revm_latest',
+              'op_revm_pinned',
+              'op_revm_latest',
+              'equivalence',
+              'mini_rex',
+              'rex',
+              'rex1',
+              'rex2',
+              'rex3',
+              'rex4',
+              'rex5',
+            ];
+
+            // Criterion's --output-format bencher emits names like
+            // "snailtracer/revm_pinned" (group/row). Group can itself contain
+            // a `/` (e.g. block_executor_mixed_txs/rex4/10_txs), so treat the
+            // *last* segment as the row and everything before as the group.
+            const groups = {};
+            for (const [fullName, data] of Object.entries(feature)) {
+              const slash = fullName.lastIndexOf('/');
+              if (slash <= 0) continue;
+              const group = fullName.slice(0, slash);
+              const row = fullName.slice(slash + 1);
+              if (!groups[group]) groups[group] = {};
+              groups[group][row] = data.ns;
+            }
+
+            let baselineGap = '';
+            const groupNames = Object.keys(groups).sort();
+            for (const group of groupNames) {
+              const rows = groups[group];
+              const base = rows[BASELINE_ROW];
+              if (base === undefined) continue; // skip groups without a revm baseline
+              const ordered = ROW_ORDER.filter((r) => rows[r] != null);
+              const extras = Object.keys(rows).filter((r) => !ROW_ORDER.includes(r)).sort();
+              const list = ordered.concat(extras);
+
+              baselineGap += `\n### \`${group}\`\n\n`;
+              baselineGap += '| spec | time | × vs `revm_pinned` |\n';
+              baselineGap += '|------|------|--------------------|\n';
+              for (const row of list) {
+                const ns = rows[row];
+                const ratio = ns / base;
+                const ratioStr = ratio.toFixed(2) + '×';
+                const marker = row === BASELINE_ROW ? ' (baseline)' : '';
+                baselineGap += `| \`${row}\` | ${formatTime(ns)} | ${ratioStr}${marker} |\n`;
+              }
+            }
+
             let body = '## Criterion Benchmark Comparison\n\n';
-            const featureSha = '${{ steps.baseline.outputs.feature_sha }}';
-            body += `> Comparing [\`baseline\`](${context.payload.repository.html_url}/commit/${{ steps.baseline.outputs.commit }})`;
+            const featureSha = '${{ needs.prepare.outputs.feature_sha }}';
+            const baselineSha = '${{ needs.prepare.outputs.baseline_sha }}';
+            body += `> Comparing [\`baseline\`](${context.payload.repository.html_url}/commit/${baselineSha})`;
             body += ` → [\`feature\`](${context.payload.repository.html_url}/commit/${featureSha})\n\n`;
+            body += '> Each target\'s feature and baseline rows are measured back-to-back on the same runner; raw ns are comparable within a target, not across targets.\n\n';
+
+            if (baselineGap) {
+              body += '### Baseline gap (HEAD only — how far is each EVM layer from `revm_pinned`)\n';
+              body += '\n_`rex4` is the current production spec — that\'s the row to read for "user-visible mega gap". `rex5` is the latest spec under active development. The other rows are diagnostic: they show which layer adds cost._\n';
+              body += baselineGap;
+              body += '\n---\n\n';
+              body += '### PR-base → PR-head regression check\n\n';
+            }
 
             let regressions = 0;
             let warnings = 0;
@@ -182,7 +314,7 @@ jobs:
               const sign = delta > 0 ? '+' : '';
               comparisons.push({
                 delta,
-                row: `| ${name} | ${bUs} us | ${fUs} us | ${sign}${delta.toFixed(1)}% | ${icon} |`,
+                row: `| ${name} | ${bUs} µs | ${fUs} µs | ${sign}${delta.toFixed(1)}% | ${icon} |`,
               });
             }
 
@@ -223,7 +355,7 @@ jobs:
               body: body
             });
 
-      - name: Upload results
+      - name: Upload combined results
         if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -45,16 +45,16 @@ The other component of total gas cost.
 
 ## Storage gas stipend
 
-Additional 23,000 gas granted to the callee of an internal `CALL` or `CALLCODE` that transfers value (value > 0).
+A 23,000-gas allowance reserved for the callee of an internal `CALL` or `CALLCODE` that transfers value (value > 0).
 Top-level transaction calls, `DELEGATECALL`, `STATICCALL`, and [system contract](system-contracts/overview.md) interceptions do not qualify.
 
 Introduced in Rex4 to compensate for the 10× storage gas multiplier on LOG opcodes, which causes LOG events to exceed the standard EVM `CALL_STIPEND` (2,300 gas).
 
-The callee's [compute gas](#compute-gas) limit is not increased — only storage gas operations can consume the extra gas.
-Unused storage gas stipend is burned on return to prevent gas leakage.
-This includes early termination from resource limit violations — the stipend is excluded from any gas rescued for the sender.
+The allowance is reserved exclusively for the storage-gas surcharges that MegaETH adds on top of standard EVM opcode costs: it does not increase the callee's [compute gas](#compute-gas) limit and cannot be spent on standard EVM opcode costs.
+The allowance never enters the callee frame's gas limit — each storage-gas surcharge site draws from the remaining allowance and charges only the residual against the frame's gas.
+Because it is never part of a frame's gas, any undrawn allowance is not returned to the caller and never contributes to gas rescued for the sender on early termination.
 
-See [Rex4 Network Upgrade](upgrades/rex4.md) for details.
+See the [Rex4](upgrades/rex4.md) and [Rex5](upgrades/rex5.md) network upgrades for details.
 
 ## SALT
 
@@ -116,10 +116,10 @@ These are frequently accessed by many transactions and are a major source of par
 
 The effective compute gas cap imposed by [gas detention](evm/gas-detention.md).
 
-An absolute cap on total compute gas for the transaction; if the transaction has already consumed more gas than the cap when the volatile access occurs, execution halts immediately.
+A relative cap of `current_usage + cap` set at the time of volatile access; if the transaction's compute gas usage later exceeds this cap, execution halts immediately.
 
-In Rex4 and later, this is a relative cap — `current_usage + cap` at the time of volatile access.
-See the [Rex4 upgrade page](upgrades/rex4.md) for details.
+In Rex3 and earlier, this was an absolute cap on total compute gas for the transaction: if the transaction had already consumed more gas than the cap when the volatile access occurred, execution halted immediately at that point.
+The relative-cap definition above was introduced in [Rex4](upgrades/rex4.md).
 
 ## Beneficiary
 
@@ -161,7 +161,7 @@ A set of MegaETH verifiable behaviors: the complete definition of what a correct
 
 Captures the execution-layer semantics that determine node correctness.
 
-Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4`.
+Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5`.
 
 See [Hardforks and Specs](hardfork-spec.md).
 
@@ -177,7 +177,7 @@ Multiple hardforks can map to the same spec (e.g., MiniRex1 → EQUIVALENCE, Min
 
 The authorized sender for [Mega System Transactions](system-contracts/system-tx.md).
 
-- Pre-[Rex5](upgrades/rex5.md): the fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (defined in [system-tx.md § Constants](system-contracts/system-tx.md#constants)).
-- Rex5 onward: resolved per block from [`SequencerRegistry.currentSystemAddress()`](system-contracts/sequencer-registry.md).
+- Resolved per block from [`SequencerRegistry.currentSystemAddress()`](system-contracts/sequencer-registry.md) after all pre-block changes are committed.
+- The fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` (defined in [system-tx.md § Constants](system-contracts/system-tx.md#constants)) is the genesis seed value used to initialize the registry at deploy time.
 
 Exempt from oracle [gas detention](evm/gas-detention.md); carries [Oracle](system-contracts/oracle.md) write authority.

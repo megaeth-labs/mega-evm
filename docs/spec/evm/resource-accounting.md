@@ -77,6 +77,11 @@ All compute gas spent by all executed call frames contributes to the transaction
 If `compute_gas_used > effective_compute_gas_limit`, the transaction MUST halt.
 The effective limit MAY be reduced by [gas detention](gas-detention.md).
 
+#### Contract Creation Code Deposit
+
+For any contract creation (`CREATE`, `CREATE2`, or a contract-creation transaction), the code-deposit compute gas (`code_length × 200`, the standard EVM per-byte code-deposit cost inherited from Ethereum) MUST be recorded atomically with the deployment commit: it is recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract.
+A node MUST NOT additionally record this code-deposit compute gas during post-execution compute-gas accounting; double-counting it is prohibited.
+
 ### Data Size
 
 #### Definition
@@ -113,7 +118,7 @@ The following contributions MUST be tracked within call frames and MUST be disca
 #### Account Update Deduplication
 
 Within a single call frame, a node MUST count a given account update at most once for data-size tracking.
-If the same account is updated multiple times within the same call frame, subsequent updates in that call frame MUST NOT add additional `ACCOUNT_UPDATE_DATA_SIZE` bytes.
+If the same account is updated multiple times within the same call frame — including the caller account across multiple value-transferring sub-calls or creates — subsequent updates in that call frame MUST NOT add additional `ACCOUNT_UPDATE_DATA_SIZE` bytes.
 
 ### KV Updates
 
@@ -217,4 +222,4 @@ Allowing the counter to go negative during intermediate steps keeps the accounti
 This page describes the current accounting behavior.
 
 - [Rex4](../upgrades/rex4.md) — introduced per-call-frame runtime budgets for all four resource dimensions.
-- [Rex5](../upgrades/rex5.md) — corrected caller-account update deduplication: pre-Rex5, the caller's `ACCOUNT_UPDATE_DATA_SIZE` (data size) and KV-update count were re-charged on every value-transferring sub-call or create from the same parent frame because the `target_updated` flag was never set after the first charge; Rex5 marks the flag after the first charge so subsequent operations from the same parent frame do not re-count the caller account.
+- [Rex5](../upgrades/rex5.md) — corrected caller-account update deduplication: pre-Rex5, the caller's `ACCOUNT_UPDATE_DATA_SIZE` (data size) and KV-update count were re-charged on every value-transferring sub-call or create from the same parent frame because the caller was never marked as already counted after the first charge; Rex5 marks the caller after the first charge so subsequent operations from the same parent frame do not re-count the caller account. Rex5 also records contract-creation code-deposit compute gas atomically with the deployment commit instead of during post-execution accounting.

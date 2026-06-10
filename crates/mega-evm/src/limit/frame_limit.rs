@@ -49,6 +49,15 @@ pub(crate) struct FrameLimitTracker<I> {
     /// `push_create_frame` and the matching unwind in `pop_frame_unwind_parent`.
     /// Other instantiations do not consult this flag.
     rex5_enabled: bool,
+
+    /// Cached `Σ(persistent_usage + discardable_usage)` across `tx_entry` and every entry on
+    /// `frame_stack`. Maintained incrementally so `net_usage()` is O(1) instead of O(depth)
+    /// per opcode. See `net_usage()` for the invariant and `pop_frame` for the revert delta.
+    cached_total_used: u64,
+    /// Cached `Σ refund` across `tx_entry` and every entry on `frame_stack`. Maintained
+    /// together with `cached_total_used` so `net_usage = saturating_sub(used, refund)` is
+    /// a single subtraction.
+    cached_total_refund: u64,
 }
 
 /// Per-frame budget entry on the frame stack.
@@ -56,12 +65,18 @@ pub(crate) struct FrameLimitTracker<I> {
 pub(crate) struct FrameLimitEntry<I> {
     /// Maximum usage allowed in this frame.
     pub(crate) limit: u64,
+
+    // The three budget fields below MUST only be mutated through `FrameLimitTracker`'s
+    // cache-aware helpers (`add_tx_persistent`, `add_frame_persistent`,
+    // `add_frame_discardable`, `add_frame_refund`) or through `pop_frame`'s explicit
+    // cache deltas. Writing them directly desyncs `cached_total_used` /
+    // `cached_total_refund` and silently corrupts every subsequent `net_usage()` result.
     /// Persistent usage in this frame even if it is reverted.
-    pub(crate) persistent_usage: u64,
+    persistent_usage: u64,
     /// Discardable usage if this frame is reverted.
-    pub(crate) discardable_usage: u64,
+    discardable_usage: u64,
     /// Refund usage in this frame.
-    pub(crate) refund: u64,
+    refund: u64,
 
     /// Additional information about the frame.
     #[allow(dead_code)]
@@ -97,6 +112,8 @@ impl<I> FrameLimitTracker<I> {
             frame_stack: Vec::new(),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
             rex5_enabled: spec.is_enabled(MegaSpecId::REX5),
+            cached_total_used: 0,
+            cached_total_refund: 0,
         }
     }
 
@@ -111,6 +128,8 @@ impl<I> FrameLimitTracker<I> {
         self.tx_entry.discardable_usage = 0;
         self.tx_entry.refund = 0;
         self.frame_stack.clear();
+        self.cached_total_used = 0;
+        self.cached_total_refund = 0;
     }
 
     /// Returns the remaining budget of the current frame.
@@ -153,21 +172,41 @@ impl<I> FrameLimitTracker<I> {
     ///
     /// On success: `persistent_usage`, `discardable_usage`, and `refund` are all merged.
     /// On failure: only `persistent_usage` is merged; `discardable_usage` and `refund` are dropped.
+    ///
+    /// Cache invariant: every mutation to `persistent_usage` / `discardable_usage` / `refund`
+    /// — whether via the public helpers or via this pop — keeps `cached_total_used` and
+    /// `cached_total_refund` in sync. On revert the child's `discardable_usage` and `refund`
+    /// are subtracted from the cache because they vanish (they are neither kept on the child
+    /// nor merged into the parent).
     pub(crate) fn pop_frame(&mut self, success: bool) -> Option<FrameLimitEntry<I>> {
         let child = self.frame_stack.pop();
         if let Some(child) = &child {
             if let Some(parent) = self.frame_stack.last_mut() {
+                // Persistent usage is always preserved: move from child slot to parent slot.
+                // The cache already counts it once, so no cache update is needed here.
                 parent.persistent_usage += child.persistent_usage;
                 if success {
+                    // Discardable & refund are preserved on success — same total, just relocated
+                    // from child entry to parent entry. Cache stays the same.
                     parent.discardable_usage += child.discardable_usage;
                     parent.refund += child.refund;
+                } else {
+                    // Revert: child's discardable_usage and refund vanish entirely. Subtract them
+                    // from the cache to maintain the `Σ(persistent + discardable) - Σ refund`
+                    // invariant.
+                    self.cached_total_used -= child.discardable_usage;
+                    self.cached_total_refund -= child.refund;
                 }
             } else {
-                // Last frame popped — merge into tx_entry.
+                // Last frame popped — merge into tx_entry. Same cache reasoning as the parent
+                // branch above.
                 self.tx_entry.persistent_usage += child.persistent_usage;
                 if success {
                     self.tx_entry.discardable_usage += child.discardable_usage;
                     self.tx_entry.refund += child.refund;
+                } else {
+                    self.cached_total_used -= child.discardable_usage;
+                    self.cached_total_refund -= child.refund;
                 }
             }
         }
@@ -190,11 +229,6 @@ impl<I> FrameLimitTracker<I> {
         }
     }
 
-    /// Returns a mutable reference to the TX-level entry.
-    pub(crate) fn tx_mut(&mut self) -> &mut FrameLimitEntry<()> {
-        &mut self.tx_entry
-    }
-
     /// Returns a mutable reference to the current (top) frame entry.
     pub(crate) fn frame_mut(&mut self) -> Option<&mut FrameLimitEntry<I>> {
         self.frame_stack.last_mut()
@@ -215,7 +249,29 @@ impl<I> FrameLimitTracker<I> {
 
     /// Returns the total net usage across `tx_entry` and all frames on the stack.
     /// Net usage = Σ(`persistent_usage` + `discardable_usage`) - Σ(refund), clamped to 0.
+    ///
+    /// O(1): served from `cached_total_used` / `cached_total_refund`, which are maintained
+    /// incrementally by `add_tx_persistent`, `add_frame_persistent`, `add_frame_discardable`,
+    /// `add_frame_refund`, and `pop_frame`.
+    #[inline]
     pub(crate) fn net_usage(&self) -> u64 {
+        let net_usage = self.cached_total_used.saturating_sub(self.cached_total_refund);
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            net_usage,
+            self.net_usage_uncached(),
+            "cached net_usage must match uncached reference"
+        );
+        net_usage
+    }
+
+    /// Reference implementation of `net_usage` that walks `tx_entry + frame_stack` directly.
+    /// Active only in debug builds (gated by `cfg(debug_assertions)`), where it backs the
+    /// per-call assertion inside `net_usage()` so the incremental cache is verified against
+    /// the slow O(depth) walk on every opcode in tests and dev runs. Release builds
+    /// (including `cargo bench` and production) compile this out entirely.
+    #[cfg(any(debug_assertions, test))]
+    fn net_usage_uncached(&self) -> u64 {
         let mut total_used: u64 = self.tx_entry.used();
         let mut total_refund: u64 = self.tx_entry.refund;
         for entry in &self.frame_stack {
@@ -223,6 +279,54 @@ impl<I> FrameLimitTracker<I> {
             total_refund += entry.refund;
         }
         total_used.saturating_sub(total_refund)
+    }
+
+    /// Adds `n` to `tx_entry.persistent_usage` and keeps the cache in sync.
+    ///
+    /// Used by trackers to record intrinsic / pre-frame usage (e.g. base TX size,
+    /// EIP-7702 authority updates, caller account update). The current frame stack
+    /// may be empty (pre-`frame_init`) or non-empty (`compute_gas`'s fallback when no
+    /// frame exists).
+    #[inline]
+    pub(crate) fn add_tx_persistent(&mut self, n: u64) {
+        self.tx_entry.persistent_usage += n;
+        self.cached_total_used += n;
+    }
+
+    /// Adds `n` to the current top frame's `persistent_usage` and keeps the cache in sync.
+    /// Returns `false` (and does nothing) when the frame stack is empty — callers that
+    /// need a tx-level fallback must check the return value.
+    #[inline]
+    pub(crate) fn add_frame_persistent(&mut self, n: u64) -> bool {
+        match self.frame_stack.last_mut() {
+            Some(entry) => {
+                entry.persistent_usage += n;
+                self.cached_total_used += n;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Adds `n` to the current top frame's `discardable_usage` and keeps the cache in sync.
+    /// No-op when the frame stack is empty (discardable usage requires a frame to be
+    /// discardable into; pre-frame usage is always persistent).
+    #[inline]
+    pub(crate) fn add_frame_discardable(&mut self, n: u64) {
+        if let Some(entry) = self.frame_stack.last_mut() {
+            entry.discardable_usage += n;
+            self.cached_total_used += n;
+        }
+    }
+
+    /// Adds `n` to the current top frame's `refund` and keeps the cache in sync.
+    /// No-op when the frame stack is empty.
+    #[inline]
+    pub(crate) fn add_frame_refund(&mut self, n: u64) {
+        if let Some(entry) = self.frame_stack.last_mut() {
+            entry.refund += n;
+            self.cached_total_refund += n;
+        }
     }
 }
 
@@ -411,5 +515,101 @@ mod tests {
         t.push_create_frame();
         t.set_created_address(ADDR);
         t.set_created_address(ADDR); // second call must panic
+    }
+
+    /// Drives `FrameLimitTracker` through a representative sequence of pushes, mutations,
+    /// and pops (both success and revert) and asserts that the cached `net_usage()` stays
+    /// in sync with the uncached reference walk after every step. This is the load-bearing
+    /// guarantee of the cache-based refactor: any future change that introduces a new
+    /// mutation site without going through a helper will break this test.
+    #[test]
+    fn test_net_usage_cache_matches_uncached() {
+        let mut t = FrameLimitTracker::<()>::new(MegaSpecId::EQUIVALENCE, u64::MAX);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+        assert_eq!(t.net_usage(), 0);
+
+        // Pre-frame intrinsic usage goes to tx_entry.
+        t.add_tx_persistent(100);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+
+        // add_frame_persistent on empty stack must be a no-op and return false.
+        assert!(!t.add_frame_persistent(50));
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+        // add_frame_discardable / add_frame_refund are no-ops on empty stack.
+        t.add_frame_discardable(50);
+        t.add_frame_refund(50);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+        assert_eq!(t.net_usage(), 100);
+
+        // Push frame 1 and mix in persistent/discardable/refund.
+        t.push_frame(());
+        assert!(t.add_frame_persistent(20));
+        t.add_frame_discardable(30);
+        t.add_frame_refund(10);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+
+        // Push frame 2 (nested) and mutate.
+        t.push_frame(());
+        assert!(t.add_frame_persistent(7));
+        t.add_frame_discardable(15);
+        t.add_frame_refund(3);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+
+        // Push frame 3 (deeper) and revert it — discardable & refund must vanish from cache,
+        // persistent must merge into the parent (frame 2).
+        t.push_frame(());
+        assert!(t.add_frame_persistent(5));
+        t.add_frame_discardable(11);
+        t.add_frame_refund(2);
+        let before_revert = t.net_usage();
+        let popped = t.pop_frame(false).expect("frame 3 popped");
+        assert_eq!(popped.discardable_usage, 11);
+        assert_eq!(popped.refund, 2);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+        // After revert: cache should drop the child's discardable (11) and refund (2),
+        // so net_usage changes by -(11) + 2 = -9 vs before.
+        assert_eq!(t.net_usage(), before_revert - 9);
+
+        // Push frame 3 again and pop it successfully — discardable/refund merge into parent,
+        // cache is unchanged by the pop itself (totals are invariant under transfer).
+        t.push_frame(());
+        assert!(t.add_frame_persistent(4));
+        t.add_frame_discardable(6);
+        t.add_frame_refund(1);
+        let before_success = t.net_usage();
+        t.pop_frame(true);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+        assert_eq!(t.net_usage(), before_success);
+
+        // Pop frame 2 with success → merge into frame 1.
+        t.pop_frame(true);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+
+        // Pop the last frame (frame 1) with revert → discardable/refund vanish, persistent
+        // merges into tx_entry.
+        let before_last_revert = t.net_usage();
+        let frame_1 = t.pop_frame(false).expect("frame 1 popped");
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+        // The popped frame's discardable/refund leave the cache.
+        assert_eq!(t.net_usage(), before_last_revert - frame_1.discardable_usage + frame_1.refund);
+
+        // Reset returns the cache to zero in sync with the entries.
+        t.reset();
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
+        assert_eq!(t.net_usage(), 0);
+    }
+
+    /// Verifies that a refund exceeding the cumulative usage clamps `net_usage()` to 0,
+    /// matching the saturating semantics of the uncached reference. This guards against
+    /// signed-style accounting bugs where refunds outrun used and an unsigned subtraction
+    /// would otherwise wrap.
+    #[test]
+    fn test_net_usage_saturates_when_refund_exceeds_used() {
+        let mut t = FrameLimitTracker::<()>::new(MegaSpecId::EQUIVALENCE, u64::MAX);
+        t.push_frame(());
+        t.add_frame_discardable(10);
+        t.add_frame_refund(100);
+        assert_eq!(t.net_usage(), 0);
+        assert_eq!(t.net_usage(), t.net_usage_uncached());
     }
 }

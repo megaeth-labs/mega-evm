@@ -45,6 +45,17 @@ impl LimitKind {
             Self::StateGrowth => 3,
         }
     }
+
+    /// Converts a discriminant value back to a `LimitKind`.
+    pub const fn from_u8(kind: u8) -> Option<Self> {
+        match kind {
+            0 => Some(Self::DataSize),
+            1 => Some(Self::KVUpdate),
+            2 => Some(Self::ComputeGas),
+            3 => Some(Self::StateGrowth),
+            _ => None,
+        }
+    }
 }
 
 /// Result of a limit check, indicating whether any resource limit has been exceeded.

@@ -2,62 +2,45 @@
 //!
 //! These benchmarks are adapted from revm's revme bench suite to measure equivalent
 //! workloads through mega-evm's execution pipeline, enabling performance comparison
-//! between vanilla revm and mega-evm.
+//! between vanilla revm, op-revm, and mega-evm.
 //!
-//! Ported benchmarks:
+//! Each workload runs against five layers so a single `cargo bench` produces a
+//! comparable table:
+//!
+//! 1. `revm_pinned`     — vanilla `revm::Evm` at the version mega-evm currently pins.
+//! 2. `revm_latest`     — vanilla `revm::Evm` at the latest crates.io release.
+//! 3. `op_revm_pinned`  — `op_revm::OpEvm` at the version mega-evm currently pins (operator fee =
+//!    0).
+//! 4. `op_revm_latest`  — `op_revm::OpEvm` at the latest crates.io release (operator fee = 0).
+//! 5. `mega_<spec>`     — `MegaEvm` at `EQUIVALENCE` / `MINI_REX` / `REX4`.
+//!
+//! Ported workloads:
 //! - **snailtracer**: CPU-intensive ray tracer exercising many opcodes
 //! - **analysis**: ERC20-like contract bytecode execution
 //! - **subcall**: Multi-level contract call performance (1000 iterations)
 //! - **`transfer_multi`**: Batch transaction execution (1000 transfers)
+//!
+//! New workloads must avoid touching mega-evm's per-tx resource limits
+//! (compute gas / data size / KV updates / state growth) under any spec, or the
+//! `mega_*` row would halt early and skew the baseline comparison.
+//! Likewise, every vanilla baseline is pinned to a Cancun-equivalent fork
+//! (`revm` rows to Cancun, `op-revm` rows to Holocene) in `common::subject`, so
+//! a new workload must execute successfully under Cancun semantics on every row.
 
 #![allow(missing_docs)]
 
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
-use revm::{bytecode::opcode, context::tx::TxEnvBuilder, ExecuteEvm};
+use criterion::{criterion_group, criterion_main, Criterion};
+use revm::bytecode::opcode;
+
+mod common;
+use common::{register_all, Account, TxSpec, Workload};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");
 
 const SUBCALL_TARGET_A: Address = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 const SUBCALL_TARGET_B: Address = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-
-/// Specs to benchmark against.
-const SPEC_IDS: &[(&str, MegaSpecId)] = &[
-    ("equivalence", MegaSpecId::EQUIVALENCE),
-    ("mini_rex", MegaSpecId::MINI_REX),
-    ("rex4", MegaSpecId::REX4),
-];
-
-//
-// ============================================================================
-// Common Utility Functions
-// ============================================================================
-//
-
-/// Execute a call to CONTRACT with the given spec, gas limit, and calldata.
-fn transact_call(spec: MegaSpecId, db: MemoryDatabase, gas_limit: u64, data: Bytes) {
-    let mut context = MegaContext::new(db, spec);
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-
-    let tx = TxEnvBuilder::new()
-        .caller(CALLER)
-        .call(CONTRACT)
-        .gas_limit(gas_limit)
-        .data(data)
-        .build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
-    mega_tx.enveloped_tx = Some(Bytes::new());
-
-    let r = evm.transact(mega_tx).expect("transaction should succeed");
-    assert!(r.result.is_success(), "transaction should succeed: {:?}", r.result);
-    black_box(r);
-}
 
 //
 // ============================================================================
@@ -73,20 +56,16 @@ const SNAILTRACER_BYTES: &str = include_str!("data/snailtracer.hex");
 fn bench_snailtracer(c: &mut Criterion) {
     let bytecode = Bytes::from(hex::decode(SNAILTRACER_BYTES).unwrap());
     let calldata = bytes!("30627b7c");
+    let caller_balance = U256::from(10).pow(U256::from(18));
 
     let mut group = c.benchmark_group("snailtracer");
     group.sample_size(10);
 
-    for &(name, spec) in SPEC_IDS {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let db = MemoryDatabase::default()
-                    .account_code(CONTRACT, bytecode.clone())
-                    .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
-                transact_call(black_box(spec), db, 1_000_000_000, calldata.clone());
-            })
-        });
-    }
+    let workload = Workload::single(
+        vec![Account::new(CONTRACT).code(bytecode), Account::new(CALLER).balance(caller_balance)],
+        TxSpec::call(CALLER, CONTRACT).gas_limit(1_000_000_000).data(calldata),
+    );
+    register_all(&mut group, &workload);
     group.finish();
 }
 
@@ -104,19 +83,15 @@ const ANALYSIS_BYTES: &str = include_str!("data/analysis.hex");
 fn bench_analysis(c: &mut Criterion) {
     let bytecode = Bytes::from(hex::decode(ANALYSIS_BYTES).unwrap());
     let calldata = bytes!("8035F0CE");
+    let caller_balance = U256::from(10).pow(U256::from(18));
 
     let mut group = c.benchmark_group("analysis");
 
-    for &(name, spec) in SPEC_IDS {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let db = MemoryDatabase::default()
-                    .account_code(CONTRACT, bytecode.clone())
-                    .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
-                transact_call(black_box(spec), db, 10_000_000_000, calldata.clone());
-            })
-        });
-    }
+    let workload = Workload::single(
+        vec![Account::new(CONTRACT).code(bytecode), Account::new(CALLER).balance(caller_balance)],
+        TxSpec::call(CALLER, CONTRACT).gas_limit(10_000_000_000).data(calldata),
+    );
+    register_all(&mut group, &workload);
     group.finish();
 }
 
@@ -195,37 +170,22 @@ fn make_subcall_bytecode(target: Address) -> Bytes {
     Bytes::from(code)
 }
 
-/// Helper to benchmark a subcall variant across specs.
+/// Benchmark one subcall variant across the 4 baselines and mega specs. The
+/// contract at `CONTRACT` drives the loop, so the tx itself just calls it with
+/// a high gas limit and no value.
 fn bench_subcall_variant(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    db_setup: impl Fn() -> MemoryDatabase,
+    accounts: Vec<Account>,
 ) {
-    for &(name, spec) in SPEC_IDS {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let db = db_setup();
-                let mut context = MegaContext::new(db, spec);
-                context.modify_chain(|chain| {
-                    chain.operator_fee_scalar = Some(U256::from(0));
-                    chain.operator_fee_constant = Some(U256::from(0));
-                });
-                let mut evm = MegaEvm::new(context);
-                let tx = TxEnvBuilder::new()
-                    .caller(CALLER)
-                    .call(CONTRACT)
-                    .gas_limit(10_000_000_000)
-                    .build_fill();
-                let mut mega_tx = MegaTransaction::new(tx);
-                mega_tx.enveloped_tx = Some(Bytes::new());
-                let r = evm.transact(mega_tx).expect("should succeed");
-                assert!(r.result.is_success(), "subcall should succeed");
-                black_box(r)
-            })
-        });
-    }
+    const SUBCALL_GAS_LIMIT: u64 = 10_000_000_000;
+    let workload =
+        Workload::single(accounts, TxSpec::call(CALLER, CONTRACT).gas_limit(SUBCALL_GAS_LIMIT));
+    register_all(group, &workload);
 }
 
 fn bench_subcall(c: &mut Criterion) {
+    let caller_balance = U256::from(u128::MAX);
+
     // Variant 1: 1000 subcalls each transferring 1 wei
     {
         let loop_code = make_loop_call_bytecode(SUBCALL_TARGET_A, 1);
@@ -233,12 +193,14 @@ fn bench_subcall(c: &mut Criterion) {
 
         let mut group = c.benchmark_group("subcall_1000_transfer_1wei");
         group.sample_size(10);
-        bench_subcall_variant(&mut group, || {
-            MemoryDatabase::default()
-                .account_balance(CALLER, U256::from(u128::MAX))
-                .account_code(CONTRACT, loop_code.clone())
-                .account_code(SUBCALL_TARGET_A, stop_code.clone())
-        });
+        bench_subcall_variant(
+            &mut group,
+            vec![
+                Account::new(CALLER).balance(caller_balance),
+                Account::new(CONTRACT).code(loop_code),
+                Account::new(SUBCALL_TARGET_A).code(stop_code),
+            ],
+        );
         group.finish();
     }
 
@@ -249,12 +211,14 @@ fn bench_subcall(c: &mut Criterion) {
 
         let mut group = c.benchmark_group("subcall_1000_no_value");
         group.sample_size(10);
-        bench_subcall_variant(&mut group, || {
-            MemoryDatabase::default()
-                .account_balance(CALLER, U256::from(u128::MAX))
-                .account_code(CONTRACT, loop_code.clone())
-                .account_code(SUBCALL_TARGET_A, stop_code.clone())
-        });
+        bench_subcall_variant(
+            &mut group,
+            vec![
+                Account::new(CALLER).balance(caller_balance),
+                Account::new(CONTRACT).code(loop_code),
+                Account::new(SUBCALL_TARGET_A).code(stop_code),
+            ],
+        );
         group.finish();
     }
 
@@ -266,13 +230,15 @@ fn bench_subcall(c: &mut Criterion) {
 
         let mut group = c.benchmark_group("subcall_1000_nested");
         group.sample_size(10);
-        bench_subcall_variant(&mut group, || {
-            MemoryDatabase::default()
-                .account_balance(CALLER, U256::from(u128::MAX))
-                .account_code(CONTRACT, loop_code.clone())
-                .account_code(SUBCALL_TARGET_A, subcall_code.clone())
-                .account_code(SUBCALL_TARGET_B, stop_code.clone())
-        });
+        bench_subcall_variant(
+            &mut group,
+            vec![
+                Account::new(CALLER).balance(caller_balance),
+                Account::new(CONTRACT).code(loop_code),
+                Account::new(SUBCALL_TARGET_A).code(subcall_code),
+                Account::new(SUBCALL_TARGET_B).code(stop_code),
+            ],
+        );
         group.finish();
     }
 }
@@ -282,7 +248,8 @@ fn bench_subcall(c: &mut Criterion) {
 // Transfer Multi Benchmark
 // ============================================================================
 //
-// Measures batch transaction execution: 1000 sequential ether transfers.
+// Measures batch transaction execution: 1000 sequential ether transfers run on
+// one reused EVM (a subject loops the workload's tx list internally).
 //
 
 fn bench_transfer_multi(c: &mut Criterion) {
@@ -292,39 +259,19 @@ fn bench_transfer_multi(c: &mut Criterion) {
     let base = U256::from(10_000);
     let targets: Vec<Address> =
         (0..1000u64).map(|i| Address::from_word((base + U256::from(i)).into())).collect();
+    let caller_balance = U256::from(3_000_000_000u64);
+    let target_balance = U256::from(3_000_000_000u64);
 
-    for &(name, spec) in SPEC_IDS {
-        let targets = targets.clone();
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                let mut db =
-                    MemoryDatabase::default().account_balance(CALLER, U256::from(3_000_000_000u64));
-                for target in &targets {
-                    db = db.account_balance(*target, U256::from(3_000_000_000u64));
-                }
+    let mut accounts = vec![Account::new(CALLER).balance(caller_balance)];
+    accounts.extend(targets.iter().map(|t| Account::new(*t).balance(target_balance)));
 
-                let mut context = MegaContext::new(db, spec);
-                context.modify_chain(|chain| {
-                    chain.operator_fee_scalar = Some(U256::from(0));
-                    chain.operator_fee_constant = Some(U256::from(0));
-                });
-                let mut evm = MegaEvm::new(context);
+    let txs: Vec<TxSpec> = targets
+        .iter()
+        .map(|t| TxSpec::call(CALLER, *t).value(U256::from(1)).gas_limit(100_000))
+        .collect();
 
-                for target in &targets {
-                    let tx = TxEnvBuilder::new()
-                        .caller(CALLER)
-                        .call(*target)
-                        .value(U256::from(1))
-                        .gas_limit(100_000)
-                        .build_fill();
-                    let mut mega_tx = MegaTransaction::new(tx);
-                    mega_tx.enveloped_tx = Some(Bytes::new());
-                    let r = evm.transact(mega_tx).expect("transfer should succeed");
-                    black_box(&r);
-                }
-            })
-        });
-    }
+    let workload = Workload::new(accounts, txs);
+    register_all(&mut group, &workload);
     group.finish();
 }
 

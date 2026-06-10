@@ -1,6 +1,6 @@
 ---
 description: MegaLimitControl system contract — runtime query for effective remaining compute gas under detention and call-frame limits.
-spec: Rex4
+spec: Rex5
 ---
 
 # MegaLimitControl
@@ -27,8 +27,6 @@ The MegaLimitControl system contract MUST exist at `MEGA_LIMIT_CONTROL_ADDRESS`.
 
 The contract takes no constructor arguments.
 A node MUST deploy the bytecode version corresponding to the active spec.
-
-Source: [`MegaLimitControl.sol`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/contracts/MegaLimitControl.sol)
 
 #### Version 1.0.0
 

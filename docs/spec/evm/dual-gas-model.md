@@ -1,6 +1,6 @@
 ---
 description: MegaETH dual gas model specification — compute gas, storage gas, SALT bucket multiplier, and per-operation storage gas schedule.
-spec: Rex4
+spec: Rex5
 ---
 
 # Dual Gas Model
@@ -64,6 +64,12 @@ A node MUST charge storage gas according to the following schedule:
 Contract creation MUST charge only `CONTRACT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)`.
 The account creation storage gas (`ACCOUNT_CREATION_STORAGE_GAS_BASE`) MUST NOT be charged on top of the contract creation cost.
 
+#### Top-Level Contract Creation Address
+
+For a top-level contract-creation transaction, the contract-creation storage gas and its [SALT bucket](../glossary.md#salt-bucket) multiplier MUST be computed from the address that the transaction will actually create.
+A node MUST derive that address from the sender account's current state nonce — the same nonce used to create the contract — and MUST NOT derive it from the transaction's nonce field.
+These two values differ when prior in-block activity or EIP-7702 authorizations have advanced the sender account's nonce ahead of the value carried in the transaction's nonce field.
+
 #### Calldata Floor Cost
 
 Per [EIP-7623](https://eips.ethereum.org/EIPS/eip-7623), after execution completes, if the total gas consumed is less than the calldata floor cost, the transaction MUST be charged the floor cost instead.
@@ -85,12 +91,11 @@ The [data size](resource-accounting.md) tracked for LOG operations within a reve
 
 The 10× storage gas on LOG opcodes causes a simple `LOG1` to cost 4,500 gas (750 compute + 3,750 storage), exceeding the EVM's `CALL_STIPEND` of 2,300.
 
-An additional **[storage gas stipend](../glossary.md#storage-gas-stipend)** of 23,000 gas is granted for internal (`depth > 0`) value-transferring `CALL` and `CALLCODE` opcodes.
+A **[storage gas stipend](../glossary.md#storage-gas-stipend)** allowance of 23,000 gas is reserved for internal (`depth > 0`) value-transferring `CALL` and `CALLCODE` opcodes.
 `DELEGATECALL`, `STATICCALL`, top-level transaction calls, and [system contract](../system-contracts/overview.md) interceptions MUST NOT receive the stipend.
-The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_CALL_STIPEND (23,000)`.
-The callee's [compute gas](../glossary.md#compute-gas) limit MUST remain at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by storage gas operations.
-On return, unused storage gas stipend MUST be burned — it MUST NOT be returned to the caller, regardless of whether the callee succeeded or reverted.
-See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+The allowance MUST NOT inflate the callee's gas limit: the callee runs with the standard `forwarded_gas + CALL_STIPEND (2,300)`, and the stipend is a separate per-frame budget drawn only at the storage-gas surcharge sites MegaETH adds on top of standard EVM opcode costs (LOG topic/data, new-account materialization, first-time-write SSTORE, contract-creation storage, SELFDESTRUCT beneficiary creation).
+Because the allowance never enters the callee's gas limit, it MUST NOT be spendable on compute (standard EVM opcode) gas, and any undrawn portion is neither returned to the caller nor rescued for the sender on early termination.
+See the [gas forwarding](gas-forwarding.md) page for the full mechanism.
 
 ### Dynamic SALT Multiplier
 
@@ -227,7 +232,7 @@ The 39,000 flat intrinsic storage gas covers this per-transaction overhead.
 **If storage gas is omitted or undercharged**, MegaETH's 0.001 gwei base fee makes every SSTORE, contract deployment, and LOG call negligible in cost.
 A single transaction could write thousands of storage slots or emit megabytes of log data for nearly zero fee — the exact attack the dual gas model exists to prevent.
 
-**If unused `STORAGE_CALL_STIPEND` is returned to the caller rather than burned**, system-granted gas leaks back to the caller, who can redirect it to non-storage operations — undermining the compute-gas cap designed to keep the stipend storage-only.
+**If the `STORAGE_CALL_STIPEND` allowance is allowed to enter the callee's gas limit or be returned to the caller**, system-granted gas leaks to the caller, who can redirect it to non-storage operations — defeating the allowance's purpose of covering only MegaETH's storage-gas surcharges.
 
 ## Spec History
 
@@ -236,3 +241,4 @@ For the historical evolution of storage gas formulas and constants across specs:
 - [MiniRex](../upgrades/minirex.md) — original `base × multiplier` formula with 2,000,000 base cost
 - [Rex](../upgrades/rex.md) — revised to `base × (multiplier − 1)` with current base costs, added transaction intrinsic storage gas
 - [Rex4](../upgrades/rex4.md) — storage gas stipend for value transfers
+- [Rex5](../upgrades/rex5.md) — reworked the storage gas stipend into a separated-allowance model, derived the top-level contract-creation storage-gas address from the sender's current state nonce, and made contract-creation code-deposit compute gas atomic with the deployment commit

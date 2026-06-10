@@ -21,6 +21,9 @@ interface ISequencerRegistry {
     /// @notice Thrown when the caller is not the current admin.
     error NotAdmin();
 
+    /// @notice Thrown when the caller is not the pending admin.
+    error NotPendingAdmin();
+
     /// @notice Thrown when a zero address is passed where a non-zero address is required.
     error ZeroAddress();
 
@@ -71,12 +74,28 @@ interface ISequencerRegistry {
     /// @notice Applies all pending role changes that are due. Called as a pre-block system call.
     function applyPendingChanges() external;
 
-    /// @notice Emitted when the admin is transferred.
+    /// @notice Emitted when the current admin starts a two-step transfer by setting a pending admin.
+    /// @dev Also emitted with `newPendingAdmin == address(0)` when the current admin cancels a
+    ///      pending transfer.
+    event AdminTransferStarted(address indexed currentAdmin, address indexed newPendingAdmin);
+
+    /// @notice Emitted when the pending admin accepts the transfer and becomes the new admin.
     event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
 
     /// @notice Returns the current admin address.
     function admin() external view returns (address);
 
-    /// @notice Transfers admin to a new address.
+    /// @notice Returns the address that is currently allowed to call `acceptAdmin`, or
+    ///         `address(0)` if no transfer is pending.
+    function pendingAdmin() external view returns (address);
+
+    /// @notice Sets the pending admin to `newAdmin`. The current admin remains in effect until
+    ///         `newAdmin` calls `acceptAdmin()`. Pass `address(0)` to cancel a pending transfer.
+    /// @dev Two-step transfer (sets pending; does not change `admin()` immediately).
+    ///      A subsequent call overwrites any previously pending admin.
     function transferAdmin(address newAdmin) external;
+
+    /// @notice Completes a two-step admin transfer. Must be called by the address previously
+    ///         passed to `transferAdmin`. Sets `admin()` to the caller and clears the pending slot.
+    function acceptAdmin() external;
 }
