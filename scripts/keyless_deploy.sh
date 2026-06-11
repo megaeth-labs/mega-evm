@@ -22,11 +22,18 @@ export FOUNDRY_DISABLE_NIGHTLY_WARNING=1 # Suppress foundry nightly warning
 
 # Check required commands
 MISSING=()
-for cmd in cast jq python3 "$MEGA_EVME"; do
+for cmd in cast jq python3; do
     if ! command -v "$cmd" &>/dev/null; then
         MISSING+=("$cmd")
     fi
 done
+
+# Check mega-evme binary separately (handle args)
+MEGA_EVME_BIN=${MEGA_EVME%% *}
+if ! command -v "$MEGA_EVME_BIN" &>/dev/null; then
+    MISSING+=("$MEGA_EVME_BIN")
+fi
+
 if [ ${#MISSING[@]} -ne 0 ]; then
     echo "ERROR: Required command(s) not found: ${MISSING[*]}"
     echo "Please install them before running this script."
