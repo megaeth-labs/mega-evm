@@ -108,13 +108,15 @@ pub enum KeylessDeployError {
     /// itself before constructing the sandbox transaction.
     SignerHasCode,
     /// Internal sandbox failure (DB I/O, header validation, etc.).
-    /// Selector-only — precompile return data is consensus-affecting, so the wire must
-    /// not pin consensus to upstream revm/op-revm `Display` impls.
+    /// Selector-only so the top-level error ABI stays stable and does not depend on
+    /// upstream revm/op-revm `Display` text. The interceptor only runs at call depth 0,
+    /// so this returndata has no inner caller to read it and never reaches a consensus
+    /// root; the selector-only shape is for off-chain decoder/tooling stability.
     InternalError,
     /// Sandbox rejected the inner transaction as a tx-validation error
     /// (`IsTxError::is_tx_error() == true`). A dedicated selector lets relayer-side
     /// decoders distinguish this from a genuine internal failure. Selector-only for the
-    /// same consensus-decoupling reason as `InternalError`.
+    /// same ABI-stability reason as `InternalError`.
     InvalidTransaction,
     /// The keylessDeploy call was not intercepted (only returned by Solidity contract for inner
     /// calls)
@@ -290,9 +292,9 @@ mod tests {
     use super::*;
 
     /// `InternalError` and `InvalidTransaction` carry no payload on the wire, so a
-    /// roundtrip MUST produce the same variant. Pinned because both selectors are
-    /// reachable on-chain via `RETURNDATACOPY` and any divergence between
-    /// `encode_error_result` and `decode_error_result` would break consensus.
+    /// roundtrip MUST produce the same variant. Pinned because these selectors are the
+    /// off-chain error ABI (RPC, traces, relayer decoders); a divergence between
+    /// `encode_error_result` and `decode_error_result` would silently break those decoders.
     #[test]
     fn test_internal_error_roundtrip_is_selector_only() {
         let encoded = encode_error_result(KeylessDeployError::InternalError);
@@ -311,7 +313,7 @@ mod tests {
         ));
     }
 
-    /// `InitCodeTooLarge { size, max }` is a consensus-visible ABI selector. Pinning the
+    /// `InitCodeTooLarge { size, max }` is an externally visible ABI selector. Pinning the
     /// round-trip catches any drift between the Solidity error definition and the Rust
     /// encode/decode (e.g. forgotten arm in `encode_error_result` or `decode_error_result`,
     /// or accidental field reordering).

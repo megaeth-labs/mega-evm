@@ -272,7 +272,12 @@ A transaction that cannot fit its final Mega-side intrinsic or floor gas require
   It is raised when the recovered signer's parent-state bytecode is non-empty and is not a valid EIP-7702 delegation designation, unless the EIP-3607 check is disabled.
   This re-enforces EIP-3607 because the deposit-style sandbox transaction bypasses the standard account nonce-and-code validation.
 
-`InvalidTransaction()`, `InternalError()`, and `SignerHasCode()` are selector-only because precompile return data is reachable on-chain via `RETURNDATACOPY` → `SSTORE` → state root, so coupling the wire format to a non-stable internal error string would pin consensus to it.
+`InvalidTransaction()`, `InternalError()`, and `SignerHasCode()` are selector-only so the top-level KeylessDeploy error ABI stays stable and does not depend on upstream internal error text.
+KeylessDeploy interception is active only at call depth 0; calls from contracts are not intercepted and therefore cannot observe sandbox validation/internal-error payloads with `RETURNDATASIZE` or `RETURNDATACOPY`.
+This ABI refactor can affect RPC responses, traces, relayer decoders, and exact-output replay tooling, but it does not create a state-root or receipt-root replay dependency through an inner-call returndata path.
+In consensus terms the change in this error's returndata from `InternalError(string)` to `InternalError()` is a non-breaking, off-chain interface change — comparable to changing an RPC error/response format — so it carries no hard-fork or coordinated-activation requirement.
+Because this returndata is never consensus-observable, the encoding is not spec-gated: the node emits the selector-only form uniformly across all specs.
+The `InternalError(string)` form above therefore describes the original Rex2 implementation, not the current node's output when re-executing a pre-Rex5 block.
 See [keyless-deploy.md](../system-contracts/keyless-deploy.md) for the normative error list.
 
 ### 16. Precompile Compute-Gas Cap
