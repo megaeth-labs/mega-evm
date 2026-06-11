@@ -33,7 +33,7 @@ use mega_evm::{
 use op_alloy_consensus::OpTxEnvelope;
 use op_alloy_rpc_types::Transaction;
 use state_test::{
-    runner::{execute_unit_collect, execution_status},
+    runner::{execute_unit_collect, execution_status, halt_reason},
     types::{AccountInfo, Env, MegaEnv, SpecName, Test, TestSuite, TestUnit, TransactionParts},
 };
 
@@ -92,6 +92,11 @@ pub(crate) struct FixtureDraft {
     actual_gas: u64,
     /// Status observed during the full replay, cross-checked before writing.
     actual_status: String,
+    /// Halt reason observed during the full replay (`None` unless the status is
+    /// `"halt"`), cross-checked before writing: two different halts typically
+    /// burn the same full gas with no output and no logs, so the coarse status
+    /// comparison alone cannot tell them apart.
+    actual_halt_reason: Option<String>,
     /// Output observed during the full replay, cross-checked before writing.
     actual_output: Option<Bytes>,
     /// Logs root observed during the full replay (already equal to the on-chain
@@ -135,6 +140,7 @@ where
 
     let actual_gas = inputs.result.gas_used();
     let actual_status = execution_status(inputs.result).to_string();
+    let actual_halt_reason = halt_reason(inputs.result);
     let actual_output = inputs.result.output().cloned();
     let actual_logs_root = state_test::utils::log_rlp_hash(inputs.result.logs());
 
@@ -183,7 +189,7 @@ where
 
     let pre = build_pre_state(db, evm_state)?;
     let env = build_env(chain_id, block);
-    let transaction = build_transaction(target_tx);
+    let transaction = build_transaction(target_tx)?;
     let spec_name = SpecName::from_mega_spec(spec);
     if spec_name == SpecName::Unknown {
         return Err(ReplayError::Other(format!(
@@ -199,6 +205,7 @@ where
         transaction,
         out: None,
         mega_env: Some(inputs.mega_env),
+        extra: BTreeMap::new(),
     };
 
     let name = format!("replay_{:#x}", target_tx.inner.inner.tx_hash());
@@ -208,6 +215,7 @@ where
         spec: spec_name,
         actual_gas,
         actual_status,
+        actual_halt_reason,
         actual_output,
         actual_logs_root,
         name,
@@ -233,6 +241,15 @@ pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) ->
         return Err(ReplayError::Other(format!(
             "fixture not reproducible: status {:?} != replay status {:?}",
             executed.status, draft.actual_status
+        )));
+    }
+    // A halted target needs more than the coarse status: two different halt
+    // reasons typically burn the same full gas with no output and no logs, so
+    // without this check the fixture would bake in the wrong failure mode.
+    if executed.halt_reason != draft.actual_halt_reason {
+        return Err(ReplayError::Other(format!(
+            "fixture not reproducible: halt reason {:?} != replay halt reason {:?}",
+            executed.halt_reason, draft.actual_halt_reason
         )));
     }
     if executed.output != draft.actual_output {
@@ -262,8 +279,20 @@ pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) ->
     let suite = TestSuite(BTreeMap::from([(draft.name, unit)]));
     let json = serde_json::to_string_pretty(&suite)
         .map_err(|e| ReplayError::Other(format!("failed to serialize fixture: {e}")))?;
-    std::fs::write(path, json)
-        .map_err(|e| ReplayError::Other(format!("failed to write fixture {}: {e}", path.display())))
+    // Write to a sibling temp file and rename so an interrupted write cannot
+    // truncate an existing fixture at `path` (e.g. a committed corpus entry
+    // being refreshed in place).
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| {
+        ReplayError::Other(format!("failed to write fixture {}: {e}", tmp.display()))
+    })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        ReplayError::Other(format!(
+            "failed to rename fixture {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        ))
+    })
 }
 
 /// Read the pre-execution values of every account in the target transaction's
@@ -369,18 +398,29 @@ fn build_env(chain_id: u64, block: &Block<Transaction>) -> Env {
 }
 
 /// Build the EEST `transaction` (single-element index arrays) from the target tx.
-fn build_transaction(target_tx: &Transaction) -> TransactionParts {
+fn build_transaction(target_tx: &Transaction) -> Result<TransactionParts> {
     let sender = target_tx.inner.inner.signer();
     let tx: &OpTxEnvelope = &target_tx.inner.inner;
     let tx_type = tx.ty();
 
     // Legacy / EIP-2930 carry a gas price; fee-market types carry max fees.
+    // A type-0/1 envelope always carries a gas price, but if that invariant
+    // ever broke, falling back to 0 would bake a wrong price into a fixture
+    // that still self-validates — so refuse instead of guessing.
     let (gas_price, max_fee_per_gas) = match tx_type {
-        0 | 1 => (Some(U256::from(tx.gas_price().unwrap_or(0))), None),
+        0 | 1 => {
+            let gas_price = tx.gas_price().ok_or_else(|| {
+                ReplayError::Other(format!(
+                    "--dump-fixture: transaction type {tx_type} reports no gas price; \
+                     refusing to record a guessed price in the fixture"
+                ))
+            })?;
+            (Some(U256::from(gas_price)), None)
+        }
         _ => (None, Some(U256::from(tx.max_fee_per_gas()))),
     };
 
-    TransactionParts {
+    Ok(TransactionParts {
         tx_type: Some(tx_type),
         data: vec![tx.input().clone()],
         gas_limit: vec![U256::from(tx.gas_limit())],
@@ -397,5 +437,5 @@ fn build_transaction(target_tx: &Transaction) -> TransactionParts {
         authorization_list: None,
         blob_versioned_hashes: tx.blob_versioned_hashes().map(|h| h.to_vec()).unwrap_or_default(),
         max_fee_per_blob_gas: tx.max_fee_per_blob_gas().map(U256::from),
-    }
+    })
 }

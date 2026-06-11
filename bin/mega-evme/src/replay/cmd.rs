@@ -139,7 +139,50 @@ impl Cmd {
         let mut pctx = self.resolve_provider().await?;
         let rctx = self.fetch_replay_context(&pctx.provider, pctx.chain_id).await?;
         let (external_envs, env_snapshot) = self.resolve_external_envs(&pctx)?;
-        let result = self.execute(&pctx.provider, &rctx, external_envs).await?;
+
+        // Execute, report, and (for --dump-fixture) finalize/write — but defer
+        // error propagation until the cache store has persisted: in capture mode
+        // an execution or dump-gate failure is exactly the case you'd want to
+        // debug offline, so the captured RPC responses must not be discarded.
+        let run_result = self.execute_and_report(&pctx.provider, &rctx, external_envs).await;
+
+        // Hand the effective external-env snapshot to the store before the final
+        // persist; no-op unless this is a fixture-capture store.
+        if let Some(snapshot) = env_snapshot {
+            pctx.cache_store.set_external_env(snapshot);
+        }
+        let persist_result = pctx.cache_store.persist();
+        match run_result {
+            Ok(()) => Ok(persist_result?),
+            Err(run_err) => {
+                // Surface the original error; a persist failure on top of it is
+                // logged, not propagated, so it cannot mask the root cause.
+                if let Err(persist_err) = persist_result {
+                    warn!(
+                        error = %persist_err,
+                        "Failed to persist RPC cache while handling an earlier error",
+                    );
+                }
+                Err(run_err)
+            }
+        }
+    }
+
+    /// Execute the replay, print the results, and (for `--dump-fixture`)
+    /// finalize and write the fixture.
+    ///
+    /// Split out of [`Self::run`] so the caller can persist the RPC cache store
+    /// regardless of which of these steps fails.
+    async fn execute_and_report<P>(
+        &self,
+        provider: &P,
+        rctx: &ReplayContext,
+        external_envs: EvmeExternalEnvs,
+    ) -> Result<()>
+    where
+        P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
+    {
+        let result = self.execute(provider, rctx, external_envs).await?;
         self.output_results(&result)?;
         // Write the self-validating fixture (re-executes the isolated unit through
         // state-test and cross-checks it against the replay before writing).
@@ -147,12 +190,6 @@ impl Cmd {
             super::fixture::finalize_and_write(draft, path)?;
             info!(path = %path.display(), "Wrote self-validating fixture");
         }
-        // Hand the effective external-env snapshot to the store before the final
-        // persist; no-op unless this is a fixture-capture store.
-        if let Some(snapshot) = env_snapshot {
-            pctx.cache_store.set_external_env(snapshot);
-        }
-        pctx.cache_store.persist()?;
         Ok(())
     }
 
@@ -367,6 +404,23 @@ impl Cmd {
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
                 .ok_or(ReplayError::TransactionNotFound(self.tx_hash))?;
+            // Anchor the receipt to the replayed block: across a reorg or a
+            // load-balanced endpoint serving divergent views, the receipt can
+            // describe a different inclusion than the block fetched earlier,
+            // and the fidelity gate would then compare the replay against the
+            // wrong on-chain execution.
+            if let Some(receipt_block_hash) = receipt.block_hash() {
+                let replayed_block_hash = ctx.block.hash();
+                if receipt_block_hash != replayed_block_hash {
+                    return Err(ReplayError::Other(format!(
+                        "receipt block hash {receipt_block_hash} != replayed block hash \
+                         {replayed_block_hash}: the receipt describes a different inclusion \
+                         than the fetched block (reorg in progress, or a load-balanced \
+                         endpoint serving divergent views); retry the dump once the chain \
+                         settles"
+                    )));
+                }
+            }
             // RLP-hash the receipt's logs with the same helper the state-test
             // runner uses for `logsRoot`, so the dump can check the replay's logs
             // against the chain (the rich RPC logs' `inner` is the consensus log).

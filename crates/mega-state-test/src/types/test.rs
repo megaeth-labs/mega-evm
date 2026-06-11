@@ -98,6 +98,7 @@ impl Test {
     /// Returns an error if:
     /// - The private key cannot be used to recover the sender address
     /// - The transaction type is invalid and no exception is expected
+    /// - A transaction field value does not fit its EVM integer width
     pub fn tx_env(&self, unit: &TestUnit) -> Result<TxEnv, TestError> {
         tx_env_at(unit, self.indexes).map_err(|e| match e {
             // Preserve the existing expect-exception messaging for state tests that
@@ -144,12 +145,22 @@ pub fn tx_env_at(unit: &TestUnit, indexes: TxPartIndices) -> Result<TxEnv, TestE
         gas_priority_fee: unit
             .transaction
             .max_priority_fee_per_gas
-            .map(|b| u128::try_from(b).expect("max priority fee less than u128::MAX")),
+            .map(|b| {
+                u128::try_from(b).map_err(|_| TestError::ValueOutOfRange {
+                    field: "maxPriorityFeePerGas",
+                    value: b,
+                })
+            })
+            .transpose()?,
         blob_hashes: unit.transaction.blob_versioned_hashes.clone(),
         max_fee_per_blob_gas: unit
             .transaction
             .max_fee_per_blob_gas
-            .map(|b| u128::try_from(b).expect("max fee less than u128::MAX"))
+            .map(|b| {
+                u128::try_from(b)
+                    .map_err(|_| TestError::ValueOutOfRange { field: "maxFeePerBlobGas", value: b })
+            })
+            .transpose()?
             .unwrap_or(u128::MAX),
         tx_type: tx_type as u8,
         gas_limit: unit
@@ -172,7 +183,10 @@ pub fn tx_env_at(unit: &TestUnit, indexes: TxPartIndices) -> Result<TxEnv, TestE
                 len: unit.transaction.data.len(),
             })?
             .clone(),
-        nonce: u64::try_from(unit.transaction.nonce).unwrap(),
+        nonce: u64::try_from(unit.transaction.nonce).map_err(|_| TestError::ValueOutOfRange {
+            field: "nonce",
+            value: unit.transaction.nonce,
+        })?,
         value: *unit.transaction.value.get(indexes.value).ok_or(
             TestError::PartIndexOutOfBounds {
                 part: "value",
@@ -203,4 +217,102 @@ pub fn tx_env_at(unit: &TestUnit, indexes: TxPartIndices) -> Result<TxEnv, TestE
     };
 
     Ok(tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mega_evm::revm::primitives::U256;
+
+    /// Minimal valid unit: explicit sender (no key recovery), legacy transfer.
+    fn unit_json() -> serde_json::Value {
+        serde_json::json!({
+            "env": {
+                "currentCoinbase": "0x3000000000000000000000000000000000000003",
+                "currentDifficulty": "0x0",
+                "currentGasLimit": "0x1c9c380",
+                "currentNumber": "0x10",
+                "currentTimestamp": "0x3e8"
+            },
+            "pre": {},
+            "post": {},
+            "transaction": {
+                "type": 0,
+                "data": ["0x"],
+                "gasLimit": ["0x30d40"],
+                "gasPrice": "0x0",
+                "nonce": "0x0",
+                "secretKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "sender": "0x1000000000000000000000000000000000000001",
+                "to": "0x2000000000000000000000000000000000000002",
+                "value": ["0x0"]
+            }
+        })
+    }
+
+    fn unit_with(patch: impl FnOnce(&mut serde_json::Value)) -> TestUnit {
+        let mut json = unit_json();
+        patch(&mut json["transaction"]);
+        serde_json::from_value(json).expect("parse unit")
+    }
+
+    const ZERO_INDEXES: TxPartIndices = TxPartIndices { data: 0, gas: 0, value: 0 };
+
+    fn assert_out_of_range(unit: &TestUnit, field: &'static str) {
+        match tx_env_at(unit, ZERO_INDEXES) {
+            Err(TestError::ValueOutOfRange { field: got, .. }) => assert_eq!(got, field),
+            other => panic!("expected ValueOutOfRange for `{field}`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tx_env_at_in_range_values_succeed() {
+        // Largest representable values must still build (full predicate domain).
+        let unit = unit_with(|tx| {
+            tx["nonce"] = serde_json::json!(format!("{:#x}", u64::MAX));
+            tx["maxPriorityFeePerGas"] = serde_json::json!(format!("{:#x}", u128::MAX));
+            tx["maxFeePerGas"] = serde_json::json!(format!("{:#x}", u128::MAX));
+        });
+        let tx = tx_env_at(&unit, ZERO_INDEXES).expect("in-range values must build");
+        assert_eq!(tx.nonce, u64::MAX);
+        assert_eq!(tx.gas_priority_fee, Some(u128::MAX));
+    }
+
+    #[test]
+    fn tx_env_at_nonce_overflow_is_structured_error() {
+        let unit =
+            unit_with(|tx| tx["nonce"] = serde_json::json!(format!("{:#x}", u64::MAX as u128 + 1)));
+        assert_out_of_range(&unit, "nonce");
+    }
+
+    #[test]
+    fn tx_env_at_priority_fee_overflow_is_structured_error() {
+        let unit = unit_with(|tx| {
+            tx["maxPriorityFeePerGas"] = serde_json::json!(format!("{:#x}", U256::MAX));
+        });
+        assert_out_of_range(&unit, "maxPriorityFeePerGas");
+    }
+
+    #[test]
+    fn tx_env_at_blob_fee_overflow_is_structured_error() {
+        let unit = unit_with(|tx| {
+            // EIP-4844 shape needs an explicit type + destination (already set).
+            tx["type"] = serde_json::json!(3);
+            tx["maxFeePerBlobGas"] = serde_json::json!(format!("{:#x}", U256::MAX));
+        });
+        assert_out_of_range(&unit, "maxFeePerBlobGas");
+    }
+
+    #[test]
+    fn tx_env_at_gas_price_and_gas_limit_keep_saturating() {
+        // Intentionally-preserved EEST behavior: gasPrice and gasLimit saturate
+        // instead of erroring, so upstream corpus runs are unaffected.
+        let unit = unit_with(|tx| {
+            tx["gasPrice"] = serde_json::json!(format!("{:#x}", U256::MAX));
+            tx["gasLimit"] = serde_json::json!([format!("{:#x}", U256::MAX)]);
+        });
+        let tx = tx_env_at(&unit, ZERO_INDEXES).expect("saturating fields must not error");
+        assert_eq!(tx.gas_price, u128::MAX);
+        assert_eq!(tx.gas_limit, u64::MAX);
+    }
 }

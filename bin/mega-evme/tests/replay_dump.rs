@@ -121,6 +121,101 @@ fn test_replay_dump_is_byte_reproducible() {
     );
 }
 
+/// Dumping over an existing fixture must go through a sibling temp file +
+/// rename: on success the target holds the new (valid) content and no
+/// `.json.tmp` residue is left behind, so an interrupt mid-write can no longer
+/// truncate a committed corpus fixture.
+#[test]
+fn test_replay_dump_overwrites_atomically_without_tmp_residue() {
+    let out =
+        std::env::temp_dir().join(format!("mega_evme_dump_atomic_{}.json", std::process::id()));
+    let tmp = out.with_extension("json.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    // Seed a pre-existing "committed" fixture that the dump overwrites in place.
+    std::fs::write(&out, br#"{"pre-existing":"corpus fixture"}"#).expect("seed existing fixture");
+
+    let output = mega_evme()
+        .args(["replay", "--rpc.replay-file", CACHE, "--dump-fixture", out.to_str().unwrap(), TX])
+        .output()
+        .expect("failed to run mega-evme");
+
+    assert!(
+        output.status.success(),
+        "dump over an existing fixture failed.\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!tmp.exists(), "dump must not leave a .json.tmp file behind");
+
+    let content = std::fs::read_to_string(&out).expect("read dumped fixture");
+    let _ = std::fs::remove_file(&out);
+    let suite: serde_json::Value =
+        serde_json::from_str(&content).expect("overwritten fixture must be valid JSON");
+    let unit = suite
+        .get(format!("replay_{TX}"))
+        .expect("overwritten fixture must hold the replayed transaction's unit");
+    assert!(
+        unit.get("post").is_some(),
+        "overwritten fixture must contain the freshly computed post section"
+    );
+}
+
+/// The fidelity gate must reject a receipt that describes a different inclusion
+/// than the replayed block (a reorg in progress, or a load-balanced endpoint
+/// serving divergent views). Doctor the captured receipt's `blockHash` and
+/// expect a clear error with no fixture written.
+#[test]
+fn test_replay_dump_rejects_receipt_from_different_block() {
+    // Doctor the capture: flip the receipt's blockHash. Cache entries are keyed
+    // by the request, not the response, so the doctored entry still resolves.
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
+            .expect("parse offline cache");
+    let mut doctored = false;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        // The receipt is the only cached response carrying cumulativeGasUsed.
+        if !value.contains("cumulativeGasUsed") {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse receipt response");
+        response["result"]["blockHash"] = serde_json::Value::String(
+            "0x1111111111111111111111111111111111111111111111111111111111111111".into(),
+        );
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored = true;
+    }
+    assert!(doctored, "offline cache should contain the receipt entry");
+
+    let doctored_cache =
+        std::env::temp_dir().join(format!("mega_evme_reorg_cache_{}.json", std::process::id()));
+    std::fs::write(&doctored_cache, envelope.to_string()).expect("write doctored cache");
+    let out =
+        std::env::temp_dir().join(format!("mega_evme_dump_reorg_{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+
+    let output = mega_evme()
+        .args([
+            "replay",
+            "--rpc.replay-file",
+            doctored_cache.to_str().unwrap(),
+            "--dump-fixture",
+            out.to_str().unwrap(),
+            TX,
+        ])
+        .output()
+        .expect("failed to run mega-evme");
+    let _ = std::fs::remove_file(&doctored_cache);
+
+    assert!(!output.status.success(), "a receipt from a different block must abort the dump");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("different inclusion"),
+        "expected reorg/divergent-endpoint hint, got stderr:\n{stderr}"
+    );
+    assert!(!out.exists(), "must not write a fixture when the receipt anchor mismatches");
+}
+
 /// `--dump-fixture` must reject `--override.spec` (a forced spec would make the
 /// fixture a what-if, not the on-chain transaction) and write nothing.
 #[test]

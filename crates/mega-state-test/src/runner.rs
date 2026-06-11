@@ -2,11 +2,12 @@
 
 use crate::{
     types::{
-        tx_env_at, SpecName, Test, TestError as TxBuildError, TestSuite, TestUnit, TxPartIndices,
+        tx_env_at, Env, SpecName, Test, TestError as TxBuildError, TestSuite, TestUnit,
+        TxPartIndices,
     },
     utils::{compute_test_roots, TestValidationResult},
 };
-use alloy_primitives::{address, U256};
+use alloy_primitives::address;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use mega_evm::{
     revm::{
@@ -61,7 +62,10 @@ pub enum TestErrorKind {
     GasUsedMismatch { got: u64, expected: u64 },
     #[error("status mismatch: got {got:?}, expected {expected:?}")]
     StatusMismatch { got: String, expected: String },
-    #[error("unknown private key: {0:?}")]
+    /// The raw key is kept for programmatic use but deliberately redacted from
+    /// the `Display` output: fixture `secretKey` values flow through error
+    /// messages into logs and CI output.
+    #[error("unable to recover sender from fixture secretKey (key redacted)")]
     UnknownPrivateKey(B256),
     #[error("unexpected exception: got {got_exception:?}, expected {expected_exception:?}")]
     UnexpectedException { expected_exception: Option<String>, got_exception: Option<String> },
@@ -77,6 +81,20 @@ pub enum TestErrorKind {
     NoJsonFiles,
     #[error("fixture execution error: {0}")]
     FixtureError(String),
+    #[error("{failed} tests failed out of {total}")]
+    TestsFailed { failed: usize, total: usize },
+}
+
+impl From<TxBuildError> for TestErrorKind {
+    /// Maps a transaction-build error to its runner-level kind, preserving the
+    /// underlying cause instead of collapsing everything to
+    /// [`TestErrorKind::UnknownPrivateKey`], which would mask the real cause.
+    fn from(e: TxBuildError) -> Self {
+        match e {
+            TxBuildError::UnknownPrivateKey(k) => Self::UnknownPrivateKey(k),
+            other => Self::FixtureError(other.to_string()),
+        }
+    }
 }
 
 /// Find all JSON test files in the given path
@@ -100,7 +118,11 @@ pub fn find_all_json_tests(path: &Path) -> Vec<PathBuf> {
 ///
 /// These tests are skipped by `revm`, so we also skip them.
 fn skip_test(path: &Path) -> bool {
-    let name = path.file_name().unwrap().to_str().unwrap();
+    // A path with no file name or a non-UTF-8 name cannot match any entry on
+    // the skip list, so it is simply not skipped (and must not panic).
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
 
     matches!(
         name,
@@ -223,13 +245,18 @@ fn validate_output(
     expected_output: Option<&Bytes>,
     actual_result: &ExecutionResult<MegaHaltReason>,
 ) -> Result<(), TestErrorKind> {
-    if let Some((expected, actual)) = expected_output.zip(actual_result.output()) {
-        if expected != actual {
-            return Err(TestErrorKind::UnexpectedOutput {
-                expected_output: Some(expected.clone()),
-                got_output: actual_result.output().cloned(),
-            });
-        }
+    // No expectation → nothing to check. But when the fixture expects output,
+    // an execution that produced none (a halt) is a failure, not a pass —
+    // a `zip` over the two options would short-circuit that case silently.
+    let Some(expected) = expected_output else {
+        return Ok(());
+    };
+    let actual = actual_result.output();
+    if actual != Some(expected) {
+        return Err(TestErrorKind::UnexpectedOutput {
+            expected_output: Some(expected.clone()),
+            got_output: actual.cloned(),
+        });
     }
     Ok(())
 }
@@ -245,6 +272,18 @@ pub fn execution_status(result: &ExecutionResult<MegaHaltReason>) -> &'static st
         ExecutionResult::Success { .. } => "success",
         ExecutionResult::Revert { .. } => "revert",
         ExecutionResult::Halt { .. } => "halt",
+    }
+}
+
+/// Halt reason (`Debug` form) when the result is a halt, `None` otherwise.
+///
+/// Anchors halted executions more precisely than the three-value status string:
+/// two halts with different reasons typically burn the same (full) gas with no
+/// output and no logs, so a status-level comparison cannot tell them apart.
+pub fn halt_reason(result: &ExecutionResult<MegaHaltReason>) -> Option<String> {
+    match result {
+        ExecutionResult::Halt { reason, .. } => Some(format!("{reason:?}")),
+        _ => None,
     }
 }
 
@@ -364,6 +403,20 @@ fn configure_max_blobs(cfg: &mut CfgEnv<MegaSpecId>) {
     }
 }
 
+/// Resolve a unit's `currentChainID` into the `u64` the EVM config takes.
+///
+/// An absent field defaults to `MegaETH`'s 6342 (intentional EEST behavior),
+/// but a present value that does not fit in a `u64` is a fixture error rather
+/// than a silent fallback to the default chain.
+fn resolve_chain_id(env: &Env) -> Result<u64, TestErrorKind> {
+    match env.current_chain_id {
+        None => Ok(6342),
+        Some(id) => id.try_into().map_err(|_| {
+            TestErrorKind::FixtureError(format!("currentChainID {id} does not fit in u64"))
+        }),
+    }
+}
+
 /// Execute a single test suite file containing multiple tests
 ///
 /// # Arguments
@@ -381,8 +434,12 @@ pub fn execute_test_suite(
         return Ok(());
     }
 
-    let s = std::fs::read_to_string(path).unwrap();
     let path = path.to_string_lossy().into_owned();
+    let s = std::fs::read_to_string(&path).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path.clone(),
+        kind: TestErrorKind::FixtureError(format!("read: {e}")),
+    })?;
     let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
         name: "Unknown".to_string(),
         path: path.clone(),
@@ -395,12 +452,11 @@ pub fn execute_test_suite(
 
         // Setup base configuration
         let mut cfg = CfgEnv::default();
-        cfg.chain_id = unit
-            .env
-            .current_chain_id
-            .unwrap_or_else(|| U256::from(6342))
-            .try_into()
-            .unwrap_or(6342);
+        cfg.chain_id = resolve_chain_id(&unit.env).map_err(|kind| TestError {
+            name: name.clone(),
+            path: path.clone(),
+            kind,
+        })?;
 
         // Post and execution
         for (spec_name, tests) in &unit.post {
@@ -409,7 +465,11 @@ pub fn execute_test_suite(
                 continue;
             }
 
-            cfg.spec = spec_name.to_spec_id();
+            cfg.spec = spec_name.to_spec_id().map_err(|e| TestError {
+                name: name.clone(),
+                path: path.clone(),
+                kind: TestErrorKind::FixtureError(format!("post spec: {e}")),
+            })?;
             configure_max_blobs(&mut cfg);
 
             // Setup block environment for this spec
@@ -419,13 +479,24 @@ pub fn execute_test_suite(
                 // Setup transaction environment
                 let tx = match test.tx_env(&unit) {
                     Ok(tx) => tx,
-                    Err(_) if test.expect_exception.is_some() => continue,
-                    Err(_) => {
-                        return Err(TestError {
-                            name,
-                            path,
-                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
-                        });
+                    // Only a transaction that is invalid *by construction* —
+                    // an underivable transaction type (e.g. a blob tx without
+                    // a destination), which `Test::tx_env` reports either
+                    // directly or remapped to `UnexpectedException` — may
+                    // satisfy `expectException`: that is the failure the
+                    // fixture deliberately encodes. Structural fixture
+                    // defects (unrecoverable secret key, out-of-bounds part
+                    // index, out-of-range field value) are errors in the
+                    // fixture itself and must propagate, never be counted as
+                    // an expected exception.
+                    Err(
+                        TxBuildError::InvalidTransactionType |
+                        TxBuildError::UnexpectedException { .. },
+                    ) if test.expect_exception.is_some() => continue,
+                    // Propagate the real underlying cause instead of masking
+                    // every failure as an unknown private key.
+                    Err(e) => {
+                        return Err(TestError { name, path, kind: e.into() });
                     }
                 };
 
@@ -487,12 +558,33 @@ fn external_envs_for(
     Ok(mega_env.to_external_envs::<AHashBucketHasher>())
 }
 
+/// Inject the fixture's recorded `blockHashes` into the [`State`] cache so
+/// `BLOCKHASH` answers come from the fixture instead of [`EmptyDB`]'s synthetic
+/// keccak-of-number hashes.
+///
+/// A key that does not fit in a `u64` could never be requested by the EVM
+/// (block numbers are `u64` on the `BLOCKHASH` path), so it is a fixture error
+/// rather than a silently dropped entry.
+fn inject_block_hashes(state: &mut State<EmptyDB>, unit: &TestUnit) -> Result<(), TestErrorKind> {
+    let Some(hashes) = &unit.env.block_hashes else {
+        return Ok(());
+    };
+    for (number, hash) in hashes {
+        let number = u64::try_from(*number).map_err(|_| {
+            TestErrorKind::FixtureError(format!("blockHashes key {number} does not fit in u64"))
+        })?;
+        state.block_hashes.insert(number, *hash);
+    }
+    Ok(())
+}
+
 fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErrorKind> {
     // Prepare state
     let mut cache = ctx.cache_state.clone();
     cache.set_state_clear_flag(ctx.cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+    inject_block_hashes(&mut state, ctx.unit)?;
 
     let evm_context = MegaContext::default()
         .with_db(&mut state)
@@ -550,6 +642,9 @@ pub struct ExecutedUnit {
     pub gas_used: u64,
     /// Execution status: `"success"`, `"revert"`, or `"halt"`.
     pub status: String,
+    /// Halt reason (`Debug` form) when `status` is `"halt"`, `None` otherwise.
+    /// See [`halt_reason`].
+    pub halt_reason: Option<String>,
     /// Transaction output bytes, if any.
     pub output: Option<Bytes>,
 }
@@ -568,21 +663,18 @@ fn run_unit_once(
 ) -> Result<(Duration, ExecutionResult<MegaHaltReason>, Option<TestValidationResult>), TestErrorKind>
 {
     let mut cfg = CfgEnv::default();
-    cfg.chain_id =
-        unit.env.current_chain_id.unwrap_or_else(|| U256::from(6342)).try_into().unwrap_or(6342);
-    cfg.spec = spec.to_spec_id();
+    cfg.chain_id = resolve_chain_id(&unit.env)?;
+    cfg.spec = spec.to_spec_id().map_err(|e| TestErrorKind::FixtureError(format!("spec: {e}")))?;
     configure_max_blobs(&mut cfg);
 
     let block = unit.block_env(&cfg);
-    let tx = tx_env_at(unit, TxPartIndices { data: 0, gas: 0, value: 0 }).map_err(|e| match e {
-        TxBuildError::UnknownPrivateKey(k) => TestErrorKind::UnknownPrivateKey(k),
-        other => TestErrorKind::FixtureError(other.to_string()),
-    })?;
+    let tx = tx_env_at(unit, TxPartIndices { data: 0, gas: 0, value: 0 })?;
 
     let mut cache = unit.state();
     cache.set_state_clear_flag(cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+    inject_block_hashes(&mut state, unit)?;
 
     let evm_context = MegaContext::default()
         .with_db(&mut state)
@@ -621,6 +713,7 @@ pub fn execute_unit_collect(
         logs_root: validation.logs_root,
         gas_used: result.gas_used(),
         status: execution_status(&result).to_string(),
+        halt_reason: halt_reason(&result),
         output: result.output().cloned(),
     })
 }
@@ -724,6 +817,13 @@ pub fn bench_test_suite(
                 }
             }
         };
+        // Reject an unmapped spec at selection time, so the error names the
+        // unit instead of surfacing from deep inside execution.
+        if spec == SpecName::Unknown {
+            return Err(fixture_err(format!(
+                "unit {name} selects an unknown spec; pass a valid --bench-spec"
+            )));
+        }
 
         for _ in 0..warmup {
             time_unit_execution(&unit, &spec)
@@ -821,6 +921,13 @@ pub fn fill_test_suite(
                 }
             }
         };
+        // Reject an unmapped spec at selection time, so the error names the
+        // unit instead of surfacing from deep inside execution.
+        if spec == SpecName::Unknown {
+            return Err(fixture_err(format!(
+                "unit {name} selects an unknown spec; pass a valid --bench-spec"
+            )));
+        }
         // Validation skips Constantinople (mirroring upstream revme), so a post
         // recorded under it would never be checked.
         if spec == SpecName::Constantinople {
@@ -867,8 +974,12 @@ fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
 
-    // The main run already validated the unit's `megaEnv`, so a failure here is
-    // unreachable; bail out of the debug re-run rather than panic.
+    // The main run already validated the unit's `megaEnv` and `blockHashes`, so
+    // a failure here is unreachable; bail out of the debug re-run rather than
+    // panic.
+    if inject_block_hashes(&mut state, ctx.unit).is_err() {
+        return;
+    }
     let Ok(external_envs) = external_envs_for(ctx.unit) else {
         return;
     };
@@ -1046,8 +1157,16 @@ pub fn run(
     } else {
         println!("Encountered {n_errors} errors out of {n_files} total tests");
 
+        // No thread carried a structured error (e.g. failures under
+        // `keep_going`): report the failure count as an error instead of
+        // exiting the process — this is library code, the CLI owns the
+        // exit-code contract.
         if n_thread_errors == 0 {
-            std::process::exit(1);
+            return Err(TestError {
+                name: "summary".to_string(),
+                path: String::new(),
+                kind: TestErrorKind::TestsFailed { failed: n_errors, total: n_files },
+            });
         }
 
         if n_thread_errors > 1 {
@@ -1101,6 +1220,17 @@ mod tests {
         assert_eq!(execution_status(&revert(21_000)), "revert");
     }
 
+    // Full domain of `halt_reason`: None for success/revert, the Debug-formatted
+    // reason for halts — the value `--dump-fixture` cross-checks so two halts
+    // with different reasons cannot be conflated.
+    #[test]
+    fn test_halt_reason_domain() {
+        assert_eq!(halt_reason(&success(21_000)), None);
+        assert_eq!(halt_reason(&revert(21_000)), None);
+        let reason = halt_reason(&halt()).expect("halt has a reason");
+        assert!(reason.contains("DataLimitExceeded"), "unexpected reason: {reason}");
+    }
+
     #[test]
     fn test_mega_expectations_pass_when_matching() {
         let test = test_with_mega(Some(21_000), Some("success"));
@@ -1138,5 +1268,151 @@ mod tests {
             }
             other => panic!("expected StatusMismatch, got {other:?}"),
         }
+    }
+
+    fn success_with_output(output: &[u8]) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Success {
+            reason: SuccessReason::Stop,
+            gas_used: 21_000,
+            gas_refunded: 0,
+            logs: vec![],
+            output: Output::Call(Bytes::copy_from_slice(output)),
+        }
+    }
+
+    fn halt() -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::DataLimitExceeded { limit: 0, actual: 0 },
+            gas_used: 21_000,
+        }
+    }
+
+    // Full domain of the (expected, actual) output predicate.
+    #[test]
+    fn test_validate_output_no_expectation_never_fails() {
+        // Expected absent: no check, regardless of what execution produced.
+        assert!(validate_output(None, &success_with_output(b"\x01")).is_ok());
+        assert!(validate_output(None, &halt()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_output_matching_passes() {
+        let expected = Bytes::copy_from_slice(b"\x01\x02");
+        assert!(validate_output(Some(&expected), &success_with_output(b"\x01\x02")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_output_mismatch_fails() {
+        let expected = Bytes::copy_from_slice(b"\x01\x02");
+        let err = validate_output(Some(&expected), &success_with_output(b"\xff")).unwrap_err();
+        assert!(matches!(err, TestErrorKind::UnexpectedOutput { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn test_validate_output_expected_but_none_produced_fails() {
+        // A halt produces no output; an expectation must not be
+        // silently satisfied by `zip` short-circuiting.
+        let expected = Bytes::copy_from_slice(b"\x01\x02");
+        let err = validate_output(Some(&expected), &halt()).unwrap_err();
+        match err {
+            TestErrorKind::UnexpectedOutput { expected_output, got_output } => {
+                assert_eq!(expected_output, Some(expected));
+                assert_eq!(got_output, None);
+            }
+            other => panic!("expected UnexpectedOutput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_skip_test_domain() {
+        // On the skip list.
+        assert!(skip_test(Path::new("/tests/ValueOverflow.json")));
+        // Ordinary name, not skipped.
+        assert!(!skip_test(Path::new("/tests/regular_fixture.json")));
+        // No file name at all: not skipped, must not panic.
+        assert!(!skip_test(Path::new("/")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_skip_test_non_utf8_name_is_not_skipped() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        // 0xff is not valid UTF-8; such a name can never match the skip list.
+        let path = Path::new(OsStr::from_bytes(b"/tests/\xff\xfe.json"));
+        assert!(!skip_test(path));
+    }
+
+    fn env_with_chain_id(chain_id: Option<&str>) -> Env {
+        let mut json = json!({
+            "currentCoinbase": "0x3000000000000000000000000000000000000003",
+            "currentGasLimit": "0x0",
+            "currentNumber": "0x0",
+            "currentTimestamp": "0x0",
+        });
+        if let Some(id) = chain_id {
+            json["currentChainID"] = json!(id);
+        }
+        serde_json::from_value(json).expect("valid Env json")
+    }
+
+    // Full domain of the chain-id predicate: absent, in-range, boundary, overflow.
+    #[test]
+    fn test_resolve_chain_id_absent_defaults() {
+        assert_eq!(resolve_chain_id(&env_with_chain_id(None)).unwrap(), 6342);
+    }
+
+    #[test]
+    fn test_resolve_chain_id_in_range_values() {
+        assert_eq!(resolve_chain_id(&env_with_chain_id(Some("0x1"))).unwrap(), 1);
+        // u64::MAX is the largest representable chain id.
+        assert_eq!(
+            resolve_chain_id(&env_with_chain_id(Some("0xffffffffffffffff"))).unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn test_resolve_chain_id_overflow_is_fixture_error() {
+        // u64::MAX + 1 must be a structured error, not a silent 6342 run.
+        let err = resolve_chain_id(&env_with_chain_id(Some("0x10000000000000000"))).unwrap_err();
+        match err {
+            TestErrorKind::FixtureError(msg) => {
+                assert!(msg.contains("currentChainID"), "message names the field: {msg}");
+            }
+            other => panic!("expected FixtureError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tx_build_error_mapping_preserves_cause() {
+        // Cause masking: every non-key error keeps its real message.
+        let kind: TestErrorKind =
+            TxBuildError::PartIndexOutOfBounds { part: "data", index: 7, len: 1 }.into();
+        match kind {
+            TestErrorKind::FixtureError(msg) => assert!(msg.contains("out of bounds"), "{msg}"),
+            other => panic!("expected FixtureError, got {other:?}"),
+        }
+
+        let key = B256::repeat_byte(0xcd);
+        let kind: TestErrorKind = TxBuildError::UnknownPrivateKey(key).into();
+        match kind {
+            TestErrorKind::UnknownPrivateKey(k) => assert_eq!(k, key),
+            other => panic!("expected UnknownPrivateKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_private_key_display_redacted() {
+        // Neither error layer's Display may contain key material.
+        let key = B256::repeat_byte(0xcd);
+        let msg = TestErrorKind::UnknownPrivateKey(key).to_string();
+        assert!(!msg.contains("cdcd"), "display leaks key material: {msg}");
+        assert!(msg.contains("redacted"), "display should say redacted: {msg}");
+    }
+
+    #[test]
+    fn test_tests_failed_display() {
+        let msg = TestErrorKind::TestsFailed { failed: 3, total: 10 }.to_string();
+        assert!(msg.contains('3') && msg.contains("10"), "{msg}");
     }
 }

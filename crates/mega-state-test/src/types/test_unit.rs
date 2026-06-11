@@ -68,7 +68,13 @@ pub struct TestUnit {
     /// environment.
     #[serde(default, rename = "megaEnv", skip_serializing_if = "Option::is_none")]
     pub mega_env: Option<MegaEnv>,
-    //pub config
+
+    /// Fields outside the schema (e.g. the EEST `config` block or custom
+    /// metadata), captured verbatim so a deserialize→serialize round-trip —
+    /// notably a `--fill` rewrite — preserves them instead of silently
+    /// deleting them. Execution ignores these fields.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl TestUnit {

@@ -112,7 +112,7 @@ impl Cmd {
         self.bench_spec
             .as_deref()
             .map(|s| {
-                MegaSpecId::from_str(s).map(SpecName::from_mega_spec).map_err(|_| TestError {
+                let invalid_spec = || TestError {
                     name: "spec".to_string(),
                     path: s.to_string(),
                     kind: TestErrorKind::FixtureError(format!(
@@ -129,7 +129,18 @@ impl Cmd {
                         ]
                         .join(", ")
                     )),
-                })
+                };
+                let spec = MegaSpecId::from_str(s)
+                    .map(SpecName::from_mega_spec)
+                    .map_err(|_| invalid_spec())?;
+                // A spec id that parses but has no fixture-facing name (a
+                // future `MegaSpecId` this crate does not map yet) would
+                // otherwise fail much later, deep inside execution — reject it
+                // here with the same actionable message.
+                if spec == SpecName::Unknown {
+                    return Err(invalid_spec());
+                }
+                Ok(spec)
             })
             .transpose()
     }
@@ -211,5 +222,55 @@ impl Cmd {
 
 fn main() {
     let cmd = Cmd::parse();
-    cmd.run().unwrap();
+    // CI exit-code contract: any error — including `TestsFailed` when tests
+    // fail under `--keep-going` — prints to stderr and exits with code 1.
+    if let Err(e) = cmd.run() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmd_with_bench_spec(spec: &str) -> Cmd {
+        Cmd::parse_from(["state-test", "fixture.json", "--bench-spec", spec])
+    }
+
+    #[test]
+    fn resolve_spec_none_when_absent() {
+        let cmd = Cmd::parse_from(["state-test", "fixture.json"]);
+        assert_eq!(cmd.resolve_spec().expect("no spec is fine"), None);
+    }
+
+    #[test]
+    fn resolve_spec_accepts_every_known_spec() {
+        for (s, expected) in [
+            (mega_evm::name::EQUIVALENCE, SpecName::Equivalence),
+            (mega_evm::name::MINI_REX, SpecName::MiniRex),
+            (mega_evm::name::REX, SpecName::Rex),
+            (mega_evm::name::REX1, SpecName::Rex1),
+            (mega_evm::name::REX2, SpecName::Rex2),
+            (mega_evm::name::REX3, SpecName::Rex3),
+            (mega_evm::name::REX4, SpecName::Rex4),
+            (mega_evm::name::REX5, SpecName::Rex5),
+        ] {
+            let spec = cmd_with_bench_spec(s).resolve_spec().expect("valid spec").expect("present");
+            assert_eq!(spec, expected, "--bench-spec {s}");
+            // No accepted spec may slip through as Unknown and fail later.
+            assert_ne!(spec, SpecName::Unknown, "--bench-spec {s}");
+        }
+    }
+
+    #[test]
+    fn resolve_spec_rejects_unparseable_string() {
+        let err = cmd_with_bench_spec("FutureFork9000")
+            .resolve_spec()
+            .expect_err("unknown spec string must be rejected");
+        assert!(
+            err.to_string().contains("invalid --bench-spec"),
+            "error should be actionable: {err}"
+        );
+    }
 }
