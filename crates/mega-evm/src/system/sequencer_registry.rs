@@ -28,12 +28,17 @@ use revm::{
     context_interface::result::ResultAndState,
     database::State,
     primitives::KECCAK_EMPTY,
-    state::{Account, Bytecode, EvmState, EvmStorageSlot},
+    state::{Account, EvmState, EvmStorageSlot},
     Database as RevmDatabase,
 };
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
 use crate::{
-    HardforkParams, HardforkParamsError, MegaHardfork, MegaHardforks, MEGA_SYSTEM_ADDRESS,
+    HardforkParams, HardforkParamsError, MegaHardfork, MegaHardforks, SystemContractSpec,
+    MEGA_SYSTEM_ADDRESS,
 };
 
 /// The address of the `SequencerRegistry` system contract.
@@ -147,20 +152,15 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
          this should have been caught by with_params()"
     );
 
+    // Guard against silently overwriting a foreign stateful contract. This is
+    // specific to the registry (which carries change history); the generic
+    // deploy below otherwise overwrites bytecode in place.
     let acc =
         db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-
     if let Some(account_info) = acc.account_info() {
-        if account_info.code_hash == SEQUENCER_REGISTRY_CODE_HASH {
-            // Already deployed with correct code — no action needed.
-            return Ok(Some(EvmState::from_iter([(
-                SEQUENCER_REGISTRY_ADDRESS,
-                Account { info: account_info, ..Default::default() },
-            )])));
-        }
-        if account_info.code_hash != KECCAK_EMPTY {
-            // Account has actual contract code that doesn't match ours.
-            // Silently overwriting would destroy change history and pending state.
+        if account_info.code_hash != SEQUENCER_REGISTRY_CODE_HASH &&
+            account_info.code_hash != KECCAK_EMPTY
+        {
             return Err(BlockValidationError::BlockHashContractCall {
                 message: format!(
                     "SequencerRegistry at {} has unexpected code hash {} (expected {}); \
@@ -172,17 +172,7 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
             }
             .into());
         }
-        // EOA with balance (KECCAK_EMPTY code hash) — safe to deploy on top.
     }
-
-    // First deploy (or EOA-only account).
-    let mut acc_info = acc.account_info().unwrap_or_default();
-    acc_info.code_hash = SEQUENCER_REGISTRY_CODE_HASH;
-    acc_info.code = Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE));
-
-    let mut revm_acc: Account = acc_info.into();
-    revm_acc.mark_touch();
-    revm_acc.mark_created();
 
     // Seed initial storage (flat slots only, no dynamic arrays).
     // The initial system address is fixed to MEGA_SYSTEM_ADDRESS at genesis — see
@@ -191,21 +181,27 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     let initial_sequencer = address_to_storage_value(config.rex5_initial_sequencer);
     let initial_admin = address_to_storage_value(config.rex5_initial_admin);
     let initial_from_block = U256::from(current_block_number);
-
-    for (slot, value) in [
+    let seed = Vec::from([
         (CURRENT_SYSTEM_ADDRESS, initial_system_address),
         (CURRENT_SEQUENCER, initial_sequencer),
         (ADMIN, initial_admin),
         (INITIAL_SYSTEM_ADDRESS, initial_system_address),
         (INITIAL_SEQUENCER, initial_sequencer),
         (INITIAL_FROM_BLOCK, initial_from_block),
-    ] {
-        revm_acc
-            .storage
-            .insert(slot, revm::state::EvmStorageSlot::new_changed(U256::ZERO, value, 0));
-    }
+    ]);
 
-    Ok(Some(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, revm_acc)])))
+    // The registry is always a fresh, seeded deploy (force_create), and the
+    // generic deploy returns the account read-only when it is already present
+    // with the matching code hash.
+    let spec = SystemContractSpec::new(
+        SEQUENCER_REGISTRY_ADDRESS,
+        SEQUENCER_REGISTRY_CODE,
+        SEQUENCER_REGISTRY_CODE_HASH,
+    )
+    .with_seed(seed)
+    .with_force_create_on_upgrade(true);
+    let state = crate::transact_deploy(db, &spec).map_err(BlockExecutionError::other)?;
+    Ok(Some(state))
 }
 
 /// Returns `(due, witness_state)` where `due` indicates whether the caller should issue
@@ -363,7 +359,11 @@ mod tests {
     use super::*;
     use alloy_primitives::{address, keccak256, B256};
     use mega_system_contracts::sequencer_registry::storage_slots::PENDING_ADMIN;
-    use revm::{context::BlockEnv, database::InMemoryDB, state::AccountInfo};
+    use revm::{
+        context::BlockEnv,
+        database::InMemoryDB,
+        state::{AccountInfo, Bytecode},
+    };
 
     use crate::{MegaHardforkConfig, MegaSpecId};
 

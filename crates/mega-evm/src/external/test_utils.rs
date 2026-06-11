@@ -200,6 +200,22 @@ impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
     pub fn clear_oracle_storage(&self) {
         self.oracle_storage.borrow_mut().clear();
     }
+
+    /// Returns the configured bucket capacities as `(bucket_id, capacity)` pairs.
+    ///
+    /// Used to snapshot the effective external environment into a self-validating
+    /// fixture.
+    pub fn bucket_capacities(&self) -> Vec<(BucketId, u64)> {
+        self.bucket_capacity.borrow().iter().map(|(&id, &cap)| (id, cap)).collect()
+    }
+
+    /// Returns the configured oracle storage as `(slot, value)` pairs.
+    ///
+    /// Used to snapshot the effective external environment into a self-validating
+    /// fixture.
+    pub fn oracle_storage(&self) -> Vec<(U256, U256)> {
+        self.oracle_storage.borrow().iter().map(|(&slot, &value)| (slot, value)).collect()
+    }
 }
 
 impl<Error: Unpin + Clone + Display, Hasher: BucketHasher> ExternalEnvFactory

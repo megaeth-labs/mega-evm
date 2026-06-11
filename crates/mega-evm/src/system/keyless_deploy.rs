@@ -19,12 +19,9 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, Address};
-use revm::{
-    database::State,
-    state::{Account, Bytecode, EvmState},
-};
+use revm::{database::State, state::EvmState};
 
-use crate::MegaHardforks;
+use crate::{MegaHardforks, SystemContractSpec};
 
 // Re-export error types and transaction functions from sandbox
 pub use crate::sandbox::{
@@ -51,47 +48,34 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    if !hardforks.is_rex_2_active_at_timestamp(block_timestamp) {
-        return Ok(None);
-    }
+    keyless_deploy_spec(&hardforks, block_timestamp)
+        .map(|s| crate::transact_deploy(db, &s))
+        .transpose()
+}
 
-    // Load the keyless deploy contract account from the cache
-    let acc = db.load_cache_account(KEYLESS_DEPLOY_ADDRESS)?;
-
-    // If the contract is already deployed with the correct code, return early
-    if let Some(account_info) = acc.account_info() {
-        if account_info.code_hash == KEYLESS_DEPLOY_CODE_HASH {
-            // Although we do not need to update the account, we need to mark it as read
-            return Ok(Some(EvmState::from_iter([(
-                KEYLESS_DEPLOY_ADDRESS,
-                Account { info: account_info, ..Default::default() },
-            )])));
-        }
-    }
-
-    // Update the account info with the contract code
-    let account_existed = acc.account_info().is_some();
-    let mut acc_info = acc.account_info().unwrap_or_default();
-    acc_info.code_hash = KEYLESS_DEPLOY_CODE_HASH;
-    acc_info.code = Some(Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
-
-    // Convert the cache account back into a revm account and mark it as touched.
-    // Only mark it as created when the account did not previously exist; an in-place
-    // bytecode upgrade of an existing account must not clear its storage.
-    let mut revm_acc: revm::state::Account = acc_info.into();
-    revm_acc.mark_touch();
-    if !account_existed {
-        revm_acc.mark_created();
-    }
-
-    Ok(Some(EvmState::from_iter([(KEYLESS_DEPLOY_ADDRESS, revm_acc)])))
+/// Builds the [`SystemContractSpec`] for the keyless-deploy contract active at
+/// the given timestamp, or `None` if Rex2 is not yet active.
+pub(crate) fn keyless_deploy_spec(
+    hardforks: &impl MegaHardforks,
+    block_timestamp: u64,
+) -> Option<SystemContractSpec> {
+    hardforks.is_rex_2_active_at_timestamp(block_timestamp).then(|| {
+        SystemContractSpec::new(
+            KEYLESS_DEPLOY_ADDRESS,
+            KEYLESS_DEPLOY_CODE,
+            KEYLESS_DEPLOY_CODE_HASH,
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{MegaHardfork, MegaHardforkConfig};
-    use revm::{database::InMemoryDB, state::AccountInfo};
+    use revm::{
+        database::InMemoryDB,
+        state::{AccountInfo, Bytecode},
+    };
 
     #[test]
     fn test_deploy_keyless_deploy_contract_on_fresh_db() {

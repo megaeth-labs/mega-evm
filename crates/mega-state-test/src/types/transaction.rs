@@ -1,4 +1,7 @@
-use super::{deserializer::deserialize_maybe_empty, TestAuthorization};
+use super::{
+    deserializer::{deserialize_maybe_empty, serialize_maybe_empty},
+    TestAuthorization,
+};
 use mega_evm::revm::{
     context::TransactionType,
     context_interface::transaction::AccessList,
@@ -27,7 +30,11 @@ pub struct TransactionParts {
     #[serde(default)]
     pub sender: Option<Address>,
     /// Recipient address (None for contract creation)
-    #[serde(default, deserialize_with = "deserialize_maybe_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_maybe_empty",
+        serialize_with = "serialize_maybe_empty"
+    )]
     pub to: Option<Address>,
     /// Ether value to transfer (multiple variants for different test cases)
     pub value: Vec<U256>,
@@ -95,7 +102,7 @@ impl TransactionParts {
 }
 
 /// Transaction part indices.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TxPartIndices {
     /// Index into the data array

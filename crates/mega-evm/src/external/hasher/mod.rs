@@ -14,8 +14,8 @@ mod convert;
 mod fallback;
 
 use self::fallback::RandomState;
+use crate::{BucketHasher, BucketId, MIN_BUCKET_SIZE};
 use core::hash::{BuildHasher, Hasher};
-use mega_evm::{BucketHasher, BucketId, MIN_BUCKET_SIZE};
 
 /// Width of each trie level in bits (256-ary trie).
 const TRIE_WIDTH_BITS: usize = 8;

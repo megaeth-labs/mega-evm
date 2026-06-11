@@ -7,12 +7,9 @@
 use alloy_evm::Database;
 use alloy_primitives::{address, Address};
 use alloy_sol_types::SolError;
-use revm::{
-    database::State,
-    state::{Account, Bytecode, EvmState},
-};
+use revm::{database::State, state::EvmState};
 
-use crate::MegaHardforks;
+use crate::{MegaHardforks, SystemContractSpec};
 
 /// The address of the access control system contract.
 pub const ACCESS_CONTROL_ADDRESS: Address = address!("0x6342000000000000000000000000000000000004");
@@ -53,46 +50,34 @@ pub fn transact_deploy_access_control_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    if !hardforks.is_rex_4_active_at_timestamp(block_timestamp) {
-        return Ok(None);
-    }
+    access_control_spec(&hardforks, block_timestamp)
+        .map(|s| crate::transact_deploy(db, &s))
+        .transpose()
+}
 
-    // Load the access control contract account from the cache
-    let acc = db.load_cache_account(ACCESS_CONTROL_ADDRESS)?;
-
-    // If the contract is already deployed with the correct code, return early
-    if let Some(account_info) = acc.account_info() {
-        if account_info.code_hash == ACCESS_CONTROL_CODE_HASH {
-            return Ok(Some(EvmState::from_iter([(
-                ACCESS_CONTROL_ADDRESS,
-                Account { info: account_info, ..Default::default() },
-            )])));
-        }
-    }
-
-    // Update the account info with the contract code
-    let account_existed = acc.account_info().is_some();
-    let mut acc_info = acc.account_info().unwrap_or_default();
-    acc_info.code_hash = ACCESS_CONTROL_CODE_HASH;
-    acc_info.code = Some(Bytecode::new_raw(ACCESS_CONTROL_CODE));
-
-    // Convert the cache account back into a revm account and mark it as touched.
-    // Only mark it as created when the account did not previously exist; an in-place
-    // bytecode upgrade of an existing account must not clear its storage.
-    let mut revm_acc: revm::state::Account = acc_info.into();
-    revm_acc.mark_touch();
-    if !account_existed {
-        revm_acc.mark_created();
-    }
-
-    Ok(Some(EvmState::from_iter([(ACCESS_CONTROL_ADDRESS, revm_acc)])))
+/// Builds the [`SystemContractSpec`] for the access-control contract active at
+/// the given timestamp, or `None` if Rex4 is not yet active.
+pub(crate) fn access_control_spec(
+    hardforks: &impl MegaHardforks,
+    block_timestamp: u64,
+) -> Option<SystemContractSpec> {
+    hardforks.is_rex_4_active_at_timestamp(block_timestamp).then(|| {
+        SystemContractSpec::new(
+            ACCESS_CONTROL_ADDRESS,
+            ACCESS_CONTROL_CODE,
+            ACCESS_CONTROL_CODE_HASH,
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_primitives::{keccak256, B256};
-    use revm::{database::InMemoryDB, state::AccountInfo};
+    use revm::{
+        database::InMemoryDB,
+        state::{AccountInfo, Bytecode},
+    };
 
     use crate::{MegaHardfork, MegaHardforkConfig};
     use alloy_hardforks::ForkCondition;
