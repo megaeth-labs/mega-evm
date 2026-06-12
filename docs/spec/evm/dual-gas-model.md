@@ -142,6 +142,15 @@ The following rules MUST apply:
 - When `multiplier > 1`: storage gas MUST scale linearly as `base × (multiplier − 1)`.
 - The multiplier MUST be determined from the SALT bucket state of the **parent block**, not the current transaction's intermediate state.
 
+<details>
+<summary>Rex6 (unstable): system-originated transactions charge storage gas at minimum bucket capacity</summary>
+
+Under Rex6, a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) MUST be charged dynamic storage gas as if every target bucket were at minimum capacity (`multiplier = 1`), regardless of the bucket's actual capacity.
+Under the `base × (multiplier − 1)` formula this makes the dynamic storage gas zero, so a protocol-mandated storage write costs only its standard EVM gas and cannot run out of gas as SALT buckets grow.
+User transactions are unaffected and continue to pay capacity-scaled storage gas.
+
+</details>
+
 #### Bucket ID Calculation
 
 For storage gas calculation, a node MUST determine the SALT bucket from the target key, regardless of whether the account or storage slot already exists.
@@ -269,4 +278,4 @@ For the historical evolution of storage gas formulas and constants across specs:
 - [Rex](../upgrades/rex.md) — revised to `base × (multiplier − 1)` with current base costs, added transaction intrinsic storage gas
 - [Rex4](../upgrades/rex4.md) — storage gas stipend for value transfers
 - [Rex5](../upgrades/rex5.md) — reworked the storage gas stipend into a separated-allowance model, derived the top-level contract-creation storage-gas address from the sender's current state nonce, and made contract-creation code-deposit compute gas atomic with the deployment commit
-- [Rex6](../upgrades/rex6.md) (**unstable**) — unified per-opcode gas metering order (compute gas recorded once, after the opcode body)
+- [Rex6](../upgrades/rex6.md) (**unstable**) — unified per-opcode gas metering order (compute gas recorded once, after the opcode body); system-originated transactions charge dynamic storage gas at minimum bucket capacity

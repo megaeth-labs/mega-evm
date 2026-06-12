@@ -40,6 +40,17 @@ The child call frame gas limit MUST be the minimum of:
 - the gas requested by the caller, and
 - `forwarded_gas_cap`.
 
+<details>
+<summary>Rex6 (unstable): forwarded gas returned on a compute-gas-limit halt</summary>
+
+When a `CALL`-family or `CREATE` / `CREATE2` opcode records its compute gas after its body and the recording exceeds the [compute gas limit](resource-limits.md), the opcode halts and its pending child frame is discarded before the child runs.
+
+Pre-Rex6, the gas already forwarded to that discarded child is not returned to the parent frame, so the transaction's `gas_used` is inflated by the forwarded amount even though the child never executed.
+
+Under Rex6, the node MUST return the forwarded gas to the parent frame before halting, so `gas_used` reflects only the gas actually consumed.
+
+</details>
+
 ### Value Transfer Stipend
 
 For `CALL` and `CALLCODE` with non-zero value transfer, the standard EVM `CALL_STIPEND` MUST be preserved.

@@ -97,6 +97,15 @@ If any runtime transaction-level limit is exceeded during execution, the transac
 
 The failed transaction's actual resource usage MUST still count toward the block's cumulative resource counters.
 
+<details>
+<summary>Rex6 (unstable): system-originated transactions are not halted by transaction-level limits</summary>
+
+Under Rex6, the four runtime transaction-level limits MUST NOT be enforced against a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption).
+The node MUST still record such a transaction's resource usage; only the per-transaction halt decision is suppressed.
+The transaction's standard EVM `gas_limit` — for the pre-block system calls, floored at 30,000,000 — remains the only bound that can halt it.
+
+</details>
+
 #### Precompile Compute-Gas Bound
 
 A precompile invocation's compute-gas consumption MUST be bounded by the compute gas remaining in the current call frame.
@@ -230,3 +239,4 @@ Including failed transactions ensures the sender always pays for consumed resour
 - [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource costs (always deducted before execution) are now reflected in the top-level frame budget before it is forwarded to child frames.
 - [Rex5](../upgrades/rex5.md) — bounded a precompile invocation's compute-gas consumption by the remaining compute-gas budget, failing the precompile with `PrecompileOOG` rather than letting it overshoot the budget.
 - [Rex6](../upgrades/rex6.md) (**unstable**) — moved EIP-7702 authority state-growth resolution from pre-execution to validation, and added dynamic SALT account-creation gas for each net-new applied authority to the pre-frame intrinsic gas deduction.
+- [Rex6](../upgrades/rex6.md) (**unstable**) — stopped enforcing the four runtime transaction-level limits against system-originated transactions; usage is still recorded.

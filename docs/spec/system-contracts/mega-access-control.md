@@ -99,6 +99,22 @@ While disabled, any volatile data access — block environment reads, beneficiar
 
 Blocked volatile access MUST NOT update volatile-access tracking and MUST NOT tighten [gas detention](../evm/gas-detention.md).
 
+For opcodes that are unconditionally volatile — block-environment reads such as `TIMESTAMP`, `NUMBER`, `COINBASE`, `DIFFICULTY` / `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `BLOCKHASH`, and `BLOBHASH` — the disabled-state revert is synthesized before operand validation.
+A malformed invocation of an operand-taking unconditionally volatile opcode (`BLOCKHASH`, `BLOBHASH`) with an insufficient stack therefore reverts with `VolatileDataAccessDisabled` instead of halting with the canonical stack-underflow error; this is intended MegaETH semantics.
+Conditionally volatile opcodes — `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the CALL family, and `SELFDESTRUCT`, which are volatile only when their operand resolves to the beneficiary — inspect their operands first and keep the canonical stack-underflow halt when the stack is malformed.
+
+<details>
+<summary>Rex6 (unstable): source-side SELFDESTRUCT and EIP-7702-delegated call targets</summary>
+
+Under Rex6, two additional beneficiary accesses MUST revert with `VolatileDataAccessDisabled` while volatile data access is disabled:
+
+- a `SELFDESTRUCT` executed by a contract whose own address is the block beneficiary — the operation reads and zeroes the executing contract's balance, so it observes beneficiary state regardless of its stack target; the guard applies only once the target operand exists, so a stack-underflow `SELFDESTRUCT` keeps its canonical stack-underflow halt;
+- a `CALL`, `CALLCODE`, `DELEGATECALL`, or `STATICCALL` whose target's [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) delegation designation resolves (one hop) to the beneficiary.
+
+Pre-Rex6, only the `SELFDESTRUCT` stack target and the raw CALL-family target operand are compared to the beneficiary.
+
+</details>
+
 ### `enableVolatileDataAccess`
 
 When intercepted, the node MUST re-enable volatile data access for the caller's call frame and descendant call frames if and only if the restriction was set at the caller's depth or was not active.
@@ -145,3 +161,4 @@ Treating these selectors as forbidden mutable side effects under `STATICCALL` wo
 ## Spec History
 
 - [Rex4](../upgrades/rex4.md) introduced the MegaAccessControl system contract.
+- [Rex6](../upgrades/rex6.md) (**unstable**) — extends the disabled-state beneficiary guard to a `SELFDESTRUCT` whose executing contract is the beneficiary and to CALL-family targets whose EIP-7702 delegate resolves to the beneficiary.

@@ -20,7 +20,7 @@ Rex6 bundles nine consensus-visible changes to gas and resource accounting:
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
 3. **CREATE-frame resource accounting.** Rex6 corrects the creator nonce-bump and net-new state-growth accounting on the `CREATE` frame.
 4. **KeylessDeploy sandbox hardening.** Rex6 rescues the outer sender's unused gas when a keyless-deploy dispatch hits the transaction-level compute-gas limit, and reports a keyless deploy whose constructor self-destructs as an empty-code deployment rather than a success.
-5. **Post-execution fee-reward accounting.** Rex6 counts account materializations performed by the post-execution beneficiary fee-reward step toward resource accounting, closing a window in which they escaped it.
+5. **Post-execution fee-reward accounting.** Rex6 counts the account writes performed by the post-execution beneficiary fee-reward step toward resource accounting, closing a window in which they escaped it.
 6. **System-originated transaction metering exemption.** Rex6 exempts the protocol's own transactions from MegaETH's per-transaction resource metering, so protocol-mandated state changes cannot be pushed out of gas as SALT buckets grow.
 7. **Beneficiary detention / volatile-access coverage.** Rex6 brings two cases under beneficiary detention and `disableVolatileDataAccess` that earlier specs missed — a `SELFDESTRUCT` whose executing contract is the block beneficiary, and a `CALL` whose EIP-7702 delegate is the block beneficiary — and counts a `SELFDESTRUCT` balance credit to an already-existing beneficiary toward resource accounting.
 8. **Additional resource-accounting corrections.** Rex6 charges a per-log base cost so empty logs are no longer free in the data-size lane, and returns forwarded gas to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
@@ -69,9 +69,9 @@ Rex6 closes two gaps in the [KeylessDeploy](../system-contracts/keyless-deploy.m
 ### Post-Execution Fee-Reward Accounting
 
 op-revm credits fee recipients (the priority-fee beneficiary and the base-fee / operator fee vaults) in a post-execution step that runs _after_ MegaETH's `AdditionalLimit` resource trackers are finalized for the transaction.
-Pre-Rex6, an account that this step materializes for the first time — a previously non-existent fee recipient — was never counted toward [resource accounting](../evm/resource-accounting.md), because the trackers had already been read out.
+Pre-Rex6, the account writes this step performs were never counted toward [resource accounting](../evm/resource-accounting.md), because the trackers had already been read out.
 
-Rex6 accounts for these post-execution materializations: a fee recipient that the reward step creates is counted toward state growth and account-update accounting, the same as any other new account. The deposit-mint half of this gap was already closed in Rex5; Rex6 covers the remaining non-deposit fee-credit paths.
+Rex6 accounts for these post-execution writes: each distinct fee recipient whose balance the reward step changes is counted as one account-info write toward data-size and KV-update accounting, and a fee recipient that the step materializes for the first time additionally counts toward state growth, the same as any other new account. The deposit-mint half of this gap was already closed in Rex5; Rex6 covers the remaining non-deposit fee-credit paths.
 
 ### System-Originated Transaction Exemption
 
@@ -90,7 +90,7 @@ Beneficiary gas detention and the `disableVolatileDataAccess` guard exist so a c
 
 - **Source-side `SELFDESTRUCT`.** A `SELFDESTRUCT` reads and zeroes its executing contract's balance. When that contract is the block beneficiary, the operation observes beneficiary state, so under `disableVolatileDataAccess` it now reverts and otherwise engages detention. Earlier specs compared only the `SELFDESTRUCT` stack target to the beneficiary. The check applies only once the operation has a target operand, so a stack-underflow `SELFDESTRUCT` keeps its `StackUnderflow` halt.
 - **EIP-7702-delegated `CALL`.** Loading an account whose [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) delegate is the block beneficiary reads the beneficiary's account. Rex6 resolves the delegate one hop before the beneficiary comparison for `CALL`, `CALLCODE`, `DELEGATECALL`, and `STATICCALL`, so a call to such a delegator reverts under `disableVolatileDataAccess` and engages detention; earlier specs compared the raw stack operand.
-- **Existing-target `SELFDESTRUCT` accounting.** A `SELFDESTRUCT` that credits its balance to an already-existing beneficiary performs an account-info write the frame-initialization accounting path never sees. Rex6 records it toward [data-size and KV-update accounting](../evm/resource-accounting.md) (no state growth — the account already exists). A `SELFDESTRUCT` to the executing contract itself is an [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) balance no-op and records nothing.
+- **Existing-target `SELFDESTRUCT` accounting.** A `SELFDESTRUCT` that credits a non-zero balance to an already-existing beneficiary performs an account-info write the frame-initialization accounting path never sees. Rex6 records it toward [data-size and KV-update accounting](../evm/resource-accounting.md) (no state growth — the account already exists). A zero-balance `SELFDESTRUCT` performs no credit and records nothing, and a `SELFDESTRUCT` to the executing contract itself is an [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) balance no-op and records nothing.
 
 ### Additional Resource-Accounting Corrections
 

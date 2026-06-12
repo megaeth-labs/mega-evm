@@ -131,7 +131,7 @@ Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas deten
 ### [Rex6](rex6.md)
 
 Unstable; not yet activated.
-Unified per-opcode [gas metering order](../evm/dual-gas-model.md#gas-metering-order): every storage-affecting opcode charges storage gas before its body and records [compute gas](../glossary.md#compute-gas) exactly once after the body completes, folding the `CREATE2` memory-expansion gas into that single recording.
+Unified per-opcode [gas metering order](../evm/dual-gas-model.md#gas-metering-order), consolidated EIP-7702 authorization accounting with dynamic SALT account-creation gas for net-new authorities, CREATE-frame accounting corrections, [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox hardening, post-execution fee-reward accounting, [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) metering exemption, extended beneficiary detention / volatile-access coverage, per-log [data size](../evm/resource-accounting.md#data-size) base, forwarded-gas return on compute-limit halts, value self-transfer account-info dedup.
 
 ## How to Read These Pages
 
