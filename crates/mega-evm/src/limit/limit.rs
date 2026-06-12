@@ -357,10 +357,31 @@ impl AdditionalLimit {
 /* Hooks for transaction execution lifecycle. */
 impl AdditionalLimit {
     /// Records the compute gas used and returns `false` if the limit has been exceeded.
+    ///
+    /// This runs on every metered opcode, so it is the hottest hook in the whole tracker.
+    /// `#[inline]` lets the record + within-limit check fold directly into the per-opcode
+    /// wrapper, removing a call across the `RefMut<AdditionalLimit>` boundary.
+    #[inline]
     pub(crate) fn record_compute_gas(&mut self, compute_gas_used: u64) -> bool {
+        // If any dimension was already latched as exceeded, surface it immediately (matches the
+        // leading short-circuit in `check_limit`).
+        if self.has_exceeded_limit.exceeded_limit() {
+            return false;
+        }
+        // Recording compute gas can only change the compute-gas dimension, so check just that one
+        // (`compute_gas.check_limit()` covers both the Rex4+ per-frame budget and the TX-level
+        // detained limit) instead of fanning out to all four sub-trackers. The other three
+        // dimensions only change at their own mutation sites (`on_sstore`, `on_log`,
+        // `record_oracle_hint_bytes`, `on_selfdestruct_new_account`, the frame-lifecycle hooks),
+        // each of which runs `check_limit()` itself and latches any exceed into
+        // `has_exceeded_limit` — which the short-circuit above then surfaces here.
         self.compute_gas.record_gas_used(compute_gas_used);
-
-        !self.check_limit().exceeded_limit()
+        let check = self.compute_gas.check_limit();
+        if check.exceeded_limit() {
+            self.has_exceeded_limit = check;
+            return false;
+        }
+        true
     }
 
     /// Records the current frame's remaining gas on a TX-level limit exceed so it can be
@@ -747,6 +768,13 @@ impl AdditionalLimit {
         self.data_size.record_account_write();
         self.kv_update.record_account_update();
         self.state_growth.record_growth(1);
+
+        // Latch any resulting data-size/KV/state-growth exceed into `has_exceeded_limit`.
+        // The SELFDESTRUCT wrapper's trailing `compute_gas!` goes through `record_compute_gas`,
+        // which only checks the compute-gas dimension and would otherwise not re-examine these
+        // three; latching here keeps the exceed visible at the same opcode, matching the prior
+        // behavior where the per-opcode check fanned out to all four dimensions.
+        let _ = self.check_limit();
     }
 }
 
