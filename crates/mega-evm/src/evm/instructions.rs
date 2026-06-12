@@ -1567,6 +1567,8 @@ pub mod storage_gas_ext {
         // installs this wrapper only for REX5+, so pre-REX5 specs never reach here.
         if context.interpreter.runtime_flag.is_static() {
             run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
+            // Defensive: unreachable in practice — a static SELFDESTRUCT always halts
+            // inside the inner instruction, so the macro returns early above.
             return;
         }
 
@@ -1850,7 +1852,30 @@ pub mod compute_gas_ext {
 
     wrap_op_compute_gas!(revert, "REVERT", instructions::control::revert);
     wrap_op_compute_gas!(invalid, "INVALID", instructions::control::invalid);
-    wrap_op_compute_gas!(selfdestruct, "SELFDESTRUCT", instructions::host::selfdestruct);
+
+    /// `SELFDESTRUCT` opcode with compute gas tracking.
+    ///
+    /// Unlike the default wrapper, the trailing check fans out across all four limit
+    /// dimensions (`record_compute_gas_all_dims`): the REX5 storage wrapper records
+    /// beneficiary data/KV/state usage *before* the inner instruction runs, without
+    /// latching, and those dimensions must latch (and halt) here — only once the inner
+    /// instruction has succeeded. Latching at the recording site instead would stick
+    /// even when the inner instruction subsequently fails and the frame's discardable
+    /// usage is rolled back.
+    pub fn selfdestruct<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let gas_before = context.interpreter.gas.remaining();
+
+        // Call the original instruction
+        run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
+
+        let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        if !additional_limit.record_compute_gas_all_dims(gas_used) {
+            context.interpreter.halt(additional_limit.exceeding_instruction_result());
+        }
+    }
 }
 
 /// Trait to inspect the stack elements.

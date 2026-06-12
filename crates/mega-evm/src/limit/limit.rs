@@ -389,6 +389,21 @@ impl AdditionalLimit {
         true
     }
 
+    /// Records the compute gas used and checks ALL four limit dimensions (the
+    /// pre-optimization fan-out), returning `false` if any has been exceeded.
+    ///
+    /// Retained for SELFDESTRUCT: its REX5 storage wrapper records beneficiary
+    /// data/KV/state usage *before* the inner instruction runs, without latching
+    /// (the inner instruction may still fail, in which case the frame pops that
+    /// discardable usage). The fan-out here latches those dimensions only after the
+    /// inner instruction has succeeded, with `check_limit`'s dimension priority.
+    /// Hot-path opcodes use [`Self::record_compute_gas`] instead.
+    #[inline]
+    pub(crate) fn record_compute_gas_all_dims(&mut self, compute_gas_used: u64) -> bool {
+        self.compute_gas.record_gas_used(compute_gas_used);
+        !self.check_limit().exceeded_limit()
+    }
+
     /// Records the current frame's remaining gas on a TX-level limit exceed so it can be
     /// refunded to the sender. The storage-stipend tracker decides how `gas.remaining()`
     /// maps to the refundable balance — see
@@ -774,12 +789,11 @@ impl AdditionalLimit {
         self.kv_update.record_account_update();
         self.state_growth.record_growth(1);
 
-        // Latch any resulting data-size/KV/state-growth exceed into `has_exceeded_limit`.
-        // The SELFDESTRUCT wrapper's trailing `compute_gas!` goes through `record_compute_gas`,
-        // which only checks the compute-gas dimension and would otherwise not re-examine these
-        // three; latching here keeps the exceed visible at the same opcode, matching the prior
-        // behavior where the per-opcode check fanned out to all four dimensions.
-        let _ = self.check_limit();
+        // Deliberately no latch here: this runs *before* the inner SELFDESTRUCT executes,
+        // which may still fail (e.g. out of gas on the cold beneficiary load, or a DB
+        // error) — the frame then pops this discardable usage, and a latch taken now would
+        // stick and misattribute the failure. The trailing `record_compute_gas_all_dims`
+        // in `compute_gas_ext::selfdestruct` latches these dimensions after inner success.
     }
 }
 
@@ -874,6 +888,14 @@ mod tests {
         }
     }
 
+    /// Returns the latched limit kind, or `None` when within limit.
+    fn latched_kind(limit: &AdditionalLimit) -> Option<LimitKind> {
+        match limit.has_exceeded_limit {
+            LimitCheck::ExceedsLimit { kind, .. } => Some(kind),
+            LimitCheck::WithinLimit => None,
+        }
+    }
+
     /// Compute gas must be recorded even when another dimension has already latched an
     /// exceed: the work was performed, and the recorded total feeds the transaction outcome
     /// and block-level compute accounting. A skipped record would under-report compute usage
@@ -895,14 +917,7 @@ mod tests {
                 .build_fill(),
         );
         limit.before_tx_start(&tx);
-        assert!(
-            matches!(
-                limit.has_exceeded_limit,
-                LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, .. }
-            ),
-            "data-size exceed should be latched, got {:?}",
-            limit.has_exceeded_limit,
-        );
+        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
 
         // The trailing compute-gas record of the same opcode must still surface the latched
         // exceed AND record the gas.
@@ -914,13 +929,29 @@ mod tests {
         );
 
         // The latched kind is preserved (not overwritten by the compute-gas check).
-        assert!(
-            matches!(
-                limit.has_exceeded_limit,
-                LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, .. }
-            ),
-            "latched kind must remain DataSize, got {:?}",
-            limit.has_exceeded_limit,
-        );
+        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
+    }
+
+    /// SELFDESTRUCT's beneficiary usage is recorded *before* the inner instruction runs and
+    /// must NOT latch at the recording site: the inner instruction can still fail (out of
+    /// gas, DB error), in which case the frame pops the discardable usage and a latch taken
+    /// at recording time would stick and misattribute the failure. The latch belongs to the
+    /// trailing all-dimension check, which only runs after the inner instruction succeeds.
+    #[test]
+    fn test_selfdestruct_usage_latches_only_at_trailing_check() {
+        let mut limits = test_limits();
+        // Below the 40-byte account-info write, so the beneficiary creation exceeds it.
+        limits.tx_data_size_limit = 10;
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, limits);
+        // Simulate an active call frame (SELFDESTRUCT always runs inside one).
+        limit.push_empty_frame();
+
+        // Recording site: usage recorded, but no latch yet (inner instruction may still fail).
+        limit.on_selfdestruct_new_account();
+        assert_eq!(latched_kind(&limit), None, "recording site must not latch");
+
+        // Trailing all-dimension check (runs only after inner success): latches and halts.
+        assert!(!limit.record_compute_gas_all_dims(100), "trailing check must surface exceed");
+        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
     }
 }
