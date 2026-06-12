@@ -121,7 +121,8 @@ use revm::{
 ///   - Block env opcodes (TIMESTAMP, NUMBER, etc.): `volatile_data_ext::*`
 ///   - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*`
 ///   - SLOAD: `compute_gas_ext::sload`
-///   - SSTORE: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - SSTORE: `additional_limit_ext` → `compute_gas_ext` (storage-gas charge inlined in
+///     `additional_limit_ext::sstore`)
 ///   - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
 ///   - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
 ///   - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
@@ -397,7 +398,8 @@ mod mini_rex {
     /// - Most opcodes: `compute_gas_ext::*` (compute gas tracking only)
     /// - Block env opcodes: `volatile_data_ext::*` (gas detention)
     /// - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*` (conditional)
-    /// - SSTORE: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - SSTORE: `additional_limit_ext` → `compute_gas_ext` (storage-gas charge inlined in
+    ///   `additional_limit_ext::sstore`)
     /// - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
     /// - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
     /// - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
@@ -1068,8 +1070,11 @@ pub mod additional_limit_ext {
 
     /// `SSTORE` opcode implementation with data size and KV update limit enforcement.
     ///
-    /// This wrapper adds limit tracking on top of [`storage_gas_ext::sstore`], which handles
-    /// compute gas tracking and storage gas costs.
+    /// This is the SSTORE entry point. It loads the storage slot once, charges the
+    /// dynamically-scaled storage gas (first-time non-zero write), delegates to
+    /// [`compute_gas_ext::sstore`] for the inner SSTORE + compute-gas tracking, then records data
+    /// size / KV / state-growth usage. The storage-gas charge is inlined here (rather than in a
+    /// separate wrapper layer) so the slot is inspected only once per SSTORE.
     ///
     /// # Data Size and KV Update Tracking
     ///
@@ -1108,8 +1113,31 @@ pub mod additional_limit_ext {
         };
         let loaded_data = SStoreResult { original_value, present_value, new_value };
 
-        // Execute the original SSTORE instruction
-        run_inner_instruction_or_abort!(storage_gas_ext::sstore, context);
+        // Charge dynamically-scaled storage gas before the instruction executes (only when first
+        // writing a non-zero value to an originally-zero slot). This was previously done in a
+        // separate `storage_gas_ext::sstore` wrapper layer that re-loaded the same slot via a
+        // second `inspect_storage`; the charge is inlined here to reuse the slot already loaded
+        // above, eliminating the redundant per-SSTORE inspection. Behavior is identical: the
+        // first-time-write decision uses the same pre-execution `original`/`present` values, the
+        // charge happens at the same point (before the inner SSTORE runs), and REX5 still drains
+        // the storage stipend allowance first (pre-REX5 returns 0).
+        if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
+            let Some(sstore_set_storage_gas) =
+                context.host.sstore_set_storage_gas(target_address, index)
+            else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            let drained = context
+                .host
+                .additional_limit()
+                .borrow_mut()
+                .try_consume_storage_stipend(sstore_set_storage_gas);
+            gas!(context.interpreter, sstore_set_storage_gas - drained);
+        }
+
+        // Execute the original SSTORE instruction (compute-gas tracking layer).
+        run_inner_instruction_or_abort!(compute_gas_ext::sstore, context);
 
         // KV update bomb and data bomb (only when first writing non-zero value to originally zero
         // slot): check if the number of key-value updates or the total data size will exceed the
@@ -1508,67 +1536,6 @@ pub mod storage_gas_ext {
         }
     }
 
-    /// `SSTORE` opcode implementation modified from `revm` with compute gas tracking and
-    /// dynamically-scaled storage gas costs.
-    ///
-    /// # Differences from the standard EVM
-    ///
-    /// 1. **Dynamic Storage Gas**: Additional storage gas ONLY when setting originally-zero slot to
-    ///    non-zero:
-    ///    - Base cost 2,000,000 gas, multiplied by `bucket_capacity / MIN_BUCKET_SIZE`
-    ///    - Not charged for updating already-non-zero slots or resetting to zero
-    ///
-    /// # Assumptions
-    ///
-    /// This alternative implementation of `SSTORE` is only used when the `MINI_REX` spec is
-    /// enabled, so we can safely assume that all features before and including Mini-Rex are
-    /// enabled.
-    pub fn sstore<
-        WIRE: InterpreterTypes<Stack: StackInspectTr>,
-        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
-    >(
-        context: InstructionContext<'_, H, WIRE>,
-    ) {
-        // The address to the underlying execution contract state
-        let target_address = context.interpreter.input.target_address();
-        // The storage slot to write
-        let Some(index) = context.interpreter.stack.inspect::<0>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        // The storage slot values
-        let mega_spec = context.host.spec_id();
-        let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        let (original_value, present_value) = (slot.original_value(), slot.present_value());
-        let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-
-        // Charge storage gas cost before the instruction is executed.
-        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
-        if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
-            let Some(sstore_set_storage_gas) =
-                context.host.sstore_set_storage_gas(target_address, index)
-            else {
-                context.interpreter.halt(InstructionResult::FatalExternalError);
-                return;
-            };
-            let drained = context
-                .host
-                .additional_limit()
-                .borrow_mut()
-                .try_consume_storage_stipend(sstore_set_storage_gas);
-            gas!(context.interpreter, sstore_set_storage_gas - drained);
-        }
-
-        // Execute the original SSTORE instruction
-        run_inner_instruction_or_abort!(compute_gas_ext::sstore, context);
-    }
-
     /// `SELFDESTRUCT` opcode implementation with storage gas metering for
     /// new beneficiary account creation (REX5+).
     ///
@@ -1590,6 +1557,21 @@ pub mod storage_gas_ext {
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) {
+        // Inside a static frame, revm's inner SELFDESTRUCT halts on the
+        // static-context check without changing state. Skip the mega host work below
+        // (two account inspections, SALT account-creation pricing, the storage-gas
+        // stipend draw and tracker write) — the frame reverts and discards all of it
+        // anyway — and let the inner instruction produce the identical halt. This is
+        // behavior-neutral: the static halt is exceptional, so the frame's gas and
+        // tracked usage are the same whether or not the host work ran first. The table
+        // installs this wrapper only for REX5+, so pre-REX5 specs never reach here.
+        if context.interpreter.runtime_flag.is_static() {
+            run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
+            // Defensive: unreachable in practice — a static SELFDESTRUCT always halts
+            // inside the inner instruction, so the macro returns early above.
+            return;
+        }
+
         let eth_spec = context.interpreter.runtime_flag.spec_id();
 
         // Peek beneficiary address from stack (SELFDESTRUCT uses stack position 0)
@@ -1640,8 +1622,33 @@ pub mod compute_gas_ext {
     use super::*;
 
     /// Macro to wrap the original instruction implementation with compute gas tracking.
+    ///
+    /// Two variants:
+    /// - default: "simple" opcodes that can never spawn a child frame. The compute gas used is
+    ///   simply `gas_before - gas_after`. These opcodes never set an `InterpreterAction::NewFrame`,
+    ///   so the child-gas-subtraction match (below) would always fall through to `_` — it is
+    ///   omitted entirely to keep the per-opcode hot path lean.
+    /// - `@frame`: the call/create family (`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL`/
+    ///   `CREATE`/`CREATE2`), the only opcodes that set `NewFrame`. These must subtract the gas
+    ///   forwarded to the child frame so the parent's compute gas is not over-counted.
     macro_rules! wrap_op_compute_gas {
         ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
+            #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
+            #[inline]
+            pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+                context: InstructionContext<'_, H, WIRE>,
+            ) {
+                let gas_before = context.interpreter.gas.remaining();
+
+                // Call the original instruction
+                run_inner_instruction_or_abort!($original_fn, context);
+
+                let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, gas_used);
+            }
+        };
+        (@frame $fn_name:ident, $opcode_name:expr, $original_fn:path) => {
             #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
             #[inline]
             pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
@@ -1835,17 +1842,40 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(log3, "LOG3", instructions::host::log::<3, _>);
     wrap_op_compute_gas!(log4, "LOG4", instructions::host::log::<4, _>);
 
-    wrap_op_compute_gas!(create, "CREATE", instructions::contract::create::<_, false, _>);
-    wrap_op_compute_gas!(call, "CALL", instructions::contract::call);
-    wrap_op_compute_gas!(call_code, "CALLCODE", instructions::contract::call_code);
+    wrap_op_compute_gas!(@frame create, "CREATE", instructions::contract::create::<_, false, _>);
+    wrap_op_compute_gas!(@frame call, "CALL", instructions::contract::call);
+    wrap_op_compute_gas!(@frame call_code, "CALLCODE", instructions::contract::call_code);
     wrap_op_compute_gas!(ret, "RETURN", instructions::control::ret);
-    wrap_op_compute_gas!(delegate_call, "DELEGATECALL", instructions::contract::delegate_call);
-    wrap_op_compute_gas!(create2, "CREATE2", instructions::contract::create::<_, true, _>);
-    wrap_op_compute_gas!(static_call, "STATICCALL", instructions::contract::static_call);
+    wrap_op_compute_gas!(@frame delegate_call, "DELEGATECALL", instructions::contract::delegate_call);
+    wrap_op_compute_gas!(@frame create2, "CREATE2", instructions::contract::create::<_, true, _>);
+    wrap_op_compute_gas!(@frame static_call, "STATICCALL", instructions::contract::static_call);
 
     wrap_op_compute_gas!(revert, "REVERT", instructions::control::revert);
     wrap_op_compute_gas!(invalid, "INVALID", instructions::control::invalid);
-    wrap_op_compute_gas!(selfdestruct, "SELFDESTRUCT", instructions::host::selfdestruct);
+
+    /// `SELFDESTRUCT` opcode with compute gas tracking.
+    ///
+    /// Unlike the default wrapper, the trailing check fans out across all four limit
+    /// dimensions (`record_compute_gas_all_dims`): the REX5 storage wrapper records
+    /// beneficiary data/KV/state usage *before* the inner instruction runs, without
+    /// latching, and those dimensions must latch (and halt) here — only once the inner
+    /// instruction has succeeded. Latching at the recording site instead would stick
+    /// even when the inner instruction subsequently fails and the frame's discardable
+    /// usage is rolled back.
+    pub fn selfdestruct<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let gas_before = context.interpreter.gas.remaining();
+
+        // Call the original instruction
+        run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
+
+        let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        if !additional_limit.record_compute_gas_all_dims(gas_used) {
+            context.interpreter.halt(additional_limit.exceeding_instruction_result());
+        }
+    }
 }
 
 /// Trait to inspect the stack elements.

@@ -1,6 +1,6 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{string::ToString, vec::Vec};
+use std::{collections::BTreeMap, string::ToString};
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use alloy_primitives::{Address, Bytes, TxKind, U256};
@@ -180,19 +180,6 @@ where
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
     ERROR: From<DB::Error> + FromStringError,
 {
-    /// Returns the authority nonce from the transaction-local simulated auth-list state.
-    ///
-    /// Used to mirror revm's sequential EIP-7702 auth processing when the same authority appears
-    /// multiple times in one transaction.
-    fn simulated_authority_nonce(
-        simulated_authorities: &[(Address, u64)],
-        authority: Address,
-    ) -> Option<u64> {
-        simulated_authorities.iter().find_map(|(simulated_authority, nonce)| {
-            (*simulated_authority == authority).then_some(*nonce)
-        })
-    }
-
     /// Records REX5 state growth for EIP-7702 authorizations that create authority accounts.
     ///
     /// The scan mirrors revm's auth-list validation order but stops before mutating delegation
@@ -211,7 +198,14 @@ where
         let authority_creations = {
             let (tx, journal) = ctx.tx_journal_mut();
             let mut authority_creations = 0;
-            let mut simulated_authorities = Vec::<(Address, u64)>::new();
+            // Transaction-local simulated auth-list state, mirroring revm's sequential
+            // processing when the same authority appears multiple times in one tx.
+            // A `BTreeMap` keeps per-authorization lookup/update at O(log N) instead of
+            // the O(N) linear scan a `Vec` would need, bounding the whole pass at
+            // O(N log N) (an attacker could otherwise drive O(N²) node CPU with ~1200
+            // unique authorities in one tx). The map is only ever keyed, never iterated for
+            // output, so the produced `authority_creations` count is unchanged.
+            let mut simulated_authorities = BTreeMap::<Address, u64>::new();
             for authorization in tx.authorization_list() {
                 let auth_chain_id = authorization.chain_id();
                 if !auth_chain_id.is_zero() && auth_chain_id != U256::from(chain_id) {
@@ -224,23 +218,22 @@ where
                     continue;
                 };
 
-                let (authority_nonce, creates_authority) = if let Some(nonce) =
-                    Self::simulated_authority_nonce(&simulated_authorities, authority)
-                {
-                    (nonce, false)
-                } else {
-                    let authority_acc = journal.load_account_code(authority)?;
-                    if let Some(bytecode) = &authority_acc.info.code {
-                        if !bytecode.is_empty() && !bytecode.is_eip7702() {
-                            continue;
+                let (authority_nonce, creates_authority) =
+                    if let Some(nonce) = simulated_authorities.get(&authority).copied() {
+                        (nonce, false)
+                    } else {
+                        let authority_acc = journal.load_account_code(authority)?;
+                        if let Some(bytecode) = &authority_acc.info.code {
+                            if !bytecode.is_empty() && !bytecode.is_eip7702() {
+                                continue;
+                            }
                         }
-                    }
-                    (
-                        authority_acc.info.nonce,
-                        authority_acc.is_empty() &&
-                            authority_acc.is_loaded_as_not_existing_not_touched(),
-                    )
-                };
+                        (
+                            authority_acc.info.nonce,
+                            authority_acc.is_empty() &&
+                                authority_acc.is_loaded_as_not_existing_not_touched(),
+                        )
+                    };
 
                 if authorization.nonce() != authority_nonce {
                     continue;
@@ -250,14 +243,9 @@ where
                     authority_creations += 1;
                 }
                 let next_nonce = authority_nonce.saturating_add(1);
-                if let Some((_, nonce)) = simulated_authorities
-                    .iter_mut()
-                    .find(|(simulated_authority, _)| *simulated_authority == authority)
-                {
-                    *nonce = next_nonce;
-                } else {
-                    simulated_authorities.push((authority, next_nonce));
-                }
+                // insert overwrites an existing entry and inserts a new one otherwise,
+                // matching the prior find-or-push.
+                simulated_authorities.insert(authority, next_nonce);
             }
             authority_creations
         };

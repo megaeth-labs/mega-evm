@@ -209,6 +209,22 @@ The following paths are common sources of leakage:
 
 When adding a new per-frame gas mechanism, verify that all three paths handle it correctly and add tests for each.
 
+### Resource-Limit Check Protocol
+
+The per-opcode hot path records and checks only the compute-gas dimension (`AdditionalLimit::record_compute_gas`).
+Correctness of the other three dimensions (data size, KV updates, state growth) rests on a protocol instead of a per-opcode fan-out across all four trackers:
+
+1. **Every non-compute mutation site must latch.**
+   Any code that records data-size/KV/state-growth usage during execution (`on_sstore`, `on_log`, `record_oracle_hint_bytes`, the frame-lifecycle hooks) must run `check_limit()` itself, latching any exceed into `has_exceeded_limit`.
+   The latch is surfaced by the leading short-circuit of the next `record_compute_gas` call, so the halt lands on the same opcode as the pre-protocol fan-out did.
+2. **Pre-inner recorders must NOT latch.**
+   A site that records usage _before_ its inner instruction executes (currently only SELFDESTRUCT beneficiary creation) must record without latching: the inner instruction can still fail, the frame then discards the usage, and an early latch would stick and rewrite the frame's real result.
+   Such opcodes use a trailing all-dimension check (`record_compute_gas_all_dims`) that runs only after the inner instruction succeeds.
+3. **Compute gas is always recorded.**
+   `record_compute_gas` must record before surfacing any latched exceed — the recorded total feeds the transaction outcome and block-level compute accounting even for transactions halted on another dimension.
+
+When adding an opcode or mutation site that touches a non-compute dimension, decide whether it records after or before its inner instruction, follow the matching case above, and add a test asserting the exceed halts at that opcode.
+
 ## Test Organization (`crates/mega-evm/tests/`)
 
 Tests are organized by spec: `equivalence/`, `mini_rex/` (12 modules), `rex/`, `rex2/`, `rex3/`, `rex4/`, `rex5/`, and `block_executor/`.

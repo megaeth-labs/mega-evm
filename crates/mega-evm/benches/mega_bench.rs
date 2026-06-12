@@ -13,15 +13,26 @@
 //! - **`selfdestruct`**: SELFDESTRUCT behavior across specs
 //! - **`call_value_empty_account`**: CALL with value to empty accounts (dynamic gas)
 //! - **`mixed_workload`**: Realistic combined workload
+//! - **`eip7702_authlist`**: REX5 pre-execution authority-list scan scaling with list size
+//! - **`staticcall_selfdestruct`**: SELFDESTRUCT inside a STATICCALL frame vs a STOP control
 
 #![allow(missing_docs)]
 
+use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
 use alloy_primitives::{address, Address, Bytes, U256};
-use criterion::{criterion_group, criterion_main, Criterion};
-use mega_evm::{test_utils::BytecodeBuilder, MegaSpecId};
-use revm::bytecode::opcode::{
-    ADD, CALL, COINBASE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, LOG1, LOG2, LOG4, NUMBER, POP,
-    PUSH0, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use mega_evm::{
+    revm::inspector::NoOpInspector,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+};
+use revm::{
+    bytecode::opcode::{
+        ADD, CALL, COINBASE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, LOG1, LOG2, LOG4, NUMBER,
+        POP, PUSH0, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
+    },
+    context::tx::TxEnvBuilder,
+    ExecuteEvm as _,
 };
 
 mod common;
@@ -668,6 +679,155 @@ fn bench_mixed_workload(c: &mut Criterion) {
     group.finish();
 }
 
+//
+// ============================================================================
+// EIP-7702 Authorization-List Scaling Benchmark
+// ============================================================================
+//
+// REX5 records state growth for EIP-7702 authority accounts during
+// pre-execution (`record_eip7702_authority_state_growth`). For each
+// authorization it consults a transaction-local collection of already-seen
+// authorities; with a `Vec` that lookup is O(N) per authorization, hence O(N²)
+// over the list — a node-CPU amplification an attacker can drive with ~1200
+// unique authorities in one 30M-gas type-4 tx. The `BTreeMap`-based
+// implementation bounds the pass at O(N log N).
+//
+// The benchmark sweeps the authority count so a quadratic term shows up as
+// super-linear growth (a map-based implementation grows linearly). Authorities
+// are pre-recovered (`RecoveredAuthority::Valid`) so no ecrecover cost dilutes
+// the measured scan; each is distinct and absent from state, so every one
+// passes validation and exercises the full lookup.
+//
+// This bench builds the mega EVM directly instead of going through the
+// `Workload` harness: `TxSpec` is deliberately backend-agnostic and carries no
+// authorization list, and only mega rows are meaningful for this REX5-only
+// pre-execution path.
+//
+
+const AUTH_DELEGATE: Address = address!("0000000000000000000000000000000000900001");
+
+fn make_recovered_auth_list(n: usize) -> Vec<RecoveredAuthorization> {
+    (0..n)
+        .map(|i| {
+            let mut bytes = [0u8; 20];
+            bytes[12..20].copy_from_slice(&((i as u64) + 0x0010_0000).to_be_bytes());
+            RecoveredAuthorization::new_unchecked(
+                // chain_id 0 = chain-agnostic, always valid regardless of cfg
+                Authorization { chain_id: U256::ZERO, address: AUTH_DELEGATE, nonce: 0 },
+                RecoveredAuthority::Valid(Address::from(bytes)),
+            )
+        })
+        .collect()
+}
+
+fn bench_eip7702_authlist(c: &mut Criterion) {
+    let mut group = c.benchmark_group("eip7702_authlist");
+    for &n in &[150usize, 400, 800, 1200] {
+        let auth_list = make_recovered_auth_list(n);
+        let db =
+            MemoryDatabase::default().account_balance(CALLER, U256::from(10).pow(U256::from(24)));
+        group.bench_function(format!("rex5/{n}"), |b| {
+            b.iter(|| {
+                let mut context = MegaContext::new(db.clone(), MegaSpecId::REX5);
+                // Match the harness's Mega subject: the op-revm base panics on
+                // unset operator-fee fields, so zero them explicitly.
+                context.modify_chain(|chain| {
+                    chain.operator_fee_scalar = Some(U256::ZERO);
+                    chain.operator_fee_constant = Some(U256::ZERO);
+                });
+                let mut evm = MegaEvm::<_, NoOpInspector, EmptyExternalEnv>::new(context);
+                let tx = TxEnvBuilder::new()
+                    .caller(CALLER)
+                    .call(CONTRACT)
+                    .gas_limit(100_000_000)
+                    .authorization_list_recovered(auth_list.clone())
+                    .build_fill();
+                let mut mega_tx = MegaTransaction::new(tx);
+                mega_tx.enveloped_tx = Some(Bytes::new());
+                black_box(evm.transact(mega_tx))
+            })
+        });
+    }
+    group.finish();
+}
+
+//
+// ============================================================================
+// STATICCALL → SELFDESTRUCT Unmetered-Work Benchmark
+// ============================================================================
+//
+// Without the `is_static` early-exit guard, the REX5 SELFDESTRUCT wrapper
+// (`storage_gas_ext::selfdestruct`) inspects the beneficiary and caller
+// accounts and runs SALT account-creation pricing BEFORE the inner interpreter
+// reaches revm's static-context check and halts. Inside a STATICCALL frame
+// that host work is always wasted: the frame reverts. An attacker repeats it
+// via STATICCALL → selfdestruct in a loop.
+//
+// The parent loops fixed-gas STATICCALLs to a SELFDESTRUCT child; a STOP-child
+// row is the control the early-exit guard must NOT change, so the wasted host
+// work is the difference between the two rows.
+//
+
+const SD_CHILD: Address = address!("00000000000000000000000000000000000a0001");
+
+/// Parent that performs `iterations` STATICCALLs to `target`, each forwarding a
+/// fixed `gas_each` (not all remaining gas, so one reverting child cannot drain
+/// the parent), then STOPs.
+fn make_repeated_staticcall_fixedgas(target: Address, gas_each: u64, iterations: usize) -> Bytes {
+    let mut builder = BytecodeBuilder::default();
+    for _ in 0..iterations {
+        builder = builder
+            .push_number(0u64) // retSize
+            .push_number(0u64) // retOffset
+            .push_number(0u64) // argsSize
+            .push_number(0u64) // argsOffset
+            .push_address(target)
+            .push_number(gas_each) // forwarded gas (fixed)
+            .append(STATICCALL)
+            .append(POP);
+    }
+    builder.append(STOP).build()
+}
+
+fn bench_staticcall_selfdestruct(c: &mut Criterion) {
+    const ITERS: usize = 500;
+    const GAS_EACH: u64 = 200_000;
+    let parent_code = make_repeated_staticcall_fixedgas(SD_CHILD, GAS_EACH, ITERS);
+    // SELFDESTRUCT(beneficiary=0): halts on the static-context check inside revm.
+    let sd_child: Bytes = vec![PUSH0, SELFDESTRUCT].into();
+    // control: pure STOP — same STATICCALL frame cost, no SELFDESTRUCT host work.
+    let stop_child: Bytes = vec![STOP].into();
+
+    let workload = |child_code: Bytes| {
+        Workload::single(
+            vec![
+                Account::new(CONTRACT).code(parent_code.clone()),
+                // fund the child so the SELFDESTRUCT `has_value` branch (SALT
+                // pricing) triggers
+                Account::new(SD_CHILD).code(child_code).balance(U256::from(1u64)),
+                Account::new(CALLER).balance(U256::from(10).pow(U256::from(18))),
+            ],
+            TxSpec::call(CALLER, CONTRACT).gas_limit(FEATURE_GAS_LIMIT),
+        )
+    };
+
+    const REX5_ONLY: &[(&str, MegaSpecId)] = &[("rex5", MegaSpecId::REX5)];
+    let mut group = c.benchmark_group("staticcall_selfdestruct");
+    register_mega_specs_suffixed(
+        &mut group,
+        REX5_ONLY,
+        &format!("selfdestruct_child/{ITERS}"),
+        &workload(sd_child),
+    );
+    register_mega_specs_suffixed(
+        &mut group,
+        REX5_ONLY,
+        &format!("stop_child/{ITERS}"),
+        &workload(stop_child),
+    );
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_volatile_data,
@@ -681,5 +841,7 @@ criterion_group!(
     bench_delegatecall_system_contract,
     bench_oracle_sload,
     bench_mixed_workload,
+    bench_eip7702_authlist,
+    bench_staticcall_selfdestruct,
 );
 criterion_main!(benches);

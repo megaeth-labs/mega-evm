@@ -9,8 +9,8 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
+    EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransaction, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -346,5 +346,131 @@ fn test_rex5_selfdestruct_to_beneficiary_without_volatile_disabled() {
         usage.state_growth > 0,
         "fall-through to storage layer must record new-account growth: {}",
         usage.state_growth,
+    );
+}
+
+// ============================================================================
+// SELFDESTRUCT attempted inside a STATICCALL frame
+// ============================================================================
+
+/// A parent that STATICCALLs `target` once (forwarding `gas_each`), discards the
+/// result, and STOPs successfully.
+fn staticcall_once_parent(target: Address, gas_each: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0u64) // retSize
+        .push_number(0u64) // retOffset
+        .push_number(0u64) // argsSize
+        .push_number(0u64) // argsOffset
+        .push_address(target)
+        .push_number(gas_each) // forwarded gas (top of stack)
+        .append(STATICCALL)
+        .append(POP)
+        .append(STOP)
+        .build()
+}
+
+/// SELFDESTRUCT attempted inside a STATICCALL frame must halt on revm's
+/// static-context check and leak NO resource usage for the (reverted)
+/// beneficiary creation. The `is_static` early-exit guard in
+/// `storage_gas_ext::selfdestruct` skips the host work; the frame revert would
+/// discard it regardless, so the tracked usage is identical to a STATICCALL that
+/// merely STOPs — and specifically records zero state growth even though the
+/// child is funded and the beneficiary is empty (the value branch that would
+/// charge new-account creation never commits).
+#[test]
+fn test_rex5_selfdestruct_in_staticcall_leaks_no_usage() {
+    let gas_each = 200_000u64;
+    let parent_code = staticcall_once_parent(CONTRACT, gas_each);
+    let sd_child =
+        BytecodeBuilder::default().push_address(EMPTY_BENEFICIARY).append(SELFDESTRUCT).build();
+    let stop_child = BytecodeBuilder::default().append(STOP).build();
+
+    let run = |spec: MegaSpecId, child: Bytes| {
+        let mut db = MemoryDatabase::default()
+            .account_code(PARENT, parent_code.clone())
+            .account_code(CONTRACT, child)
+            // fund the child so the SELFDESTRUCT has_value / SALT branch would trigger
+            .account_balance(CONTRACT, U256::from(1_000u64))
+            .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
+        let tx =
+            TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(10_000_000).build_fill();
+        transact(spec, &mut db, tx)
+    };
+
+    let (sd_res, sd_usage) = run(MegaSpecId::REX5, sd_child.clone());
+    let (stop_res, stop_usage) = run(MegaSpecId::REX5, stop_child);
+
+    // The parent swallows the inner STATICCALL failure and completes.
+    assert!(sd_res.result.is_success(), "parent tx should succeed: {:?}", sd_res.result);
+    assert!(stop_res.result.is_success(), "control tx should succeed: {:?}", stop_res.result);
+
+    // No beneficiary creation leaks into committed usage: identical to the STOP
+    // control on every lane, and zero state growth.
+    assert_eq!(
+        sd_usage.state_growth, stop_usage.state_growth,
+        "static SELFDESTRUCT leaked state growth vs STOP control",
+    );
+    assert_eq!(
+        sd_usage.kv_updates, stop_usage.kv_updates,
+        "static SELFDESTRUCT leaked KV updates vs STOP control",
+    );
+    assert_eq!(
+        sd_usage.data_size, stop_usage.data_size,
+        "static SELFDESTRUCT leaked data size vs STOP control",
+    );
+    assert_eq!(sd_usage.state_growth, 0, "no beneficiary account should be created");
+
+    // Pre-REX5 control: the same scenario under REX4 also completes with no
+    // leaked growth, confirming the REX5 guard did not diverge the two specs.
+    let (sd_res_rex4, sd_usage_rex4) = run(MegaSpecId::REX4, sd_child);
+    assert!(sd_res_rex4.result.is_success(), "rex4 parent tx should succeed");
+    assert_eq!(sd_usage_rex4.state_growth, 0, "rex4 static SELFDESTRUCT must not grow state");
+}
+
+/// SELFDESTRUCT whose beneficiary creation exceeds the state-growth budget must fail at
+/// the SELFDESTRUCT itself via the trailing all-dimension check: the usage is recorded
+/// before the inner instruction runs, but only latched once the inner instruction has
+/// succeeded.
+#[test]
+fn test_rex5_selfdestruct_beneficiary_creation_fails_on_state_growth_limit() {
+    let sd_code =
+        BytecodeBuilder::default().push_address(EMPTY_BENEFICIARY).append(SELFDESTRUCT).build();
+
+    let run = |growth_limit: u64| {
+        let mut db = MemoryDatabase::default()
+            .account_code(CONTRACT, sd_code.clone())
+            .account_balance(CONTRACT, U256::from(1_000u64))
+            .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX5).with_tx_runtime_limits(
+            EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(growth_limit),
+        );
+        context.modify_chain(|chain| {
+            chain.operator_fee_scalar = Some(U256::from(0));
+            chain.operator_fee_constant = Some(U256::from(0));
+        });
+        let mut evm = MegaEvm::new(context);
+        let tx = TxEnvBuilder::default()
+            .caller(CALLER)
+            .call(CONTRACT)
+            .gas_limit(10_000_000)
+            .build_fill();
+        let mut tx = MegaTransaction::new(tx);
+        tx.enveloped_tx = Some(Bytes::new());
+        let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+        let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
+        (r, usage)
+    };
+
+    // Control: a budget of 1 admits the single new beneficiary account.
+    let (ok_res, ok_usage) = run(1);
+    assert!(ok_res.result.is_success(), "control should succeed: {:?}", ok_res.result);
+    assert_eq!(ok_usage.state_growth, 1, "beneficiary creation should count as growth");
+
+    // Budget 0: the beneficiary creation trips the limit at the SELFDESTRUCT.
+    let (res, _) = run(0);
+    assert!(
+        !res.result.is_success(),
+        "zero state-growth budget must fail the SELFDESTRUCT, got {:?}",
+        res.result,
     );
 }
