@@ -363,6 +363,12 @@ impl AdditionalLimit {
     /// wrapper, removing a call across the `RefMut<AdditionalLimit>` boundary.
     #[inline]
     pub(crate) fn record_compute_gas(&mut self, compute_gas_used: u64) -> bool {
+        // Record unconditionally, even when another dimension has already latched an exceed:
+        // the compute work was performed, and the recorded total feeds the transaction outcome
+        // and block-level compute accounting. Skipping the record would under-report compute
+        // usage for transactions halted on a non-compute dimension (e.g. intrinsic data size
+        // latched in `before_tx_start` before `validate` records the initial gas).
+        self.compute_gas.record_gas_used(compute_gas_used);
         // If any dimension was already latched as exceeded, surface it immediately (matches the
         // leading short-circuit in `check_limit`).
         if self.has_exceeded_limit.exceeded_limit() {
@@ -375,7 +381,6 @@ impl AdditionalLimit {
         // `record_oracle_hint_bytes`, `on_selfdestruct_new_account`, the frame-lifecycle hooks),
         // each of which runs `check_limit()` itself and latches any exceed into
         // `has_exceeded_limit` — which the short-circuit above then surfaces here.
-        self.compute_gas.record_gas_used(compute_gas_used);
         let check = self.compute_gas.check_limit();
         if check.exceeded_limit() {
             self.has_exceeded_limit = check;
@@ -849,5 +854,73 @@ pub(crate) fn mark_frame_result_as_exceeding_limit(
                 output,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use revm::context::tx::TxEnvBuilder;
+
+    use super::{super::LimitKind, *};
+
+    fn test_limits() -> EvmTxRuntimeLimits {
+        EvmTxRuntimeLimits {
+            tx_data_size_limit: 100,
+            tx_kv_updates_limit: 1_000,
+            tx_compute_gas_limit: 1_000_000,
+            tx_state_growth_limit: 1_000,
+            block_env_access_compute_gas_limit: 1_000_000,
+            oracle_access_compute_gas_limit: 1_000_000,
+        }
+    }
+
+    /// Compute gas must be recorded even when another dimension has already latched an
+    /// exceed: the work was performed, and the recorded total feeds the transaction outcome
+    /// and block-level compute accounting. A skipped record would under-report compute usage
+    /// for transactions halted on a non-compute dimension.
+    ///
+    /// This pins the `validate()` path: `before_tx_start` latches intrinsic data-size
+    /// overflow before any frame exists, then the initial gas is recorded.
+    #[test]
+    fn test_record_compute_gas_records_after_other_dimension_latched() {
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, test_limits());
+
+        // Latch the data-size dimension at its mutation site: intrinsic transaction data
+        // (110-byte base + 200 bytes of calldata) exceeds the 100-byte limit.
+        let tx = MegaTransaction::new(
+            TxEnvBuilder::new()
+                .caller(Address::ZERO)
+                .call(Address::ZERO)
+                .data(vec![0u8; 200].into())
+                .build_fill(),
+        );
+        limit.before_tx_start(&tx);
+        assert!(
+            matches!(
+                limit.has_exceeded_limit,
+                LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, .. }
+            ),
+            "data-size exceed should be latched, got {:?}",
+            limit.has_exceeded_limit,
+        );
+
+        // The trailing compute-gas record of the same opcode must still surface the latched
+        // exceed AND record the gas.
+        assert!(!limit.record_compute_gas(5_000), "latched exceed must surface as false");
+        assert_eq!(
+            limit.get_usage().compute_gas,
+            5_000,
+            "compute gas must be recorded even after another dimension latched",
+        );
+
+        // The latched kind is preserved (not overwritten by the compute-gas check).
+        assert!(
+            matches!(
+                limit.has_exceeded_limit,
+                LimitCheck::ExceedsLimit { kind: LimitKind::DataSize, .. }
+            ),
+            "latched kind must remain DataSize, got {:?}",
+            limit.has_exceeded_limit,
+        );
     }
 }

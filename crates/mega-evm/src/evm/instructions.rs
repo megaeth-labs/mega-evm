@@ -121,7 +121,8 @@ use revm::{
 ///   - Block env opcodes (TIMESTAMP, NUMBER, etc.): `volatile_data_ext::*`
 ///   - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*`
 ///   - SLOAD: `compute_gas_ext::sload`
-///   - SSTORE: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - SSTORE: `additional_limit_ext` → `compute_gas_ext` (storage-gas charge inlined in
+///     `additional_limit_ext::sstore`)
 ///   - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
 ///   - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
 ///   - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
@@ -397,7 +398,8 @@ mod mini_rex {
     /// - Most opcodes: `compute_gas_ext::*` (compute gas tracking only)
     /// - Block env opcodes: `volatile_data_ext::*` (gas detention)
     /// - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*` (conditional)
-    /// - SSTORE: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - SSTORE: `additional_limit_ext` → `compute_gas_ext` (storage-gas charge inlined in
+    ///   `additional_limit_ext::sstore`)
     /// - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
     /// - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
     /// - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
