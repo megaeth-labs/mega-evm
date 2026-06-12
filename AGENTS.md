@@ -147,12 +147,12 @@ Detained gas is effectively refunded — users only pay for actual computation p
 #### Storage Gas Stipend (Rex4+)
 
 MegaETH's 10× storage gas multiplier on LOG opcodes causes even `LOG1` to cost 4,500 gas, exceeding the EVM's `CALL_STIPEND` of 2,300.
-Rex4 introduces `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`.
-The stipend inflates the child's total gas but a per-frame compute gas cap keeps the extra gas usable only for storage-gas-heavy operations (LOG topic/data costs).
-Unused stipend is burned on return — the caller never recovers it.
+Rex4 introduced `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`; Rex5 reworked it into a separated allowance, so the tracker is dual-mode.
+Under Rex5 the stipend is a per-frame allowance that does NOT inflate the child's `gas_limit`: it is drawn only at MegaETH's storage-gas surcharge sites (LOG topic/data, new-account materialization, first-time-write SSTORE, contract-creation storage, SELFDESTRUCT beneficiary creation), is structurally unspendable on compute, and is neither returned to the caller nor rescued for the sender — nothing is burned because nothing ever enters the frame's gas limit.
+Under Rex4 (legacy mode) the stipend instead inflates the child's `gas_limit`, a per-frame compute gas cap keeps the extra gas usable only for storage-gas-heavy operations, and unused stipend is burned on return.
 
 The stipend lifecycle is managed by `StorageCallStipendTracker` (`limit/storage_call_stipend.rs`), which maintains a per-frame stack aligned with the EVM call stack.
-The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for `cap_current_frame_limit`).
+The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for the Rex4 legacy-mode per-frame cap).
 
 The storage gas stipend is subject to the general gas leakage pitfalls described below.
 
@@ -276,9 +276,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **Do NOT modify behavior for existing stable specs.**
-  All specs in `MegaSpecId` are currently stable (frozen).
-  New EVM behavior, gas cost changes, or opcode modifications **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
-  Never change what an existing spec does.
+  All specs through `REX5` are stable (frozen); `REX6` is the unstable spec under active development.
+  New EVM behavior, gas cost changes, or opcode modifications for stable specs **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
+  Never change what an existing stable spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
 - **Override `HardforkParams::validate()` for every new params type.**

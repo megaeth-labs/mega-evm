@@ -1,6 +1,6 @@
 ---
 description: MegaETH formal specification — normative behavioral definitions for EVM execution, system contracts, oracle services, and protocol upgrades.
-spec: Rex4
+spec: Rex5
 ---
 
 # MegaETH Specification
@@ -69,7 +69,7 @@ Contracts deployed under a given spec will continue to behave identically, regar
 - **REX2** — SELFDESTRUCT re-enabled (EIP-6780), KeylessDeploy system contract.
 - **REX3** — Oracle gas cap raised to 20M, SLOAD-based oracle detention, keyless deploy compute gas tracking.
 - **REX4** — Per-call-frame resource budgets, relative gas detention, [storage gas stipend](glossary.md#storage-gas-stipend), MegaAccessControl and MegaLimitControl system contracts.
-- **REX5** _(unstable)_ — SequencerRegistry system contract, Oracle v2.0.0 with dynamic system address, caller-account update deduplication, KeylessDeploy trailing-bytes rejection.
+- **REX5** — SequencerRegistry system contract, Oracle v2.0.0 with dynamic system address, caller-account update deduplication, storage-gas-stipend separated-allowance model, value-transfer CALL/CALLCODE parent compute-gas attribution, CREATE code-deposit compute-gas atomicity, EIP-2935/EIP-4788 pre-block gas floor with fail-closed block rejection, CREATE2 empty-initcode short-circuit, KeylessDeploy trailing-bytes rejection and empty-code log forwarding.
 
 See [Hardforks and Specs](hardfork-spec.md) for full details.
 

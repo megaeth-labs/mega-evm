@@ -1,6 +1,6 @@
 ---
 description: MegaETH gas detention specification — compute gas caps triggered by volatile data access (block environment, oracle SLOAD).
-spec: Rex4
+spec: Rex5
 ---
 
 # Gas Detention
@@ -190,4 +190,4 @@ Gas detention semantics evolved across specs:
 - [Rex1](../upgrades/rex1.md) — reset detained compute gas limit between transactions in the same block
 - [Rex3](../upgrades/rex3.md) — raised oracle cap to 20M and changed oracle detection from CALL-based to SLOAD-based
 - [Rex4](../upgrades/rex4.md) — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior
-- Rex6 (**unstable**) — adds a beneficiary-detention trigger for an applied EIP-7702 authorization whose authority equals the block beneficiary
+- [Rex6](../upgrades/rex6.md) (**unstable**) — adds a beneficiary-detention trigger for an applied EIP-7702 authorization whose authority equals the block beneficiary

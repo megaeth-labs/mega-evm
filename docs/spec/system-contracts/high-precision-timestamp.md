@@ -1,6 +1,6 @@
 ---
 description: High-Precision Timestamp system contract — sub-second timestamp oracle service backed by Oracle storage.
-spec: Rex4
+spec: Rex5
 ---
 
 # High-Precision Timestamp

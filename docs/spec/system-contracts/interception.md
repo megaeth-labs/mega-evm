@@ -1,6 +1,6 @@
 ---
 description: Generic call-interception mechanism for MegaETH system contracts — frame-init hook, selector matching, intercepted vs. fall-through semantics, gas treatment, and call-scheme rules.
-spec: Rex4
+spec: Rex5
 ---
 
 # Call Interception
@@ -26,6 +26,14 @@ Interception fires during call-frame initialization, after the call opcode has b
 At this point the opcode-level gas accounting (including [gas forwarding](../evm/gas-forwarding.md) cap and new-account storage-gas charges) has already been applied.
 
 A system contract MAY intercept `CALL` or `STATICCALL`, but MUST NOT intercept `DELEGATECALL`, `CALLCODE`, `CREATE`, or `CREATE2`.
+
+### Call-Depth Gate
+
+Interceptor dispatch MUST respect the EVM call-stack depth limit.
+For a `CALL` or `STATICCALL` whose call depth exceeds `CALL_STACK_LIMIT`, a node MUST NOT consult any interceptor.
+Such a call MUST follow the same depth-failure path an ordinary over-deep call follows: the node MUST produce a synthetic too-deep call result that consumes no gas (the forwarded gas limit is fully refundable to the caller) and MUST NOT perform any interceptor side effect.
+
+When both a transaction-level resource-limit overflow and the depth limit apply to the same call, the resource-limit overflow result takes priority over the depth-gate result.
 
 ### Matching
 
@@ -62,6 +70,12 @@ Each system contract MAY define additional gas consumption for its intercepted f
 An intercepted call MUST NOT receive a [storage gas stipend](../glossary.md#storage-gas-stipend).
 The stipend is only applicable on fall-through.
 
+## Constants
+
+| Constant           | Value | Description                                                            |
+| ------------------ | ----- | ---------------------------------------------------------------------- |
+| `CALL_STACK_LIMIT` | 1,024 | Maximum EVM call-stack depth; calls deeper than this fail as too-deep. |
+
 ## Rationale
 
 **Why intercept at frame initialization rather than call dispatch?**
@@ -73,6 +87,11 @@ Intercepting earlier (at opcode decode) would require reimplementing gas account
 DELEGATECALL and CALLCODE execute the target's code in the caller's context — `msg.sender`, `msg.value`, and storage all belong to the caller, not the target.
 Intercepting these call schemes would mean the interceptor runs with the caller's identity and state, which is inconsistent with the system contract's intended semantics.
 Excluding them keeps interception limited to schemes where the system contract's address is both the target and the execution context.
+
+**Why gate interception on call depth?**
+The depth check that rejects over-deep calls for ordinary contracts lives inside child-frame creation, which runs after interception.
+Without an explicit depth gate, an interceptor could short-circuit and return a synthetic success at a call depth that a normal call would reject, letting a system contract be invoked beyond the EVM call-stack limit.
+Applying the depth gate before interceptor dispatch keeps the depth-failure behavior identical for system-contract calls and ordinary calls.
 
 ## Security Considerations
 
@@ -86,3 +105,4 @@ This is a deliberate design choice, not a security constraint.
 ## Spec History
 
 - [Rex2](../upgrades/rex2.md) introduced the call-interception mechanism.
+- [Rex5](../upgrades/rex5.md) gated interceptor dispatch on the `CALL_STACK_LIMIT` call-depth limit, so over-deep calls to system contracts fail as too-deep instead of being intercepted.

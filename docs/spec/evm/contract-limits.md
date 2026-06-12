@@ -1,6 +1,6 @@
 ---
 description: MegaETH contract size limits — 512 KB max bytecode, 536 KB max initcode, inherited from MiniRex.
-spec: Rex4
+spec: Rex5
 ---
 
 # Contract Limits
@@ -29,6 +29,12 @@ The initcode limit is defined as:
 
 `MAX_INITCODE_SIZE = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE`
 
+### Zero-Length Init Code in CREATE2
+
+When a `CREATE2` opcode is executed with an init-code length of zero, a node MUST short-circuit after validating the salt operand: it MUST use the keccak-256 hash of the empty byte string as the resulting init-code hash, and MUST NOT perform any offset conversion, memory expansion, or hashing of memory.
+Because the init-code length is zero, the init-code offset operand MUST be ignored entirely, even when it is a very large value.
+This ensures that a zero-length `CREATE2` charges no memory-expansion gas (and no associated compute gas) for the unused offset operand and never halts with a spurious out-of-gas error caused by an out-of-range offset whose length is zero.
+
 ## Constants
 
 | Constant                   | Value         | Description                                                         |
@@ -50,4 +56,5 @@ This page has no security considerations.
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced the enlarged contract and initcode limits.
-- [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable limits.
+- [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), [Rex3](../upgrades/rex3.md), and [Rex4](../upgrades/rex4.md) retain the same stable limits.
+- [Rex5](../upgrades/rex5.md) short-circuits zero-length `CREATE2` after salt validation, using the empty-init-code hash without observing the init-code offset operand.

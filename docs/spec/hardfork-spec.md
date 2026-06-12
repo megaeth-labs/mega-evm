@@ -25,18 +25,17 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6
 ```
 
 Each newer spec includes all previous behaviors.
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
-REX5 is currently **unstable** — its semantics can still change before network activation.
-All other specs are stable (frozen).
+All specs through REX5 are stable (frozen); REX6 is **unstable** and under active development.
 
 ### Backward Compatibility
 
 EVM semantics for stable (activated) specs are frozen.
-A new spec may add behavior or change the unstable spec, but it never alters what an existing stable spec does.
+A new spec may add behavior, but it never alters what an existing stable spec does.
 Every spec carries the invariant that stable pre-{Spec} semantics remain unchanged.
 
 This means:
@@ -114,14 +113,23 @@ _See [Rex4 Network Upgrade](upgrades/rex4.md) for full details._
 
 ### REX5
 
-> **Unstable** — This spec is under active development.
-> Its semantics may change before network activation.
-
 - **[SequencerRegistry](system-contracts/sequencer-registry.md) system contract** — Tracks the system address and sequencer roles independently with on-chain change scheduling and history.
 - **Dynamic system address** — `MEGA_SYSTEM_ADDRESS` is resolved per block from `SequencerRegistry.currentSystemAddress()` instead of a hardcoded constant.
 - **Oracle v2.0.0** — `onlySystemAddress` reads the authority from `SequencerRegistry`. In-place Oracle bytecode upgrades preserve existing storage instead of clearing it.
 - **Caller-account update deduplication** — Fixes overcounting of caller-account data-size and KV updates across multiple value-transferring sub-calls or creates from the same parent frame.
 - **[KeylessDeploy](system-contracts/keyless-deploy.md) trailing-bytes rejection** — RLP encodings with trailing bytes after the signed payload are rejected with `MalformedEncoding()`.
 - **CALLCODE new-account storage gas fix** — New-account storage gas is now charged against the caller's storage context rather than the code-source address.
+- **Storage-gas-stipend separated allowance** — The `STORAGE_CALL_STIPEND` no longer inflates the callee's gas limit; it is a per-frame allowance drawn only at storage-gas surcharge sites and is neither burned nor rescued.
+- **Value-transfer CALL/CALLCODE compute attribution** — Compute gas recorded into the parent excludes the `CALL_STIPEND` granted to the callee.
+- **CREATE code-deposit compute-gas atomicity** — Contract-creation code-deposit compute gas is charged atomically with the deployment commit and not double-counted in post-execution accounting.
+- **EIP-2935 / EIP-4788 pre-block gas floor** — The history-storage and beacon-roots pre-block system calls use `max(block_gas_limit, 30,000,000)` and are fail-closed: a non-successful call rejects the block.
+- **CREATE2 empty-initcode short-circuit** — A `CREATE2` with zero-length init code short-circuits after the salt check using the empty-code hash, without offset conversion, memory expansion, or hashing.
+- **KeylessDeploy empty-code log forwarding** — An empty-runtime-code deployment success forwards the constructor's logs before returning.
 
 _See [Rex5 Network Upgrade](upgrades/rex5.md) for full details._
+
+### REX6
+
+Unstable spec under active development; semantics may still change before activation.
+
+_See [Rex6 Network Upgrade](upgrades/rex6.md) for full details._
