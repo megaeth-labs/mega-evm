@@ -1,9 +1,9 @@
 //! SSTORE storage-gas pricing error path.
 //!
-//! The dynamically-scaled storage gas for a first-time non-zero write is charged inline
-//! in `additional_limit_ext::sstore`, before the inner SSTORE executes. When the SALT
-//! environment fails to price the slot (`sstore_set_storage_gas` returns `None`), the
-//! instruction must halt with `FatalExternalError`, which surfaces as `EVMError::Custom`.
+//! The dynamically-scaled storage gas for a first-time non-zero write is charged in
+//! `storage_gas_ext::sstore`, before the inner SSTORE executes. When the SALT environment
+//! fails to price the slot (`sstore_set_storage_gas` returns `None`), the instruction must
+//! halt with `FatalExternalError`, which surfaces as `EVMError::Custom`.
 
 use std::convert::Infallible;
 

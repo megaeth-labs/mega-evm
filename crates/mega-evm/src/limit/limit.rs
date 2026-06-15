@@ -369,6 +369,20 @@ impl AdditionalLimit {
         // usage for transactions halted on a non-compute dimension (e.g. intrinsic data size
         // latched in `before_tx_start` before `validate` records the initial gas).
         self.compute_gas.record_gas_used(compute_gas_used);
+        // Debug-only guard for the latch protocol: the compute-only fast path below is sound
+        // only if every non-compute mutation site already latched its own exceed. If a
+        // non-compute dimension is over limit but not yet latched, some mutation site is missing
+        // its `check_limit()` — catch it here in tests, not in production. The sub-tracker
+        // `check_limit()` calls are non-mutating, so this compiles out of release builds. (The
+        // one pre-inner recorder, SELFDESTRUCT, routes through `record_compute_gas_all_dims`, not
+        // this method, so it never trips this.)
+        debug_assert!(
+            self.has_exceeded_limit.exceeded_limit() ||
+                (!self.data_size.check_limit().exceeded_limit() &&
+                    !self.kv_update.check_limit().exceeded_limit() &&
+                    !self.state_growth.check_limit().exceeded_limit()),
+            "non-compute limit exceeded without latching: a mutation site is missing check_limit()",
+        );
         // If any dimension was already latched as exceeded, surface it immediately (matches the
         // leading short-circuit in `check_limit`).
         if self.has_exceeded_limit.exceeded_limit() {

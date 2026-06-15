@@ -223,6 +223,9 @@ Correctness of the other three dimensions (data size, KV updates, state growth) 
 3. **Compute gas is always recorded.**
    `record_compute_gas` must record before surfacing any latched exceed — the recorded total feeds the transaction outcome and block-level compute accounting even for transactions halted on another dimension.
 
+Rule 1 is backed by a `debug_assert!` in `record_compute_gas`: if a non-compute dimension is over its limit but not yet latched, the assert trips at the exact opcode whose mutation site forgot to call `check_limit()`.
+The sub-tracker checks are non-mutating, so the guard compiles out of release builds.
+
 When adding an opcode or mutation site that touches a non-compute dimension, decide whether it records after or before its inner instruction, follow the matching case above, and add a test asserting the exceed halts at that opcode.
 
 ## Test Organization (`crates/mega-evm/tests/`)
