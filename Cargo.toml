@@ -4,6 +4,7 @@ members = [
     "bin/mega-evme",
     "bin/mega-t8n",
     "crates/mega-evm",
+    "crates/mega-state-test",
     "crates/state-test",
     "crates/system-contracts",
 ]
@@ -122,8 +123,8 @@ too_long_first_doc_paragraph = "allow"
 [workspace.dependencies]
 # megaeth
 mega-evm = { path = "./crates/mega-evm", version = "1.6.0", default-features = false }
+mega-state-test = { path = "./crates/mega-state-test", version = "1.6.0", default-features = false }
 mega-system-contracts = { path = "./crates/system-contracts", version = "1.6.0", default-features = false }
-state-test = { path = "./crates/state-test", version = "1.6.0" }
 
 # revm
 op-revm = { version = "8.1.0", default-features = false }

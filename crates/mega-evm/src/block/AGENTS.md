@@ -7,6 +7,7 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - `executor.rs`: `MegaBlockExecutor` lifecycle, pre/post execution changes, tx commit policy.
 - `factory.rs`: executor factory wiring from hardfork config and EVM factory.
 - `hardfork.rs`: `MegaHardfork` definitions, activation checks, spec mapping.
+- `chain.rs`: canonical chain IDs and per-chain hardfork activation schedules (mainnet, testnet, all-activated fallback for unknown chains).
 - `limit.rs`: `BlockLimits` config and `BlockLimiter` pre/post checks.
 - `eips.rs`: EIP system calls (blockhashes, beacon root, balance increments).
 - `helpers.rs`: utility helpers for block execution.
@@ -31,6 +32,7 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 
 ## WHERE TO LOOK
 - Add a new hardfork activation condition: `hardfork.rs` and `MegaHardforkConfig` wiring.
+- Change when a fork activates on mainnet/testnet (or the unknown-chain fallback): `chain.rs`.
 - Change tx inclusion behavior under block pressure: `limit.rs` and `executor.rs::run_transaction`/commit methods.
 - Add pre-block or post-block system call: `eips.rs` and `executor.rs::{pre_execution_changes,post_execution_changes}`.
 - Change block-level default limits for a hardfork: `limit.rs::from_hardfork_and_block_gas_limit`.

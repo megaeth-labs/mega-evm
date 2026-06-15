@@ -1,0 +1,1418 @@
+#![allow(missing_docs)]
+
+use crate::{
+    types::{
+        tx_env_at, Env, SpecName, Test, TestError as TxBuildError, TestSuite, TestUnit,
+        TxPartIndices,
+    },
+    utils::{compute_test_roots, TestValidationResult},
+};
+use alloy_primitives::address;
+use indicatif::{ProgressBar, ProgressDrawTarget};
+use mega_evm::{
+    revm::{
+        context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
+        context_interface::{
+            result::{EVMError, ExecutionResult},
+            Cfg,
+        },
+        database,
+        database::State,
+        database_interface::EmptyDB,
+        inspector::{inspectors::TracerEip3155, InspectCommitEvm},
+        primitives::{hardfork::SpecId, Bytes, B256},
+        ExecuteCommitEvm,
+    },
+    AHashBucketHasher, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError,
+};
+use serde_json::json;
+use std::{
+    convert::Infallible,
+    fmt::Debug,
+    io::stderr,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+use thiserror::Error;
+use walkdir::{DirEntry, WalkDir};
+
+/// Error that occurs during test execution
+#[derive(Debug, Error)]
+#[error("Path: {path}\nName: {name}\nError: {kind}")]
+pub struct TestError {
+    pub name: String,
+    pub path: String,
+    pub kind: TestErrorKind,
+}
+
+/// Specific kind of error that occurred during test execution
+#[derive(Debug, Error)]
+#[allow(missing_docs)]
+pub enum TestErrorKind {
+    #[error("logs root mismatch: got {got}, expected {expected}")]
+    LogsRootMismatch { got: B256, expected: B256 },
+    #[error("state root mismatch: got {got}, expected {expected}")]
+    StateRootMismatch { got: B256, expected: B256 },
+    #[error("gas used mismatch: got {got}, expected {expected}")]
+    GasUsedMismatch { got: u64, expected: u64 },
+    #[error("status mismatch: got {got:?}, expected {expected:?}")]
+    StatusMismatch { got: String, expected: String },
+    /// The raw key is kept for programmatic use but deliberately redacted from
+    /// the `Display` output: fixture `secretKey` values flow through error
+    /// messages into logs and CI output.
+    #[error("unable to recover sender from fixture secretKey (key redacted)")]
+    UnknownPrivateKey(B256),
+    #[error("unexpected exception: got {got_exception:?}, expected {expected_exception:?}")]
+    UnexpectedException { expected_exception: Option<String>, got_exception: Option<String> },
+    #[error("unexpected output: got {got_output:?}, expected {expected_output:?}")]
+    UnexpectedOutput { expected_output: Option<Bytes>, got_output: Option<Bytes> },
+    #[error(transparent)]
+    SerdeDeserialize(#[from] serde_json::Error),
+    #[error("thread panicked")]
+    Panic,
+    #[error("path does not exist")]
+    InvalidPath,
+    #[error("no JSON test files found in path")]
+    NoJsonFiles,
+    #[error("fixture execution error: {0}")]
+    FixtureError(String),
+    #[error("{failed} tests failed out of {total}")]
+    TestsFailed { failed: usize, total: usize },
+}
+
+impl From<TxBuildError> for TestErrorKind {
+    /// Maps a transaction-build error to its runner-level kind, preserving the
+    /// underlying cause instead of collapsing everything to
+    /// [`TestErrorKind::UnknownPrivateKey`], which would mask the real cause.
+    fn from(e: TxBuildError) -> Self {
+        match e {
+            TxBuildError::UnknownPrivateKey(k) => Self::UnknownPrivateKey(k),
+            other => Self::FixtureError(other.to_string()),
+        }
+    }
+}
+
+/// Find all JSON test files in the given path
+/// If path is a file, returns it in a vector
+/// If path is a directory, recursively finds all .json files
+pub fn find_all_json_tests(path: &Path) -> Vec<PathBuf> {
+    if path.is_file() {
+        vec![path.to_path_buf()]
+    } else {
+        WalkDir::new(path)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension() == Some("json".as_ref()))
+            .map(DirEntry::into_path)
+            .collect()
+    }
+}
+
+/// Check if a test should be skipped based on its filename
+/// Some tests are known to be problematic or take too long
+///
+/// These tests are skipped by `revm`, so we also skip them.
+fn skip_test(path: &Path) -> bool {
+    // A path with no file name or a non-UTF-8 name cannot match any entry on
+    // the skip list, so it is simply not skipped (and must not panic).
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        // Test check if gas price overflows, we handle this correctly but does not match tests
+        // specific exception.
+        | "CreateTransactionHighNonce.json"
+
+        // Test with some storage check.
+        | "RevertInCreateInInit_Paris.json"
+        | "RevertInCreateInInit.json"
+        | "dynamicAccountOverwriteEmpty.json"
+        | "dynamicAccountOverwriteEmpty_Paris.json"
+        | "RevertInCreateInInitCreate2Paris.json"
+        | "create2collisionStorage.json"
+        | "RevertInCreateInInitCreate2.json"
+        | "create2collisionStorageParis.json"
+        | "InitCollision.json"
+        | "InitCollisionParis.json"
+
+        // Malformed value.
+        | "ValueOverflow.json"
+        | "ValueOverflowParis.json"
+
+        // These tests are passing, but they take a lot of time to execute so we are going to skip them.
+        | "Call50000_sha256.json"
+        | "static_Call50000_sha256.json"
+        | "loopMul.json"
+        | "CALLBlake2f_MaxRounds.json"
+    )
+}
+
+struct TestExecutionContext<'a> {
+    name: &'a str,
+    unit: &'a TestUnit,
+    test: &'a Test,
+    cfg: &'a CfgEnv<MegaSpecId>,
+    block: &'a BlockEnv,
+    tx: &'a TxEnv,
+    cache_state: &'a database::CacheState,
+    elapsed: &'a Arc<Mutex<Duration>>,
+    trace: bool,
+    print_json_outcome: bool,
+}
+
+struct DebugContext<'a> {
+    name: &'a str,
+    path: &'a str,
+    index: usize,
+    unit: &'a TestUnit,
+    test: &'a Test,
+    cfg: &'a CfgEnv<MegaSpecId>,
+    block: &'a BlockEnv,
+    tx: &'a TxEnv,
+    cache_state: &'a database::CacheState,
+    error: &'a TestErrorKind,
+}
+
+fn build_json_output(
+    test: &Test,
+    test_name: &str,
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
+    validation: &TestValidationResult,
+    spec: MegaSpecId,
+    error: Option<String>,
+) -> serde_json::Value {
+    json!({
+        "stateRoot": validation.state_root,
+        "logsRoot": validation.logs_root,
+        "output": exec_result.as_ref().ok().and_then(|r| r.output().cloned()).unwrap_or_default(),
+        "gasUsed": exec_result.as_ref().ok().map(|r| r.gas_used()).unwrap_or_default(),
+        "pass": error.is_none(),
+        "errorMsg": error.unwrap_or_default(),
+        "evmResult": format_evm_result(exec_result),
+        "postLogsHash": validation.logs_root,
+        "fork": spec,
+        "test": test_name,
+        "d": test.indexes.data,
+        "g": test.indexes.gas,
+        "v": test.indexes.value,
+    })
+}
+
+fn format_evm_result(
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
+) -> String {
+    match exec_result {
+        Ok(r) => match r {
+            ExecutionResult::Success { reason, .. } => format!("Success: {reason:?}"),
+            ExecutionResult::Revert { .. } => "Revert".to_string(),
+            ExecutionResult::Halt { reason, .. } => format!("Halt: {reason:?}"),
+        },
+        Err(e) => e.to_string(),
+    }
+}
+
+fn validate_exception(
+    test: &Test,
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
+) -> Result<bool, TestErrorKind> {
+    match (&test.expect_exception, exec_result) {
+        (None, Ok(_)) => Ok(false), // No exception expected, execution succeeded
+        (Some(_), Err(_)) => Ok(true), // Exception expected and occurred
+        _ => Err(TestErrorKind::UnexpectedException {
+            expected_exception: test.expect_exception.clone(),
+            got_exception: exec_result.as_ref().err().map(|e| e.to_string()),
+        }),
+    }
+}
+
+fn validate_output(
+    expected_output: Option<&Bytes>,
+    actual_result: &ExecutionResult<MegaHaltReason>,
+) -> Result<(), TestErrorKind> {
+    // No expectation → nothing to check. But when the fixture expects output,
+    // an execution that produced none (a halt) is a failure, not a pass —
+    // a `zip` over the two options would short-circuit that case silently.
+    let Some(expected) = expected_output else {
+        return Ok(());
+    };
+    let actual = actual_result.output();
+    if actual != Some(expected) {
+        return Err(TestErrorKind::UnexpectedOutput {
+            expected_output: Some(expected.clone()),
+            got_output: actual.cloned(),
+        });
+    }
+    Ok(())
+}
+
+/// Canonical status string for an execution result: `"success"`, `"revert"`, or
+/// `"halt"`.
+///
+/// Single source shared by validation (`megaStatus` checks) and by
+/// `mega-evme --dump-fixture` so the dumped status and the validated status can
+/// never disagree.
+pub fn execution_status(result: &ExecutionResult<MegaHaltReason>) -> &'static str {
+    match result {
+        ExecutionResult::Success { .. } => "success",
+        ExecutionResult::Revert { .. } => "revert",
+        ExecutionResult::Halt { .. } => "halt",
+    }
+}
+
+/// Halt reason (`Debug` form) when the result is a halt, `None` otherwise.
+///
+/// Anchors halted executions more precisely than the three-value status string:
+/// two halts with different reasons typically burn the same (full) gas with no
+/// output and no logs, so a status-level comparison cannot tell them apart.
+pub fn halt_reason(result: &ExecutionResult<MegaHaltReason>) -> Option<String> {
+    match result {
+        ExecutionResult::Halt { reason, .. } => Some(format!("{reason:?}")),
+        _ => None,
+    }
+}
+
+/// Validate the MegaETH-specific explicit expectations (`megaGasUsed`,
+/// `megaStatus`) when present.
+///
+/// These produce readable, targeted diffs for replay-derived fixtures. They are
+/// in addition to — not a replacement for — the state-root / logs-root backstop,
+/// and are skipped entirely for pure-Ethereum tests that omit the fields.
+fn validate_mega_expectations(
+    test: &Test,
+    actual_result: &ExecutionResult<MegaHaltReason>,
+) -> Result<(), TestErrorKind> {
+    if let Some(expected) = test.mega_gas_used {
+        let got = actual_result.gas_used();
+        if got != expected {
+            return Err(TestErrorKind::GasUsedMismatch { got, expected });
+        }
+    }
+    if let Some(expected) = &test.mega_status {
+        let got = execution_status(actual_result);
+        if got != expected {
+            return Err(TestErrorKind::StatusMismatch {
+                got: got.to_string(),
+                expected: expected.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_evm_execution(
+    test: &Test,
+    expected_output: Option<&Bytes>,
+    test_name: &str,
+    exec_result: &Result<
+        ExecutionResult<MegaHaltReason>,
+        EVMError<Infallible, MegaTransactionError>,
+    >,
+    db: &State<EmptyDB>,
+    spec: MegaSpecId,
+    print_json_outcome: bool,
+) -> Result<(), TestErrorKind> {
+    let validation = compute_test_roots(exec_result, db);
+
+    let print_json = |error: Option<&TestErrorKind>| {
+        if print_json_outcome {
+            let json = build_json_output(
+                test,
+                test_name,
+                exec_result,
+                &validation,
+                spec,
+                error.map(|e| e.to_string()),
+            );
+            eprintln!("{json}");
+        }
+    };
+
+    // Check if exception handling is correct
+    let exception_expected = validate_exception(test, exec_result).inspect_err(|e| {
+        print_json(Some(e));
+    })?;
+
+    // If exception was expected and occurred, we're done
+    if exception_expected {
+        print_json(None);
+        return Ok(());
+    }
+
+    // Validate output if execution succeeded
+    if let Ok(result) = exec_result {
+        validate_output(expected_output, result).inspect_err(|e| {
+            print_json(Some(e));
+        })?;
+
+        // MegaETH explicit expectations (replay fixtures): readable gas/status diff.
+        validate_mega_expectations(test, result).inspect_err(|e| {
+            print_json(Some(e));
+        })?;
+    }
+
+    // Validate logs root
+    if validation.logs_root != test.logs {
+        let error =
+            TestErrorKind::LogsRootMismatch { got: validation.logs_root, expected: test.logs };
+        print_json(Some(&error));
+        return Err(error);
+    }
+
+    // Validate state root
+    if validation.state_root != test.hash {
+        let error =
+            TestErrorKind::StateRootMismatch { got: validation.state_root, expected: test.hash };
+        print_json(Some(&error));
+        return Err(error);
+    }
+
+    print_json(None);
+    Ok(())
+}
+
+/// Sets the per-spec maximum blobs per transaction on the config.
+///
+/// Single source of truth shared by [`execute_test_suite`] and single-unit
+/// execution so the validation and dump paths stay byte-identical.
+fn configure_max_blobs(cfg: &mut CfgEnv<MegaSpecId>) {
+    // OSAKA (which implies PRAGUE) caps blobs back at 6, while the PRAGUE-only
+    // window allows 9 — so the OSAKA arm must be checked first and is distinct
+    // from the pre-PRAGUE default of 6 despite the same value.
+    if cfg.spec.into_eth_spec().is_enabled_in(SpecId::OSAKA) {
+        cfg.set_max_blobs_per_tx(6);
+    } else if cfg.spec.into_eth_spec().is_enabled_in(SpecId::PRAGUE) {
+        cfg.set_max_blobs_per_tx(9);
+    } else {
+        cfg.set_max_blobs_per_tx(6);
+    }
+}
+
+/// Resolve a unit's `currentChainID` into the `u64` the EVM config takes.
+///
+/// An absent field defaults to `MegaETH`'s 6342 (intentional EEST behavior),
+/// but a present value that does not fit in a `u64` is a fixture error rather
+/// than a silent fallback to the default chain.
+fn resolve_chain_id(env: &Env) -> Result<u64, TestErrorKind> {
+    match env.current_chain_id {
+        None => Ok(6342),
+        Some(id) => id.try_into().map_err(|_| {
+            TestErrorKind::FixtureError(format!("currentChainID {id} does not fit in u64"))
+        }),
+    }
+}
+
+/// Execute a single test suite file containing multiple tests
+///
+/// # Arguments
+/// * `path` - Path to the JSON test file
+/// * `elapsed` - Shared counter for total execution time
+/// * `trace` - Whether to enable EVM tracing
+/// * `print_json_outcome` - Whether to print JSON formatted results
+pub fn execute_test_suite(
+    path: &Path,
+    elapsed: &Arc<Mutex<Duration>>,
+    trace: bool,
+    print_json_outcome: bool,
+) -> Result<(), TestError> {
+    if skip_test(path) {
+        return Ok(());
+    }
+
+    let path = path.to_string_lossy().into_owned();
+    let s = std::fs::read_to_string(&path).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path.clone(),
+        kind: TestErrorKind::FixtureError(format!("read: {e}")),
+    })?;
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path.clone(),
+        kind: e.into(),
+    })?;
+
+    for (name, unit) in suite.0 {
+        // Prepare initial state
+        let cache_state = unit.state();
+
+        // Setup base configuration
+        let mut cfg = CfgEnv::default();
+        cfg.chain_id = resolve_chain_id(&unit.env).map_err(|kind| TestError {
+            name: name.clone(),
+            path: path.clone(),
+            kind,
+        })?;
+
+        // Post and execution
+        for (spec_name, tests) in &unit.post {
+            // Skip Constantinople spec
+            if *spec_name == SpecName::Constantinople {
+                continue;
+            }
+
+            cfg.spec = spec_name.to_spec_id().map_err(|e| TestError {
+                name: name.clone(),
+                path: path.clone(),
+                kind: TestErrorKind::FixtureError(format!("post spec: {e}")),
+            })?;
+            configure_max_blobs(&mut cfg);
+
+            // Setup block environment for this spec
+            let block = unit.block_env(&cfg);
+
+            for (index, test) in tests.iter().enumerate() {
+                // Setup transaction environment
+                let tx = match test.tx_env(&unit) {
+                    Ok(tx) => tx,
+                    // Only a transaction that is invalid *by construction* —
+                    // an underivable transaction type (e.g. a blob tx without
+                    // a destination), which `Test::tx_env` reports either
+                    // directly or remapped to `UnexpectedException` — may
+                    // satisfy `expectException`: that is the failure the
+                    // fixture deliberately encodes. Structural fixture
+                    // defects (unrecoverable secret key, out-of-bounds part
+                    // index, out-of-range field value) are errors in the
+                    // fixture itself and must propagate, never be counted as
+                    // an expected exception.
+                    Err(
+                        TxBuildError::InvalidTransactionType |
+                        TxBuildError::UnexpectedException { .. },
+                    ) if test.expect_exception.is_some() => continue,
+                    // Propagate the real underlying cause instead of masking
+                    // every failure as an unknown private key.
+                    Err(e) => {
+                        return Err(TestError { name, path, kind: e.into() });
+                    }
+                };
+
+                // Execute the test
+                let result = execute_single_test(TestExecutionContext {
+                    name: &name,
+                    unit: &unit,
+                    test,
+                    cfg: &cfg,
+                    block: &block,
+                    tx: &tx,
+                    cache_state: &cache_state,
+                    elapsed,
+                    trace,
+                    print_json_outcome,
+                });
+
+                if let Err(e) = result {
+                    // Handle error with debug trace if needed
+                    static FAILED: AtomicBool = AtomicBool::new(false);
+                    if print_json_outcome || FAILED.swap(true, Ordering::SeqCst) {
+                        return Err(TestError { name, path, kind: e });
+                    }
+
+                    // Re-run with trace for debugging
+                    debug_failed_test(DebugContext {
+                        name: &name,
+                        path: &path,
+                        index,
+                        unit: &unit,
+                        test,
+                        cfg: &cfg,
+                        block: &block,
+                        tx: &tx,
+                        cache_state: &cache_state,
+                        error: &e,
+                    });
+
+                    return Err(TestError { path, name, kind: e });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build the `MegaETH` external environment for a test unit, reproducing the
+/// recorded SALT bucket capacities and oracle storage. Falls back to an empty
+/// environment for pure-Ethereum tests, which omit the `megaEnv` field.
+///
+/// Uses [`AHashBucketHasher`] so that bucket IDs match those recorded during
+/// `mega-evme replay` — a different hasher would map keys to different buckets
+/// and reproduce different gas.
+fn external_envs_for(
+    unit: &TestUnit,
+) -> Result<mega_evm::TestExternalEnvs<Infallible, AHashBucketHasher>, TestErrorKind> {
+    let mega_env = unit.mega_env.clone().unwrap_or_default();
+    mega_env.validate().map_err(TestErrorKind::FixtureError)?;
+    Ok(mega_env.to_external_envs::<AHashBucketHasher>())
+}
+
+/// Inject the fixture's recorded `blockHashes` into the [`State`] cache so
+/// `BLOCKHASH` answers come from the fixture instead of [`EmptyDB`]'s synthetic
+/// keccak-of-number hashes.
+///
+/// A key that does not fit in a `u64` could never be requested by the EVM
+/// (block numbers are `u64` on the `BLOCKHASH` path), so it is a fixture error
+/// rather than a silently dropped entry.
+fn inject_block_hashes(state: &mut State<EmptyDB>, unit: &TestUnit) -> Result<(), TestErrorKind> {
+    let Some(hashes) = &unit.env.block_hashes else {
+        return Ok(());
+    };
+    for (number, hash) in hashes {
+        let number = u64::try_from(*number).map_err(|_| {
+            TestErrorKind::FixtureError(format!("blockHashes key {number} does not fit in u64"))
+        })?;
+        state.block_hashes.insert(number, *hash);
+    }
+    Ok(())
+}
+
+fn execute_single_test<'a>(ctx: TestExecutionContext<'a>) -> Result<(), TestErrorKind> {
+    // Prepare state
+    let mut cache = ctx.cache_state.clone();
+    cache.set_state_clear_flag(ctx.cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let mut state =
+        database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+    inject_block_hashes(&mut state, ctx.unit)?;
+
+    let evm_context = MegaContext::default()
+        .with_db(&mut state)
+        .with_cfg(ctx.cfg.clone())
+        .with_block(ctx.block.clone())
+        .with_external_envs(external_envs_for(ctx.unit)?.into());
+    let mut tx = MegaTransaction::new(ctx.tx.clone());
+    tx.enveloped_tx = Some(Bytes::default());
+
+    // Execute
+    let timer = Instant::now();
+    let (db, exec_result) = if ctx.trace {
+        let mut evm = MegaEvm::new(evm_context)
+            .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
+        let res = evm.inspect_tx_commit(tx);
+        let db = evm.into_inner().ctx.into_inner().journaled_state.database;
+        (db, res)
+    } else {
+        let mut evm = MegaEvm::new(evm_context);
+        let res = evm.transact_commit(tx);
+        let db = evm.into_inner().ctx.into_inner().journaled_state.database;
+        (db, res)
+    };
+    *ctx.elapsed.lock().unwrap() += timer.elapsed();
+
+    // Optimism special handling: prune the changes to BaseFeeVault
+    prune_base_fee_vault_changes(db);
+
+    // Check results
+    check_evm_execution(
+        ctx.test,
+        ctx.unit.out.as_ref(),
+        ctx.name,
+        &exec_result,
+        db,
+        ctx.cfg.spec(),
+        ctx.print_json_outcome,
+    )
+}
+
+/// Canonical post-execution outcome of running a single [`TestUnit`].
+///
+/// Returned by [`execute_unit_collect`] and used by `mega-evme --dump-fixture`
+/// to fill a fixture's `post` expectation. Because dump and validation share
+/// this exact execution + root-computation path, a fixture written from these
+/// values is self-consistent: re-running it through [`execute_test_suite`]
+/// reproduces the same roots.
+#[derive(Debug, Clone)]
+pub struct ExecutedUnit {
+    /// Post-state trie root over the unit's account closure.
+    pub state_root: B256,
+    /// RLP hash of the emitted logs.
+    pub logs_root: B256,
+    /// Total gas used by the transaction.
+    pub gas_used: u64,
+    /// Execution status: `"success"`, `"revert"`, or `"halt"`.
+    pub status: String,
+    /// Halt reason (`Debug` form) when `status` is `"halt"`, `None` otherwise.
+    /// See [`halt_reason`].
+    pub halt_reason: Option<String>,
+    /// Transaction output bytes, if any.
+    pub output: Option<Bytes>,
+}
+
+/// Execute a single [`TestUnit`] at transaction index 0 for the given spec, in
+/// isolation, timing only the EVM `transact` call.
+///
+/// This runs the same `MegaEVM` pipeline as [`execute_test_suite`] — including the
+/// reproduced external environment and the Optimism `BaseFeeVault` pruning. When
+/// `compute_roots` is set, the post-state / logs roots are computed (outside the
+/// timed region); otherwise they are skipped for leaner repeated benchmarking.
+fn run_unit_once(
+    unit: &TestUnit,
+    spec: &SpecName,
+    compute_roots: bool,
+) -> Result<(Duration, ExecutionResult<MegaHaltReason>, Option<TestValidationResult>), TestErrorKind>
+{
+    let mut cfg = CfgEnv::default();
+    cfg.chain_id = resolve_chain_id(&unit.env)?;
+    cfg.spec = spec.to_spec_id().map_err(|e| TestErrorKind::FixtureError(format!("spec: {e}")))?;
+    configure_max_blobs(&mut cfg);
+
+    let block = unit.block_env(&cfg);
+    let tx = tx_env_at(unit, TxPartIndices { data: 0, gas: 0, value: 0 })?;
+
+    let mut cache = unit.state();
+    cache.set_state_clear_flag(cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let mut state =
+        database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+    inject_block_hashes(&mut state, unit)?;
+
+    let evm_context = MegaContext::default()
+        .with_db(&mut state)
+        .with_cfg(cfg.clone())
+        .with_block(block)
+        .with_external_envs(external_envs_for(unit)?.into());
+    let mut megatx = MegaTransaction::new(tx);
+    megatx.enveloped_tx = Some(Bytes::default());
+
+    let mut evm = MegaEvm::new(evm_context);
+    let timer = Instant::now();
+    let exec_result = evm.transact_commit(megatx);
+    let elapsed = timer.elapsed();
+
+    let db = evm.into_inner().ctx.into_inner().journaled_state.database;
+    prune_base_fee_vault_changes(db);
+    let validation = compute_roots.then(|| compute_test_roots(&exec_result, db));
+
+    let result = exec_result.map_err(|e| TestErrorKind::FixtureError(e.to_string()))?;
+    Ok((elapsed, result, validation))
+}
+
+/// Execute a single [`TestUnit`] at transaction index 0 for the given spec and
+/// collect its canonical post-execution roots, gas, status, and output.
+///
+/// Returns the computed values instead of comparing them against an expectation;
+/// it is the dump-time counterpart to validation.
+pub fn execute_unit_collect(
+    unit: &TestUnit,
+    spec: &SpecName,
+) -> Result<ExecutedUnit, TestErrorKind> {
+    let (_elapsed, result, validation) = run_unit_once(unit, spec, true)?;
+    let validation = validation.expect("roots requested");
+    Ok(ExecutedUnit {
+        state_root: validation.state_root,
+        logs_root: validation.logs_root,
+        gas_used: result.gas_used(),
+        status: execution_status(&result).to_string(),
+        halt_reason: halt_reason(&result),
+        output: result.output().cloned(),
+    })
+}
+
+/// Execute a single [`TestUnit`] at transaction index 0 once, returning the time
+/// spent in the EVM `transact` call together with the gas used and status.
+///
+/// The primitive behind [`bench_test_suite`] / `state-test --bench`: it measures
+/// EVM throughput in isolation (excluding root computation).
+pub fn time_unit_execution(
+    unit: &TestUnit,
+    spec: &SpecName,
+) -> Result<(Duration, u64, String), TestErrorKind> {
+    let (elapsed, result, _validation) = run_unit_once(unit, spec, false)?;
+    Ok((elapsed, result.gas_used(), execution_status(&result).to_string()))
+}
+
+/// Benchmark result for one [`TestUnit`]: the timing distribution plus the gas
+/// and status it executed with.
+#[derive(Debug)]
+pub struct UnitBench {
+    /// Suite key (unit name) the result belongs to.
+    pub name: String,
+    /// Gas used by the (identical) execution.
+    pub gas_used: u64,
+    /// Whether the execution succeeded.
+    pub success: bool,
+    /// Number of timed iterations.
+    pub runs: u32,
+    /// Fastest observed iteration.
+    pub min: Duration,
+    /// Median iteration time.
+    pub median: Duration,
+    /// Mean iteration time.
+    pub mean: Duration,
+}
+
+impl UnitBench {
+    /// Throughput in millions of gas per second, from the median time.
+    pub fn mgas_per_sec(&self) -> f64 {
+        let secs = self.median.as_secs_f64();
+        if secs > 0.0 {
+            self.gas_used as f64 / secs / 1.0e6
+        } else {
+            f64::INFINITY
+        }
+    }
+}
+
+/// Benchmark every unit in a fixture file by timing its isolated EVM execution.
+///
+/// The fixture is self-contained (pre-state closure + transaction + block env),
+/// so this needs no RPC and no archive node: any source that can produce a
+/// state-test fixture — a `mega-evme --dump-fixture` replay, a `prestateTracer`
+/// snapshot, or a hand-crafted case — can be benchmarked offline through the
+/// same path used to validate it.
+///
+/// `spec_override` selects the spec to run under; when `None`, the unit's single
+/// `post` spec is used (and a unit with zero or several post specs is an error).
+pub fn bench_test_suite(
+    path: &Path,
+    runs: u32,
+    warmup: u32,
+    spec_override: Option<SpecName>,
+) -> Result<Vec<UnitBench>, TestError> {
+    let path_str = path.to_string_lossy().into_owned();
+    let fixture_err = |msg: String| TestError {
+        name: "bench".to_string(),
+        path: path_str.clone(),
+        kind: TestErrorKind::FixtureError(msg),
+    };
+
+    if runs == 0 {
+        return Err(fixture_err("bench requires at least one run".to_string()));
+    }
+    let s = std::fs::read_to_string(path).map_err(|e| fixture_err(format!("read: {e}")))?;
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path_str.clone(),
+        kind: e.into(),
+    })?;
+
+    let mut results = Vec::new();
+    for (name, unit) in suite.0 {
+        let spec = match spec_override {
+            Some(s) => s,
+            None => {
+                let mut specs = unit.post.keys();
+                match (specs.next(), specs.next()) {
+                    (Some(s), None) => *s,
+                    (Some(_), Some(_)) => {
+                        return Err(fixture_err(format!(
+                            "unit {name} has multiple post specs; pass --bench-spec"
+                        )))
+                    }
+                    (None, _) => {
+                        return Err(fixture_err(format!(
+                            "unit {name} has no post spec; pass --bench-spec"
+                        )))
+                    }
+                }
+            }
+        };
+        // Reject an unmapped spec at selection time, so the error names the
+        // unit instead of surfacing from deep inside execution.
+        if spec == SpecName::Unknown {
+            return Err(fixture_err(format!(
+                "unit {name} selects an unknown spec; pass a valid --bench-spec"
+            )));
+        }
+
+        for _ in 0..warmup {
+            time_unit_execution(&unit, &spec)
+                .map_err(|e| fixture_err(format!("warmup {name}: {e}")))?;
+        }
+        let mut durations = Vec::with_capacity(runs as usize);
+        let mut gas_used = 0u64;
+        let mut status = String::new();
+        for _ in 0..runs {
+            let (elapsed, gas, st) = time_unit_execution(&unit, &spec)
+                .map_err(|e| fixture_err(format!("run {name}: {e}")))?;
+            durations.push(elapsed);
+            gas_used = gas;
+            status = st;
+        }
+        durations.sort_unstable();
+        let median = durations[durations.len() / 2];
+        let min = durations[0];
+        let mean = durations.iter().sum::<Duration>() / durations.len() as u32;
+        results.push(UnitBench {
+            name,
+            gas_used,
+            success: status == "success",
+            runs,
+            min,
+            median,
+            mean,
+        });
+    }
+    Ok(results)
+}
+
+/// Compute and write the `post` expectation for every unit in a fixture file,
+/// in place — the offline analog of `--dump-fixture`'s post-fill step, for a
+/// fixture that has no `post` yet (a hand-built or `prestateTracer`-snapshot
+/// case). It re-uses the same `execute_unit_collect` + [`Test::for_dump`] the
+/// dump path uses, so the result is a self-validating fixture that
+/// [`execute_test_suite`] checks like any other. Returns the number of units
+/// filled.
+///
+/// `spec_override` selects the spec to execute/record under; when `None`, the
+/// unit's single existing `post` spec is used (so a fixture with an empty `post`
+/// must pass a spec).
+///
+/// Filling replaces the unit's entire `post` map (single spec, single index
+/// `{0,0,0}`) with circularly-derived expectations, so a unit that already has a
+/// non-empty `post` is refused unless `force` is set.
+pub fn fill_test_suite(
+    path: &Path,
+    spec_override: Option<SpecName>,
+    force: bool,
+) -> Result<usize, TestError> {
+    let path_str = path.to_string_lossy().into_owned();
+    let fixture_err = |msg: String| TestError {
+        name: "fill".to_string(),
+        path: path_str.clone(),
+        kind: TestErrorKind::FixtureError(msg),
+    };
+
+    // Validation skips these filenames entirely, so a filled fixture here would
+    // never be checked — refuse rather than produce a vacuously-valid file.
+    if skip_test(path) {
+        return Err(fixture_err(
+            "this filename is on the validation skip list; the filled fixture would never \
+             be validated"
+                .to_string(),
+        ));
+    }
+
+    let s = std::fs::read_to_string(path).map_err(|e| fixture_err(format!("read: {e}")))?;
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path_str.clone(),
+        kind: e.into(),
+    })?;
+
+    let mut filled = std::collections::BTreeMap::new();
+    for (name, mut unit) in suite.0 {
+        if !force && unit.post.values().any(|tests| !tests.is_empty()) {
+            return Err(fixture_err(format!(
+                "unit {name} already has a post expectation; pass --force to overwrite"
+            )));
+        }
+        let spec = match spec_override {
+            Some(s) => s,
+            None => {
+                let mut specs = unit.post.keys();
+                match (specs.next(), specs.next()) {
+                    (Some(s), None) => *s,
+                    _ => {
+                        return Err(fixture_err(format!(
+                            "unit {name} has no single post spec; pass --bench-spec to fill"
+                        )))
+                    }
+                }
+            }
+        };
+        // Reject an unmapped spec at selection time, so the error names the
+        // unit instead of surfacing from deep inside execution.
+        if spec == SpecName::Unknown {
+            return Err(fixture_err(format!(
+                "unit {name} selects an unknown spec; pass a valid --bench-spec"
+            )));
+        }
+        // Validation skips Constantinople (mirroring upstream revme), so a post
+        // recorded under it would never be checked.
+        if spec == SpecName::Constantinople {
+            return Err(fixture_err(format!(
+                "unit {name}: validation skips Constantinople; a post filled under it \
+                 would never be checked"
+            )));
+        }
+        let executed = execute_unit_collect(&unit, &spec)
+            .map_err(|e| fixture_err(format!("execute {name}: {e}")))?;
+        unit.out = executed.output.clone();
+        let test = Test::for_dump(
+            executed.state_root,
+            executed.logs_root,
+            executed.gas_used,
+            executed.status,
+        );
+        unit.post = std::collections::BTreeMap::from([(spec, vec![test])]);
+        filled.insert(name, unit);
+    }
+
+    let count = filled.len();
+    let json = serde_json::to_string_pretty(&TestSuite(filled))
+        .map_err(|e| fixture_err(format!("serialize: {e}")))?;
+    // Write to a sibling temp file and rename so an interrupted write cannot
+    // truncate the original fixture.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| fixture_err(format!("write: {e}")))?;
+    std::fs::rename(&tmp, path).map_err(|e| fixture_err(format!("rename: {e}")))?;
+    Ok(count)
+}
+
+fn prune_base_fee_vault_changes(db: &mut State<EmptyDB>) {
+    let base_fee_vault = address!("0x4200000000000000000000000000000000000019");
+    db.cache.accounts.remove(&base_fee_vault);
+}
+
+fn debug_failed_test<'a>(ctx: DebugContext<'a>) {
+    println!("\nTraces:");
+
+    // Re-run with tracing
+    let mut cache = ctx.cache_state.clone();
+    cache.set_state_clear_flag(ctx.cfg.spec.into_eth_spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let mut state =
+        database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+
+    // The main run already validated the unit's `megaEnv` and `blockHashes`, so
+    // a failure here is unreachable; bail out of the debug re-run rather than
+    // panic.
+    if inject_block_hashes(&mut state, ctx.unit).is_err() {
+        return;
+    }
+    let Ok(external_envs) = external_envs_for(ctx.unit) else {
+        return;
+    };
+    let evm_context = MegaContext::default()
+        .with_db(&mut state)
+        .with_cfg(ctx.cfg.clone())
+        .with_block(ctx.block.clone())
+        .with_external_envs(external_envs.into());
+    let mut tx = MegaTransaction::new(ctx.tx.clone());
+    tx.enveloped_tx = Some(Bytes::default());
+    let mut evm = MegaEvm::new(evm_context)
+        .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
+
+    let exec_result = evm.inspect_tx_commit(tx);
+
+    let state_after = evm.into_inner().ctx.into_inner().journaled_state.database;
+    prune_base_fee_vault_changes(state_after);
+
+    println!("\nExecution result: {exec_result:#?}");
+    println!("\nExpected exception: {:?}", ctx.test.expect_exception);
+    println!("\nState before: {:#?}", ctx.cache_state);
+    println!("\nState after: {:#?}", state_after);
+    println!("\nSpecification: {:?}", ctx.cfg.spec);
+    println!("\nTx: {:#?}", ctx.tx);
+    println!("Block: {:#?}", ctx.block);
+    println!("Cfg: {:#?}", ctx.cfg);
+    println!(
+        "\nTest name: {:?} (index: {}, path: {:?}) failed:\n{}",
+        ctx.name, ctx.index, ctx.path, ctx.error
+    );
+}
+
+#[derive(Clone, Copy)]
+struct TestRunnerConfig {
+    single_thread: bool,
+    trace: bool,
+    print_outcome: bool,
+    keep_going: bool,
+}
+
+impl TestRunnerConfig {
+    fn new(single_thread: bool, trace: bool, print_outcome: bool, keep_going: bool) -> Self {
+        // Trace implies print_outcome
+        let print_outcome = print_outcome || trace;
+        // print_outcome or trace implies single_thread
+        let single_thread = single_thread || print_outcome;
+
+        Self { single_thread, trace, print_outcome, keep_going }
+    }
+}
+
+#[derive(Clone)]
+struct TestRunnerState {
+    n_errors: Arc<AtomicUsize>,
+    console_bar: Arc<ProgressBar>,
+    queue: Arc<Mutex<(usize, Vec<PathBuf>)>>,
+    elapsed: Arc<Mutex<Duration>>,
+}
+
+impl TestRunnerState {
+    fn new(test_files: Vec<PathBuf>) -> Self {
+        let n_files = test_files.len();
+        Self {
+            n_errors: Arc::new(AtomicUsize::new(0)),
+            console_bar: Arc::new(ProgressBar::with_draw_target(
+                Some(n_files as u64),
+                ProgressDrawTarget::stdout(),
+            )),
+            queue: Arc::new(Mutex::new((0usize, test_files))),
+            elapsed: Arc::new(Mutex::new(Duration::ZERO)),
+        }
+    }
+
+    fn next_test(&self) -> Option<PathBuf> {
+        let (current_idx, queue) = &mut *self.queue.lock().unwrap();
+        let idx = *current_idx;
+        let test_path = queue.get(idx).cloned()?;
+        *current_idx = idx + 1;
+        Some(test_path)
+    }
+}
+
+fn run_test_worker(state: TestRunnerState, config: TestRunnerConfig) -> Result<(), TestError> {
+    loop {
+        if !config.keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
+            return Ok(());
+        }
+
+        let Some(test_path) = state.next_test() else {
+            return Ok(());
+        };
+
+        let result =
+            execute_test_suite(&test_path, &state.elapsed, config.trace, config.print_outcome);
+
+        state.console_bar.inc(1);
+
+        if let Err(err) = result {
+            state.n_errors.fetch_add(1, Ordering::SeqCst);
+            if !config.keep_going {
+                return Err(err);
+            }
+        }
+    }
+}
+
+fn determine_thread_count(single_thread: bool, n_files: usize) -> usize {
+    match (single_thread, std::thread::available_parallelism()) {
+        (true, _) | (false, Err(_)) => 1,
+        (false, Ok(n)) => n.get().min(n_files),
+    }
+}
+
+/// Run all test files in parallel or single-threaded mode
+///
+/// # Arguments
+/// * `test_files` - List of test files to execute
+/// * `single_thread` - Force single-threaded execution
+/// * `trace` - Enable EVM execution tracing
+/// * `print_outcome` - Print test outcomes in JSON format
+/// * `keep_going` - Continue running tests even if some fail
+pub fn run(
+    test_files: Vec<PathBuf>,
+    single_thread: bool,
+    trace: bool,
+    print_outcome: bool,
+    keep_going: bool,
+) -> Result<(), TestError> {
+    let config = TestRunnerConfig::new(single_thread, trace, print_outcome, keep_going);
+    let n_files = test_files.len();
+    let state = TestRunnerState::new(test_files);
+    let num_threads = determine_thread_count(config.single_thread, n_files);
+
+    // Spawn worker threads
+    let mut handles = Vec::with_capacity(num_threads);
+    for i in 0..num_threads {
+        let state = state.clone();
+
+        let thread = std::thread::Builder::new()
+            .name(format!("runner-{i}"))
+            .spawn(move || run_test_worker(state, config))
+            .unwrap();
+
+        handles.push(thread);
+    }
+
+    // Collect results from all threads
+    let mut thread_errors = Vec::new();
+    for (i, handle) in handles.into_iter().enumerate() {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => thread_errors.push(e),
+            Err(_) => thread_errors.push(TestError {
+                name: format!("thread {i} panicked"),
+                path: String::new(),
+                kind: TestErrorKind::Panic,
+            }),
+        }
+    }
+
+    state.console_bar.finish();
+
+    // Print summary
+    println!(
+        "Finished execution. Total CPU time: {:.6}s",
+        state.elapsed.lock().unwrap().as_secs_f64()
+    );
+
+    let n_errors = state.n_errors.load(Ordering::SeqCst);
+    let n_thread_errors = thread_errors.len();
+
+    if n_errors == 0 && n_thread_errors == 0 {
+        println!("All tests passed!");
+        Ok(())
+    } else {
+        println!("Encountered {n_errors} errors out of {n_files} total tests");
+
+        // No thread carried a structured error (e.g. failures under
+        // `keep_going`): report the failure count as an error instead of
+        // exiting the process — this is library code, the CLI owns the
+        // exit-code contract.
+        if n_thread_errors == 0 {
+            return Err(TestError {
+                name: "summary".to_string(),
+                path: String::new(),
+                kind: TestErrorKind::TestsFailed { failed: n_errors, total: n_files },
+            });
+        }
+
+        if n_thread_errors > 1 {
+            println!("{n_thread_errors} threads returned an error, out of {num_threads} total:");
+            for error in &thread_errors {
+                println!("{error}");
+            }
+        }
+        Err(thread_errors.swap_remove(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mega_evm::revm::context::result::{Output, SuccessReason};
+    use serde_json::json;
+
+    fn success(gas_used: u64) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Success {
+            reason: SuccessReason::Stop,
+            gas_used,
+            gas_refunded: 0,
+            logs: vec![],
+            output: Output::Call(Bytes::new()),
+        }
+    }
+
+    fn revert(gas_used: u64) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Revert { gas_used, output: Bytes::new() }
+    }
+
+    fn test_with_mega(mega_gas_used: Option<u64>, mega_status: Option<&str>) -> Test {
+        let mut value = json!({
+            "indexes": { "data": 0, "gas": 0, "value": 0 },
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "logs": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        });
+        if let Some(gas) = mega_gas_used {
+            value["megaGasUsed"] = json!(gas);
+        }
+        if let Some(status) = mega_status {
+            value["megaStatus"] = json!(status);
+        }
+        serde_json::from_value(value).expect("valid Test json")
+    }
+
+    #[test]
+    fn test_execution_status_strings() {
+        assert_eq!(execution_status(&success(21_000)), "success");
+        assert_eq!(execution_status(&revert(21_000)), "revert");
+    }
+
+    // Full domain of `halt_reason`: None for success/revert, the Debug-formatted
+    // reason for halts — the value `--dump-fixture` cross-checks so two halts
+    // with different reasons cannot be conflated.
+    #[test]
+    fn test_halt_reason_domain() {
+        assert_eq!(halt_reason(&success(21_000)), None);
+        assert_eq!(halt_reason(&revert(21_000)), None);
+        let reason = halt_reason(&halt()).expect("halt has a reason");
+        assert!(reason.contains("DataLimitExceeded"), "unexpected reason: {reason}");
+    }
+
+    #[test]
+    fn test_mega_expectations_pass_when_matching() {
+        let test = test_with_mega(Some(21_000), Some("success"));
+        assert!(validate_mega_expectations(&test, &success(21_000)).is_ok());
+    }
+
+    #[test]
+    fn test_mega_expectations_absent_fields_skip() {
+        // Pure-Ethereum test: no mega expectations → never fails on gas/status.
+        let test = test_with_mega(None, None);
+        assert!(validate_mega_expectations(&test, &success(99_999)).is_ok());
+    }
+
+    #[test]
+    fn test_mega_expectations_gas_mismatch() {
+        let test = test_with_mega(Some(21_000), None);
+        let err = validate_mega_expectations(&test, &success(21_042)).unwrap_err();
+        match err {
+            TestErrorKind::GasUsedMismatch { got, expected } => {
+                assert_eq!(got, 21_042);
+                assert_eq!(expected, 21_000);
+            }
+            other => panic!("expected GasUsedMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mega_expectations_status_mismatch() {
+        let test = test_with_mega(None, Some("success"));
+        let err = validate_mega_expectations(&test, &revert(21_000)).unwrap_err();
+        match err {
+            TestErrorKind::StatusMismatch { got, expected } => {
+                assert_eq!(got, "revert");
+                assert_eq!(expected, "success");
+            }
+            other => panic!("expected StatusMismatch, got {other:?}"),
+        }
+    }
+
+    fn success_with_output(output: &[u8]) -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Success {
+            reason: SuccessReason::Stop,
+            gas_used: 21_000,
+            gas_refunded: 0,
+            logs: vec![],
+            output: Output::Call(Bytes::copy_from_slice(output)),
+        }
+    }
+
+    fn halt() -> ExecutionResult<MegaHaltReason> {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::DataLimitExceeded { limit: 0, actual: 0 },
+            gas_used: 21_000,
+        }
+    }
+
+    // Full domain of the (expected, actual) output predicate.
+    #[test]
+    fn test_validate_output_no_expectation_never_fails() {
+        // Expected absent: no check, regardless of what execution produced.
+        assert!(validate_output(None, &success_with_output(b"\x01")).is_ok());
+        assert!(validate_output(None, &halt()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_output_matching_passes() {
+        let expected = Bytes::copy_from_slice(b"\x01\x02");
+        assert!(validate_output(Some(&expected), &success_with_output(b"\x01\x02")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_output_mismatch_fails() {
+        let expected = Bytes::copy_from_slice(b"\x01\x02");
+        let err = validate_output(Some(&expected), &success_with_output(b"\xff")).unwrap_err();
+        assert!(matches!(err, TestErrorKind::UnexpectedOutput { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn test_validate_output_expected_but_none_produced_fails() {
+        // A halt produces no output; an expectation must not be
+        // silently satisfied by `zip` short-circuiting.
+        let expected = Bytes::copy_from_slice(b"\x01\x02");
+        let err = validate_output(Some(&expected), &halt()).unwrap_err();
+        match err {
+            TestErrorKind::UnexpectedOutput { expected_output, got_output } => {
+                assert_eq!(expected_output, Some(expected));
+                assert_eq!(got_output, None);
+            }
+            other => panic!("expected UnexpectedOutput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_skip_test_domain() {
+        // On the skip list.
+        assert!(skip_test(Path::new("/tests/ValueOverflow.json")));
+        // Ordinary name, not skipped.
+        assert!(!skip_test(Path::new("/tests/regular_fixture.json")));
+        // No file name at all: not skipped, must not panic.
+        assert!(!skip_test(Path::new("/")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_skip_test_non_utf8_name_is_not_skipped() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        // 0xff is not valid UTF-8; such a name can never match the skip list.
+        let path = Path::new(OsStr::from_bytes(b"/tests/\xff\xfe.json"));
+        assert!(!skip_test(path));
+    }
+
+    fn env_with_chain_id(chain_id: Option<&str>) -> Env {
+        let mut json = json!({
+            "currentCoinbase": "0x3000000000000000000000000000000000000003",
+            "currentGasLimit": "0x0",
+            "currentNumber": "0x0",
+            "currentTimestamp": "0x0",
+        });
+        if let Some(id) = chain_id {
+            json["currentChainID"] = json!(id);
+        }
+        serde_json::from_value(json).expect("valid Env json")
+    }
+
+    // Full domain of the chain-id predicate: absent, in-range, boundary, overflow.
+    #[test]
+    fn test_resolve_chain_id_absent_defaults() {
+        assert_eq!(resolve_chain_id(&env_with_chain_id(None)).unwrap(), 6342);
+    }
+
+    #[test]
+    fn test_resolve_chain_id_in_range_values() {
+        assert_eq!(resolve_chain_id(&env_with_chain_id(Some("0x1"))).unwrap(), 1);
+        // u64::MAX is the largest representable chain id.
+        assert_eq!(
+            resolve_chain_id(&env_with_chain_id(Some("0xffffffffffffffff"))).unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn test_resolve_chain_id_overflow_is_fixture_error() {
+        // u64::MAX + 1 must be a structured error, not a silent 6342 run.
+        let err = resolve_chain_id(&env_with_chain_id(Some("0x10000000000000000"))).unwrap_err();
+        match err {
+            TestErrorKind::FixtureError(msg) => {
+                assert!(msg.contains("currentChainID"), "message names the field: {msg}");
+            }
+            other => panic!("expected FixtureError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tx_build_error_mapping_preserves_cause() {
+        // Cause masking: every non-key error keeps its real message.
+        let kind: TestErrorKind =
+            TxBuildError::PartIndexOutOfBounds { part: "data", index: 7, len: 1 }.into();
+        match kind {
+            TestErrorKind::FixtureError(msg) => assert!(msg.contains("out of bounds"), "{msg}"),
+            other => panic!("expected FixtureError, got {other:?}"),
+        }
+
+        let key = B256::repeat_byte(0xcd);
+        let kind: TestErrorKind = TxBuildError::UnknownPrivateKey(key).into();
+        match kind {
+            TestErrorKind::UnknownPrivateKey(k) => assert_eq!(k, key),
+            other => panic!("expected UnknownPrivateKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_private_key_display_redacted() {
+        // Neither error layer's Display may contain key material.
+        let key = B256::repeat_byte(0xcd);
+        let msg = TestErrorKind::UnknownPrivateKey(key).to_string();
+        assert!(!msg.contains("cdcd"), "display leaks key material: {msg}");
+        assert!(msg.contains("redacted"), "display should say redacted: {msg}");
+    }
+
+    #[test]
+    fn test_tests_failed_display() {
+        let msg = TestErrorKind::TestsFailed { failed: 3, total: 10 }.to_string();
+        assert!(msg.contains('3') && msg.contains("10"), "{msg}");
+    }
+}

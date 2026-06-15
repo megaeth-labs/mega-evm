@@ -1,0 +1,47 @@
+{
+  "description": "Characteristic MegaETH workloads for the replay-throughput benchmark. Each case is a self-contained state-test fixture (pre-state + tx + env + megaEnv), replayed offline in isolation — no RPC, no archive node. Most are real mainnet transactions dumped via `mega-evme replay --dump-fixture`; non-on-chain cases (e.g. attack snapshots) use the same format. See run.py and README.md.",
+  "default_runs": 50,
+  "default_warmup": 5,
+  "cases": [
+    {
+      "name": "system_call",
+      "category": "system-contract",
+      "type": "fixture",
+      "fixture": "fixtures/system_call.json",
+      "expected_gas": 81740,
+      "note": "Call into a 0x6342… system contract — exercises interceptor dispatch and volatile-data/oracle paths."
+    },
+    {
+      "name": "medium_call",
+      "category": "plain-call",
+      "type": "fixture",
+      "fixture": "fixtures/medium_call.json",
+      "expected_gas": 75514,
+      "note": "Medium contract call with no logs — baseline compute + a few SLOAD/SSTORE."
+    },
+    {
+      "name": "log_heavy",
+      "category": "logs",
+      "type": "fixture",
+      "fixture": "fixtures/log_heavy.json",
+      "expected_gas": 456913,
+      "note": "12 logs — exercises LOG opcodes and the dual (compute + storage) gas metering on topics/data."
+    },
+    {
+      "name": "large_defi",
+      "category": "heavy",
+      "type": "fixture",
+      "fixture": "fixtures/large_defi.json",
+      "expected_gas": 600700,
+      "note": "Large multi-call DeFi transaction — deep call stack, many storage writes."
+    },
+    {
+      "name": "attack_deploy",
+      "category": "attack/limit-stress",
+      "type": "fixture",
+      "fixture": "fixtures/attack_deploy.json",
+      "expected_gas": 141927106,
+      "note": "Mainnet attack contract deployment captured as a self-contained prestate fixture (not a mined tx; converted from crates/mega-evm/benches/fixtures/known_attack_deploy.json, #299). 142M gas of CREATE — the heaviest stress on the multi-dimensional AdditionalLimit accounting. Its post was filled offline (`state-test --fill --bench-spec Rex5`), so it is validated and benched like the others."
+    }
+  ]
+}

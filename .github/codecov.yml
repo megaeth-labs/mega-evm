@@ -21,6 +21,7 @@ comment:
 ignore:
   - "bin/**/*"
   - "crates/mega-evme/**/*"
+  - "crates/mega-state-test/**/*"
   - "crates/state-test/**/*"
   - "crates/system-contracts/**/*"
   - "crates/mega-evm/benches/**/*"

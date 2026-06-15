@@ -1,8 +1,8 @@
 use mega_evm::{revm::primitives::eip4844, MegaSpecId};
-use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-use super::{AccountInfo, Env, SpecName, Test, TransactionParts};
+use super::{AccountInfo, Env, MegaEnv, SpecName, Test, TransactionParts};
 use mega_evm::revm::{
     context::{block::BlockEnv, cfg::CfgEnv},
     context_interface::block::calc_excess_blob_gas,
@@ -15,7 +15,7 @@ use mega_evm::revm::{
 };
 
 /// Single test unit struct
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 //#[serde(deny_unknown_fields)]
 // field config
 pub struct TestUnit {
@@ -34,8 +34,9 @@ pub struct TestUnit {
     ///
     /// A mapping of addresses to their account information before the transaction
     /// is executed. This represents the initial state of all accounts involved
-    /// in the test, including their balances, nonces, code, and storage.
-    pub pre: HashMap<Address, AccountInfo>,
+    /// in the test, including their balances, nonces, code, and storage. Ordered
+    /// by address so serialized fixtures are byte-reproducible.
+    pub pre: BTreeMap<Address, AccountInfo>,
 
     /// Post-execution expectations per specification.
     ///
@@ -57,9 +58,23 @@ pub struct TestUnit {
     /// Optional field containing the expected return data from the transaction.
     /// This is typically used for testing contract calls that return specific
     /// values or for CREATE operations that return deployed contract addresses.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub out: Option<Bytes>,
-    //pub config
+
+    /// `MegaETH` external-environment inputs (SALT bucket capacities, oracle
+    /// storage) required to deterministically reproduce a `MegaETH` transaction.
+    ///
+    /// Absent for pure-Ethereum tests, which run against the empty external
+    /// environment.
+    #[serde(default, rename = "megaEnv", skip_serializing_if = "Option::is_none")]
+    pub mega_env: Option<MegaEnv>,
+
+    /// Fields outside the schema (e.g. the EEST `config` block or custom
+    /// metadata), captured verbatim so a deserialize→serialize round-trip —
+    /// notably a `--fill` rewrite — preserves them instead of silently
+    /// deleting them. Execution ignores these fields.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl TestUnit {
@@ -83,7 +98,11 @@ impl TestUnit {
                 code: Some(bytecode),
                 nonce: info.nonce,
             };
-            cache_state.insert_account_with_storage(*address, acc_info, info.storage.clone());
+            cache_state.insert_account_with_storage(
+                *address,
+                acc_info,
+                info.storage.iter().map(|(k, v)| (*k, *v)).collect(),
+            );
         }
         cache_state
     }

@@ -41,13 +41,14 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ## Workspace Structure
 
-| Crate                   | Path                      | Purpose                                                      |
-| ----------------------- | ------------------------- | ------------------------------------------------------------ |
-| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                      |
-| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based) |
-| `state-test`            | `crates/state-test`       | Ethereum state test runner                                   |
-| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)           |
-| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                       |
+| Crate                   | Path                      | Purpose                                                                                     |
+| ----------------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                                                     |
+| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based)                                |
+| `mega-state-test`       | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
+| `state-test`            | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
+| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)                                          |
+| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
 
 ## Architecture
 
@@ -73,8 +74,9 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 
 - **`evm/`** — Core mega-evm logic: spec definitions, context, factory, execution pipeline, modified opcodes (LOG, SELFDESTRUCT), host hooks, precompiles.
   This module collects all our modifications and customizations of EVM's behavior for mega-evm based on the revm.
-- **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement.
+- **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement, and the canonical per-chain hardfork schedules.
   This module defines how a block in MegaETH block should be executed.
+  `block/chain.rs` is the single source of truth for the mainnet/testnet chain IDs and activation-timestamp schedules (`hardfork_schedule(chain_id)`, `MAINNET_CHAIN_ID`, `TESTNET_CHAIN_ID`, `mainnet_hardforks()`, `testnet_hardforks()`); look there to find or change when a fork activates on a given chain.
 - **`limit/`** — Resource limit tracking: compute gas, data size, KV updates, state growth (each in its own module).
   MegaETH introduces additional resource metering mechanism and this module implements their logic as utility structs to be used by mega-evm.
 - **`access/`** — Block env access tracking and volatile data detection for parallel execution.

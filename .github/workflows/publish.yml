@@ -10,7 +10,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,6 +41,17 @@ jobs:
 
       - name: Publish mega-evm
         run: cargo publish -p mega-evm --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index update
+        run: sleep 90
+
+      # The state-test runner library; mega-evme depends on it, so it is
+      # published after mega-evm and before mega-evme. (The `state-test` CLI crate
+      # is `publish = false`.)
+      - name: Publish mega-state-test
+        run: cargo publish -p mega-state-test --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
