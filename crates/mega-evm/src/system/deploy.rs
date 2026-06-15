@@ -170,7 +170,7 @@ mod tests {
     };
     use alloy_hardforks::ForkCondition;
     use alloy_primitives::address;
-    use revm::{database::InMemoryDB, state::AccountInfo};
+    use revm::{database::InMemoryDB, state::AccountInfo, Database as _, DatabaseCommit};
 
     fn addrs(specs: &[SystemContractSpec]) -> Vec<Address> {
         specs.iter().map(|s| s.address).collect()
@@ -178,6 +178,7 @@ mod tests {
 
     const SEEDED_ADDR: Address = address!("0x6342000000000000000000000000000000000099");
     const SEED_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
+    const UNRELATED_SLOT: U256 = U256::from_limbs([5, 0, 0, 0]);
 
     /// Builds a spec whose code hash differs from any pre-existing account, so
     /// `transact_deploy` takes the bytecode-upgrade path rather than the
@@ -197,7 +198,8 @@ mod tests {
     #[test]
     fn test_seed_skipped_on_storage_preserving_upgrade() {
         let mut db = InMemoryDB::default();
-        // Pre-existing account with different bytecode (so the upgrade path runs).
+        // Pre-existing account with different bytecode (so the upgrade path runs)
+        // and a live value at the slot the spec would otherwise seed.
         let existing_code = Bytes::from_static(&[0xfe]);
         db.insert_account_info(
             SEEDED_ADDR,
@@ -208,6 +210,7 @@ mod tests {
                 code: Some(Bytecode::new_raw(existing_code)),
             },
         );
+        db.insert_account_storage(SEEDED_ADDR, SEED_SLOT, U256::from(99)).unwrap();
         let mut state = State::builder().with_database(&mut db).build();
 
         let result = transact_deploy(&mut state, &seeded_spec(false)).unwrap();
@@ -218,6 +221,14 @@ mod tests {
         assert!(
             !account.storage.contains_key(&SEED_SLOT),
             "seed must not be written when storage is preserved"
+        );
+
+        // Committing the upgrade must leave the pre-existing slot at its old value.
+        state.commit(result);
+        assert_eq!(
+            state.storage(SEEDED_ADDR, SEED_SLOT).unwrap(),
+            U256::from(99),
+            "preserved storage must keep its pre-upgrade value after commit"
         );
     }
 
@@ -236,6 +247,8 @@ mod tests {
                 code: Some(Bytecode::new_raw(existing_code)),
             },
         );
+        // An unrelated live slot that recreation must clear.
+        db.insert_account_storage(SEEDED_ADDR, UNRELATED_SLOT, U256::from(99)).unwrap();
         let mut state = State::builder().with_database(&mut db).build();
 
         let result = transact_deploy(&mut state, &seeded_spec(true)).unwrap();
@@ -245,6 +258,16 @@ mod tests {
         let slot = account.storage.get(&SEED_SLOT).expect("seed slot must be written");
         assert_eq!(slot.present_value, U256::from(42));
         assert_eq!(slot.original_value, U256::ZERO);
+
+        // Recreation clears prior storage: after commit the seed slot holds its
+        // value and the unrelated pre-existing slot reads back as zero.
+        state.commit(result);
+        assert_eq!(state.storage(SEEDED_ADDR, SEED_SLOT).unwrap(), U256::from(42));
+        assert_eq!(
+            state.storage(SEEDED_ADDR, UNRELATED_SLOT).unwrap(),
+            U256::ZERO,
+            "recreation must clear unrelated pre-existing storage"
+        );
     }
 
     /// A fresh deploy seeds regardless of `force_create_on_upgrade`.
