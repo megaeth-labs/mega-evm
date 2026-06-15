@@ -1590,6 +1590,21 @@ pub mod storage_gas_ext {
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) {
+        // Inside a static frame, revm's inner SELFDESTRUCT halts on the
+        // static-context check without changing state. Skip the mega host work below
+        // (two account inspections, SALT account-creation pricing, the storage-gas
+        // stipend draw and tracker write) — the frame reverts and discards all of it
+        // anyway — and let the inner instruction produce the identical halt. This is
+        // behavior-neutral: the static halt is exceptional, so the frame's gas and
+        // tracked usage are the same whether or not the host work ran first. The table
+        // installs this wrapper only for REX5+, so pre-REX5 specs never reach here.
+        if context.interpreter.runtime_flag.is_static() {
+            run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
+            // Defensive: unreachable in practice — a static SELFDESTRUCT always halts
+            // inside the inner instruction, so the macro returns early above.
+            return;
+        }
+
         let eth_spec = context.interpreter.runtime_flag.spec_id();
 
         // Peek beneficiary address from stack (SELFDESTRUCT uses stack position 0)
@@ -1640,8 +1655,33 @@ pub mod compute_gas_ext {
     use super::*;
 
     /// Macro to wrap the original instruction implementation with compute gas tracking.
+    ///
+    /// Two variants:
+    /// - default: "simple" opcodes that can never spawn a child frame. The compute gas used is
+    ///   simply `gas_before - gas_after`. These opcodes never set an `InterpreterAction::NewFrame`,
+    ///   so the child-gas-subtraction match (below) would always fall through to `_` — it is
+    ///   omitted entirely to keep the per-opcode hot path lean.
+    /// - `@frame`: the call/create family (`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL`/
+    ///   `CREATE`/`CREATE2`), the only opcodes that set `NewFrame`. These must subtract the gas
+    ///   forwarded to the child frame so the parent's compute gas is not over-counted.
     macro_rules! wrap_op_compute_gas {
         ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
+            #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
+            #[inline]
+            pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+                context: InstructionContext<'_, H, WIRE>,
+            ) {
+                let gas_before = context.interpreter.gas.remaining();
+
+                // Call the original instruction
+                run_inner_instruction_or_abort!($original_fn, context);
+
+                let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, gas_used);
+            }
+        };
+        (@frame $fn_name:ident, $opcode_name:expr, $original_fn:path) => {
             #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
             #[inline]
             pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
@@ -1835,17 +1875,40 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(log3, "LOG3", instructions::host::log::<3, _>);
     wrap_op_compute_gas!(log4, "LOG4", instructions::host::log::<4, _>);
 
-    wrap_op_compute_gas!(create, "CREATE", instructions::contract::create::<_, false, _>);
-    wrap_op_compute_gas!(call, "CALL", instructions::contract::call);
-    wrap_op_compute_gas!(call_code, "CALLCODE", instructions::contract::call_code);
+    wrap_op_compute_gas!(@frame create, "CREATE", instructions::contract::create::<_, false, _>);
+    wrap_op_compute_gas!(@frame call, "CALL", instructions::contract::call);
+    wrap_op_compute_gas!(@frame call_code, "CALLCODE", instructions::contract::call_code);
     wrap_op_compute_gas!(ret, "RETURN", instructions::control::ret);
-    wrap_op_compute_gas!(delegate_call, "DELEGATECALL", instructions::contract::delegate_call);
-    wrap_op_compute_gas!(create2, "CREATE2", instructions::contract::create::<_, true, _>);
-    wrap_op_compute_gas!(static_call, "STATICCALL", instructions::contract::static_call);
+    wrap_op_compute_gas!(@frame delegate_call, "DELEGATECALL", instructions::contract::delegate_call);
+    wrap_op_compute_gas!(@frame create2, "CREATE2", instructions::contract::create::<_, true, _>);
+    wrap_op_compute_gas!(@frame static_call, "STATICCALL", instructions::contract::static_call);
 
     wrap_op_compute_gas!(revert, "REVERT", instructions::control::revert);
     wrap_op_compute_gas!(invalid, "INVALID", instructions::control::invalid);
-    wrap_op_compute_gas!(selfdestruct, "SELFDESTRUCT", instructions::host::selfdestruct);
+
+    /// `SELFDESTRUCT` opcode with compute gas tracking.
+    ///
+    /// Unlike the default wrapper, the trailing check fans out across all four limit
+    /// dimensions (`record_compute_gas_all_dims`): the REX5 storage wrapper records
+    /// beneficiary data/KV/state usage *before* the inner instruction runs, without
+    /// latching, and those dimensions must latch (and halt) here — only once the inner
+    /// instruction has succeeded. Latching at the recording site instead would stick
+    /// even when the inner instruction subsequently fails and the frame's discardable
+    /// usage is rolled back.
+    pub fn selfdestruct<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let gas_before = context.interpreter.gas.remaining();
+
+        // Call the original instruction
+        run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
+
+        let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        if !additional_limit.record_compute_gas_all_dims(gas_used) {
+            context.interpreter.halt(additional_limit.exceeding_instruction_result());
+        }
+    }
 }
 
 /// Trait to inspect the stack elements.
