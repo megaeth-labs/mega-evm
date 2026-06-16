@@ -98,7 +98,10 @@ fn test_sequencer_registry_slot_constants_match_forge_layout() {
             .expect("storage entry missing string `slot`")
             .parse()
             .expect("storage `slot` is not a u64");
-        slots.insert(label, slot);
+        assert!(
+            slots.insert(label.clone(), slot).is_none(),
+            "duplicate field label `{label}` in forge inspect output"
+        );
     }
 
     // A changed field count means a Solidity field was added or removed (including the
