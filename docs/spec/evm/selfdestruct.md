@@ -58,18 +58,12 @@ This refund MUST NOT be applied when `SELFDESTRUCT` targets a pre-existing accou
 
 The refund is frame-aware: if the call frame that performed the `SELFDESTRUCT` reverts, the refund MUST be discarded together with the destruction effect.
 
-### MiniRex Behavior
-
-For [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md), `SELFDESTRUCT` MUST be disabled.
-When disabled, executing `SELFDESTRUCT` MUST halt with `InvalidFEOpcode`.
-
 ## Constants
 
-| Constant                              | Value             | Description                                                                        |
-| ------------------------------------- | ----------------- | ---------------------------------------------------------------------------------- |
-| `SELFDESTRUCT_DISABLED_HALT`          | `InvalidFEOpcode` | Halt reason when `SELFDESTRUCT` is disabled in MiniRex through Rex1                |
-| `ACCOUNT_CREATION_STORAGE_GAS_BASE`   | 25,000            | Base storage gas charged when a value transfer creates a previously empty account  |
-| `SELFDESTRUCT_BENEFICIARY_DATA_BYTES` | 40                | Data-size bytes recorded for the beneficiary account write on beneficiary creation |
+| Constant                              | Value  | Description                                                                        |
+| ------------------------------------- | ------ | ---------------------------------------------------------------------------------- |
+| `ACCOUNT_CREATION_STORAGE_GAS_BASE`   | 25,000 | Base storage gas charged when a value transfer creates a previously empty account  |
+| `SELFDESTRUCT_BENEFICIARY_DATA_BYTES` | 40     | Data-size bytes recorded for the beneficiary account write on beneficiary creation |
 
 ## Rationale
 
@@ -92,7 +86,7 @@ Charging the same account-creation storage gas and recording the same resource-l
 
 ## Spec History
 
-- [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md) disable `SELFDESTRUCT`.
+- [MiniRex](../upgrades/minirex.md), [Rex](../upgrades/rex.md), and [Rex1](../upgrades/rex1.md) disable `SELFDESTRUCT`; executing it halts with `InvalidFEOpcode`.
 - [Rex2](../upgrades/rex2.md) re-enables `SELFDESTRUCT` with [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics.
 - [Rex4](../upgrades/rex4.md) — added beneficiary-triggered volatile-access behavior for SELFDESTRUCT, and [state growth refund](#state-growth-refund) for same-transaction-created accounts destroyed by `SELFDESTRUCT`.
 - [Rex5](../upgrades/rex5.md) — charged account-creation storage gas and recorded data-size, KV-update, and state-growth usage when a value-carrying `SELFDESTRUCT` creates a previously non-existent beneficiary account.

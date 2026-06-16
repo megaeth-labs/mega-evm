@@ -117,14 +117,14 @@ This is useful when testing contracts that branch on historical block hashes.
 ## Fork Mode
 
 Fork mode fetches account state from a live RPC endpoint instead of starting from an empty state.
-Enable it with `--fork`:
+Enable it with `--fork`, which requires `--rpc`:
 
 ```bash
-mega-evme run --fork ...
+mega-evme run --fork --rpc https://mainnet.megaeth.com/rpc ...
 ```
 
-By default it connects to `http://localhost:8545`.
-Override the endpoint with `--rpc` (or the `RPC_URL` environment variable) and pin a specific block with `--fork.block`:
+There is no default endpoint, and the `RPC_URL` environment variable is not consulted — `--rpc` must be passed explicitly.
+Set the endpoint with `--rpc` (aliases `--rpc-url`, `--fork.rpc`) and pin a specific block with `--fork.block`:
 
 ```bash
 mega-evme run \
@@ -222,7 +222,6 @@ The default cache directory is the platform cache directory:
 | `--rpc.cache-size <N>`   | `u32` | `10000`            | Maximum number of items in the in-memory RPC LRU cache. Set to `0` to disable the cache layer entirely.                  |
 | `--rpc.cache-dir <PATH>` | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`.            |
 | `--rpc.no-cache-file`    | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies — use `--rpc.cache-size 0` to disable that too. |
-| `--rpc.chain-id <ID>`    | `u64` | auto-detected      | Chain ID override. Skips the `eth_chainId` RPC call at startup and uses this value to locate the per-chain cache file.   |
 | `--rpc.clear-cache`      | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                  |
 
 ### Retry Flags
@@ -235,25 +234,28 @@ The default cache directory is the platform cache directory:
 
 ### Examples
 
-Replay a transaction with a local cache directory and explicit chain ID (fully offline if the cache is warm):
+Replay a transaction with a local per-chain cache directory (a warm cache avoids redundant RPC calls on later runs):
 
 ```bash
 mega-evme replay \
-  --rpc.chain-id 4326 \
+  --rpc https://mainnet.megaeth.com/rpc \
   --rpc.cache-dir ./my-cache \
   0xabc123...
 ```
 
+The per-chain cache supplements `--rpc`; it does not replace it.
+For a fully offline replay, capture a single-file fixture and replay it with `--rpc.replay-file` (see [replay](../commands/replay.md#rpc-cache-file)).
+
 Disable on-disk caching but keep the in-memory LRU:
 
 ```bash
-mega-evme tx --fork --rpc.no-cache-file ...
+mega-evme tx --fork --rpc https://mainnet.megaeth.com/rpc --rpc.no-cache-file ...
 ```
 
 Clear a corrupt cache before replaying:
 
 ```bash
-mega-evme replay --rpc.clear-cache 0xabc123...
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --rpc.clear-cache 0xabc123...
 ```
 
 ## Round-Trip Example

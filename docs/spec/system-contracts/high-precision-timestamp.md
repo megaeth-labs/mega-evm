@@ -24,23 +24,25 @@ The High-Precision Timestamp contract MUST exist at `HIGH_PRECISION_TIMESTAMP_AD
 
 ### Interface
 
-The contract MUST expose the following interface:
+The contract MUST expose the following methods:
 
 ```solidity
 interface IHighPrecisionTimestamp {
     function timestamp() external view returns (uint256);
-    function update(uint256 index) external;
-    function oracle() external view returns (address);
-    function baseSlot() external view returns (uint256);
-    function maxSlots() external view returns (uint32);
+    function update(uint256 ts) external;
+    function ORACLE_CONTRACT_ADDRESS() external view returns (address);
+    function ALLOCATION_START() external view returns (uint256);
+    function ALLOCATION_SIZE() external view returns (uint32);
 }
 ```
 
-`oracle()` MUST return `ORACLE_CONTRACT_ADDRESS`.
-`baseSlot()` MUST return `TIMESTAMP_BASE_SLOT`.
-`maxSlots()` MUST return `TIMESTAMP_MAX_SLOTS`.
-
 The `timestamp()` method MUST return the value stored at Oracle slot `TIMESTAMP_BASE_SLOT`, interpreted as a `uint256` number of microseconds since Unix epoch.
+
+The `update(uint256 ts)` method forwards a timestamp write to the [Oracle](oracle.md) contract; the write is gated by the Oracle's own [system-address](system-tx.md) authorization, so it is not callable by an ordinary on-chain sender.
+
+`ORACLE_CONTRACT_ADDRESS()` MUST return `ORACLE_CONTRACT_ADDRESS`.
+`ALLOCATION_START()` MUST return `TIMESTAMP_BASE_SLOT`.
+`ALLOCATION_SIZE()` MUST return `TIMESTAMP_MAX_SLOTS`.
 
 ### Storage Layout
 

@@ -50,11 +50,11 @@ Each group is documented on its own page.
 | Group             | Flags                                                                                                                                                                                      | Reference                                                                       |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | Transaction       | `--create`, `--gas`, `--basefee`, `--priority-fee`, `--tx-type`, `--value`, `--sender`, `--receiver`, `--nonce`, `--input`, `--inputfile`, `--source-hash`, `--mint`, `--auth`, `--access` | [Transaction Types](../transaction-types.md)                                    |
-| State management  | `--prestate`, `--sender.balance`, `--dump`, `--dump.output`                                                                                                                                | [State Management](../configuration/state-management.md)                        |
+| State management  | `--prestate`, `--sender.balance`, `--faucet`, `--balance`, `--storage`, `--block-hash`, `--fork`, `--fork.block`, `--rpc`, `--dump`, `--dump.output`                                       | [State Management](../configuration/state-management.md)                        |
 | Chain and spec    | `--spec`, `--chain-id`                                                                                                                                                                     | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas`                      | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | `--bucket-capacity`                                                                                                                                                                        | [SALT Buckets](../configuration/salt-buckets.md)                                |
-| RPC cache / retry | `--rpc.cache-size`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.chain-id`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.rate-limit`                           | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
+| RPC cache / retry | `--rpc.cache-size`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.rate-limit`                                             | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
 | Tracing           | `--trace`, `--tracer`, `--trace.output`, and tracer-specific flags                                                                                                                         | [Tracing Overview](../tracing/overview.md)                                      |
 | Output            | `--json`                                                                                                                                                                                   | See [JSON output](#json-output) below                                           |
 
@@ -62,7 +62,7 @@ Each group is documented on its own page.
 
 | Option       | Default                                      |
 | ------------ | -------------------------------------------- |
-| `--spec`     | `Rex4`                                       |
+| `--spec`     | `Rex5`                                       |
 | `--gas`      | `10000000`                                   |
 | `--sender`   | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
 | `--receiver` | `0x0000000000000000000000000000000000000000` |
@@ -266,11 +266,6 @@ State Options:
       --fork.block <FORK_BLOCK>
           Block number of the state (post-block state) to fork from
 
-      --rpc <RPC_URL>
-          RPC URL [env: RPC_URL=] [default: http://localhost:8545]
-
-          [aliases: --rpc-url] [compat alias: --fork.rpc]
-
       --prestate <PRESTATE>
           JSON file with prestate (genesis) config
 
@@ -295,9 +290,42 @@ State Options:
       --storage <STORAGE>
           Override storage slots. Format: `ADDRESS:SLOT=VALUE` (repeatable)
 
+RPC Options:
+      --rpc <RPC_URL>
+          RPC URL. Required for networked operation (replay, run --fork, tx --fork). No default; the RPC_URL environment variable is not consulted
+
+          [aliases: --rpc-url] [compat alias: --fork.rpc]
+
+      --rpc.capture-file <CAPTURE_FILE>
+          Capture JSON-RPC responses to a file for later offline replay. Requires --rpc
+
+      --rpc.replay-file <REPLAY_FILE>
+          Replay from a previously captured JSON-RPC fixture file (offline). Cannot be used with --rpc
+
+      --rpc.cache-size <cache_size>
+          Max items in the in-memory RPC LRU cache; 0 disables it [default: 10000]
+
+      --rpc.cache-dir <CACHE_DIR>
+          Directory for per-chain RPC cache files (default: platform cache dir)
+
+      --rpc.no-cache-file
+          Disable on-disk cache persistence (the in-memory LRU still applies)
+
+      --rpc.clear-cache
+          Delete the current chain's cache file before loading it
+
+      --rpc.max-retries <MAX_RETRIES>
+          Max transport retries on 429/503, rate-limit, and transport failures; 0 disables [default: 5]
+
+      --rpc.backoff-ms <BACKOFF_MS>
+          Fixed sleep (ms) between retries; no exponential backoff [default: 1000]
+
+      --rpc.rate-limit <COMPUTE_UNITS_PER_SEC>
+          Compute-units-per-second budget for the retry layer [default: 660]
+
 Chain Options:
       --spec <SPEC>
-          Spec to use: MiniRex, Equivalence, Rex, Rex1, Rex2, Rex3, Rex4 [default: Rex4]
+          Spec to use: MiniRex, Equivalence, Rex, Rex1, Rex2, Rex3, Rex4, Rex5 [default: Rex5]
 
       --chain-id <CHAIN_ID>
           Chain ID [default: 6342] [aliases: --chainid]
