@@ -45,7 +45,7 @@ const FIELD_CONSTANTS: &[(&str, U256)] = &[
 const EXPECTED_FIELD_COUNT: usize = FIELD_CONSTANTS.len() + 2;
 
 #[test]
-fn sequencer_registry_slot_constants_match_forge_layout() {
+fn test_sequencer_registry_slot_constants_match_forge_layout() {
     // Repo-only check: the packaged crate ships this test (`tests/` is not excluded) but excludes
     // the Solidity source and Foundry config (`contracts/*.sol`, `foundry.toml`), so `forge
     // inspect` cannot run there. Skip when those inputs are absent — same rationale as the

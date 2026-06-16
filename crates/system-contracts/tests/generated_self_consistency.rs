@@ -32,7 +32,7 @@ macro_rules! assert_code_hashes {
 }
 
 #[test]
-fn oracle_constants_are_self_consistent() {
+fn test_oracle_constants_are_self_consistent() {
     use mega_system_contracts::oracle::*;
     assert_code_hashes!(
         (LATEST_CODE, LATEST_CODE_HASH),
@@ -43,25 +43,25 @@ fn oracle_constants_are_self_consistent() {
 }
 
 #[test]
-fn keyless_deploy_constants_are_self_consistent() {
+fn test_keyless_deploy_constants_are_self_consistent() {
     use mega_system_contracts::keyless_deploy::*;
     assert_code_hashes!((LATEST_CODE, LATEST_CODE_HASH), (V1_0_0_CODE, V1_0_0_CODE_HASH));
 }
 
 #[test]
-fn access_control_constants_are_self_consistent() {
+fn test_access_control_constants_are_self_consistent() {
     use mega_system_contracts::access_control::*;
     assert_code_hashes!((LATEST_CODE, LATEST_CODE_HASH), (V1_0_0_CODE, V1_0_0_CODE_HASH));
 }
 
 #[test]
-fn limit_control_constants_are_self_consistent() {
+fn test_limit_control_constants_are_self_consistent() {
     use mega_system_contracts::limit_control::*;
     assert_code_hashes!((LATEST_CODE, LATEST_CODE_HASH), (V1_0_0_CODE, V1_0_0_CODE_HASH));
 }
 
 #[test]
-fn sequencer_registry_constants_are_self_consistent() {
+fn test_sequencer_registry_constants_are_self_consistent() {
     use mega_system_contracts::sequencer_registry::*;
     assert_code_hashes!((LATEST_CODE, LATEST_CODE_HASH), (V1_0_0_CODE, V1_0_0_CODE_HASH));
 }
