@@ -291,16 +291,18 @@ State Options:
           Override storage slots. Format: `ADDRESS:SLOT=VALUE` (repeatable)
 
 RPC Options:
+      (On run/tx, --rpc and the --rpc.* options below take effect only with --fork; without --fork they are accepted but ignored.)
+
       --rpc <RPC_URL>
           RPC URL. Required for networked operation (replay, run --fork, tx --fork). No default; the RPC_URL environment variable is not consulted
 
           [aliases: --rpc-url] [compat alias: --fork.rpc]
 
       --rpc.capture-file <CAPTURE_FILE>
-          Capture JSON-RPC responses to a file for later offline replay. Requires --rpc
+          (replay command only) Capture JSON-RPC responses to a fixture file; not usable as a run/tx offline-fork path
 
       --rpc.replay-file <REPLAY_FILE>
-          Replay from a previously captured JSON-RPC fixture file (offline). Cannot be used with --rpc
+          (replay command only) Serve JSON-RPC from a captured fixture; not usable as a run/tx offline-fork path
 
       --rpc.cache-size <cache_size>
           Max items in the in-memory RPC LRU cache; 0 disables it [default: 10000]

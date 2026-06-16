@@ -70,7 +70,7 @@ Each group has its own reference page with the full flag table.
 | Chain / spec      | Spec version, chain ID                                               | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao    | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | Per-bucket capacity overrides for dynamic gas pricing                | [SALT Buckets](../configuration/salt-buckets.md)                                |
-| RPC cache / retry | Cache size, cache dir, capture/replay file, retry and rate-limit     | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
+| RPC cache / retry | Cache size, cache dir, retry and rate-limit                          | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
 | Tracing           | Opcode, call, and pre-state tracers with output options              | [Tracing Overview](../tracing/overview.md)                                      |
 | Output            | JSON output mode                                                     | See [JSON output](#json-output) below                                           |
 
@@ -199,10 +199,11 @@ State Options:
       --storage <STORAGE>                Set storage: ADDRESS:SLOT=VALUE (repeatable)
 
 RPC Options:
+      (On run/tx, --rpc and --rpc.* take effect only with --fork; otherwise accepted but ignored.)
       --rpc <RPC_URL>                    RPC URL (required for --fork; no default, RPC_URL env not used)
                                          [aliases: --rpc-url] [compat alias: --fork.rpc]
-      --rpc.capture-file <PATH>          Capture JSON-RPC responses for offline replay (requires --rpc)
-      --rpc.replay-file <PATH>           Replay from a captured fixture file (offline; cannot use --rpc)
+      --rpc.capture-file <PATH>          (replay command only) capture to fixture; not usable as a run/tx offline path
+      --rpc.replay-file <PATH>           (replay command only) serve from fixture; not usable as a run/tx offline path
       --rpc.cache-size <N>               In-memory RPC LRU cache size; 0 disables [default: 10000]
       --rpc.cache-dir <DIR>              Per-chain RPC cache directory (default: platform cache dir)
       --rpc.no-cache-file                Disable on-disk cache persistence

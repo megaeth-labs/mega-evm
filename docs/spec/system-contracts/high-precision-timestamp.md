@@ -38,7 +38,9 @@ interface IHighPrecisionTimestamp {
 
 The `timestamp()` method MUST return the value stored at Oracle slot `TIMESTAMP_BASE_SLOT`, interpreted as a `uint256` number of microseconds since Unix epoch.
 
-The `update(uint256 ts)` method forwards a timestamp write to the [Oracle](oracle.md) contract; the write is gated by the Oracle's own [system-address](system-tx.md) authorization, so it is not callable by an ordinary on-chain sender.
+The `update(uint256 ts)` method is not an on-chain write path.
+It forwards to the [Oracle](oracle.md) `setSlot`, which authorizes the immediate caller against the current [system address](system-tx.md); because the immediate caller is the timestamp contract itself rather than the system address, an on-chain `update` call reverts.
+The current timestamp value is instead maintained by the sequencer writing the per-transaction snapshot directly to Oracle storage (see [Service Semantics](#service-semantics)).
 
 `ORACLE_CONTRACT_ADDRESS()` MUST return `ORACLE_CONTRACT_ADDRESS`.
 `ALLOCATION_START()` MUST return `TIMESTAMP_BASE_SLOT`.
