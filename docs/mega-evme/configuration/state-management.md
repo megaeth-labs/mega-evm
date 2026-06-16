@@ -205,7 +205,7 @@ All numeric values use Ethereum quantity encoding:
 
 When using fork mode, `mega-evme` caches RPC responses to avoid redundant network calls and supports configurable retry behavior for resilience against transient failures.
 
-These options take effect only when an RPC endpoint is actually used: on `run` and `tx` that means together with `--fork` — without `--fork` they are accepted but silently ignored — while the `replay` command always uses them.
+These options take effect only when an RPC endpoint is actually contacted: on `run` and `tx` that requires `--fork` (without `--fork` they are accepted but silently ignored); on `replay` they apply to its `--rpc` fetches (an offline `--rpc.replay-file` run contacts no endpoint and does not use them).
 
 ### Per-Chain Cache Files
 

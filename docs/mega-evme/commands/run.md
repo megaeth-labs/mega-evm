@@ -291,7 +291,7 @@ State Options:
           Override storage slots. Format: `ADDRESS:SLOT=VALUE` (repeatable)
 
 RPC Options:
-      (On run/tx, --rpc and the --rpc.* options below take effect only with --fork; without --fork they are accepted but ignored.)
+      (On run/tx, --rpc and the --rpc.* cache/retry options below take effect only with --fork; without --fork they are accepted but ignored. The capture/replay fixture flags are replay-command-only.)
 
       --rpc <RPC_URL>
           RPC URL. Required for networked operation (replay, run --fork, tx --fork). No default; the RPC_URL environment variable is not consulted

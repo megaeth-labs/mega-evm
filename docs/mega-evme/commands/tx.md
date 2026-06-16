@@ -199,7 +199,7 @@ State Options:
       --storage <STORAGE>                Set storage: ADDRESS:SLOT=VALUE (repeatable)
 
 RPC Options:
-      (On run/tx, --rpc and --rpc.* take effect only with --fork; otherwise accepted but ignored.)
+      (On run/tx, --rpc and the --rpc.* cache/retry options take effect only with --fork; otherwise accepted but ignored. Capture/replay fixture flags are replay-command-only.)
       --rpc <RPC_URL>                    RPC URL (required for --fork; no default, RPC_URL env not used)
                                          [aliases: --rpc-url] [compat alias: --fork.rpc]
       --rpc.capture-file <PATH>          (replay command only) capture to fixture; not usable as a run/tx offline path
