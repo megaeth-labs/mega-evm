@@ -140,6 +140,37 @@ fn collect_versioned_artifacts(artifacts_dir: &Path, prefix: &str) -> Vec<Contra
     versions
 }
 
+/// Attests the `*-latest.json` alias for a contract.
+///
+/// The versioned artifacts are self-hash-validated when collected, but the `*-latest.json` alias
+/// is a separate file (a symlink in the repo, a regular copy in packaged crates). This verifies
+/// that the alias:
+/// 1. is internally consistent — `keccak256(deployed_bytecode) == code_hash`, and
+/// 2. matches one of the already-attested versioned artifacts on BOTH `version` and `code_hash`.
+fn attest_latest_alias(name: &str, latest: &ContractArtifact, versions: &[ContractArtifact]) {
+    // (a) Self-hash: the alias's own bytecode must match its own recorded code hash.
+    let computed_hash = keccak256(&latest.deployed_bytecode);
+    assert!(
+        computed_hash == latest.code_hash,
+        "Code hash mismatch for {name}-latest.json: recorded {:x}, computed {:x}",
+        latest.code_hash,
+        computed_hash
+    );
+
+    // (b) Cross-check on BOTH version and code hash. Matching only the hash is insufficient:
+    // `generate_rust_constants` derives `LATEST_CODE = V{latest.version}_CODE` from the `version`
+    // field, so a latest.json whose bytecode/hash is e.g. v2.0.0 but whose `version` field says
+    // "1.1.0" would pass a hash-only check yet alias the wrong versioned constant. Binding
+    // (version, code_hash) keeps the generated alias consistent with the attested bytecode.
+    assert!(
+        versions.iter().any(|v| v.version == latest.version && v.code_hash == latest.code_hash),
+        "{name}-latest.json (version {}, code hash {:x}) does not match any attested versioned \
+         artifact on both version and code hash",
+        latest.version,
+        latest.code_hash
+    );
+}
+
 /// Generates Rust source content with bytecode constants for a contract.
 fn generate_rust_constants(
     config: &ContractConfig<'_>,
@@ -273,6 +304,10 @@ fn main() {
             "cargo::rerun-if-changed={}",
             crate_dir.join(format!("artifacts/{}-latest.json", config.name)).display()
         );
+        println!(
+            "cargo::rerun-if-changed={}",
+            crate_dir.join("src/generated").join(config.generated_file).display()
+        );
     }
     println!("cargo::rerun-if-changed={}", crate_dir.join("foundry.toml").display());
 
@@ -283,6 +318,18 @@ fn main() {
     let is_repo_build = crate_dir.join("scripts").exists();
 
     // Phase 1: Forge validation — required when building from the repository.
+    if !is_repo_build {
+        // Published crate: `scripts/`, Solidity source, and `artifacts/` are excluded from the
+        // package, so the bytecode cannot be re-derived from source here. Make this explicit
+        // instead of silently trusting the checked-in constants. The `cargo test` self-consistency
+        // check (tests/generated_self_consistency.rs) still runs in this context.
+        println!(
+            "cargo::warning=system-contract bytecode source-attestation was SKIPPED: forge / \
+             Solidity source / scripts/ are unavailable (published crate). The build is trusting \
+             the pre-generated constants in src/generated/ without re-deriving them from source."
+        );
+    }
+
     if is_repo_build {
         let forge_available = Command::new("forge")
             .arg("--version")
@@ -325,6 +372,10 @@ Quick install:
                 .unwrap_or_else(|_| panic!("Failed to read {}-latest.json", config.name));
             let latest: ContractArtifact = serde_json::from_str(&latest_content)
                 .unwrap_or_else(|_| panic!("Failed to parse {}-latest.json", config.name));
+
+            // Attest the latest alias against the self-validated versioned artifacts before
+            // trusting it as the source for the generated constants.
+            attest_latest_alias(config.name, &latest, &versions);
 
             verify_generated_constants(crate_dir, config, &versions, &latest);
         }
