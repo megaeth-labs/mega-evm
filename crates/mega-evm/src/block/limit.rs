@@ -652,7 +652,7 @@ impl BlockLimits {
 ///
 /// for tx in transactions {
 ///     // Pre-execution check
-///     limiter.pre_execution_check(tx.hash(), tx.gas_limit(), tx.size(), tx.da_size(), is_deposit)?;
+///     limiter.pre_execution_check(tx.hash(), tx.gas_limit(), tx.size(), tx.da_size(), is_deposit, block_number)?;
 ///
 ///     let outcome = execute_transaction(tx);
 ///
@@ -739,6 +739,7 @@ impl BlockLimiter {
     /// - `tx_size`: Transaction's encoded size in bytes (EIP-2718 encoding)
     /// - `da_size`: Transaction's compressed data availability size in bytes
     /// - `is_deposit`: Whether the transaction is an L1-to-L2 deposit (exempt from DA size limits)
+    /// - `block_number`: Current block height; used only for the temporary block-21951576 skip
     ///
     /// # Returns
     ///
@@ -764,6 +765,7 @@ impl BlockLimiter {
     ///     tx.encode_2718_len() as u64,
     ///     tx.estimated_da_size(),
     ///     tx.is_deposit(),
+    ///     block_number,
     /// )?;
     /// ```
     pub fn pre_execution_check(
@@ -773,6 +775,7 @@ impl BlockLimiter {
         tx_size: u64,
         da_size: u64,
         is_deposit: bool,
+        block_number: u64,
     ) -> Result<(), BlockExecutionError> {
         // Check single transaction gas limit
         if gas_limit > self.limits.tx_gas_limit {
@@ -785,8 +788,23 @@ impl BlockLimiter {
             }));
         }
 
-        // Check block gas limit
-        if self.block_gas_used.saturating_add(gas_limit) > self.limits.block_gas_limit {
+        // Check block gas limit.
+        //
+        // TEMPORARY (private-net hotfix, revert me): block 21951576 was produced by sequencer
+        // v2.0.22 while recovering an incomplete payload without carrying over the prior
+        // `BlockLimiter` counters. Its sequencer-sent oracle tx sizes its own gas as
+        // `block_gas_limit - block_gas_used`, so with the counters reset to zero it overshoots the
+        // block's actual available gas (observed: tx gas_limit 1997800000 > available 1996845898).
+        // That block is already on-chain, so the stateless components (rpc-replayer,
+        // witness-generator, stateless-validator) must accept it during replay/validation. Skip
+        // ONLY the block-available-gas check for this single block: every other limit check and
+        // every other block remain fully enforced. The sequencer-side fix is separate. Remove this
+        // once block 21951576 is past the stateless components' replay window. To extend to more
+        // blocks, make this a `&[u64]` and use `.contains(&block_number)`.
+        const SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCK: u64 = 21951576;
+        if block_number != SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCK
+            && self.block_gas_used.saturating_add(gas_limit) > self.limits.block_gas_limit
+        {
             return Err(BlockExecutionError::Validation(
                 BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
                     transaction_gas_limit: gas_limit,
@@ -1049,7 +1067,7 @@ mod tests {
         // gas limit; unchecked addition would wrap and accidentally pass the limit check.
         let mut limiter = BlockLimiter::new(limits_with_block_gas(1_000_000));
         limiter.block_gas_used = u64::MAX - 10;
-        let result = limiter.pre_execution_check(B256::ZERO, u64::MAX, 0, 0, false);
+        let result = limiter.pre_execution_check(B256::ZERO, u64::MAX, 0, 0, false, 0);
         assert!(result.is_err(), "saturating_add must keep the rejection in place");
     }
 
@@ -1057,7 +1075,7 @@ mod tests {
     fn test_pre_execution_check_block_tx_size_addition_saturates() {
         let mut limiter = BlockLimiter::new(limits_with_block_tx_size(1_000_000));
         limiter.block_tx_size_used = u64::MAX - 10;
-        let result = limiter.pre_execution_check(B256::ZERO, 0, u64::MAX, 0, false);
+        let result = limiter.pre_execution_check(B256::ZERO, 0, u64::MAX, 0, false, 0);
         assert!(result.is_err());
     }
 
@@ -1065,8 +1083,30 @@ mod tests {
     fn test_pre_execution_check_block_da_size_addition_saturates() {
         let mut limiter = BlockLimiter::new(limits_with_block_da_size(1_000_000));
         limiter.block_da_size_used = u64::MAX - 10;
-        let result = limiter.pre_execution_check(B256::ZERO, 0, 0, u64::MAX, false);
+        let result = limiter.pre_execution_check(B256::ZERO, 0, 0, u64::MAX, false, 0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pre_execution_check_skips_block_gas_for_hotfixed_block() {
+        // Regression for the private-net v2.0.21->v2.0.22 incident: block 21951576 carries a
+        // sequencer oracle tx whose gas_limit (1_997_800_000) exceeds the block's available gas
+        // (1_996_845_898). The block-available-gas check MUST still reject this for every normal
+        // block (here, block 1)...
+        let limiter = BlockLimiter::new(limits_with_block_gas(1_996_845_898));
+        assert!(
+            limiter.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 1).is_err(),
+            "normal blocks must still reject a tx whose gas_limit exceeds available block gas",
+        );
+
+        // ...but be bypassed for the single hot-fixed block 21951576 so the stateless components
+        // can accept the already-on-chain block. Only the block-available-gas check is skipped;
+        // the per-tx gas limit (tx_gas_limit) is left at u64::MAX here, so this still exercises
+        // that path passing rather than being disabled.
+        assert!(
+            limiter.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 21951576).is_ok(),
+            "block 21951576 must bypass ONLY the block-available-gas check",
+        );
     }
 
     #[test]

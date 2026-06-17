@@ -423,6 +423,7 @@ where
             tx_size,
             da_size,
             is_deposit,
+            self.evm.block().number.to::<u64>(),
         )?;
 
         // Cache the depositor account prior to the state transition for the deposit nonce.
@@ -490,6 +491,7 @@ where
             outcome.tx_size,
             outcome.da_size,
             outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE,
+            self.evm.block().number.to::<u64>(),
         )?;
 
         // Accumulate post-execution resource usage into block-level counters.
