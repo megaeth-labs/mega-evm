@@ -122,9 +122,9 @@ too_long_first_doc_paragraph = "allow"
 
 [workspace.dependencies]
 # megaeth
-mega-evm = { path = "./crates/mega-evm", version = "1.6.0", default-features = false }
-mega-state-test = { path = "./crates/mega-state-test", version = "1.6.0", default-features = false }
-mega-system-contracts = { path = "./crates/system-contracts", version = "1.6.0", default-features = false }
+mega-evm = { path = "./crates/mega-evm", version = "1.6.1", default-features = false }
+mega-state-test = { path = "./crates/mega-state-test", version = "1.6.1", default-features = false }
+mega-system-contracts = { path = "./crates/system-contracts", version = "1.6.1", default-features = false }
 
 # revm
 op-revm = { version = "8.1.0", default-features = false }
