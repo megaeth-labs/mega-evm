@@ -188,7 +188,7 @@ See the linked pages for full details.
   See [State Management](../configuration/state-management.md).
 - **RPC cache file** — Single-file JSON-RPC capture and offline replay via `--rpc.capture-file` / `--rpc.replay-file`.
   See [RPC Cache File](#rpc-cache-file) above.
-- **RPC cache / retry** — Per-chain response cache, chain-id override, retry and rate-limit settings.
+- **RPC cache / retry** — Per-chain response cache, retry, and rate-limit settings.
   See [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry).
 - **Tracing** — Emit execution traces (call traces, opcode traces, gas profiles, etc.).
   See [Tracing Overview](../tracing/overview.md).

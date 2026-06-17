@@ -39,21 +39,20 @@ The default sender is `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` and the defau
 By default, `tx` runs against local state — either empty or loaded from a `--prestate` file.
 Fork mode fetches account balances, contract code, and storage slots on demand from a remote RPC node, so you can call real deployed contracts without manually constructing their state.
 
-| Flag                    | Default                 | Description                                |
-| ----------------------- | ----------------------- | ------------------------------------------ |
-| `--fork`                | `false`                 | Enable state forking from RPC              |
-| `--rpc <URL>`           | `http://localhost:8545` | RPC endpoint to fork from (env: `RPC_URL`) |
-| `--fork.block <NUMBER>` | latest                  | Pin the fork to a specific block number    |
+| Flag                    | Default  | Description                                                    |
+| ----------------------- | -------- | -------------------------------------------------------------- |
+| `--fork`                | `false`  | Enable state forking from RPC                                  |
+| `--rpc <URL>`           | required | RPC endpoint to fork from (aliases: `--rpc-url`, `--fork.rpc`) |
+| `--fork.block <NUMBER>` | latest   | Pin the fork to a specific block number                        |
 
 When `--fork` is set, `mega-evme` connects to `--rpc` and resolves any state reads that aren't covered by a local `--prestate` file against that node.
 `--fork.block` pins the fork to a specific block's post-state, which is useful for reproducing historical behavior or writing deterministic tests.
 Without `--fork.block`, the fork uses the latest block at the time of execution.
 
-You can set the RPC URL via the `RPC_URL` environment variable instead of passing `--rpc` every time:
+`--fork` requires `--rpc` — there is no default endpoint, and the `RPC_URL` environment variable is not consulted:
 
 ```bash
-export RPC_URL=https://mainnet.megaeth.com/rpc
-mega-evme tx --fork --sender.balance 1ether --receiver 0x4200000000000000000000000000000000000006 --input 0x06fdde03
+mega-evme tx --fork --rpc https://mainnet.megaeth.com/rpc --sender.balance 1ether --receiver 0x4200000000000000000000000000000000000006 --input 0x06fdde03
 ```
 
 Local `--prestate` overrides take precedence over forked state.
@@ -71,7 +70,7 @@ Each group has its own reference page with the full flag table.
 | Chain / spec      | Spec version, chain ID                                               | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | Block number, timestamp, coinbase, basefee, gas limit, prevrandao    | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | Per-bucket capacity overrides for dynamic gas pricing                | [SALT Buckets](../configuration/salt-buckets.md)                                |
-| RPC cache / retry | Cache size, cache dir, chain-id override, retry and rate-limit       | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
+| RPC cache / retry | Cache size, cache dir, retry and rate-limit                          | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
 | Tracing           | Opcode, call, and pre-state tracers with output options              | [Tracing Overview](../tracing/overview.md)                                      |
 | Output            | JSON output mode                                                     | See [JSON output](#json-output) below                                           |
 
@@ -192,8 +191,6 @@ Transaction Options:
 State Options:
       --fork                             Fork state from remote RPC
       --fork.block <FORK_BLOCK>          Block to fork from (default: latest)
-      --rpc <RPC_URL>                    RPC URL [env: RPC_URL=] [default: http://localhost:8545]
-                                         [aliases: --rpc-url] [compat alias: --fork.rpc]
       --prestate <PRESTATE>              JSON prestate file [aliases: --pre-state]
       --block-hash <BLOCK_HASHES>        BLOCKHASH overrides (repeatable) [aliases: --blockhash]
       --sender.balance <SENDER_BALANCE>  Sender balance (supports suffixes) [aliases: --from.balance]
@@ -201,8 +198,22 @@ State Options:
       --balance <BALANCE>                Set balance: ADDRESS=VALUE (repeatable)
       --storage <STORAGE>                Set storage: ADDRESS:SLOT=VALUE (repeatable)
 
+RPC Options:
+      (On run/tx, --rpc and the --rpc.* cache/retry options take effect only with --fork; otherwise accepted but ignored. Capture/replay fixture flags are replay-command-only.)
+      --rpc <RPC_URL>                    RPC URL (required for --fork; no default, RPC_URL env not used)
+                                         [aliases: --rpc-url] [compat alias: --fork.rpc]
+      --rpc.capture-file <PATH>          (replay command only) capture to fixture; not usable as a run/tx offline path
+      --rpc.replay-file <PATH>           (replay command only) serve from fixture; not usable as a run/tx offline path
+      --rpc.cache-size <N>               In-memory RPC LRU cache size; 0 disables [default: 10000]
+      --rpc.cache-dir <DIR>              Per-chain RPC cache directory (default: platform cache dir)
+      --rpc.no-cache-file                Disable on-disk cache persistence
+      --rpc.clear-cache                  Delete the current chain's cache file before loading
+      --rpc.max-retries <N>              Max transport retries; 0 disables [default: 5]
+      --rpc.backoff-ms <MS>              Fixed retry sleep in ms [default: 1000]
+      --rpc.rate-limit <CU/S>            Retry-layer compute-units-per-second budget [default: 660]
+
 Chain Options:
-      --spec <SPEC>                Spec [default: Rex4]
+      --spec <SPEC>                Spec [default: Rex5]
       --chain-id <CHAIN_ID>       Chain ID [default: 6342] [aliases: --chainid]
 
 Block Options:

@@ -499,9 +499,9 @@ where
                 .borrow_mut()
                 .record_compute_gas(initial_and_floor_gas.initial_gas);
 
-            // MegaETH MiniRex modification: calldata storage gas costs
-            // - Standard tokens: 400 gas per token (vs 4)
-            // - EIP-7623 floor: 100x increase for transaction data floor cost
+            // MegaETH MiniRex modification: calldata storage gas costs (10x the standard EVM rates)
+            // - Standard tokens: 40 gas per token (vs 4)
+            // - EIP-7623 floor: 100 gas per token (vs 10)
             let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
             let calldata_storage_gas =
                 constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * tokens_in_calldata;
