@@ -7,7 +7,14 @@ use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{Bytes, B256};
 use revm::{database::State, inspector::NoOpInspector, Inspector};
 
-use crate::{BlockLimits, MegaBlockExecutor, MegaEvm, MegaHardforks, MegaSpecId, MegaTxEnvelope};
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
+use crate::{
+    BlockLimits, MegaBlockExecutor, MegaEvm, MegaHardforks, MegaSpecId, MegaTxEnvelope,
+    DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS,
+};
 
 /// `MegaETH` block executor factory.
 ///
@@ -190,16 +197,45 @@ pub struct MegaBlockExecutionCtx {
 
     /// The block limits.
     pub block_limits: BlockLimits,
+
+    /// Block numbers for which the block-available-gas check is skipped.
+    ///
+    /// TEMPORARY (private-net hotfix): threaded into the [`crate::BlockLimiter`] at executor
+    /// construction. Defaults to [`DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS`]; downstream
+    /// binaries (rpc-replayer, stateless-validator) override it from their CLI parameter via
+    /// [`Self::with_skip_block_gas_limit_check_blocks`]. See
+    /// [`crate::BlockLimiter::pre_execution_check`] for the exact semantics.
+    pub skip_block_gas_limit_check_blocks: Vec<u64>,
 }
 
 impl MegaBlockExecutionCtx {
     /// Create a new block execution context with default limits.
+    ///
+    /// The block-available-gas skip-set defaults to [`DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS`];
+    /// use [`Self::with_skip_block_gas_limit_check_blocks`] to override it.
     pub fn new(
         parent_hash: B256,
         parent_beacon_block_root: Option<B256>,
         extra_data: Bytes,
         block_limits: BlockLimits,
     ) -> Self {
-        Self { parent_hash, parent_beacon_block_root, extra_data, block_limits }
+        Self {
+            parent_hash,
+            parent_beacon_block_root,
+            extra_data,
+            block_limits,
+            skip_block_gas_limit_check_blocks: DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS.to_vec(),
+        }
+    }
+
+    /// Override the set of block numbers whose block-available-gas check is skipped.
+    ///
+    /// Builder method that consumes `self`. This fully replaces the default
+    /// ([`DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS`]); pass an empty vector to enforce the check
+    /// for every block. The value is threaded into the [`crate::BlockLimiter`] when the executor is
+    /// constructed.
+    pub fn with_skip_block_gas_limit_check_blocks(mut self, blocks: Vec<u64>) -> Self {
+        self.skip_block_gas_limit_check_blocks = blocks;
+        self
     }
 }

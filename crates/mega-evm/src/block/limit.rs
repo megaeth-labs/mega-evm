@@ -185,7 +185,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::boxed::Box;
+use std::{boxed::Box, vec::Vec};
 
 use alloy_consensus::Transaction;
 use alloy_evm::{
@@ -199,6 +199,22 @@ use crate::{
     BlockMegaTransactionOutcome, EvmTxRuntimeLimits, MegaBlockLimitExceededError, MegaHardfork,
     MegaTransactionExt, MegaTxLimitExceededError,
 };
+
+/// Default set of block numbers whose block-available-gas check is skipped.
+///
+/// TEMPORARY (private-net hotfix, revert me): block 21951576 was produced by sequencer v2.0.22
+/// while recovering an incomplete payload without carrying over the prior [`BlockLimiter`]
+/// counters. Its sequencer-sent oracle tx sizes its own gas as `block_gas_limit - block_gas_used`,
+/// so with the counters reset to zero it overshoots the block's actual available gas (observed: tx
+/// gas_limit 1997800000 > available 1996845898). That block is already on-chain, so the stateless
+/// components (rpc-replayer, witness-generator, stateless-validator) must accept it during
+/// replay/validation.
+///
+/// This is the *default* used when a consumer does not configure its own skip-set (see
+/// [`BlockLimiter::with_skip_block_gas_limit_check_blocks`]). Downstream binaries expose a CLI
+/// parameter to override it. Remove this once block 21951576 is past the stateless components'
+/// replay window.
+pub const DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS: &[u64] = &[21951576];
 
 /// Configuration for block-level resource limits. The block-level resource limits are associated
 /// with a specific `MegaHardfork` instead of a `MegaSpecId`. In constrast, `EvmTxRuntimeLimits` is
@@ -609,6 +625,7 @@ impl BlockLimits {
             block_da_size_used: 0,
             block_compute_gas_used: 0,
             block_state_growth_used: 0,
+            skip_block_gas_limit_check_blocks: DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS.to_vec(),
         }
     }
 
@@ -690,6 +707,15 @@ pub struct BlockLimiter {
 
     /// Cumulative state growth consumed by all transactions in the block.
     pub block_state_growth_used: u64,
+
+    /// Block numbers for which the block-available-gas check is skipped.
+    ///
+    /// TEMPORARY (private-net hotfix): see [`DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS`]. When a
+    /// transaction's block height is contained in this set, [`Self::pre_execution_check`] bypasses
+    /// **only** the block-available-gas branch; every other limit check and every other block
+    /// remain fully enforced. Defaults to [`DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS`] and can be
+    /// overridden via [`Self::with_skip_block_gas_limit_check_blocks`].
+    pub skip_block_gas_limit_check_blocks: Vec<u64>,
 }
 
 impl BlockLimiter {
@@ -714,7 +740,21 @@ impl BlockLimiter {
             block_da_size_used: 0,
             block_compute_gas_used: 0,
             block_state_growth_used: 0,
+            skip_block_gas_limit_check_blocks: DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS.to_vec(),
         }
+    }
+
+    /// Override the set of block numbers whose block-available-gas check is skipped.
+    ///
+    /// Builder method that consumes `self` and returns the limiter with the given skip-set. This
+    /// fully replaces the default ([`DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS`]); pass an empty
+    /// vector to enforce the block-available-gas check for every block. Downstream binaries
+    /// (rpc-replayer, stateless-validator) wire their CLI parameter through here. See
+    /// [`Self::pre_execution_check`] for the exact semantics (only the block-available-gas branch
+    /// is bypassed).
+    pub fn with_skip_block_gas_limit_check_blocks(mut self, blocks: Vec<u64>) -> Self {
+        self.skip_block_gas_limit_check_blocks = blocks;
+        self
     }
 
     /// Validate transaction against pre-execution limits.
@@ -739,7 +779,9 @@ impl BlockLimiter {
     /// - `tx_size`: Transaction's encoded size in bytes (EIP-2718 encoding)
     /// - `da_size`: Transaction's compressed data availability size in bytes
     /// - `is_deposit`: Whether the transaction is an L1-to-L2 deposit (exempt from DA size limits)
-    /// - `block_number`: Current block height; used only for the temporary block-21951576 skip
+    /// - `block_number`: Current block height; the block-available-gas check is skipped when this
+    ///   is contained in [`Self::skip_block_gas_limit_check_blocks`] (temporary hotfix, see that
+    ///   field and [`DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS`])
     ///
     /// # Returns
     ///
@@ -797,13 +839,14 @@ impl BlockLimiter {
         // block's actual available gas (observed: tx gas_limit 1997800000 > available 1996845898).
         // That block is already on-chain, so the stateless components (rpc-replayer,
         // witness-generator, stateless-validator) must accept it during replay/validation. Skip
-        // ONLY the block-available-gas check for this single block: every other limit check and
-        // every other block remain fully enforced. The sequencer-side fix is separate. Remove this
-        // once block 21951576 is past the stateless components' replay window. To extend to more
-        // blocks, make this a `&[u64]` and use `.contains(&block_number)`.
-        const SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCK: u64 = 21951576;
-        if block_number != SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCK
-            && self.block_gas_used.saturating_add(gas_limit) > self.limits.block_gas_limit
+        // ONLY the block-available-gas check for the configured blocks: every other limit check and
+        // every other block remain fully enforced. The set defaults to
+        // `DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS` and is overridable by downstream binaries via
+        // `with_skip_block_gas_limit_check_blocks` (wired to their CLI parameter). The
+        // sequencer-side fix is separate. Remove this once the affected blocks are past the
+        // stateless components' replay window.
+        if !self.skip_block_gas_limit_check_blocks.contains(&block_number) &&
+            self.block_gas_used.saturating_add(gas_limit) > self.limits.block_gas_limit
         {
             return Err(BlockExecutionError::Validation(
                 BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
@@ -1094,18 +1137,56 @@ mod tests {
         // (1_996_845_898). The block-available-gas check MUST still reject this for every normal
         // block (here, block 1)...
         let limiter = BlockLimiter::new(limits_with_block_gas(1_996_845_898));
+        assert_eq!(
+            limiter.skip_block_gas_limit_check_blocks, DEFAULT_SKIP_BLOCK_GAS_LIMIT_CHECK_BLOCKS,
+            "a freshly-constructed limiter must default to the hotfix skip-set",
+        );
         assert!(
             limiter.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 1).is_err(),
             "normal blocks must still reject a tx whose gas_limit exceeds available block gas",
         );
 
-        // ...but be bypassed for the single hot-fixed block 21951576 so the stateless components
+        // ...but be bypassed for the default hot-fixed block 21951576 so the stateless components
         // can accept the already-on-chain block. Only the block-available-gas check is skipped;
         // the per-tx gas limit (tx_gas_limit) is left at u64::MAX here, so this still exercises
         // that path passing rather than being disabled.
         assert!(
             limiter.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 21951576).is_ok(),
-            "block 21951576 must bypass ONLY the block-available-gas check",
+            "block 21951576 must bypass ONLY the block-available-gas check by default",
+        );
+    }
+
+    #[test]
+    fn test_pre_execution_check_skip_set_is_configurable() {
+        // An empty skip-set enforces the block-available-gas check for EVERY block, including the
+        // default hotfix block: this is what a downstream caller gets if it explicitly disables the
+        // skip (e.g. `--skip-block-gas-limit-check ""`).
+        let strict = BlockLimiter::new(limits_with_block_gas(1_996_845_898))
+            .with_skip_block_gas_limit_check_blocks(Vec::new());
+        assert!(
+            strict.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 21951576).is_err(),
+            "an empty skip-set must enforce the block-available-gas check for every block",
+        );
+
+        // A custom skip-set bypasses ONLY the configured blocks; it fully replaces the default, so
+        // the previous default (21951576) is enforced again unless it is listed.
+        let custom = BlockLimiter::new(limits_with_block_gas(1_996_845_898))
+            .with_skip_block_gas_limit_check_blocks(std::vec![42, 100]);
+        assert!(
+            custom.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 42).is_ok(),
+            "a configured block must bypass the block-available-gas check",
+        );
+        assert!(
+            custom.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 100).is_ok(),
+            "every configured block must bypass the block-available-gas check",
+        );
+        assert!(
+            custom.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 21951576).is_err(),
+            "a custom skip-set replaces the default: 21951576 is enforced unless re-listed",
+        );
+        assert!(
+            custom.pre_execution_check(B256::ZERO, 1_997_800_000, 0, 0, false, 7).is_err(),
+            "blocks outside the skip-set must still be checked",
         );
     }
 

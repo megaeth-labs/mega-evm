@@ -137,7 +137,12 @@ where
             hardforks: hardforks.clone(),
             receipt_builder,
             receipts: Vec::new(),
-            block_limiter: ctx.block_limits.to_block_limiter(),
+            block_limiter: ctx
+                .block_limits
+                .to_block_limiter()
+                .with_skip_block_gas_limit_check_blocks(
+                    ctx.skip_block_gas_limit_check_blocks.clone(),
+                ),
             ctx,
             evm,
             system_caller: SystemCaller::new(hardforks),
