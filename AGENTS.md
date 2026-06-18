@@ -121,7 +121,7 @@ A transaction can be halted by exceeding either limit.
 
 #### Multidimensional Resource Limits
 
-Beyond the dual gas model, mega-evm enforces **four independent per-transaction resource limits** via `AdditionalLimit` (`limit/mod.rs`):
+Beyond the dual gas model, mega-evm enforces **four independent per-transaction resource limits** via `AdditionalLimit` (`limit/limit.rs`):
 
 - **Compute gas** — Computational opcode cost
 - **Data size** — Calldata + logs + storage writes + code deploy + account updates

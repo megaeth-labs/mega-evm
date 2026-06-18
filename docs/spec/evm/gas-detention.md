@@ -145,6 +145,8 @@ The detained compute gas limit MUST remain in effect for the rest of the transac
 | `ORACLE_DETENTION_CAP`         | 20,000,000 | Relative compute gas cap after oracle storage access                 |
 | `ORACLE_DETENTION_CAP_MINIREX` | 1,000,000  | Historical absolute compute gas cap after oracle access (superseded) |
 
+`BLOCK_ENV_DETENTION_CAP` and `BENEFICIARY_DETENTION_CAP` have the same value: block-environment and beneficiary access are detained at the same level.
+
 ## Rationale
 
 **Why detention instead of outright prohibition?**
