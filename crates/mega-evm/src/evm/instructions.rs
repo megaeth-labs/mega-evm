@@ -1650,7 +1650,13 @@ pub mod storage_gas_ext {
     }
 }
 
-/// Compute gas recording implementation. TODO: add more doc
+/// Per-opcode compute-gas recording wrappers.
+///
+/// Each opcode is wrapped so the compute gas it consumes (`gas_before - gas_after`, minus any
+/// gas forwarded to a child frame for the call/create family) is recorded into the compute-gas
+/// dimension of `AdditionalLimit` after the inner instruction runs. The `wrap_op_compute_gas`
+/// macro below defines the `default` and `@frame` variants; `SELFDESTRUCT` uses a dedicated
+/// wrapper whose trailing check fans out across all four limit dimensions.
 pub mod compute_gas_ext {
     use super::*;
 

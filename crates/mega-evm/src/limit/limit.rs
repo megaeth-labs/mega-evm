@@ -569,6 +569,12 @@ impl AdditionalLimit {
             self.data_size.after_frame_init_on_frame(frame);
             self.kv_update.after_frame_init_on_frame(frame);
             self.compute_gas.after_frame_init_on_frame(frame);
+            // Deliberately no `check_limit()` here: this records the child frame's init growth
+            // (e.g. the CREATE account-info write), but `before_frame_run` runs `check_limit()`
+            // before the frame's first metered opcode executes. Per the Resource-Limit Check
+            // Protocol, that latches any exceed ahead of the first `record_compute_gas`, so a
+            // latch here would be redundant. The deferral is sound only because this fixed
+            // lifecycle order (after_frame_init → before_frame_run → first opcode) is guaranteed.
         } else if let ItemOrResult::Result(result) = init_result {
             // Rescue gas if a TX-level limit was exceeded. This covers the
             // before_frame_init early-return path and any other Result from frame_init.

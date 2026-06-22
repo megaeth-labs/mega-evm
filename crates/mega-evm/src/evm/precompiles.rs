@@ -52,13 +52,14 @@ impl MegaPrecompiles {
         Self { inner: EthPrecompiles { precompiles: inner, spec: spec.into_eth_spec() }, spec }
     }
 
-    /// Get the precompiles for the current spec.
+    /// Returns the static base precompile table selected for this provider's spec.
     ///
-    /// This method returns precompiles with custom gas cost overrides for `MINI_REX` spec.
+    /// The MegaETH precompile gas-cost overrides (the fixed-cost KZG point evaluation and the
+    /// Osaka ModExp schedule) are baked into the table itself by [`mini_rex`] / [`rex`]; the
+    /// per-spec compute-gas accounting and the REX5 forwarded-gas cap are applied separately in
+    /// the `run()` method, not here.
     #[inline]
     pub fn precompiles(&self) -> &'static Precompiles {
-        // For now, just use the inner precompiles
-        // Custom gas costs will be applied in the run() method
         self.inner.precompiles
     }
 }
