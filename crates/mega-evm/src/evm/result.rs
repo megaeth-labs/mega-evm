@@ -44,15 +44,19 @@ pub struct MegaSystemCallOutcome {
 
 /// `MegaETH` transaction validation error type.
 ///
-/// TODO: This is currently a type alias due to constraints from `op_revm::OpHandler`.
-/// `OpHandler` requires `ERROR: From<OpTransactionError>`, but we cannot satisfy this
-/// for `EVMError<DBError, MegaTransactionError>` due to Rust's orphan rules.
+/// Currently a type alias for [`OpTransactionError`], so mega-evm cannot yet surface custom
+/// transaction *validation* error variants — unlike [`MegaHaltReason`], which is already a
+/// `Base(..) + custom` enum.
 ///
-/// To add custom transaction error variants, we need to:
-/// 1. Stop using `OpHandler` directly
-/// 2. Implement all handler methods manually without delegating to `OpHandler`
-/// 3. Then we can use a custom enum like: ``` pub enum MegaTransactionError {
-///    Base(OpTransactionError), CustomVariant, } ```
+/// Why it is blocked: `op_revm::OpHandler` bounds its error type with `From<OpTransactionError>`
+/// and calls `ERROR::from(OpTransactionError::..)` internally. Rust's orphan rules forbid
+/// `impl From<OpTransactionError> for EVMError<DBError, MegaTransactionError>` in this crate
+/// (both `From` and `EVMError` are foreign, and the `DBError` parameter is uncovered).
+///
+/// This does NOT require abandoning `OpHandler`: because `OpHandler<EVM, ERROR, FRAME>` is generic
+/// over `ERROR`, a local newtype error adapter (wrapping `EVMError<DBError, MegaTransactionError>`)
+/// can implement `From<OpTransactionError>` locally and keep delegating to `OpHandler`. See the
+/// `MegaTransactionError` RFC discussion before changing this.
 pub type MegaTransactionError = OpTransactionError;
 
 /// `MegaETH` halt reason type, with additional MegaETH-specific halt reasons.
