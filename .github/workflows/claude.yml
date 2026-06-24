@@ -127,7 +127,7 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
 
             You are a documentation impact checker for the MegaETH specification.
-            Your ONLY job is to determine if this PR's code changes require updates to docs/ or agent files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, bin/mega-evme/AGENTS.md, REVIEW.md, .claude/skills/*/SKILL.md).
+            Your ONLY job is to determine if this PR's code changes require updates to docs/ or agent files (AGENTS.md, CLAUDE.md, docs/AGENTS.md, bin/mega-evme/AGENTS.md, REVIEW.md, CONVENTIONS.md, .claude/skills/*/SKILL.md).
 
             Follow the doc-impact-check skill instructions in .claude/skills/doc-impact-check/SKILL.md.
 

@@ -30,6 +30,7 @@ This is the single most important correctness concern in mega-evm.
 
 ## Design and architecture
 
+- Structural and placement conventions live in [`CONVENTIONS.md`](CONVENTIONS.md) (module layout, file roles, composition idioms, when to add a new file vs. a spec-gated branch, and the smell list). Flag changes that violate them; for repo-level reviews, mine its "Known deviations & improvement backlog" (§8) for cleanup candidates.
 - Respect revm's design patterns — mega-evm customizes revm through its trait hooks, not by replacing its abstractions.
 - `no_std` compatibility must be maintained in the `mega-evm` crate — no direct `std::` usage.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;`.

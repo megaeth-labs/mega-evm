@@ -72,6 +72,8 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 
 ### Core Source Layout (`crates/mega-evm/src/`)
 
+For the cross-cutting structure and taste conventions — where logic belongs, file-role conventions, when to add a new file vs. extend an existing one, composition idioms, smells to avoid, and the known-deviations backlog — see [`CONVENTIONS.md`](CONVENTIONS.md).
+
 - **`evm/`** — Core mega-evm logic: spec definitions, context, factory, execution pipeline, modified opcodes (LOG, SELFDESTRUCT), host hooks, precompiles.
   This module collects all our modifications and customizations of EVM's behavior for mega-evm based on the revm.
 - **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement, and the canonical per-chain hardfork schedules.
