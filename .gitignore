@@ -5,3 +5,6 @@
 /mutants.out*
 
 *.log
+
+# Python bytecode cache (scripts/)
+__pycache__/
