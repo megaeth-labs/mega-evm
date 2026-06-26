@@ -4,6 +4,7 @@
 //! by fetching them from an RPC endpoint and re-executing them.
 
 mod cmd;
+mod fixture;
 mod hardforks;
 
 pub use cmd::Cmd;

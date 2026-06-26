@@ -4,10 +4,12 @@
 System contract integration layer with canonical addresses, deployment transactions, and frame-init interception logic.
 
 ## STRUCTURE
-- `oracle.rs`: oracle contract address, code constants, deployment helper.
-- `keyless_deploy.rs`: keyless deploy address, code constants, deployment helper.
-- `control.rs`: MegaAccessControl address, selectors, deployment helper, revert payload builders.
-- `limit_control.rs`: MegaLimitControl address and deployment helper.
+- `deploy.rs`: shared deployment primitive — declarative `SystemContractSpec`, the uniform `transact_deploy` state patch, and the `flat_system_contract_specs()` registry of all flat (storage-less) contracts.
+- `oracle.rs`: oracle contract address, code constants, spec builder.
+- `keyless_deploy.rs`: keyless deploy address, code constants, spec builder.
+- `control.rs`: MegaAccessControl address, selectors, spec builder, revert payload builders.
+- `limit_control.rs`: MegaLimitControl address and spec builder.
+- `sequencer_registry.rs`: SequencerRegistry address, seeded deploy, role-change application, system-address resolution.
 - `intercept.rs`: interceptor dispatch and synthetic frame-result handling.
 - `tx.rs`: helpers for system/deposit-like transaction construction.
 
@@ -46,7 +48,8 @@ The counterpart block-executor side (collection, `on_state`, commit order) is do
 - Do not return `None` from a helper on a "no change needed" path. Return `Some(EvmState)` with the account entries observed, even when nothing is written.
 
 ## WHERE TO LOOK
-- Add a new system contract deployment: new `<name>.rs` + hook call in `block/executor.rs::pre_execution_changes`.
+- Add a new flat (storage-less) system contract deployment: new `<name>.rs` with a `<name>_spec()` builder, registered in `deploy.rs::flat_system_contract_specs()`.
+- Add a stateful system contract with bespoke deploy logic (seeded storage, migration guards): own `transact_deploy_*` helper called from `block/executor.rs::pre_execution_changes` — see `sequencer_registry.rs`.
 - Add interceptor method behavior: `intercept.rs` for decode/dispatch and revert policy.
 - Change access-control volatile disable semantics: `control.rs` + `intercept.rs` + `access/tracker.rs`.
 - Change keyless deploy interception entrypoint: `intercept.rs` and `keyless_deploy.rs`.

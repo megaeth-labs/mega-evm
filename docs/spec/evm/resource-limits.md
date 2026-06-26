@@ -1,6 +1,6 @@
 ---
 description: MegaETH per-transaction and per-block resource limits — compute gas, data size, KV updates, and state growth ceilings with enforcement semantics.
-spec: Rex4
+spec: Rex5
 ---
 
 # Multidimensional Resource Limits
@@ -97,6 +97,13 @@ If any runtime transaction-level limit is exceeded during execution, the transac
 
 The failed transaction's actual resource usage MUST still count toward the block's cumulative resource counters.
 
+#### Precompile Compute-Gas Bound
+
+A precompile invocation's compute-gas consumption MUST be bounded by the compute gas remaining in the current call frame.
+A node MUST cap the gas forwarded into a precompile at the minimum of the caller-supplied call gas limit and the remaining compute-gas budget, so a precompile cannot consume more compute gas than remains.
+A precompile whose minimum cost exceeds that cap MUST fail without performing its computation, halting with `PrecompileOOG`.
+On successful or reverting precompile returns, the caller's gas-refund accounting MUST reflect the originally forwarded gas limit minus the precompile's actual spent gas, so the cap does not alter the caller's observed refund on non-halting returns.
+
 ### Runtime Block-Level Limits
 
 A node MUST maintain cumulative block counters for:
@@ -144,15 +151,16 @@ Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains und
 If a child call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 The parent call frame MAY continue execution.
 
-The top-level call frame's budget MUST equal the transaction limit minus any intrinsic resource usage already recorded before the first frame begins.
-Each resource dimension deducts only the intrinsic items relevant to it:
+The top-level call frame's budget MUST equal the transaction limit minus any resource usage already recorded before the first frame begins.
+These deductions include transaction-only intrinsic usage and any DB-dependent pre-execution usage that is resolved before the first frame starts.
+Each resource dimension deducts only the pre-frame items relevant to it:
 
 - **Data size** — base transaction data (110 bytes), calldata byte length, access-list entry sizes, EIP-7702 authorization records, and the caller account update.
 - **KV updates** — EIP-7702 authority account updates and the caller account update.
-- **State growth** — no intrinsic deduction.
+- **State growth** — valid EIP-7702 authorizations that create previously non-existent authority accounts, resolved during pre-execution.
 - **Compute gas** — standard EVM transaction intrinsic gas (not enumerated here; see EIP-2028 and related specs).
 
-This deduction ensures that intrinsic costs reduce the budget available to the first call frame, preventing transactions from front-loading intrinsic usage to escape per-frame limits.
+These deductions ensure that pre-frame costs reduce the budget available to the first call frame, preventing transactions from front-loading pre-frame usage to escape per-frame limits.
 
 ## Constants
 
@@ -187,6 +195,10 @@ Allowing the first over-limit transaction to be included maximizes block utiliza
 Cumulative block compute gas is already indirectly constrained by the block gas limit.
 The stable protocol therefore does not need a second independent block-level compute gas ceiling.
 
+**Why cap precompile gas at the remaining compute-gas budget?**
+A precompile whose natural cost exceeds the remaining compute-gas budget would otherwise execute fully and overshoot the budget, with the overshoot detected only after the work was already performed.
+Capping the forwarded gas at the remaining compute-gas budget converts that overshoot into a fail-fast `PrecompileOOG` before the computation runs, keeping the compute-gas limit enforceable for precompile work as well as ordinary opcodes.
+
 ## Security Considerations
 
 **If a transaction that exceeds a runtime limit is excluded from the block rather than included as failed**, an attacker can force the sequencer to execute expensive but failing transactions at no cost — the sender never pays because the transaction is dropped.
@@ -198,3 +210,4 @@ Including failed transactions ensures the sender always pays for consumed resour
 - [Rex](../upgrades/rex.md) changed the stable runtime transaction-level limits to `TX_COMPUTE_GAS_LIMIT = 200,000,000`, `TX_DATA_LIMIT = 13,107,200`, `TX_KV_UPDATE_LIMIT = 500,000`, and introduced state-growth limits.
 - [Rex3](../upgrades/rex3.md) retained the stable resource-limit set.
 - [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource costs (always deducted before execution) are now reflected in the top-level frame budget before it is forwarded to child frames.
+- [Rex5](../upgrades/rex5.md) — bounded a precompile invocation's compute-gas consumption by the remaining compute-gas budget, failing the precompile with `PrecompileOOG` rather than letting it overshoot the budget.

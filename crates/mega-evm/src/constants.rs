@@ -133,9 +133,10 @@ pub mod rex4 {
 /// Constants for the `REX5` spec.
 pub mod rex5 {
     /// Floor for the gas limit assigned to REX5 pre-block system calls that opt
-    /// into the live block gas budget — currently only
-    /// `SequencerRegistry.applyPendingChanges()` via
-    /// [`crate::MegaEvm::transact_system_call_with_gas_limit`].
+    /// into the live block gas budget via
+    /// [`crate::MegaEvm::transact_system_call_with_gas_limit`] — currently the
+    /// `SequencerRegistry.applyPendingChanges()`, EIP-2935 history-storage, and
+    /// EIP-4788 beacon-roots pre-block calls.
     ///
     /// The value (30M) matches the historical revm system-call default at the
     /// time REX5 was specified — see the `gas_limit(30_000_000)` literal in

@@ -6,7 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "The utility to run Ethereum State Tests for mega-evm"
+description = "CLI to run Ethereum State Tests for mega-evm"
+# The runner library lives in the published `mega-state-test` crate; this CLI is
+# a thin front-end and is not published.
+publish = false
 
 [lints]
 workspace = true
@@ -16,22 +19,9 @@ name = "state-test"
 path = "src/main.rs"
 
 [dependencies]
-mega-evm = { workspace = true, features = ["default"] }
-
-# alloy
-alloy-eips = { workspace = true, features = ["serde"] }
-alloy-primitives.workspace = true
-alloy-rlp.workspace = true
-alloy-serde.workspace = true
+mega-evm = { workspace = true, features = ["default", "test-utils"] }
+mega-state-test.workspace = true
 
 # misc
 clap = { workspace = true, features = ["default"] }
-hash-db.workspace = true
-indicatif.workspace = true
-k256.workspace = true
-plain_hasher.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
-triehash.workspace = true
-walkdir.workspace = true

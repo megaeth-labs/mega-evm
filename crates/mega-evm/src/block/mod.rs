@@ -91,6 +91,7 @@
 //! - Support for parallel execution through access tracking
 //! - Optimized gas calculations for modified opcodes
 
+mod chain;
 mod eips;
 mod executor;
 mod factory;
@@ -99,6 +100,7 @@ mod helpers;
 mod limit;
 mod result;
 
+pub use chain::*;
 pub use executor::*;
 pub use factory::*;
 pub use hardfork::*;

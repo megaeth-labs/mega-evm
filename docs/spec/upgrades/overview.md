@@ -104,11 +104,29 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 ### [Rex4](rex4.md)
 
+{% tabs %}
+{% tab title="Testnet" %}
+`1776400000` (Apr 17, 2026, 04:26 UTC)
+{% endtab %}
+{% tab title="Mainnet" %}
+`1776659200` (Apr 20, 2026, 04:26 UTC)
+{% endtab %}
+{% endtabs %}
+
 Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, [storage gas stipend](../glossary.md#storage-gas-stipend), MegaAccessControl, MegaLimitControl, sandbox environment inheritance.
 
-### [Rex5](rex5.md) _(unstable)_
+### [Rex5](rex5.md)
 
-[SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection.
+{% tabs %}
+{% tab title="Testnet" %}
+`1780459200` (Jun 3, 2026, 04:00 UTC)
+{% endtab %}
+{% tab title="Mainnet" %}
+`1780632000` (Jun 5, 2026, 04:00 UTC)
+{% endtab %}
+{% endtabs %}
+
+[SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [storage gas stipend](../glossary.md#storage-gas-stipend) separated-allowance model, value-transfer CALL/CALLCODE parent [compute gas](../glossary.md#compute-gas) attribution, CREATE code-deposit compute-gas atomicity, EIP-2935/EIP-4788 pre-block gas floor with fail-closed block rejection, CREATE2 empty-initcode short-circuit, [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection, sandbox resource accounting, and empty-code log forwarding, precompile compute gas correction, EIP-7702 [state growth](../evm/resource-accounting.md#state-growth) tracking, non-delegating metering inspection, SELFDESTRUCT beneficiary accounting.
 
 ## How to Read These Pages
 

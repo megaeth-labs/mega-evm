@@ -67,9 +67,13 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     /// and volatile data access disable (`MegaAccessControl` system contract).
     pub volatile_data_tracker: Rc<RefCell<VolatileDataAccessTracker>>,
 
-    /// Whether sandbox interception is disabled for this context.
-    /// Set to `true` to prevent recursive sandbox creation (e.g., keyless deploy).
-    pub(crate) disable_sandbox: Rc<RefCell<bool>>,
+    /// Set to `true` when this context is itself a sandbox execution.
+    ///
+    /// Suppresses sandbox interception (preventing recursive sandboxing) and signals other
+    /// Mega hooks to defer to outer-frame accounting (e.g., the Rex5+ deposit-caller
+    /// materialization charge in `validate`, which is paid by the outer keyless-deploy call
+    /// before the sandbox runs).
+    pub(crate) inside_sandbox: Rc<RefCell<bool>>,
 
     /// The system address for the current block.
     /// Pre-REX5: always `MEGA_SYSTEM_ADDRESS` (the legacy hardcoded constant).
@@ -154,7 +158,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
                 tx_limits.block_env_access_compute_gas_limit,
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
-            disable_sandbox: Rc::new(RefCell::new(false)),
+            inside_sandbox: Rc::new(RefCell::new(false)),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -217,7 +221,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                 tx_limits.block_env_access_compute_gas_limit,
                 tx_limits.oracle_access_compute_gas_limit,
             ))),
-            disable_sandbox: Rc::new(RefCell::new(false)),
+            inside_sandbox: Rc::new(RefCell::new(false)),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
             inner,
         }
@@ -245,7 +249,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             dynamic_storage_gas_cost: self.dynamic_storage_gas_cost,
             oracle_env: self.oracle_env,
             volatile_data_tracker: self.volatile_data_tracker,
-            disable_sandbox: self.disable_sandbox,
+            inside_sandbox: self.inside_sandbox,
             system_address: self.system_address,
         }
     }
@@ -349,7 +353,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             oracle_env: Rc::new(RefCell::new(external_envs.oracle_env)),
             volatile_data_tracker: self.volatile_data_tracker,
-            disable_sandbox: self.disable_sandbox,
+            inside_sandbox: self.inside_sandbox,
             system_address: self.system_address,
         }
     }
@@ -408,27 +412,28 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.system_address = address;
     }
 
-    /// Returns whether sandbox interception is disabled for this context.
+    /// Returns whether this context is itself a sandbox execution.
     ///
-    /// When `true`, sandbox interception (e.g., keyless deploy) is disabled to prevent
-    /// infinite recursion during sandbox execution.
+    /// When `true`, sandbox interception (e.g., keyless deploy) is suppressed to prevent
+    /// recursive sandboxing, and Mega hooks defer to outer-frame accounting (e.g., the
+    /// Rex5+ deposit-caller materialization charge in `validate`).
     #[inline]
-    pub fn is_sandbox_disabled(&self) -> bool {
-        *self.disable_sandbox.borrow()
+    pub fn is_inside_sandbox(&self) -> bool {
+        *self.inside_sandbox.borrow()
     }
 
-    /// Sets whether sandbox interception is disabled for this context.
+    /// Sets whether this context is itself a sandbox execution.
     #[inline]
-    pub(crate) fn set_sandbox_disabled(&self, value: bool) {
-        *self.disable_sandbox.borrow_mut() = value;
+    pub(crate) fn set_inside_sandbox(&self, value: bool) {
+        *self.inside_sandbox.borrow_mut() = value;
     }
 
-    /// Builder method to disable sandbox interception.
+    /// Builder method to mark this context as itself a sandbox execution.
     ///
-    /// Used when creating sandbox contexts to prevent recursive interception.
+    /// Used when constructing a sandbox's own context to prevent recursive interception.
     #[inline]
-    pub fn with_sandbox_disabled(self, value: bool) -> Self {
-        self.set_sandbox_disabled(value);
+    pub fn with_inside_sandbox(self, value: bool) -> Self {
+        self.set_inside_sandbox(value);
         self
     }
 
@@ -565,10 +570,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// This method is called when starting a new transaction and resets
     /// block environment access tracking and additional limits.
     ///
-    /// If intrinsic resource usage exceeds a configured limit, `before_tx_start()`
-    /// sets `has_exceeded_limit` so that the subsequent `frame_result_if_exceeding_limit()`
-    /// or `before_frame_init()` call produces a normal execution failure on the standard
-    /// additional-limit path.
+    /// If transaction-only intrinsic resource usage exceeds a configured limit,
+    /// `before_tx_start()` sets `has_exceeded_limit` so that the subsequent
+    /// `frame_result_if_exceeding_limit()` or `before_frame_init()` call produces a normal
+    /// execution failure on the standard additional-limit path.
+    ///
+    /// DB-dependent pre-frame usage may still be recorded later during pre-execution.
     pub(crate) fn on_new_tx(&mut self) {
         self.reset_volatile_data_access();
 
@@ -815,7 +822,7 @@ mod tests {
             )
             .with_block(parent.block().clone())
             .with_chain(parent.chain().clone())
-            .with_sandbox_disabled(true);
+            .with_inside_sandbox(true);
         sandbox
             .dynamic_storage_gas_cost
             .borrow_mut()

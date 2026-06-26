@@ -26,7 +26,9 @@ interface IKeylessDeploy {
     /// @notice Failed to recover signer from signature (invalid signature).
     error InvalidSignature();
 
-    /// @notice The signer does not have enough balance to cover gas + value.
+    /// @notice The signer does not have enough balance to cover the sandbox transaction's
+    ///         pre-execution debit. Pre-Rex5 specs require `gas_limit × gas_price + value`;
+    ///         Rex5+ requires `value` only because the sandbox transaction runs fee-free.
     error InsufficientBalance();
 
     /// @notice The deploy address already has code (contract already exists).
@@ -44,6 +46,16 @@ interface IKeylessDeploy {
     /// @notice The sandbox execution halted (out of gas, stack overflow, etc.).
     /// @param gasUsed The amount of gas used before halting.
     error ExecutionHalted(uint64 gasUsed);
+
+    /// @notice Rex5 preflight rejected the call because the parent transaction's remaining budget
+    ///         for a resource dimension is smaller than the sandbox's known pre-frame intrinsic usage.
+    /// @dev Emitted as a Revert by the Rust interceptor when the preflight check fails.
+    ///      Not used by the on-chain KeylessDeploy bytecode.
+    /// @param kind The resource dimension that exceeded (0=DataSize, 1=KVUpdate, 2=ComputeGas,
+    ///        3=StateGrowth).
+    /// @param limit The parent's remaining limit for that dimension.
+    /// @param used The sandbox's known pre-frame intrinsic usage for that dimension.
+    error ParentBudgetExceeded(uint8 kind, uint64 limit, uint64 used);
 
     /// @notice Contract creation succeeded but returned empty bytecode.
     /// @param gasUsed The amount of gas used.
@@ -69,9 +81,34 @@ interface IKeylessDeploy {
     /// @param used The compute gas usage.
     error InsufficientComputeGas(uint64 limit, uint64 used);
 
-    /// @notice Internal error during sandbox execution.
-    /// @param message The error message.
-    error InternalError(string message);
+    /// @notice The init code of the keyless deployment transaction exceeds the configured
+    ///         maximum initcode size for the current spec.
+    /// @dev REX5+: enforced by the Rust interceptor before the sandbox is constructed, because
+    ///      the deposit-style sandbox bypasses op-revm's `validate_env` (which would otherwise
+    ///      apply the same limit via revm's EIP-3860 check).
+    /// @param size The init code length in bytes.
+    /// @param max The configured maximum init code size (from `cfg().max_initcode_size()`).
+    error InitCodeTooLarge(uint64 size, uint64 max);
+
+    /// @notice The recovered signer of the keyless deployment transaction has non-empty,
+    ///         non-EIP-7702 code in parent state, so it cannot originate transactions per
+    ///         EIP-3607.
+    /// @dev REX5+: enforced by the Rust interceptor because the deposit-style sandbox
+    ///      bypasses op-revm's `validate_account_nonce_and_code` check.
+    error SignerHasCode();
+
+    /// @notice Internal sandbox failure (DB I/O, header validation, etc.).
+    /// @dev Selector-only: precompile return data is consensus-affecting, so the wire
+    ///      must not pin consensus to upstream revm/op-revm `Display` impls.
+    error InternalError();
+
+    /// @notice Sandbox rejected the inner transaction as a tx-validation error — any
+    /// `IsTxError::is_tx_error() == true` outcome of the sandbox `transact_raw` call.
+    /// Behaviorally identical to `InternalError` (outer call reverts, signer is not
+    /// charged because `pre_execution()` never ran); a dedicated selector lets
+    /// relayer-side decoders distinguish this from a genuine internal failure.
+    /// @dev Selector-only for the same consensus-decoupling reason as `InternalError`.
+    error InvalidTransaction();
 
     /// @notice The call was not intercepted by the EVM (called on unsupported network).
     error NotIntercepted();
@@ -97,5 +134,6 @@ interface IKeylessDeploy {
     ///         Execution errors (ExecutionReverted, ExecutionHalted, EmptyCodeDeployed) return
     ///         success with errorData populated. Validation errors revert the entire call.
     function keylessDeploy(bytes calldata keylessDeploymentTransaction, uint256 gasLimitOverride)
-        external returns (uint64 gasUsed, address deployedAddress, bytes memory errorData);
+        external
+        returns (uint64 gasUsed, address deployedAddress, bytes memory errorData);
 }

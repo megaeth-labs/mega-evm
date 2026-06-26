@@ -1,6 +1,6 @@
 ---
 description: High-Precision Timestamp system contract — sub-second timestamp oracle service backed by Oracle storage.
-spec: Rex4
+spec: Rex5
 ---
 
 # High-Precision Timestamp
@@ -24,23 +24,27 @@ The High-Precision Timestamp contract MUST exist at `HIGH_PRECISION_TIMESTAMP_AD
 
 ### Interface
 
-The contract MUST expose the following interface:
+The contract MUST expose the following methods:
 
 ```solidity
 interface IHighPrecisionTimestamp {
     function timestamp() external view returns (uint256);
-    function update(uint256 index) external;
-    function oracle() external view returns (address);
-    function baseSlot() external view returns (uint256);
-    function maxSlots() external view returns (uint32);
+    function update(uint256 ts) external;
+    function ORACLE_CONTRACT_ADDRESS() external view returns (address);
+    function ALLOCATION_START() external view returns (uint256);
+    function ALLOCATION_SIZE() external view returns (uint32);
 }
 ```
 
-`oracle()` MUST return `ORACLE_CONTRACT_ADDRESS`.
-`baseSlot()` MUST return `TIMESTAMP_BASE_SLOT`.
-`maxSlots()` MUST return `TIMESTAMP_MAX_SLOTS`.
-
 The `timestamp()` method MUST return the value stored at Oracle slot `TIMESTAMP_BASE_SLOT`, interpreted as a `uint256` number of microseconds since Unix epoch.
+
+The `update(uint256 ts)` method is not a usable on-chain write path under the canonical configuration.
+It forwards to the [Oracle](oracle.md) `setSlot`, which authorizes the _immediate_ caller against the current [system address](system-tx.md); because the immediate caller is the timestamp contract itself, an on-chain `update` commits only if the system address has been set to `HIGH_PRECISION_TIMESTAMP_ADDRESS`, and otherwise reverts.
+Under the canonical configuration the system address is the sequencer, not the timestamp contract, so `update` reverts and the current timestamp value is instead maintained by the sequencer writing the per-transaction snapshot directly to Oracle storage (see [Service Semantics](#service-semantics)).
+
+`ORACLE_CONTRACT_ADDRESS()` MUST return `ORACLE_CONTRACT_ADDRESS`.
+`ALLOCATION_START()` MUST return `TIMESTAMP_BASE_SLOT`.
+`ALLOCATION_SIZE()` MUST return `TIMESTAMP_MAX_SLOTS`.
 
 ### Storage Layout
 
