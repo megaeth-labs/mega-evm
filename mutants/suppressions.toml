@@ -244,3 +244,56 @@ file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs at len == 16, where both the mid branch (front | (back<<64)) and the large branch (read_last_u128, with no loop pass since 16 is not > 16) feed the identical le_u128(bytes[0..16]) to a single large_update. Same buffer, same bucket id; no input distinguishes them. The line-108 and line-112 mutants sharing this text are non-equivalent and are caught by the len-8 / len-32 tests."
 reviewer = "improve-mutation-score"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# spec-gate operator survivors (universalmutator + comby; scripts/umutate.py).
+#
+# Equivalent mutants of backward-compat spec gates in src/limit/. The one real
+# survivor (limit.rs:203) is closed behaviorally by
+# `test_intrinsic_check_for_tx_requires_rex5_spec`. The state_growth entries use
+# the full `file:line:col:` form because three sites share identical source text.
+
+# --- data_size.rs:173 defensive invariant guard (equivalent) -----------------
+[[suppress]]
+kind = "line"
+file = "crates/mega-evm/src/limit/data_size.rs"
+mutant = "spec-gate rex5_enabled: spec.is_enabled(MegaSpecId::REX5), -> rex5_enabled: spec.is_enabled(MegaSpecId::REX4),"
+justification = "Equivalent: rex5_enabled only feeds the debug_assert! at data_size.rs:173, which executes only inside the `used > limit` branch with an active frame — a TX-level data-size exceed while a frame is live. Pre-REX5 that state is unreachable in valid execution (before_tx_start, the only mid-execution tx_entry writer, runs before any frame; an exceed there halts before a frame is pushed). Relaxing the guard to REX4 cannot change behavior on any reachable input."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- frame_limit.rs:113 per-frame derivation gate (equivalent: coupled) -------
+[[suppress]]
+kind = "line"
+file = "crates/mega-evm/src/limit/frame_limit.rs"
+mutant = "spec-gate rex4_enabled: spec.is_enabled(MegaSpecId::REX4), -> rex4_enabled: spec.is_enabled(MegaSpecId::REX3),"
+justification = "Equivalent (coupled gates): frame_limit rex4_enabled gates only per-frame limit DERIVATION (push_call_frame_info, line 339). ENFORCEMENT (exceeds_current_frame_limit) is gated separately on each dimension's own REX4 check. Shifting derivation to REX3 sets per-frame limits that no dimension checks at REX3 — their checks stay TX-level — so net_usage and every limit outcome are unchanged."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- state_growth.rs REX4 per-frame gates (equivalent: coupled/REX5-only) -----
+[[suppress]]
+kind = "line"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+mutant = "crates/mega-evm/src/limit/state_growth.rs:121:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Equivalent (coupled): push_frame shifted to REX3 derives per-frame state-growth limits at REX3, but check_limit (line 206, unmutated) skips the per-frame check pre-REX4 and uses TX-level net_usage only. The derived frame limits are never read, so no observable change."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+mutant = "crates/mega-evm/src/limit/state_growth.rs:206:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Equivalent (coupled): check_limit shifted to REX3 runs the per-frame check at REX3, but push_frame (line 121, unmutated) pushes frames with u64::MAX limit pre-REX4, so exceeds_current_frame_limit never fires and control falls through to the identical TX-level check."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Equivalent: current_call_remaining is only read when building a child sandbox budget (sandbox/execution.rs:1037, KeylessDeploy, REX5+); it is never called at REX3/REX4. And at REX3 frames carry u64::MAX limits (push_frame, line 121), so frame_remaining.min(tx_remaining) == tx_remaining regardless."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
+justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs:1037). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
+reviewer = "improve-mutation-score (William Aaron Cheung)"

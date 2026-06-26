@@ -70,11 +70,15 @@ def cmd_report(args: argparse.Namespace) -> int:
     timeout = read_lines(results / "timeout.txt")
 
     _, line_supp = load_suppressions(Path(args.suppressions)) if args.suppressions else ([], [])
-    supp_bodies = {e["mutant"].strip() for e in line_supp if "mutant" in e}
+    # A line suppression matches either the bare mutation text (`mutant` written
+    # without a locator) or the full `file:line:col: text` line. The latter lets
+    # two mutants that share identical source text be suppressed independently.
+    supp = {e["mutant"].strip() for e in line_supp if "mutant" in e}
 
     suppressed, real_survivors = [], []
     for m in missed:
-        (suppressed if mutant_body(m) in supp_bodies else real_survivors).append(m)
+        matched = m in supp or mutant_body(m) in supp
+        (suppressed if matched else real_survivors).append(m)
 
     viable = len(caught) + len(missed)
     scored = viable - len(suppressed)  # equivalents/dead-code excluded from denominator
