@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Score and gate a cargo-mutants run for mega-evm.
+
+Two subcommands:
+
+  exclude-re  --suppressions <toml>
+        Print one `--exclude-re <regex>` pair per line for every function-scoped
+        suppression. Consumed by scripts/mutation_test.sh so suppressed
+        functions are never generated as mutants.
+
+  report      --results <mutants.out dir> [--suppressions <toml>]
+              [--comment <path>] [--summary <path>]
+        Read the run outcomes, apply line-scoped suppressions, compute the
+        mutation score, write a Markdown report, and exit non-zero if any
+        unsuppressed survivor remains (the "no new survivors" gate).
+
+The gate is intended to run diff-scoped (cargo mutants --in-diff), so every
+mutant it sees lives on a line the PR changed; an unsuppressed survivor there is
+a test gap the PR introduced.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+
+def load_suppressions(path: Path) -> tuple[list[dict], list[dict]]:
+    """Return (function_scoped, line_scoped) suppression entries."""
+    if not path or not path.exists():
+        return [], []
+    data = tomllib.loads(path.read_text())
+    entries = data.get("suppress", [])
+    func = [e for e in entries if e.get("kind") == "function"]
+    line = [e for e in entries if e.get("kind") == "line"]
+    return func, line
+
+
+def cmd_exclude_re(args: argparse.Namespace) -> int:
+    func, _ = load_suppressions(Path(args.suppressions))
+    for e in func:
+        pattern = e.get("pattern")
+        if not pattern:
+            print(f"suppression for {e.get('file', '?')} missing 'pattern'", file=sys.stderr)
+            return 1
+        # Emitted as two lines so `mapfile` in the driver yields separate argv items.
+        print("--exclude-re")
+        print(pattern)
+    return 0
+
+
+def read_lines(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
+
+
+def mutant_body(line: str) -> str:
+    """Strip the leading 'file:line:col: ' locator, leaving the mutation text."""
+    parts = line.split(": ", 1)
+    return parts[1] if len(parts) == 2 else line
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    results = Path(args.results)
+    missed = read_lines(results / "missed.txt")
+    caught = read_lines(results / "caught.txt")
+    unviable = read_lines(results / "unviable.txt")
+    timeout = read_lines(results / "timeout.txt")
+
+    _, line_supp = load_suppressions(Path(args.suppressions)) if args.suppressions else ([], [])
+    supp_bodies = {e["mutant"].strip() for e in line_supp if "mutant" in e}
+
+    suppressed, real_survivors = [], []
+    for m in missed:
+        (suppressed if mutant_body(m) in supp_bodies else real_survivors).append(m)
+
+    viable = len(caught) + len(missed)
+    scored = viable - len(suppressed)  # equivalents/dead-code excluded from denominator
+    killed = len(caught)
+    score = (killed / scored * 100.0) if scored else 100.0
+    gate_pass = not real_survivors
+
+    # ---- Markdown report (PR comment + step summary) ----
+    status = "✅ PASS" if gate_pass else "❌ FAIL"
+    md = [
+        f"## 🧬 Mutation testing — {status}",
+        "",
+        f"**Diff mutation score: {score:.1f}%** ({killed}/{scored} viable mutants killed)",
+        "",
+        f"- caught: {len(caught)}",
+        f"- survived (real gaps): **{len(real_survivors)}**",
+        f"- suppressed (equivalent/dead-code): {len(suppressed)}",
+        f"- unviable: {len(unviable)} · timeout: {len(timeout)}",
+        "",
+    ]
+    if real_survivors:
+        md += [
+            "### Survivors needing attention",
+            "",
+            "Each mutation below changed the code but **no test failed**. Add a test "
+            "that kills it, or — if it is provably equivalent/dead — add a justified "
+            "entry to `mutants/suppressions.toml`.",
+            "",
+        ]
+        md += [f"- `{m}`" for m in real_survivors]
+        md += ["", "_Tip: run `/improve-mutation-score` to triage and fix these._"]
+    else:
+        md.append("No new test gaps introduced by this change. 🎉")
+    report = "\n".join(md) + "\n"
+
+    if args.comment:
+        Path(args.comment).write_text(report)
+    if args.summary:
+        with open(args.summary, "a") as fh:
+            fh.write(report)
+    print(report)
+
+    return 0 if gate_pass else 1
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pe = sub.add_parser("exclude-re")
+    pe.add_argument("--suppressions", required=True)
+    pe.set_defaults(func=cmd_exclude_re)
+
+    pr = sub.add_parser("report")
+    pr.add_argument("--results", required=True)
+    pr.add_argument("--suppressions", default=None)
+    pr.add_argument("--comment", default=None, help="write Markdown report here")
+    pr.add_argument("--summary", default=None, help="append report here (GITHUB_STEP_SUMMARY)")
+    pr.set_defaults(func=cmd_report)
+
+    args = p.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

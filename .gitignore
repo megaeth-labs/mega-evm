@@ -1,1 +1,7 @@
 /target
+
+# cargo-mutants run artifacts (regenerable; the curated inputs live in
+# mutants/, .cargo/mutants.toml, and scripts/). See mutants/README.md.
+/mutants.out*
+
+*.log
