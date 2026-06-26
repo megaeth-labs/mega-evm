@@ -150,7 +150,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
     }
 
     fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
-        if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
+        // The oracle-contract predicate is path-invariant across this function: `spec` (a `Copy`
+        // field) is never written here, `address` is a `Copy` parameter never reassigned, and the
+        // only intervening mutation (`self.inner.sload`) borrows the disjoint `inner` field. So we
+        // evaluate it once and reuse it for the tail cold-access fix-up, avoiding a redundant
+        // second `spec`/`address` compare (and an identity `Option::map`) on the hot non-oracle
+        // SLOAD path.
+        let is_oracle =
+            self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS;
+        if is_oracle {
             // Rex3+: Mark oracle access for gas detention on SLOAD rather than CALL.
             // The actual gas limit enforcement happens in the SLOAD instruction wrapper
             // (detain_gas_ext::sload in instructions.rs).
@@ -170,17 +178,24 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             }
         }
         let state_load = self.inner.sload(address, key);
-        state_load.map(|mut state_load| {
-            if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
+        // Pin the path-invariant: nothing between the hoist and here can flip the predicate.
+        debug_assert_eq!(
+            is_oracle,
+            self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS,
+        );
+        if is_oracle {
+            state_load.map(|mut state_load| {
                 // It is indistinguishable to tell whether a storage access of oracle contract is
                 // warm or not even if it is loaded from the inner journal state. This is because
                 // the current execution may be a replay of existing blocks and we cannot know
                 // whether the payload builder read from the oracle_env or not. So we force such
                 // sload always to be cold access to ensure consistent gas cost.
                 state_load.is_cold = true;
-            }
+                state_load
+            })
+        } else {
             state_load
-        })
+        }
     }
 
     fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
