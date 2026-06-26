@@ -119,10 +119,10 @@ fn block_limits_from_rex_sets_all_three_block_fields() {
     assert_eq!(limits.block_gas_limit, 50_000_000, "block gas limit not applied");
 }
 
-/// For the `MiniRex` arm, `block_txs_data_limit` and `block_kv_update_limit` are set to the `MiniRex`
-/// constants while `block_state_growth_limit` stays at the `no_limits()` default (`u64::MAX`).
-/// Asserting the exact data/kv values kills the field-deletion mutants on lines 405/406; the
-/// state-growth assertion pins the arm's distinct shape.
+/// For the `MiniRex` arm, `block_txs_data_limit` and `block_kv_update_limit` are set to the
+/// `MiniRex` constants while `block_state_growth_limit` stays at the `no_limits()` default
+/// (`u64::MAX`). Asserting the exact data/kv values kills the field-deletion mutants on lines
+/// 405/406; the state-growth assertion pins the arm's distinct shape.
 #[test]
 fn block_limits_from_mini_rex_sets_data_and_kv_fields() {
     let limits = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::MiniRex, 30_000_000);
@@ -199,8 +199,9 @@ fn hardfork_activation_predicates_are_true_at_activation() {
 // ============================================================================
 
 /// Deleting the `MAINNET_CHAIN_ID` arm makes `hardfork_schedule(4326)` fall through to the
-/// all-activated fallback, which activates `MiniRex1` at genesis. The real mainnet schedule activates
-/// `MiniRex1` at a specific non-zero timestamp, so the per-fork conditions distinguish the two.
+/// all-activated fallback, which activates `MiniRex1` at genesis. The real mainnet schedule
+/// activates `MiniRex1` at a specific non-zero timestamp, so the per-fork conditions distinguish
+/// the two.
 #[test]
 fn hardfork_schedule_mainnet_arm_returns_mainnet_schedule() {
     let from_dispatch = hardfork_schedule(MAINNET_CHAIN_ID);
