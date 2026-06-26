@@ -136,7 +136,7 @@ mod tests {
 
     /// `within_limit` must mirror the enum variant exactly, not return a constant.
     #[test]
-    fn within_limit_reflects_variant() {
+    fn test_within_limit_reflects_variant() {
         assert!(LimitCheck::WithinLimit.within_limit());
         let exceeded = LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
@@ -150,7 +150,7 @@ mod tests {
     /// Every `LimitKind` discriminant must survive an `as_u8` -> `from_u8` round-trip,
     /// and unknown discriminants must map to `None`.
     #[test]
-    fn limit_kind_u8_roundtrip() {
+    fn test_limit_kind_u8_roundtrip() {
         for kind in [
             LimitKind::DataSize,
             LimitKind::KVUpdate,

@@ -127,7 +127,7 @@ macro_rules! build_executor {
 /// `Debug` for `MegaBlockExecutor` must write the struct name. The mutant returns `Ok(())`
 /// without writing anything, producing an empty string.
 #[test]
-fn block_executor_debug_writes_struct_name() {
+fn test_block_executor_debug_writes_struct_name() {
     let mut db = MemoryDatabase::default();
     let mut state = State::builder().with_database(&mut db).build();
     let executor = build_executor!(&mut state);
@@ -148,7 +148,7 @@ fn block_executor_debug_writes_struct_name() {
 /// because `eips::transact_balance_increments` unconditionally returns `Some(state)`. The mutant
 /// drops it to an empty vec.
 #[test]
-fn post_execution_changes_yields_balance_increment_outcome() {
+fn test_post_execution_changes_yields_balance_increment_outcome() {
     let mut db = MemoryDatabase::default();
     let mut state = State::builder().with_database(&mut db).build();
     let mut executor = build_executor!(&mut state);
@@ -186,7 +186,7 @@ fn sstore_contract() -> Bytes {
 /// `[NUM_META_BUCKETS, NUM_BUCKETS)` (≥ `65_536`), so the result is neither empty (kills `vec![]`)
 /// nor `{0}` (kills `vec![Default::default()]`).
 #[test]
-fn get_accessed_bucket_ids_records_sstore_bucket() {
+fn test_get_accessed_bucket_ids_records_sstore_bucket() {
     let mut db = MemoryDatabase::default();
     db.set_account_code(STORAGE_CONTRACT, sstore_contract());
     db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
@@ -238,7 +238,7 @@ const fn bucket_id_from_hash(hash: u64) -> u32 {
 /// `len <= 8` (small branch, line 125): `"hello"` is 5 bytes.
 /// `hash("hello") = 1_027_176_506_268_606_463` (documented in `external/hasher/mod.rs`).
 #[test]
-fn ahash_bucket_id_small_input_is_pinned() {
+fn test_ahash_bucket_id_small_input_is_pinned() {
     assert_eq!(
         AHashBucketHasher::bucket_id(b"hello"),
         bucket_id_from_hash(1_027_176_506_268_606_463),
@@ -252,7 +252,7 @@ fn ahash_bucket_id_small_input_is_pinned() {
 /// at line 109 also misroutes the boundary len 16 and all len >= 17 — covered by the large test —
 /// while the `|`->`&` mutant on line 120 directly changes this 9-byte result.
 #[test]
-fn ahash_bucket_id_mid_input_is_pinned() {
+fn test_ahash_bucket_id_mid_input_is_pinned() {
     assert_eq!(
         AHashBucketHasher::bucket_id(b"hash test"),
         bucket_id_from_hash(2_116_618_212_096_523_432),
@@ -268,7 +268,7 @@ fn ahash_bucket_id_mid_input_is_pinned() {
 /// (and three times for the 52-byte key); the `> 16`→`== 16` mutants on lines 109/112 skip or
 /// misroute those reads, changing the hash.
 #[test]
-fn ahash_bucket_id_large_input_is_pinned() {
+fn test_ahash_bucket_id_large_input_is_pinned() {
     // 20-byte all-zero key: single loop iteration after the tail update.
     assert_eq!(
         AHashBucketHasher::bucket_id(&[0u8; 20]),
@@ -324,7 +324,7 @@ fn ahash_bucket_id_large_input_is_pinned() {
 /// `len == 8` boundary (line 108 `> 8`). The small branch (`read_small`) is taken; a `>= 8`
 /// mutant misroutes this input into the mid branch.
 #[test]
-fn ahash_bucket_id_len8_boundary_is_pinned() {
+fn test_ahash_bucket_id_len8_boundary_is_pinned() {
     let key: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
     assert_eq!(
         AHashBucketHasher::bucket_id(&key),
@@ -337,7 +337,7 @@ fn ahash_bucket_id_len8_boundary_is_pinned() {
 /// == 16` after one 16-byte read; `>` stops (one pass) while a `>= 16` mutant runs a second
 /// `read_u128` pass, changing the hash.
 #[test]
-fn ahash_bucket_id_len32_loop_boundary_is_pinned() {
+fn test_ahash_bucket_id_len32_loop_boundary_is_pinned() {
     let key: [u8; 32] = [0x22; 32];
     assert_eq!(
         AHashBucketHasher::bucket_id(&key),

@@ -52,7 +52,7 @@ const BENEFICIARY: Address = address!("3000000000000000000000000000000000000003"
 /// `-> 0` mutant (the `BENEFICIARY_BALANCE`/`ORACLE` cases are non-zero) and the `-> 1` mutant
 /// (the `BLOCK_NUMBER` case is zero), since no single constant can satisfy all of them.
 #[test]
-fn as_u8_returns_exact_bit_position_for_each_variant() {
+fn test_as_u8_returns_exact_bit_position_for_each_variant() {
     assert_eq!(VolatileDataAccess::BLOCK_NUMBER.as_u8(), 0, "BLOCK_NUMBER is bit 0");
     assert_eq!(VolatileDataAccess::TIMESTAMP.as_u8(), 1, "TIMESTAMP is bit 1");
     assert_eq!(VolatileDataAccess::COINBASE.as_u8(), 2, "COINBASE is bit 2");
@@ -75,7 +75,7 @@ fn new_tracker() -> VolatileDataAccessTracker {
 
 /// A fresh tracker has not accessed the beneficiary balance. The `-> true` mutant flips this.
 #[test]
-fn has_accessed_beneficiary_balance_is_false_until_marked() {
+fn test_has_accessed_beneficiary_balance_is_false_until_marked() {
     let mut tracker = new_tracker();
     assert!(
         !tracker.has_accessed_beneficiary_balance(),
@@ -92,7 +92,7 @@ fn has_accessed_beneficiary_balance_is_false_until_marked() {
 /// A fresh tracker reports `None` for volatile-data info. The `-> Some(Default::default())` mutant
 /// returns `Some(empty)`, which is `!= None`.
 #[test]
-fn get_volatile_data_info_is_none_until_accessed() {
+fn test_get_volatile_data_info_is_none_until_accessed() {
     let tracker = new_tracker();
     assert_eq!(
         tracker.get_volatile_data_info(),
@@ -121,7 +121,7 @@ fn get_volatile_data_info_is_none_until_accessed() {
 /// * guard → `true`: the guard is always taken, so `disable_access(2)` becomes a no-op and the
 ///   shallower depth 2 is never adopted, leaving `volatile_access_disabled(2)` false.
 #[test]
-fn disable_access_keeps_shallower_depth() {
+fn test_disable_access_keeps_shallower_depth() {
     let mut tracker = new_tracker();
 
     tracker.disable_access(5);
@@ -162,7 +162,7 @@ fn empty_evm(
 /// The `Debug` impl writes the struct name and the `inspect` field. The
 /// `fmt -> Ok(Default::default())` mutant skips all writes, producing an empty body.
 #[test]
-fn debug_impl_writes_struct_name_and_field() {
+fn test_debug_impl_writes_struct_name_and_field() {
     let mut db = MemoryDatabase::default();
     let evm = empty_evm(&mut db);
 
@@ -180,7 +180,7 @@ fn debug_impl_writes_struct_name_and_field() {
 /// `block_env_mut` must return a reference to the EVM's own block env, so a write through it is
 /// visible via `block_env_ref`. The mutant returns a leaked default env, so the write is lost.
 #[test]
-fn block_env_mut_returns_live_block_env() {
+fn test_block_env_mut_returns_live_block_env() {
     let mut db = MemoryDatabase::default();
     let mut evm = empty_evm(&mut db);
 
@@ -200,7 +200,7 @@ fn block_env_mut_returns_live_block_env() {
 /// ID is non-zero, so the result distinguishes both the `vec![]` mutant (empty) and the
 /// `vec![Default::default()]` mutant (`[0]`).
 #[test]
-fn get_accessed_bucket_ids_reports_touched_non_zero_bucket() {
+fn test_get_accessed_bucket_ids_reports_touched_non_zero_bucket() {
     let storage_slot = U256::from(1_u64);
 
     // Contract that sets storage slot 1 to a non-zero value, then stops.
@@ -303,7 +303,7 @@ fn beneficiary_balance_after_transfer(disable: bool) -> U256 {
 /// like the control and credits the beneficiary — making the `assert_eq!(disabled, ZERO)` below
 /// fail, which kills the mutant.
 #[test]
-fn disable_beneficiary_suppresses_coinbase_reward() {
+fn test_disable_beneficiary_suppresses_coinbase_reward() {
     let credited = beneficiary_balance_after_transfer(false);
     assert!(
         credited > U256::ZERO,
@@ -374,7 +374,7 @@ fn intrinsic_boundary_result(
 /// by the `is_success()` assertion below. The `gas_limit == initial_gas - 1` case pins the lower
 /// side of the boundary: validation (`initial_gas > gas_limit`) rejects it as a transaction error.
 #[test]
-fn before_execution_allows_exact_intrinsic_gas() {
+fn test_before_execution_allows_exact_intrinsic_gas() {
     // Fully Mega-adjusted intrinsic gas for the bare REX call: base 21000 + the REX intrinsic
     // storage surcharge. The `gas_used == intrinsic` assertion below self-validates this value.
     let intrinsic: u64 = 21_000 + constants::rex::TX_INTRINSIC_STORAGE_GAS;
@@ -423,7 +423,7 @@ fn before_execution_allows_exact_intrinsic_gas() {
 /// `on_new_block`, and asserts the recomputed SSTORE gas reflects `C2`. The no-op mutant keeps the
 /// stale `C1` multiplier, so the assertion fails — killing the mutant.
 #[test]
-fn on_new_block_clears_stale_dynamic_gas_cache() {
+fn test_on_new_block_clears_stale_dynamic_gas_cache() {
     let min_bucket = MIN_BUCKET_SIZE as u64;
     // Two capacities yielding distinct multipliers (capacity / MIN_BUCKET_SIZE).
     let cap_before = 2 * min_bucket; // multiplier 2

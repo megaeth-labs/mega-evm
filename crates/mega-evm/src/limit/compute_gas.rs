@@ -251,7 +251,7 @@ mod tests {
     /// Usage exactly equal to the detained limit must NOT count as a detained exceed:
     /// the predicate is strictly-greater-than (`used > detained_limit`), not `>=`.
     #[test]
-    fn is_detained_exceed_is_strict_at_boundary() {
+    fn test_is_detained_exceed_is_strict_at_boundary() {
         // tx_limit = 100, detained lowered to 50 (< tx_limit, so detention is binding).
         let mut tracker = ComputeGasTracker::new(MegaSpecId::MINI_REX, 100);
         tracker.set_detained_limit(50);

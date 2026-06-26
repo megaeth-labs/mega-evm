@@ -354,7 +354,7 @@ mod tests {
     /// `reset` must clear accumulated TX-level state-growth usage so a tracker reused
     /// across transactions does not leak growth from the previous one.
     #[test]
-    fn reset_clears_accumulated_usage() {
+    fn test_reset_clears_accumulated_usage() {
         let mut tracker = StateGrowthTracker::new(MegaSpecId::MINI_REX, 100);
         tracker.record_deposit_caller_creation();
         assert_eq!(tracker.tx_usage(), 1, "recorded growth should be reflected in tx_usage");

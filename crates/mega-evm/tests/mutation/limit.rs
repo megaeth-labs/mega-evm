@@ -80,7 +80,7 @@ fn transact_with_kv_limit(
 /// constructor's SSTORE runs before the exceed is re-detected in `after_frame_run`,
 /// changing the gas consumed by the create frame and therefore the transaction `gas_used`.
 #[test]
-fn before_frame_run_short_circuits_already_exceeded_create_frame() {
+fn test_before_frame_run_short_circuits_already_exceeded_create_frame() {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000));
     db.set_account_code(FACTORY, create_factory_code());
 

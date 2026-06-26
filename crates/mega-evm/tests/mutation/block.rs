@@ -56,7 +56,7 @@ fn legacy_envelope() -> MegaTxEnvelope {
 /// `MegaTxEnvelope::tx_size`/`estimated_da_size` must return the real encoded sizes (well above 1),
 /// and `tx_hash` must return the real hash (not `Default::default()`).
 #[test]
-fn mega_tx_envelope_ext_returns_real_size_da_and_hash() {
+fn test_mega_tx_envelope_ext_returns_real_size_da_and_hash() {
     let tx = legacy_envelope();
 
     // A signed legacy tx with 5 bytes of calldata encodes to far more than 1 byte.
@@ -73,7 +73,7 @@ fn mega_tx_envelope_ext_returns_real_size_da_and_hash() {
 
 /// `Recovered<MegaTxEnvelope>::tx_hash` must return the inner envelope hash, not the default.
 #[test]
-fn recovered_mega_tx_envelope_ext_returns_real_hash() {
+fn test_recovered_mega_tx_envelope_ext_returns_real_hash() {
     let tx = legacy_envelope();
     let recovered = Recovered::new_unchecked(tx, CALLER);
 
@@ -98,7 +98,7 @@ fn recovered_mega_tx_envelope_ext_returns_real_hash() {
 /// state-growth, and the same `MiniRex` constants for data/kv), so asserting the exact value kills
 /// the field-deletion mutants on lines 399/400/401.
 #[test]
-fn block_limits_from_rex_sets_all_three_block_fields() {
+fn test_block_limits_from_rex_sets_all_three_block_fields() {
     let limits = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::Rex4, 50_000_000);
 
     assert_eq!(
@@ -124,7 +124,7 @@ fn block_limits_from_rex_sets_all_three_block_fields() {
 /// (`u64::MAX`). Asserting the exact data/kv values kills the field-deletion mutants on lines
 /// 405/406; the state-growth assertion pins the arm's distinct shape.
 #[test]
-fn block_limits_from_mini_rex_sets_data_and_kv_fields() {
+fn test_block_limits_from_mini_rex_sets_data_and_kv_fields() {
     let limits = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::MiniRex, 30_000_000);
 
     assert_eq!(
@@ -167,7 +167,7 @@ fn staged_config() -> MegaHardforkConfig {
 /// Each `is_*_active_at_timestamp` returns `true` at/after activation and `false` before. This
 /// kills the `-> false` mutants on the MiniRex1/MiniRex2/Rex1/Rex3 predicates (and pins the rest).
 #[test]
-fn hardfork_activation_predicates_are_true_at_activation() {
+fn test_hardfork_activation_predicates_are_true_at_activation() {
     let cfg = staged_config();
 
     // MiniRex1 (line 144) — false strictly before, true at activation.
@@ -203,7 +203,7 @@ fn hardfork_activation_predicates_are_true_at_activation() {
 /// activates `MiniRex1` at a specific non-zero timestamp, so the per-fork conditions distinguish
 /// the two.
 #[test]
-fn hardfork_schedule_mainnet_arm_returns_mainnet_schedule() {
+fn test_hardfork_schedule_mainnet_arm_returns_mainnet_schedule() {
     let from_dispatch = hardfork_schedule(MAINNET_CHAIN_ID);
     let expected = mainnet_hardforks();
 
@@ -230,7 +230,7 @@ fn hardfork_schedule_mainnet_arm_returns_mainnet_schedule() {
 /// all-activated fallback. The testnet schedule sets MiniRex1/MiniRex2 to `Never` and Rex5 to a
 /// testnet-specific timestamp, none of which the fallback reproduces.
 #[test]
-fn hardfork_schedule_testnet_arm_returns_testnet_schedule() {
+fn test_hardfork_schedule_testnet_arm_returns_testnet_schedule() {
     let from_dispatch = hardfork_schedule(TESTNET_CHAIN_ID);
     let expected = testnet_hardforks();
 
@@ -333,7 +333,7 @@ fn legacy_recovered() -> MegaRecovered<MegaTxEnvelope> {
 /// 778:22 (`gas_limit > self.limits.tx_gas_limit`). A gas limit *equal* to the per-tx cap must
 /// pass (kills `>`→`==` and `>`→`>=`, which both error at equality); one over must error.
 #[test]
-fn pre_execution_check_tx_gas_limit_boundary() {
+fn test_pre_execution_check_tx_gas_limit_boundary() {
     let mut limits = BlockLimits::no_limits();
     limits.tx_gas_limit = 1_000;
     let limiter = BlockLimiter::new(limits);
@@ -353,7 +353,7 @@ fn pre_execution_check_tx_gas_limit_boundary() {
 /// 789:58 (`block_gas_used + gas_limit > block_gas_limit`). With `block_gas_used == 0`, a
 /// `gas_limit` exactly equal to `block_gas_limit` must pass (kills `>`→`>=`); one over errors.
 #[test]
-fn pre_execution_check_block_gas_boundary() {
+fn test_pre_execution_check_block_gas_boundary() {
     let mut limits = BlockLimits::no_limits();
     limits.block_gas_limit = 1_000;
     let limiter = BlockLimiter::new(limits);
@@ -373,7 +373,7 @@ fn pre_execution_check_block_gas_boundary() {
 /// 802:20 (`tx_size > self.limits.tx_encode_size_limit`). A `tx_size` equal to the cap must pass
 /// (kills `>`→`==` and `>`→`>=`); one over errors.
 #[test]
-fn pre_execution_check_tx_size_boundary() {
+fn test_pre_execution_check_tx_size_boundary() {
     let mut limits = BlockLimits::no_limits();
     limits.tx_encode_size_limit = 500;
     let limiter = BlockLimiter::new(limits);
@@ -394,7 +394,7 @@ fn pre_execution_check_tx_size_boundary() {
 /// a non-deposit `da_size` equal to `block_da_size_limit` must pass (kills `>`→`>=`); one over
 /// errors. (`tx_da_size_limit` stays `u64::MAX`, so the per-tx da check at 828 never triggers.)
 #[test]
-fn pre_execution_check_block_da_size_boundary() {
+fn test_pre_execution_check_block_da_size_boundary() {
     let mut limits = BlockLimits::no_limits();
     limits.block_da_size_limit = 800;
     let limiter = BlockLimiter::new(limits);
@@ -422,7 +422,7 @@ fn pre_execution_check_block_da_size_boundary() {
 /// advance `block_da_size_used` by `da_size`. Under the `==`→`!=` mutant the legacy type is
 /// (mis)classified as a deposit, so the da counter would stay at 0.
 #[test]
-fn post_execution_update_advances_da_for_non_deposit() {
+fn test_post_execution_update_advances_da_for_non_deposit() {
     let mut limiter = BlockLimiter::new(BlockLimits::no_limits());
     let outcome = outcome_for(legacy_recovered(), 1_234);
 
@@ -440,7 +440,7 @@ fn post_execution_update_advances_da_for_non_deposit() {
 
 /// All counters strictly below their limits ⇒ `false`. Kills the whole-fn `->true` mutant.
 #[test]
-fn is_block_limit_reached_all_below_is_false() {
+fn test_is_block_limit_reached_all_below_is_false() {
     let mut limits = BlockLimits::no_limits();
     limits.block_gas_limit = 10;
     limits.block_txs_encode_size_limit = 10;
@@ -494,43 +494,43 @@ macro_rules! only_dimension_at_limit {
 }
 
 #[test]
-fn is_block_limit_reached_gas_dimension() {
+fn test_is_block_limit_reached_gas_dimension() {
     let limiter = only_dimension_at_limit!(block_gas_limit, block_gas_used);
     assert!(limiter.is_block_limit_reached(), "gas at limit ⇒ block full");
 }
 
 #[test]
-fn is_block_limit_reached_tx_size_dimension() {
+fn test_is_block_limit_reached_tx_size_dimension() {
     let limiter = only_dimension_at_limit!(block_txs_encode_size_limit, block_tx_size_used);
     assert!(limiter.is_block_limit_reached(), "tx encode size at limit ⇒ block full");
 }
 
 #[test]
-fn is_block_limit_reached_da_size_dimension() {
+fn test_is_block_limit_reached_da_size_dimension() {
     let limiter = only_dimension_at_limit!(block_da_size_limit, block_da_size_used);
     assert!(limiter.is_block_limit_reached(), "da size at limit ⇒ block full");
 }
 
 #[test]
-fn is_block_limit_reached_data_dimension() {
+fn test_is_block_limit_reached_data_dimension() {
     let limiter = only_dimension_at_limit!(block_txs_data_limit, block_data_used);
     assert!(limiter.is_block_limit_reached(), "tx data at limit ⇒ block full");
 }
 
 #[test]
-fn is_block_limit_reached_kv_updates_dimension() {
+fn test_is_block_limit_reached_kv_updates_dimension() {
     let limiter = only_dimension_at_limit!(block_kv_update_limit, block_kv_updates_used);
     assert!(limiter.is_block_limit_reached(), "kv updates at limit ⇒ block full");
 }
 
 #[test]
-fn is_block_limit_reached_compute_gas_dimension() {
+fn test_is_block_limit_reached_compute_gas_dimension() {
     let limiter = only_dimension_at_limit!(block_compute_gas_limit, block_compute_gas_used);
     assert!(limiter.is_block_limit_reached(), "compute gas at limit ⇒ block full");
 }
 
 #[test]
-fn is_block_limit_reached_state_growth_dimension() {
+fn test_is_block_limit_reached_state_growth_dimension() {
     let limiter = only_dimension_at_limit!(block_state_growth_limit, block_state_growth_used);
     assert!(limiter.is_block_limit_reached(), "state growth at limit ⇒ block full");
 }

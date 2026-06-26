@@ -251,7 +251,7 @@ mod tests {
     /// `record_account_update` must charge exactly one KV update against the current frame
     /// (used by REX5+ SELFDESTRUCT-beneficiary metering); it must not be a no-op.
     #[test]
-    fn record_account_update_charges_one_kv() {
+    fn test_record_account_update_charges_one_kv() {
         let mut tracker = KVUpdateTracker::new(MegaSpecId::MINI_REX, u64::MAX);
         tracker.push_empty_frame();
         assert_eq!(tracker.tx_usage(), 0);
