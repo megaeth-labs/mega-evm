@@ -39,8 +39,16 @@ jobs:
           # generated mutants, which would silently shift the gate's baseline.
           tool: cargo-mutants@27.1.0
 
-      - name: Run diff-scoped mutation testing
-        run: scripts/mutation_test.sh diff "${{ github.event.pull_request.base.sha }}"
+      - name: Run mutation testing
+        # On a PR: mutate only the changed lines (fast gate). On manual dispatch
+        # there is no PR base, so run the whole crate as an on-demand baseline
+        # instead of feeding an empty base into `diff` mode (which would fail).
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts/mutation_test.sh diff "${{ github.event.pull_request.base.sha }}"
+          else
+            scripts/mutation_test.sh full
+          fi
 
       - name: Score and gate
         id: gate

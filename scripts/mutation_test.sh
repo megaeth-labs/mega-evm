@@ -33,6 +33,7 @@ run_mutants() {
     # --no-shuffle: test mutants in deterministic source order so runs are
     #   reproducible and comparable (recommended by https://mutants.rs/pr-diff.html).
     # -vV: verbose progress + version banner, for diagnosable CI logs.
+    local rc=0
     cargo mutants \
         --package "$PKG" \
         --jobs "$JOBS" \
@@ -40,7 +41,18 @@ run_mutants() {
         --no-shuffle \
         -vV \
         "${EXCLUDE_ARGS[@]}" \
-        "$@"
+        "$@" || rc=$?
+
+    # cargo-mutants exit codes (https://mutants.rs/exit-codes.html): 0 = all caught,
+    # 2 = missed mutants, 3 = timeouts. Those three are normal run outcomes that the
+    # gate (scripts/mutation_gate.py) is responsible for scoring, so swallow them and
+    # let the gate be the single source of truth for pass/fail. Everything else
+    # (1 usage, 4 baseline broken, 5/6 bad --in-diff, 70 internal) is a real failure
+    # of the run itself and must abort.
+    case "$rc" in
+        0 | 2 | 3) return 0 ;;
+        *) return "$rc" ;;
+    esac
 }
 
 cmd="${1:-}"

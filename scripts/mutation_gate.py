@@ -21,7 +21,6 @@ a test gap the PR introduced.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import tomllib
 from pathlib import Path
@@ -100,9 +99,11 @@ def cmd_report(args: argparse.Namespace) -> int:
         md += [
             "### Survivors needing attention",
             "",
-            "Each mutation below changed the code but **no test failed**. Add a test "
-            "that kills it, or — if it is provably equivalent/dead — add a justified "
-            "entry to `mutants/suppressions.toml`.",
+            (
+                "Each mutation below changed the code but **no test failed**. Add a test "
+                "that kills it, or — if it is provably equivalent/dead — add a justified "
+                "entry to `mutants/suppressions.toml`."
+            ),
             "",
         ]
         md += [f"- `{m}`" for m in real_survivors]
