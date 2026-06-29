@@ -328,14 +328,21 @@ def cmd_run(args) -> int:
     if args.diff:
         changed_files, changed_lines = changed_files_and_lines(args.diff)
 
-    # Baseline: every distinct test command must pass on the unmutated tree first.
-    for tc in {pack.get("test_cmd", DEFAULT_TEST_CMD) for pack in packs}:
+    # Baseline check, run lazily: a test command must pass on the unmutated tree
+    # before we trust any of its mutants, but we only pay for it once there is
+    # actually a mutant to analyze (most PRs change no gate, so skip it then).
+    baselined: set[str] = set()
+
+    def ensure_baseline(tc: str) -> None:
+        if tc in baselined:
+            return
         if not baseline_ok(tc):
             sys.exit(
                 f"baseline failed on the unmutated tree: `{tc}`\n"
                 f"fix the failing tests before running mutation analysis "
                 f"(otherwise every mutant is falsely 'caught')."
             )
+        baselined.add(tc)
 
     with tempfile.TemporaryDirectory() as tmp:
         for pack in packs:
@@ -346,6 +353,7 @@ def cmd_run(args) -> int:
                 generate_mutants(pack, rules, src, md, allowed)
                 if not any(p.is_file() for p in md.glob("*")):
                     continue
+                ensure_baseline(pack.get("test_cmd", DEFAULT_TEST_CMD))
                 c, s, t = analyze(pack, src, md)
                 for names, sink in ((c, caught), (s, missed), (t, timeouts)):
                     for name in names:
