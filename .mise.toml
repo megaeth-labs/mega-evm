@@ -3,10 +3,13 @@ lychee = "latest"
 "npm:markdownlint-cli2" = "latest"
 "npm:prettier" = "latest"
 # universalmutator (`mutate`, `analyze_mutants`) for the custom-operator mutation
-# engine (scripts/umutate.py). comby is NOT managed here: its only prebuilt links
-# against Debian sonames — fine on the Ubuntu CI runners, but on Arch it must be
-# the patched AUR build (`paru -S comby-bin`), so mise must not shadow it.
-"pipx:universalmutator" = "latest"
+# engine (scripts/umutate.py). Pinned (like cargo-mutants@27.1.0 in
+# mutation.yml): a new release can change the set of generated mutants, which
+# would silently shift the gate baseline. comby is NOT managed here: its only
+# prebuilt links against Debian sonames — fine on the Ubuntu CI runners, but on
+# Arch it must be the patched AUR build (`paru -S comby-bin`), so mise must not
+# shadow it (comby itself is pinned to a known version in the CI installer).
+"pipx:universalmutator" = "1.14.1"
 
 [tasks.lint]
 description = "Run all doc checks (links, lint, format)"

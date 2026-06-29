@@ -40,12 +40,15 @@ jobs:
       - name: Install universalmutator (mise)
         uses: jdx/mise-action@v2
       - name: Install comby
-        # The prebuilt comby links against libev/libpcre, which are not on the
-        # runner by default — install them before the official installer runs.
+        # Pin the version (reproducible mutant generation, like universalmutator
+        # and cargo-mutants). The prebuilt links against libev/libpcre, which are
+        # not on the runner by default — install them first.
         run: |
           sudo apt-get update
           sudo apt-get install -y libpcre3 libev4
-          bash <(curl -sL get.comby.dev)
+          sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
+          sudo chmod +x /usr/local/bin/comby
+          comby -version
       - name: Run diff-scoped spec-gate mutation
         run: |
           python3 scripts/umutate.py run --packs spec-gate \
@@ -125,12 +128,15 @@ jobs:
       - name: Install universalmutator (mise)
         uses: jdx/mise-action@v2
       - name: Install comby
-        # The prebuilt comby links against libev/libpcre, which are not on the
-        # runner by default — install them before the official installer runs.
+        # Pin the version (reproducible mutant generation, like universalmutator
+        # and cargo-mutants). The prebuilt links against libev/libpcre, which are
+        # not on the runner by default — install them first.
         run: |
           sudo apt-get update
           sudo apt-get install -y libpcre3 libev4
-          bash <(curl -sL get.comby.dev)
+          sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
+          sudo chmod +x /usr/local/bin/comby
+          comby -version
       - name: Run spec-gate mutation (${{ matrix.subsystem }})
         run: |
           python3 scripts/umutate.py run --packs spec-gate \

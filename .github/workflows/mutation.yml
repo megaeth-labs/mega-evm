@@ -3,6 +3,11 @@ name: Mutation Testing
 on:
   workflow_dispatch:
   pull_request:
+  schedule:
+    # Nightly full-crate run. The diff gate never mutates #[cfg(test)] code, so
+    # the in-repo mutation-killing tests are only re-verified here, against the
+    # real source — catching a killing test that has silently stopped killing.
+    - cron: "0 3 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,7 +21,9 @@ jobs:
   diff-mutants:
     name: diff-scoped mutation gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Diff-scoped PR runs finish in minutes; the nightly full-crate run needs
+    # much longer headroom.
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
         with:

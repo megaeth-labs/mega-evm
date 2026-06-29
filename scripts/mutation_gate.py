@@ -120,6 +120,25 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     # ---- Markdown report (PR comment + step summary) ----
     status = "✅ PASS" if gate_pass else "❌ FAIL"
+
+    # No viable mutants at all (typical for a diff-scoped run whose changed lines
+    # contain nothing mutatable). Reporting "100% (0/0)" reads like a real result
+    # and confuses readers — say plainly that nothing was tested.
+    if viable == 0:
+        note = "**Nothing to test** — no mutants were generated"
+        if unviable or timeout:
+            note += f" ({len(unviable)} unviable, {len(timeout)} timed out)"
+        else:
+            note += " on the changed lines"
+        report = f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n"
+        if args.comment:
+            Path(args.comment).write_text(report)
+        if args.summary:
+            with open(args.summary, "a") as fh:
+                fh.write(report)
+        print(report)
+        return 0
+
     md = [
         f"## 🧬 Mutation testing — {status}",
         "",

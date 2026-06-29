@@ -29,6 +29,17 @@
 # Inline `#[mutants::skip]` on a function is also honored natively by
 # cargo-mutants and is appropriate for truly dead helpers; prefer this file when
 # the decision needs a recorded justification.
+#
+# CAVEAT — suppression rot. A `kind = "function"` entry becomes an --exclude-re,
+# so the function is never mutated again: if a "dead today" function later gains
+# a caller, its mutants silently stop being generated and no gap is reported.
+# `kind = "line"` is safer — the mutant is still generated and run every time, so
+# if the code changes such that a test now kills it, it simply shows up as caught
+# and the suppression becomes a harmless no-op. Prefer "line" unless the whole
+# function is genuinely, permanently dead, and re-audit the "function" entries
+# (and every "dead" justification) whenever their surrounding code changes. The
+# nightly full-crate run (.github/workflows/mutation.yml) re-checks "line"
+# entries against real source for exactly this reason.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # crates/mega-evm/src/limit/ survivors.
