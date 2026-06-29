@@ -107,24 +107,31 @@ def cmd_report(args: argparse.Namespace) -> int:
     # two mutants that share identical source text be suppressed independently.
     supp = {e["mutant"].strip() for e in line_supp if "mutant" in e}
 
-    suppressed, real_survivors = [], []
-    for m in missed:
-        matched = m in supp or mutant_body(m) in supp
-        (suppressed if matched else real_survivors).append(m)
+    def partition(items: list[str]) -> tuple[list[str], list[str]]:
+        sup, real = [], []
+        for m in items:
+            (sup if (m in supp or mutant_body(m) in supp) else real).append(m)
+        return sup, real
+
+    suppressed, real_survivors = partition(missed)
+    # Timeouts are inconclusive — a mutant that hangs was never proven caught — so
+    # an unsuppressed timeout fails the gate (the dev must make it terminate, kill
+    # it, or record an explicit suppression). Suppressing reuses the same model.
+    supp_timeouts, real_timeouts = partition(timeout)
 
     viable = len(caught) + len(missed)
     scored = viable - len(suppressed)  # equivalents/dead-code excluded from denominator
     killed = len(caught)
     score = (killed / scored * 100.0) if scored else 100.0
-    gate_pass = not real_survivors
+    gate_pass = not real_survivors and not real_timeouts
 
     # ---- Markdown report (PR comment + step summary) ----
     status = "✅ PASS" if gate_pass else "❌ FAIL"
 
-    # No viable mutants at all (typical for a diff-scoped run whose changed lines
-    # contain nothing mutatable). Reporting "100% (0/0)" reads like a real result
-    # and confuses readers — say plainly that nothing was tested.
-    if viable == 0:
+    # No viable mutants and nothing inconclusive (typical diff run whose changed
+    # lines contain nothing mutatable). Reporting "100% (0/0)" reads like a real
+    # result and confuses readers — say plainly that nothing was tested.
+    if viable == 0 and not real_timeouts:
         note = "**Nothing to test** — no mutants were generated"
         if unviable or timeout:
             note += f" ({len(unviable)} unviable, {len(timeout)} timed out)"
@@ -146,31 +153,40 @@ def cmd_report(args: argparse.Namespace) -> int:
         "",
         f"- caught: {len(caught)}",
         f"- survived (real gaps): **{len(real_survivors)}**",
-        f"- suppressed (equivalent/dead-code): {len(suppressed)}",
-        f"- unviable: {len(unviable)} · timeout: {len(timeout)}",
+        f"- timed out (inconclusive): **{len(real_timeouts)}**",
+        f"- suppressed (equivalent/dead-code): {len(suppressed) + len(supp_timeouts)}",
+        f"- unviable: {len(unviable)} · timeout total: {len(timeout)}",
         "",
     ]
-    if real_survivors:
-        md += [
-            "### Survivors needing attention",
-            "",
-            (
-                "Each mutation below changed the code but **no test failed**. Add a test "
-                "that kills it, or — if it is provably equivalent/dead — add a justified "
-                "entry to `mutants/suppressions.toml`."
-            ),
-            "",
-        ]
-        # Cap the rendered list: GitHub truncates comments at 65536 chars, and a
-        # PR that introduces dozens of survivors would otherwise dump an unreadable
-        # wall. The full set is always in the uploaded artifacts.
-        shown = real_survivors[:MAX_SURVIVORS_SHOWN]
-        md += [f"- `{m}`" for m in shown]
-        if len(real_survivors) > MAX_SURVIVORS_SHOWN:
-            md.append(
-                f"- … and {len(real_survivors) - MAX_SURVIVORS_SHOWN} more "
-                f"(see the `missed.txt` in the run artifacts)."
+
+    def section(title: str, blurb: str, items: list[str], artifact: str) -> list[str]:
+        out = [f"### {title}", "", blurb, ""]
+        out += [f"- `{m}`" for m in items[:MAX_SURVIVORS_SHOWN]]
+        if len(items) > MAX_SURVIVORS_SHOWN:
+            out.append(
+                f"- … and {len(items) - MAX_SURVIVORS_SHOWN} more "
+                f"(see `{artifact}` in the run artifacts)."
             )
+        return out
+
+    if real_survivors:
+        md += section(
+            "Survivors needing attention",
+            "Each mutation below changed the code but **no test failed**. Add a test "
+            "that kills it, or — if it is provably equivalent/dead — add a justified "
+            "entry to `mutants/suppressions.toml`.",
+            real_survivors, "missed.txt",
+        )
+    if real_timeouts:
+        md += section(
+            "Timed-out mutants (inconclusive)",
+            "Each mutation below never finished within the timeout, so it was **not "
+            "proven caught**. Make it terminate (a faster test), kill it, or — if it "
+            "is a genuine non-terminating/equivalent case — add a justified entry to "
+            "`mutants/suppressions.toml`.",
+            real_timeouts, "timeout.txt",
+        )
+    if real_survivors or real_timeouts:
         md += ["", "_Tip: run `/improve-mutation-score` to triage and fix these._"]
     else:
         md.append("No new test gaps introduced by this change. 🎉")

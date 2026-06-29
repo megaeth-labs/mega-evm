@@ -14,9 +14,10 @@
 #                         Use for whole functions that are entirely equivalent or
 #                         dead (stable across line moves). `pattern` is a regex.
 #   kind = "line"      -> matched against the exact mutant description line from
-#                         missed.txt. Use for a single surviving mutant inside an
-#                         otherwise-tested function. `mutant` is the literal text
-#                         (without the leading "file:line:col: ").
+#                         missed.txt OR timeout.txt. Use for a single surviving
+#                         mutant inside an otherwise-tested function, or to accept
+#                         a genuinely non-terminating/equivalent timed-out mutant.
+#                         `mutant` is the literal text (without "file:line:col: ").
 #
 # Every entry also carries:
 #   category = "equivalent" | "dead"
