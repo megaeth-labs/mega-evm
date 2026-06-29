@@ -308,11 +308,15 @@ jobs:
           comby -version
       - name: Build the full mutant universe (both engines)
         run: |
-          # cargo-mutants --list includes function-suppressed mutants (the driver's
-          # --exclude-re is not applied here), giving the complete universe.
+          # --package mega-evm: match the driver's scope (otherwise --list also
+          #   covers the CLI bins in the virtual workspace's default-members, so a
+          #   stale mega-evm suppression could be kept alive by a same-named mutant
+          #   in another crate).
+          # No --exclude-re here, so function-suppressed mutants are included —
+          #   giving the complete universe to validate suppressions against.
           # --colors never: CI forces CARGO_TERM_COLOR=always, which would otherwise
-          # embed ANSI codes and break exact suppression matching.
-          cargo mutants --list --colors never > universe.txt
+          #   embed ANSI codes and break exact suppression matching.
+          cargo mutants --list --package mega-evm --colors never > universe.txt
           python3 scripts/umutate.py plan --packs spec-gate \
             | grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' >> universe.txt
           echo "universe: $(wc -l < universe.txt) mutants"

@@ -25,7 +25,15 @@ fi
 
 # Function-scoped suppressions become --exclude-re so they are never generated
 # (saves build/test time). Line-scoped suppressions are filtered later by the gate.
-mapfile -t EXCLUDE_ARGS < <(python3 "$ROOT_DIR/scripts/mutation_gate.py" exclude-re --suppressions "$SUPPRESS")
+# Capture into a variable first: `mapfile < <(...)` would mask a non-zero exit
+# from the helper (a malformed suppressions.toml), letting the run continue
+# without the function-scoped excludes.
+if ! exclude_re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" exclude-re --suppressions "$SUPPRESS")"; then
+    echo "failed to parse function suppressions from $SUPPRESS" >&2
+    exit 1
+fi
+EXCLUDE_ARGS=()
+[[ -n "$exclude_re_output" ]] && mapfile -t EXCLUDE_ARGS <<< "$exclude_re_output"
 
 run_mutants() {
     rm -rf "$OUT_DIR"
