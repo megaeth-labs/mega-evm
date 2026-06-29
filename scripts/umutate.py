@@ -108,7 +108,10 @@ def changed_files_and_lines(base: str) -> tuple[set[str], dict[str, set[int]]]:
             lines.setdefault(cur, set())
         elif cur and (m := hunk.match(ln)):
             start, count = int(m.group(1)), int(m.group(2) or "1")
-            for i in range(start, start + max(count, 1)):
+            # A pure-deletion hunk has new-side `+N,0` (count == 0): it adds no
+            # new line, so contribute nothing. (A single-line add omits the count
+            # entirely -> defaulted to 1 above.)
+            for i in range(start, start + count):
                 lines[cur].add(i)
     return files, lines
 
@@ -133,21 +136,28 @@ def resolve_targets(pack: dict, changed: set[str] | None,
 def generate_mutants(pack: dict, rules: Path, src: str, mutant_dir: Path,
                      allowed_lines: set[int] | None) -> None:
     mutant_dir.mkdir(parents=True, exist_ok=True)
+    if allowed_lines is not None and not allowed_lines:
+        return  # diff mode, but nothing changed in this file
     # `--only <rules>` restricts to our pack's rules (no default language rules).
     # The rules path is absolute and contains ".rules", so universalmutator's
     # built-in lookup fails and it falls back to opening the file directly.
+    #
+    # We do NOT use universalmutator's `--lines` for diff scoping: in comby mode
+    # its line filter compares against comby's byte-offset range (not line
+    # numbers), so it silently drops every mutant. Instead we generate all mutants
+    # and prune by the actual changed line, detected the same way the adapter does.
     cmd = ["mutate", src, "--only", str(rules), "--comby", "--noCheck",
            "--mutantDir", str(mutant_dir)]
-    lines_file = None
-    if allowed_lines is not None:
-        if not allowed_lines:
-            return  # nothing changed in this file
-        lines_file = mutant_dir / "_lines.txt"
-        lines_file.write_text("\n".join(str(n) for n in sorted(allowed_lines)) + "\n")
-        cmd += ["--lines", str(lines_file)]
     r = _run(cmd)
     if r.returncode != 0:
         sys.exit(f"[{pack['name']}] mutate failed on {src}:\n{r.stderr}\n{r.stdout}")
+    if allowed_lines is not None:
+        for m in list(mutant_dir.glob("*")):
+            if not m.is_file():
+                continue
+            change = _first_change(ROOT / src, m)
+            if change is None or change[0] not in allowed_lines:
+                m.unlink()  # outside the PR's changed lines
 
 
 def _ascii(s: str) -> str:
