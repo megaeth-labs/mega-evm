@@ -62,7 +62,9 @@ case "$cmd" in
         base="${1:?usage: mutation_test.sh diff <base-ref>}"
         diff_file="$OUT_DIR.diff"
         mkdir -p "$(dirname "$diff_file")"
-        git diff --no-color "$base"...HEAD -- 'crates/mega-evm/**' > "$diff_file"
+        # Only src/ is mutatable; scoping the diff there avoids a non-empty diff
+        # (and a wasted run) when a PR touches only tests/, Cargo.toml, etc.
+        git diff --no-color "$base"...HEAD -- 'crates/mega-evm/src/**' > "$diff_file"
         if [[ ! -s "$diff_file" ]]; then
             echo "No changes under crates/mega-evm vs $base; nothing to mutate." >&2
             exit 0

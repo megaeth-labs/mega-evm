@@ -25,6 +25,10 @@ import sys
 import tomllib
 from pathlib import Path
 
+# Cap how many survivors are rendered inline in the PR comment (GitHub caps a
+# single comment at 65536 chars). The rest live in the run artifacts.
+MAX_SURVIVORS_SHOWN = 20
+
 
 def load_suppressions(path: Path) -> tuple[list[dict], list[dict]]:
     """Return (function_scoped, line_scoped) suppression entries."""
@@ -64,6 +68,34 @@ def mutant_body(line: str) -> str:
 
 def cmd_report(args: argparse.Namespace) -> int:
     results = Path(args.results)
+
+    # Guard against a silent pass when the run produced no results. We must tell
+    # apart two cases that both leave the outcome lists empty:
+    #   * the results dir is absent  -> no run happened (e.g. the diff had no
+    #     mutatable changes); benign, report "nothing tested" and pass.
+    #   * the results dir exists but the expected files are missing -> the run
+    #     aborted, wrote elsewhere, or the tool renamed its output. Refusing to
+    #     report a 100% pass here is the whole point.
+    if not results.exists():
+        report = "## 🧬 Mutation testing\n\nNo results at "
+        report += f"`{results}` — nothing was mutated (e.g. no mutatable changes).\n"
+        if args.comment:
+            Path(args.comment).write_text(report)
+        if args.summary:
+            with open(args.summary, "a") as fh:
+                fh.write(report)
+        print(report)
+        return 0
+    for required in ("caught.txt", "missed.txt"):
+        if not (results / required).exists():
+            print(
+                f"ERROR: {results / required} is missing although {results} exists. "
+                f"The mutation run aborted or changed its output format — refusing to "
+                f"report a passing gate on incomplete results.",
+                file=sys.stderr,
+            )
+            return 2
+
     missed = read_lines(results / "missed.txt")
     caught = read_lines(results / "caught.txt")
     unviable = read_lines(results / "unviable.txt")
@@ -110,7 +142,16 @@ def cmd_report(args: argparse.Namespace) -> int:
             ),
             "",
         ]
-        md += [f"- `{m}`" for m in real_survivors]
+        # Cap the rendered list: GitHub truncates comments at 65536 chars, and a
+        # PR that introduces dozens of survivors would otherwise dump an unreadable
+        # wall. The full set is always in the uploaded artifacts.
+        shown = real_survivors[:MAX_SURVIVORS_SHOWN]
+        md += [f"- `{m}`" for m in shown]
+        if len(real_survivors) > MAX_SURVIVORS_SHOWN:
+            md.append(
+                f"- … and {len(real_survivors) - MAX_SURVIVORS_SHOWN} more "
+                f"(see the `missed.txt` in the run artifacts)."
+            )
         md += ["", "_Tip: run `/improve-mutation-score` to triage and fix these._"]
     else:
         md.append("No new test gaps introduced by this change. 🎉")

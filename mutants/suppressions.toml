@@ -18,6 +18,14 @@
 #                         otherwise-tested function. `mutant` is the literal text
 #                         (without the leading "file:line:col: ").
 #
+# Every entry also carries:
+#   category = "equivalent" | "dead"
+#     "equivalent" -> reachable code, but the mutation cannot change observable
+#                     behavior on any valid input.
+#     "dead"       -> the mutated code is unreachable (zero call sites / an
+#                     unsatisfiable bound / not reachable from the public API).
+#   justification  -> the proof; reviewer -> who signed off.
+#
 # Inline `#[mutants::skip]` on a function is also honored natively by
 # cargo-mutants and is appropriate for truly dead helpers; prefer this file when
 # the decision needs a recorded justification.
@@ -44,6 +52,7 @@
 # These are required only to satisfy the `TxRuntimeLimit` trait contract.
 [[suppress]]
 kind = "function"
+category = "dead"
 file = "crates/mega-evm/src/limit/data_size.rs"
 pattern = "<impl TxRuntimeLimit for DataSizeTracker>::tx_limit"
 justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
@@ -51,6 +60,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "function"
+category = "dead"
 file = "crates/mega-evm/src/limit/kv_update.rs"
 pattern = "<impl TxRuntimeLimit for KVUpdateTracker>::tx_limit"
 justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
@@ -58,6 +68,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "function"
+category = "dead"
 file = "crates/mega-evm/src/limit/state_growth.rs"
 pattern = "<impl TxRuntimeLimit for StateGrowthTracker>::tx_limit"
 justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
@@ -75,6 +86,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 # survives.
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/limit/storage_call_stipend.rs"
 mutant = "replace > with >= in StorageCallStipendTracker::effective_remaining_for_rescue"
 justification = "Equivalent: the > vs >= boundary only differs when stipend == 0, where the then-branch reduces to gas.remaining().min(gas.limit()) == gas.remaining() (the else-branch) because remaining <= limit is invariant. No reachable input observes the difference."
@@ -93,6 +105,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 # applied, confirming no observable difference.
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/limit/limit.rs"
 mutant = "replace && with || in AdditionalLimit::before_frame_return_result"
 justification = "Equivalent: at every <true> (last_frame_result) call has_active_frame() is already false (the frame was popped by the preceding <false> frame_return_result pass), so LAST_FRAME && !has_active == LAST_FRAME || !has_active == true; at <false> calls LAST_FRAME is false in both. Full suite (incl. all multi-frame exceed tests) green with the mutant."
@@ -105,10 +118,11 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 # (mod.rs:70-74), yielding identical fields. Value-identical, no observable difference.
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/external/mod.rs"
 mutant = "replace <impl ExternalEnvFactory for EmptyExternalEnv>::external_envs -> ExternalEnvs<Self::EnvTypes> with ExternalEnvs::from(Default::default())"
 justification = "EmptyExternalEnv is a unit struct; real body builds ExternalEnvs{salt_env:EmptyExternalEnv, oracle_env:EmptyExternalEnv}; from(Default::default()) resolves to Default for ExternalEnvs<EmptyExternalEnv> producing identical fields. Value-identical, no observable behavioral difference."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 # --- EnrichedMegaTx stored-field overrides (dead: unreachable) ---------------------
 # `<impl MegaTransactionExt for EnrichedMegaTx<T>>::{tx_size, estimated_da_size}` (helpers.rs:89/93)
@@ -120,17 +134,19 @@ reviewer = "improve-mutation-score"
 # changes no observable behavior. (Latent perf bug: the precomputed fields are never used.)
 [[suppress]]
 kind = "function"
+category = "dead"
 file = "crates/mega-evm/src/block/helpers.rs"
 pattern = "<impl MegaTransactionExt for EnrichedMegaTx<T>>::tx_size"
 justification = "Dead/unreachable: trait method's `where Self: Encodable2718` bound is unsatisfiable for EnrichedMegaTx (no Encodable2718 impl), and `.tx_size()` resolves via Deref to inner T. Override never dispatched; mutation changes nothing."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "function"
+category = "dead"
 file = "crates/mega-evm/src/block/helpers.rs"
 pattern = "<impl MegaTransactionExt for EnrichedMegaTx<T>>::estimated_da_size"
 justification = "Dead/unreachable: trait method's `where Self: Encodable2718` bound is unsatisfiable for EnrichedMegaTx (no Encodable2718 impl), and `.estimated_da_size()` resolves via Deref to inner T. Override never dispatched; mutation changes nothing."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 # --- DeterministicHasher::write line-125 `|` combine (equivalent) ------------------
 # `let combined = (value[0] as u128) | ((value[1] as u128) << 64);` where
@@ -147,10 +163,11 @@ reviewer = "improve-mutation-score"
 # branch and is the equivalent one.
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent: `(value[0] as u128) | ((value[1] as u128) << 64)` ORs a u64-widened low half (bits 0..63 only) with a u64-widened high half shifted into bits 64..127 only. The operands have disjoint set bits by construction for every input, so | == ^ identically; no reachable input distinguishes them."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 # --- DeterministicHasher typed write_uN / update mutants (dead: unreachable from public API) -------
 # `AHashBucketHasher` — the crate's ONLY public hasher — computes bucket ids via
@@ -175,52 +192,59 @@ reviewer = "improve-mutation-score"
 # kill them — and the public API offers no path to do so. Recorded here as dead code.
 [[suppress]]
 kind = "line"
+category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace ^ with | in DeterministicHasher::update"
 justification = "Dead/unreachable from the public API: AHashBucketHasher::bucket_id drives only the slice write() -> large_update; update() is reached solely via the typed write_uN methods, which are unreachable (pub(crate) DeterministicHasher/RandomState are not re-exported, no integration test can construct them, and zero non-test callers exist crate-wide). The ^->| mutant changes no observable bucket_id output."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace ^ with & in DeterministicHasher::update"
 justification = "Dead/unreachable from the public API: see the ^->| entry for update — update() is only reached via the unreachable typed write_uN methods. The ^->& mutant changes no observable bucket_id output."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u8 with ()"
 justification = "Dead/unreachable from the public API: bucket_id uses only the slice write() -> large_update; write_u8 is reached only via core::hash::Hasher trait dispatch on the pub(crate), non-re-exported DeterministicHasher, which no integration test (or any non-test crate caller) can invoke. Stubbing it to () changes no observable bucket_id output."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u16 with ()"
 justification = "Dead/unreachable from the public API: same as write_u8 — write_u16 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u32 with ()"
 justification = "Dead/unreachable from the public API: same as write_u8 — write_u32 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u64 with ()"
 justification = "Dead/unreachable from the public API: same as write_u8 — write_u64 (and write_usize, which delegates to it) is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u128 with ()"
 justification = "Dead/unreachable from the public API: bucket_id's slice write() never delegates to write_u128 (it calls large_update directly); write_u128 is reached only via trait dispatch on the non-re-exported pub(crate) hasher, which no non-test caller invokes. Stubbing it to () changes no observable output."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 # --- DeterministicHasher::write line-109 `> 16` -> `>= 16` (equivalent) ------------
 # `if data.len() > 16 { large branch } else { mid branch }`. The `>=` mutant only diverges
@@ -240,10 +264,11 @@ reviewer = "improve-mutation-score"
 # line-109 survivor reaches this filter.
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
 mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs at len == 16, where both the mid branch (front | (back<<64)) and the large branch (read_last_u128, with no loop pass since 16 is not > 16) feed the identical le_u128(bytes[0..16]) to a single large_update. Same buffer, same bucket id; no input distinguishes them. The line-108 and line-112 mutants sharing this text are non-equivalent and are caught by the len-8 / len-32 tests."
-reviewer = "improve-mutation-score"
+reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # spec-gate operator survivors (universalmutator + comby; scripts/umutate.py).
@@ -256,6 +281,7 @@ reviewer = "improve-mutation-score"
 # --- data_size.rs:173 defensive invariant guard (equivalent) -----------------
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/limit/data_size.rs"
 mutant = "spec-gate rex5_enabled: spec.is_enabled(MegaSpecId::REX5), -> rex5_enabled: spec.is_enabled(MegaSpecId::REX4),"
 justification = "Equivalent: rex5_enabled only feeds the debug_assert! at data_size.rs:173, which executes only inside the `used > limit` branch with an active frame — a TX-level data-size exceed while a frame is live. Pre-REX5 that state is unreachable in valid execution (before_tx_start, the only mid-execution tx_entry writer, runs before any frame; an exceed there halts before a frame is pushed). Relaxing the guard to REX4 cannot change behavior on any reachable input."
@@ -264,6 +290,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 # --- frame_limit.rs:113 per-frame derivation gate (equivalent: coupled) -------
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/limit/frame_limit.rs"
 mutant = "spec-gate rex4_enabled: spec.is_enabled(MegaSpecId::REX4), -> rex4_enabled: spec.is_enabled(MegaSpecId::REX3),"
 justification = "Equivalent (coupled gates): frame_limit rex4_enabled gates only per-frame limit DERIVATION (push_call_frame_info, line 339). ENFORCEMENT (exceeds_current_frame_limit) is gated separately on each dimension's own REX4 check. Shifting derivation to REX3 sets per-frame limits that no dimension checks at REX3 — their checks stay TX-level — so net_usage and every limit outcome are unchanged."
@@ -272,6 +299,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 # --- state_growth.rs REX4 per-frame gates (equivalent: coupled/REX5-only) -----
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
 mutant = "crates/mega-evm/src/limit/state_growth.rs:121:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
 justification = "Equivalent (coupled): push_frame shifted to REX3 derives per-frame state-growth limits at REX3, but check_limit (line 206, unmutated) skips the per-frame check pre-REX4 and uses TX-level net_usage only. The derived frame limits are never read, so no observable change."
@@ -279,6 +307,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
 mutant = "crates/mega-evm/src/limit/state_growth.rs:206:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
 justification = "Equivalent (coupled): check_limit shifted to REX3 runs the per-frame check at REX3, but push_frame (line 121, unmutated) pushes frames with u64::MAX limit pre-REX4, so exceeds_current_frame_limit never fires and control falls through to the identical TX-level check."
@@ -286,6 +315,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
 mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
 justification = "Equivalent: current_call_remaining is only read when building a child sandbox budget (sandbox/execution.rs:1037, KeylessDeploy, REX5+); it is never called at REX3/REX4. And at REX3 frames carry u64::MAX limits (push_frame, line 121), so frame_remaining.min(tx_remaining) == tx_remaining regardless."
@@ -293,6 +323,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 
 [[suppress]]
 kind = "line"
+category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
 mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
 justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs:1037). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
