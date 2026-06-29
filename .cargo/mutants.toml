@@ -30,3 +30,9 @@ exclude_globs = [
 # (a timeout is treated as "could not decide", not as a survivor).
 minimum_test_timeout = 120
 timeout_multiplier = 3.0
+
+# Seed each scratch build directory from ./target so mutant builds reuse the
+# already-compiled dependencies instead of recompiling them from scratch. Paired
+# with a warm ./target (a prebuild step + Swatinem/rust-cache in CI), this is what
+# lets the cache benefit the per-mutant builds, not just the dependency download.
+copy_target = true

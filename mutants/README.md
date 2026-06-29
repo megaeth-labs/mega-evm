@@ -54,6 +54,14 @@ cargo-mutants; prefer `suppressions.toml` when the decision needs a record.
 
 Adding a suppression is a reviewed decision — scrutinize it like disabling a test.
 
+A suppression that stops matching any mutant (its function was renamed/deleted, or
+its line text changed) silently becomes a permanent blind spot. The **Suppression
+Hygiene** workflow (`.github/workflows/suppression-hygiene.yml`) guards against
+this: it assembles the full mutant universe from both engines and runs
+`mutation_gate.py orphans`, failing if any suppression matches nothing. It runs on
+PRs that touch `suppressions.toml` or `src/`, and weekly. For dead code, prefer
+deleting it or `#[mutants::skip]` over a permanent `kind = "function"` exclude.
+
 ## Fixing survivors
 
 Run the `improve-mutation-score` skill: it triages each survivor

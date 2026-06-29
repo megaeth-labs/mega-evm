@@ -1,0 +1,61 @@
+name: Suppression Hygiene
+
+# Flags stale mutation suppressions: an entry in mutants/suppressions.toml that
+# no longer matches any live mutant (e.g. the suppressed function was renamed or
+# deleted) silently becomes a permanent blind spot. This check assembles the full
+# mutant universe from both engines and fails if any suppression matches nothing.
+# It runs no tests, so it is fast (just mutant *generation*/listing).
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "mutants/suppressions.toml"
+      - "mutants/operators/**"
+      - "crates/mega-evm/src/**"
+  schedule:
+    - cron: "0 5 * * 1" # weekly
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  orphan-suppressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Install universalmutator (mise)
+        uses: jdx/mise-action@v2
+      - name: Install comby
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          bash <(curl -sL get.comby.dev)
+      - name: Build the full mutant universe (both engines)
+        run: |
+          # cargo-mutants --list includes function-suppressed mutants (the driver's
+          # --exclude-re is not applied here), giving the complete universe.
+          cargo mutants --list > universe.txt
+          python3 scripts/umutate.py plan --packs spec-gate \
+            | grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' >> universe.txt
+          echo "universe: $(wc -l < universe.txt) mutants"
+      - name: Check for orphan suppressions
+        run: |
+          python3 scripts/mutation_gate.py orphans \
+            --suppressions mutants/suppressions.toml \
+            --universe universe.txt

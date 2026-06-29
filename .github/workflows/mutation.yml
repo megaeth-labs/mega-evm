@@ -46,6 +46,13 @@ jobs:
           # generated mutants, which would silently shift the gate's baseline.
           tool: cargo-mutants@27.1.0
 
+      - name: Warm build cache
+        # Compile deps + test binaries into ./target so (a) Swatinem/rust-cache
+        # (bundled in setup-rust-toolchain) caches the compiled dependencies, and
+        # (b) cargo-mutants' `copy_target` seeds each scratch build from this warm
+        # target — so per-mutant builds skip recompiling dependencies.
+        run: cargo nextest run -p mega-evm --all-features --no-run
+
       - name: Run mutation testing
         # On a PR: mutate only the changed lines (fast gate). On manual dispatch
         # there is no PR base, so run the whole crate as an on-demand baseline

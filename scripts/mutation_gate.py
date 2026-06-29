@@ -21,6 +21,7 @@ a test gap the PR introduced.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -202,6 +203,52 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0 if gate_pass else 1
 
 
+def cmd_orphans(args: argparse.Namespace) -> int:
+    """Flag suppressions that match no live mutant (stale = a silent blind spot).
+
+    `--universe` is a file of mutant lines (`file:line:col: text`) covering the
+    whole crate, assembled from BOTH engines (cargo-mutants `--list` and
+    `umutate.py plan`). A function suppression's regex `pattern` must match at
+    least one mutant name; a line suppression's `mutant` must match one mutant
+    (bare body or full locator line). Otherwise the suppression is an orphan and
+    should be removed or updated."""
+    func, line = load_suppressions(Path(args.suppressions))
+    universe = read_lines(Path(args.universe))
+    if not universe:
+        print(f"ERROR: empty mutant universe at {args.universe}", file=sys.stderr)
+        return 2
+    bodies = {mutant_body(m) for m in universe}
+    full = set(universe)
+
+    orphans: list[str] = []
+    for e in func:
+        pat = e.get("pattern")
+        if not pat:
+            continue
+        try:
+            rx = re.compile(pat)
+        except re.error as err:
+            print(f"bad regex in suppression ({e.get('file', '?')}): {err}", file=sys.stderr)
+            return 2
+        if not any(rx.search(b) for b in bodies):
+            orphans.append(f'[function] {e.get("file", "?")}: pattern "{pat}"')
+    for e in line:
+        m = e.get("mutant", "").strip()
+        if m and m not in bodies and m not in full:
+            orphans.append(f'[line] {e.get("file", "?")}: "{m[:90]}"')
+
+    total = len(func) + len(line)
+    if orphans:
+        print(f"❌ {len(orphans)}/{total} suppressions are stale (no live mutant matches).")
+        print("Remove or update these — a suppression that matches nothing is a "
+              "silent blind spot:")
+        for o in orphans:
+            print(f"  - {o}")
+        return 1
+    print(f"✅ all {total} suppressions match a live mutant.")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -216,6 +263,12 @@ def main() -> int:
     pr.add_argument("--comment", default=None, help="write Markdown report here")
     pr.add_argument("--summary", default=None, help="append report here (GITHUB_STEP_SUMMARY)")
     pr.set_defaults(func=cmd_report)
+
+    po = sub.add_parser("orphans", help="flag suppressions matching no live mutant")
+    po.add_argument("--suppressions", required=True)
+    po.add_argument("--universe", required=True,
+                    help="file of all mutant lines (cargo-mutants --list + umutate.py plan)")
+    po.set_defaults(func=cmd_orphans)
 
     args = p.parse_args()
     return args.func(args)
