@@ -110,7 +110,8 @@ only yields expected/equivalent survivors).
 ```bash
 # one-time tools: universalmutator via mise; comby per-platform (see below)
 mise install                        # provides `mutate`, `analyze_mutants`
-#   comby:  paru -S comby-bin  (Arch)   |   bash <(curl -sL get.comby.dev)  (CI)
+#   comby (Arch):   paru -S comby-bin
+#   comby (Ubuntu): sudo apt-get install -y libpcre3 libev4 && bash <(curl -sL get.comby.dev)
 
 # read-only: show what would be mutated (no tests run)
 python3 scripts/umutate.py plan  --packs spec-gate

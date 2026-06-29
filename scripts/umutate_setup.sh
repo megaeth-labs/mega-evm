@@ -29,6 +29,11 @@ if ! command -v comby >/dev/null 2>&1; then
     if command -v paru >/dev/null 2>&1; then
         paru -S --needed comby-bin || paru -S --needed comby
     else
+        # The prebuilt comby links against libev/libpcre; install them first on
+        # apt-based systems (e.g. Ubuntu CI).
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y libpcre3 libev4
+        fi
         bash <(curl -sL get.comby.dev) || {
             echo "comby install failed; see https://github.com/comby-tools/comby/releases" >&2
             exit 1

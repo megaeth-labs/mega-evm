@@ -40,7 +40,12 @@ jobs:
       - name: Install universalmutator (mise)
         uses: jdx/mise-action@v2
       - name: Install comby
-        run: bash <(curl -sL get.comby.dev)
+        # The prebuilt comby links against libev/libpcre, which are not on the
+        # runner by default — install them before the official installer runs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          bash <(curl -sL get.comby.dev)
       - name: Run diff-scoped spec-gate mutation
         run: |
           python3 scripts/umutate.py run --packs spec-gate \
@@ -120,7 +125,12 @@ jobs:
       - name: Install universalmutator (mise)
         uses: jdx/mise-action@v2
       - name: Install comby
-        run: bash <(curl -sL get.comby.dev)
+        # The prebuilt comby links against libev/libpcre, which are not on the
+        # runner by default — install them before the official installer runs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          bash <(curl -sL get.comby.dev)
       - name: Run spec-gate mutation (${{ matrix.subsystem }})
         run: |
           python3 scripts/umutate.py run --packs spec-gate \
