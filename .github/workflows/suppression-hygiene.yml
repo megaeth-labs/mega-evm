@@ -50,7 +50,9 @@ jobs:
         run: |
           # cargo-mutants --list includes function-suppressed mutants (the driver's
           # --exclude-re is not applied here), giving the complete universe.
-          cargo mutants --list > universe.txt
+          # --colors never: CI forces CARGO_TERM_COLOR=always, which would otherwise
+          # embed ANSI codes and break exact suppression matching.
+          cargo mutants --list --colors never > universe.txt
           python3 scripts/umutate.py plan --packs spec-gate \
             | grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' >> universe.txt
           echo "universe: $(wc -l < universe.txt) mutants"

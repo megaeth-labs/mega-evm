@@ -213,7 +213,11 @@ def cmd_orphans(args: argparse.Namespace) -> int:
     (bare body or full locator line). Otherwise the suppression is an orphan and
     should be removed or updated."""
     func, line = load_suppressions(Path(args.suppressions))
-    universe = read_lines(Path(args.universe))
+    # Strip ANSI color codes defensively: `cargo mutants --list` colorizes its
+    # output when CARGO_TERM_COLOR=always (as CI sets), which would otherwise make
+    # every exact line-suppression "match nothing" and fail the check spuriously.
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    universe = [ansi.sub("", m) for m in read_lines(Path(args.universe))]
     if not universe:
         print(f"ERROR: empty mutant universe at {args.universe}", file=sys.stderr)
         return 2
