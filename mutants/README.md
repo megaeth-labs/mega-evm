@@ -56,7 +56,7 @@ Adding a suppression is a reviewed decision — scrutinize it like disabling a t
 
 A suppression that stops matching any mutant (its function was renamed/deleted, or
 its line text changed) silently becomes a permanent blind spot. The **Suppression
-Hygiene** workflow (`.github/workflows/suppression-hygiene.yml`) guards against
+Hygiene** job (the `orphan-suppressions` job in `.github/workflows/mutation.yml`) guards against
 this: it assembles the full mutant universe from both engines and runs
 `mutation_gate.py orphans`, failing if any suppression matches nothing. It runs on
 PRs that touch `suppressions.toml` or `src/`, and weekly. For dead code, prefer
@@ -146,4 +146,4 @@ Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect
 meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"`
 entries matching the mutant text, prefixed with the pack name. The PR gate runs
 diff-scoped (instant on PRs that touch no gate lines); the full crate sweep runs
-on a nightly schedule (`.github/workflows/spec-gate-mutation.yml`).
+on a nightly schedule (the `spec-gate-sweep` job in `.github/workflows/mutation.yml`).
