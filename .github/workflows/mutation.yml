@@ -1,0 +1,327 @@
+name: Mutation Testing
+
+# All mutation-testing CI lives here. Three concerns, one file:
+#   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly)
+#   * spec-gate            — universalmutator + comby custom operators for
+#                            backward-compat spec gates (diff PR + nightly sweep)
+#   * suppression hygiene  — flag suppressions that no longer match a live mutant
+# All three share the scorer scripts/mutation_gate.py. See mutants/README.md.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  schedule:
+    # Nightly: full-crate cargo-mutants re-verify (the diff gate never mutates
+    # #[cfg(test)] code, so the in-repo killing tests are only re-checked here),
+    # the full spec-gate sweep, and the suppression-hygiene check.
+    - cron: "0 3 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # to upsert the result comments
+
+jobs:
+  # ── cargo-mutants: diff-scoped gate on PRs, full-crate run nightly ──────────
+  cargo-mutants:
+    name: cargo-mutants gate
+    runs-on: ubuntu-24.04
+    # Diff-scoped PR runs finish in minutes; the nightly full-crate run needs
+    # much longer headroom.
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0 # need base history for the diff
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          # Pin the version: a new cargo-mutants release can change the set of
+          # generated mutants, which would silently shift the gate's baseline.
+          tool: cargo-mutants@27.1.0
+
+      - name: Warm build cache
+        # Compile deps + test binaries into ./target so (a) Swatinem/rust-cache
+        # (bundled in setup-rust-toolchain) caches the compiled dependencies, and
+        # (b) cargo-mutants' `copy_target` seeds each scratch build from this warm
+        # target — so per-mutant builds skip recompiling dependencies.
+        run: cargo nextest run -p mega-evm --all-features --no-run
+
+      - name: Run mutation testing
+        # On a PR: mutate only the changed lines (fast gate). On manual dispatch
+        # there is no PR base, so run the whole crate as an on-demand baseline
+        # instead of feeding an empty base into `diff` mode (which would fail).
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts/mutation_test.sh diff "${{ github.event.pull_request.base.sha }}"
+          else
+            scripts/mutation_test.sh full
+          fi
+
+      - name: Score and gate
+        run: |
+          python3 scripts/mutation_gate.py report \
+            --results target/mutants/mutants.out \
+            --suppressions mutants/suppressions.toml \
+            --comment mutation-report.md \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upsert PR comment
+        # Fork / Dependabot PRs run with a read-only token, so commenting fails;
+        # don't let that fail the gate job.
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body;
+            try {
+              body = fs.readFileSync('mutation-report.md', 'utf8');
+            } catch {
+              body = '## 🧬 Mutation testing\n\nNo report produced (no mega-evm changes to mutate).';
+            }
+            const marker = '<!-- mutation-testing-report -->';
+            body = `${marker}\n${body}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      - name: Upload mutation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results
+          path: |
+            target/mutants/mutants.out
+            target/mutants.diff
+            mutation-report.md
+          if-no-files-found: ignore
+
+  # ── spec-gate: diff-scoped blocking gate on PRs ────────────────────────────
+  # Only files+lines the PR changed are mutated, so most PRs generate zero
+  # spec-gate mutants and this is near-instant.
+  spec-gate:
+    name: diff-scoped spec-gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0 # need base history for the diff
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install universalmutator (mise)
+        uses: jdx/mise-action@v2
+      - name: Install comby
+        # Pin the version (reproducible mutant generation). The prebuilt links
+        # against libev/libpcre, which are not on the runner by default.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
+          sudo chmod +x /usr/local/bin/comby
+          comby -version
+      - name: Run diff-scoped spec-gate mutation
+        run: |
+          python3 scripts/umutate.py run --packs spec-gate \
+            --diff "${{ github.event.pull_request.base.sha }}" \
+            --output target/umutate
+      - name: Score and gate
+        run: |
+          python3 scripts/mutation_gate.py report \
+            --results target/umutate \
+            --suppressions mutants/suppressions.toml \
+            --comment spec-gate-report.md \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upsert PR comment
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body;
+            try {
+              body = fs.readFileSync('spec-gate-report.md', 'utf8');
+            } catch {
+              body = '## 🧬 Spec-gate mutation\n\nNo report produced.';
+            }
+            const marker = '<!-- spec-gate-mutation-report -->';
+            body = `${marker}\n${body}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-gate-mutation-diff
+          path: |
+            target/umutate
+            spec-gate-report.md
+          if-no-files-found: ignore
+
+  # ── spec-gate: nightly full sweep, sharded by subsystem ────────────────────
+  # Each shard stays bounded (analyze is sequential). Informational: surfaces
+  # survivors but does not fail the workflow — triage into suppressions or tests.
+  spec-gate-sweep:
+    name: spec-gate sweep (${{ matrix.subsystem }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        subsystem: [evm, limit, block, access, external, system, sandbox]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install universalmutator (mise)
+        uses: jdx/mise-action@v2
+      - name: Install comby
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
+          sudo chmod +x /usr/local/bin/comby
+          comby -version
+      - name: Run spec-gate mutation (${{ matrix.subsystem }})
+        run: |
+          python3 scripts/umutate.py run --packs spec-gate \
+            --files "crates/mega-evm/src/${{ matrix.subsystem }}/*" \
+            --output "target/umutate/${{ matrix.subsystem }}"
+      - name: Score (informational)
+        run: |
+          python3 scripts/mutation_gate.py report \
+            --results "target/umutate/${{ matrix.subsystem }}" \
+            --suppressions mutants/suppressions.toml \
+            --summary "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-gate-mutation-${{ matrix.subsystem }}
+          path: target/umutate/${{ matrix.subsystem }}
+          if-no-files-found: ignore
+
+  # ── suppression hygiene: gate on relevant PR changes, plus nightly ─────────
+  # `changes` scopes the hygiene job to PRs that could orphan a suppression
+  # (suppressions, operators, or src edits); nightly/dispatch always run it.
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      hygiene: ${{ steps.filter.outputs.hygiene }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            hygiene:
+              - 'mutants/suppressions.toml'
+              - 'mutants/operators/**'
+              - 'crates/mega-evm/src/**'
+
+  orphan-suppressions:
+    name: suppression hygiene
+    needs: changes
+    # Always on nightly/dispatch; on PRs only when a relevant path changed.
+    if: |
+      always() &&
+      (github.event_name != 'pull_request' || needs.changes.outputs.hygiene == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Install universalmutator (mise)
+        uses: jdx/mise-action@v2
+      - name: Install comby
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
+          sudo chmod +x /usr/local/bin/comby
+          comby -version
+      - name: Build the full mutant universe (both engines)
+        run: |
+          # --package mega-evm: match the driver's scope (otherwise --list also
+          #   covers the CLI bins in the virtual workspace's default-members, so a
+          #   stale mega-evm suppression could be kept alive by a same-named mutant
+          #   in another crate).
+          # No --exclude-re here, so function-suppressed mutants are included —
+          #   giving the complete universe to validate suppressions against.
+          # --colors never: CI forces CARGO_TERM_COLOR=always, which would otherwise
+          #   embed ANSI codes and break exact suppression matching.
+          cargo mutants --list --package mega-evm --colors never > universe.txt
+          python3 scripts/umutate.py plan --packs spec-gate \
+            | grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' >> universe.txt
+          echo "universe: $(wc -l < universe.txt) mutants"
+      - name: Check for orphan suppressions
+        run: |
+          python3 scripts/mutation_gate.py orphans \
+            --suppressions mutants/suppressions.toml \
+            --universe universe.txt

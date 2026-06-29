@@ -1,0 +1,28 @@
+# Operator pack: spec-gate
+#
+# A custom mutation-operator pack run through universalmutator + comby and scored
+# by the shared gate (scripts/mutation_gate.py). See mutants/README.md for the
+# pack framework, and generate.py for the operator definitions.
+
+name = "spec-gate"
+description = "Mutate spec gates and per-spec dispatch to surface backward-compat test gaps"
+
+# Mutation engine mode: "comby" (structural) or "regex".
+mode = "comby"
+
+# Candidate source files. Globs are matched from the repo root.
+targets = ["crates/mega-evm/src/**/*.rs"]
+
+# Only mutate files whose contents match this regex (skips files with no gates,
+# saving build/test time). Optional.
+match = "is_enabled\\(MegaSpecId::|::instruction_table"
+
+# Rules are produced by a generator (kept in sync with the spec progression).
+# A simpler pack may instead set `rules = "<name>.rules"` and ship a static file.
+# NOTE: universalmutator requires ".rules" in the filename.
+generator = "generate.py"
+rules = "spec-gate.rules"
+
+# Test command whose non-zero exit means a mutant was killed (caught).
+# Optional; defaults to the engine default if omitted.
+test_cmd = "cargo nextest run -p mega-evm --all-features"

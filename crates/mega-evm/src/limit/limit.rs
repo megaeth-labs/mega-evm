@@ -968,4 +968,22 @@ mod tests {
         assert!(!limit.record_compute_gas_all_dims(100), "trailing check must surface exceed");
         assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
     }
+
+    /// `intrinsic_check_for_tx` is a REX5-only preflight (EIP-7702 authority growth);
+    /// its `debug_assert!(spec.is_enabled(REX5))` precondition must reject a pre-REX5
+    /// spec. Calling it at REX4 must trip the assert.
+    ///
+    /// Kills the spec-gate mutant `is_enabled(MegaSpecId::REX5) -> is_enabled(REX4)` at
+    /// limit.rs:203: under the mutant the precondition would silently accept REX4 and the
+    /// call would return a `LimitCheck` instead of panicking.
+    #[test]
+    #[should_panic(expected = "REX5")]
+    #[cfg(debug_assertions)]
+    fn test_intrinsic_check_for_tx_requires_rex5_spec() {
+        let tx = MegaTransaction::new(
+            TxEnvBuilder::new().caller(Address::ZERO).call(Address::ZERO).build_fill(),
+        );
+        // REX4 < REX5: the precondition assert must fire.
+        let _ = AdditionalLimit::intrinsic_check_for_tx(MegaSpecId::REX4, &tx, test_limits());
+    }
 }
