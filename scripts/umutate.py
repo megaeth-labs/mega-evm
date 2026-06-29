@@ -5,9 +5,13 @@ This is the engine for *custom operator packs* — the domain-specific complemen
 to cargo-mutants. Each pack lives under `mutants/operators/<name>/` with a
 `manifest.toml` (see that dir for the schema). The engine is pack-agnostic: it
 runs whatever packs exist and feeds their results to the SAME shared gate that
-cargo-mutants uses (`scripts/mutation_gate.py`), via the `caught.txt`/`missed.txt`
-file contract. The killed/not-killed -> caught/missed adapter is the `_adapt`
-step below.
+cargo-mutants uses (`scripts/mutation_gate.py`), via the
+caught/missed/timeout/unviable file contract (the `_adapt` step maps a mutant to
+its stable id).
+
+It uses universalmutator's `mutate` to GENERATE mutants but runs and classifies
+them itself (`analyze`): a clean baseline is required first, `#[cfg(test)]` code
+is excluded, and timeouts are reported separately rather than counted as caught.
 
 Subcommands:
 
@@ -31,8 +35,10 @@ import argparse
 import difflib
 import fnmatch
 import glob
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,11 +56,13 @@ def _run(cmd, **kw):
 
 
 def require_tools() -> None:
-    missing = [t for t in ("mutate", "analyze_mutants", "comby") if shutil.which(t) is None]
+    # We use universalmutator's `mutate` to generate mutants but run/score them
+    # ourselves (so we control the baseline check and timeout classification).
+    missing = [t for t in ("mutate", "comby") if shutil.which(t) is None]
     if missing:
         sys.exit(
             f"missing required tools: {', '.join(missing)}\n"
-            f"  mutate/analyze_mutants: `mise install` (declared in .mise.toml)\n"
+            f"  mutate: `mise install` (declared in .mise.toml)\n"
             f"  comby: `paru -S comby-bin` (Arch) or `bash <(curl -sL get.comby.dev)`\n"
             f"see scripts/umutate_setup.sh."
         )
@@ -151,13 +159,54 @@ def generate_mutants(pack: dict, rules: Path, src: str, mutant_dir: Path,
     r = _run(cmd)
     if r.returncode != 0:
         sys.exit(f"[{pack['name']}] mutate failed on {src}:\n{r.stderr}\n{r.stdout}")
-    if allowed_lines is not None:
-        for m in list(mutant_dir.glob("*")):
-            if not m.is_file():
+    # Prune: drop mutants in #[cfg(test)] code (always — mutating test assertions
+    # is meaningless and would score test edits as production gaps) and, in diff
+    # mode, drop mutants outside the PR's changed lines.
+    test_lines = _test_line_ranges((ROOT / src).read_text(errors="ignore"))
+    for m in list(mutant_dir.glob("*")):
+        if not m.is_file():
+            continue
+        change = _first_change(ROOT / src, m)
+        line = change[0] if change else None
+        if (line is None
+                or line in test_lines
+                or (allowed_lines is not None and line not in allowed_lines)):
+            m.unlink()
+
+
+def _test_line_ranges(text: str) -> set[int]:
+    """1-based line numbers inside `#[cfg(test)]` / `#[test]` blocks.
+
+    A heuristic brace counter (it does not parse strings/comments), which is
+    sufficient to keep spec-gate mutation off test code; production gates live
+    far from test modules."""
+    lines = text.splitlines()
+    n = len(lines)
+    test: set[int] = set()
+    i = 0
+    while i < n:
+        s = lines[i].strip()
+        if s.startswith("#[cfg(test)]") or s.startswith("#[test]"):
+            j = i
+            while j < n and "{" not in lines[j]:
+                j += 1
+            if j >= n:
+                test.add(i + 1)
+                i += 1
                 continue
-            change = _first_change(ROOT / src, m)
-            if change is None or change[0] not in allowed_lines:
-                m.unlink()  # outside the PR's changed lines
+            depth, k, started = 0, j, False
+            while k < n:
+                depth += lines[k].count("{") - lines[k].count("}")
+                started = started or "{" in lines[k]
+                if started and depth <= 0:
+                    break
+                k += 1
+            for ln in range(i + 1, k + 2):  # 1-based, inclusive of i..k
+                test.add(ln)
+            i = k + 1
+            continue
+        i += 1
+    return test
 
 
 def _ascii(s: str) -> str:
@@ -198,24 +247,44 @@ def _adapt(pack: dict, src: str, mutant_basename: str, mutant_dir: Path,
     return f"{src}:{line}:1: {pack['name']} {before} -> {after}"
 
 
-def analyze(pack: dict, src: str, mutant_dir: Path) -> tuple[list[str], list[str]]:
-    """Run analyze_mutants; return (killed_basenames, notkilled_basenames).
+def _run_test(test_cmd: str) -> str:
+    """Run the test command from the repo root; return 'fail' (non-zero exit, the
+    mutant is caught), 'ok' (exit 0, the mutant survived), or 'timeout'."""
+    p = subprocess.Popen(test_cmd, cwd=ROOT, shell=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    try:
+        return "fail" if p.wait(timeout=float(ANALYZE_TIMEOUT)) != 0 else "ok"
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(p.pid), signal.SIGKILL)  # kill the whole cargo group
+        p.wait()
+        return "timeout"
 
-    analyze_mutants writes `<prefix>.killed.txt` / `<prefix>.notkilled.txt`
-    (it inserts a literal '.' between the prefix and the filename)."""
-    prefix = str(mutant_dir / "_result")
+
+def baseline_ok(test_cmd: str) -> bool:
+    """The test command must pass on the UNMUTATED tree; otherwise every mutant
+    looks 'caught' (non-zero) and the run is meaningless."""
+    return _run_test(test_cmd) == "ok"
+
+
+def analyze(pack: dict, src: str, mutant_dir: Path) -> tuple[list, list, list]:
+    """Swap each mutant into `src`, run the pack's test command, and classify it
+    as caught / survived / timed-out. The original file is always restored.
+
+    We run this ourselves rather than via `analyze_mutants` so we (a) control the
+    baseline and (b) separate timeouts (which it would record as 'killed')."""
+    src_path = ROOT / src
+    original = src_path.read_text()
     test_cmd = pack.get("test_cmd", DEFAULT_TEST_CMD)
-    r = _run(["analyze_mutants", src, test_cmd, "--mutantDir", str(mutant_dir),
-              "--prefix", prefix, "--noShuffle", "--timeout", ANALYZE_TIMEOUT])
-    if r.returncode != 0:
-        sys.exit(f"[{pack['name']}] analyze_mutants failed on {src}:\n{r.stderr}")
-    killed = _read(Path(prefix + ".killed.txt"))
-    notkilled = _read(Path(prefix + ".notkilled.txt"))
-    return killed, notkilled
-
-
-def _read(p: Path) -> list[str]:
-    return [ln.strip() for ln in p.read_text().splitlines() if ln.strip()] if p.exists() else []
+    caught, survived, timed_out = [], [], []
+    bucket = {"fail": caught, "ok": survived, "timeout": timed_out}
+    try:
+        for m in sorted(p for p in mutant_dir.glob("*") if p.is_file()):
+            src_path.write_text(m.read_text())
+            bucket[_run_test(test_cmd)].append(m.name)
+    finally:
+        src_path.write_text(original)
+    return caught, survived, timed_out
 
 
 def cmd_plan(args) -> int:
@@ -236,7 +305,7 @@ def cmd_plan(args) -> int:
                 generate_mutants(pack, rules, src, md, allowed)
                 ids = []
                 for m in sorted(md.glob("*")):
-                    if m.is_file() and m.name != "_lines.txt":
+                    if m.is_file():
                         a = _adapt(pack, src, m.name, md, allowed)
                         if a:
                             ids.append(a)
@@ -253,11 +322,21 @@ def cmd_run(args) -> int:
     require_tools()
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    caught, missed = [], []
+    caught, missed, timeouts = [], [], []
     packs = load_packs(args.packs)
     changed_files = changed_lines = None
     if args.diff:
         changed_files, changed_lines = changed_files_and_lines(args.diff)
+
+    # Baseline: every distinct test command must pass on the unmutated tree first.
+    for tc in {pack.get("test_cmd", DEFAULT_TEST_CMD) for pack in packs}:
+        if not baseline_ok(tc):
+            sys.exit(
+                f"baseline failed on the unmutated tree: `{tc}`\n"
+                f"fix the failing tests before running mutation analysis "
+                f"(otherwise every mutant is falsely 'caught')."
+            )
+
     with tempfile.TemporaryDirectory() as tmp:
         for pack in packs:
             rules = ensure_rules(pack)
@@ -265,21 +344,25 @@ def cmd_run(args) -> int:
                 md = Path(tmp) / pack["name"] / src.replace("/", "_")
                 allowed = changed_lines.get(src) if changed_lines is not None else None
                 generate_mutants(pack, rules, src, md, allowed)
-                if not any(p.is_file() and p.name != "_lines.txt" for p in md.glob("*")):
+                if not any(p.is_file() for p in md.glob("*")):
                     continue
-                killed, notkilled = analyze(pack, src, md)
-                for names, sink in ((killed, caught), (notkilled, missed)):
+                c, s, t = analyze(pack, src, md)
+                for names, sink in ((c, caught), (s, missed), (t, timeouts)):
                     for name in names:
                         a = _adapt(pack, src, name, md, allowed)
                         if a:
                             sink.append(a)
-    (out / "caught.txt").write_text("\n".join(caught) + ("\n" if caught else ""))
-    (out / "missed.txt").write_text("\n".join(missed) + ("\n" if missed else ""))
-    # Spec-gate mutants are valid Rust by construction, so there is no separate
-    # unviable bucket; write empty files so the gate's reader is happy.
-    (out / "unviable.txt").write_text("")
-    (out / "timeout.txt").write_text("")
-    print(f"caught: {len(caught)}  missed: {len(missed)}  -> {out}")
+
+    def write(name, items):
+        (out / name).write_text("\n".join(items) + ("\n" if items else ""))
+
+    write("caught.txt", caught)
+    write("missed.txt", missed)
+    write("timeout.txt", timeouts)
+    # Spec-gate mutants are valid Rust by construction, so there is no unviable
+    # bucket; write an empty file so the gate's reader is happy.
+    write("unviable.txt", [])
+    print(f"caught: {len(caught)}  missed: {len(missed)}  timeout: {len(timeouts)}  -> {out}")
     print(f"score with: python3 scripts/mutation_gate.py report --results {out} "
           f"--suppressions mutants/suppressions.toml")
     return 0
