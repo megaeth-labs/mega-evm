@@ -176,17 +176,28 @@ def noise_floor(series_list) -> float:
     """A/A noise floor (percent) for one bench, computed from the round-to-round
     variation of repeated measurements of the SAME binary — so it costs no extra
     runs. Each phase's per-round values (feature_1..feature_R, baseline_1..R) are
-    repeats of one binary; their consecutive relative |Δ%| estimate the machine's
-    own jitter. Floor = 90th percentile of those magnitudes, clamped — exactly
-    ARO's calibrate_floors, fed from in-band data instead of a separate A/A pass.
+    repeats of one binary; the spread of their relative |Δ%| estimates the
+    machine's own jitter. Floor = 90th percentile of those magnitudes, clamped —
+    exactly ARO's calibrate_floors, fed from in-band data instead of a separate
+    A/A pass.
+
+    Compare only rounds of the SAME execution slot. `bench_paired.sh` alternates
+    the within-pair order every round, so for each phase the odd and even series
+    represent different first-vs-second slots. Consecutive rounds therefore
+    straddle the slot boundary and their delta is dominated by the slot-order
+    effect (frequency ramp, cold cache) — which the paired *mean* already
+    cancels. Pairing within a slot (odd-with-odd, even-with-even) keeps this
+    floor measuring the random jitter it is meant to, instead of re-importing the
+    slot effect the mean removed and over-suppressing real sub-floor changes.
 
     `series_list` is a list of {round: ns} dicts (one per phase)."""
     mags = []
     for series in series_list:
-        vals = [series[r] for r in sorted(series)]
-        for a, b in zip(vals, vals[1:]):
-            if _finite(a) and _finite(b) and a != 0.0:
-                mags.append(abs((b - a) / a * 100.0))
+        for parity in (0, 1):
+            vals = [series[r] for r in sorted(series) if r % 2 == parity]
+            for a, b in zip(vals, vals[1:]):
+                if _finite(a) and _finite(b) and a != 0.0:
+                    mags.append(abs((b - a) / a * 100.0))
     if len(mags) < 2:
         return FLOOR_FALLBACK
     q90 = quantile(mags, 0.90)

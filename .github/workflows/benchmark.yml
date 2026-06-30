@@ -22,7 +22,11 @@ concurrency:
 # per-round configs keep the wall-clock close to the old single sequential pass;
 # precision is recovered across rounds, not within one. Tune here.
 env:
-  BENCH_ROUNDS: '15'
+  # Keep BENCH_ROUNDS even: the within-pair order alternates each round
+  # (feature-first / baseline-first), so an even count runs each side first
+  # exactly as often and the order-effect cancels in the mean. An odd count
+  # leaves a one-round imbalance that biases even the A/A self-check.
+  BENCH_ROUNDS: '16'
   BENCH_SAMPLE_SIZE: '10'
   BENCH_WARMUP: '0.2'
   BENCH_MEAS: '0.5'

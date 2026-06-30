@@ -31,6 +31,11 @@ sample_size="$6"
 warmup="$7"
 measure="$8"
 
+if [ "$rounds" -lt 2 ] || [ $((rounds % 2)) -ne 0 ]; then
+  echo "round count must be an even number >= 2 so feature-first and baseline-first slots balance" >&2
+  exit 1
+fi
+
 mkdir -p "$out_dir"
 
 run_one() {
@@ -49,6 +54,9 @@ for r in $(seq 1 "$rounds"); do
 
   # Alternate the within-pair order every round so no side is structurally
   # favoured by always warming the cache / running on a hotter core first.
+  # Convention: odd round = feature-first, even round = baseline-first.
+  # `bench_compare.py` noise_floor relies on this (same-parity rounds = same
+  # execution slot) — keep the two in sync.
   if [ "$baseline_bin" = "" ]; then
     run_one "$feature_bin" "$feat_out"            # feature-only (no baseline)
   elif [ $((r % 2)) -eq 1 ]; then
