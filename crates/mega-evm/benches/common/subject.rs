@@ -91,40 +91,34 @@ pub trait Subject {
     fn name(&self) -> &str;
     /// Build a fresh DB + EVM from the workload, run every tx on that one
     /// reused instance, and (unless the workload opts out) assert each
-    /// succeeds. Returns the total gas used across all txs in the workload.
-    /// Implementations delegate to [`run_workload`].
-    fn run(&self, workload: &Workload) -> u64;
+    /// succeeds. Implementations delegate to [`run_workload`].
+    fn run(&self, workload: &Workload);
 }
 
 /// The one place the per-tx loop, success assertion, and `black_box` live.
 ///
 /// `build` constructs the (stack-specific) EVM once; `exec` runs a single tx
-/// and returns `(is_success, gas_used)`. Keeping the skeleton here means the
-/// success check can never drift or be forgotten on one stack — the bug that
-/// the old per-stack `run` bodies were prone to. The generic `E` is inferred
-/// from `build`, so no stack has to spell out its verbose revm `Evm<…>` type.
+/// and returns its `is_success()`. Keeping the skeleton here means the success
+/// check can never drift or be forgotten on one stack — the bug that the old
+/// per-stack `run` bodies were prone to. The generic `E` is inferred from
+/// `build`, so no stack has to spell out its verbose revm `Evm<…>` type.
 ///
 /// On failure the panic names the row and tx index; the concrete result is not
 /// surfaced because `exec` has already abstracted away the stack's distinct
 /// `ExecutionResult` type (it `black_box`es the result for the optimizer).
-///
-/// Returns the total gas used across all txs, for criterion throughput reporting.
 fn run_workload<E>(
     name: &str,
     workload: &Workload,
     build: impl FnOnce() -> E,
-    exec: impl Fn(&mut E, &TxSpec) -> (bool, u64),
-) -> u64 {
+    exec: impl Fn(&mut E, &TxSpec) -> bool,
+) {
     let mut evm = build();
-    let mut total_gas = 0u64;
     for (i, tx) in workload.txs.iter().enumerate() {
-        let (success, gas) = exec(&mut evm, tx);
+        let success = exec(&mut evm, tx);
         if workload.assert_success {
             assert!(success, "{name} tx #{i} should succeed");
         }
-        total_gas = total_gas.saturating_add(gas);
     }
-    total_gas
 }
 
 //
@@ -206,7 +200,7 @@ impl Subject for Mega {
         self.name
     }
 
-    fn run(&self, workload: &Workload) -> u64 {
+    fn run(&self, workload: &Workload) {
         let spec = self.spec;
         run_workload(
             self.name,
@@ -223,11 +217,10 @@ impl Subject for Mega {
                 mega_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(mega_tx).expect("mega transact");
                 let success = r.result.is_success();
-                let gas = r.result.gas_used();
                 black_box(r);
-                (success, gas)
+                success
             },
-        )
+        );
     }
 }
 
@@ -251,7 +244,7 @@ impl Subject for MegaWithEnv {
         self.name
     }
 
-    fn run(&self, workload: &Workload) -> u64 {
+    fn run(&self, workload: &Workload) {
         let spec = self.spec;
         let env = self.env.clone();
         run_workload(
@@ -270,11 +263,10 @@ impl Subject for MegaWithEnv {
                 mega_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(mega_tx).expect("mega transact");
                 let success = r.result.is_success();
-                let gas = r.result.gas_used();
                 black_box(r);
-                (success, gas)
+                success
             },
-        )
+        );
     }
 }
 
@@ -293,7 +285,7 @@ impl Subject for RevmPinned {
         "revm_pinned"
     }
 
-    fn run(&self, workload: &Workload) -> u64 {
+    fn run(&self, workload: &Workload) {
         run_workload(
             self.name(),
             workload,
@@ -306,11 +298,10 @@ impl Subject for RevmPinned {
             |evm, tx| {
                 let r = evm.transact(pinned_tx_env(tx)).expect("revm_pinned transact");
                 let success = r.result.is_success();
-                let gas = r.result.gas_used();
                 black_box(r);
-                (success, gas)
+                success
             },
-        )
+        );
     }
 }
 
@@ -322,7 +313,7 @@ impl Subject for RevmLatest {
         "revm_latest"
     }
 
-    fn run(&self, workload: &Workload) -> u64 {
+    fn run(&self, workload: &Workload) {
         run_workload(
             self.name(),
             workload,
@@ -335,11 +326,10 @@ impl Subject for RevmLatest {
             |evm, tx| {
                 let r = evm.transact(latest_tx_env(tx)).expect("revm_latest transact");
                 let success = r.result.is_success();
-                let gas = r.result.tx_gas_used();
                 black_box(r);
-                (success, gas)
+                success
             },
-        )
+        );
     }
 }
 
@@ -352,7 +342,7 @@ impl Subject for OpRevmPinned {
         "op_revm_pinned"
     }
 
-    fn run(&self, workload: &Workload) -> u64 {
+    fn run(&self, workload: &Workload) {
         run_workload(
             self.name(),
             workload,
@@ -368,11 +358,10 @@ impl Subject for OpRevmPinned {
                 op_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(op_tx).expect("op_revm_pinned transact");
                 let success = r.result.is_success();
-                let gas = r.result.gas_used();
                 black_box(r);
-                (success, gas)
+                success
             },
-        )
+        );
     }
 }
 
@@ -385,7 +374,7 @@ impl Subject for OpRevmLatest {
         "op_revm_latest"
     }
 
-    fn run(&self, workload: &Workload) -> u64 {
+    fn run(&self, workload: &Workload) {
         run_workload(
             self.name(),
             workload,
@@ -401,11 +390,10 @@ impl Subject for OpRevmLatest {
                 op_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(op_tx).expect("op_revm_latest transact");
                 let success = r.result.is_success();
-                let gas = r.result.tx_gas_used();
                 black_box(r);
-                (success, gas)
+                success
             },
-        )
+        );
     }
 }
 
