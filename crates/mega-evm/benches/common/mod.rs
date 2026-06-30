@@ -47,6 +47,18 @@ fn mega_subjects(specs: &[(&'static str, MegaSpecId)]) -> Vec<Box<dyn Subject>> 
 /// Run each subject as one row of `group`, named `<subject>` or, when `variant`
 /// is non-empty, `<subject>/<variant>` (e.g. `revm_pinned/log0_32b`) so every
 /// row shares a single variant axis.
+///
+/// Each row prints a single `gas\t<row>\t<gas_used>` line — its own gas
+/// accounting (mega rows include mega's surcharges, revm rows use revm's) — so
+/// the page can derive MGas/s = gas / median-ns. The gas run lives INSIDE the
+/// `bench_function` closure (not the registration loop), so it executes only for
+/// the rows Criterion's name / `--test` filter selects, never during
+/// registration. Criterion invokes that closure many times (per warmup batch and
+/// per sample), so a `Cell` guard emits the gas line exactly once per row.
+/// (Criterion's `Throughput` is deliberately not used: it must be set before
+/// `bench_function`, which would force a warm run in the registration path that
+/// bypasses the filter; and the `--output-format bencher` text the CI parses
+/// carries no throughput field anyway.)
 fn run_subjects(group: &mut Group<'_>, variant: &str, w: &Workload, subjects: &[Box<dyn Subject>]) {
     for subject in subjects {
         let row = if variant.is_empty() {
@@ -54,7 +66,15 @@ fn run_subjects(group: &mut Group<'_>, variant: &str, w: &Workload, subjects: &[
         } else {
             format!("{}/{variant}", subject.name())
         };
-        group.bench_function(row, |b| b.iter(|| subject.run(w)));
+        // Criterion calls the routine closure repeatedly; this guard reports the
+        // (untimed) gas run once per row, only for filter-selected rows.
+        let reported = core::cell::Cell::new(false);
+        group.bench_function(row.clone(), move |b| {
+            if !reported.replace(true) {
+                println!("gas\t{row}\t{}", subject.run(w));
+            }
+            b.iter(|| subject.run(w));
+        });
     }
 }
 
