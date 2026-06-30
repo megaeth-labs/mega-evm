@@ -12,7 +12,7 @@
 //! 3. `op_revm_pinned`  — `op_revm::OpEvm` at the version mega-evm currently pins (operator fee =
 //!    0).
 //! 4. `op_revm_latest`  — `op_revm::OpEvm` at the latest crates.io release (operator fee = 0).
-//! 5. `mega_<spec>`     — `MegaEvm` at `EQUIVALENCE` / `MINI_REX` / `REX4`.
+//! 5. `mega_<spec>`     — `MegaEvm` at `EQUIVALENCE` / `MINI_REX` / `REX4` / `REX5`.
 //!
 //! Ported workloads:
 //! - **snailtracer**: CPU-intensive ray tracer exercising many opcodes

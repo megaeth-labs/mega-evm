@@ -101,8 +101,12 @@ pub struct TestExternalEnvs<Error = Infallible, Hasher = SimpleBucketHasher> {
     /// Oracle contract storage values. Maps storage slot keys to their values.
     oracle_storage: Rc<RefCell<HashMap<U256, U256>>>,
     /// Bucket capacities. Maps bucket IDs to their capacity values.
-    /// Buckets not in this map default to [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
+    /// Buckets not in this map default to [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE) or
+    /// `default_bucket_capacity` if set.
     bucket_capacity: Rc<RefCell<HashMap<BucketId, u64>>>,
+    /// Fallback capacity for buckets not in `bucket_capacity`.
+    /// When `None`, falls back to [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
+    default_bucket_capacity: Rc<RefCell<Option<u64>>>,
     /// Recorded hints from `on_hint` calls. Used for testing the hint mechanism.
     recorded_hints: Rc<RefCell<Vec<RecordedHint>>>,
 }
@@ -138,6 +142,7 @@ impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
             _phantom: core::marker::PhantomData,
             oracle_storage: Rc::new(RefCell::new(HashMap::default())),
             bucket_capacity: Rc::new(RefCell::new(HashMap::default())),
+            default_bucket_capacity: Rc::new(RefCell::new(None)),
             recorded_hints: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -172,9 +177,18 @@ impl<Error: Unpin + Clone + Display + 'static, Hasher: BucketHasher>
         self
     }
 
+    /// Sets a fallback capacity returned for every bucket not configured via
+    /// [`with_bucket_capacity`]. Lets a bench exercise the dynamic-gas multiplier
+    /// without computing the bucket id of each touched slot.
+    pub fn with_default_bucket_capacity(self, capacity: u64) -> Self {
+        *self.default_bucket_capacity.borrow_mut() = Some(capacity);
+        self
+    }
+
     /// Removes all configured bucket capacities.
     ///
-    /// After calling this, all buckets will return the default minimum capacity.
+    /// After calling this, all buckets will return the configured `default_bucket_capacity` if
+    /// set, otherwise [`MIN_BUCKET_SIZE`](crate::MIN_BUCKET_SIZE).
     pub fn clear_bucket_capacity(&self) {
         self.bucket_capacity.borrow_mut().clear();
     }
@@ -248,12 +262,9 @@ impl<Error: Unpin + Display, Hasher: BucketHasher> SaltEnv for TestExternalEnvs<
     type Error = Error;
 
     fn get_bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-        Ok(self
-            .bucket_capacity
-            .borrow()
-            .get(&bucket_id)
-            .copied()
-            .unwrap_or(crate::MIN_BUCKET_SIZE as u64))
+        Ok(self.bucket_capacity.borrow().get(&bucket_id).copied().unwrap_or_else(|| {
+            self.default_bucket_capacity.borrow().unwrap_or(crate::MIN_BUCKET_SIZE as u64)
+        }))
     }
 
     fn bucket_id_for_account(account: Address) -> BucketId {
@@ -274,5 +285,24 @@ impl<Error: Unpin + Display, Hasher: BucketHasher> OracleEnv for TestExternalEnv
 
     fn on_hint(&self, from: Address, topic: B256, data: Bytes) {
         self.recorded_hints.borrow_mut().push(RecordedHint { from, topic, data });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_with_default_bucket_capacity_applies_to_all_buckets() {
+        use crate::external::salt::SaltEnv;
+        let env =
+            TestExternalEnvs::<core::convert::Infallible>::new().with_default_bucket_capacity(2048);
+        // Any bucket id not explicitly configured now returns the default, not MIN_BUCKET_SIZE.
+        assert_eq!(env.get_bucket_capacity(123), Ok(2048));
+        assert_eq!(env.get_bucket_capacity(999), Ok(2048));
+        // An explicit per-bucket capacity still wins.
+        let env = env.with_bucket_capacity(123, 512);
+        assert_eq!(env.get_bucket_capacity(123), Ok(512));
+        assert_eq!(env.get_bucket_capacity(999), Ok(2048));
     }
 }

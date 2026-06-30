@@ -110,6 +110,21 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
+    /// Test/bench-only public wrapper over [`new_with_shared_ext_envs`] so a
+    /// bench can build a context over a configurable external environment
+    /// (e.g. `TestExternalEnvs` with crowded buckets or oracle storage).
+    pub fn new_with_ext_envs(
+        db: DB,
+        spec: MegaSpecId,
+        salt_env: Rc<ExtEnvs::SaltEnv>,
+        oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
+    ) -> Self {
+        Self::new_with_shared_ext_envs(db, spec, salt_env, oracle_env)
+    }
+}
+
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Creates a new `MegaContext` with shared external environment references.
     ///

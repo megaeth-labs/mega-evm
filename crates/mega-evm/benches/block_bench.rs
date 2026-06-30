@@ -165,46 +165,49 @@ fn bench_block_empty_txs(c: &mut Criterion) {
     group.sample_size(10);
 
     let contract_code = empty_contract();
-    let spec = MegaSpecId::REX4;
+    let specs: &[(&str, MegaSpecId)] = &[("rex4", MegaSpecId::REX4), ("rex5", MegaSpecId::REX5)];
 
-    for n_txs in [1, 10, 50] {
-        group.bench_function(format!("rex4/{n_txs}_txs"), |b| {
-            b.iter(|| {
-                let mut db = MemoryDatabase::default();
-                db.set_account_code(CONTRACT, contract_code.clone());
-                db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+    for &(spec_name, spec) in specs {
+        for n_txs in [1, 10, 50] {
+            group.bench_function(format!("{spec_name}/{n_txs}_txs"), |b| {
+                b.iter(|| {
+                    let mut db = MemoryDatabase::default();
+                    db.set_account_code(CONTRACT, contract_code.clone());
+                    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
 
-                let mut state = State::builder().with_database(&mut db).build();
-                let external_envs = TestExternalEnvs::<Infallible>::new();
-                let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-                let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+                    let mut state = State::builder().with_database(&mut db).build();
+                    let external_envs = TestExternalEnvs::<Infallible>::new();
+                    let evm_factory =
+                        MegaEvmFactory::new().with_external_env_factory(external_envs);
+                    let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
 
-                let block_ctx = MegaBlockExecutionCtx::new(
-                    B256::ZERO,
-                    Some(B256::ZERO),
-                    Bytes::new(),
-                    BlockLimits::no_limits(),
-                );
-                let mut executor = MegaBlockExecutor::new(
-                    evm,
-                    block_ctx,
-                    all_hardforks_config(),
-                    OpAlloyReceiptBuilder::default(),
-                );
-                executor
-                    .apply_pre_execution_changes()
-                    .expect("pre-execution changes should succeed");
+                    let block_ctx = MegaBlockExecutionCtx::new(
+                        B256::ZERO,
+                        Some(B256::ZERO),
+                        Bytes::new(),
+                        BlockLimits::no_limits(),
+                    );
+                    let mut executor = MegaBlockExecutor::new(
+                        evm,
+                        block_ctx,
+                        all_hardforks_config(),
+                        OpAlloyReceiptBuilder::default(),
+                    );
+                    executor
+                        .apply_pre_execution_changes()
+                        .expect("pre-execution changes should succeed");
 
-                for i in 0..n_txs {
-                    let tx = create_call_tx(i, 1_000_000);
-                    let gas = executor.execute_transaction(&tx).expect("should succeed");
-                    black_box(gas);
-                }
+                    for i in 0..n_txs {
+                        let tx = create_call_tx(i, 1_000_000);
+                        let gas = executor.execute_transaction(&tx).expect("should succeed");
+                        black_box(gas);
+                    }
 
-                let (_evm, block_result) = executor.finish().expect("finish should succeed");
-                black_box(block_result);
-            })
-        });
+                    let (_evm, block_result) = executor.finish().expect("finish should succeed");
+                    black_box(block_result);
+                })
+            });
+        }
     }
     group.finish();
 }
@@ -215,46 +218,49 @@ fn bench_block_mixed_txs(c: &mut Criterion) {
     group.sample_size(10);
 
     let contract_code = mixed_contract();
-    let spec = MegaSpecId::REX4;
+    let specs: &[(&str, MegaSpecId)] = &[("rex4", MegaSpecId::REX4), ("rex5", MegaSpecId::REX5)];
 
-    for n_txs in [1, 10] {
-        group.bench_function(format!("rex4/{n_txs}_txs"), |b| {
-            b.iter(|| {
-                let mut db = MemoryDatabase::default();
-                db.set_account_code(CONTRACT, contract_code.clone());
-                db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+    for &(spec_name, spec) in specs {
+        for n_txs in [1, 10] {
+            group.bench_function(format!("{spec_name}/{n_txs}_txs"), |b| {
+                b.iter(|| {
+                    let mut db = MemoryDatabase::default();
+                    db.set_account_code(CONTRACT, contract_code.clone());
+                    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
 
-                let mut state = State::builder().with_database(&mut db).build();
-                let external_envs = TestExternalEnvs::<Infallible>::new();
-                let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-                let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+                    let mut state = State::builder().with_database(&mut db).build();
+                    let external_envs = TestExternalEnvs::<Infallible>::new();
+                    let evm_factory =
+                        MegaEvmFactory::new().with_external_env_factory(external_envs);
+                    let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
 
-                let block_ctx = MegaBlockExecutionCtx::new(
-                    B256::ZERO,
-                    Some(B256::ZERO),
-                    Bytes::new(),
-                    BlockLimits::no_limits(),
-                );
-                let mut executor = MegaBlockExecutor::new(
-                    evm,
-                    block_ctx,
-                    all_hardforks_config(),
-                    OpAlloyReceiptBuilder::default(),
-                );
-                executor
-                    .apply_pre_execution_changes()
-                    .expect("pre-execution changes should succeed");
+                    let block_ctx = MegaBlockExecutionCtx::new(
+                        B256::ZERO,
+                        Some(B256::ZERO),
+                        Bytes::new(),
+                        BlockLimits::no_limits(),
+                    );
+                    let mut executor = MegaBlockExecutor::new(
+                        evm,
+                        block_ctx,
+                        all_hardforks_config(),
+                        OpAlloyReceiptBuilder::default(),
+                    );
+                    executor
+                        .apply_pre_execution_changes()
+                        .expect("pre-execution changes should succeed");
 
-                for i in 0..n_txs {
-                    let tx = create_call_tx(i, 10_000_000);
-                    let gas = executor.execute_transaction(&tx).expect("should succeed");
-                    black_box(gas);
-                }
+                    for i in 0..n_txs {
+                        let tx = create_call_tx(i, 10_000_000);
+                        let gas = executor.execute_transaction(&tx).expect("should succeed");
+                        black_box(gas);
+                    }
 
-                let (_evm, block_result) = executor.finish().expect("finish should succeed");
-                black_box(block_result);
-            })
-        });
+                    let (_evm, block_result) = executor.finish().expect("finish should succeed");
+                    black_box(block_result);
+                })
+            });
+        }
     }
     group.finish();
 }
@@ -266,41 +272,45 @@ fn bench_block_deploy(c: &mut Criterion) {
 
     // Init code that deploys a small runtime: PUSH1 0x00 PUSH1 0x00 RETURN
     let init_code: Bytes = vec![0x60, 0x00, 0x60, 0x00, 0xf3].into();
-    let spec = MegaSpecId::REX4;
+    let specs: &[(&str, MegaSpecId)] = &[("rex4", MegaSpecId::REX4), ("rex5", MegaSpecId::REX5)];
 
-    group.bench_function("rex4/deploy_1", |b| {
-        b.iter(|| {
-            let mut db = MemoryDatabase::default();
-            db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+    for &(spec_name, spec) in specs {
+        group.bench_function(format!("{spec_name}/deploy_1"), |b| {
+            b.iter(|| {
+                let mut db = MemoryDatabase::default();
+                db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
 
-            let mut state = State::builder().with_database(&mut db).build();
-            let external_envs = TestExternalEnvs::<Infallible>::new();
-            let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-            let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+                let mut state = State::builder().with_database(&mut db).build();
+                let external_envs = TestExternalEnvs::<Infallible>::new();
+                let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+                let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
 
-            let block_ctx = MegaBlockExecutionCtx::new(
-                B256::ZERO,
-                Some(B256::ZERO),
-                Bytes::new(),
-                BlockLimits::no_limits(),
-            );
-            let mut executor = MegaBlockExecutor::new(
-                evm,
-                block_ctx,
-                all_hardforks_config(),
-                OpAlloyReceiptBuilder::default(),
-            );
-            executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
+                let block_ctx = MegaBlockExecutionCtx::new(
+                    B256::ZERO,
+                    Some(B256::ZERO),
+                    Bytes::new(),
+                    BlockLimits::no_limits(),
+                );
+                let mut executor = MegaBlockExecutor::new(
+                    evm,
+                    block_ctx,
+                    all_hardforks_config(),
+                    OpAlloyReceiptBuilder::default(),
+                );
+                executor
+                    .apply_pre_execution_changes()
+                    .expect("pre-execution changes should succeed");
 
-            let nonce = 0u64;
-            let tx = create_deploy_tx(nonce, 10_000_000, init_code.clone());
-            let gas = executor.execute_transaction(&tx).expect("deploy should succeed");
-            black_box(gas);
+                let nonce = 0u64;
+                let tx = create_deploy_tx(nonce, 10_000_000, init_code.clone());
+                let gas = executor.execute_transaction(&tx).expect("deploy should succeed");
+                black_box(gas);
 
-            let (_evm, block_result) = executor.finish().expect("finish should succeed");
-            black_box(block_result);
-        })
-    });
+                let (_evm, block_result) = executor.finish().expect("finish should succeed");
+                black_box(block_result);
+            })
+        });
+    }
     group.finish();
 }
 
