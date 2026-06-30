@@ -847,4 +847,28 @@ mod tests {
         assert_eq!(parent.accessed_bucket_ids(), parent_bucket_ids);
         assert_ne!(sandbox.accessed_bucket_ids(), parent_bucket_ids);
     }
+
+    /// The test/bench-only `new_with_ext_envs` wrapper builds a `MegaContext`
+    /// over a caller-supplied external environment (`TestExternalEnvs`), at the
+    /// requested spec and wired to the given SALT/oracle handles.
+    #[test]
+    fn test_new_with_ext_envs_builds_over_configurable_env() {
+        let env = TestExternalEnvs::<std::convert::Infallible>::new();
+        let context =
+            MegaContext::<_, TestExternalEnvs<std::convert::Infallible>>::new_with_ext_envs(
+                EmptyDB::default(),
+                MegaSpecId::REX5,
+                Rc::new(env.clone()),
+                Rc::new(RefCell::new(env)),
+            );
+
+        assert_eq!(context.mega_spec(), MegaSpecId::REX5);
+        // The supplied SALT env is wired through: a bucket lookup against the
+        // dynamic-gas cache succeeds.
+        context
+            .dynamic_storage_gas_cost
+            .borrow_mut()
+            .new_account_gas(address!("0000000000000000000000000000000000100003"))
+            .expect("bucket lookup against the supplied env should succeed");
+    }
 }
