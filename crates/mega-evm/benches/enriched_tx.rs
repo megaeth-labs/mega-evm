@@ -5,13 +5,13 @@
 //! mempool-cached value) so block-execution callers can reuse them instead of recomputing on
 //! every access. Three rows:
 //! - `recompute_via_tx_unwrap` mirrors `MegaBlockExecutor::run_transaction`'s call pattern
-//!   (`tx.tx().estimated_da_size()` / `tx.tx().tx_size()`), which unwraps `EnrichedMegaTx` down
-//!   to the raw inner transaction and always hits the recomputing default impl.
+//!   (`tx.tx().estimated_da_size()` / `tx.tx().tx_size()`), which unwraps `EnrichedMegaTx` down to
+//!   the raw inner transaction and always hits the recomputing default impl.
 //! - `via_trait_dispatch` mirrors `MegaBlockExecutor::run_transaction_enriched`'s call pattern
-//!   (`tx.estimated_da_size()` / `tx.tx_size()` on the outer wrapper), which now dispatches to
-//!   the stored fields.
-//! - `cached_fields` reads the wrapper's precomputed fields directly, the floor `via_trait_dispatch`
-//!   should match.
+//!   (`tx.estimated_da_size()` / `tx.tx_size()` on the outer wrapper), which now dispatches to the
+//!   stored fields.
+//! - `cached_fields` reads the wrapper's precomputed fields directly, the floor
+//!   `via_trait_dispatch` should match.
 
 #![allow(missing_docs)]
 

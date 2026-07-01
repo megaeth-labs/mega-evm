@@ -398,6 +398,9 @@ where
         self.run_transaction_with_sizes(tx, tx_size, da_size)
     }
 
+    /// Shared body of [`MegaBlockExecutor::run_transaction`] and
+    /// [`MegaBlockExecutor::run_transaction_enriched`]: `tx_size`/`da_size` are resolved by the
+    /// caller (recomputed or read from a cache), this only consumes them.
     fn run_transaction_with_sizes<Tx>(
         &mut self,
         tx: Tx,
