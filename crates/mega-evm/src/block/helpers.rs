@@ -96,6 +96,7 @@ impl<T: Encodable2718> EnrichedMegaTx<T> {
 impl<T: Encodable2718> Encodable2718 for EnrichedMegaTx<T> {
     delegate! {
         to self.inner {
+            fn type_flag(&self) -> Option<u8>;
             fn encode_2718_len(&self) -> usize;
             fn encode_2718(&self, out: &mut dyn alloy_primitives::bytes::BufMut);
         }

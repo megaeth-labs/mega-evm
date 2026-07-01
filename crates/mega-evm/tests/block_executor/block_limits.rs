@@ -12,12 +12,9 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, EnrichedMegaTx, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory,
+    MegaHardforkConfig, MegaSpecId, MegaTransactionExt, MegaTxEnvelope, TestExternalEnvs,
 };
-// Only used by the debug_assertions-only test below (see its doc comment).
-#[cfg(debug_assertions)]
-use mega_evm::{EnrichedMegaTx, MegaTransactionExt};
 use revm::{
     bytecode::opcode::{ADD, DUP1, LOG0, PUSH0, SLOAD, SSTORE},
     context::BlockEnv,
@@ -48,8 +45,6 @@ fn create_transaction(
 
 /// Like [`create_transaction`], but returns the bare envelope so callers can build a
 /// `Recovered<&MegaTxEnvelope>` (needed for `EnrichedMegaTx<T>: Copy`, which requires `T: Copy`).
-/// Only used by the debug_assertions-only test below (see its doc comment).
-#[cfg(debug_assertions)]
 fn create_envelope(nonce: u64, gas_limit: u64) -> MegaTxEnvelope {
     let tx_legacy = TxLegacy {
         chain_id: Some(8453), // Base mainnet
@@ -292,6 +287,53 @@ fn test_run_transaction_enriched_uses_stored_da_size_for_limit_check() {
     // which would incorrectly pass a transaction the real recomputation rejects — but its
     // debug_assert catches the mismatch and panics instead of silently letting it through.
     let _ = executor.run_transaction_enriched(enriched);
+}
+
+/// `MegaBlockExecutor::execute_mega_transaction_enriched` (the alias for
+/// [`MegaBlockExecutor::run_transaction_enriched`]) must succeed and produce an outcome carrying
+/// the cached fields when they accurately reflect the wrapped transaction — the intended,
+/// common-case usage, as opposed to the deliberately mismatched cache exercised above.
+#[test]
+fn test_execute_mega_transaction_enriched_succeeds_with_accurate_cache() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    let block_ctx =
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), BlockLimits::no_limits());
+
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let envelope = create_envelope(0, 1_000_000);
+    let expected_da_size = MegaTransactionExt::estimated_da_size(&envelope);
+    let expected_tx_size = MegaTransactionExt::tx_size(&envelope);
+    let recovered = alloy_consensus::transaction::Recovered::new_unchecked(&envelope, CALLER);
+    let enriched = EnrichedMegaTx::new_slow(recovered);
+
+    let outcome = executor
+        .execute_mega_transaction_enriched(enriched)
+        .expect("accurate cached values must satisfy the debug_assert and succeed normally");
+    assert_eq!(outcome.da_size, expected_da_size, "outcome da_size must match the accurate cache");
+    assert_eq!(outcome.tx_size, expected_tx_size, "outcome tx_size must match the accurate cache");
 }
 
 #[test]
