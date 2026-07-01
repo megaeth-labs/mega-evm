@@ -2,11 +2,13 @@ use alloy_consensus::{transaction::Recovered, Transaction};
 use alloy_eips::{eip2930::AccessList, eip7702::SignedAuthorization, Encodable2718, Typed2718};
 use alloy_evm::{IntoTxEnv, RecoveredTx};
 use alloy_primitives::{Address, Bytes, ChainId, Selector, TxHash, TxKind, B256, U256};
+use auto_impl::auto_impl;
 use delegate::delegate;
 
 use crate::MegaTxEnvelope;
 
 /// Helper trait that allows attaching extra information to a transaction.
+#[auto_impl(&)]
 pub trait MegaTransactionExt {
     /// Get the estimated data availability size of the transaction.
     ///
@@ -80,6 +82,15 @@ impl<T: Encodable2718> EnrichedMegaTx<T> {
             da_size: op_alloy_flz::tx_estimated_size_fjord_bytes(inner.encoded_2718().as_slice()),
             tx_size: inner.encode_2718_len() as u64,
             inner,
+        }
+    }
+}
+
+impl<T: Encodable2718> Encodable2718 for EnrichedMegaTx<T> {
+    delegate! {
+        to self.inner {
+            fn encode_2718_len(&self) -> usize;
+            fn encode_2718(&self, out: &mut dyn alloy_primitives::bytes::BufMut);
         }
     }
 }

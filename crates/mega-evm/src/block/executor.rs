@@ -340,6 +340,21 @@ where
         self.run_transaction(tx)
     }
 
+    /// Alias to [`MegaBlockExecutor::run_transaction_enriched`].
+    pub fn execute_mega_transaction_enriched<Tx>(
+        &mut self,
+        tx: Tx,
+    ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction>
+            + RecoveredTx<R::Transaction>
+            + MegaTransactionExt
+            + Encodable2718
+            + Copy,
+    {
+        self.run_transaction_enriched(tx)
+    }
+
     /// Execute a transaction with a commit condition function without committing the execution
     /// result to the block executor's inner state.
     ///
@@ -358,9 +373,41 @@ where
     where
         Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
     {
-        let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
         let tx_size = tx.tx().encode_2718_len() as u64;
         let da_size = tx.tx().estimated_da_size();
+        self.run_transaction_with_sizes(tx, tx_size, da_size)
+    }
+
+    /// Like [`MegaBlockExecutor::run_transaction`], but for callers whose `Tx` also implements
+    /// [`MegaTransactionExt`] (e.g. [`crate::EnrichedMegaTx`]): `tx_size`/`da_size` are read
+    /// from `Tx` itself instead of being recomputed from the raw inner transaction, so a
+    /// precomputed value (e.g. one already cached by a mempool) is actually reused.
+    pub fn run_transaction_enriched<Tx>(
+        &mut self,
+        tx: Tx,
+    ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction>
+            + RecoveredTx<R::Transaction>
+            + MegaTransactionExt
+            + Encodable2718
+            + Copy,
+    {
+        let tx_size = tx.tx_size();
+        let da_size = tx.estimated_da_size();
+        self.run_transaction_with_sizes(tx, tx_size, da_size)
+    }
+
+    fn run_transaction_with_sizes<Tx>(
+        &mut self,
+        tx: Tx,
+        tx_size: u64,
+        da_size: u64,
+    ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
+    where
+        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+    {
+        let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
 
         // Check transaction-level and block-level limits before transaction execution
         self.block_limiter.pre_execution_check(

@@ -19,9 +19,9 @@ use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
 use alloy_hardforks::ForkCondition;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, U256};
 use mega_evm::{
-    constants, hardfork_schedule, mainnet_hardforks, testnet_hardforks, BlockLimits, MegaHardfork,
-    MegaHardforkConfig, MegaHardforks, MegaTransactionExt, MegaTxEnvelope, MAINNET_CHAIN_ID,
-    TESTNET_CHAIN_ID,
+    constants, hardfork_schedule, mainnet_hardforks, testnet_hardforks, BlockLimits,
+    EnrichedMegaTx, MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaTransactionExt,
+    MegaTxEnvelope, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
 };
 
 const CALLER: Address = address!("2000000000000000000000000000000000000001");
@@ -82,12 +82,42 @@ fn test_recovered_mega_tx_envelope_ext_returns_real_hash() {
     assert_eq!(h, STORED_TX_HASH, "recovered tx_hash mismatch");
 }
 
-// `EnrichedMegaTx::{tx_size, estimated_da_size}` (helpers.rs:89/93) are NOT tested here: the
-// stored-field overrides are unreachable — the trait method's `where Self: Encodable2718` bound is
-// unsatisfiable for the wrapper (it does not implement `Encodable2718`), and `.method()` resolves
-// via `Deref` to the inner tx instead, so the override never dispatches. Those mutants are recorded
-// as dead/equivalent in `mutants/suppressions.toml`. (This dead override looks like a latent
-// perf bug: callers recompute size/da instead of using the precomputed fields.)
+/// `EnrichedMegaTx::{tx_size, estimated_da_size, tx_hash}` must dispatch to the stored fields, not
+/// recompute from the inner transaction. Constructs the wrapper with stored values that
+/// deliberately differ from what a fresh recomputation on the inner tx would produce, so a mutant
+/// collapsing the override to a constant (or one that silently falls back to recomputing) is
+/// distinguishable.
+#[test]
+fn test_enriched_mega_tx_ext_returns_stored_fields_not_recomputed() {
+    let tx = legacy_envelope();
+    let recovered = Recovered::new_unchecked(tx, CALLER);
+
+    let real_da_size = MegaTransactionExt::estimated_da_size(&recovered);
+    let real_tx_size = MegaTransactionExt::tx_size(&recovered);
+
+    const STORED_DA_SIZE: u64 = 424_242;
+    const STORED_TX_SIZE: u64 = 131_313;
+    assert_ne!(STORED_DA_SIZE, real_da_size, "stored da_size must differ from a fresh recompute");
+    assert_ne!(STORED_TX_SIZE, real_tx_size, "stored tx_size must differ from a fresh recompute");
+
+    let enriched = EnrichedMegaTx::new(recovered, STORED_TX_HASH, STORED_DA_SIZE, STORED_TX_SIZE);
+
+    assert_eq!(
+        MegaTransactionExt::estimated_da_size(&enriched),
+        STORED_DA_SIZE,
+        "estimated_da_size must return the stored field, not a recomputed value"
+    );
+    assert_eq!(
+        MegaTransactionExt::tx_size(&enriched),
+        STORED_TX_SIZE,
+        "tx_size must return the stored field, not a recomputed value"
+    );
+    assert_eq!(
+        MegaTransactionExt::tx_hash(&enriched),
+        STORED_TX_HASH,
+        "tx_hash must return the stored field, not Default::default()"
+    );
+}
 
 // ============================================================================
 // block/limit.rs — BlockLimits::from_hardfork_and_block_gas_limit

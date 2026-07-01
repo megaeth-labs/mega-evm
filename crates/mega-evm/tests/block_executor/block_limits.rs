@@ -12,8 +12,8 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, EnrichedMegaTx, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory,
+    MegaHardforkConfig, MegaSpecId, MegaTransactionExt, MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{ADD, DUP1, LOG0, PUSH0, SLOAD, SSTORE},
@@ -41,6 +41,22 @@ fn create_transaction(
     let signed = Signed::new_unchecked(tx_legacy, Signature::test_signature(), Default::default());
     let tx = MegaTxEnvelope::Legacy(signed);
     alloy_consensus::transaction::Recovered::new_unchecked(tx, CALLER)
+}
+
+/// Like [`create_transaction`], but returns the bare envelope so callers can build a
+/// `Recovered<&MegaTxEnvelope>` (needed for `EnrichedMegaTx<T>: Copy`, which requires `T: Copy`).
+fn create_envelope(nonce: u64, gas_limit: u64) -> MegaTxEnvelope {
+    let tx_legacy = TxLegacy {
+        chain_id: Some(8453), // Base mainnet
+        nonce,
+        gas_price: 1_000_000,
+        gas_limit,
+        to: TxKind::Call(CONTRACT),
+        value: U256::ZERO,
+        input: Bytes::new(),
+    };
+    let signed = Signed::new_unchecked(tx_legacy, Signature::test_signature(), Default::default());
+    MegaTxEnvelope::Legacy(signed)
 }
 
 /// Creates a contract that generates a log with specified data size.
@@ -178,6 +194,87 @@ fn test_block_custom_data_limit() {
         "Error should mention TransactionDataLimit, got: {}",
         err_msg
     );
+}
+
+/// `MegaBlockExecutor::run_transaction_enriched` must use `EnrichedMegaTx`'s precomputed
+/// `da_size` for the pre-execution DA-size limit check instead of recomputing from the raw
+/// transaction.
+///
+/// A freshly recomputed DA size for any legacy tx is always >= 100 bytes (the `op_alloy_flz`
+/// minimum-size floor), so a `tx_da_size_limit` of 80 rejects every transaction under
+/// `run_transaction` — both for a plain `Recovered<&MegaTxEnvelope>` and for an `EnrichedMegaTx`
+/// wrapping it, since `run_transaction` always recomputes. A deliberately understated stored
+/// `da_size` of 50 passes that same limit only via `run_transaction_enriched`, proving the
+/// stored value (not a recomputation) is what actually gets checked.
+#[test]
+fn test_run_transaction_enriched_uses_stored_da_size_for_limit_check() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    const TX_DA_SIZE_LIMIT: u64 = 80;
+    const STORED_DA_SIZE: u64 = 50;
+
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        None,
+        Bytes::new(),
+        BlockLimits::no_limits().with_tx_da_size_limit(TX_DA_SIZE_LIMIT),
+    );
+
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let envelope = create_envelope(0, 100_000);
+    let real_da_size = MegaTransactionExt::estimated_da_size(&envelope);
+    assert!(
+        real_da_size > TX_DA_SIZE_LIMIT,
+        "test setup requires the freshly recomputed da_size ({real_da_size}) to exceed the limit"
+    );
+    const { assert!(STORED_DA_SIZE < TX_DA_SIZE_LIMIT, "stored da_size must pass the limit") };
+
+    let recovered = alloy_consensus::transaction::Recovered::new_unchecked(&envelope, CALLER);
+
+    // A plain (non-enriched) transaction recomputes da_size and is rejected.
+    let plain_result = executor.run_transaction(&recovered);
+    assert!(
+        plain_result.is_err(),
+        "plain transaction should be rejected: real da_size exceeds the limit"
+    );
+
+    // `run_transaction` (unmodified path) recomputes even for an `EnrichedMegaTx`, so the
+    // understated stored value has no effect and the transaction is still rejected.
+    let enriched = EnrichedMegaTx::new(recovered, envelope.trie_hash(), STORED_DA_SIZE, 10);
+    let unfixed_result = executor.run_transaction(enriched);
+    assert!(
+        unfixed_result.is_err(),
+        "run_transaction must still recompute da_size for EnrichedMegaTx, ignoring the stored field"
+    );
+
+    // `run_transaction_enriched` reads the stored (understated) da_size, so the transaction
+    // that was rejected above now passes the same limit.
+    let outcome = executor
+        .run_transaction_enriched(enriched)
+        .expect("run_transaction_enriched must use the stored da_size, which passes the limit");
+    assert_eq!(outcome.da_size, STORED_DA_SIZE, "outcome da_size must be the stored value");
 }
 
 #[test]
