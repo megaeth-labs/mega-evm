@@ -341,6 +341,8 @@ where
     }
 
     /// Alias to [`MegaBlockExecutor::run_transaction_enriched`].
+    ///
+    /// See that method's doc comment for the caller contract on `tx_size`/`da_size` accuracy.
     pub fn execute_mega_transaction_enriched<Tx>(
         &mut self,
         tx: Tx,
@@ -366,6 +368,14 @@ where
     ///
     /// Returns the execution outcome of the transaction. Note that the execution result is not
     /// committed to the block executor's inner state.
+    /// Recomputes `tx_size`/`da_size` from the raw inner transaction on every call. For a `Tx`
+    /// that carries precomputed values (e.g. [`crate::EnrichedMegaTx`]), prefer
+    /// [`MegaBlockExecutor::run_transaction_enriched`] to reuse them instead.
+    ///
+    /// This method exists (rather than always taking the enriched path) because it also backs
+    /// [`BlockExecutor::execute_transaction_with_commit_condition`], whose `tx: impl
+    /// ExecutableTx<Self>` parameter is constrained by `alloy_evm` and cannot be required to
+    /// implement [`MegaTransactionExt`].
     pub fn run_transaction<Tx>(
         &mut self,
         tx: Tx,
@@ -382,6 +392,22 @@ where
     /// [`MegaTransactionExt`] (e.g. [`crate::EnrichedMegaTx`]): `tx_size`/`da_size` are read
     /// from `Tx` itself instead of being recomputed from the raw inner transaction, so a
     /// precomputed value (e.g. one already cached by a mempool) is actually reused.
+    ///
+    /// # Correctness
+    ///
+    /// `tx_size`/`da_size` feed directly into [`BlockLimiter::pre_execution_check`]'s
+    /// `tx_encode_size_limit`/`tx_da_size_limit`/block cumulative-size checks, with no
+    /// validation against the real encoded transaction. Callers MUST ensure `Tx::tx_size()`/
+    /// `Tx::estimated_da_size()` accurately reflect `tx`'s actual EIP-2718 encoding — an
+    /// understated value lets a transaction bypass a limit it should have been rejected by.
+    /// This is safe for the sequencer's own block-building path (the cache is computed by the
+    /// same trusted process, e.g. at mempool insertion), but this method must not be fed a
+    /// `Tx` whose cached sizes could come from an untrusted or stale source (e.g. block
+    /// validation of another party's block) without first re-establishing that invariant.
+    ///
+    /// A `debug_assert` cross-checks the cached values against a fresh recompute, so a mismatch
+    /// is caught in tests/CI; it is compiled out in release builds, so it does not affect the
+    /// performance this method exists to deliver.
     pub fn run_transaction_enriched<Tx>(
         &mut self,
         tx: Tx,
@@ -395,6 +421,18 @@ where
     {
         let tx_size = tx.tx_size();
         let da_size = tx.estimated_da_size();
+        debug_assert_eq!(
+            tx_size,
+            tx.encode_2718_len() as u64,
+            "run_transaction_enriched: Tx-reported tx_size does not match a fresh recompute \
+             from the encoded transaction"
+        );
+        debug_assert_eq!(
+            da_size,
+            op_alloy_flz::tx_estimated_size_fjord_bytes(tx.encoded_2718().as_slice()),
+            "run_transaction_enriched: Tx-reported da_size does not match a fresh recompute \
+             from the encoded transaction"
+        );
         self.run_transaction_with_sizes(tx, tx_size, da_size)
     }
 

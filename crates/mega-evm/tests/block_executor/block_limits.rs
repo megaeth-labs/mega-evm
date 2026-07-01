@@ -196,17 +196,21 @@ fn test_block_custom_data_limit() {
     );
 }
 
-/// `MegaBlockExecutor::run_transaction_enriched` must use `EnrichedMegaTx`'s precomputed
-/// `da_size` for the pre-execution DA-size limit check instead of recomputing from the raw
-/// transaction.
+/// `MegaBlockExecutor::run_transaction_enriched` trusts `Tx`'s reported `tx_size`/`da_size` for
+/// the pre-execution limit check instead of recomputing them from the raw transaction (see that
+/// method's "Correctness" doc section). Its `debug_assert` cross-checks the reported values
+/// against a fresh recompute, so a caller bug — or, as constructed here, a deliberately
+/// understated stored `da_size` — is caught immediately in debug/test builds instead of silently
+/// letting a transaction bypass a limit it should have been rejected by.
 ///
 /// A freshly recomputed DA size for any legacy tx is always >= 100 bytes (the `op_alloy_flz`
 /// minimum-size floor), so a `tx_da_size_limit` of 80 rejects every transaction under
 /// `run_transaction` — both for a plain `Recovered<&MegaTxEnvelope>` and for an `EnrichedMegaTx`
-/// wrapping it, since `run_transaction` always recomputes. A deliberately understated stored
-/// `da_size` of 50 passes that same limit only via `run_transaction_enriched`, proving the
-/// stored value (not a recomputation) is what actually gets checked.
+/// wrapping it, since `run_transaction` always recomputes. An `EnrichedMegaTx` constructed with a
+/// deliberately understated stored `da_size` of 50 trips `run_transaction_enriched`'s
+/// `debug_assert` rather than silently passing that same limit.
 #[test]
+#[should_panic(expected = "does not match a fresh recompute")]
 fn test_run_transaction_enriched_uses_stored_da_size_for_limit_check() {
     let mut db = MemoryDatabase::default();
     db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
@@ -262,19 +266,20 @@ fn test_run_transaction_enriched_uses_stored_da_size_for_limit_check() {
 
     // `run_transaction` (unmodified path) recomputes even for an `EnrichedMegaTx`, so the
     // understated stored value has no effect and the transaction is still rejected.
-    let enriched = EnrichedMegaTx::new(recovered, envelope.trie_hash(), STORED_DA_SIZE, 10);
+    // `tx_size` is stored accurately here so the debug_assert below trips on `da_size` alone.
+    let real_tx_size = MegaTransactionExt::tx_size(&envelope);
+    let enriched =
+        EnrichedMegaTx::new(recovered, envelope.trie_hash(), STORED_DA_SIZE, real_tx_size);
     let unfixed_result = executor.run_transaction(enriched);
     assert!(
         unfixed_result.is_err(),
         "run_transaction must still recompute da_size for EnrichedMegaTx, ignoring the stored field"
     );
 
-    // `run_transaction_enriched` reads the stored (understated) da_size, so the transaction
-    // that was rejected above now passes the same limit.
-    let outcome = executor
-        .run_transaction_enriched(enriched)
-        .expect("run_transaction_enriched must use the stored da_size, which passes the limit");
-    assert_eq!(outcome.da_size, STORED_DA_SIZE, "outcome da_size must be the stored value");
+    // `run_transaction_enriched` would use the stored (understated) da_size for the limit check —
+    // which would incorrectly pass a transaction the real recomputation rejects — but its
+    // debug_assert catches the mismatch and panics instead of silently letting it through.
+    let _ = executor.run_transaction_enriched(enriched);
 }
 
 #[test]
