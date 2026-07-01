@@ -12,9 +12,12 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, EnrichedMegaTx, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory,
-    MegaHardforkConfig, MegaSpecId, MegaTransactionExt, MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
+    MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
 };
+// Only used by the debug_assertions-only test below (see its doc comment).
+#[cfg(debug_assertions)]
+use mega_evm::{EnrichedMegaTx, MegaTransactionExt};
 use revm::{
     bytecode::opcode::{ADD, DUP1, LOG0, PUSH0, SLOAD, SSTORE},
     context::BlockEnv,
@@ -45,6 +48,8 @@ fn create_transaction(
 
 /// Like [`create_transaction`], but returns the bare envelope so callers can build a
 /// `Recovered<&MegaTxEnvelope>` (needed for `EnrichedMegaTx<T>: Copy`, which requires `T: Copy`).
+/// Only used by the debug_assertions-only test below (see its doc comment).
+#[cfg(debug_assertions)]
 fn create_envelope(nonce: u64, gas_limit: u64) -> MegaTxEnvelope {
     let tx_legacy = TxLegacy {
         chain_id: Some(8453), // Base mainnet
@@ -209,6 +214,13 @@ fn test_block_custom_data_limit() {
 /// wrapping it, since `run_transaction` always recomputes. An `EnrichedMegaTx` constructed with a
 /// deliberately understated stored `da_size` of 50 trips `run_transaction_enriched`'s
 /// `debug_assert` rather than silently passing that same limit.
+///
+/// `#[cfg(debug_assertions)]`: this test exercises the `debug_assert` itself, which is compiled
+/// out in release builds — under `cargo test --release` the same call would not panic and would
+/// instead silently succeed using the understated cached value. That is the documented,
+/// deliberate trade-off on `run_transaction_enriched` (see its "Correctness" doc section): the
+/// cache contract is enforced in debug/test builds only, at zero cost in release.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "does not match a fresh recompute")]
 fn test_run_transaction_enriched_uses_stored_da_size_for_limit_check() {

@@ -360,6 +360,15 @@ where
     /// Execute a transaction with a commit condition function without committing the execution
     /// result to the block executor's inner state.
     ///
+    /// Recomputes `tx_size`/`da_size` from the raw inner transaction on every call. For a `Tx`
+    /// that carries precomputed values (e.g. [`crate::EnrichedMegaTx`]), prefer
+    /// [`MegaBlockExecutor::run_transaction_enriched`] to reuse them instead.
+    ///
+    /// This method exists (rather than always taking the enriched path) because it also backs
+    /// [`alloy_evm::block::BlockExecutor::execute_transaction_with_commit_condition`], whose
+    /// `tx: impl ExecutableTx<Self>` parameter is constrained by `alloy_evm` and cannot be
+    /// required to implement [`MegaTransactionExt`].
+    ///
     /// # Parameters
     ///
     /// - `tx`: The transaction to execute.
@@ -368,14 +377,6 @@ where
     ///
     /// Returns the execution outcome of the transaction. Note that the execution result is not
     /// committed to the block executor's inner state.
-    /// Recomputes `tx_size`/`da_size` from the raw inner transaction on every call. For a `Tx`
-    /// that carries precomputed values (e.g. [`crate::EnrichedMegaTx`]), prefer
-    /// [`MegaBlockExecutor::run_transaction_enriched`] to reuse them instead.
-    ///
-    /// This method exists (rather than always taking the enriched path) because it also backs
-    /// [`BlockExecutor::execute_transaction_with_commit_condition`], whose `tx: impl
-    /// ExecutableTx<Self>` parameter is constrained by `alloy_evm` and cannot be required to
-    /// implement [`MegaTransactionExt`].
     pub fn run_transaction<Tx>(
         &mut self,
         tx: Tx,
