@@ -76,6 +76,10 @@ name = "ctt"
 harness = false
 
 [[bench]]
+name = "enriched_tx"
+harness = false
+
+[[bench]]
 name = "mega_bench"
 harness = false
 

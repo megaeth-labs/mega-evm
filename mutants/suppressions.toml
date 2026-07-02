@@ -136,30 +136,6 @@ mutant = "replace <impl ExternalEnvFactory for EmptyExternalEnv>::external_envs 
 justification = "EmptyExternalEnv is a unit struct; real body builds ExternalEnvs{salt_env:EmptyExternalEnv, oracle_env:EmptyExternalEnv}; from(Default::default()) resolves to Default for ExternalEnvs<EmptyExternalEnv> producing identical fields. Value-identical, no observable behavioral difference."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
-# --- EnrichedMegaTx stored-field overrides (dead: unreachable) ---------------------
-# `<impl MegaTransactionExt for EnrichedMegaTx<T>>::{tx_size, estimated_da_size}` (helpers.rs:89/93)
-# override the trait defaults to return precomputed fields, but they are unreachable: the trait
-# declares these methods with `where Self: Encodable2718`, and EnrichedMegaTx<T> does NOT implement
-# Encodable2718 (only an inherent `impl<T: Encodable2718> EnrichedMegaTx<T>` exists). So the bound is
-# unsatisfiable for any caller, and `enriched.tx_size()` / `.estimated_da_size()` resolve via Deref
-# to the inner T instead. The override bodies are never dispatched; mutating them (-> 0 / -> 1)
-# changes no observable behavior. (Latent perf bug: the precomputed fields are never used.)
-[[suppress]]
-kind = "function"
-category = "dead"
-file = "crates/mega-evm/src/block/helpers.rs"
-pattern = "<impl MegaTransactionExt for EnrichedMegaTx<T>>::tx_size"
-justification = "Dead/unreachable: trait method's `where Self: Encodable2718` bound is unsatisfiable for EnrichedMegaTx (no Encodable2718 impl), and `.tx_size()` resolves via Deref to inner T. Override never dispatched; mutation changes nothing."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
-
-[[suppress]]
-kind = "function"
-category = "dead"
-file = "crates/mega-evm/src/block/helpers.rs"
-pattern = "<impl MegaTransactionExt for EnrichedMegaTx<T>>::estimated_da_size"
-justification = "Dead/unreachable: trait method's `where Self: Encodable2718` bound is unsatisfiable for EnrichedMegaTx (no Encodable2718 impl), and `.estimated_da_size()` resolves via Deref to inner T. Override never dispatched; mutation changes nothing."
-reviewer = "improve-mutation-score (William Aaron Cheung)"
-
 # --- DeterministicHasher::write line-125 `|` combine (equivalent) ------------------
 # `let combined = (value[0] as u128) | ((value[1] as u128) << 64);` where
 # `value: [u64; 2] = read_small(data)`. The first operand `value[0] as u128` is a u64 widened
