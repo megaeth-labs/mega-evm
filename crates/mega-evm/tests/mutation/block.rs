@@ -7,8 +7,8 @@
 //!
 //! Covered survivors:
 //! * `helpers.rs` — `MegaTransactionExt::{tx_size, tx_hash, estimated_da_size}` for
-//!   `MegaTxEnvelope`, `Recovered<MegaTxEnvelope>` and `EnrichedMegaTx<T>` (constant-return /
-//!   `Default::default()` mutants).
+//!   `MegaTxEnvelope`, `Recovered<MegaTxEnvelope>`, `Recovered<&MegaTxEnvelope>` and
+//!   `EnrichedMegaTx<T>` (constant-return / `Default::default()` mutants).
 //! * `limit.rs` — `BlockLimits::from_hardfork_and_block_gas_limit` per-field initializers (deleting
 //!   a field initializer makes it fall back to `..limits`, i.e. a different value).
 //! * `hardfork.rs` — `MegaHardforks::is_*_active_at_timestamp` (`-> false` mutants).
@@ -80,6 +80,25 @@ fn test_recovered_mega_tx_envelope_ext_returns_real_hash() {
     let h = MegaTransactionExt::tx_hash(&recovered);
     assert_ne!(h, alloy_primitives::TxHash::ZERO, "recovered tx_hash returned Default::default()");
     assert_eq!(h, STORED_TX_HASH, "recovered tx_hash mismatch");
+}
+
+/// `Recovered<&MegaTxEnvelope>::tx_hash` must return the inner envelope hash, not the default.
+/// Same shape as the owned `Recovered<MegaTxEnvelope>` case above, but for the by-reference impl
+/// `MegaBlockExecutor::run_transaction` needs now that its bound is `MegaTransactionExt` (a
+/// zero-copy `Recovered<&Tx>` is the common way a caller satisfies `Copy` without cloning the
+/// transaction).
+#[test]
+fn test_recovered_ref_mega_tx_envelope_ext_returns_real_hash() {
+    let tx = legacy_envelope();
+    let recovered = Recovered::new_unchecked(&tx, CALLER);
+
+    let h = MegaTransactionExt::tx_hash(&recovered);
+    assert_ne!(
+        h,
+        alloy_primitives::TxHash::ZERO,
+        "recovered-ref tx_hash returned Default::default()"
+    );
+    assert_eq!(h, STORED_TX_HASH, "recovered-ref tx_hash mismatch");
 }
 
 /// `EnrichedMegaTx::{tx_size, estimated_da_size, tx_hash}` must dispatch to the stored fields, not
