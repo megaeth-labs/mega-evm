@@ -150,20 +150,23 @@ def parse_bencher(text: str) -> dict:
 
 
 def load_rounds(rounds_dir: str):
-    """Return {phase: {bench_name: {round: ns}}} for phase in feature/baseline."""
+    """Return {phase: {(target, bench_name): {round: ns}}} for phase in
+    feature/baseline. The key is (target, bench_name), not bench_name alone: all
+    per-target artifacts are downloaded into one directory, so two targets that
+    happen to emit the same criterion name would otherwise overwrite each other."""
     data = {"feature": {}, "baseline": {}}
     for path in sorted(glob.glob(os.path.join(rounds_dir, "*.txt"))):
         fm = _ROUND_FILE.match(os.path.basename(path))
         if not fm:
             continue
-        phase, _target, rnd = fm.group(1), fm.group(2), int(fm.group(3))
+        phase, target, rnd = fm.group(1), fm.group(2), int(fm.group(3))
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 parsed = parse_bencher(fh.read())
         except OSError:
             continue
         for name, ns in parsed.items():
-            data[phase].setdefault(name, {})[rnd] = ns
+            data[phase].setdefault((target, name), {})[rnd] = ns
     return data
 
 
@@ -237,10 +240,11 @@ class Comparison:
 
 def compare(data, iters: int):
     feature, baseline = data["feature"], data["baseline"]
-    names = sorted(set(feature) & set(baseline))
+    keys = sorted(set(feature) & set(baseline))  # (target, bench_name) tuples
     out = []
-    for name in names:
-        frounds, brounds = feature[name], baseline[name]
+    for key in keys:
+        target, name = key
+        frounds, brounds = feature[key], baseline[key]
         deltas, fvals, bvals = [], [], []
         for rnd in sorted(set(frounds) & set(brounds)):
             f, b = frounds[rnd], brounds[rnd]
@@ -252,7 +256,7 @@ def compare(data, iters: int):
         if not deltas:
             continue
         mean_delta = sum(deltas) / len(deltas)
-        ci_low, ci_high = bootstrap_ci(deltas, iters, seed_for_metric(name))
+        ci_low, ci_high = bootstrap_ci(deltas, iters, seed_for_metric(f"{target}/{name}"))
         floor = noise_floor([frounds, brounds])
         out.append(Comparison(name, len(deltas), mean_delta, ci_low, ci_high,
                               floor, median(fvals), median(bvals)))
@@ -270,6 +274,7 @@ ROW_ORDER = [
     "revm_pinned", "revm_latest", "op_revm_pinned", "op_revm_latest",
     "equivalence", "mini_rex", "rex", "rex1", "rex2", "rex3", "rex4", "rex5",
 ]
+SPECS = set(ROW_ORDER)
 
 
 def format_time(ns: float) -> str:
@@ -280,20 +285,35 @@ def format_time(ns: float) -> str:
     return f"{ns:.0f} ns"
 
 
+def split_spec(full_name):
+    """Split a criterion name into (group, spec). `spec` is the segment naming an
+    EVM layer (`revm_pinned`, `rex4`, ...); `group` is the rest of the path. The
+    spec is NOT always the last segment: a per-row variant suffix produces
+    `<group>/<spec>/<variant>` (e.g. `sstore_heavy/revm_pinned/existing_account_50`),
+    so locate the spec by name rather than assuming position — otherwise groups
+    with a variant lose their `revm_pinned` row and drop out of the table. Returns
+    None when no segment is a spec (not a baseline-comparison bench)."""
+    segs = full_name.split("/")
+    idx = next((i for i, s in enumerate(segs) if s in SPECS), None)
+    if idx is None:
+        return None
+    group = "/".join(segs[:idx] + segs[idx + 1:])
+    return (group, segs[idx]) if group else None
+
+
 def baseline_gap_section(feature) -> str:
-    # feature: {bench_name: {round: ns}} → median ns per row.
-    feature_med = {name: median(list(r.values())) for name, r in feature.items()}
+    # feature: {(target, bench_name): {round: ns}} → median ns per (target, row).
     groups = {}
-    for full_name, ns in feature_med.items():
-        slash = full_name.rfind("/")
-        if slash <= 0:
+    for (target, full_name), rounds in feature.items():
+        parsed = split_spec(full_name)
+        if parsed is None:
             continue
-        group, row = full_name[:slash], full_name[slash + 1:]
-        groups.setdefault(group, {})[row] = ns
+        group, spec = parsed
+        groups.setdefault((target, group), {})[spec] = median(list(rounds.values()))
 
     out = ""
-    for group in sorted(groups):
-        rows = groups[group]
+    for target, group in sorted(groups):
+        rows = groups[(target, group)]
         base = rows.get(BASELINE_ROW)
         if base is None:
             continue
