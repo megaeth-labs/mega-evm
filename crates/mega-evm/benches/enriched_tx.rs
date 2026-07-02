@@ -4,12 +4,12 @@
 //! `EnrichedMegaTx` exists to precompute `tx_size`/`da_size` once (e.g. via `new_slow` from a
 //! mempool-cached value) so block-execution callers can reuse them instead of recomputing on
 //! every access. Three rows:
-//! - `recompute_via_tx_unwrap` mirrors `MegaBlockExecutor::run_transaction`'s call pattern
+//! - `recompute_via_tx_unwrap` mirrors the `alloy_evm` block-execution path's call pattern
 //!   (`tx.tx().estimated_da_size()` / `tx.tx().tx_size()`), which unwraps `EnrichedMegaTx` down to
 //!   the raw inner transaction and always hits the recomputing default impl.
-//! - `via_trait_dispatch` mirrors `MegaBlockExecutor::run_transaction_enriched`'s call pattern
-//!   (`tx.estimated_da_size()` / `tx.tx_size()` on the outer wrapper), which now dispatches to the
-//!   stored fields.
+//! - `via_trait_dispatch` mirrors `MegaBlockExecutor::run_transaction`'s call pattern
+//!   (`tx.estimated_da_size()` / `tx.tx_size()` on the outer wrapper), which dispatches to the
+//!   stored fields for an `EnrichedMegaTx`.
 //! - `cached_fields` reads the wrapper's precomputed fields directly, the floor
 //!   `via_trait_dispatch` should match.
 
@@ -46,9 +46,9 @@ fn enriched_tx(calldata_len: usize) -> EnrichedMegaTx<Recovered<MegaTxEnvelope>>
     EnrichedMegaTx::new_slow(recovered)
 }
 
-/// `MegaBlockExecutor::run_transaction`'s hot-path pattern: `tx.tx().<method>()` unwraps
-/// `EnrichedMegaTx` down to the raw inner transaction, so `tx_size`/`estimated_da_size` always
-/// hit the recomputing default impl even when the wrapper carries precomputed fields.
+/// The `alloy_evm` block-execution path's pattern: `tx.tx().<method>()` unwraps `EnrichedMegaTx`
+/// down to the raw inner transaction, so `tx_size`/`estimated_da_size` always hit the recomputing
+/// default impl even when the wrapper carries precomputed fields.
 fn bench_recompute_via_tx_unwrap(c: &mut Criterion) {
     let mut group = c.benchmark_group("tx_size_da_size/recompute_via_tx_unwrap");
     for &len in CALLDATA_SIZES {
@@ -63,8 +63,8 @@ fn bench_recompute_via_tx_unwrap(c: &mut Criterion) {
     group.finish();
 }
 
-/// `MegaBlockExecutor::run_transaction_enriched`'s call pattern: `tx.<method>()` called directly
-/// on the outer `EnrichedMegaTx`, dispatching to the stored fields via `MegaTransactionExt`.
+/// `MegaBlockExecutor::run_transaction`'s call pattern: `tx.<method>()` called directly on the
+/// outer `EnrichedMegaTx`, dispatching to the stored fields via `MegaTransactionExt`.
 fn bench_via_trait_dispatch(c: &mut Criterion) {
     let mut group = c.benchmark_group("tx_size_da_size/via_trait_dispatch");
     for &len in CALLDATA_SIZES {

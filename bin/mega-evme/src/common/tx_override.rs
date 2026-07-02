@@ -5,11 +5,12 @@
 
 use std::cell::RefCell;
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_eips::{Encodable2718, Typed2718};
+use alloy_primitives::{Address, Bytes, TxHash, U256};
 use clap::Args;
 use mega_evm::{
     alloy_evm::{IntoTxEnv, RecoveredTx},
-    MegaTransaction,
+    MegaTransaction, MegaTransactionExt,
 };
 
 use super::{load_hex, parse_ether_value, Result};
@@ -140,5 +141,38 @@ impl<Tx, T: RecoveredTx<Tx> + Copy> RecoveredTx<Tx> for OverriddenTx<T> {
 
     fn signer(&self) -> &Address {
         self.inner.signer()
+    }
+}
+
+// Delegate Typed2718 to inner (required as the `Encodable2718` supertrait below).
+impl<T: Typed2718 + Copy> Typed2718 for OverriddenTx<T> {
+    fn ty(&self) -> u8 {
+        self.inner.ty()
+    }
+}
+
+// Delegate Encodable2718 to inner. Overrides only affect the `TxEnv` produced by `IntoTxEnv`, not
+// the EIP-2718 encoding, so the encoded size reflects the original transaction — matching the
+// `tx_size`/`da_size` the executor charged before override support existed.
+impl<T: Encodable2718 + Copy> Encodable2718 for OverriddenTx<T> {
+    fn type_flag(&self) -> Option<u8> {
+        self.inner.type_flag()
+    }
+
+    fn encode_2718_len(&self) -> usize {
+        self.inner.encode_2718_len()
+    }
+
+    fn encode_2718(&self, out: &mut dyn alloy_primitives::bytes::BufMut) {
+        self.inner.encode_2718(out)
+    }
+}
+
+// Delegate MegaTransactionExt to inner so `OverriddenTx` is accepted by `run_transaction`.
+// `tx_size`/`estimated_da_size` fall back to the trait defaults (recomputed from the delegated
+// encoding above); only `tx_hash` needs explicit forwarding.
+impl<T: MegaTransactionExt + Copy> MegaTransactionExt for OverriddenTx<T> {
+    fn tx_hash(&self) -> TxHash {
+        self.inner.tx_hash()
     }
 }

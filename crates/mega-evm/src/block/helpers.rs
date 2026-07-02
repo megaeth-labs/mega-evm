@@ -39,6 +39,12 @@ impl MegaTransactionExt for Recovered<MegaTxEnvelope> {
     }
 }
 
+impl MegaTransactionExt for Recovered<&MegaTxEnvelope> {
+    fn tx_hash(&self) -> TxHash {
+        self.inner().tx_hash()
+    }
+}
+
 impl MegaTransactionExt for MegaTxEnvelope {
     fn tx_hash(&self) -> TxHash {
         self.tx_hash()
@@ -70,11 +76,12 @@ impl<T> EnrichedMegaTx<T> {
     /// Create a new `WithDASize` wrapper with a known data availability size.
     ///
     /// `da_size`/`tx_size` are trusted as-is and not validated against `inner`'s actual
-    /// encoding. When this value reaches [`crate::MegaBlockExecutor::run_transaction_enriched`],
-    /// it is used directly for `tx_da_size_limit`/`tx_encode_size_limit`/block cumulative-size
-    /// enforcement, so an inaccurate value can let a transaction bypass a limit it should have
-    /// been rejected by. Only pass values computed from `inner` itself (e.g. by a trusted
-    /// mempool at insertion time); prefer [`EnrichedMegaTx::new_slow`] when in doubt.
+    /// encoding. When this wrapper reaches [`crate::MegaBlockExecutor::run_transaction`], these
+    /// values are read via [`MegaTransactionExt`] and used directly for
+    /// `tx_da_size_limit`/`tx_encode_size_limit`/block cumulative-size enforcement, so an
+    /// inaccurate value can let a transaction bypass a limit it should have been rejected by.
+    /// Only pass values computed from `inner` itself (e.g. by a trusted mempool at insertion
+    /// time); prefer [`EnrichedMegaTx::new_slow`] when in doubt.
     pub fn new(inner: T, tx_hash: TxHash, da_size: u64, tx_size: u64) -> Self {
         Self { inner, tx_hash, da_size, tx_size }
     }
