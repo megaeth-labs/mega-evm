@@ -209,13 +209,14 @@ def noise_floor(series_list) -> float:
 
 class Comparison:
     __slots__ = (
-        "name", "n_pairs", "mean_delta", "ci_low", "ci_high", "floor",
+        "target", "name", "n_pairs", "mean_delta", "ci_low", "ci_high", "floor",
         "feature_ns", "baseline_ns", "significant", "noise_limited",
         "regressed", "improved",
     )
 
-    def __init__(self, name, n_pairs, mean_delta, ci_low, ci_high, floor,
+    def __init__(self, target, name, n_pairs, mean_delta, ci_low, ci_high, floor,
                  feature_ns, baseline_ns):
+        self.target = target
         self.name = name
         self.n_pairs = n_pairs
         self.mean_delta = mean_delta
@@ -258,8 +259,8 @@ def compare(data, iters: int):
         mean_delta = sum(deltas) / len(deltas)
         ci_low, ci_high = bootstrap_ci(deltas, iters, seed_for_metric(f"{target}/{name}"))
         floor = noise_floor([frounds, brounds])
-        out.append(Comparison(name, len(deltas), mean_delta, ci_low, ci_high,
-                              floor, median(fvals), median(bvals)))
+        out.append(Comparison(target, name, len(deltas), mean_delta, ci_low,
+                              ci_high, floor, median(fvals), median(bvals)))
     return out
 
 
@@ -311,6 +312,12 @@ def baseline_gap_section(feature) -> str:
         group, spec = parsed
         groups.setdefault((target, group), {})[spec] = median(list(rounds.values()))
 
+    # Prefix the target only when the same group name came from >1 target, so
+    # colliding groups get distinct headers instead of duplicates.
+    targets_by_group = {}
+    for target, group in groups:
+        targets_by_group.setdefault(group, set()).add(target)
+
     out = ""
     for target, group in sorted(groups):
         rows = groups[(target, group)]
@@ -319,7 +326,8 @@ def baseline_gap_section(feature) -> str:
             continue
         ordered = [r for r in ROW_ORDER if rows.get(r) is not None]
         extras = sorted(r for r in rows if r not in ROW_ORDER)
-        out += f"\n### `{group}`\n\n"
+        title = f"{target}/{group}" if len(targets_by_group[group]) > 1 else group
+        out += f"\n### `{title}`\n\n"
         out += "| spec | time | × vs `revm_pinned` |\n"
         out += "|------|------|--------------------|\n"
         for row in ordered + extras:
@@ -348,11 +356,11 @@ def ci_str(c: Comparison) -> str:
     return f"[{c.ci_low:+.1f}%, {c.ci_high:+.1f}%]"
 
 
-def row_str(c: Comparison) -> str:
+def row_str(c: Comparison, label: str) -> str:
     b_us = f"{c.baseline_ns / 1000:.1f} µs"
     f_us = f"{c.feature_ns / 1000:.1f} µs"
     sign = "+" if c.mean_delta > 0 else ""
-    return (f"| {c.name} | {b_us} | {f_us} | {sign}{c.mean_delta:.1f}% "
+    return (f"| {label} | {b_us} | {f_us} | {sign}{c.mean_delta:.1f}% "
             f"| {ci_str(c)} | ±{c.floor:.1f}% | {icon(c)} |")
 
 
@@ -410,12 +418,22 @@ def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
         body += "_No comparable benchmarks found._\n"
         return body
 
-    comparisons = sorted(comparisons, key=lambda c: c.name)
+    comparisons = sorted(comparisons, key=lambda c: (c.name, c.target))
+    # Only prefix the target when the same bench name came from more than one
+    # target — otherwise two targets that collide on a name would render as two
+    # indistinguishable rows. The common (no-collision) case stays unprefixed.
+    targets_by_name = {}
+    for c in comparisons:
+        targets_by_name.setdefault(c.name, set()).add(c.target)
+    label_of = {
+        id(c): (f"{c.target}/{c.name}" if len(targets_by_name[c.name]) > 1 else c.name)
+        for c in comparisons
+    }
     regressions = sum(1 for c in comparisons if c.regressed)
     improvements = sum(1 for c in comparisons if c.improved)
     noise_limited = sum(1 for c in comparisons if c.noise_limited)
     significant = [c for c in comparisons if c.significant]
-    rows = [row_str(c) for c in comparisons]
+    rows = [row_str(c, label_of[id(c)]) for c in comparisons]
 
     if len(rows) > 20 and 0 < len(significant) < len(rows):
         body += (
@@ -424,7 +442,7 @@ def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
         )
         body += TABLE_HEADER + "\n".join(rows) + "\n\n</details>\n\n"
         body += "**Significant changes:**\n\n"
-        body += TABLE_HEADER + "\n".join(row_str(c) for c in significant) + "\n"
+        body += TABLE_HEADER + "\n".join(row_str(c, label_of[id(c)]) for c in significant) + "\n"
     else:
         body += TABLE_HEADER + "\n".join(rows) + "\n"
 
