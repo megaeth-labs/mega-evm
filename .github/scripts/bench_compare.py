@@ -155,7 +155,12 @@ def load_rounds(rounds_dir: str):
     per-target artifacts are downloaded into one directory, so two targets that
     happen to emit the same criterion name would otherwise overwrite each other."""
     data = {"feature": {}, "baseline": {}}
-    for path in sorted(glob.glob(os.path.join(rounds_dir, "*.txt"))):
+    # Recurse: download-artifact + merge-multiple may place the round files
+    # directly under the download root (when upload-artifact collapses the
+    # `rounds/` prefix) or one level down — search both so the comparator finds
+    # them regardless.
+    paths = glob.glob(os.path.join(rounds_dir, "**", "*.txt"), recursive=True)
+    for path in sorted(paths):
         fm = _ROUND_FILE.match(os.path.basename(path))
         if not fm:
             continue

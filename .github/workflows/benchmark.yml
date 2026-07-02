@@ -287,7 +287,10 @@ jobs:
 
       - name: Aggregate rounds into a comparison
         env:
-          ROUNDS_DIR: all_rounds/rounds
+          # Point at the download root; upload-artifact collapses the `rounds/`
+          # prefix, so the round files land directly under here. The comparator
+          # globs recursively, so a one-level-deeper layout also works.
+          ROUNDS_DIR: all_rounds
           OUT: comparison.md
           FEATURE_SHA: ${{ needs.prepare.outputs.feature_sha }}
           BASELINE_SHA: ${{ needs.prepare.outputs.baseline_sha }}
@@ -295,7 +298,7 @@ jobs:
           AA_CHECK: ${{ needs.prepare.outputs.aa_check }}
           BOOTSTRAP_ITERS: ${{ env.BOOTSTRAP_ITERS }}
         run: |
-          mkdir -p all_rounds/rounds
+          mkdir -p all_rounds
           python3 .github/scripts/bench_compare.py
 
       - name: Comment on PR
@@ -319,4 +322,4 @@ jobs:
           name: criterion-benchmark-results
           path: |
             comparison.md
-            all_rounds/rounds
+            all_rounds
