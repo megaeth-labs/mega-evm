@@ -883,4 +883,131 @@ mod tests {
         assert_eq!(db.storage(KNOWN, U256::ZERO).unwrap(), U256::ZERO);
         assert_eq!(db.block_hash(0).unwrap(), B256::ZERO);
     }
+
+    // === inspect_storage coverage tests (PR #334) ===
+
+    #[test]
+    fn test_inspect_storage_rex4_slot_hit_returns_existing_value() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000bb");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        let key = U256::from(3);
+        let expected_value = U256::from(42);
+        {
+            let tid = journal.transaction_id;
+            let account = inspect_account(&mut journal, ADDR, false).unwrap();
+            let mut slot = EvmStorageSlot::new(expected_value, tid);
+            slot.mark_cold();
+            account.storage.insert(key, slot);
+        }
+
+        let spec = MegaSpecId::REX4;
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed on existing slot");
+
+        assert_eq!(slot.present_value, expected_value,
+            "REX4 slot hit must return the pre-seeded value");
+        assert!(slot.is_cold, "inspected slot must remain cold");
+    }
+
+    #[test]
+    fn test_inspect_storage_rex4_slot_miss_inserts_and_returns_db_value() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000cc");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        let key = U256::from(7);
+        let spec = MegaSpecId::REX4;
+
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed on absent slot");
+
+        assert_eq!(slot.present_value, U256::ZERO,
+            "absent slot on non-created account must return ZERO from database");
+        assert!(slot.is_cold, "newly inserted slot must be marked cold");
+
+        let slot2 = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("second inspect_storage must succeed");
+
+        assert_eq!(slot2.present_value, U256::ZERO,
+            "second call must return the same value");
+    }
+
+    #[test]
+    fn test_inspect_storage_rex4_newly_created_short_circuits_db() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000dd");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        {
+            let account = inspect_account(&mut journal, ADDR, false).unwrap();
+            account.mark_created();
+        }
+
+        let key = U256::from(1);
+        let spec = MegaSpecId::REX4;
+
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed on newly-created account");
+
+        assert_eq!(slot.present_value, U256::ZERO,
+            "newly-created account must return ZERO without querying database");
+        assert!(slot.is_cold, "slot must be marked cold");
+    }
+
+    #[test]
+    fn test_inspect_storage_pre_rex4_uses_delegation_path() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000ee");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        let key = U256::from(5);
+        let spec = MegaSpecId::MINI_REX;
+
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed pre-REX4");
+
+        assert_eq!(slot.present_value, U256::ZERO,
+            "pre-REX4 absent slot must return ZERO");
+        assert!(slot.is_cold, "slot must be marked cold");
+    }
+
+    #[test]
+    fn test_inspect_storage_rex4_ignores_eip7702_delegation() {
+        const DELEGATOR: Address = address!("0000000000000000000000000000000000000d01");
+        const DELEGATE: Address = address!("0000000000000000000000000000000000000d02");
+        let delegate_code = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default()
+            .with_eip7702_delegation(DELEGATOR, DELEGATE)
+            .with_account_code(DELEGATE, delegate_code);
+        let mut journal = Journal::new(db);
+
+        let key = U256::from(2);
+        let expected = U256::from(99);
+        {
+            let tid = journal.transaction_id;
+            let account = inspect_account(&mut journal, DELEGATOR, false).unwrap();
+            let mut slot = EvmStorageSlot::new(expected, tid);
+            slot.mark_cold();
+            account.storage.insert(key, slot);
+        }
+
+        let spec = MegaSpecId::REX4;
+        let slot = journal
+            .inspect_storage(spec, DELEGATOR, key)
+            .expect("inspect_storage must succeed for REX4 delegator");
+
+        assert_eq!(slot.present_value, expected,
+            "REX4 must read storage from delegator (original address), not delegate");
+    }
 }
