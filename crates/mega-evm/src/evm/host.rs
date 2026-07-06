@@ -494,13 +494,28 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         // the delegate's flag instead would mistakenly short-circuit storage reads when the
         // delegate happens to be a freshly-CREATEd contract in the same tx, corrupting
         // SSTORE accounting (gas / kv_updates / data_size) on the delegator's slots.
-        let is_newly_created = inspect_account(self, address, false)?.is_created();
         // REX4+: storage belongs to the original address, not the delegate — do not follow
         // EIP-7702 delegation here (matching upstream revm's sload behavior).
         // Pre-REX4: follows delegation (original behavior).
+        let is_newly_created;
         let account = if is_rex4_enabled {
-            inspect_account(self, address, false)?
+            // Fold what used to be two separate `inspect_account(self, address, false)` calls
+            // (one for `is_created`, one for the storage account) into a single hydrating load.
+            // `inspect_account`'s occupied branch hydrates lazy code unconditionally, so the old
+            // second (always-occupied) pass hydrated the same code that `load_code = true`
+            // hydrates inline here — identical final account state, identical `basic()` +
+            // `code_by_hash` DB-call sequence and error position — while saving one `state.entry`
+            // lookup on the REX4/REX5 SLOAD hot path.
+            let account = inspect_account(self, address, true)?;
+            is_newly_created = account.is_created();
+            // Pin the hydration invariant the removed second call used to guarantee.
+            debug_assert!(account.info.code_hash == KECCAK_EMPTY || account.info.code.is_some());
+            account
         } else {
+            // Non-REX4: `is_created` must be read on the *original* address (an EOA delegating via
+            // 7702 is never CREATEd), but the storage account follows delegation — genuinely two
+            // different accounts, so the two loads cannot be folded.
+            is_newly_created = inspect_account(self, address, false)?.is_created();
             self.inspect_account_delegated(spec, address)?
         };
         if account.storage.contains_key(&key) {
