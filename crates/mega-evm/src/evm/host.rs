@@ -494,42 +494,60 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         // the delegate's flag instead would mistakenly short-circuit storage reads when the
         // delegate happens to be a freshly-CREATEd contract in the same tx, corrupting
         // SSTORE accounting (gas / kv_updates / data_size) on the delegator's slots.
-        let is_newly_created = inspect_account(self, address, false)?.is_created();
-        // REX4+: storage belongs to the original address, not the delegate — do not follow
-        // EIP-7702 delegation here (matching upstream revm's sload behavior).
-        // Pre-REX4: follows delegation (original behavior).
+        // Fold two inspect_account calls into one hydrating load on REX4 path.
+        // inspect_account's occupied branch hydrates lazy code unconditionally,
+        // so the old second (always-occupied) pass hydrated the same code that
+        // load_code=true hydrates inline here — identical final account state,
+        // identical DB-call sequence and error position, one fewer state.entry lookup.
+        let is_newly_created;
         let account = if is_rex4_enabled {
-            inspect_account(self, address, false)?
+            let account = inspect_account(self, address, true)?;
+            is_newly_created = account.is_created();
+            debug_assert!(account.info.code_hash == KECCAK_EMPTY || account.info.code.is_some());
+            account
         } else {
+            // Non-REX4: is_created must be read on the original address (an EOA delegating
+            // via 7702 is never CREATEd), but the storage account follows delegation —
+            // genuinely two different accounts, so the two loads cannot be folded.
+            is_newly_created = inspect_account(self, address, false)?.is_created();
             self.inspect_account_delegated(spec, address)?
         };
-        if account.storage.contains_key(&key) {
-            // Slot already exists, return reference to it.
-            // Need to reload account to satisfy borrow checker.
-            let account = if is_rex4_enabled {
-                inspect_account(self, address, false)?
-            } else {
-                self.inspect_account_delegated(spec, address)?
+        // REX4/REX5 hot path: use entry() API for a single HashMap probe.
+        // The prologue guarantees the account is in inner.state; reload via get_mut
+        // to narrow the borrow from &mut self to &mut inner.state, keeping
+        // self.database reachable for the miss path.
+        if is_rex4_enabled {
+            let account = self.inner.state.get_mut(&address).unwrap();
+            return match account.storage.entry(key) {
+                Entry::Occupied(entry) => Ok(entry.into_mut()),
+                Entry::Vacant(entry) => {
+                    let slot_value = if is_newly_created {
+                        U256::ZERO
+                    } else {
+                        self.database.storage(address, key)?
+                    };
+                    let mut slot = EvmStorageSlot::new(slot_value, transaction_id);
+                    slot.mark_cold();
+                    Ok(entry.insert(slot))
+                }
             };
+        }
+
+        // Pre-REX4: original contains_key + reload pattern (genuinely two different accounts).
+        if account.storage.contains_key(&key) {
+            // Need to reload account to satisfy borrow checker.
+            let account = self.inspect_account_delegated(spec, address)?;
             return Ok(account.storage.get(&key).unwrap());
         }
         // Slot doesn't exist. For newly-created accounts, post-CREATE storage is
         // guaranteed empty (EIP-161 / EIP-6780), so return ZERO without touching the DB.
-        // Querying here would otherwise generate a witness lookup for a slot that has no
-        // meaningful pre-state value — which fails for stateless replay when CREATE lands
-        // on a pre-funded address (its `Loaded` cache status bypasses revm's
-        // `State::storage` short-circuit and exposes the call to the witness backend).
         let slot_value =
             if is_newly_created { U256::ZERO } else { self.database.storage(address, key)? };
         let mut slot = EvmStorageSlot::new(slot_value, transaction_id);
         // deliberately mark the slot as cold since we are only inspecting it, not warming it
         slot.mark_cold();
         // Load account again to bypass the borrow checker and insert the slot
-        let account = if is_rex4_enabled {
-            inspect_account(self, address, false)?
-        } else {
-            self.inspect_account_delegated(spec, address)?
-        };
+        let account = self.inspect_account_delegated(spec, address)?;
         account.storage.insert(key, slot);
         // Return reference to the newly inserted slot
         Ok(account.storage.get(&key).expect("slot should exist"))
