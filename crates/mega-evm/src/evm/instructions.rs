@@ -1676,7 +1676,14 @@ pub mod compute_gas_ext {
                 // Call the original instruction
                 run_inner_instruction_or_abort!($original_fn, context);
 
-                let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                let gas_after = context.interpreter.gas.remaining();
+                // remaining is monotonically non-increasing across a non-frame opcode: revm's
+                // Gas::record_cost only subtracts, and refunds accrue to a separate refunded
+                // field - never to remaining. So gas_before >= gas_after always holds here and
+                // the subtraction can never underflow, making a plain - byte-identical to
+                // saturating_sub while dropping the saturation branch from the per-opcode hot path.
+                debug_assert!(gas_before >= gas_after);
+                let gas_used = gas_before - gas_after;
                 let mut additional_limit = context.host.additional_limit().borrow_mut();
                 compute_gas!(context.interpreter, additional_limit, gas_used);
             }
