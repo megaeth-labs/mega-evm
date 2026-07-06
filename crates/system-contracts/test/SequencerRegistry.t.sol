@@ -505,6 +505,20 @@ contract SequencerRegistryTest is Test {
         registry.scheduleNextSequencerChange(newSequencer, futureBlock, sig);
     }
 
+    function test_scheduleNextSequencerChange_revertsSignatureFromDifferentChain() public {
+        // The EIP-712 domain binds block.chainid, so a rotation proof signed for one chain
+        // cannot be replayed on another chain's registry.
+        uint256 futureBlock = block.number + 100;
+
+        vm.chainId(999);
+        bytes memory foreignChainSig = _validRotationSig(futureBlock);
+        vm.chainId(31337);
+
+        vm.prank(INITIAL_ADMIN);
+        vm.expectRevert(ISequencerRegistry.InvalidRotationProof.selector);
+        registry.scheduleNextSequencerChange(newSequencer, futureBlock, foreignChainSig);
+    }
+
     function test_scheduleNextSequencerChange_reschedulingAfterCancelStillRequiresProof() public {
         uint256 futureBlock = block.number + 100;
         bytes memory sig = _validRotationSig(futureBlock);

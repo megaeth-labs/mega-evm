@@ -276,6 +276,59 @@ fn test_rex6_upgrade_block_applies_v1_scheduled_rotation() {
     );
 }
 
+/// The common mainnet upgrade shape: a rotation scheduled under v1.0.0 whose activation block
+/// lands AFTER the Rex6 activation block. The upgrade block must swap the bytecode without
+/// flipping the not-yet-due rotation, and the later activation block must flip it under the
+/// v2.0.0 bytecode.
+#[test]
+fn test_rex6_v1_scheduled_rotation_activates_after_upgrade_block() {
+    let (new_sequencer, _) = new_sequencer_keypair();
+    let upgrade_block = 1000u64;
+    let activation_block = upgrade_block + 50;
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
+    seed_v1_registry_with_pending_rotation(&mut db, new_sequencer, activation_block);
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let factory = executor_factory();
+
+    // Upgrade block: bytecode swaps, but the rotation is not yet due and must stay pending.
+    let mut executor =
+        factory.create_executor(&mut state, block_ctx(), evm_env_at_block(upgrade_block));
+    executor.apply_pre_execution_changes().expect("upgrade block pre-execution should succeed");
+    drop(executor);
+
+    assert_eq!(registry_code_hash(&mut state), SEQUENCER_REGISTRY_CODE_HASH_REX6);
+    assert_eq!(
+        read_registry_slot(&mut state, CURRENT_SEQUENCER),
+        U256::from_be_bytes(BOOTSTRAP_SEQUENCER.into_word().0),
+        "a not-yet-due rotation must not flip on the upgrade block"
+    );
+    assert_eq!(
+        read_registry_slot(&mut state, PENDING_SEQUENCER),
+        U256::from_be_bytes(new_sequencer.into_word().0),
+        "the pending rotation must survive the upgrade untouched"
+    );
+    assert_eq!(
+        read_registry_slot(&mut state, SEQUENCER_ACTIVATION_BLOCK),
+        U256::from(activation_block),
+    );
+
+    // Activation block: the rotation flips under the v2.0.0 bytecode.
+    let mut executor =
+        factory.create_executor(&mut state, block_ctx(), evm_env_at_block(activation_block));
+    executor.apply_pre_execution_changes().expect("activation block pre-execution should succeed");
+    drop(executor);
+
+    assert_eq!(
+        read_registry_slot(&mut state, CURRENT_SEQUENCER),
+        U256::from_be_bytes(new_sequencer.into_word().0),
+        "the v1-scheduled rotation must flip at its activation block under v2.0.0"
+    );
+    assert_eq!(read_registry_slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
+}
+
 /// Full v2.0.0 round trip through normal transactions: the admin schedules a rotation with
 /// the new key's EIP-712 possession proof in one block, and the rotation activates in a
 /// later block's pre-execution phase.
