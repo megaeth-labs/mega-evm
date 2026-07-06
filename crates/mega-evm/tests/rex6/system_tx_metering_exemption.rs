@@ -29,8 +29,8 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     test_utils::MemoryDatabase, BlockLimits, BucketHasher, BucketId, IOracle,
     MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs,
-    MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, TestExternalEnvs, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     context::{BlockEnv, CfgEnv, ContextTr as _},
@@ -68,10 +68,13 @@ impl BucketHasher for SingleBucketHasher {
 }
 
 fn rex6_chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(SequencerRegistryConfig {
-        rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
-        rex5_initial_admin: BOOTSTRAP_ADMIN,
-    })
+    MegaHardforkConfig::default()
+        .with_all_activated()
+        .with_params(SequencerRegistryConfig {
+            rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
+            rex5_initial_admin: BOOTSTRAP_ADMIN,
+        })
+        .with_params(SequencerRegistryRex6Config { rex6_min_rotation_delay: 100 })
 }
 
 /// REX5-only chain spec (REX6 stays at `ForkCondition::Never`). Used by the negative parity test

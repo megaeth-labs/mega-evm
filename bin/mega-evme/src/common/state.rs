@@ -551,7 +551,7 @@ where
     pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
         use mega_evm::{
             flat_system_contract_specs, MegaSpecId, SEQUENCER_REGISTRY_ADDRESS,
-            SEQUENCER_REGISTRY_CODE,
+            SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_REX6,
         };
 
         // Flat predeploys (Oracle, high-precision timestamp Oracle, KeylessDeploy,
@@ -563,14 +563,16 @@ where
             self.set_account_code(contract.address, Bytecode::new_raw(contract.code));
         }
 
-        // Rex5+: SequencerRegistry. Only the bytecode is installed here — a local run has
-        // no chain-config sequencer/admin to seed (the registry's storage is otherwise
-        // read from forked state).
+        // Rex5+: SequencerRegistry (v1.0.0 pre-Rex6, v2.0.0 from Rex6). Only the bytecode
+        // is installed here — a local run has no chain-config sequencer/admin to seed (the
+        // registry's storage is otherwise read from forked state).
         if spec >= MegaSpecId::REX5 {
-            self.set_account_code(
-                SEQUENCER_REGISTRY_ADDRESS,
-                Bytecode::new_raw(SEQUENCER_REGISTRY_CODE),
-            );
+            let code = if spec >= MegaSpecId::REX6 {
+                SEQUENCER_REGISTRY_CODE_REX6
+            } else {
+                SEQUENCER_REGISTRY_CODE
+            };
+            self.set_account_code(SEQUENCER_REGISTRY_ADDRESS, Bytecode::new_raw(code));
         }
     }
 }

@@ -157,14 +157,20 @@ contract OracleTest is Test {
     function test_sequencerChange_doesNotAffectOracleAuthority() public {
         uint256 activationBlock = block.number + 100;
 
+        // V2 scheduling needs the new sequencer key's EIP-712 possession proof, so the rotated
+        // sequencer must be an address with a known private key.
+        (address rotatedSequencer, uint256 rotatedSequencerKey) = makeAddrAndKey("oracleTestSequencer");
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(rotatedSequencerKey, registry.rotationDigest(rotatedSequencer, activationBlock));
+
         vm.prank(INITIAL_ADMIN);
-        registry.scheduleNextSequencerChange(newSequencer, activationBlock);
+        registry.scheduleNextSequencerChange(rotatedSequencer, activationBlock, abi.encodePacked(r, s, v));
 
         vm.roll(activationBlock);
         registry.applyPendingChanges();
 
         // Sequencer changed, but Oracle authority is still the original system address.
-        assertEq(registry.currentSequencer(), newSequencer);
+        assertEq(registry.currentSequencer(), rotatedSequencer);
         assertEq(registry.currentSystemAddress(), INITIAL_SYSTEM_ADDRESS);
 
         // Original system address can still call Oracle.
@@ -173,7 +179,7 @@ contract OracleTest is Test {
         assertEq(oracle.getSlot(99), bytes32(uint256(0xFEED)));
 
         // New sequencer cannot call Oracle.
-        vm.prank(newSequencer);
+        vm.prank(rotatedSequencer);
         vm.expectRevert(Oracle.NotSystemAddress.selector);
         oracle.setSlot(0, bytes32(uint256(1)));
     }

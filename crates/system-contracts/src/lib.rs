@@ -128,5 +128,9 @@ pub mod sequencer_registry {
         // Rust never reads or writes these arrays directly — `systemAddressAt` and
         // `sequencerAt` are on-chain getters that iterate them — so there is no flat slot
         // constant.
+
+        /// Storage slot for `_minRotationDelay` (v2.0.0+). Appended after the two dynamic
+        /// arrays at slots 11/12, so 13 is the first free flat slot.
+        pub const MIN_ROTATION_DELAY: U256 = U256::from_limbs([13, 0, 0, 0]);
     }
 }
