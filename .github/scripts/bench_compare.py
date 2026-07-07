@@ -362,11 +362,9 @@ def ci_str(c: Comparison) -> str:
 
 
 def row_str(c: Comparison, label: str) -> str:
-    b_us = f"{c.baseline_ns / 1000:.1f} µs"
-    f_us = f"{c.feature_ns / 1000:.1f} µs"
     sign = "+" if c.mean_delta > 0 else ""
-    return (f"| {label} | {b_us} | {f_us} | {sign}{c.mean_delta:.1f}% "
-            f"| {ci_str(c)} | ±{c.floor:.1f}% | {icon(c)} |")
+    return (f"| {label} | {format_time(c.baseline_ns)} | {format_time(c.feature_ns)} "
+            f"| {sign}{c.mean_delta:.1f}% | {ci_str(c)} | ±{c.floor:.1f}% | {icon(c)} |")
 
 
 TABLE_HEADER = (
@@ -375,28 +373,55 @@ TABLE_HEADER = (
 )
 
 LEGEND = (
-    "\n_:rocket: significant speedup · :x:/:warning: significant regression · "
+    "_:rocket: significant speedup · :x:/:warning: significant regression · "
     ":eyes: directional but below the A/A noise floor · :white_circle: within "
-    "noise. **Significant = 95% bootstrap CI excludes 0 AND |Δ| > the A/A "
-    "floor** (that bench's own round-to-round jitter)._\n"
+    "noise._\n"
 )
+
+METHODOLOGY = (
+    "**Paired, order-interleaved A/B.** Each round runs the feature and "
+    "baseline binaries back-to-back on the same runner; the verdict is the "
+    "mean of the per-round paired Δ% with a 95% bootstrap CI over the "
+    "rounds. A change is flagged only when its **CI excludes 0 _and_ |Δ| "
+    "clears the bench's A/A noise floor** (that bench's own round-to-round "
+    "jitter), so minutes-apart machine drift no longer reads as a regression "
+    "and a real sub-5% change is no longer buried in it.\n\n" + LEGEND
+)
+
+# Lanes that run upstream revm / op-revm, not this repo's EVM code. A PR that
+# doesn't touch the bench harness or vendored dependencies cannot change what
+# these lanes execute — so a significant delta on them measures the
+# binary-layout / link-order difference between the two builds (the relink
+# floor), not the change under review.
+CONTROL_SPECS = {"revm_pinned", "revm_latest", "op_revm_pinned", "op_revm_latest"}
+
+# Significant rows shown expanded; the rest fold into a <details>.
+TOP_SIGNIFICANT = 15
+
+
+def _is_control(label: str) -> bool:
+    return any(seg in CONTROL_SPECS for seg in label.split("/"))
+
+
+def _details(summary: str, inner: str) -> str:
+    return f"<details><summary>{summary}</summary>\n\n{inner}\n</details>\n\n"
+
+
+def _table(cs, label_of) -> str:
+    return TABLE_HEADER + "\n".join(row_str(c, label_of[id(c)]) for c in cs) + "\n"
 
 
 def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
            aa_check: bool) -> str:
+    """One screen tells the verdict; everything long folds into <details>.
+
+    Order: header → headline counts → relink-floor hint (when control lanes
+    flag) → significant table (worst first, top rows expanded) → folded
+    baseline-gap / full-table / methodology sections."""
     body = "## Criterion Benchmark Comparison\n\n"
     body += (
         f"> Comparing [`baseline`]({repo_url}/commit/{baseline_sha})"
         f" → [`feature`]({repo_url}/commit/{feature_sha})\n\n"
-    )
-    body += (
-        "> **Paired, order-interleaved A/B.** Each round runs the feature and "
-        "baseline binaries back-to-back on the same runner; the verdict is the "
-        "mean of the per-round paired Δ% with a 95% bootstrap CI over the "
-        "rounds. A change is flagged only when its **CI excludes 0 _and_ |Δ| "
-        "clears the bench's A/A noise floor**, so minutes-apart machine drift no "
-        "longer reads as a regression and a real sub-5% change is no longer "
-        "buried in it.\n\n"
     )
 
     if aa_check:
@@ -408,20 +433,19 @@ def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
         )
 
     gap = baseline_gap_section(feature_rounds)
+    gap_section = ""
     if gap:
-        body += "### Baseline gap (HEAD only — how far is each EVM layer from `revm_pinned`)\n"
-        body += (
-            "\n_Read the highest `rex*` row (currently `rex5`, the latest spec) "
+        gap_section = _details(
+            "Baseline gap — each EVM layer vs <code>revm_pinned</code> (HEAD only)",
+            "_Read the highest `rex*` row (currently `rex5`, the latest spec) "
             'for the "user-visible mega gap"; the earlier `rex*` rows are prior '
-            "specs. The non-`rex` rows are diagnostic: they show which layer adds "
-            "cost._\n"
+            "specs. The non-`rex` rows are diagnostic: they show which layer "
+            "adds cost._\n" + gap,
         )
-        body += gap
-        body += "\n---\n\n### PR-base → PR-head regression check\n\n"
 
     if not comparisons:
-        body += "_No comparable benchmarks found._\n"
-        return body
+        body += "_No comparable benchmarks found._\n\n"
+        return body + gap_section
 
     comparisons = sorted(comparisons, key=lambda c: (c.name, c.target))
     # Only prefix the target when the same bench name came from more than one
@@ -438,28 +462,51 @@ def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
     improvements = sum(1 for c in comparisons if c.improved)
     noise_limited = sum(1 for c in comparisons if c.noise_limited)
     significant = [c for c in comparisons if c.significant]
-    rows = [row_str(c, label_of[id(c)]) for c in comparisons]
-
-    if len(rows) > 20 and 0 < len(significant) < len(rows):
-        body += (
-            f"<details><summary>{len(rows)} benchmarks total, "
-            f"{len(significant)} significant</summary>\n\n"
-        )
-        body += TABLE_HEADER + "\n".join(rows) + "\n\n</details>\n\n"
-        body += "**Significant changes:**\n\n"
-        body += TABLE_HEADER + "\n".join(row_str(c, label_of[id(c)]) for c in significant) + "\n"
-    else:
-        body += TABLE_HEADER + "\n".join(rows) + "\n"
-
-    body += LEGEND
+    within = len(comparisons) - len(significant) - noise_limited
     n_rounds = max((c.n_pairs for c in comparisons), default=0)
-    within = len(rows) - len(significant) - noise_limited
+
+    # The verdict, first — the counts used to sit at the very bottom.
     body += (
-        f"\n**{len(rows)} benchmarks** (paired over up to {n_rounds} rounds): "
-        f"{regressions} significant regressions, {improvements} significant "
-        f"improvements, {noise_limited} directional-but-noise-limited, "
-        f"{within} within noise\n"
+        f"**{len(comparisons)} benchmarks · up to {n_rounds} paired rounds** — "
+        f"{regressions} :warning: significant regressions · "
+        f"{improvements} :rocket: significant improvements · "
+        f"{noise_limited} :eyes: noise-limited · "
+        f"{within} :white_circle: within noise\n\n"
     )
+
+    ctrl = [c for c in significant if _is_control(label_of[id(c)])]
+    if ctrl and not aa_check:
+        worst = max(ctrl, key=lambda c: abs(c.mean_delta))
+        body += (
+            f"> :straight_ruler: **Relink-floor hint:** {len(ctrl)} significant "
+            f"row(s) sit on upstream control lanes (`revm_*` / `op_revm_*`), "
+            f"worst {worst.mean_delta:+.1f}% on `{label_of[id(worst)]}`. Those "
+            "lanes do not execute this repo's EVM code — unless the PR touches "
+            "the bench harness or vendored dependencies, a significant delta "
+            "there measures binary-layout / link-order noise between the two "
+            "builds, and same-magnitude findings on mega lanes should be read "
+            "against that floor.\n\n"
+        )
+
+    if significant:
+        by_impact = sorted(significant, key=lambda c: -abs(c.mean_delta))
+        head, tail = by_impact[:TOP_SIGNIFICANT], by_impact[TOP_SIGNIFICANT:]
+        body += "### Significant changes (worst first)\n\n"
+        body += _table(head, label_of) + "\n"
+        if tail:
+            body += _details(f"{len(tail)} more significant rows",
+                             _table(tail, label_of))
+        body += LEGEND + "\n"
+    else:
+        body += (
+            "**No significant changes** — no bench cleared both the bootstrap "
+            "CI and its A/A noise floor.\n\n"
+        )
+
+    body += gap_section
+    body += _details(f"All {len(comparisons)} comparisons",
+                     _table(comparisons, label_of))
+    body += _details("Methodology", METHODOLOGY)
     return body
 
 

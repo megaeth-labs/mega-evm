@@ -28,6 +28,7 @@ pub const SPEC_IDS: &[(&str, MegaSpecId)] = &[
     ("equivalence", MegaSpecId::EQUIVALENCE),
     ("mini_rex", MegaSpecId::MINI_REX),
     ("rex4", MegaSpecId::REX4),
+    ("rex5", MegaSpecId::REX5),
 ];
 
 type Group<'a> = criterion::BenchmarkGroup<'a, criterion::measurement::WallTime>;
