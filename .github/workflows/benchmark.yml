@@ -17,11 +17,12 @@ on:
 # group + cancel-in-progress an unrelated comment lands in the same group and
 # cancels a live benchmark mid-flight. Non-trigger comment runs now share their
 # own group and only ever cancel each other; real runs still debounce real
-# re-triggers. The author gate mirrors the prepare job's `if` — without it an
-# UNAUTHORIZED `/benchmark` would cancel a live run and then skip at the guard
-# (a benchmark-DoS on public PRs); keep the two predicates in sync.
+# re-triggers. The suffix mirrors the prepare job's FULL trigger gate
+# (PR-comment + /benchmark + author association) — any comment that would fail
+# the gate must not share a group with real runs, or it cancels a live run it
+# cannot replace (a benchmark-DoS on public PRs); keep the two in sync.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || (contains(github.event.comment.body, '/benchmark') && (github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR' || github.event.comment.author_association == 'OWNER')) }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/benchmark') && contains(fromJSON('["MEMBER","COLLABORATOR","OWNER"]'), github.event.comment.author_association)) }}
   cancel-in-progress: true
 
 # Paired, order-interleaved A/B knobs. The harness runs the feature and baseline
@@ -166,7 +167,8 @@ jobs:
             const issue_number = context.payload.issue.number;
             const comments = await github.paginate(github.rest.issues.listComments,
               { owner, repo, issue_number, per_page: 100 });
-            const mine = comments.filter(c => c.body && c.body.includes(marker)).pop();
+            const mine = comments.filter(c => c.user && c.user.login === 'github-actions[bot]'
+              && c.body && c.body.includes(marker)).pop();
             if (mine) {
               await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
             } else {
@@ -311,12 +313,14 @@ jobs:
     needs: [prepare, bench]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # `always()` so a failed bench leg still updates the status comment (which
-    # would otherwise sit at "in progress" forever) — partial rounds are
-    # aggregated and the comment gets a warning banner instead.
+    # `!cancelled()` (NOT `always()`): a failed bench leg still updates the
+    # status comment (partial rounds aggregated under a warning banner), but a
+    # CANCELLED run must not run compare — the newer run that cancelled it owns
+    # the shared comment now, and `always()` would overwrite its fresh
+    # "in progress" status with this run's stale partial report.
     if: >-
-      always() && needs.prepare.result == 'success' &&
-      needs.prepare.outputs.compare == 'true'
+      ${{ !cancelled() && needs.prepare.result == 'success' &&
+          needs.prepare.outputs.compare == 'true' }}
     # Posts the comparison comment; consumes artifacts plus the TRUSTED base-repo
     # aggregation script (checked out below from the default branch, never PR
     # code).
@@ -384,7 +388,8 @@ jobs:
             const issue_number = context.issue.number;
             const comments = await github.paginate(github.rest.issues.listComments,
               { owner, repo, issue_number, per_page: 100 });
-            const mine = comments.filter(c => c.body && c.body.includes(marker)).pop();
+            const mine = comments.filter(c => c.user && c.user.login === 'github-actions[bot]'
+              && c.body && c.body.includes(marker)).pop();
             if (mine) {
               await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
             } else {

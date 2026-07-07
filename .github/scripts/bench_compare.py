@@ -495,7 +495,11 @@ def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
         )
 
     if significant:
-        by_impact = sorted(significant, key=lambda c: -abs(c.mean_delta))
+        # Regressions strictly before improvements (each worst-first): ranking
+        # by |Δ| alone would let a stack of big speedups push a real +6%
+        # regression below the fold — the one row a reviewer must not miss.
+        by_impact = sorted(significant,
+                           key=lambda c: (c.improved, -abs(c.mean_delta)))
         head, tail = by_impact[:TOP_SIGNIFICANT], by_impact[TOP_SIGNIFICANT:]
         body += "### Significant changes (worst first)\n\n"
         body += _table(head, label_of) + "\n"
