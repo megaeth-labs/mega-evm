@@ -879,6 +879,50 @@ fn test_stipend_burned_on_eoa_value_transfer() {
     );
 }
 
+/// On the REX4 legacy-inflation path, when a value-transferring child frame that received a
+/// `STORAGE_CALL_STIPEND` hits a TX-level detained compute-gas limit, `rescue_gas` must EXCLUDE
+/// the stipend from the gas rescued back to the sender (system-granted gas must not leak).
+///
+/// This pins the exact `gas_used` so the stipend exclusion is observable end-to-end: with the
+/// exclusion (correct) the rescued gas is capped at the pre-stipend limit; without it the full
+/// child `gas.remaining()` is rescued, refunding ~13k extra gas and lowering `gas_used`.
+///
+/// Kills the mutant `current_frame_stipend -> 0` in `storage_call_stipend.rs`: with the mutant,
+/// `effective_remaining_for_rescue` skips the exclusion and `gas_used` drops from `69_321` to
+/// `56_325`.
+#[test]
+fn test_stipend_excluded_from_rescued_gas_on_tx_level_detention_exceed() {
+    let sender_code = build_value_call_contract(RECEIVER, 100_000);
+    let receiver_code =
+        append_burn_gas(BytecodeBuilder::default().append(TIMESTAMP).append(POP), 20_000)
+            .append(STOP)
+            .build();
+    let mut db = setup_db(&[(SENDER_CONTRACT, sender_code), (RECEIVER, receiver_code)]);
+
+    let tx = default_tx();
+    let limits = EvmTxRuntimeLimits::no_limits()
+        .with_tx_compute_gas_limit(1_000_000)
+        .with_block_env_access_compute_gas_limit(10_000);
+    let result = transact_with_limits(MegaSpecId::REX4, &mut db, tx, limits).unwrap();
+
+    match &result.result {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::VolatileDataAccessOutOfGas { .. },
+            gas_used,
+        } => {
+            // Exact gas_used with the stipend correctly excluded from the rescued gas.
+            // If `current_frame_stipend` returns 0 (mutant), the exclusion is skipped, the full
+            // child `gas.remaining()` is rescued, and gas_used drops to 56_325.
+            assert_eq!(
+                *gas_used, 69_321,
+                "STORAGE_CALL_STIPEND must be excluded from rescued gas on TX-level exceed; \
+                 a lower gas_used means the system-granted stipend leaked back to the sender"
+            );
+        }
+        other => panic!("expected VolatileDataAccessOutOfGas halt, got {other:?}"),
+    }
+}
+
 /// If a value-transferring child frame with an active `STORAGE_CALL_STIPEND` hits a TX-level
 /// detained compute gas limit, `rescue_gas` must cap the refund at the pre-stipend limit instead
 /// of panicking in debug builds.
