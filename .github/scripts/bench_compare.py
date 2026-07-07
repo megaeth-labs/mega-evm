@@ -398,6 +398,12 @@ CONTROL_SPECS = {"revm_pinned", "revm_latest", "op_revm_pinned", "op_revm_latest
 # Significant rows shown expanded; the rest fold into a <details>.
 TOP_SIGNIFICANT = 15
 
+# GitHub caps issue comments at 65536 characters; stay comfortably under it by
+# dropping the bulkiest folded sections (full table first, then baseline gap)
+# instead of failing the post. The raw round files ride in the run artifact
+# either way. Env-overridable so tests can exercise the drop path.
+MAX_COMMENT_CHARS = int(os.environ.get("MAX_COMMENT_CHARS", "60000"))
+
 
 def _is_control(label: str) -> bool:
     return any(seg in CONTROL_SPECS for seg in label.split("/"))
@@ -503,10 +509,29 @@ def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
             "CI and its A/A noise floor.\n\n"
         )
 
-    body += gap_section
-    body += _details(f"All {len(comparisons)} comparisons",
-                     _table(comparisons, label_of))
-    body += _details("Methodology", METHODOLOGY)
+    # Folded bulk, dropped last-first when the comment would blow the size cap:
+    # the full table goes before the baseline gap (it is the least-read — the
+    # significant rows are already shown and the rounds live in the artifact).
+    optional = []
+    if gap_section:
+        optional.append(("the baseline-gap tables", gap_section))
+    optional.append((f"the all-{len(comparisons)}-comparisons table",
+                     _details(f"All {len(comparisons)} comparisons",
+                              _table(comparisons, label_of))))
+    methodology = _details("Methodology", METHODOLOGY)
+    dropped = []
+    while optional and (len(body) + sum(len(s) for _, s in optional)
+                        + len(methodology) > MAX_COMMENT_CHARS):
+        dropped.append(optional.pop()[0])
+    for _, section in optional:
+        body += section
+    body += methodology
+    if dropped:
+        body += (
+            f"_Dropped to fit GitHub's comment size limit: "
+            f"{', '.join(reversed(dropped))}. The complete data is in the "
+            "run's `criterion-benchmark-results` artifact._\n"
+        )
     return body
 
 

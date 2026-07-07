@@ -18,8 +18,11 @@ on:
   issue_comment:
     types: [created]
 
+# Suffixed with "is this a real trigger" so unrelated comments (bots, chat)
+# land in their own group instead of cancelling a live run — same fix as
+# benchmark.yml.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || contains(github.event.comment.body, '/replay-bench') }}
   cancel-in-progress: true
 
 permissions:

@@ -12,8 +12,14 @@ on:
   issue_comment:
     types: [created]
 
+# The group is suffixed with "is this a real trigger": issue_comment fires for
+# EVERY new comment (codecov, mutation bots, humans chatting), and with a single
+# group + cancel-in-progress an unrelated comment lands in the same group and
+# cancels a live benchmark mid-flight. Non-trigger comment runs now share their
+# own group and only ever cancel each other; real runs still debounce real
+# re-triggers.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || contains(github.event.comment.body, '/benchmark') }}
   cancel-in-progress: true
 
 # Paired, order-interleaved A/B knobs. The harness runs the feature and baseline
