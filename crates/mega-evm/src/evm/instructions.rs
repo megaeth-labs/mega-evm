@@ -1162,12 +1162,6 @@ pub mod storage_gas_ext {
     use super::*;
     use alloy_primitives::Address;
 
-    /// Address-selector for opcodes where the storage account is the stack `to` address (e.g.
-    /// CALL).
-    fn storage_addr_from_to(_mega_spec: MegaSpecId, _current: Address, to: Address) -> Address {
-        to
-    }
-
     /// Address-selector for CALLCODE: Rex5+ uses the current frame's address because CALLCODE
     /// executes borrowed code in the caller's own storage context; pre-Rex5 preserves the frozen
     /// behavior of metering against the code-source (stack `to`).
@@ -1177,6 +1171,12 @@ pub mod storage_gas_ext {
         } else {
             to
         }
+    }
+
+    /// Address-selector for opcodes where the storage account is the stack `to` address (e.g.
+    /// CALL).
+    fn storage_addr_from_to(_mega_spec: MegaSpecId, _current: Address, to: Address) -> Address {
+        to
     }
 
     /// Macro to charge storage gas for new account creation before calling the wrapped instruction.
