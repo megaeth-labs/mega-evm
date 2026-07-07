@@ -17,9 +17,11 @@ on:
 # group + cancel-in-progress an unrelated comment lands in the same group and
 # cancels a live benchmark mid-flight. Non-trigger comment runs now share their
 # own group and only ever cancel each other; real runs still debounce real
-# re-triggers.
+# re-triggers. The author gate mirrors the prepare job's `if` — without it an
+# UNAUTHORIZED `/benchmark` would cancel a live run and then skip at the guard
+# (a benchmark-DoS on public PRs); keep the two predicates in sync.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || contains(github.event.comment.body, '/benchmark') }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || (contains(github.event.comment.body, '/benchmark') && (github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR' || github.event.comment.author_association == 'OWNER')) }}
   cancel-in-progress: true
 
 # Paired, order-interleaved A/B knobs. The harness runs the feature and baseline
