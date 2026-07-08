@@ -214,6 +214,18 @@ strip = "symbols"
 panic = "unwind"
 codegen-units = 16
 
+# Bench builds must be layout-STABLE, not just fast: with release's 16
+# codegen units + thin LTO, any code change reshuffles function layout
+# binary-wide, and a paired A/B across two builds then measures the
+# reshuffle — a semantically-inert change can read as a multi-percent
+# "significant" delta, including on benches that never execute the changed
+# code. One codegen unit makes intra-crate code placement deterministic
+# given the same source; the bench workflow adds 64-byte function alignment
+# on top. Slower to compile — benches build once per CI side, so the cost
+# is minutes.
+[profile.bench]
+codegen-units = 1
+
 # Use the `--profile profiling` flag to show symbols in release mode.
 # e.g. `cargo build --profile profiling`
 [profile.profiling]
