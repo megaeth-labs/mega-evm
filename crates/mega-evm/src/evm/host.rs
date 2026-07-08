@@ -499,6 +499,11 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         // so the old second (always-occupied) pass hydrated the same code that
         // load_code=true hydrates inline here — identical final account state,
         // identical DB-call sequence and error position, one fewer state.entry lookup.
+        // Newly-created accounts must short-circuit storage misses to ZERO before any DB call.
+        // Querying here would otherwise trigger a witness lookup for a slot with no meaningful
+        // pre-state value, which breaks stateless replay when CREATE lands on a pre-funded
+        // address: its `Loaded` cache status bypasses revm's `State::storage` short-circuit and
+        // exposes the call to the witness backend.
         let is_newly_created;
         let account = if is_rex4_enabled {
             let account = inspect_account(self, address, true)?;
@@ -601,6 +606,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> JournalInspectTr for MegaContext<D
 mod tests {
     use super::*;
     use alloy_primitives::{address, keccak256};
+    use core::cell::Cell;
     use revm::{
         primitives::HashMap,
         state::{AccountInfo, Bytecode},
@@ -618,6 +624,7 @@ mod tests {
     struct LazyCodeDatabase {
         accounts: HashMap<Address, AccountInfo>,
         codes: HashMap<B256, Bytecode>,
+        storage_calls: Cell<usize>,
     }
 
     impl LazyCodeDatabase {
@@ -642,6 +649,10 @@ mod tests {
             self.codes.insert(code_hash, code);
             self
         }
+
+        fn storage_calls(&self) -> usize {
+            self.storage_calls.get()
+        }
     }
 
     impl revm::Database for LazyCodeDatabase {
@@ -658,6 +669,7 @@ mod tests {
         }
 
         fn storage(&mut self, _address: Address, _index: U256) -> Result<U256, Self::Error> {
+            self.storage_calls.set(self.storage_calls.get() + 1);
             Ok(U256::ZERO)
         }
 
@@ -908,8 +920,10 @@ mod tests {
             .inspect_storage(spec, ADDR, key)
             .expect("inspect_storage must succeed on existing slot");
 
-        assert_eq!(slot.present_value, expected_value,
-            "REX4 slot hit must return the pre-seeded value");
+        assert_eq!(
+            slot.present_value, expected_value,
+            "REX4 slot hit must return the pre-seeded value"
+        );
         assert!(slot.is_cold, "inspected slot must remain cold");
     }
 
@@ -927,16 +941,17 @@ mod tests {
             .inspect_storage(spec, ADDR, key)
             .expect("inspect_storage must succeed on absent slot");
 
-        assert_eq!(slot.present_value, U256::ZERO,
-            "absent slot on non-created account must return ZERO from database");
+        assert_eq!(
+            slot.present_value,
+            U256::ZERO,
+            "absent slot on non-created account must return ZERO from database"
+        );
         assert!(slot.is_cold, "newly inserted slot must be marked cold");
 
-        let slot2 = journal
-            .inspect_storage(spec, ADDR, key)
-            .expect("second inspect_storage must succeed");
+        let slot2 =
+            journal.inspect_storage(spec, ADDR, key).expect("second inspect_storage must succeed");
 
-        assert_eq!(slot2.present_value, U256::ZERO,
-            "second call must return the same value");
+        assert_eq!(slot2.present_value, U256::ZERO, "second call must return the same value");
     }
 
     #[test]
@@ -958,8 +973,11 @@ mod tests {
             .inspect_storage(spec, ADDR, key)
             .expect("inspect_storage must succeed on newly-created account");
 
-        assert_eq!(slot.present_value, U256::ZERO,
-            "newly-created account must return ZERO without querying database");
+        assert_eq!(
+            slot.present_value,
+            U256::ZERO,
+            "newly-created account must return ZERO without querying database"
+        );
         assert!(slot.is_cold, "slot must be marked cold");
     }
 
@@ -977,9 +995,40 @@ mod tests {
             .inspect_storage(spec, ADDR, key)
             .expect("inspect_storage must succeed pre-REX4");
 
-        assert_eq!(slot.present_value, U256::ZERO,
-            "pre-REX4 absent slot must return ZERO");
+        assert_eq!(slot.present_value, U256::ZERO, "pre-REX4 absent slot must return ZERO");
         assert!(slot.is_cold, "slot must be marked cold");
+    }
+
+    #[test]
+    fn test_inspect_storage_pre_rex4_newly_created_short_circuits_db() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000ef");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        {
+            let account = inspect_account(&mut journal, ADDR, false).unwrap();
+            account.mark_created();
+        }
+
+        let key = U256::from(6);
+        let spec = MegaSpecId::MINI_REX;
+
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed pre-REX4 on newly-created account");
+
+        assert_eq!(
+            slot.present_value,
+            U256::ZERO,
+            "pre-REX4 newly-created account must return ZERO without querying database"
+        );
+        assert!(slot.is_cold, "slot must be marked cold");
+        assert_eq!(
+            journal.database.storage_calls(),
+            0,
+            "newly-created pre-REX4 path must not hit the database storage lookup",
+        );
     }
 
     #[test]
@@ -1007,7 +1056,9 @@ mod tests {
             .inspect_storage(spec, DELEGATOR, key)
             .expect("inspect_storage must succeed for REX4 delegator");
 
-        assert_eq!(slot.present_value, expected,
-            "REX4 must read storage from delegator (original address), not delegate");
+        assert_eq!(
+            slot.present_value, expected,
+            "REX4 must read storage from delegator (original address), not delegate"
+        );
     }
 }
