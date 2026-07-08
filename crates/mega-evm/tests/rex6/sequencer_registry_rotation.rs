@@ -16,6 +16,7 @@
 use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
+use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
 use alloy_evm::{block::BlockExecutor, EvmEnv};
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
@@ -60,6 +61,17 @@ fn rex6_chain_spec() -> MegaHardforkConfig {
         })
 }
 
+/// Like [`rex6_chain_spec`] but omits the Rex5 [`SequencerRegistryConfig`], so the pre-block
+/// pipeline reaches the sequencer-registry deploy with the config unset and must fail closed.
+fn rex6_chain_spec_missing_registry_config() -> MegaHardforkConfig {
+    MegaHardforkConfig::default()
+        .with(MegaHardfork::Rex5, ForkCondition::Timestamp(0))
+        .with(MegaHardfork::Rex6, ForkCondition::Timestamp(0))
+        .with_params(SequencerRegistryRex6Config {
+            rex6_min_rotation_delay: MIN_ROTATION_DELAY_BLOCKS,
+        })
+}
+
 fn evm_env_at_block(block_number: u64) -> EvmEnv<MegaSpecId> {
     let mut cfg_env = revm::context::CfgEnv::default();
     cfg_env.spec = MegaSpecId::REX6;
@@ -82,9 +94,33 @@ fn executor_factory() -> MegaBlockExecutorFactory<
     MegaEvmFactory<TestExternalEnvs<Infallible>>,
     OpAlloyReceiptBuilder,
 > {
+    executor_factory_with(rex6_chain_spec())
+}
+
+fn executor_factory_with(
+    chain_spec: MegaHardforkConfig,
+) -> MegaBlockExecutorFactory<
+    MegaHardforkConfig,
+    MegaEvmFactory<TestExternalEnvs<Infallible>>,
+    OpAlloyReceiptBuilder,
+> {
     let external_envs = TestExternalEnvs::<Infallible>::new();
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-    MegaBlockExecutorFactory::new(rex6_chain_spec(), evm_factory, OpAlloyReceiptBuilder::default())
+    MegaBlockExecutorFactory::new(chain_spec, evm_factory, OpAlloyReceiptBuilder::default())
+}
+
+/// Plants always-reverting bytecode (`PUSH1 0 PUSH1 0 REVERT`) at `addr` so a pre-block system
+/// call targeting it returns a non-success result.
+fn plant_reverting_code(db: &mut MemoryDatabase, addr: Address) {
+    let code = Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd]);
+    db.insert_account_info(
+        addr,
+        AccountInfo {
+            code_hash: keccak256(&code),
+            code: Some(Bytecode::new_raw(code)),
+            ..Default::default()
+        },
+    );
 }
 
 fn create_tx_from(
@@ -415,5 +451,74 @@ fn test_rex6_schedule_without_proof_reverts() {
         read_registry_slot(&mut state, PENDING_SEQUENCER),
         U256::ZERO,
         "a schedule without a possession proof must not record a pending rotation"
+    );
+}
+
+/// Fail-closed guard: a Rex5+ EIP-2935 (blockhash) pre-block system call that does not succeed
+/// must abort block execution instead of silently committing the failed outcome. Reverting
+/// bytecode is planted at the history-storage contract so the system call reverts.
+#[test]
+fn test_rex6_eip2935_pre_block_call_failure_aborts_block() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
+    plant_reverting_code(&mut db, HISTORY_STORAGE_ADDRESS);
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor =
+        executor_factory().create_executor(&mut state, block_ctx(), evm_env_at_block(1000));
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("a failed EIP-2935 pre-block call must abort the block");
+
+    let msg = std::format!("{err}");
+    assert!(
+        msg.contains("EIP-2935 pre-block system call did not succeed"),
+        "expected an EIP-2935 pre-block failure, got: {msg}"
+    );
+}
+
+/// Fail-closed guard: same as the EIP-2935 case but for the Rex5+ EIP-4788 (beacon-root)
+/// pre-block system call. Reverting bytecode is planted at the beacon-roots contract; the
+/// EIP-2935 call still succeeds (no code planted there), so the EIP-4788 guard is the one that
+/// fires.
+#[test]
+fn test_rex6_eip4788_pre_block_call_failure_aborts_block() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
+    plant_reverting_code(&mut db, BEACON_ROOTS_ADDRESS);
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor =
+        executor_factory().create_executor(&mut state, block_ctx(), evm_env_at_block(1000));
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("a failed EIP-4788 pre-block call must abort the block");
+
+    let msg = std::format!("{err}");
+    assert!(
+        msg.contains("EIP-4788 pre-block system call did not succeed"),
+        "expected an EIP-4788 pre-block failure, got: {msg}"
+    );
+}
+
+/// Fail-closed guard: with Rex5 active but no [`SequencerRegistryConfig`] on the chain's
+/// hardfork configuration, the pre-block pipeline must abort rather than deploy the registry
+/// with unseeded roles.
+#[test]
+fn test_rex5_active_without_sequencer_registry_config_aborts_block() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let mut executor = executor_factory_with(rex6_chain_spec_missing_registry_config())
+        .create_executor(&mut state, block_ctx(), evm_env_at_block(1000));
+    let err = executor
+        .apply_pre_execution_changes()
+        .expect_err("Rex5 active without SequencerRegistryConfig must fail closed");
+
+    let msg = std::format!("{err}");
+    assert!(
+        msg.contains("SequencerRegistryConfig not configured"),
+        "expected a missing-config failure, got: {msg}"
     );
 }
