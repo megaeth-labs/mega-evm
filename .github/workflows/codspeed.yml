@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Only paths that can move instruction counts (benches, sources, deps,
+    # toolchain, or this workflow itself) — doc-only PRs skip the matrix.
+    paths:
+      - "crates/**"
+      - "bin/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/codspeed.yml"
   workflow_dispatch:
 
 permissions:
