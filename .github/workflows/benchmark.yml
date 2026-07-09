@@ -227,13 +227,6 @@ jobs:
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          # 64-byte (2^6) function alignment: cache-line-aligned function
-          # starts remove the largest layout-noise term a relink can inject
-          # into the A/B comparison (complements the bench profile's single
-          # codegen unit; replaces the action's default `-D warnings`, which
-          # measurement builds don't need).
-          rustflags: -C llvm-args=-align-all-functions=6
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
