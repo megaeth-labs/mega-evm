@@ -29,6 +29,7 @@ cargo sort --check --workspace --grouped --order package,workspace,lints,profile
 
 # Benchmarks
 cargo bench -p mega-evm --bench transact
+cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
 
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
@@ -290,6 +291,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Add benchmarks for performance-sensitive changes.**
   Changes on the EVM execution hot path must be accompanied by benchmarks.
   This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.
+  Per-PR instruction-count reports for these benchmarks are produced automatically by the CodSpeed CI workflow.
 - **Always run benchmarks locally before committing.**
   New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
   Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
