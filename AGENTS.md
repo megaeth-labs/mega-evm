@@ -30,6 +30,8 @@ cargo sort --check --workspace --grouped --order package,workspace,lints,profile
 # Benchmarks
 cargo bench -p mega-evm --bench transact
 cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
+# note: criterion's local HTML reports (target/criterion/report) are no longer generated —
+# the criterion dependency is the codspeed-criterion-compat shim without the html_reports feature
 
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
