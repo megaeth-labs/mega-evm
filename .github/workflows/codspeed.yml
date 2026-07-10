@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     # Only paths that can move instruction counts (benches, sources, deps,
-    # toolchain, or this workflow itself) — doc-only PRs skip the matrix.
+    # toolchain, or this workflow itself) — doc-only PRs skip the run.
     paths:
       - "crates/**"
       - "bin/**"
@@ -25,15 +25,11 @@ concurrency:
 
 jobs:
   codspeed:
-    name: instruction count (${{ matrix.target }})
+    name: instruction count
     runs-on: ubuntu-24.04
-    # Measured on the first full runs: a cold leg finishes in ~12 min, a warm
-    # one in 2–7 min — 30 min is ample headroom.
+    # A cold full-suite run measures in at ~13 min (simulation mode executes
+    # each bench once — no criterion sampling loop) — 30 min is ample headroom.
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [revm_bench, mega_bench, block_bench, transact, comp_cost, ctt, attack_replay]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,25 +37,20 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          # The explicit rust-cache step below owns caching (matrix-shared key).
-          cache: false
           # Empty rustflags overrides this action's default `-D warnings` —
           # measurement builds should not fail on unrelated warnings (clippy CI
           # is the warnings gate). Mirrors benchmark.yml.
           rustflags: ""
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shared across the 7 matrix legs so a cold workspace build is paid once.
-          shared-key: codspeed
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-codspeed@5.0.1
+      # No --bench filter: every bench target in the crate is built, so newly
+      # added bench targets are picked up without touching this workflow.
       - name: Build benches under instrumentation
-        run: cargo codspeed build -p mega-evm --bench ${{ matrix.target }}
+        run: cargo codspeed build -p mega-evm
       - name: Run benches
         uses: CodSpeedHQ/action@v4
         with:
