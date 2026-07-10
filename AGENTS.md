@@ -28,10 +28,8 @@ cargo clippy --workspace --lib --examples --tests --benches --all-features --loc
 cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
 
 # Benchmarks
-cargo bench -p mega-evm --bench transact
+cargo bench -p mega-evm --bench transact                                    # wall-clock (stdout only)
 cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
-# note: criterion's local HTML reports (target/criterion/report) are no longer generated —
-# the criterion dependency is the codspeed-criterion-compat shim without the html_reports feature
 
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
@@ -297,6 +295,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Always run benchmarks locally before committing.**
   New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
   Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
+  Local wall-clock output is stdout-only: the `criterion` dev-dependency is the `codspeed-criterion-compat` shim without the `html_reports` feature, so `target/criterion/report/**` is no longer generated.
+  For instruction-count deltas across a PR, use the CodSpeed report posted on the PR rather than local wall-clock numbers.
+  Escape hatch if distribution plots are needed while investigating a regression: temporarily re-enable `html_reports` (and `plotters`) on the local `criterion` dev-dependency and re-run `cargo bench` — do not commit that change.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
