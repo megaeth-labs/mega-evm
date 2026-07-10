@@ -27,7 +27,9 @@ jobs:
   codspeed:
     name: instruction count (${{ matrix.target }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Measured on the first full runs: a cold leg finishes in ~12 min, a warm
+    # one in 2–7 min — 30 min is ample headroom.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +43,10 @@ jobs:
         with:
           # The explicit rust-cache step below owns caching (matrix-shared key).
           cache: false
+          # Empty rustflags overrides this action's default `-D warnings` —
+          # measurement builds should not fail on unrelated warnings (clippy CI
+          # is the warnings gate). Mirrors benchmark.yml.
+          rustflags: ""
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
