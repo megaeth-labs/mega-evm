@@ -1,5 +1,7 @@
 # MegaETH EVM
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/megaeth-labs/mega-evm?utm_source=badge)
+
 A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH specifications, built on top of [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
 
 ## Crates
