@@ -38,10 +38,20 @@ jobs:
           submodules: recursive
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # The explicit rust-cache step below owns caching (matrix-shared key).
+          cache: false
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shared across the 7 matrix legs so a cold workspace build is paid once.
+          shared-key: codspeed
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
       - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed --locked --version 5.0.1
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed@5.0.1
       - name: Build benches under instrumentation
         run: cargo codspeed build -p mega-evm --bench ${{ matrix.target }}
       - name: Run benches
