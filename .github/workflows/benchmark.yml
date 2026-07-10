@@ -227,6 +227,12 @@ jobs:
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Empty rustflags overrides this action's default `-D warnings`.
+          # Measurement builds should not fail on unrelated warnings; the
+          # previous align-all-functions flag is gone (layout stabilization
+          # was ineffective), but the opt-out of `-D warnings` stays.
+          rustflags: ""
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
