@@ -47,7 +47,7 @@ tracing.workspace = true
 # `use criterion::...` in the benches is unchanged. Under a normal `cargo bench`
 # it behaves exactly like criterion; under `cargo codspeed` it runs each bench
 # once under valgrind and reports layout-insensitive instruction counts.
-criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support"] }
+criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
 hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
 op-revm-latest = { package = "op-revm", version = "20.0.0", default-features = false, features = ["dev", "serde", "std"] }
