@@ -990,19 +990,42 @@ mod tests {
     #[test]
     fn test_inspect_storage_pre_rex4_uses_delegation_path() {
         const ADDR: Address = address!("00000000000000000000000000000000000000ee");
-        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
-        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        const DELEGATE: Address = address!("00000000000000000000000000000000000000ed");
+        let delegate_code = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default()
+            .with_eip7702_delegation(ADDR, DELEGATE)
+            .with_account_code(DELEGATE, delegate_code);
         let mut journal = Journal::new(db);
 
         let key = U256::from(5);
+        let expected = U256::from(123);
         let spec = MegaSpecId::MINI_REX;
+
+        // Preload the delegator so the subsequent occupied-branch inspection hydrates the
+        // EIP-7702 designation and the pre-REX4 delegated walk can follow it.
+        let _ = inspect_account(&mut journal, ADDR, false).unwrap();
+        {
+            let tid = journal.transaction_id;
+            let account = inspect_account(&mut journal, DELEGATE, false).unwrap();
+            let mut slot = EvmStorageSlot::new(expected, tid);
+            slot.mark_cold();
+            account.storage.insert(key, slot);
+        }
 
         let slot = journal
             .inspect_storage(spec, ADDR, key)
             .expect("inspect_storage must succeed pre-REX4");
 
-        assert_eq!(slot.present_value, U256::ZERO, "pre-REX4 absent slot must return ZERO");
+        assert_eq!(
+            slot.present_value, expected,
+            "pre-REX4 storage inspection must follow the delegator to the delegate's slot",
+        );
         assert!(slot.is_cold, "slot must be marked cold");
+        assert_eq!(
+            journal.database.storage_calls(),
+            0,
+            "delegate slot pre-seeded in the cache must be returned without hitting the DB",
+        );
     }
 
     #[test]
