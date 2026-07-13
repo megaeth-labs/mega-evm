@@ -1,0 +1,68 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Only paths that can move instruction counts (benches, sources, deps,
+    # toolchain, or this workflow itself) — doc-only PRs skip the run.
+    paths:
+      - "crates/**"
+      - "bin/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/codspeed.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # OIDC auth — public repo, no token secret needed
+
+concurrency:
+  group: codspeed-${{ github.ref }}
+  # PR runs coalesce (only the newest push matters), but every main push is a
+  # baseline datapoint — cancelling one mid-flight leaves a gap CodSpeed must
+  # bridge from an older ancestor. Queue main runs instead of cancelling.
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
+
+jobs:
+  codspeed:
+    name: instruction count
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    # A cold full-suite run measured ~13 min on a GitHub-hosted 4-vCPU runner
+    # (simulation mode executes each bench once — no criterion sampling loop);
+    # the 32vcpu runner only shortens the build — 30 min is ample headroom.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Drop the checkout token from .git/config after fetch so the bench
+          # build/run steps (which execute crate build scripts) cannot read it.
+          persist-credentials: false
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Empty rustflags overrides this action's default `-D warnings` —
+          # measurement builds should not fail on unrelated warnings (clippy CI
+          # is the warnings gate). Mirrors benchmark.yml.
+          rustflags: ""
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          # The CLI and the codspeed-criterion-compat crate are released in
+          # lockstep and must agree on the major version — keep this pin in
+          # sync with the `criterion` dev-dependency in crates/mega-evm.
+          tool: cargo-codspeed@5.0.1
+      # No --bench filter: every bench target in the crate is built, so newly
+      # added bench targets are picked up without touching this workflow.
+      - name: Build benches under instrumentation
+        run: cargo codspeed build -p mega-evm
+      - name: Run benches
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: simulation
+          run: cargo codspeed run
