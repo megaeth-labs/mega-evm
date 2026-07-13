@@ -603,17 +603,41 @@ where
     fn pre_execution(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
         self.validate_against_state_and_deduct_caller(evm)?;
         self.load_accounts(evm)?;
-        // REX5-only state-growth scan: REX6+ consolidates every per-authorization effect into the
-        // validate-time `record_rex6_eip7702_authority_accounting` instead.
-        let record_rex5_state_growth = {
-            let ctx = evm.ctx();
-            ctx.spec.is_enabled(MegaSpecId::REX5) &&
-                !ctx.spec.is_enabled(MegaSpecId::REX6) &&
-                ctx.tx().tx_type() == TransactionType::Eip7702
-        };
-        if record_rex5_state_growth {
-            self.record_rex5_eip7702_authority_state_growth(evm)?;
+        // EIP-7702 authority state-growth handling, split by spec era. Only type-4 txs reach
+        // either branch, and no exempt (system-originated) tx is type-4 here — system txs are
+        // legacy-typed pre-promotion / deposit-typed post-promotion, and a type-4 system caller is
+        // rejected earlier in `before_run` — so neither branch consults `is_exempt()`.
+        if evm.ctx().tx().tx_type() == TransactionType::Eip7702 {
+            if evm.ctx().spec.is_enabled(MegaSpecId::REX6) {
+                // `validate()` (`record_rex6_eip7702_authority_accounting`) already charged every
+                // applied authority against the pre-frame resource dimensions it touches (a
+                // persistent account write on `data_size` + `kv_update`; `state_growth` for net-new
+                // authorities; and — when an applied authority is the block beneficiary — a lowered
+                // detention cap that the intrinsic `compute_gas` can then exceed). If any of those
+                // pushed the tx over a per-tx limit, the first frame halts anyway — but
+                // `apply_eip7702_auth_list` `mark_touch`es every authority in pre-execution, and a
+                // HALT (unlike an `Err`) does not roll those pre-frame writes back. Skip the whole
+                // list so the halt discards them.
+                //
+                // Gate on `AdditionalLimit::limit_exceeded()`: that is the exact condition
+                // `frame_result_if_exceeding_limit` halts on, so skipping here covers every
+                // pre-frame dimension (`DataSize`/`KVUpdate`/`ComputeGas`/`StateGrowth`) that could
+                // trigger that halt — including compute overflows and any dimension added later —
+                // with no risk of the check and the halt disagreeing. (It is false for both
+                // `WithinLimit` and `Exempt`, matching the halt path.) `Ok(0)` forgoes the
+                // existing-authority EIP-7702 refund (`post_execution::refund` records it
+                // unconditionally) — the intended all-or-nothing consequence of skipping the whole
+                // list (see `test_rex6_authority_state_growth_overflow_forgoes_refund`).
+                if evm.ctx().additional_limit.borrow().limit_exceeded() {
+                    return Ok(0);
+                }
+            } else if evm.ctx().spec.is_enabled(MegaSpecId::REX5) {
+                // REX5 runs the authority state-growth scan here in pre-execution; REX6 folds it
+                // into `validate()`'s accounting above instead.
+                self.record_rex5_eip7702_authority_state_growth(evm)?;
+            }
         }
+
         self.apply_eip7702_auth_list(evm)
     }
 

@@ -1,5 +1,5 @@
 ---
-description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, CREATE-frame resource accounting corrected (creator nonce-bump booked to the parent frame and CREATE state growth recorded only for net-new addresses), KeylessDeploy sandbox hardened (outer sender's unused gas rescued on a transaction-level compute-gas halt, and a self-destructing constructor reported as an empty-code deployment), post-execution fee-reward account materializations counted toward resource accounting, beneficiary detention and disableVolatileDataAccess coverage extended to source-side SELFDESTRUCT and EIP-7702-delegated CALLs (with existing-target SELFDESTRUCT balance credits counted toward resource accounting), system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow, and two smaller resource-accounting corrections (a per-log data-size base so an empty log is no longer free in the data-size lane, and forwarded gas returned to the parent frame when a CALL or CREATE halts on the compute-gas limit).
+description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, the authorization list skipped in full when a pre-frame resource limit is already exceeded, CREATE2 halting on oversized initcode — and any static-frame CREATE or CREATE2 — before its address-computation prework runs, CREATE-frame resource accounting corrected (creator nonce-bump booked to the parent frame and CREATE state growth recorded only for net-new addresses), KeylessDeploy sandbox hardened (outer sender's unused gas rescued on a transaction-level compute-gas halt, a self-destructing constructor reported as an empty-code deployment, and the deploy-address occupancy check reading through the journal so the address is captured in the transaction's returned state), post-execution fee-reward account materializations counted toward resource accounting, beneficiary detention and disableVolatileDataAccess coverage extended to source-side SELFDESTRUCT and EIP-7702-delegated CALLs (with existing-target SELFDESTRUCT balance credits counted toward resource accounting and Oracle sendHint forwarding suppressed while volatile data access is disabled), system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow, and two smaller resource-accounting corrections (a per-log data-size base so an empty log is no longer free in the data-size lane, and forwarded gas returned to the parent frame when a CALL or CREATE halts on the compute-gas limit).
 ---
 
 # Rex6 Network Upgrade
@@ -14,7 +14,8 @@ Its semantics may still change before network activation.
 
 ## Summary
 
-Rex6 bundles nine consensus-visible changes to gas and resource accounting:
+Rex6 bundles thirteen changes to gas metering, resource accounting, and execution behavior.
+All are consensus-visible except the `CREATE`-family early-halt ordering, which changes only the trace-visible halt reason, and the KeylessDeploy occupancy read, which changes only the transaction's returned read set:
 
 1. **Unified per-opcode gas metering order.** Rex6 defines a single, canonical order in which every storage-affecting opcode charges [storage gas](../glossary.md#storage-gas) and records [compute gas](../glossary.md#compute-gas), and brings `CREATE2` under it.
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
@@ -25,6 +26,10 @@ Rex6 bundles nine consensus-visible changes to gas and resource accounting:
 7. **Beneficiary detention / volatile-access coverage.** Rex6 brings two cases under beneficiary detention and `disableVolatileDataAccess` that earlier specs missed — a `SELFDESTRUCT` whose executing contract is the block beneficiary, and a `CALL` whose EIP-7702 delegate is the block beneficiary — and counts a `SELFDESTRUCT` balance credit to an already-existing beneficiary toward resource accounting.
 8. **Additional resource-accounting corrections.** Rex6 charges a per-log base cost so empty logs are no longer free in the data-size lane, and returns forwarded gas to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
 9. **Value self-transfer account-info dedup.** Rex6 records a value transfer whose target equals the caller as a single account-info write on the data-size and KV-update limiter lanes instead of two.
+10. **EIP-7702 authorization list skip on pre-frame limit exceed.** Rex6 skips applying a type-4 transaction's entire authorization list when a per-transaction resource limit has already been exceeded by pre-frame accounting, so no authority writes survive the transaction's frame-boundary halt.
+11. **CREATE2 oversized-initcode and static-frame early halts.** Rex6 halts a `CREATE2` whose initcode exceeds the max initcode size — and any `CREATE` or `CREATE2` executed inside a static call frame — before the address-computation prework runs, instead of only once the inner opcode reaches its own checks.
+12. **Oracle `sendHint` forwarding respects volatile-access-disable.** Rex6 stops forwarding a `sendHint` call's payload to the oracle backend when the calling frame's volatile data access is disabled.
+13. **KeylessDeploy occupancy check reads through the journal.** Rex6 routes the KeylessDeploy deploy-address occupancy check through the parent journal as a cold, code-hash-only read, so the deploy address is captured in the transaction's returned state.
 
 ### Unified Gas Metering Order
 
@@ -107,8 +112,54 @@ When the target equals the caller these refer to the same account, so pre-Rex6 r
 Rex6 suppresses the redundant target-side write whenever the call's target equals its caller, so the account is counted exactly once.
 Non-self transfers (`A -> B`) and zero-value calls are unchanged.
 
+### EIP-7702 Authorization List Skip on Pre-Frame Limit Exceed
+
+A type-4 transaction's authorization list is applied — each applied authority's account written — during pre-execution, before the transaction's first call frame begins.
+A per-transaction [resource limit](../evm/resource-limits.md) — data size, key-value updates, compute gas, or state growth — that pre-frame accounting (the consolidated validation-time scan described above, plus the transaction's intrinsic usage) has already exceeded by that point still halts the transaction at the first frame boundary, but a frame-boundary halt does not roll back writes performed before that frame began.
+Without a guard, a transaction halting on the state-growth limit could still commit more net-new authority accounts than the per-transaction state-growth cap allows, breaking that limit's invariant.
+
+Rex6 closes this gap: for a type-4 transaction, if any per-transaction resource limit has already been exceeded at the point where the authorization list would be applied, the node MUST NOT apply any authorization in the list.
+The skip is all-or-nothing: once any per-transaction limit is exceeded — whether by the authorizations themselves or by the transaction's other pre-frame usage, such as calldata — no authorization in the list is applied, including ones that would fit under the limit.
+The transaction still halts at the same frame boundary with the same limit-exceeded halt reason it would have reached without the skip.
+Because no authorization is applied, an already-existing authority forgoes the per-authorization refund it would otherwise earn.
+
+Pre-Rex6, the authorization list is applied unconditionally regardless of pre-frame limit state, and any authority writes it performs survive the subsequent halt.
+
+### CREATE2 Oversized-Initcode and Static-Frame Early Halts
+
+`CREATE2` computes its target address by expanding memory, copying the initcode, and hashing it before running the inner opcode body, and both `CREATE` and `CREATE2` charge the contract-creation storage gas for the derived address before the inner opcode body runs.
+Under Rex6, when the initcode length exceeds the [max initcode size](../evm/contract-limits.md), the node MUST halt with `CreateInitCodeSizeLimit` before that address-computation prework — memory expansion, the initcode copy, the `keccak256` hash, and address derivation — runs.
+The check follows canonical ordering: the length operand is converted first, then the size check runs, then the offset operand is converted.
+Inside a static call frame, any `CREATE` or `CREATE2` MUST halt with the static-call rejection before its operands are read, the size check runs, the deployment address is derived, or the contract-creation storage gas is charged.
+This matches canonical ordering, where the static-context check precedes every other check, and unifies the halt reasons the prework previously produced in static frames — a stack underflow, a memory out-of-gas, a storage-gas out-of-gas, or a fatal external error from the storage-pricing lookup — into the static-call rejection.
+
+Committed gas and committed state are identical under either ordering: every halt involved is all-gas-consuming regardless of when it fires.
+Rex6 changes only the halt reason and timing visible to execution traces, and the amount of node work spent before the halt.
+
+Pre-Rex6, the address-computation prework runs first and the size-limit halt fires only once the inner opcode reaches its own size check, so a sufficiently large initcode length can instead surface as a memory out-of-gas halt.
+Pre-Rex6 static call frames keep the prework-first order and its per-path halt reasons — a stack underflow, a memory out-of-gas, or a storage-gas out-of-gas, depending on which prework step fails first.
+
+### Oracle `sendHint` Forwarding Respects Volatile-Access-Disable
+
+[`sendHint`](../system-contracts/oracle.md#hint-forwarding) forwards its payload to the off-chain oracle backend as a side effect of an intercepted call.
+Under Rex6, the node MUST NOT forward a `sendHint` call's payload when the calling frame's volatile data access is disabled via [`MegaAccessControl`](../system-contracts/mega-access-control.md#disablevolatiledataaccess).
+The call is not reverted: it falls through to the on-chain Oracle bytecode without forwarding, and it is not charged against the transaction's data-size resource lane — the same admission-failure shape as a zero-gas-limit or selector-mismatch call.
+
+Pre-Rex6, `sendHint` forwarding never consulted the volatile-access-disabled state.
+
+See [`MegaAccessControl`](../system-contracts/mega-access-control.md#disablevolatiledataaccess) and [`Oracle`](../system-contracts/oracle.md#hint-forwarding) for the full normative behavior.
+
+### KeylessDeploy Occupancy Check Reads Through the Journal
+
+[KeylessDeploy](../system-contracts/keyless-deploy.md) rejects a deploy whose deterministic deploy address is already occupied.
+Under Rex6, the node MUST perform this occupancy check as a cold, code-hash-only read through the parent journal, so the deploy address is part of the transaction's returned state — including when the check fails with `ContractAlreadyExists()`.
+The read MUST NOT load the account's bytecode, and the deploy address remains cold for warm/cold access-list gas accounting.
+This change affects only the transaction's returned state (the stateless-witness read set); it does not change the occupancy decision, committed gas, or committed state.
+
+Pre-Rex6, the occupancy check reads the database directly, bypassing the journal, so the deploy address is absent from the transaction's returned state.
+
 All consensus-visible changes are gated on the Rex6 spec.
-Pre-Rex6 specs retain their existing metering order, per-authorization accounting, CREATE-frame accounting, KeylessDeploy sandbox behavior, post-execution fee-reward accounting, beneficiary-detention and volatile-access coverage, full metering of system transactions, log data-size, forwarded-gas handling on a compute-limit halt, and the value self-transfer account-info double-count unchanged.
+Pre-Rex6 specs retain their existing metering order and the CREATE family's initcode-size and static-context check ordering relative to its address-computation prework, per-authorization accounting including unconditional application of the authorization list regardless of pre-frame limit state, CREATE-frame accounting, KeylessDeploy sandbox behavior including the deploy-address occupancy check's direct database read, post-execution fee-reward accounting, beneficiary-detention and volatile-access coverage including Oracle sendHint forwarding that does not consult the volatile-access-disabled state, full metering of system transactions, log data-size, forwarded-gas handling on a compute-limit halt, and the value self-transfer account-info double-count unchanged.
 
 ## What Changed
 

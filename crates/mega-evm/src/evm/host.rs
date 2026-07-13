@@ -509,6 +509,35 @@ fn inspect_account<DB: revm::Database>(
     }
 }
 
+/// Cold occupancy read that returns an account's `code_hash` and loads it into the journal (so it
+/// appears in the returned `EvmState` / witness) but — unlike [`inspect_account`] — never hydrates
+/// `info.code`, even when the account is already resident (`inspect_account`'s already-loaded
+/// branch force-loads code via `code_by_hash` regardless of its `load_code` argument). An occupancy
+/// check needs only the hash; forcing `code_by_hash` on an already-warmed occupied address would
+/// require its bytecode in a stateless witness that need only carry the account proof, turning the
+/// expected revert into a spurious DB error on replay.
+///
+/// Only [`Journal`] needs this (the REX6 keyless-deploy occupancy check calls it on
+/// `ctx.journal_mut()`), so it is a free function rather than a `JournalInspectTr` method.
+pub(crate) fn inspect_account_code_hash<DB: revm::Database>(
+    journal: &mut Journal<DB>,
+    address: Address,
+) -> Result<B256, <DB as revm::Database>::Error> {
+    let transaction_id = journal.transaction_id;
+    match journal.inner.state.entry(address) {
+        Entry::Occupied(entry) => Ok(entry.get().info.code_hash),
+        Entry::Vacant(entry) => {
+            let mut account = journal
+                .database
+                .basic(address)?
+                .map(|info| info.into())
+                .unwrap_or_else(|| Account::new_not_existing(transaction_id));
+            account.mark_cold();
+            Ok(entry.insert(account).info.code_hash)
+        }
+    }
+}
+
 impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
     type DBError = <DB as revm::Database>::Error;
 
@@ -842,6 +871,43 @@ mod tests {
             account.info.code.is_none(),
             "EOA code must stay `None`; the `code_hash != KECCAK_EMPTY` guard keeps \
              `code_by_hash` off the hot path for accounts without on-chain code",
+        );
+    }
+
+    /// `inspect_account_code_hash` returns the account's `code_hash` but must NEVER hydrate
+    /// `info.code` — on either branch. In particular the occupied branch must not fall through to
+    /// `code_by_hash` the way `inspect_account(.., false)` does (see
+    /// `test_inspect_account_occupied_branch_hydrates_on_second_inspection`). This is what lets the
+    /// REX6 keyless-deploy occupancy check decide on the hash alone, without demanding an
+    /// already-warmed occupied address's bytecode in a stateless witness carrying only its proof.
+    #[test]
+    fn test_inspect_account_code_hash_never_hydrates_code() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000dd");
+        let bytecode = Bytes::from_static(&[0x5b]); // JUMPDEST
+        let expected_hash = keccak256(&bytecode);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        // Vacant cache-miss: returns the hash from `basic()` without hydrating code.
+        let vacant_hash =
+            inspect_account_code_hash(&mut journal, ADDR).expect("vacant read must succeed");
+        assert_eq!(vacant_hash, expected_hash, "vacant branch must return the code_hash");
+        assert!(
+            journal.inner.state.get(&ADDR).is_some_and(|a| a.info.code.is_none()),
+            "vacant branch must not hydrate info.code",
+        );
+
+        // The address is now resident with `code == None`. `inspect_account` would hydrate on this
+        // occupied branch; `inspect_account_code_hash` must not.
+        let occupied_hash =
+            inspect_account_code_hash(&mut journal, ADDR).expect("occupied read must succeed");
+        assert_eq!(
+            occupied_hash, expected_hash,
+            "occupied branch must return the cached code_hash"
+        );
+        assert!(
+            journal.inner.state.get(&ADDR).is_some_and(|a| a.info.code.is_none()),
+            "inspect_account_code_hash must NOT hydrate info.code on the occupied branch",
         );
     }
 

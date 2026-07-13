@@ -180,9 +180,26 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
     fn intercept(
         ctx: &mut MegaContext<DB, ExtEnvs>,
         call_inputs: &CallInputs,
-        _depth: usize,
+        depth: usize,
     ) -> InterceptResult {
         if call_inputs.target_address != ORACLE_CONTRACT_ADDRESS {
+            return None;
+        }
+
+        // REX6 mirrors the SLOAD volatile-access guard (`instructions::sload`) on this surface.
+        // Unlike SLOAD, `on_hint` forwarding is not gated on the disabled-subtree tracker on
+        // pre-REX6 specs, so a disabled (or since-reverted) child can still leak a hint to the
+        // off-chain backend there. The hint is an off-chain side-channel, not consensus
+        // state, so skip forwarding (return `None`) instead of reverting like SLOAD does — a
+        // revert here would change the caller's on-chain control flow for what should be a
+        // silently-dropped side effect. Uses the caller's depth passed by the dispatcher (not
+        // `HostExt::volatile_access_disabled`, which reads the current journal depth — at this
+        // point in `frame_init` that still is the caller's depth, but `depth` is the documented,
+        // explicit contract). Gated to REX6 (not retroactive to REX4/REX5): this restricts
+        // previously-ungated behavior and REX5 is sealed.
+        if ctx.spec.is_enabled(MegaSpecId::REX6) &&
+            ctx.volatile_data_tracker.borrow().volatile_access_disabled(depth)
+        {
             return None;
         }
 

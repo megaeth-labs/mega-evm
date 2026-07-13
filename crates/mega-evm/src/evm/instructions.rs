@@ -1526,8 +1526,9 @@ pub mod storage_gas_ext {
     ///   caller decides when to record it: the pre-REX5 late-record path, or the REX6 single-window
     ///   folding in [`record_storage_compute_gas!`].
     ///
-    /// Returns `None` if a precondition failed (stack underflow, oversized operand, memory OOG,
-    /// external DB error, or an eager compute-gas-limit exceed) and the interpreter was halted.
+    /// Returns `None` if a precondition failed (stack underflow, oversized operand, a REX6
+    /// oversized-initcode halt, memory OOG, external DB error, or an eager compute-gas-limit
+    /// exceed) and the interpreter was halted.
     fn compute_created_address<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         const IS_CREATE2: bool,
@@ -1581,9 +1582,39 @@ pub mod storage_gas_ext {
             let initcode_hash = if is_rex5_enabled && initcode_len.is_zero() {
                 KECCAK_EMPTY
             } else {
+                // Convert `initcode_len` before `initcode_offset` (matching canonical revm's
+                // `create`, which pops/converts `len` first): both operands halt with the same
+                // `InstructionResult::InvalidOperandOOG` reason when they don't fit in a
+                // `usize` (see `as_usize_or_fail_ret!`'s default reason), so this reordering
+                // does not change pre-REX6 behavior — but it matters for the REX6 size check
+                // below, which must run before `initcode_offset` is ever touched so that an
+                // oversized `initcode_len` halts with `CreateInitCodeSizeLimit` even when
+                // `initcode_offset` does not fit in a `usize` either.
+                let initcode_len = as_usize_or_fail_ret!(context.interpreter, initcode_len, None);
+
+                // REX6: EIP-3860 initcode-size halt, matching revm's canonical
+                // ordering intent (`revm::interpreter::instructions::contract::create`) — halt
+                // BEFORE `initcode_offset` conversion, `resize_memory!`/copy/keccak256/address-
+                // derivation, not after. Pre-REX6 performs that prework before the halt
+                // eventually fires inside the inner opcode call below; that ordering is
+                // non-consensus under REX6 when the halt fires before the inner opcode
+                // completes (committed gas/state is identical either way —
+                // `record_resize_eagerly=false` means the resize gas is not yet recorded at
+                // this point, so skipping it here charges nothing that a later, slower path
+                // would have charged — only the halt timing / node CPU differ), but changing
+                // pre-REX6 timing would perturb sealed-spec replay, so this is gated to REX6
+                // only. A REX6 static frame never reaches this check: [`create_rex6`] rejects
+                // static frames before entering this helper.
+                if spec.is_enabled(MegaSpecId::REX6) &&
+                    initcode_len > context.host.max_initcode_size()
+                {
+                    context.interpreter.halt(InstructionResult::CreateInitCodeSizeLimit);
+                    return None;
+                }
+
                 let initcode_offset =
                     as_usize_or_fail_ret!(context.interpreter, initcode_offset, None);
-                let initcode_len = as_usize_or_fail_ret!(context.interpreter, initcode_len, None);
+
                 // Expand memory before slicing so the read can never go out of bounds. The inner
                 // CREATE2 also calls `resize_memory!`, which is a no-op once memory already fits.
                 let gas_before_resize = context.interpreter.gas.remaining();
@@ -1730,8 +1761,23 @@ pub mod storage_gas_ext {
     >(
         mut context: InstructionContext<'_, H, WIRE>,
     ) {
-        // Captured at the very top so the single compute window covers the wrapper-side CREATE2
-        // memory expansion as well as the inner opcode.
+        // Canonical revm's `create` runs `require_non_staticcall!` before any operand read,
+        // memory work, address derivation, or storage-gas charge, so a static-frame
+        // `CREATE`/`CREATE2` halts here first. This unifies the halt reasons the prework below
+        // would otherwise produce in a static frame — stack underflow from operand inspection,
+        // memory OOG from an unaffordable resize, storage-gas OOG from the creation charge, or
+        // a fatal external error from the storage-pricing lookup — into the canonical
+        // `StateChangeDuringStaticCall`. No spec gate: [`create`] dispatches here exactly when
+        // REX6 is enabled. Pre-REX6 keeps the prework-first order (changing sealed-spec halt
+        // reasons would perturb replay). Every reachable path is an all-gas-consuming halt, so
+        // committed gas and state are identical either way.
+        if context.interpreter.runtime_flag.is_static() {
+            context.interpreter.halt(InstructionResult::StateChangeDuringStaticCall);
+            return;
+        }
+
+        // Captured before any gas movement so the single compute window covers the wrapper-side
+        // CREATE2 memory expansion as well as the inner opcode.
         let gas_before = context.interpreter.gas.remaining();
         let spec = context.host.spec_id();
 

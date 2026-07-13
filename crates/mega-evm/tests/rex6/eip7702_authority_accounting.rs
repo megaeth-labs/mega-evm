@@ -414,12 +414,10 @@ fn test_rex6_existing_authority_charged_but_not_state_growth() {
     assert_eq!(u_new.state_growth, 1, "delegating a net-new account is state growth");
 }
 
-/// A net-new authority that overflows the state-growth limit still halts the REX6 transaction.
-///
-/// REX6 records the authority's state growth in `validate` (earlier than the pre-REX6 pre-execution
-/// scan), but the overflow is latched and surfaced at the first frame boundary just the same: the
-/// tx halts with `StateGrowthLimitExceeded`, the first frame never starts, and the authorization
-/// was still applied (nonce bumped) before the halt.
+/// A net-new authority that overflows the state-growth limit halts the REX6 tx AND is never
+/// applied. The halt is a HALT (not `Err`), so `apply_eip7702_auth_list`'s pre-frame `mark_touch`
+/// would otherwise persist; the guard skips applying the list. Pins: halt fires, and `AUTHORITY_A`
+/// is neither nonce-bumped nor delegated.
 #[test]
 fn test_rex6_authority_state_growth_overflow_still_halts() {
     let (res, usage) = transact_with_limits(
@@ -440,13 +438,319 @@ fn test_rex6_authority_state_growth_overflow_still_halts() {
         ),
         "REX6 must halt when an applied authority overflows the state-growth limit: {res:?}",
     );
-    assert_eq!(usage.state_growth, 1, "the authority creation is recorded before the halt");
+    assert_eq!(
+        usage.state_growth, 1,
+        "validate()'s accounting still records the attempted authority creation",
+    );
     assert!(
         res.state.get(&CALLEE).is_none_or(|a| !a.is_touched()),
         "the first frame must not start once pre-frame state growth already exceeds the limit",
     );
+    // The account may still show up in `res.state` as a cold LoadedAsNotExisting read-touch from
+    // `validate()`'s accounting scan — that's not a delegation. The invariant is: not delegated
+    // (no EIP-7702 code) and not nonce-bumped.
+    let authority_after = res.state.get(&AUTHORITY_A);
+    assert!(
+        authority_after.is_none_or(
+            |a| a.info.nonce == 0 && a.info.code.as_ref().is_none_or(|c| !c.is_eip7702())
+        ),
+        "the authorization must NOT be applied once state growth is already known to \
+         exceed the limit, got {authority_after:?}",
+    );
+}
+
+/// The skip is all-or-nothing: once the tx's authority creations exceed `TX_STATE_GROWTH_LIMIT`,
+/// the ENTIRE list is skipped, not just the authority that crossed it. Two net-new authorities,
+/// limit 1: both must be left untouched (nonce 0, no delegation), not only the second.
+#[test]
+fn test_rex6_authority_state_growth_overflow_skips_all_authorities() {
+    let (res, usage) = transact_with_limits(
+        MegaSpecId::REX6,
+        &mut funded_db(),
+        &no_heavy_buckets(),
+        EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(1),
+        tx_with_auths(vec![auth(AUTHORITY_A, 1, 0), auth(AUTHORITY_B, 1, 0)]),
+    );
+
+    assert!(
+        matches!(
+            &res.result,
+            ExecutionResult::Halt {
+                reason: MegaHaltReason::StateGrowthLimitExceeded { limit: 1, actual: 2 },
+                ..
+            }
+        ),
+        "REX6 must halt when applied authorities overflow the state-growth limit: {res:?}",
+    );
+    assert_eq!(
+        usage.state_growth, 2,
+        "validate()'s accounting still records both attempted authority creations",
+    );
+    for authority in [AUTHORITY_A, AUTHORITY_B] {
+        let after = res.state.get(&authority);
+        assert!(
+            after.is_none_or(|a| {
+                a.info.nonce == 0 && a.info.code.as_ref().is_none_or(|c| !c.is_eip7702())
+            }),
+            "authority {authority} must not be materialized once state growth already \
+             exceeds the limit, got {after:?}",
+        );
+    }
+}
+
+/// Sibling of the overflow tests: a tx whose authority creations stay within the state-growth
+/// budget must still apply normally (the state-growth guard must not fire on a non-overflowing tx).
+#[test]
+fn test_rex6_authority_state_growth_within_limit_still_applies() {
+    let (res, usage) = transact_with_limits(
+        MegaSpecId::REX6,
+        &mut funded_db(),
+        &no_heavy_buckets(),
+        EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(1),
+        tx_with_auths(vec![auth(AUTHORITY_A, 1, 0)]),
+    );
+
+    assert!(res.result.is_success(), "a tx within the state-growth budget must succeed: {res:?}");
+    assert_eq!(usage.state_growth, 1, "the single net-new authority is recorded");
     let authority = res.state.get(&AUTHORITY_A).expect("authority update should be preserved");
-    assert_eq!(authority.info.nonce, 1, "the authorization was still applied before the halt");
+    assert_eq!(authority.info.nonce, 1, "the authorization must still apply when within budget");
+    assert!(authority.info.code.as_ref().is_some_and(|c| c.is_eip7702()), "delegation must be set");
+}
+
+/// When several dimensions overflow at once, the skip fires regardless of which one the halt
+/// reports. Here KV (limit 0) and state growth (limit 1, two net-new authorities) both exceed; KV
+/// is checked first so `KVUpdateLimitExceeded` is the reported reason, but the guard — reading the
+/// aggregate `has_exceeded_limit` — still skips the whole list and materializes neither authority.
+#[test]
+fn test_rex6_authority_state_growth_overflow_detected_even_when_kv_limit_reported() {
+    let (res, usage) = transact_with_limits(
+        MegaSpecId::REX6,
+        &mut funded_db(),
+        &no_heavy_buckets(),
+        EvmTxRuntimeLimits::no_limits().with_tx_kv_updates_limit(0).with_tx_state_growth_limit(1),
+        tx_with_auths(vec![auth(AUTHORITY_A, 1, 0), auth(AUTHORITY_B, 1, 0)]),
+    );
+
+    // KV is checked before StateGrowth in the priority order and its limit (0) is exceeded by
+    // intrinsic usage alone, so the reported halt reason is KVUpdateLimitExceeded, not
+    // StateGrowthLimitExceeded — even though state growth (2) also exceeds its own limit (1).
+    assert!(
+        matches!(
+            &res.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::KVUpdateLimitExceeded { .. }, .. }
+        ),
+        "expected the KV dimension to be the reported halt reason: {res:?}",
+    );
+    assert_eq!(usage.state_growth, 2, "both authority creations are still recorded");
+    for authority in [AUTHORITY_A, AUTHORITY_B] {
+        let after = res.state.get(&authority);
+        assert!(
+            after.is_none_or(|a| {
+                a.info.nonce == 0 && a.info.code.as_ref().is_none_or(|c| !c.is_eip7702())
+            }),
+            "authority {authority} must not be materialized even though a DIFFERENT \
+             dimension (KV) is the reported halt reason, got {after:?}",
+        );
+    }
+}
+
+/// The skip must fire for ANY pre-frame authority-accounting overflow, not just state growth.
+/// `on_rex6_eip7702_authority_applied` records a KV + `DataSize` write for *every* applied
+/// authority but state growth only for net-new ones — so a tx full of *existing* authorities grows
+/// state by 0 yet exceeds a tight `tx_kv_updates_limit`. The guard must still skip the whole list;
+/// otherwise those authorities are applied and their pre-frame writes persist past the KV HALT,
+/// breaking the per-tx KV limit exactly like the state-growth case. A state-growth-only guard
+/// misses this.
+#[test]
+fn test_rex6_authority_kv_overflow_skips_all_authorities() {
+    // Both authorities already exist → applying each is 0 state growth but +1 KV update. Two of
+    // them exceed a KV limit of 1 with no state growth at all.
+    let mut db = funded_db()
+        .account_balance(AUTHORITY_A, U256::from(1u64))
+        .account_balance(AUTHORITY_B, U256::from(1u64));
+    let (res, usage) = transact_with_limits(
+        MegaSpecId::REX6,
+        &mut db,
+        &no_heavy_buckets(),
+        EvmTxRuntimeLimits::no_limits().with_tx_kv_updates_limit(1),
+        tx_with_auths(vec![auth(AUTHORITY_A, 1, 0), auth(AUTHORITY_B, 1, 0)]),
+    );
+
+    assert!(
+        matches!(
+            &res.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::KVUpdateLimitExceeded { .. }, .. }
+        ),
+        "existing authorities exceeding the KV limit must halt on KV: {res:?}",
+    );
+    assert_eq!(usage.state_growth, 0, "existing authorities grow no state — only the KV dimension");
+    for authority in [AUTHORITY_A, AUTHORITY_B] {
+        let after = res.state.get(&authority);
+        assert!(
+            after.is_none_or(|a| {
+                a.info.nonce == 0 && a.info.code.as_ref().is_none_or(|c| !c.is_eip7702())
+            }),
+            "authority {authority} must not be applied on a KV overflow with 0 state growth (the \
+             guard must cover KV/DataSize, not just state growth), got {after:?}",
+        );
+    }
+}
+
+/// The fourth pre-frame dimension: `compute_gas`. An applied authority that is the block
+/// beneficiary lowers the compute-gas cap (REX4 beneficiary detention) inside
+/// `record_rex6_eip7702_authority_accounting`, and the tx's own EIP-7702 intrinsic compute
+/// (recorded via `record_compute_gas(initial_gas)` right after) then exceeds that cap — a pre-frame
+/// compute overflow with no DataSize/KV/state-growth overflow. The guard must still skip the whole
+/// list; a check that enumerated only DataSize/KV/state-growth (or only state-growth) would miss it
+/// and let the beneficiary authority persist past the `ComputeGasLimitExceeded` HALT.
+#[test]
+fn test_rex6_authority_compute_overflow_skips_authorities() {
+    const TX_COMPUTE_LIMIT: u64 = 200_000_000;
+    // Detention cap far below the tx's EIP-7702 intrinsic compute (~46k for one authorization).
+    const TINY_DETENTION_CAP: u64 = 1_000;
+
+    // BENEFICIARY is funded (exists), so `auth(BENEFICIARY, 1, 0)` applies and — being the block
+    // beneficiary — triggers detention.
+    let mut db = funded_db().account_balance(BENEFICIARY, U256::from(1u64));
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CALLEE)
+        .gas_limit(10_000_000)
+        .authorization_list_recovered(vec![auth(BENEFICIARY, 1, 0)])
+        .build_fill();
+
+    let (res, _detained) =
+        transact_detention(MegaSpecId::REX6, &mut db, TX_COMPUTE_LIMIT, TINY_DETENTION_CAP, tx);
+
+    // The intrinsic compute (~46k) exceeds the detained cap (1k). In this beneficiary-detention
+    // context that surfaces as `VolatileDataAccessOutOfGas`, but it is the same pre-frame
+    // compute-over-cap that latches `has_exceeded_limit` — which is what the guard reads.
+    assert!(
+        matches!(
+            &res.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::VolatileDataAccessOutOfGas { .. }, .. }
+        ),
+        "the beneficiary-detention compute overflow must halt: {res:?}",
+    );
+    let after = res.state.get(&BENEFICIARY);
+    assert!(
+        after.is_none_or(|a| {
+            a.info.nonce == 0 && a.info.code.as_ref().is_none_or(|c| !c.is_eip7702())
+        }),
+        "the beneficiary authority must not be applied on a compute overflow (the guard must cover \
+         compute_gas too), got {after:?}",
+    );
+}
+
+/// The fourth pre-frame dimension: `data_size`. `on_rex6_eip7702_authority_applied` charges the
+/// applied authority's account write (+40) to `data_size` on top of the intrinsic TX base +
+/// calldata + authorization-record size that `before_tx_start` already recorded, so a single
+/// net-new authority against a tight `tx_data_size_limit` overflows before any frame is pushed —
+/// with state growth and KV both comfortably within their (unset) limits. The guard must still
+/// skip the whole list; a check that missed the data-size lane would let the authority persist
+/// past the `DataLimitExceeded` HALT.
+#[test]
+fn test_rex6_authority_data_size_overflow_skips_authorities() {
+    // One applied, net-new authorization: `before_tx_start` records BASE_TX_SIZE (110) + one
+    // AUTHORIZATION_SIZE record (101) + the caller account update (40) = 251, then
+    // `on_rex6_eip7702_authority_applied` adds the authority's own account write (40) = 291. A
+    // limit of 290 makes data size the exceeded dimension.
+    let (res, usage) = transact_with_limits(
+        MegaSpecId::REX6,
+        &mut funded_db(),
+        &no_heavy_buckets(),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(290),
+        tx_with_auths(vec![auth(AUTHORITY_A, 1, 0)]),
+    );
+
+    assert!(
+        matches!(
+            &res.result,
+            ExecutionResult::Halt {
+                reason: MegaHaltReason::DataLimitExceeded { limit: 290, actual: 291 },
+                ..
+            }
+        ),
+        "REX6 must halt when an applied authority overflows the data-size limit: {res:?}",
+    );
+    assert_eq!(
+        usage.data_size, 291,
+        "validate()'s accounting still records the attempted authority write",
+    );
+    let authority_after = res.state.get(&AUTHORITY_A);
+    assert!(
+        authority_after.is_none_or(
+            |a| a.info.nonce == 0 && a.info.code.as_ref().is_none_or(|c| !c.is_eip7702())
+        ),
+        "the authorization must NOT be applied once data size is already known to exceed the \
+         limit, got {authority_after:?}",
+    );
+}
+
+/// Fee semantics: skipping the whole auth list forgoes the EIP-7702 refund an already-existing
+/// authority would have earned (`PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST` = `12_500`, recorded
+/// unconditionally by `post_execution::refund` and subtracted from `gas_used`).
+///
+/// Differential: two runs, same two-authority list, both overflow and skip — differing ONLY in
+/// whether `AUTHORITY_A` pre-exists (i.e. would be refund-eligible). `gas_used` must be identical;
+/// applying the pre-existing authority would drop the existing-`A` run by `12_500`. (Absolute
+/// `gas_used` isn't hardcoded — the soft frame-boundary halt charges only spent gas.)
+#[test]
+fn test_rex6_authority_state_growth_overflow_forgoes_refund() {
+    let auths = vec![auth(AUTHORITY_A, 1, 0), auth(AUTHORITY_B, 1, 0)];
+    let overflow_limits = || EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(0);
+
+    // Run 1: AUTHORITY_A already exists (its application would earn the existing-account refund).
+    let mut db_existing = funded_db().account_balance(AUTHORITY_A, U256::from(1u64));
+    let (res_existing, _) = transact_with_limits(
+        MegaSpecId::REX6,
+        &mut db_existing,
+        &no_heavy_buckets(),
+        overflow_limits(),
+        tx_with_auths(auths.clone()),
+    );
+
+    // Run 2: AUTHORITY_A does not exist (never refund-eligible).
+    let (res_fresh, _) = transact_with_limits(
+        MegaSpecId::REX6,
+        &mut funded_db(),
+        &no_heavy_buckets(),
+        overflow_limits(),
+        tx_with_auths(auths),
+    );
+
+    // Both overflow the zero state-growth limit and halt (existing-A grows by 1 via B; fresh-A by 2
+    // via A and B) — the `actual` differs but both exceed the limit.
+    for (label, res) in [("existing-A", &res_existing), ("fresh-A", &res_fresh)] {
+        assert!(
+            matches!(
+                &res.result,
+                ExecutionResult::Halt {
+                    reason: MegaHaltReason::StateGrowthLimitExceeded { limit: 0, .. },
+                    ..
+                }
+            ),
+            "{label} run must halt on the state-growth overflow: {res:?}",
+        );
+    }
+
+    // The whole list is skipped in both, so the pre-existing authority's 12_500 refund is forgone:
+    // gas_used is identical. Were it applied, only the existing-A run would drop by 12_500.
+    assert_eq!(
+        res_existing.result.gas_used(),
+        res_fresh.result.gas_used(),
+        "skipping the whole auth list forgoes the pre-existing authority's EIP-7702 refund, so \
+         gas_used must not differ on account of A's pre-existence",
+    );
+
+    // And the existing authority is not delegated either — the skip is total.
+    let a_after = res_existing.state.get(&AUTHORITY_A);
+    assert!(
+        a_after.is_none_or(
+            |a| a.info.nonce == 0 && a.info.code.as_ref().is_none_or(|c| !c.is_eip7702())
+        ),
+        "the existing authority must not be delegated, got {a_after:?}",
+    );
 }
 
 /// An authority that is also the value-transfer recipient is charged its SALT gas once, not twice.

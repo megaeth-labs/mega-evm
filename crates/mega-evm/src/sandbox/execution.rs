@@ -55,9 +55,9 @@ use revm::{
 use tracing::{error, warn};
 
 use crate::{
-    constants, mark_frame_result_as_exceeding_limit, AdditionalLimit, EvmTxRuntimeLimits,
-    ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitUsage, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit, VolatileDataAccess,
+    constants, inspect_account_code_hash, mark_frame_result_as_exceeding_limit, AdditionalLimit,
+    EvmTxRuntimeLimits, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitUsage, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit, VolatileDataAccess,
     SANDBOX_TX_SOURCE_HASH,
 };
 
@@ -362,7 +362,45 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     };
 
     // Step 7: check the deterministic deploy address isn't already occupied.
-    {
+    //
+    // REX6 reads occupancy through the journaled, cold `inspect_account_code_hash` so the deploy
+    // address lands in the returned `EvmState` / witness; pre-REX6 keeps the raw `database.basic`
+    // read that bypasses the journal. The gate is load-bearing: the pre-REX5 legacy merge
+    // (`apply_sandbox_state_legacy`, `merge_status = false`) does not carry `AccountStatus` through
+    // an already-`Occupied` journal entry, so journaling this read there would drop a deployed
+    // address's `Created|Touched` status and let `commit()` discard it — silently losing successful
+    // pre-REX5 deploys (guarded by
+    // `test_keyless_deploy_pre_rex6_success_still_commits_deployed_code`). Only the witness
+    // changes, not the `ContractAlreadyExists` decision — the interceptor fires only at
+    // `depth == 0`, so while access-list warming may already have journaled `deploy_address`
+    // (read-only, same `code_hash` as the database), no reachable path can have changed its
+    // `code_hash` before this check (writing EIP-7702 delegation code to it would require the
+    // deploy address's own signing key, which does not exist for a CREATE-derived address).
+    //
+    // `inspect_account_code_hash` (not `inspect_account(.., false)`) because the occupancy decision
+    // needs only `code_hash`: `inspect_account`'s already-resident branch force-loads `info.code`
+    // via `code_by_hash` regardless of `load_code`, so if the outer tx's access list pre-warmed an
+    // occupied `deploy_address`, that read would demand the address's bytecode in a stateless
+    // witness carrying only its account proof and turn the expected revert into a spurious DB
+    // error.
+    if ctx.spec.is_enabled(MegaSpecId::REX6) {
+        let deploy_code_hash = inspect_account_code_hash(ctx.journal_mut(), deploy_address)
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    deploy_address = ?deploy_address,
+                    "keyless deploy deploy-address state read failed",
+                );
+                KeylessDeployError::InternalError
+            });
+        match deploy_code_hash {
+            Ok(code_hash) if code_hash != KECCAK_EMPTY => {
+                return make_error!(KeylessDeployError::ContractAlreadyExists);
+            }
+            Err(e) => return make_error!(e),
+            _ => {}
+        }
+    } else {
         let deploy_account = ctx.journal_mut().database.basic(deploy_address).map_err(|e| {
             error!(
                 error = %e,

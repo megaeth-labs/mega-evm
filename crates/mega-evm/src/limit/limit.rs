@@ -386,6 +386,15 @@ impl AdditionalLimit {
         self.has_exceeded_limit
     }
 
+    /// `true` when a per-tx resource limit has already been latched as exceeded — the exact
+    /// condition [`frame_result_if_exceeding_limit`](Self::frame_result_if_exceeding_limit) halts
+    /// the transaction on. `WithinLimit` and `Exempt` both return `false`. Reads the latched
+    /// aggregate; call [`check_limit`](Self::check_limit) first if a fresh evaluation is needed.
+    #[inline]
+    pub(crate) fn limit_exceeded(&self) -> bool {
+        self.has_exceeded_limit.exceeded_limit()
+    }
+
     /// Checks if the halt reason indicates that the limit has been exceeded.
     ///
     /// # Arguments
@@ -550,7 +559,7 @@ impl AdditionalLimit {
         &mut self,
         frame_input: &FrameInput,
     ) -> Option<FrameResult> {
-        if !self.has_exceeded_limit.exceeded_limit() {
+        if !self.limit_exceeded() {
             return None;
         }
         self.create_exceeded_limit_result(frame_input)
@@ -662,7 +671,7 @@ impl AdditionalLimit {
                 // Fast-path: a TX-level limit was latched earlier; pick it up without re-running
                 // sub-tracker checks. Under `Exempt`, the predicate is false, so the exemption
                 // passes through unchanged.
-                if self.has_exceeded_limit.exceeded_limit() {
+                if self.limit_exceeded() {
                     let output = self.has_exceeded_limit.revert_data();
                     mark_interpreter_result_as_exceeding_limit(
                         interpreter_result,

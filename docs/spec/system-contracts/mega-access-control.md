@@ -115,6 +115,17 @@ Pre-Rex6, only the `SELFDESTRUCT` stack target and the raw CALL-family target op
 
 </details>
 
+<details>
+<summary>Rex6 (unstable): Oracle `sendHint` forwarding</summary>
+
+Under Rex6, a `sendHint` call (see [`Oracle`](oracle.md#hint-forwarding)) MUST NOT forward its payload to the off-chain oracle backend when the calling frame's volatile data access is disabled.
+Unlike the reverting accesses above, a disabled `sendHint` call MUST NOT revert: the node MUST skip forwarding and let the call fall through to the on-chain Oracle bytecode, without charging the call against the transaction's data-size resource lane — the same admission-failure shape as a zero-gas-limit or selector-mismatch call (a decode failure differs: it is still charged).
+The hint is an off-chain side-channel, not consensus state, so silently dropping it — rather than reverting the caller's on-chain control flow — is the correct failure mode.
+
+Pre-Rex6, `sendHint` forwarding did not consult the volatile-access-disabled state at all.
+
+</details>
+
 ### `enableVolatileDataAccess`
 
 When intercepted, the node MUST re-enable volatile data access for the caller's call frame and descendant call frames if and only if the restriction was set at the caller's depth or was not active.

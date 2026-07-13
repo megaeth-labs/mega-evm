@@ -7,10 +7,12 @@
 //!   `MEGA_SYSTEM_ADDRESS` can surface a database error. The `map_err` must wrap it as
 //!   `EVMError::Custom` so OP handler returns the canonical fatal-external shape rather than
 //!   silently dropping the system tx.
-//! - **Keyless deploy step 7** (`sandbox/execution.rs`): the `basic(deploy_address)` read before
-//!   sandbox setup can surface a database error. The `map_err` must wrap it as the selector-only
-//!   `KeylessDeployError::InternalError` and surface as `Revert` (validation-style — no sandbox
-//!   state to merge).
+//! - **Keyless deploy step 7** (`sandbox/execution.rs`): the deploy-address occupancy read before
+//!   sandbox setup can surface a database error — pre-REX6 via `basic(deploy_address)`, REX6 via
+//!   the journaled, cold `inspect_account_code_hash(ctx.journal_mut(), deploy_address)`, which
+//!   reads only `code_hash` and never hydrates `info.code`. Both arms' `map_err` must wrap it as
+//!   the selector-only `KeylessDeployError::InternalError` and surface as `Revert` (validation-
+//!   style — no sandbox state to merge).
 
 use std::convert::Infallible;
 
@@ -90,6 +92,73 @@ fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert() {
 
     // Signer untouched: the pre-sandbox failure path is validation-shaped, so the signer
     // must not be fee-debited and the nonce must remain 0.
+    let signer_after =
+        res.state.get(&CREATE2_FACTORY_DEPLOYER).cloned().map(|acc| acc.info).unwrap_or_default();
+    assert_eq!(
+        signer_after.nonce, 0,
+        "DB error before sandbox must not bump signer nonce (no replay barrier)",
+    );
+}
+
+/// REX6 twin of the test above: under REX6 the step-7 occupancy check reads the deploy address
+/// through the journaled, cold `inspect_account_code_hash`, not the raw `basic`. That read's
+/// `map_err` DB-error arm must still surface as the selector-only `InternalError` revert, signer
+/// untouched. Without this the REX6 branch's error path is never exercised (the raw-`basic` test
+/// above only covers the pre-REX6 arm).
+#[test]
+fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert_rex6() {
+    let mut inner = MemoryDatabase::default();
+    inner.set_account_balance(
+        CREATE2_FACTORY_DEPLOYER,
+        U256::from(1_000_000_000_000_000_000_000u128),
+    );
+    inner.set_account_balance(RELAYER, U256::from(1_000_000_000u64));
+
+    let mut db = ErrorInjectingDatabase::new(inner);
+    // Step 7 under REX6 does `inspect_account_code_hash(ctx.journal_mut(), deploy_address)`; fail
+    // that read.
+    db.fail_on_account = Some(CREATE2_FACTORY_CONTRACT);
+
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let call_data = IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: Bytes::from_static(CREATE2_FACTORY_TX),
+        gasLimitOverride: U256::from(10_000_000u64),
+    }
+    .abi_encode();
+
+    let mut context =
+        MegaContext::new(db, MegaSpecId::REX6).with_external_envs(external_envs.into());
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::ZERO);
+        chain.operator_fee_constant = Some(U256::ZERO);
+    });
+
+    let tx = TxEnv {
+        caller: RELAYER,
+        kind: TxKind::Call(KEYLESS_DEPLOY_ADDRESS),
+        data: call_data.into(),
+        value: U256::ZERO,
+        gas_limit: 30_000_000,
+        gas_price: 0,
+        ..Default::default()
+    };
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
+    let res = alloy_evm::Evm::transact(&mut evm, tx).expect("outer EVM error not expected");
+
+    let revert_output = match res.result {
+        ExecutionResult::Revert { output, .. } => output,
+        other => panic!("expected outer Revert, got {other:?}"),
+    };
+    let decoded = decode_error_result(&revert_output)
+        .expect("revert payload must decode to a known KeylessDeployError");
+    assert!(
+        matches!(decoded, KeylessDeployError::InternalError),
+        "REX6 inspect_account_code_hash DB failure on deploy address must surface as InternalError, got {decoded:?}",
+    );
+
     let signer_after =
         res.state.get(&CREATE2_FACTORY_DEPLOYER).cloned().map(|acc| acc.info).unwrap_or_default();
     assert_eq!(

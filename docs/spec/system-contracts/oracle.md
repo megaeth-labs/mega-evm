@@ -124,6 +124,7 @@ interface IOracle {
 
 `multiCall` MUST execute each payload by `DELEGATECALL` into the Oracle contract and MUST return the results in order.
 If any delegated call fails, `multiCall` MUST revert and MUST bubble up the revert data if present.
+Because `multiCall` delegates, a `sendHint` payload inside it does not trigger [hint forwarding](#hint-forwarding) — it executes only the no-op function body.
 
 `sendHint` MUST be externally callable and MUST be a no-op at the Solidity bytecode level.
 
@@ -152,6 +153,9 @@ All other Oracle functions (`getSlot`, `getSlots`, `setSlot`, `setSlots`, `emitL
 When a `CALL` or `STATICCALL` targets `ORACLE_CONTRACT_ADDRESS` with the `sendHint(bytes32,bytes)` selector, the node MUST forward the `topic` and `data` to the external oracle backend as a side effect, subject to the admission conditions below.
 The call MUST then fall through — the Oracle contract's deployed `sendHint` function body executes as ordinary bytecode.
 
+Only these two call schemes trigger forwarding (see [call interception](interception.md)).
+A `sendHint` payload that reaches the Oracle under any other scheme — in particular via `multiCall`, which executes its payloads by `DELEGATECALL` — MUST NOT be forwarded: it runs only the no-op function body and delivers no hint.
+
 Because the Solidity implementation of `sendHint` is a no-op `view` function, the net observable behavior is the combination of:
 
 - hint forwarding to the oracle backend (side effect), and
@@ -169,7 +173,19 @@ If the gas limit is zero, or the selector does not match, or decoding fails, the
 A zero-gas-limit, selector-mismatch, or decode-failure call falls through to the on-chain Oracle bytecode for canonical handling.
 A data-size overflow halts the transaction with the canonical data-size `OutOfGas` failure.
 
-If a transaction calls `sendHint` and subsequently reads an Oracle slot, the hint MUST be delivered to the oracle backend before the read is served.
+If a transaction sends a hint — a direct `CALL` or `STATICCALL` to `sendHint` that meets the admission conditions above — and subsequently reads an Oracle slot, the hint MUST be delivered to the oracle backend before the read is served.
+This guarantee does not extend to a `sendHint` payload whose forwarding was not triggered: a `sendHint` routed through `multiCall`'s `DELEGATECALL` delivers no hint, so a subsequent read observes the backend as if that payload had never been sent.
+
+<details>
+<summary>Rex6 (unstable): volatile-access-disabled admission condition</summary>
+
+Under Rex6, the node MUST additionally NOT forward a hint when the calling frame's volatile data access is disabled (see [`MegaAccessControl`](mega-access-control.md#disablevolatiledataaccess)).
+This condition MUST be evaluated before the data-size charge described above: a call blocked for this reason MUST NOT be charged against the transaction's data-size resource lane, regardless of its gas limit or whether its calldata matches the `sendHint` selector.
+This groups with the zero-gas-limit and selector-mismatch cases (uncharged), not with a decode failure (charged) — a call whose forwarding is skipped for this reason falls through to the on-chain Oracle bytecode without reverting, exactly like those two, but unlike a decode failure it never reaches the byte-length charge at all.
+
+Pre-Rex6, `sendHint` forwarding did not consult the volatile-access-disabled state.
+
+</details>
 
 ### Gas and Detention Semantics
 

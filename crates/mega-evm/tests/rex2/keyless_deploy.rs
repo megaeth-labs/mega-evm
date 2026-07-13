@@ -20,10 +20,13 @@ use mega_evm::{
     test_utils::{transact, BytecodeBuilder, MemoryDatabase},
     IKeylessDeploy, MegaSpecId, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
 };
-use revm::bytecode::opcode::{
-    CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0, MLOAD,
-    MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT, SSTORE,
-    STATICCALL, STOP,
+use revm::{
+    bytecode::opcode::{
+        CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0,
+        MLOAD, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT,
+        SSTORE, STATICCALL, STOP,
+    },
+    Database, DatabaseCommit,
 };
 
 // =============================================================================
@@ -339,6 +342,130 @@ fn test_keyless_deploy_contract_already_exists() {
     );
 
     assert_revert_with_error(&result, KeylessDeployError::ContractAlreadyExists);
+}
+
+/// REX6 only: the deploy-address occupancy check must read through the journal
+/// (`JournalInspectTr::inspect_account`), not a raw `database.basic` call, so the deploy address
+/// is present in the returned `EvmState` / witness — even though the transaction as a whole
+/// reverts. A stateless verifier replaying this transaction needs the deploy address's pre-state
+/// in its witness to independently confirm the `ContractAlreadyExists` revert was warranted;
+/// before this fix the raw DB read bypassed the journal entirely and the address never appeared
+/// in `result.state`.
+///
+/// REX6-only: review found that journaling this read pre-REX5 corrupts the legacy sandbox-state
+/// merge (`apply_sandbox_state_legacy`), which does not carry account status through an
+/// already-`Occupied` journal entry — see
+/// `test_keyless_deploy_pre_rex6_success_still_commits_deployed_code` below for the regression
+/// this would cause if ever ungated.
+#[test]
+fn test_keyless_deploy_contract_already_exists_deploy_address_in_witness_rex6() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
+    db.set_account_code(CREATE2_FACTORY_CONTRACT, Bytes::from_static(&[0x60, 0x00]));
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX6,
+        &mut db,
+        Bytes::from_static(CREATE2_FACTORY_TX),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    assert_revert_with_error(&result, KeylessDeployError::ContractAlreadyExists);
+    assert!(
+        result.state.contains_key(&CREATE2_FACTORY_CONTRACT),
+        "the deploy address's occupancy read must appear in the returned EvmState \
+         (witness) under REX6, even on the ContractAlreadyExists revert path",
+    );
+}
+
+/// Pre-REX6 replay parity: the journaled read is gated to REX6+. Pre-REX6 (sealed) must keep using
+/// the raw, unjournaled DB read for the occupancy check, so the deploy address must NOT appear in
+/// the returned `EvmState` / witness — no retroactive behavior change.
+#[test]
+fn test_keyless_deploy_contract_already_exists_deploy_address_not_in_witness_pre_rex6() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
+    db.set_account_code(CREATE2_FACTORY_CONTRACT, Bytes::from_static(&[0x60, 0x00]));
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        Bytes::from_static(CREATE2_FACTORY_TX),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+
+    assert_revert_with_error(&result, KeylessDeployError::ContractAlreadyExists);
+    assert!(
+        !result.state.contains_key(&CREATE2_FACTORY_CONTRACT),
+        "pre-REX6 (sealed) must keep the raw DB read: the deploy address must NOT appear in the \
+         returned EvmState — no retroactive witness change",
+    );
+}
+
+/// Regression guard for the critical issue this fix's review caught: journaling the deploy-
+/// address occupancy read pre-REX5 corrupts the legacy sandbox-state merge
+/// (`apply_sandbox_state_legacy` / `merge_evm_state_optional_status` with `merge_status = false`),
+/// which copies `info`/storage for an already-`Occupied` journal entry but does NOT merge account
+/// status. A deploy address pre-inserted into the journal by the occupancy check (as a
+/// `LoadedAsNotExisting|Cold` placeholder) would hit that `Occupied` branch instead of the
+/// `Vacant` one, losing the `Created|Touched` status the successfully deployed contract needs to
+/// survive `revm`'s commit (which discards untouched accounts). This test performs a full
+/// `db.commit(result.state)` round trip and confirms the deployed contract's code is actually
+/// present afterward — the exact thing a `state.get(..).info.code` check on the raw `EvmState`
+/// (as the other success tests in this file do) would NOT catch, since `info` is still copied
+/// correctly; only the `AccountStatus` bits needed for `commit()` to keep the account are lost.
+#[test]
+fn test_keyless_deploy_pre_rex6_success_still_commits_deployed_code() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX2,
+        &mut db,
+        Bytes::from_static(CREATE2_FACTORY_TX),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+    assert!(result.result.is_success(), "keyless deploy should succeed: {:?}", result.result);
+
+    db.commit(result.state);
+    let deployed = db.basic(CREATE2_FACTORY_CONTRACT).unwrap();
+    assert!(
+        deployed.is_some_and(|info| info.code_hash == CREATE2_FACTORY_CODE_HASH),
+        "the deployed contract must survive a commit() round trip on pre-REX6 — a regression \
+         here means the occupancy-check journal read is corrupting the legacy state merge",
+    );
+}
+
+/// REX6 twin of the test above: under REX6 the step-7 occupancy check journals the deploy
+/// address (cold, via `inspect_account_code_hash`) *before* the sandbox runs, so at merge time
+/// the address is already an occupied journal entry rather than a fresh one. The merge must
+/// still carry the `Created|Touched` status through that occupied entry so `commit()` keeps the
+/// account — this is the same `db.commit()` round trip as the pre-REX6 sibling, run under REX6.
+#[test]
+fn test_keyless_deploy_rex6_success_still_commits_deployed_code() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CREATE2_FACTORY_DEPLOYER, U256::from(1_000_000_000_000_000_000_000u128));
+
+    let result = call_keyless_deploy(
+        MegaSpecId::REX6,
+        &mut db,
+        Bytes::from_static(CREATE2_FACTORY_TX),
+        LARGE_GAS_LIMIT_OVERRIDE,
+        U256::ZERO,
+    );
+    assert!(result.result.is_success(), "keyless deploy should succeed: {:?}", result.result);
+
+    db.commit(result.state);
+    let deployed = db.basic(CREATE2_FACTORY_CONTRACT).unwrap();
+    assert!(
+        deployed.is_some_and(|info| info.code_hash == CREATE2_FACTORY_CODE_HASH),
+        "the deployed contract must survive a commit() round trip on REX6 — a regression here \
+         means the occupancy-check journal read is dropping AccountStatus through the already- \
+         occupied journal entry it creates",
+    );
 }
 
 #[test]
