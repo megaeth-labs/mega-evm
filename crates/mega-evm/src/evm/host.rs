@@ -948,10 +948,16 @@ mod tests {
         );
         assert!(slot.is_cold, "newly inserted slot must be marked cold");
 
+        let calls_after_first = journal.database.storage_calls();
         let slot2 =
             journal.inspect_storage(spec, ADDR, key).expect("second inspect_storage must succeed");
 
         assert_eq!(slot2.present_value, U256::ZERO, "second call must return the same value");
+        assert_eq!(
+            journal.database.storage_calls(),
+            calls_after_first,
+            "second inspect_storage on the same slot must hit the cache, not the DB",
+        );
     }
 
     #[test]
