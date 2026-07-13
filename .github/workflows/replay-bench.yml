@@ -36,7 +36,7 @@ jobs:
   # PR code (or even a PR-controlled ref) into the workspace.
   prepare:
     name: Resolve commits
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: read
@@ -104,7 +104,7 @@ jobs:
   bench:
     name: Replay throughput
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 90
     permissions:
       contents: read
@@ -200,7 +200,7 @@ jobs:
   compare:
     name: Comment on PR
     needs: [prepare, bench]
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     if: needs.prepare.outputs.compare == 'true'
     permissions:
