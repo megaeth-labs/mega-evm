@@ -12,8 +12,17 @@ on:
   issue_comment:
     types: [created]
 
+# The group is suffixed with "is this a real trigger": issue_comment fires for
+# EVERY new comment (codecov, mutation bots, humans chatting), and with a single
+# group + cancel-in-progress an unrelated comment lands in the same group and
+# cancels a live benchmark mid-flight. Non-trigger comment runs now share their
+# own group and only ever cancel each other; real runs still debounce real
+# re-triggers. The suffix mirrors the prepare job's FULL trigger gate
+# (PR-comment + /benchmark + author association) — any comment that would fail
+# the gate must not share a group with real runs, or it cancels a live run it
+# cannot replace (a benchmark-DoS on public PRs); keep the two in sync.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/benchmark') && contains(fromJSON('["MEMBER","COLLABORATOR","OWNER"]'), github.event.comment.author_association)) }}
   cancel-in-progress: true
 
 # Paired, order-interleaved A/B knobs. The harness runs the feature and baseline
@@ -44,7 +53,7 @@ jobs:
   # cannot make different jobs measure different code (or mislabel the result).
   prepare:
     name: Resolve commits
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     # Reacts to the triggering comment; does not execute PR code.
     # `issues: write` is required to react to the (issue) comment — PR
@@ -128,6 +137,44 @@ jobs:
               core.warning(`could not add :rocket: reaction: ${e.message}`);
             }
 
+      # Claim/refresh THE report comment right away: it names the action run so
+      # a watcher knows where the benchmark lives, and the compare job later
+      # edits this same comment in place — repeated /benchmark runs never stack
+      # a second giant report. Best-effort: a failed post must not skip bench.
+      - name: Post in-progress status comment
+        if: github.event_name == 'issue_comment'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          FEATURE_SHA: ${{ steps.resolve.outputs.feature_sha }}
+          BASELINE_SHA: ${{ steps.resolve.outputs.baseline_sha }}
+        with:
+          script: |
+            const marker = '<!-- criterion-benchmark-report -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const short = (s) => (s || '').slice(0, 12);
+            const body = [
+              marker,
+              '## Criterion Benchmark Comparison',
+              '',
+              `:hourglass_flowing_sand: **Benchmark in progress** — [watch the run](${runUrl})`,
+              '',
+              `Comparing \`${short(process.env.BASELINE_SHA)}\` (baseline) → ` +
+                `\`${short(process.env.FEATURE_SHA)}\` (feature). ` +
+                'This comment is updated in place when the run finishes.',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 });
+            const mine = comments.filter(c => c.user && c.user.login === 'github-actions[bot]'
+              && c.body && c.body.includes(marker)).pop();
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
   # One job per bench target. Each job builds BOTH the feature and baseline bench
   # binaries up front (no rebuild during measurement), then runs them paired and
   # order-interleaved on the SAME runner for BENCH_ROUNDS short rounds. Pairing
@@ -137,11 +184,11 @@ jobs:
   bench:
     name: Bench ${{ matrix.target }}
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     # Paired interleaving runs each round's measurement ~1.5x the old single
     # pass, and re-pays per-bench setup once per round; give heavy-setup targets
-    # (block_bench / attack_replay / comp_cost) generous headroom. Well under the
-    # 6h hosted-runner job cap. Lower BENCH_ROUNDS in env to trade back time.
+    # (block_bench / attack_replay / comp_cost) generous headroom. Lower
+    # BENCH_ROUNDS in env to trade back time.
     timeout-minutes: 180
     # This job compiles and runs untrusted PR code — keep it read-only so there
     # is no write-scoped token to exfiltrate. `pull-requests: read` lets
@@ -180,6 +227,12 @@ jobs:
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Empty rustflags overrides this action's default `-D warnings`.
+          # Measurement builds should not fail on unrelated warnings; the
+          # previous align-all-functions flag is gone (layout stabilization
+          # was ineffective), but the opt-out of `-D warnings` stays.
+          rustflags: ""
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -264,9 +317,16 @@ jobs:
   compare:
     name: Compare and comment on PR
     needs: [prepare, bench]
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
-    if: needs.prepare.outputs.compare == 'true'
+    # `!cancelled()` (NOT `always()`): a failed bench leg still updates the
+    # status comment (partial rounds aggregated under a warning banner), but a
+    # CANCELLED run must not run compare — the newer run that cancelled it owns
+    # the shared comment now, and `always()` would overwrite its fresh
+    # "in progress" status with this run's stale partial report.
+    if: >-
+      ${{ !cancelled() && needs.prepare.result == 'success' &&
+          needs.prepare.outputs.compare == 'true' }}
     # Posts the comparison comment; consumes artifacts plus the TRUSTED base-repo
     # aggregation script (checked out below from the default branch, never PR
     # code).
@@ -279,6 +339,9 @@ jobs:
           fetch-depth: 1
 
       - name: Download all round results
+        # May find nothing when every bench leg failed; the aggregate step
+        # tolerates an empty dir and the comment step banners the failure.
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: bench-rounds-*
@@ -301,19 +364,43 @@ jobs:
           mkdir -p all_rounds
           python3 .github/scripts/bench_compare.py
 
+      # Update the status comment the prepare job claimed (create if it is
+      # somehow missing) — one report comment per PR, edited in place, never a
+      # growing stack of giant comments.
       - name: Comment on PR
         if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
+        env:
+          BENCH_RESULT: ${{ needs.bench.result }}
         with:
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('comparison.md', 'utf8');
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body,
-            });
+            const marker = '<!-- criterion-benchmark-report -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let report;
+            try {
+              report = fs.readFileSync('comparison.md', 'utf8');
+            } catch (e) {
+              report = '## Criterion Benchmark Comparison\n\n_No comparison was produced._\n';
+            }
+            let banner = '';
+            if (process.env.BENCH_RESULT !== 'success') {
+              banner = `> :warning: **Some bench jobs did not succeed** ` +
+                `(bench: \`${process.env.BENCH_RESULT}\`) — results below may be ` +
+                `partial; see the [run log](${runUrl}).\n\n`;
+            }
+            const body = `${marker}\n${banner}${report}\n_Produced by [this run](${runUrl})._`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 });
+            const mine = comments.filter(c => c.user && c.user.login === 'github-actions[bot]'
+              && c.body && c.body.includes(marker)).pop();
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
 
       - name: Upload comparison
         if: always()
