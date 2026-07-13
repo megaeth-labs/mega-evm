@@ -21,7 +21,10 @@ permissions:
 
 concurrency:
   group: codspeed-${{ github.ref }}
-  cancel-in-progress: true
+  # PR runs coalesce (only the newest push matters), but every main push is a
+  # baseline datapoint — cancelling one mid-flight leaves a gap CodSpeed must
+  # bridge from an older ancestor. Queue main runs instead of cancelling.
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
   codspeed:
