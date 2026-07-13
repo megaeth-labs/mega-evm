@@ -53,7 +53,7 @@ jobs:
   # cannot make different jobs measure different code (or mislabel the result).
   prepare:
     name: Resolve commits
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     # Reacts to the triggering comment; does not execute PR code.
     # `issues: write` is required to react to the (issue) comment — PR
@@ -184,11 +184,11 @@ jobs:
   bench:
     name: Bench ${{ matrix.target }}
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     # Paired interleaving runs each round's measurement ~1.5x the old single
     # pass, and re-pays per-bench setup once per round; give heavy-setup targets
-    # (block_bench / attack_replay / comp_cost) generous headroom. Well under the
-    # 6h hosted-runner job cap. Lower BENCH_ROUNDS in env to trade back time.
+    # (block_bench / attack_replay / comp_cost) generous headroom. Lower
+    # BENCH_ROUNDS in env to trade back time.
     timeout-minutes: 180
     # This job compiles and runs untrusted PR code — keep it read-only so there
     # is no write-scoped token to exfiltrate. `pull-requests: read` lets
@@ -228,12 +228,11 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          # 64-byte (2^6) function alignment: cache-line-aligned function
-          # starts remove the largest layout-noise term a relink can inject
-          # into the A/B comparison (complements the bench profile's single
-          # codegen unit; replaces the action's default `-D warnings`, which
-          # measurement builds don't need).
-          rustflags: -C llvm-args=-align-all-functions=6
+          # Empty rustflags overrides this action's default `-D warnings`.
+          # Measurement builds should not fail on unrelated warnings; the
+          # previous align-all-functions flag is gone (layout stabilization
+          # was ineffective), but the opt-out of `-D warnings` stays.
+          rustflags: ""
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -318,7 +317,7 @@ jobs:
   compare:
     name: Compare and comment on PR
     needs: [prepare, bench]
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     # `!cancelled()` (NOT `always()`): a failed bench leg still updates the
     # status comment (partial rounds aggregated under a warning banner), but a
