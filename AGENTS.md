@@ -28,7 +28,8 @@ cargo clippy --workspace --lib --examples --tests --benches --all-features --loc
 cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
 
 # Benchmarks
-cargo bench -p mega-evm --bench transact
+cargo bench -p mega-evm --bench transact                                  # wall-clock + HTML report
+cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
 
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
@@ -290,9 +291,11 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Add benchmarks for performance-sensitive changes.**
   Changes on the EVM execution hot path must be accompanied by benchmarks.
   This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.
+  Per-PR instruction-count reports for these benchmarks are produced automatically by the CodSpeed CI workflow.
 - **Always run benchmarks locally before committing.**
   New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
   Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
+  For instruction-count deltas across a PR, use the CodSpeed report posted on the PR rather than local wall-clock numbers.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.

@@ -18,8 +18,13 @@ on:
   issue_comment:
     types: [created]
 
+# Suffixed with "is this a real trigger" so unrelated comments (bots, chat)
+# land in their own group instead of cancelling a live run — same fix as
+# benchmark.yml: mirror the FULL trigger gate (PR-comment + /replay-bench +
+# author association); a comment that would fail the gate must not cancel a
+# live run it cannot replace.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/replay-bench') && contains(fromJSON('["MEMBER","COLLABORATOR","OWNER"]'), github.event.comment.author_association)) }}
   cancel-in-progress: true
 
 permissions:
@@ -31,7 +36,7 @@ jobs:
   # PR code (or even a PR-controlled ref) into the workspace.
   prepare:
     name: Resolve commits
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: read
@@ -99,7 +104,7 @@ jobs:
   bench:
     name: Replay throughput
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 90
     permissions:
       contents: read
@@ -195,7 +200,7 @@ jobs:
   compare:
     name: Comment on PR
     needs: [prepare, bench]
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     if: needs.prepare.outputs.compare == 'true'
     permissions:
