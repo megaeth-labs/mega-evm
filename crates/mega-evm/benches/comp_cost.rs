@@ -30,7 +30,8 @@ use revm::{
         kzg_point_evaluation, modexp,
         secp256k1::ECRECOVER,
     },
-    ExecuteEvm,
+    primitives::hardfork::SpecId,
+    Context as RevmContext, ExecuteEvm, MainBuilder as _, MainContext as _,
 };
 use sha2::{Digest, Sha256 as Sha256Hash};
 
@@ -82,6 +83,52 @@ fn execute_bytecode(
 /// Execute bytecode with the given spec and return gas used.
 fn execute_and_get_gas(bytecode: &Bytes, spec: MegaSpecId) -> u64 {
     execute_bytecode(bytecode, spec).result.gas_used()
+}
+
+/// Run `bytecode` on vanilla revm at PRAGUE (has all precompiles incl. BLS12-381,
+/// no EIP-7825 tx-gas cap). The no-mega floor for precompile benchmarks.
+///
+/// Mirrors `execute_bytecode`'s measurement boundary: the full execution result is
+/// kept alive through `black_box` before being dropped, so the optimizer cannot
+/// elide result construction for the revm row while keeping it for the mega rows —
+/// an asymmetry that would underestimate the revm floor and inflate the gap.
+fn execute_bytecode_revm(bytecode: &Bytes) -> bool {
+    let db = MemoryDatabase::default()
+        .account_code(CONTRACT, bytecode.clone())
+        .account_balance(CALLER, U256::from(10).pow(U256::from(18)));
+    let mut evm = RevmContext::mainnet()
+        .modify_cfg_chained(|cfg| cfg.spec = SpecId::PRAGUE)
+        .with_db(db)
+        .build_mainnet();
+    let tx =
+        TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(10_000_000_000u64).build_fill();
+    let r = evm.transact(tx).expect("revm transact");
+    assert!(r.result.is_success(), "revm precompile bench tx should succeed: {:?}", r.result);
+    let success = r.result.is_success();
+    black_box(r);
+    success
+}
+
+/// Print gas for each spec, then bench a `revm_pinned` row and one row per spec.
+///
+/// The `revm_pinned` row runs vanilla revm at PRAGUE — the no-mega floor.
+/// One row per `SPEC_IDS` entry follows so the mega-vs-revm gap is visible.
+fn bench_precompile_group(c: &mut Criterion, group_name: &str, bytecode: Bytes) {
+    let mut group = c.benchmark_group(group_name);
+    println!("\n=== Gas consumption for {group_name} ===");
+    for &(spec_name, spec) in SPEC_IDS {
+        println!("  {spec_name} spec: {} gas", execute_and_get_gas(&bytecode, spec));
+    }
+    println!();
+    group.bench_function("revm_pinned", |b| {
+        b.iter(|| black_box(execute_bytecode_revm(black_box(&bytecode))))
+    });
+    for &(spec_name, spec) in SPEC_IDS {
+        group.bench_function(spec_name, |b| {
+            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
+        });
+    }
+    group.finish();
 }
 
 //
@@ -313,25 +360,7 @@ fn generate_ecrecover_bytecode(iterations: usize) -> Bytes {
 /// Benchmark ECRECOVER precompile.
 fn bench_ecrecover_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_ecrecover");
-    let bytecode = generate_ecrecover_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!("\n=== Gas consumption for precompile_ecrecover ({}x iterations) ===", ITERATIONS);
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
+    bench_precompile_group(c, "precompile_ecrecover", generate_ecrecover_bytecode(ITERATIONS));
 }
 
 //
@@ -371,27 +400,11 @@ fn bench_sha256_precompile(c: &mut Criterion) {
     let test_cases = [("32B", 32), ("1KB", 1024)];
 
     for (size_name, data_size) in test_cases {
-        let mut group = c.benchmark_group(format!("precompile_sha256_{}", size_name));
-        let bytecode = generate_sha256_bytecode(data_size, ITERATIONS);
-
-        // Run once to collect gas consumption before benchmarking
-        println!(
-            "\n=== Gas consumption for precompile_sha256_{} ({}x iterations) ===",
-            size_name, ITERATIONS
+        bench_precompile_group(
+            c,
+            &format!("precompile_sha256_{}", size_name),
+            generate_sha256_bytecode(data_size, ITERATIONS),
         );
-        for &(spec_name, spec) in SPEC_IDS {
-            let gas_used = execute_and_get_gas(&bytecode, spec);
-            println!("  {} spec: {} gas", spec_name, gas_used);
-        }
-        println!();
-
-        for &(spec_name, spec) in SPEC_IDS {
-            group.bench_function(spec_name, |b| {
-                b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-            });
-        }
-
-        group.finish();
     }
 }
 
@@ -432,27 +445,11 @@ fn bench_ripemd160_precompile(c: &mut Criterion) {
     let test_cases = [("32B", 32), ("1KB", 1024)];
 
     for (size_name, data_size) in test_cases {
-        let mut group = c.benchmark_group(format!("precompile_ripemd160_{}", size_name));
-        let bytecode = generate_ripemd160_bytecode(data_size, ITERATIONS);
-
-        // Run once to collect gas consumption before benchmarking
-        println!(
-            "\n=== Gas consumption for precompile_ripemd160_{} ({}x iterations) ===",
-            size_name, ITERATIONS
+        bench_precompile_group(
+            c,
+            &format!("precompile_ripemd160_{}", size_name),
+            generate_ripemd160_bytecode(data_size, ITERATIONS),
         );
-        for &(spec_name, spec) in SPEC_IDS {
-            let gas_used = execute_and_get_gas(&bytecode, spec);
-            println!("  {} spec: {} gas", spec_name, gas_used);
-        }
-        println!();
-
-        for &(spec_name, spec) in SPEC_IDS {
-            group.bench_function(spec_name, |b| {
-                b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-            });
-        }
-
-        group.finish();
     }
 }
 
@@ -512,27 +509,11 @@ fn bench_modexp_precompile(c: &mut Criterion) {
     let test_cases = [("32B", 32)];
 
     for (size_name, modulus_size) in test_cases {
-        let mut group = c.benchmark_group(format!("precompile_modexp_{}", size_name));
-        let bytecode = generate_modexp_bytecode(modulus_size, ITERATIONS);
-
-        // Run once to collect gas consumption before benchmarking
-        println!(
-            "\n=== Gas consumption for precompile_modexp_{} ({}x iterations) ===",
-            size_name, ITERATIONS
+        bench_precompile_group(
+            c,
+            &format!("precompile_modexp_{}", size_name),
+            generate_modexp_bytecode(modulus_size, ITERATIONS),
         );
-        for &(spec_name, spec) in SPEC_IDS {
-            let gas_used = execute_and_get_gas(&bytecode, spec);
-            println!("  {} spec: {} gas", spec_name, gas_used);
-        }
-        println!();
-
-        for &(spec_name, spec) in SPEC_IDS {
-            group.bench_function(spec_name, |b| {
-                b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-            });
-        }
-
-        group.finish();
     }
 }
 
@@ -579,25 +560,7 @@ fn generate_ecadd_bytecode(iterations: usize) -> Bytes {
 /// Benchmark ECADD precompile.
 fn bench_ecadd_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_ecadd");
-    let bytecode = generate_ecadd_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!("\n=== Gas consumption for precompile_ecadd ({}x iterations) ===", ITERATIONS);
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
+    bench_precompile_group(c, "precompile_ecadd", generate_ecadd_bytecode(ITERATIONS));
 }
 
 //
@@ -641,25 +604,7 @@ fn generate_ecmul_bytecode(iterations: usize) -> Bytes {
 /// Benchmark ECMUL precompile.
 fn bench_ecmul_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_ecmul");
-    let bytecode = generate_ecmul_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!("\n=== Gas consumption for precompile_ecmul ({}x iterations) ===", ITERATIONS);
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
+    bench_precompile_group(c, "precompile_ecmul", generate_ecmul_bytecode(ITERATIONS));
 }
 
 //
@@ -726,25 +671,7 @@ fn generate_ecpairing_bytecode(iterations: usize) -> Bytes {
 /// Benchmark ECPAIRING precompile with varying number of pairing points.
 fn bench_ecpairing_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_ecpairing");
-    let bytecode = generate_ecpairing_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!("\n=== Gas consumption for precompile_ecpairing ({}x iterations) ===", ITERATIONS);
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
+    bench_precompile_group(c, "precompile_ecpairing", generate_ecpairing_bytecode(ITERATIONS));
 }
 
 //
@@ -800,27 +727,11 @@ fn bench_blake2f_precompile(c: &mut Criterion) {
     let test_cases = [("1round", 1)];
 
     for (rounds_name, rounds) in test_cases {
-        let mut group = c.benchmark_group(format!("precompile_blake2f_{}", rounds_name));
-        let bytecode = generate_blake2f_bytecode(rounds, ITERATIONS);
-
-        // Run once to collect gas consumption before benchmarking
-        println!(
-            "\n=== Gas consumption for precompile_blake2f_{} ({}x iterations) ===",
-            rounds_name, ITERATIONS
+        bench_precompile_group(
+            c,
+            &format!("precompile_blake2f_{}", rounds_name),
+            generate_blake2f_bytecode(rounds, ITERATIONS),
         );
-        for &(spec_name, spec) in SPEC_IDS {
-            let gas_used = execute_and_get_gas(&bytecode, spec);
-            println!("  {} spec: {} gas", spec_name, gas_used);
-        }
-        println!();
-
-        for &(spec_name, spec) in SPEC_IDS {
-            group.bench_function(spec_name, |b| {
-                b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-            });
-        }
-
-        group.finish();
     }
 }
 
@@ -875,28 +786,11 @@ fn generate_kzg_point_evaluation_bytecode(iterations: usize) -> Bytes {
 /// Benchmark KZG Point Evaluation precompile.
 fn bench_kzg_point_evaluation_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_kzg_point_evaluation");
-    let bytecode = generate_kzg_point_evaluation_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!(
-        "\n=== Gas consumption for precompile_kzg_point_evaluation ({}x iterations) ===",
-        ITERATIONS
+    bench_precompile_group(
+        c,
+        "precompile_kzg_point_evaluation",
+        generate_kzg_point_evaluation_bytecode(ITERATIONS),
     );
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
 }
 
 //
@@ -935,28 +829,11 @@ fn generate_bls12_381_g1add_bytecode(iterations: usize) -> Bytes {
 /// Benchmark BLS12-381 G1ADD precompile.
 fn bench_bls12_381_g1add_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_bls12_381_g1add");
-    let bytecode = generate_bls12_381_g1add_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!(
-        "\n=== Gas consumption for precompile_bls12_381_g1add ({}x iterations) ===",
-        ITERATIONS
+    bench_precompile_group(
+        c,
+        "precompile_bls12_381_g1add",
+        generate_bls12_381_g1add_bytecode(ITERATIONS),
     );
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
 }
 
 //
@@ -995,28 +872,11 @@ fn generate_bls12_381_g1msm_bytecode(iterations: usize) -> Bytes {
 /// Benchmark BLS12-381 G1MSM precompile.
 fn bench_bls12_381_g1msm_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_bls12_381_g1msm");
-    let bytecode = generate_bls12_381_g1msm_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!(
-        "\n=== Gas consumption for precompile_bls12_381_g1msm ({}x iterations) ===",
-        ITERATIONS
+    bench_precompile_group(
+        c,
+        "precompile_bls12_381_g1msm",
+        generate_bls12_381_g1msm_bytecode(ITERATIONS),
     );
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
 }
 
 //
@@ -1055,28 +915,11 @@ fn generate_bls12_381_g2add_bytecode(iterations: usize) -> Bytes {
 /// Benchmark BLS12-381 G2ADD precompile.
 fn bench_bls12_381_g2add_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_bls12_381_g2add");
-    let bytecode = generate_bls12_381_g2add_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!(
-        "\n=== Gas consumption for precompile_bls12_381_g2add ({}x iterations) ===",
-        ITERATIONS
+    bench_precompile_group(
+        c,
+        "precompile_bls12_381_g2add",
+        generate_bls12_381_g2add_bytecode(ITERATIONS),
     );
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
 }
 
 //
@@ -1115,28 +958,11 @@ fn generate_bls12_381_g2msm_bytecode(iterations: usize) -> Bytes {
 /// Benchmark BLS12-381 G2MSM precompile.
 fn bench_bls12_381_g2msm_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_bls12_381_g2msm");
-    let bytecode = generate_bls12_381_g2msm_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!(
-        "\n=== Gas consumption for precompile_bls12_381_g2msm ({}x iterations) ===",
-        ITERATIONS
+    bench_precompile_group(
+        c,
+        "precompile_bls12_381_g2msm",
+        generate_bls12_381_g2msm_bytecode(ITERATIONS),
     );
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
 }
 
 //
@@ -1175,28 +1001,11 @@ fn generate_bls12_381_pairing_bytecode(iterations: usize) -> Bytes {
 /// Benchmark BLS12-381 PAIRING precompile.
 fn bench_bls12_381_pairing_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_bls12_381_pairing");
-    let bytecode = generate_bls12_381_pairing_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!(
-        "\n=== Gas consumption for precompile_bls12_381_pairing ({}x iterations) ===",
-        ITERATIONS
+    bench_precompile_group(
+        c,
+        "precompile_bls12_381_pairing",
+        generate_bls12_381_pairing_bytecode(ITERATIONS),
     );
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
 }
 
 //
@@ -1236,28 +1045,11 @@ fn generate_bls12_381_map_fp_to_g1_bytecode(iterations: usize) -> Bytes {
 /// Benchmark BLS12-381 `MAP_FP_TO_G1` precompile.
 fn bench_bls12_381_map_fp_to_g1_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_bls12_381_map_fp_to_g1");
-    let bytecode = generate_bls12_381_map_fp_to_g1_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!(
-        "\n=== Gas consumption for precompile_bls12_381_map_fp_to_g1 ({}x iterations) ===",
-        ITERATIONS
+    bench_precompile_group(
+        c,
+        "precompile_bls12_381_map_fp_to_g1",
+        generate_bls12_381_map_fp_to_g1_bytecode(ITERATIONS),
     );
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
 }
 
 //
@@ -1299,28 +1091,11 @@ fn generate_bls12_381_map_fp2_to_g2_bytecode(iterations: usize) -> Bytes {
 /// Benchmark BLS12-381 `MAP_FP2_TO_G2` precompile.
 fn bench_bls12_381_map_fp2_to_g2_precompile(c: &mut Criterion) {
     const ITERATIONS: usize = 100;
-
-    let mut group = c.benchmark_group("precompile_bls12_381_map_fp2_to_g2");
-    let bytecode = generate_bls12_381_map_fp2_to_g2_bytecode(ITERATIONS);
-
-    // Run once to collect gas consumption before benchmarking
-    println!(
-        "\n=== Gas consumption for precompile_bls12_381_map_fp2_to_g2 ({}x iterations) ===",
-        ITERATIONS
+    bench_precompile_group(
+        c,
+        "precompile_bls12_381_map_fp2_to_g2",
+        generate_bls12_381_map_fp2_to_g2_bytecode(ITERATIONS),
     );
-    for &(spec_name, spec) in SPEC_IDS {
-        let gas_used = execute_and_get_gas(&bytecode, spec);
-        println!("  {} spec: {} gas", spec_name, gas_used);
-    }
-    println!();
-
-    for &(spec_name, spec) in SPEC_IDS {
-        group.bench_function(spec_name, |b| {
-            b.iter(|| black_box(execute_bytecode(&bytecode, black_box(spec))))
-        });
-    }
-
-    group.finish();
 }
 
 //

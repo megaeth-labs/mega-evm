@@ -14,10 +14,11 @@
 //! already pulls the chosen `revm` version transitively.
 
 use alloy_primitives::{Address, Bytes, U256};
+use core::convert::Infallible;
 use criterion::black_box;
 use mega_evm::{
     revm::inspector::NoOpInspector, test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext,
-    MegaEvm, MegaSpecId, MegaTransaction,
+    MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use op_revm::{
     DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned, OpSpecId as OpSpecIdPinned,
@@ -40,6 +41,7 @@ use revm_latest::{
     primitives::hardfork::SpecId as SpecIdLatest,
     Context as ContextLatest, ExecuteEvm as _, MainBuilder as _, MainContext as _,
 };
+use std::{cell::RefCell, rc::Rc};
 
 use super::workload::{Account, TxSpec, Workload};
 
@@ -211,6 +213,52 @@ impl Subject for Mega {
             |evm, tx| {
                 // Wrap into a `MegaTransaction` with an empty envelope, matching
                 // what the production tx-pool would attach.
+                let mut mega_tx = MegaTransaction::new(pinned_tx_env(tx));
+                mega_tx.enveloped_tx = Some(Bytes::new());
+                let r = evm.transact(mega_tx).expect("mega transact");
+                let success = r.result.is_success();
+                black_box(r);
+                success
+            },
+        );
+    }
+}
+
+//
+// ============================================================================
+// MegaWithEnv subject.
+// ============================================================================
+//
+
+/// `MegaEvm` at a single spec over a configurable `TestExternalEnvs` (crowded
+/// SALT buckets and/or oracle storage). Used by the SALT and oracle benches.
+/// The `env` is cloned per build so each iteration starts from the same config.
+pub struct MegaWithEnv {
+    pub name: &'static str,
+    pub spec: MegaSpecId,
+    pub env: TestExternalEnvs<Infallible>,
+}
+
+impl Subject for MegaWithEnv {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn run(&self, workload: &Workload) {
+        let spec = self.spec;
+        let env = self.env.clone();
+        run_workload(
+            self.name,
+            workload,
+            || {
+                let db = build_pinned_db(&workload.accounts);
+                let salt = Rc::new(env.clone());
+                let oracle = Rc::new(RefCell::new(env.clone()));
+                let mut context = MegaContext::new_with_ext_envs(db, spec, salt, oracle);
+                context.modify_chain(|chain| zero_operator_fee!(chain));
+                MegaEvm::<_, NoOpInspector, TestExternalEnvs<Infallible>>::new(context)
+            },
+            |evm, tx| {
                 let mut mega_tx = MegaTransaction::new(pinned_tx_env(tx));
                 mega_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(mega_tx).expect("mega transact");

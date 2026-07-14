@@ -16,7 +16,10 @@
 pub mod subject;
 pub mod workload;
 
-use mega_evm::MegaSpecId;
+use core::convert::Infallible;
+
+use mega_evm::{MegaSpecId, TestExternalEnvs};
+pub use subject::MegaWithEnv;
 use subject::{Mega, OpRevmLatest, OpRevmPinned, RevmLatest, RevmPinned, Subject};
 pub use workload::{Account, TxSpec, Workload};
 
@@ -95,4 +98,50 @@ pub fn register_mega_specs_suffixed(
     w: &Workload,
 ) {
     run_subjects(group, variant, w, &mega_subjects(specs));
+}
+
+/// Register three isolation rows for one spec + workload under a `/variant`
+/// suffix, in order:
+///
+/// 1. `revm_pinned` — the env-agnostic absolute floor (no mega overhead).
+/// 2. `baseline_name` — `Mega` over `EmptyExternalEnv`, where the external-env path (SALT / oracle)
+///    short-circuits to constants (no hash, no map lookup).
+/// 3. `active_name` — `MegaWithEnv` over the supplied `env`, exercising the real external-env path
+///    (e.g. crowded SALT buckets or oracle storage).
+///
+/// The `active_name` − `baseline_name` gap isolates the external-env path cost
+/// while holding spec and workload fixed. Shared by the SALT and oracle benches.
+pub fn register_env_isolation(
+    group: &mut Group<'_>,
+    spec: MegaSpecId,
+    baseline_name: &'static str,
+    active_name: &'static str,
+    env: TestExternalEnvs<Infallible>,
+    variant: &str,
+    w: &Workload,
+) {
+    run_subjects(group, variant, w, &[Box::new(RevmPinned)]);
+    run_subjects(group, variant, w, &[Box::new(Mega { name: baseline_name, spec })]);
+    run_subjects(group, variant, w, &[Box::new(MegaWithEnv { name: active_name, spec, env })]);
+}
+
+/// Like [`register_env_isolation`] but omits the `revm_pinned` floor row.
+///
+/// Use this to register more than one spec's env-isolation rows in the SAME
+/// group: call [`register_env_isolation`] for the first spec (registering the
+/// shared `revm_pinned` floor plus that spec's baseline + active env rows),
+/// then call this floor-less variant for each additional spec. The
+/// `revm_pinned` row must appear only once per group — registering it twice
+/// panics with a duplicate benchmark-id error.
+pub fn register_env_isolation_mega_only(
+    group: &mut Group<'_>,
+    spec: MegaSpecId,
+    baseline_name: &'static str,
+    active_name: &'static str,
+    env: TestExternalEnvs<Infallible>,
+    variant: &str,
+    w: &Workload,
+) {
+    run_subjects(group, variant, w, &[Box::new(Mega { name: baseline_name, spec })]);
+    run_subjects(group, variant, w, &[Box::new(MegaWithEnv { name: active_name, spec, env })]);
 }

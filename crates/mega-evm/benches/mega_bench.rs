@@ -360,6 +360,7 @@ fn bench_selfdestruct(c: &mut Criterion) {
         ("equivalence", MegaSpecId::EQUIVALENCE),
         ("rex2", MegaSpecId::REX2),
         ("rex4", MegaSpecId::REX4),
+        ("rex5", MegaSpecId::REX5),
     ];
 
     let mut group = c.benchmark_group("selfdestruct");
@@ -828,6 +829,127 @@ fn bench_staticcall_selfdestruct(c: &mut Criterion) {
     group.finish();
 }
 
+//
+// ============================================================================
+// SALT Dynamic-Gas Benchmarks
+// ============================================================================
+//
+// Isolates the SALT dynamic-gas path cost. For each storage-write workload,
+// three rows run the SAME spec + workload:
+//   - `revm_pinned`: the env-agnostic absolute floor (no mega overhead).
+//   - `rex5`:        mega over `EmptyExternalEnv`, where the SALT path short-circuits to a constant
+//     `MIN_BUCKET_SIZE` (no hash, no map lookup).
+//   - `rex5_salt`:   mega over a crowded `TestExternalEnvs` (FNV hash + HashMap lookup + multiply
+//     per touched bucket).
+// The `rex5_salt` − `rex5` gap is the isolated SALT-path cost.
+//
+// There is NO multiplier sweep: the bucket-capacity multiplier changes the gas
+// AMOUNT charged, not the compute performed, so it does not move wall-clock time
+// (verified empirically — x1 ≈ x32). A single crowded capacity
+// (32 × MIN_BUCKET_SIZE) keeps the multiply operand non-trivial; what exercises
+// the path is the number of distinct buckets touched, which `sstore_100` already
+// drives to ~100.
+//
+// Only SSTORE / new-account / CREATE consult the SALT bucket multiplier; LOG
+// storage gas uses a FIXED 10× multiplier (compile-time constants charged in
+// `storage_gas_ext::log` without calling `load_bucket_cost_multiplier`), so a
+// LOG workload would show ~0 gap — the crowded `TestExternalEnvs` is inert for
+// LOG. The workloads below are therefore limited to `sstore_100` and `create_10`,
+// both of which genuinely drive `load_bucket_cost_multiplier`.
+
+fn bench_salt_dynamic_gas(c: &mut Criterion) {
+    use mega_evm::MIN_BUCKET_SIZE;
+
+    let workloads: &[(&str, Bytes)] = &[
+        ("sstore_100", generate_sstore_bytecode(SSTORE_ITERATIONS)),
+        ("create_10", make_create_bytecode(10)),
+    ];
+
+    let mut group = c.benchmark_group("salt_dynamic_gas");
+    for (wl_name, bytecode) in workloads {
+        let workload = mega_contract_workload(bytecode.clone());
+        let crowded = mega_evm::TestExternalEnvs::<core::convert::Infallible>::new()
+            .with_default_bucket_capacity(32 * MIN_BUCKET_SIZE as u64);
+        common::register_env_isolation(
+            &mut group,
+            MegaSpecId::REX5,
+            "rex5",
+            "rex5_salt",
+            crowded,
+            wl_name,
+            &workload,
+        );
+    }
+    group.finish();
+}
+
+//
+// ============================================================================
+// Oracle Real-Data Benchmark
+// ============================================================================
+//
+// Characterizes the real oracle SLOAD path (`host.rs::sload`), which no prior
+// bench drove with populated oracle storage. At the oracle address `sload`
+// forks on `get_oracle_storage(key)`: `Some(value)` early-returns and bypasses
+// the journal entirely (oracle HIT); `None` falls through to the full journal
+// SLOAD (`inner.sload`) for each slot (oracle MISS).
+//
+// Three rows, same shape as bench_salt_dynamic_gas:
+//   - `revm_pinned`:   raw SLOAD floor — no oracle machinery at all.
+//   - `<spec>`:        oracle SLOAD MISS — Mega over EmptyExternalEnv, where `get_oracle_storage`
+//     returns `None` and each slot falls through to the journal SLOAD.
+//   - `<spec>_oracle`: oracle SLOAD HIT — MegaWithEnv over populated TestExternalEnvs, where
+//     `get_oracle_storage` serves real data and early-returns past the journal.
+//
+// The `<spec>_oracle` − `<spec>` gap is the HIT-vs-MISS *structural* cost of the
+// oracle SLOAD path (early-return vs journal traversal), NOT an isolated
+// `get_oracle_storage` lookup microcost. The path forks structurally on hit vs
+// miss, so — unlike the SALT bucket-multiply — the lookup cost cannot be isolated
+// further; this bench characterizes the hit / miss / floor costs of the real
+// oracle path. Address-based oracle gas detention fires identically on both mega
+// rows, so it does not enter the gap.
+//
+
+fn bench_oracle_real_data(c: &mut Criterion) {
+    let sload_bytecode = generate_sload_bytecode(50);
+    let workload = Workload::single(
+        vec![
+            Account::new(ORACLE_ADDRESS).code(sload_bytecode),
+            Account::new(CALLER).balance(U256::from(10).pow(U256::from(18))),
+        ],
+        TxSpec::call(CALLER, ORACLE_ADDRESS).gas_limit(FEATURE_GAS_LIMIT),
+    );
+
+    // Populate the first 50 oracle slots with non-zero values.
+    let mut env = mega_evm::TestExternalEnvs::<core::convert::Infallible>::new();
+    for slot in 0u64..50 {
+        env = env.with_oracle_storage(U256::from(slot), U256::from(slot + 1));
+    }
+
+    let mut group = c.benchmark_group("oracle_real_data");
+    // REX4: includes the revm_pinned floor row (registered only once per group).
+    common::register_env_isolation(
+        &mut group,
+        MegaSpecId::REX4,
+        "rex4",
+        "rex4_oracle",
+        env.clone(),
+        "oracle_sload_50",
+        &workload,
+    );
+    // REX5: omit revm_pinned (already registered above — duplicate IDs panic).
+    common::register_env_isolation_mega_only(
+        &mut group,
+        MegaSpecId::REX5,
+        "rex5",
+        "rex5_oracle",
+        env,
+        "oracle_sload_50",
+        &workload,
+    );
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_volatile_data,
@@ -840,8 +962,10 @@ criterion_group!(
     bench_system_contract,
     bench_delegatecall_system_contract,
     bench_oracle_sload,
+    bench_oracle_real_data,
     bench_mixed_workload,
     bench_eip7702_authlist,
     bench_staticcall_selfdestruct,
+    bench_salt_dynamic_gas,
 );
 criterion_main!(benches);

@@ -1,8 +1,8 @@
 //! Benchmarks for the `ExecuteEvm::transact()` interface.
 //!
 //! Each workload runs against four vanilla baselines (`revm_pinned`,
-//! `revm_latest`, `op_revm_pinned`, `op_revm_latest`) and three mega specs
-//! (`EQUIVALENCE`, `MINI_REX`, `REX4`) so a single bench produces a
+//! `revm_latest`, `op_revm_pinned`, `op_revm_latest`) and four mega specs
+//! (`EQUIVALENCE`, `MINI_REX`, `REX4`, `REX5`) so a single bench produces a
 //! cross-row gap table.
 #![allow(missing_docs)]
 
