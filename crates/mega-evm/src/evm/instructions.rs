@@ -13,7 +13,9 @@ use revm::{
         as_usize_or_fail, gas, gas_or_fail,
         instructions::{self, control, utility::IntoAddress},
         interpreter::EthInterpreter,
-        interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
+        interpreter_types::{
+            Immediates, InputsTr, Jumps, LoopControl, MemoryTr, RuntimeFlag, StackTr,
+        },
         resize_memory, CallScheme, FrameInput, Instruction, InstructionContext, InstructionResult,
         InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
@@ -1726,7 +1728,22 @@ pub mod compute_gas_ext {
     }
 
     wrap_op_compute_gas!(stop, "STOP", instructions::control::stop);
-    wrap_op_compute_gas!(add, "ADD", instructions::arithmetic::add);
+    /// `ADD` opcode with compute gas tracking.
+    #[inline]
+    pub fn add<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        gas!(context.interpreter, gas::VERYLOW);
+
+        let Some(([op1], op2)) = context.interpreter.stack.popn_top() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        *op2 = op1.wrapping_add(*op2);
+
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        compute_gas!(context.interpreter, additional_limit, gas::VERYLOW);
+    }
     wrap_op_compute_gas!(mul, "MUL", instructions::arithmetic::mul);
     wrap_op_compute_gas!(sub, "SUB", instructions::arithmetic::sub);
     wrap_op_compute_gas!(div, "DIV", instructions::arithmetic::div);
@@ -1785,7 +1802,24 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(blobhash, "BLOBHASH", instructions::tx_info::blob_hash);
     wrap_op_compute_gas!(blobbasefee, "BLOBBASEFEE", instructions::block_info::blob_basefee);
 
-    wrap_op_compute_gas!(pop, "POP", instructions::stack::pop);
+    /// `POP` opcode with compute gas tracking.
+    #[inline]
+    pub fn pop<WIRE: InterpreterTypes<Stack: StackInspectTr>, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let gas_before = context.interpreter.gas.remaining();
+
+        gas!(context.interpreter, gas::BASE);
+        if !context.interpreter.stack.discard_top() {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        }
+
+        let gas_used = gas::BASE;
+        debug_assert_eq!(gas_before.saturating_sub(context.interpreter.gas.remaining()), gas_used);
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        compute_gas!(context.interpreter, additional_limit, gas_used);
+    }
     wrap_op_compute_gas!(mload, "MLOAD", instructions::memory::mload);
     wrap_op_compute_gas!(mstore, "MSTORE", instructions::memory::mstore);
     wrap_op_compute_gas!(mstore8, "MSTORE8", instructions::memory::mstore8);
@@ -1802,7 +1836,24 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(mcopy, "MCOPY", instructions::memory::mcopy);
 
     wrap_op_compute_gas!(push0, "PUSH0", instructions::stack::push0);
-    wrap_op_compute_gas!(push1, "PUSH1", instructions::stack::push::<1, _, _>);
+    /// `PUSH1` opcode with compute gas tracking.
+    #[inline]
+    pub fn push1<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        gas!(context.interpreter, gas::VERYLOW);
+
+        let value = U256::from(context.interpreter.bytecode.read_u8());
+        if !context.interpreter.stack.push(value) {
+            context.interpreter.halt(InstructionResult::StackOverflow);
+            return;
+        }
+
+        context.interpreter.bytecode.relative_jump(1);
+
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        compute_gas!(context.interpreter, additional_limit, gas::VERYLOW);
+    }
     wrap_op_compute_gas!(push2, "PUSH2", instructions::stack::push::<2, _, _>);
     wrap_op_compute_gas!(push3, "PUSH3", instructions::stack::push::<3, _, _>);
     wrap_op_compute_gas!(push4, "PUSH4", instructions::stack::push::<4, _, _>);
@@ -1916,6 +1967,10 @@ pub trait StackInspectTr {
     /// Inspect the N-th element of the stack. The top of the stack is the 0-th element.
     /// If the stack is too short, return None.
     fn inspect<const N: usize>(&self) -> Option<U256>;
+
+    /// Discard the top element of the stack.
+    /// Returns false if the stack is empty.
+    fn discard_top(&mut self) -> bool;
 }
 
 impl StackInspectTr for Stack {
@@ -1926,5 +1981,18 @@ impl StackInspectTr for Stack {
         let index = self.len() - 1 - N;
         // SAFETY: the index must be within the bounds of the stack
         Some(unsafe { *self.data().get_unchecked(index) })
+    }
+
+    fn discard_top(&mut self) -> bool {
+        let len = self.len();
+        if len == 0 {
+            return false;
+        }
+        debug_assert!(self.len() > 0);
+        // SAFETY: the stack is non-empty and U256 does not need drop glue.
+        unsafe {
+            self.data_mut().set_len(len - 1);
+        }
+        true
     }
 }

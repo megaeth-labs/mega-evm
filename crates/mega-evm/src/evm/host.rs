@@ -74,11 +74,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         self.inner.blob_hash(number)
     }
 
+    #[inline]
+    fn log(&mut self, log: Log) {
+        debug_assert!(self.inner.journaled_state.depth() > 0);
+        self.inner.journaled_state.logs.push(log);
+    }
+
     delegate! {
         to self.inner {
             fn chain_id(&self) -> U256;
             fn effective_gas_price(&self) -> U256;
-            fn log(&mut self, log: Log);
             fn caller(&self) -> Address;
             fn max_initcode_size(&self) -> usize;
             fn sstore(
