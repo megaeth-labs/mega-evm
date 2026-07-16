@@ -56,7 +56,7 @@ use tracing::{error, warn};
 
 use crate::{
     constants, mark_frame_result_as_exceeding_limit, AdditionalLimit, EvmTxRuntimeLimits,
-    ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitUsage, MegaContext, MegaEvm,
+    ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm,
     MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit, VolatileDataAccess,
     SANDBOX_TX_SOURCE_HASH,
 };
@@ -179,23 +179,46 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     if ctx.spec.is_enabled(MegaSpecId::REX3) {
         let mut limit = ctx.additional_limit.borrow_mut();
         if !limit.record_compute_gas(cost) {
-            let crate::LimitCheck::ExceedsLimit { limit, used, frame_local, .. } =
-                limit.compute_gas.check_limit()
-            else {
-                unreachable!()
-            };
-            return if frame_local {
-                // Frame-local: revert; gas returns to caller.
-                make_error!(KeylessDeployError::InsufficientComputeGas { limit, used })
-            } else {
-                // TX-level: halt with OOG, marked as exceeding.
-                let mut result = make_halt!();
-                mark_frame_result_as_exceeding_limit(
-                    &mut result,
-                    crate::AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
-                    Default::default(),
-                );
-                result
+            // `record_compute_gas` returns false on ANY latched dimension, not just
+            // compute. Pre-REX4 has no `frame_result_if_exceeding_limit` guard before
+            // interceptor dispatch, so an intrinsic non-compute overflow from
+            // `before_tx_start` surfaces here; use the aggregate `check_limit()` (the
+            // old compute-only check returned `WithinLimit` and hit `unreachable!()`).
+            return match limit.check_limit() {
+                LimitCheck::ExceedsLimit {
+                    kind: LimitKind::ComputeGas,
+                    limit: compute_gas_limit,
+                    used,
+                    frame_local: true,
+                } => {
+                    // Frame-local: revert; gas returns to caller.
+                    make_error!(KeylessDeployError::InsufficientComputeGas {
+                        limit: compute_gas_limit,
+                        used,
+                    })
+                }
+                LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, .. } => {
+                    // TX-level compute: preserve frozen behavior (halt, no rescue).
+                    let mut result = make_halt!();
+                    mark_frame_result_as_exceeding_limit(
+                        &mut result,
+                        crate::AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+                        Default::default(),
+                    );
+                    result
+                }
+                _ => {
+                    // TX-level non-compute: rescue gas here, since the interceptor
+                    // short-circuit skips `after_frame_run`'s rescue.
+                    limit.rescue_gas(&gas);
+                    let mut result = make_halt!();
+                    mark_frame_result_as_exceeding_limit(
+                        &mut result,
+                        crate::AdditionalLimit::EXCEEDING_LIMIT_INSTRUCTION_RESULT,
+                        Default::default(),
+                    );
+                    result
+                }
             };
         }
     }
