@@ -400,6 +400,28 @@ mod tests {
     }
 
     #[test]
+    fn test_kzg_precompile_equivalence_does_not_record_compute_gas() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::EQUIVALENCE);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::EQUIVALENCE).precompiles(),
+        );
+        let inputs = generate_kzg_test_input();
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+
+        let result = precompiles_map.run(&mut context, &address, &inputs, true, 200_000);
+        assert!(result.is_ok(), "Precompile should succeed with sufficient gas");
+        let output = result.unwrap().unwrap();
+        assert!(matches!(output.result, InstructionResult::Return), "Result should be Return");
+        assert!(output.gas.spent() > 0, "successful EQUIVALENCE precompile should consume gas");
+        assert_eq!(
+            context.additional_limit.borrow().get_usage().compute_gas,
+            0,
+            "EQUIVALENCE must not record precompile compute gas; widening the MINI_REX gate would break replay",
+        );
+    }
+
+    #[test]
     fn test_set_spec_preserves_mega_kzg_override() {
         let mut db = MemoryDatabase::default();
         let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX);
