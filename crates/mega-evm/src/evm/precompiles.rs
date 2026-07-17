@@ -253,9 +253,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             //   wrapper's pre-check itself OOG'd before verification could run): revm did not call
             //   `record_cost`, so `spent() == 0`. The parent still permanently loses the forwarded
             //   amount, so record `limit()` to match the EVM-gas burn.
-            if is_rex5_enabled {
-                context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
-            } else if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+            if context.spec.is_enabled(MegaSpecId::MINI_REX) {
                 context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
             }
             output
