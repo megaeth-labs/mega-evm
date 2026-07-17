@@ -1683,10 +1683,6 @@ pub mod compute_gas_ext {
             resize_memory!(context.interpreter, offset, len);
             Bytes::copy_from_slice(context.interpreter.memory.slice_len(offset, len).as_ref())
         };
-        if context.interpreter.stack.len() < N {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        }
         let Some(topics) = context.interpreter.stack.popn::<N>() else {
             context.interpreter.halt(InstructionResult::StackUnderflow);
             return;

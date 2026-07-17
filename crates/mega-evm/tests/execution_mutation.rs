@@ -1,5 +1,6 @@
 //! Focused mutation-killing regression tests for `evm/execution.rs`.
 
+use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
@@ -22,6 +23,8 @@ use revm::{
 const CALLER: Address = address!("0000000000000000000000000000000000700000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000700001");
 const INSPECT_TARGET: Address = address!("0000000000000000000000000000000000700002");
+const EIP7702_AUTHORITY: Address = address!("0000000000000000000000000000000000700010");
+const EIP7702_DELEGATE: Address = address!("0000000000000000000000000000000000700011");
 const GAS_LIMIT: u64 = 100_000;
 const REFUND_SLOTS: u64 = 4;
 
@@ -89,6 +92,23 @@ fn make_refund_tx(is_deposit: bool) -> MegaTransaction {
     if is_deposit {
         tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     }
+    tx.enveloped_tx = Some(Bytes::new());
+    tx
+}
+
+fn make_eip7702_tx() -> MegaTransaction {
+    let authorization_list = vec![RecoveredAuthorization::new_unchecked(
+        Authorization { chain_id: U256::from(1_u64), address: EIP7702_DELEGATE, nonce: 0 },
+        RecoveredAuthority::Valid(EIP7702_AUTHORITY),
+    )];
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CONTRACT)
+        .gas_limit(200_000)
+        .gas_price(0)
+        .authorization_list_recovered(authorization_list)
+        .build_fill();
+    let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -165,6 +185,36 @@ fn test_deposit_refund_matches_regular_tx_under_isthmus() {
     assert_eq!(
         normal_refunded, deposit_refunded,
         "under ISTHMUS/REGOLITH, deposit transactions must preserve the same final gas refund as regular transactions",
+    );
+}
+
+#[test]
+fn test_eip7702_existing_authority_records_final_refund() {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_u64))
+        .account_balance(CONTRACT, U256::from(1_u64))
+        .account_balance(EIP7702_AUTHORITY, U256::from(1_u64));
+
+    let result = transact(MegaSpecId::REX5, &mut db, make_eip7702_tx());
+    assert!(result.result.is_success(), "EIP-7702 transaction should succeed: {:?}", result.result);
+
+    let revm::context::result::ExecutionResult::Success { gas_refunded, .. } = &result.result
+    else {
+        panic!("expected success result");
+    };
+    assert!(
+        *gas_refunded > 0,
+        "existing authorities in a valid EIP-7702 auth list must contribute a non-zero final refund; otherwise the post_execution refund branch becomes unobservable",
+    );
+
+    let authority_account = result
+        .state
+        .get(&EIP7702_AUTHORITY)
+        .expect("authority should be updated by auth processing");
+    assert_eq!(authority_account.info.nonce, 1, "successful auth should increment authority nonce");
+    assert!(
+        authority_account.info.code.as_ref().is_some_and(|code| code.is_eip7702()),
+        "successful auth should install EIP-7702 bytecode",
     );
 }
 
