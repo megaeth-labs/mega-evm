@@ -19,7 +19,7 @@ use revm::{
     context::Cfg,
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
-    interpreter::{Gas, InputsImpl, InterpreterResult},
+    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     precompile::Precompiles,
     primitives::{Address, HashMap},
 };
@@ -210,7 +210,30 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             // precompiles do not allocate from `Gas::memory` — memory expansion is
             // the caller-interpreter's responsibility and is settled before the
             // precompile is invoked.
-            if is_rex5_enabled && output.result.is_ok_or_revert() {
+            if is_rex5_enabled && !output.result.is_ok_or_revert() {
+                let compute_gas = if address == &kzg_point_evaluation::ADDRESS &&
+                    output.gas.limit() >= kzg_point_evaluation::GAS_COST
+                {
+                    // KZG with the wrapper's `gas_limit < GAS_COST` pre-check passed: upstream
+                    // verification ran and returned a non-OOG error
+                    // (`BlobInvalidInputLength` / `BlobMismatchedVersion` /
+                    // `BlobVerifyKzgProofFailed`). Charge the fixed cost regardless of which
+                    // error variant fired. Using the structural predicate
+                    // (`limit() >= GAS_COST`) instead of an error-variant match keeps this arm
+                    // robust against upstream KZG adding new non-OOG variants.
+                    kzg_point_evaluation::GAS_COST
+                } else {
+                    output.gas.limit()
+                };
+                context.additional_limit.borrow_mut().record_compute_gas(compute_gas);
+                return output;
+            }
+
+            if is_rex5_enabled {
+                debug_assert!(matches!(
+                    output.result,
+                    InstructionResult::Return | InstructionResult::Revert
+                ));
                 let spent = output.gas.spent();
                 let refunded = output.gas.refunded();
                 let mut normalized = Gas::new(gas_limit);
@@ -231,23 +254,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             //   `record_cost`, so `spent() == 0`. The parent still permanently loses the forwarded
             //   amount, so record `limit()` to match the EVM-gas burn.
             if is_rex5_enabled {
-                let compute_gas = if output.result.is_ok_or_revert() {
-                    output.gas.spent()
-                } else if address == &kzg_point_evaluation::ADDRESS &&
-                    output.gas.limit() >= kzg_point_evaluation::GAS_COST
-                {
-                    // KZG with the wrapper's `gas_limit < GAS_COST` pre-check passed: upstream
-                    // verification ran and returned a non-OOG error
-                    // (`BlobInvalidInputLength` / `BlobMismatchedVersion` /
-                    // `BlobVerifyKzgProofFailed`). Charge the fixed cost regardless of which
-                    // error variant fired. Using the structural predicate
-                    // (`limit() >= GAS_COST`) instead of an error-variant match keeps this arm
-                    // robust against upstream KZG adding new non-OOG variants.
-                    kzg_point_evaluation::GAS_COST
-                } else {
-                    output.gas.limit()
-                };
-                context.additional_limit.borrow_mut().record_compute_gas(compute_gas);
+                context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
             } else if context.spec.is_enabled(MegaSpecId::MINI_REX) {
                 context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
             }
