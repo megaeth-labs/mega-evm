@@ -23,6 +23,7 @@ const CALLER: Address = address!("0000000000000000000000000000000000700000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000700001");
 const INSPECT_TARGET: Address = address!("0000000000000000000000000000000000700002");
 const GAS_LIMIT: u64 = 100_000;
+const REFUND_SLOTS: u64 = 4;
 
 #[derive(Default)]
 struct AlwaysInterceptInspector {
@@ -70,7 +71,11 @@ fn transact(
 }
 
 fn refund_contract_code() -> Bytes {
-    BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).stop().build()
+    let mut builder = BytecodeBuilder::default();
+    for slot in 0..REFUND_SLOTS {
+        builder = builder.sstore(U256::from(slot), U256::ZERO);
+    }
+    builder.stop().build()
 }
 
 fn make_refund_tx(is_deposit: bool) -> MegaTransaction {
@@ -110,26 +115,56 @@ fn make_call_frame_init(depth: usize) -> FrameInit {
 fn test_deposit_refund_matches_regular_tx_under_isthmus() {
     let mut normal_db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000_u64))
-        .account_code(CONTRACT, refund_contract_code())
-        .account_storage(CONTRACT, U256::ZERO, U256::from(1_u64));
+        .account_code(CONTRACT, refund_contract_code());
+    for slot in 0..REFUND_SLOTS {
+        normal_db = normal_db.account_storage(CONTRACT, U256::from(slot), U256::from(1_u64));
+    }
     let normal = transact(MegaSpecId::REX4, &mut normal_db, make_refund_tx(false));
     assert!(normal.result.is_success(), "regular transaction should succeed: {:?}", normal.result);
+    let revm::context::result::ExecutionResult::Success {
+        gas_refunded: normal_refunded,
+        gas_used: normal_used,
+        ..
+    } = &normal.result
+    else {
+        panic!("expected success result");
+    };
 
     let mut deposit_db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000_u64))
-        .account_code(CONTRACT, refund_contract_code())
-        .account_storage(CONTRACT, U256::ZERO, U256::from(1_u64));
+        .account_code(CONTRACT, refund_contract_code());
+    for slot in 0..REFUND_SLOTS {
+        deposit_db = deposit_db.account_storage(CONTRACT, U256::from(slot), U256::from(1_u64));
+    }
     let deposit = transact(MegaSpecId::REX4, &mut deposit_db, make_refund_tx(true));
     assert!(
         deposit.result.is_success(),
         "deposit transaction should succeed: {:?}",
         deposit.result
     );
-
+    let revm::context::result::ExecutionResult::Success {
+        gas_refunded: deposit_refunded,
+        gas_used: deposit_used,
+        ..
+    } = &deposit.result
+    else {
+        panic!("expected success result");
+    };
     assert_eq!(
-        normal.result.gas_used(),
-        deposit.result.gas_used(),
+        normal_used, deposit_used,
         "all Mega specs map to OpSpecId::ISTHMUS, so REGOLITH refund rules must apply equally to deposit and regular transactions",
+    );
+    assert!(
+        *normal_refunded > 0,
+        "the SSTORE clear path must produce a non-zero refund so the branch stays observable",
+    );
+    assert!(
+        *normal_refunded < REFUND_SLOTS * 4_800,
+        "the multi-slot clear must hit the London refund cap; otherwise skipping set_final_refund stays observationally identical",
+    );
+    assert_eq!(
+        normal_refunded, deposit_refunded,
+        "under ISTHMUS/REGOLITH, deposit transactions must preserve the same final gas refund as regular transactions",
     );
 }
 
