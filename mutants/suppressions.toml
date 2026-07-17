@@ -218,6 +218,31 @@ mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u32 w
 justification = "Dead/unreachable from the public API: same as write_u8 — write_u32 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
+# --- REX5 implies every earlier MegaSpecId gate (equivalent) ----------------------
+#
+# The debug assertion in `frame_init` intentionally pins the architectural invariant that REX5
+# implies REX3, because Rex3 introduced the SLOAD-based oracle detection that makes the old
+# CALL-based path unreachable. Replacing that check with REX2 or REX4 cannot change observable
+# behavior: `MegaSpecId::is_enabled` is monotonic across the linear progression
+# EQUIVALENCE -> MINI_REX -> REX -> REX1 -> REX2 -> REX3 -> REX4 -> REX5, so a REX5 context also
+# satisfies both earlier predicates. These mutants therefore only weaken or strengthen a debug-only
+# proof without affecting any reachable runtime path.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+mutant = "spec-gate self.ctx().spec.is_enabled(MegaSpecId::REX3), -> self.ctx().spec.is_enabled(MegaSpecId::REX2),"
+justification = "Equivalent: MegaSpecId gates are monotonic in the linear spec progression, so every REX5 context also satisfies is_enabled(REX2). The mutated debug_assert checks a weaker predicate but cannot change any runtime behavior or observable outcome."
+reviewer = "address-review-feedback"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+mutant = "spec-gate self.ctx().spec.is_enabled(MegaSpecId::REX3), -> self.ctx().spec.is_enabled(MegaSpecId::REX4),"
+justification = "Equivalent: MegaSpecId gates are monotonic in the linear spec progression, so every REX5 context also satisfies is_enabled(REX4). The mutated debug_assert checks a different-but-still-always-true invariant under REX5 and cannot affect runtime behavior."
+reviewer = "address-review-feedback"
+
 [[suppress]]
 kind = "line"
 category = "dead"

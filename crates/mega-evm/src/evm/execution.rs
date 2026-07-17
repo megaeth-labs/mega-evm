@@ -257,8 +257,7 @@ where
     }
 }
 
-impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes>
-    MegaHandler<EVM, ERROR, FRAME>
+impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes> MegaHandler<EVM, ERROR, FRAME>
 where
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
     ERROR: EvmTrError<EVM>
@@ -1250,14 +1249,12 @@ where
                     return Ok(ItemOrResult::Result(frame_result));
                 }
             }
-            // (2) REX5+: enforce CALL_STACK_LIMIT for Call/StaticCall so an inspector
+            // (2) REX5+: enforce CALL_STACK_LIMIT for all call schemes so an inspector
             // cannot deliver a synthetic call result at unbounded depth, mirroring the
             // protection added to `frame_init` before interceptor dispatch.
             if is_rex5_enabled {
                 if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                    if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
-                        frame_init.depth > CALL_STACK_LIMIT as usize
-                    {
+                    if frame_init.depth > CALL_STACK_LIMIT as usize {
                         let mut frame_result = gen_call_too_deep_result(call_inputs);
                         ctx.additional_limit.borrow_mut().push_empty_frame();
                         frame_end(ctx, inspector, &frame_init.frame_input, &mut frame_result);

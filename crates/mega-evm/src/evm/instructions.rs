@@ -5,7 +5,7 @@ use crate::{
     ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
-use alloy_primitives::{keccak256, B256, Bytes, Log, U256};
+use alloy_primitives::{keccak256, Bytes, Log, B256, U256};
 use revm::{
     context::ContextTr,
     handler::instructions::{EthInstructions, InstructionProvider},
@@ -1661,11 +1661,7 @@ pub mod compute_gas_ext {
     /// This mirrors revm's LOG implementation, but uses `Log::new_unchecked` because this module
     /// only wires it for LOG0..LOG4.
     #[inline]
-    fn log_unchecked<
-        const N: usize,
-        WIRE: InterpreterTypes,
-        H: HostExt + ?Sized,
-    >(
+    fn log_unchecked<const N: usize, WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
     ) {
         debug_assert!(N <= 4);
@@ -2035,7 +2031,7 @@ impl StackInspectTr for Stack {
         if len == 0 {
             return false;
         }
-        debug_assert!(self.len() > 0);
+        debug_assert!(!self.is_empty());
         // SAFETY: the stack is non-empty and U256 does not need drop glue.
         unsafe {
             self.data_mut().set_len(len - 1);
