@@ -200,6 +200,40 @@ fn test_log_topic_underflow_halts_after_offset_and_len_are_present() {
 }
 
 #[test]
+fn test_log_len_overflow_halts_with_invalid_operand_oog() {
+    let bytecode = BytecodeBuilder::default()
+        .push_u256(U256::MAX)
+        .push_number(0u8)
+        .append(LOG0)
+        .append(STOP)
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    let result = transact_code(&mut db, CONTRACT).unwrap();
+    assert_halt(&result.result);
+}
+
+#[test]
+fn test_log_offset_overflow_halts_with_invalid_operand_oog() {
+    let bytecode = BytecodeBuilder::default()
+        .push_number(1u8)
+        .push_u256(U256::MAX)
+        .append(LOG0)
+        .append(STOP)
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    let result = transact_code(&mut db, CONTRACT).unwrap();
+    assert_halt(&result.result);
+}
+
+#[test]
 fn test_log_staticcall_halts_without_emitting_logs() {
     let target_code = build_log_contract(0);
     let caller_code = BytecodeBuilder::default()

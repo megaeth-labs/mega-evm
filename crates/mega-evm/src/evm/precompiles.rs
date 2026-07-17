@@ -286,7 +286,7 @@ mod tests {
         test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId,
     };
     use alloy_evm::precompiles::PrecompilesMap;
-    use alloy_primitives::Bytes;
+    use alloy_primitives::{address, Bytes};
     use core::cell::RefCell;
     use revm::{
         handler::PrecompileProvider,
@@ -336,6 +336,17 @@ mod tests {
         buf[last] ^= 0x01;
         inputs.input = revm::interpreter::CallInput::Bytes(Bytes::from(buf));
         inputs
+    }
+
+    fn generate_invalid_blake2f_input() -> InputsImpl {
+        let address = address!("0000000000000000000000000000000000000009");
+        InputsImpl {
+            target_address: address,
+            bytecode_address: Some(address),
+            caller_address: address,
+            input: revm::interpreter::CallInput::Bytes(Bytes::from(vec![0xff])),
+            call_value: Default::default(),
+        }
     }
 
     fn set_spec_for_context<DB: alloy_evm::Database, ExtEnvs: crate::ExternalEnvTypes>(
@@ -633,6 +644,25 @@ mod tests {
             "at the exact-cap boundary on a verification failure, the recorded \
              compute-gas must equal GAS_COST"
         );
+    }
+
+    #[test]
+    fn test_rex5_non_kzg_precompile_error_records_forwarded_limit() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX5).precompiles(),
+        );
+        let inputs = generate_invalid_blake2f_input();
+        let address = address!("0000000000000000000000000000000000000009");
+        let forwarded_gas = 50_000u64;
+
+        let result = precompiles_map.run(&mut context, &address, &inputs, true, forwarded_gas);
+        let output = result.expect("run ok").expect("Some output");
+        assert!(matches!(output.result, InstructionResult::PrecompileError));
+        assert_eq!(output.gas.limit(), forwarded_gas);
+        assert_eq!(output.gas.spent(), 0);
+        assert_eq!(context.additional_limit.borrow().get_usage().compute_gas, forwarded_gas);
     }
 
     /// End-to-end verification that the REX5+ `Gas` normalization on `PrecompileOOG` does NOT
