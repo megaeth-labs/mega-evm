@@ -33,12 +33,12 @@ Since: [Rex4](../upgrades/rex4.md)
 
 Code hash: `0x96d0f3ba6b474e9684a97e4388ec8dbb7929818b51e6b4f19f885ccbdf642f9b`
 
-Deployed bytecode: `0x60806040526004361061003e...` ([full bytecode](../static/bytecode/MegaAccessControl-1.0.0.txt)).
+Deployed bytecode: `0x60806040526004361061003e...` (full bytecode: [`MegaAccessControl-1.0.0.json`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/artifacts/MegaAccessControl-1.0.0.json), `deployedBytecode` field).
 
 To verify the code hash, from the repository root:
 
 ```bash
-cast keccak $(cat docs/spec/static/bytecode/MegaAccessControl-1.0.0.txt)
+cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/MegaAccessControl-1.0.0.json)
 ```
 
 ### Interface

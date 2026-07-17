@@ -40,7 +40,7 @@ System contracts MUST be available at their specified addresses when the corresp
 Their availability is gated by [spec](../hardfork-spec.md) activation.
 
 The code hash stated on each contract page is the normative identity of that contract version.
-The full deployed bytecode of each version is published as a static file linked from that contract page.
+The artifact JSON linked on each page is the canonical source of the full deployed bytecode.
 
 ### Call Interception
 
