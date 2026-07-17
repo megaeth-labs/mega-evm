@@ -342,3 +342,76 @@ fn test_rex5_inspect_frame_init_depth_guard_overrides_callcode_inspector() {
     assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
     assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");
 }
+
+#[test]
+fn test_rex5_inspect_frame_init_depth_guard_overrides_delegatecall_inspector() {
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+
+    let target = address!("0000000000000000000000000000000000300003");
+    let frame_init = make_call_frame_init(
+        target,
+        [0u8; 4],
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::DelegateCall,
+    );
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::CallTooDeep,
+        "depth guard must override inspector output for DELEGATECALL too",
+    );
+
+    let insp = evm.inspector();
+    assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
+    assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");
+}
+
+#[test]
+fn test_rex5_inspect_frame_init_exceeded_tx_limit_wins_over_call_too_deep() {
+    use mega_evm::{AdditionalLimit, EvmTxRuntimeLimits, LimitCheck, LimitKind};
+    use std::{cell::RefCell, rc::Rc};
+
+    let mut db = MemoryDatabase::default();
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let mut additional =
+        AdditionalLimit::new(MegaSpecId::REX5, EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5));
+    additional.has_exceeded_limit = LimitCheck::ExceedsLimit {
+        kind: LimitKind::KVUpdate,
+        limit: 0,
+        used: 1,
+        frame_local: false,
+    };
+    context.additional_limit = Rc::new(RefCell::new(additional));
+
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+    let frame_init = make_call_frame_init(
+        address!("0000000000000000000000000000000000300004"),
+        [0u8; 4],
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::Call,
+    );
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::OutOfGas,
+        "inspect_frame_init must preserve exceeded-limit priority over CallTooDeep",
+    );
+
+    let insp = evm.inspector();
+    assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
+    assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");
+}

@@ -58,6 +58,15 @@ fn build_log_contract(topic_count: usize) -> Bytes {
         .build()
 }
 
+fn build_zero_length_log_contract(topic_count: usize) -> Bytes {
+    let mut builder = BytecodeBuilder::default();
+    for i in 0..topic_count {
+        builder = builder.push_number((0x20 + i) as u8);
+    }
+
+    builder.push_number(0u8).push_number(0u8).append(LOG0 + topic_count as u8).append(STOP).build()
+}
+
 #[test]
 fn test_push1_add_pop_success_paths_execute() {
     let bytecode = BytecodeBuilder::default()
@@ -147,8 +156,40 @@ fn test_log_variants_emit_expected_topic_counts() {
 }
 
 #[test]
+fn test_log_zero_length_uses_empty_data_branch() {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, build_zero_length_log_contract(1));
+
+    let result = transact_code(&mut db, CONTRACT).unwrap();
+    assert!(result.result.is_success(), "expected success, got {:?}", result.result);
+
+    let logs = result.result.logs();
+    assert_eq!(logs.len(), 1, "expected exactly one zero-length log");
+    assert_eq!(logs[0].data.data.as_ref(), &[0u8; 0], "zero-length log should have empty data",);
+    assert_eq!(logs[0].data.topics().len(), 1, "LOG1 should retain its topic");
+}
+
+#[test]
 fn test_log_stack_underflow_halts() {
     let bytecode = BytecodeBuilder::default().append(PUSH0).append(LOG1).append(STOP).build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(CONTRACT, bytecode);
+
+    let result = transact_code(&mut db, CONTRACT).unwrap();
+    assert_halt(&result.result);
+}
+
+#[test]
+fn test_log_topic_underflow_halts_after_offset_and_len_are_present() {
+    let bytecode = BytecodeBuilder::default()
+        .push_number(0u8)
+        .push_number(0u8)
+        .append(LOG1)
+        .append(STOP)
+        .build();
 
     let mut db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(1_000_000))
