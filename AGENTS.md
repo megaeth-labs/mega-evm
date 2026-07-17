@@ -177,6 +177,7 @@ Key design aspects:
 
 - Solidity sources in `crates/system-contracts/contracts/`, compiled by Foundry, with Rust ABI bindings generated via `alloy-sol-types`.
 - Bytecode is versioned and hash-verified at build time (`crates/system-contracts/build.rs`).
+  Each version's full deployed bytecode is also published as `docs/spec/static/bytecode/<Contract>-<version>.txt`, kept 1:1 with the versioned artifacts by the `docs_bytecode_consistency` test in `mega-system-contracts`.
 - The **MEGA_SYSTEM_ADDRESS** can call whitelisted system contracts as deposit-like transactions — no signature or fee required.
   This is how the sequencer updates oracle storage.
 - **Any system contract modification requires a new spec** to preserve backward compatibility.

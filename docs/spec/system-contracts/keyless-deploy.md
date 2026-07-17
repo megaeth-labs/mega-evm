@@ -31,12 +31,12 @@ Since: [Rex2](../upgrades/rex2.md)
 
 Code hash: `0x55020d41649acf7a84add6e628b887f802218d9ac86f142ef0994da43ea5eeb6`
 
-Deployed bytecode: `0x608060405234801561000f57...` (full bytecode: [`KeylessDeploy-1.0.0.json`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/artifacts/KeylessDeploy-1.0.0.json), `deployedBytecode` field).
+Deployed bytecode: `0x608060405234801561000f57...` ([full bytecode](../static/bytecode/KeylessDeploy-1.0.0.txt)).
 
-To verify the code hash:
+To verify the code hash, from the repository root:
 
 ```bash
-cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/KeylessDeploy-1.0.0.json)
+cast keccak $(cat docs/spec/static/bytecode/KeylessDeploy-1.0.0.txt)
 ```
 
 ### Interception Scope

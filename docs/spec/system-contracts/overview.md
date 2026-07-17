@@ -39,6 +39,9 @@ A node MUST recognize the following contracts as system contracts:
 System contracts MUST be available at their specified addresses when the corresponding spec is active.
 Their availability is gated by [spec](../hardfork-spec.md) activation.
 
+The code hash stated on each contract page is the normative identity of that contract version.
+The full deployed bytecode of each version is published as a static file linked from that contract page.
+
 ### Call Interception
 
 Some system-contract functions are handled at the EVM level rather than exclusively by contract bytecode.

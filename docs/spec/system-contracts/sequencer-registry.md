@@ -36,12 +36,12 @@ Since: [Rex5](../upgrades/rex5.md)
 
 Code hash: `0x63cd411a379be1c198613ef1d15c3058e7b0db4a5d07d4bcf07014af90040315`
 
-Deployed bytecode: `0x608060405234801561000f57...` (full bytecode: [`SequencerRegistry-1.0.0.json`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/artifacts/SequencerRegistry-1.0.0.json), `deployedBytecode` field).
+Deployed bytecode: `0x608060405234801561000f57...` ([full bytecode](../static/bytecode/SequencerRegistry-1.0.0.txt)).
 
-To verify the code hash:
+To verify the code hash, from the repository root:
 
 ```bash
-cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/SequencerRegistry-1.0.0.json)
+cast keccak $(cat docs/spec/static/bytecode/SequencerRegistry-1.0.0.txt)
 ```
 
 A node MUST deploy the contract via raw state patch with initial storage seeded at deploy time.

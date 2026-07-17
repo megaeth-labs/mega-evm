@@ -113,6 +113,10 @@ Optional, if it helps orient readers.
 - **Do not invent guarantees.**
   The specification MUST NOT introduce constraints or behavioral rules that are not verified against the implementation.
   If uncertain, surface the ambiguity to the user rather than guessing.
+- **Publish full system-contract bytecode as static files.**
+  A system-contract page states each version's code hash inline (the normative identity) and links the full deployed bytecode as a relative link to `static/bytecode/<Contract>-<version>.txt`.
+  Do not inline full bytecode in pages and do not link to implementation-repo paths (e.g., `crates/...`) for it.
+  Every versioned artifact in `crates/system-contracts/artifacts/` must have a matching static file with identical content; the `docs_bytecode_consistency` test in `mega-system-contracts` enforces this 1:1 correspondence.
 
 ## Tone & Language
 

@@ -31,12 +31,12 @@ Since: [MiniRex](../upgrades/minirex.md)
 
 Code hash: `0xe9b044afb735a0f569faeb248088b4f267578f60722f87d06ec3867b250a2c34`
 
-Deployed bytecode: `0x608060405234801561000f57...` (full bytecode: [`Oracle-1.0.0.json`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/artifacts/Oracle-1.0.0.json), `deployedBytecode` field).
+Deployed bytecode: `0x608060405234801561000f57...` ([full bytecode](../static/bytecode/Oracle-1.0.0.txt)).
 
-To verify the code hash:
+To verify the code hash, from the repository root:
 
 ```bash
-cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/Oracle-1.0.0.json)
+cast keccak $(cat docs/spec/static/bytecode/Oracle-1.0.0.txt)
 ```
 
 #### Version 1.1.0
@@ -45,12 +45,12 @@ Since: [Rex2](../upgrades/rex2.md)
 
 Code hash: `0x06df675a69e53ea2a3c948521e330b3801740fede324a1cef2044418f8e09242`
 
-Deployed bytecode: `0x608060405234801561000f57...` (full bytecode: [`Oracle-1.1.0.json`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/artifacts/Oracle-1.1.0.json), `deployedBytecode` field).
+Deployed bytecode: `0x608060405234801561000f57...` ([full bytecode](../static/bytecode/Oracle-1.1.0.txt)).
 
-To verify the code hash:
+To verify the code hash, from the repository root:
 
 ```bash
-cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/Oracle-1.1.0.json)
+cast keccak $(cat docs/spec/static/bytecode/Oracle-1.1.0.txt)
 ```
 
 #### Version 2.0.0
@@ -59,12 +59,12 @@ Since: [Rex5](../upgrades/rex5.md)
 
 Code hash: `0x71a65239db8d0f1bb765fad36e34f57600420d103a4401ef7555bd50b229dc55`
 
-Deployed bytecode: `0x608060405234801561000f57...` (full bytecode: [`Oracle-2.0.0.json`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/artifacts/Oracle-2.0.0.json), `deployedBytecode` field).
+Deployed bytecode: `0x608060405234801561000f57...` ([full bytecode](../static/bytecode/Oracle-2.0.0.txt)).
 
-To verify the code hash:
+To verify the code hash, from the repository root:
 
 ```bash
-cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/Oracle-2.0.0.json)
+cast keccak $(cat docs/spec/static/bytecode/Oracle-2.0.0.txt)
 ```
 
 The authorization check MUST read the authorized address from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) instead of a constructor `immutable`.
