@@ -70,35 +70,6 @@ pattern = "<impl TxRuntimeLimit for DataSizeTracker>::tx_limit"
 justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
-# --- execution.rs post_execution_without_eip7702_refund_work equivalents ----------
-#
-# Every reachable `MegaSpecId` maps to `OpSpecId::ISTHMUS` (`evm/spec.rs`), and ISTHMUS
-# already enables REGOLITH. At this call site:
-#
-#   let is_regolith = spec.is_enabled_in(OpSpecId::REGOLITH);
-#   if !is_deposit || is_regolith { ... }
-#
-# `is_regolith` is therefore always `true` for every reachable MegaEVM execution, so the
-# branch condition collapses to `true` regardless of the deposit bit. Mutating the
-# `tx_type() == DEPOSIT_TRANSACTION_TYPE` comparison or deleting the `!` cannot change
-# observable behavior today; the non-equivalent `|| -> &&` mutant remains unsuppressed and
-# is pinned by `tests/execution_mutation.rs`.
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "crates/mega-evm/src/evm/execution.rs"
-mutant = "replace == with != in MegaHandler<EVM, ERROR, FRAME>::post_execution_without_eip7702_refund_work"
-justification = "Equivalent for all reachable MegaEVM specs: every MegaSpecId maps to OpSpecId::ISTHMUS, and ISTHMUS enables REGOLITH. That makes `is_regolith` always true here, so the surrounding `if !is_deposit || is_regolith` branch is taken regardless of whether `tx_type() == DEPOSIT_TRANSACTION_TYPE` is true or false."
-reviewer = "engineer-agent"
-
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "crates/mega-evm/src/evm/execution.rs"
-mutant = "delete ! in MegaHandler<EVM, ERROR, FRAME>::post_execution_without_eip7702_refund_work"
-justification = "Equivalent for all reachable MegaEVM specs: every MegaSpecId maps to OpSpecId::ISTHMUS, and ISTHMUS enables REGOLITH. With `is_regolith` always true, both `!is_deposit || is_regolith` and `is_deposit || is_regolith` reduce to `true`, so deleting the negation cannot change behavior."
-reviewer = "engineer-agent"
-
 [[suppress]]
 kind = "function"
 category = "dead"

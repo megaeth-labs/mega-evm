@@ -275,16 +275,13 @@ where
         exec_result: &mut FRAME::FrameResult,
         init_and_floor_gas: InitialAndFloorGas,
     ) -> Result<(), ERROR> {
-        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let spec = evm.ctx().cfg().spec();
-        let is_regolith = spec.is_enabled_in(OpSpecId::REGOLITH);
 
-        // Match `OpHandler::refund` except for the no-op EIP-7702 refund addition.
-        if !is_deposit || is_regolith {
-            exec_result
-                .gas_mut()
-                .set_final_refund(spec.into_eth_spec().is_enabled_in(SpecId::LONDON));
-        }
+        // All reachable Mega specs map to ISTHMUS, which already includes REGOLITH.
+        // That makes the deposit special-case in OpHandler::refund unreachable here, so the
+        // only behavior difference from the full refund path is skipping record_refund(0).
+        debug_assert!(spec.is_enabled_in(OpSpecId::REGOLITH));
+        exec_result.gas_mut().set_final_refund(spec.into_eth_spec().is_enabled_in(SpecId::LONDON));
 
         self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
         self.reimburse_caller(evm, exec_result)?;
