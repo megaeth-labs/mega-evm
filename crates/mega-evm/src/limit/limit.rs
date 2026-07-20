@@ -728,6 +728,9 @@ impl AdditionalLimit {
         self.data_size.merge_persistent_usage(usage.data_size);
         self.kv_update.merge_persistent_usage(usage.kv_updates);
         self.state_growth.merge_persistent_usage(usage.state_growth);
+        // Self-latch any TX-level exceed, per the resource-limit protocol (like the
+        // sibling `record_oracle_hint_bytes` / `record_deposit_caller_creation`).
+        self.check_limit();
     }
 
     /// Hook called when an orginally zero storage slot is written non-zero value for the first time
