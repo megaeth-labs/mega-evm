@@ -64,7 +64,7 @@ A pending sequencer change scheduled under version 1.0.0 MUST still activate nor
 
 Deployed bytecode: `0x608060405234801561000f57...` (full bytecode: [`SequencerRegistry-2.0.0.json`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/artifacts/SequencerRegistry-2.0.0.json), `deployedBytecode` field).
 
-To verify the code hash:
+To verify the code hash, from the repository root:
 
 ```bash
 cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/SequencerRegistry-2.0.0.json)
