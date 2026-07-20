@@ -5,7 +5,7 @@ use crate::{
     ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId,
 };
 use alloy_evm::Database;
-use alloy_primitives::{keccak256, Bytes, U256};
+use alloy_primitives::{keccak256, Bytes, Log, B256, U256};
 use revm::{
     context::ContextTr,
     handler::instructions::{EthInstructions, InstructionProvider},
@@ -13,7 +13,9 @@ use revm::{
         as_usize_or_fail, gas, gas_or_fail,
         instructions::{self, control, utility::IntoAddress},
         interpreter::EthInterpreter,
-        interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
+        interpreter_types::{
+            Immediates, InputsTr, Jumps, LoopControl, MemoryTr, RuntimeFlag, StackTr,
+        },
         resize_memory, CallScheme, FrameInput, Instruction, InstructionContext, InstructionResult,
         InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
     },
@@ -1654,6 +1656,45 @@ pub mod storage_gas_ext {
 pub mod compute_gas_ext {
     use super::*;
 
+    /// LOG opcode leaf with compute gas charged by the surrounding wrapper.
+    ///
+    /// This mirrors revm's LOG implementation, but uses `Log::new_unchecked` because this module
+    /// only wires it for LOG0..LOG4.
+    #[inline]
+    fn log_unchecked<const N: usize, WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        debug_assert!(N <= 4);
+        if context.interpreter.runtime_flag.is_static() {
+            context.interpreter.halt(InstructionResult::StateChangeDuringStaticCall);
+            return;
+        }
+
+        let Some([offset, len]) = context.interpreter.stack.popn::<2>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        let len = as_usize_or_fail!(context.interpreter, len);
+        gas_or_fail!(context.interpreter, gas::log_cost(N as u8, len as u64));
+        let data = if len == 0 {
+            Bytes::new()
+        } else {
+            let offset = as_usize_or_fail!(context.interpreter, offset);
+            resize_memory!(context.interpreter, offset, len);
+            Bytes::copy_from_slice(context.interpreter.memory.slice_len(offset, len).as_ref())
+        };
+        let Some(topics) = context.interpreter.stack.popn::<N>() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+
+        context.host.log(Log::new_unchecked(
+            context.interpreter.input.target_address(),
+            topics.into_iter().map(B256::from).collect(),
+            data,
+        ));
+    }
+
     /// Macro to wrap the original instruction implementation with compute gas tracking.
     ///
     /// Two variants:
@@ -1726,7 +1767,22 @@ pub mod compute_gas_ext {
     }
 
     wrap_op_compute_gas!(stop, "STOP", instructions::control::stop);
-    wrap_op_compute_gas!(add, "ADD", instructions::arithmetic::add);
+    /// `ADD` opcode with compute gas tracking.
+    #[inline]
+    pub fn add<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        gas!(context.interpreter, gas::VERYLOW);
+
+        let Some(([op1], op2)) = context.interpreter.stack.popn_top() else {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        };
+        *op2 = op1.wrapping_add(*op2);
+
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        compute_gas!(context.interpreter, additional_limit, gas::VERYLOW);
+    }
     wrap_op_compute_gas!(mul, "MUL", instructions::arithmetic::mul);
     wrap_op_compute_gas!(sub, "SUB", instructions::arithmetic::sub);
     wrap_op_compute_gas!(div, "DIV", instructions::arithmetic::div);
@@ -1785,7 +1841,24 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(blobhash, "BLOBHASH", instructions::tx_info::blob_hash);
     wrap_op_compute_gas!(blobbasefee, "BLOBBASEFEE", instructions::block_info::blob_basefee);
 
-    wrap_op_compute_gas!(pop, "POP", instructions::stack::pop);
+    /// `POP` opcode with compute gas tracking.
+    #[inline]
+    pub fn pop<WIRE: InterpreterTypes<Stack: StackInspectTr>, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let gas_before = context.interpreter.gas.remaining();
+
+        gas!(context.interpreter, gas::BASE);
+        if !context.interpreter.stack.discard_top() {
+            context.interpreter.halt(InstructionResult::StackUnderflow);
+            return;
+        }
+
+        let gas_used = gas::BASE;
+        debug_assert_eq!(gas_before.saturating_sub(context.interpreter.gas.remaining()), gas_used);
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        compute_gas!(context.interpreter, additional_limit, gas_used);
+    }
     wrap_op_compute_gas!(mload, "MLOAD", instructions::memory::mload);
     wrap_op_compute_gas!(mstore, "MSTORE", instructions::memory::mstore);
     wrap_op_compute_gas!(mstore8, "MSTORE8", instructions::memory::mstore8);
@@ -1802,7 +1875,24 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(mcopy, "MCOPY", instructions::memory::mcopy);
 
     wrap_op_compute_gas!(push0, "PUSH0", instructions::stack::push0);
-    wrap_op_compute_gas!(push1, "PUSH1", instructions::stack::push::<1, _, _>);
+    /// `PUSH1` opcode with compute gas tracking.
+    #[inline]
+    pub fn push1<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        gas!(context.interpreter, gas::VERYLOW);
+
+        let value = U256::from(context.interpreter.bytecode.read_u8());
+        if !context.interpreter.stack.push(value) {
+            context.interpreter.halt(InstructionResult::StackOverflow);
+            return;
+        }
+
+        context.interpreter.bytecode.relative_jump(1);
+
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        compute_gas!(context.interpreter, additional_limit, gas::VERYLOW);
+    }
     wrap_op_compute_gas!(push2, "PUSH2", instructions::stack::push::<2, _, _>);
     wrap_op_compute_gas!(push3, "PUSH3", instructions::stack::push::<3, _, _>);
     wrap_op_compute_gas!(push4, "PUSH4", instructions::stack::push::<4, _, _>);
@@ -1869,11 +1959,11 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(swap15, "SWAP15", instructions::stack::swap::<15, _, _>);
     wrap_op_compute_gas!(swap16, "SWAP16", instructions::stack::swap::<16, _, _>);
 
-    wrap_op_compute_gas!(log0, "LOG0", instructions::host::log::<0, _>);
-    wrap_op_compute_gas!(log1, "LOG1", instructions::host::log::<1, _>);
-    wrap_op_compute_gas!(log2, "LOG2", instructions::host::log::<2, _>);
-    wrap_op_compute_gas!(log3, "LOG3", instructions::host::log::<3, _>);
-    wrap_op_compute_gas!(log4, "LOG4", instructions::host::log::<4, _>);
+    wrap_op_compute_gas!(log0, "LOG0", log_unchecked::<0, _, _>);
+    wrap_op_compute_gas!(log1, "LOG1", log_unchecked::<1, _, _>);
+    wrap_op_compute_gas!(log2, "LOG2", log_unchecked::<2, _, _>);
+    wrap_op_compute_gas!(log3, "LOG3", log_unchecked::<3, _, _>);
+    wrap_op_compute_gas!(log4, "LOG4", log_unchecked::<4, _, _>);
 
     wrap_op_compute_gas!(@frame create, "CREATE", instructions::contract::create::<_, false, _>);
     wrap_op_compute_gas!(@frame call, "CALL", instructions::contract::call);
@@ -1916,6 +2006,10 @@ pub trait StackInspectTr {
     /// Inspect the N-th element of the stack. The top of the stack is the 0-th element.
     /// If the stack is too short, return None.
     fn inspect<const N: usize>(&self) -> Option<U256>;
+
+    /// Discard the top element of the stack.
+    /// Returns false if the stack is empty.
+    fn discard_top(&mut self) -> bool;
 }
 
 impl StackInspectTr for Stack {
@@ -1926,5 +2020,18 @@ impl StackInspectTr for Stack {
         let index = self.len() - 1 - N;
         // SAFETY: the index must be within the bounds of the stack
         Some(unsafe { *self.data().get_unchecked(index) })
+    }
+
+    fn discard_top(&mut self) -> bool {
+        let len = self.len();
+        if len == 0 {
+            return false;
+        }
+        debug_assert!(!self.is_empty());
+        // SAFETY: the stack is non-empty and U256 does not need drop glue.
+        unsafe {
+            self.data_mut().set_len(len - 1);
+        }
+        true
     }
 }

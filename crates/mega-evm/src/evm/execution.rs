@@ -8,7 +8,7 @@ use delegate::delegate;
 use op_revm::{
     handler::{IsTxError, OpHandler},
     transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
-    OpHaltReason, OpTransactionError,
+    OpHaltReason, OpSpecId, OpTransactionError,
 };
 use revm::{
     context::{
@@ -33,7 +33,7 @@ use revm::{
         CallOutcome, CallScheme, CreateOutcome, FrameInput, Gas, InitialAndFloorGas,
         InstructionResult, InterpreterAction, InterpreterResult,
     },
-    primitives::CALL_STACK_LIMIT,
+    primitives::{hardfork::SpecId, CALL_STACK_LIMIT},
     Inspector, Journal,
 };
 
@@ -257,6 +257,39 @@ where
     }
 }
 
+impl<DB: Database, EVM, ERROR, FRAME, ExtEnvs: ExternalEnvTypes> MegaHandler<EVM, ERROR, FRAME>
+where
+    EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>, Frame = FRAME>,
+    ERROR: EvmTrError<EVM>
+        + From<OpTransactionError>
+        + From<MegaTransactionError>
+        + FromStringError
+        + IsTxError
+        + core::fmt::Debug,
+    FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
+{
+    #[inline]
+    fn post_execution_without_eip7702_refund_work(
+        &self,
+        evm: &mut EVM,
+        exec_result: &mut FRAME::FrameResult,
+        init_and_floor_gas: InitialAndFloorGas,
+    ) -> Result<(), ERROR> {
+        let spec = evm.ctx().cfg().spec();
+
+        // All reachable Mega specs map to ISTHMUS, which already includes REGOLITH.
+        // That makes the deposit special-case in OpHandler::refund unreachable here, so the
+        // only behavior difference from the full refund path is skipping record_refund(0).
+        debug_assert!(spec.is_enabled_in(OpSpecId::REGOLITH));
+        exec_result.gas_mut().set_final_refund(spec.into_eth_spec().is_enabled_in(SpecId::LONDON));
+
+        self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
+        self.reimburse_caller(evm, exec_result)?;
+        self.reward_beneficiary(evm, exec_result)?;
+        Ok(())
+    }
+}
+
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// This is the hook to be called in the beginning of the `frame_run` and `inspect_frame_run`
     /// functions. This function checks if the additional limit is already exceeded, if so, we
@@ -471,8 +504,27 @@ where
 
         let init_and_floor_gas = self.validate(evm)?;
         let eip7702_refund = self.pre_execution(evm)? as i64;
-        let mut exec_result = self.execution(evm, &init_and_floor_gas)?;
-        self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
+        let mut exec_result = if evm.ctx().spec.is_enabled(MegaSpecId::REX5) {
+            debug_assert!(evm.ctx().tx().gas_limit() >= init_and_floor_gas.initial_gas);
+
+            let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+            let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+            let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
+            self.last_frame_result(evm, &mut frame_result)?;
+            frame_result
+        } else {
+            self.execution(evm, &init_and_floor_gas)?
+        };
+        if evm.ctx().tx().tx_type() == TransactionType::Eip7702 {
+            self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
+        } else {
+            debug_assert_eq!(eip7702_refund, 0);
+            self.post_execution_without_eip7702_refund_work(
+                evm,
+                &mut exec_result,
+                init_and_floor_gas,
+            )?;
+        }
 
         // Prepare the output
         self.execution_result(evm, exec_result)
@@ -896,49 +948,9 @@ where
         &mut self,
         mut frame_init: <Self::Frame as revm::handler::FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
-        let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
-        let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
         let is_rex4_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX4);
         let is_rex5_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX5);
         let additional_limit = self.ctx().additional_limit.clone();
-
-        // Check if this is a call to the oracle contract and mark it as accessed.
-        // This handles both direct transaction calls and internal CALL operations.
-        // Rex3+: Oracle access gas detention is triggered by SLOAD (not CALL), so skip this
-        // CALL-based check for Rex3 and later specs.
-        //
-        // The check uses `target_address` which equals the oracle address for CALL and
-        // STATICCALL, but equals the caller's address for CALLCODE and DELEGATECALL (since
-        // those execute in the caller's state context). CALLCODE and DELEGATECALL are therefore
-        // never detected here by design — they do not access oracle state.
-        //
-        // MiniRex: Only CALL triggers oracle access detection. STATICCALL, CALLCODE, and
-        //   DELEGATECALL bypass it.
-        // Rex: STATICCALL is added to oracle access detection (unifying CALL-like behavior).
-        if is_mini_rex_enabled && !is_rex3_enabled {
-            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                let detect_oracle = match call_inputs.scheme {
-                    CallScheme::Call => true,
-                    // Rex fixes the bug in MiniRex where STATICCALL bypasses oracle access
-                    // detection.
-                    CallScheme::StaticCall => is_rex_enabled,
-                    // CALLCODE and DELEGATECALL have target_address = caller (not oracle),
-                    // so check_and_mark_oracle_access would never match anyway.
-                    CallScheme::CallCode | CallScheme::DelegateCall => false,
-                };
-                // Mega system address is exempted from volatile data access enforcement.
-                if detect_oracle && call_inputs.caller != self.ctx().system_address {
-                    let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
-                    let mut tracker = volatile_data_tracker.borrow_mut();
-                    if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
-                        if let Some(compute_gas_limit) = tracker.get_compute_gas_limit() {
-                            additional_limit.borrow_mut().set_compute_gas_limit(compute_gas_limit);
-                        }
-                    }
-                }
-            }
-        }
 
         // REX4+: If a TX-level limit is already exceeded (e.g., intrinsic DataSize/KVUpdate
         // overflow from before_tx_start), abort before interceptor dispatch. Interceptors
@@ -962,16 +974,71 @@ where
         // REX5+: enforce `CALL_STACK_LIMIT` before interceptor dispatch. Interceptors
         // short-circuit before revm's `make_call_frame` runs its own depth check, so
         // without this guard a system contract could be invoked at unbounded depth.
-        // Scope mirrors interceptor dispatch (Call/StaticCall only); other schemes still
-        // flow into revm where its own depth check applies.
+        // Revm's depth check is scheme-independent and runs before any call-frame side effect,
+        // so all call schemes can share this early result.
         if is_rex5_enabled {
+            debug_assert!(
+                self.ctx().spec.is_enabled(MegaSpecId::REX3),
+                "REX5 must imply REX3, so Rex5 calls cannot need CALL-based oracle detection"
+            );
+
             if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
-                    frame_init.depth > CALL_STACK_LIMIT as usize
-                {
+                if frame_init.depth > CALL_STACK_LIMIT as usize {
+                    debug_assert!(
+                        matches!(
+                            call_inputs.scheme,
+                            CallScheme::Call |
+                                CallScheme::StaticCall |
+                                CallScheme::CallCode |
+                                CallScheme::DelegateCall
+                        ),
+                        "all FrameInput::Call schemes must share revm's too-deep call result"
+                    );
+
                     let frame_result = gen_call_too_deep_result(call_inputs);
                     additional_limit.borrow_mut().push_empty_frame();
                     return Ok(FrameInitResult::Result(frame_result));
+                }
+            }
+        }
+
+        let is_mini_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
+        let is_rex3_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX3);
+
+        // Check if this is a call to the oracle contract and mark it as accessed.
+        // This handles both direct transaction calls and internal CALL operations.
+        // Rex3+: Oracle access gas detention is triggered by SLOAD (not CALL), so skip this
+        // CALL-based check for Rex3 and later specs.
+        //
+        // The check uses `target_address` which equals the oracle address for CALL and
+        // STATICCALL, but equals the caller's address for CALLCODE and DELEGATECALL (since
+        // those execute in the caller's state context). CALLCODE and DELEGATECALL are therefore
+        // never detected here by design — they do not access oracle state.
+        //
+        // MiniRex: Only CALL triggers oracle access detection. STATICCALL, CALLCODE, and
+        //   DELEGATECALL bypass it.
+        // Rex: STATICCALL is added to oracle access detection (unifying CALL-like behavior).
+        if is_mini_rex_enabled && !is_rex3_enabled {
+            let is_rex_enabled = self.ctx().spec.is_enabled(MegaSpecId::REX);
+            if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
+                let detect_oracle = match call_inputs.scheme {
+                    CallScheme::Call => true,
+                    // Rex fixes the bug in MiniRex where STATICCALL bypasses oracle access
+                    // detection.
+                    CallScheme::StaticCall => is_rex_enabled,
+                    // CALLCODE and DELEGATECALL have target_address = caller (not oracle),
+                    // so check_and_mark_oracle_access would never match anyway.
+                    CallScheme::CallCode | CallScheme::DelegateCall => false,
+                };
+                // Mega system address is exempted from volatile data access enforcement.
+                if detect_oracle && call_inputs.caller != self.ctx().system_address {
+                    let volatile_data_tracker = self.ctx().volatile_data_tracker.clone();
+                    let mut tracker = volatile_data_tracker.borrow_mut();
+                    if tracker.check_and_mark_oracle_access(&call_inputs.target_address) {
+                        if let Some(compute_gas_limit) = tracker.get_compute_gas_limit() {
+                            additional_limit.borrow_mut().set_compute_gas_limit(compute_gas_limit);
+                        }
+                    }
                 }
             }
         }
@@ -1179,14 +1246,12 @@ where
                     return Ok(ItemOrResult::Result(frame_result));
                 }
             }
-            // (2) REX5+: enforce CALL_STACK_LIMIT for Call/StaticCall so an inspector
+            // (2) REX5+: enforce CALL_STACK_LIMIT for all call schemes so an inspector
             // cannot deliver a synthetic call result at unbounded depth, mirroring the
             // protection added to `frame_init` before interceptor dispatch.
             if is_rex5_enabled {
                 if let FrameInput::Call(call_inputs) = &frame_init.frame_input {
-                    if matches!(call_inputs.scheme, CallScheme::Call | CallScheme::StaticCall) &&
-                        frame_init.depth > CALL_STACK_LIMIT as usize
-                    {
+                    if frame_init.depth > CALL_STACK_LIMIT as usize {
                         let mut frame_result = gen_call_too_deep_result(call_inputs);
                         ctx.additional_limit.borrow_mut().push_empty_frame();
                         frame_end(ctx, inspector, &frame_init.frame_input, &mut frame_result);

@@ -30,7 +30,7 @@ A system contract MAY intercept `CALL` or `STATICCALL`, but MUST NOT intercept `
 ### Call-Depth Gate
 
 Interceptor dispatch MUST respect the EVM call-stack depth limit.
-For a `CALL` or `STATICCALL` whose call depth exceeds `CALL_STACK_LIMIT`, a node MUST NOT consult any interceptor.
+For any call-frame initialization whose call depth exceeds `CALL_STACK_LIMIT`, a node MUST NOT consult any interceptor.
 Such a call MUST follow the same depth-failure path an ordinary over-deep call follows: the node MUST produce a synthetic too-deep call result that consumes no gas (the forwarded gas limit is fully refundable to the caller) and MUST NOT perform any interceptor side effect.
 
 When both a transaction-level resource-limit overflow and the depth limit apply to the same call, the resource-limit overflow result takes priority over the depth-gate result.

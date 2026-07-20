@@ -36,7 +36,12 @@ use revm::{
 const CALLER: Address = address!("0000000000000000000000000000000000300010");
 const GAS_LIMIT: u64 = 100_000;
 
-fn make_call_frame_init(target: Address, selector: [u8; 4], depth: usize) -> FrameInit {
+fn make_call_frame_init(
+    target: Address,
+    selector: [u8; 4],
+    depth: usize,
+    scheme: CallScheme,
+) -> FrameInit {
     FrameInit {
         depth,
         memory: SharedMemory::new(),
@@ -48,7 +53,7 @@ fn make_call_frame_init(target: Address, selector: [u8; 4], depth: usize) -> Fra
             target_address: target,
             caller: CALLER,
             value: CallValue::Transfer(U256::ZERO),
-            scheme: CallScheme::Call,
+            scheme,
             is_static: false,
         })),
     }
@@ -82,8 +87,12 @@ fn test_rex5_depth_guard_returns_call_too_deep_for_system_contract() {
     let mut evm = MegaEvm::new(context);
 
     let selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
-    let frame_init =
-        make_call_frame_init(ACCESS_CONTROL_ADDRESS, selector, CALL_STACK_LIMIT as usize + 1);
+    let frame_init = make_call_frame_init(
+        ACCESS_CONTROL_ADDRESS,
+        selector,
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::Call,
+    );
 
     let result = EvmTr::frame_init(&mut evm, frame_init).expect("frame_init should not error");
     let ItemOrResult::Result(frame_result) = result else {
@@ -110,8 +119,12 @@ fn test_rex5_depth_boundary_allows_call_at_limit() {
     let mut evm = MegaEvm::new(context);
 
     let selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
-    let frame_init =
-        make_call_frame_init(ACCESS_CONTROL_ADDRESS, selector, CALL_STACK_LIMIT as usize);
+    let frame_init = make_call_frame_init(
+        ACCESS_CONTROL_ADDRESS,
+        selector,
+        CALL_STACK_LIMIT as usize,
+        CallScheme::Call,
+    );
 
     let result = EvmTr::frame_init(&mut evm, frame_init).expect("frame_init should not error");
     let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
@@ -132,8 +145,12 @@ fn test_pre_rex5_depth_guard_disabled() {
     let mut evm = MegaEvm::new(context);
 
     let selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
-    let frame_init =
-        make_call_frame_init(ACCESS_CONTROL_ADDRESS, selector, CALL_STACK_LIMIT as usize + 1);
+    let frame_init = make_call_frame_init(
+        ACCESS_CONTROL_ADDRESS,
+        selector,
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::Call,
+    );
 
     let result = EvmTr::frame_init(&mut evm, frame_init).expect("frame_init should not error");
     let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
@@ -174,8 +191,12 @@ fn test_rex5_exceeded_tx_limit_wins_over_call_too_deep() {
 
     let mut evm = MegaEvm::new(context);
     let selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
-    let frame_init =
-        make_call_frame_init(ACCESS_CONTROL_ADDRESS, selector, CALL_STACK_LIMIT as usize + 1);
+    let frame_init = make_call_frame_init(
+        ACCESS_CONTROL_ADDRESS,
+        selector,
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::Call,
+    );
 
     let result = EvmTr::frame_init(&mut evm, frame_init).expect("frame_init should not error");
     let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
@@ -231,7 +252,8 @@ fn test_rex5_inspect_frame_init_depth_guard_overrides_inspector() {
     // Target a regular address (not a system contract). The inspector will intercept;
     // without the depth guard, the inspector's synthetic Stop result would survive.
     let target = address!("0000000000000000000000000000000000300001");
-    let frame_init = make_call_frame_init(target, [0u8; 4], CALL_STACK_LIMIT as usize + 1);
+    let frame_init =
+        make_call_frame_init(target, [0u8; 4], CALL_STACK_LIMIT as usize + 1, CallScheme::Call);
 
     let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
         .expect("inspect_frame_init should not error");
@@ -247,6 +269,200 @@ fn test_rex5_inspect_frame_init_depth_guard_overrides_inspector() {
     // call_end must have fired to keep the inspector start/end pair balanced. If a
     // future refactor drops the `frame_end(...)` from the depth-guard early return,
     // this asserts catches it.
+    let insp = evm.inspector();
+    assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
+    assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");
+}
+
+#[test]
+fn test_rex5_depth_guard_returns_call_too_deep_for_callcode() {
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let mut evm = MegaEvm::new(context);
+
+    let selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
+    let frame_init = make_call_frame_init(
+        ACCESS_CONTROL_ADDRESS,
+        selector,
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::CallCode,
+    );
+
+    let result = EvmTr::frame_init(&mut evm, frame_init).expect("frame_init should not error");
+    let ItemOrResult::Result(frame_result) = result else {
+        panic!("expected Result variant, got Item");
+    };
+    assert_call_too_deep(&frame_result);
+}
+
+#[test]
+fn test_rex5_depth_guard_returns_call_too_deep_for_delegatecall() {
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let mut evm = MegaEvm::new(context);
+
+    let selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
+    let frame_init = make_call_frame_init(
+        ACCESS_CONTROL_ADDRESS,
+        selector,
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::DelegateCall,
+    );
+
+    let result = EvmTr::frame_init(&mut evm, frame_init).expect("frame_init should not error");
+    let ItemOrResult::Result(frame_result) = result else {
+        panic!("expected Result variant, got Item");
+    };
+    assert_call_too_deep(&frame_result);
+}
+
+#[test]
+fn test_rex5_depth_guard_returns_call_too_deep_for_staticcall() {
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let mut evm = MegaEvm::new(context);
+
+    let selector = IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
+    let frame_init = make_call_frame_init(
+        ACCESS_CONTROL_ADDRESS,
+        selector,
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::StaticCall,
+    );
+
+    let result = EvmTr::frame_init(&mut evm, frame_init).expect("frame_init should not error");
+    let ItemOrResult::Result(frame_result) = result else {
+        panic!("expected Result variant, got Item");
+    };
+    assert_call_too_deep(&frame_result);
+}
+
+#[test]
+fn test_rex5_inspect_frame_init_depth_guard_overrides_callcode_inspector() {
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+
+    let target = address!("0000000000000000000000000000000000300002");
+    let frame_init =
+        make_call_frame_init(target, [0u8; 4], CALL_STACK_LIMIT as usize + 1, CallScheme::CallCode);
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::CallTooDeep,
+        "depth guard must override inspector output for CALLCODE too",
+    );
+
+    let insp = evm.inspector();
+    assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
+    assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");
+}
+
+#[test]
+fn test_rex5_inspect_frame_init_depth_guard_overrides_delegatecall_inspector() {
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+
+    let target = address!("0000000000000000000000000000000000300003");
+    let frame_init = make_call_frame_init(
+        target,
+        [0u8; 4],
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::DelegateCall,
+    );
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::CallTooDeep,
+        "depth guard must override inspector output for DELEGATECALL too",
+    );
+
+    let insp = evm.inspector();
+    assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
+    assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");
+}
+
+#[test]
+fn test_rex5_inspect_frame_init_depth_guard_overrides_staticcall_inspector() {
+    let mut db = MemoryDatabase::default();
+    let context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+
+    let target = address!("0000000000000000000000000000000000300005");
+    let frame_init = make_call_frame_init(
+        target,
+        [0u8; 4],
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::StaticCall,
+    );
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::CallTooDeep,
+        "depth guard must override inspector output for STATICCALL too",
+    );
+
+    let insp = evm.inspector();
+    assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
+    assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");
+}
+
+#[test]
+fn test_rex5_inspect_frame_init_exceeded_tx_limit_wins_over_call_too_deep() {
+    use mega_evm::{AdditionalLimit, EvmTxRuntimeLimits, LimitCheck, LimitKind};
+    use std::{cell::RefCell, rc::Rc};
+
+    let mut db = MemoryDatabase::default();
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    let mut additional =
+        AdditionalLimit::new(MegaSpecId::REX5, EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5));
+    additional.has_exceeded_limit = LimitCheck::ExceedsLimit {
+        kind: LimitKind::KVUpdate,
+        limit: 0,
+        used: 1,
+        frame_local: false,
+    };
+    context.additional_limit = Rc::new(RefCell::new(additional));
+
+    let evm = MegaEvm::new(context);
+    let mut evm = evm.with_inspector(AlwaysInterceptInspector::default());
+    let frame_init = make_call_frame_init(
+        address!("0000000000000000000000000000000000300004"),
+        [0u8; 4],
+        CALL_STACK_LIMIT as usize + 1,
+        CallScheme::Call,
+    );
+
+    let result = InspectorEvmTr::inspect_frame_init(&mut evm, frame_init)
+        .expect("inspect_frame_init should not error");
+    let ItemOrResult::Result(FrameResult::Call(outcome)) = result else {
+        panic!("expected Call result");
+    };
+    assert_eq!(
+        outcome.result.result,
+        InstructionResult::OutOfGas,
+        "inspect_frame_init must preserve exceeded-limit priority over CallTooDeep",
+    );
+
     let insp = evm.inspector();
     assert_eq!(insp.call_count, 1, "inspector should see exactly one call_start");
     assert_eq!(insp.call_end_count, 1, "inspector's call_end must be paired");

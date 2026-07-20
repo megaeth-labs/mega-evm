@@ -320,14 +320,13 @@ A call to a system contract from a frame whose depth exceeded the limit could th
 
 #### New behavior
 
-For any `CALL` or `STATICCALL` whose call depth exceeds `CALL_STACK_LIMIT`, a node MUST short-circuit frame initialization with a synthetic call-too-deep result that spends no gas (the full call gas limit is refundable to the caller) BEFORE consulting any system contract interceptor.
+For any call-frame initialization whose call depth exceeds `CALL_STACK_LIMIT`, a node MUST short-circuit frame initialization with a synthetic call-too-deep result that spends no gas (the full call gas limit is refundable to the caller) BEFORE consulting any system contract interceptor.
 No interceptor side effects (volatile-data tracker mutation, oracle hint forwarding, keyless deploy) MUST be performed in the too-deep case.
 
 A transaction-level additional-limit exceed takes priority over this depth gate.
 The inspector-driven frame-initialization path mirrors the same ordering: exceeded-limit check, then depth gate, then any inspector-provided synthetic output.
 
-`CALLCODE`, `DELEGATECALL`, and the `CREATE` / `CREATE2` paths are out of scope for this gate.
-Their depth checks remain in the standard EVM frame-construction path.
+`CREATE` and `CREATE2` remain out of scope for this gate.
 
 ### 19. Oracle Hint Admission and Metering
 

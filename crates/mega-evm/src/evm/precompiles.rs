@@ -19,7 +19,7 @@ use revm::{
     context::Cfg,
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
-    interpreter::{Gas, InputsImpl, InterpreterResult},
+    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     precompile::Precompiles,
     primitives::{Address, HashMap},
 };
@@ -190,50 +190,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
         )?;
 
         Ok(maybe_output.map(|mut output| {
-            // Normalize the returned Gas back to the caller's original `gas_limit` budget
-            // ONLY on `is_ok_or_revert` paths — those are the paths where the caller's
-            // refund logic (`EthFrame::return_result` and `Handler::last_frame_result`,
-            // both gated on `is_ok_or_revert()`) actually consumes `gas.remaining()`.
-            //
-            // Halt paths (`PrecompileOOG`, `PrecompileError`) skip the refund entirely:
-            // the parent burns the full forwarded `gas_limit` regardless of the Gas
-            // object's reported `remaining`. Leaving revm's vanilla `Gas::new(effective)`
-            // on those paths keeps the post-cap halt result semantically identical to
-            // an uncapped precompile OOG, matches what tracers / inspectors expect, and
-            // makes the "cap forced an OOG" behavior locally indistinguishable from
-            // "user just forwarded too little gas".
-            //
-            // The normalize preserves the precompile's `refunded()` value (today every
-            // standard revm precompile leaves refunded == 0, but custom precompiles
-            // injected via `PrecompilesMap` may set a refund, and a future EIP
-            // precompile could also). Memory expansion gas is not preserved because
-            // precompiles do not allocate from `Gas::memory` — memory expansion is
-            // the caller-interpreter's responsibility and is settled before the
-            // precompile is invoked.
-            if is_rex5_enabled && output.result.is_ok_or_revert() {
-                let spent = output.gas.spent();
-                let refunded = output.gas.refunded();
-                let mut normalized = Gas::new(gas_limit);
-                normalized.set_spent(spent);
-                normalized.record_refund(refunded);
-                output.gas = normalized;
-            }
-            // Compute-gas recording on REX5+:
-            //
-            // * Success / revert: revm called `record_cost`, so `spent()` already reflects the
-            //   actually-consumed amount. Use it.
-            // * Fixed-cost precompile that reached past its wrapper gas pre-check (today: KZG with
-            //   `limit() >= GAS_COST`): record the declared fixed cost. revm's `PrecompileError`
-            //   halt still consumes the parent's forwarded `gas_limit` from the EVM-gas meter, so
-            //   compute-gas here is intentionally a separate number from the EVM-gas burn.
-            // * All other error paths (non-KZG, or KZG with `limit() < GAS_COST` meaning the
-            //   wrapper's pre-check itself OOG'd before verification could run): revm did not call
-            //   `record_cost`, so `spent() == 0`. The parent still permanently loses the forwarded
-            //   amount, so record `limit()` to match the EVM-gas burn.
-            if is_rex5_enabled {
-                let compute_gas = if output.result.is_ok_or_revert() {
-                    output.gas.spent()
-                } else if address == &kzg_point_evaluation::ADDRESS &&
+            if is_rex5_enabled && !output.result.is_ok_or_revert() {
+                // Compute-gas recording on REX5+ halt paths:
+                //
+                // * Fixed-cost precompile that reached past its wrapper gas pre-check (today: KZG
+                //   with `limit() >= GAS_COST`): record the declared fixed cost. revm's
+                //   `PrecompileError` halt still consumes the parent's forwarded `gas_limit` from
+                //   the EVM-gas meter, so compute-gas here is intentionally a separate number from
+                //   the EVM-gas burn.
+                // * All other error paths (non-KZG, or KZG with `limit() < GAS_COST` meaning the
+                //   wrapper's pre-check itself OOG'd before verification could run): revm did not
+                //   call `record_cost`, so `spent() == 0`. The parent still permanently loses the
+                //   forwarded amount, so record `limit()` to match the EVM-gas burn.
+                let compute_gas = if address == &kzg_point_evaluation::ADDRESS &&
                     output.gas.limit() >= kzg_point_evaluation::GAS_COST
                 {
                     // KZG with the wrapper's `gas_limit < GAS_COST` pre-check passed: upstream
@@ -248,7 +217,46 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                     output.gas.limit()
                 };
                 context.additional_limit.borrow_mut().record_compute_gas(compute_gas);
-            } else if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+                return output;
+            }
+
+            if is_rex5_enabled {
+                // Normalize the returned Gas back to the caller's original `gas_limit` budget
+                // ONLY on `is_ok_or_revert` paths — those are the paths where the caller's
+                // refund logic (`EthFrame::return_result` and `Handler::last_frame_result`,
+                // both gated on `is_ok_or_revert()`) actually consumes `gas.remaining()`.
+                //
+                // Halt paths (`PrecompileOOG`, `PrecompileError`) skip the refund entirely:
+                // the parent burns the full forwarded `gas_limit` regardless of the Gas
+                // object's reported `remaining`. Leaving revm's vanilla `Gas::new(effective)`
+                // on those paths keeps the post-cap halt result semantically identical to
+                // an uncapped precompile OOG, matches what tracers / inspectors expect, and
+                // makes the "cap forced an OOG" behavior locally indistinguishable from
+                // "user just forwarded too little gas".
+                //
+                // The normalize preserves the precompile's `refunded()` value (today every
+                // standard revm precompile leaves refunded == 0, but custom precompiles
+                // injected via `PrecompilesMap` may set a refund, and a future EIP
+                // precompile could also). Memory expansion gas is not preserved because
+                // precompiles do not allocate from `Gas::memory` — memory expansion is
+                // the caller-interpreter's responsibility and is settled before the
+                // precompile is invoked.
+                debug_assert!(matches!(
+                    output.result,
+                    InstructionResult::Return | InstructionResult::Revert
+                ));
+                let spent = output.gas.spent();
+                let refunded = output.gas.refunded();
+                let mut normalized = Gas::new(gas_limit);
+                normalized.set_spent(spent);
+                normalized.record_refund(refunded);
+                output.gas = normalized;
+            }
+            if context.spec.is_enabled(MegaSpecId::MINI_REX) {
+                // Compute-gas recording on success / revert:
+                //
+                // revm already called `record_cost`, so `spent()` reflects the actual
+                // consumption for the finalized precompile result. Use it directly.
                 context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
             }
             output
@@ -281,7 +289,7 @@ mod tests {
         test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId,
     };
     use alloy_evm::precompiles::PrecompilesMap;
-    use alloy_primitives::Bytes;
+    use alloy_primitives::{address, Bytes};
     use core::cell::RefCell;
     use revm::{
         handler::PrecompileProvider,
@@ -333,6 +341,17 @@ mod tests {
         inputs
     }
 
+    fn generate_invalid_blake2f_input() -> InputsImpl {
+        let address = address!("0000000000000000000000000000000000000009");
+        InputsImpl {
+            target_address: address,
+            bytecode_address: Some(address),
+            caller_address: address,
+            input: revm::interpreter::CallInput::Bytes(Bytes::from(vec![0xff])),
+            call_value: Default::default(),
+        }
+    }
+
     fn set_spec_for_context<DB: alloy_evm::Database, ExtEnvs: crate::ExternalEnvTypes>(
         precompiles_map: &mut PrecompilesMap,
         _context: &MegaContext<DB, ExtEnvs>,
@@ -381,6 +400,28 @@ mod tests {
         let output = result.unwrap().unwrap();
         assert!(matches!(output.result, InstructionResult::Return), "Result should be Return");
         assert_eq!(output.gas.spent(), GAS_COST);
+    }
+
+    #[test]
+    fn test_kzg_precompile_equivalence_does_not_record_compute_gas() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::EQUIVALENCE);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::EQUIVALENCE).precompiles(),
+        );
+        let inputs = generate_kzg_test_input();
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+
+        let result = precompiles_map.run(&mut context, &address, &inputs, true, 200_000);
+        assert!(result.is_ok(), "Precompile should succeed with sufficient gas");
+        let output = result.unwrap().unwrap();
+        assert!(matches!(output.result, InstructionResult::Return), "Result should be Return");
+        assert!(output.gas.spent() > 0, "successful EQUIVALENCE precompile should consume gas");
+        assert_eq!(
+            context.additional_limit.borrow().get_usage().compute_gas,
+            0,
+            "EQUIVALENCE must not record precompile compute gas; widening the MINI_REX gate would break replay",
+        );
     }
 
     #[test]
@@ -628,6 +669,25 @@ mod tests {
             "at the exact-cap boundary on a verification failure, the recorded \
              compute-gas must equal GAS_COST"
         );
+    }
+
+    #[test]
+    fn test_rex5_non_kzg_precompile_error_records_forwarded_limit() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::REX5).precompiles(),
+        );
+        let inputs = generate_invalid_blake2f_input();
+        let address = address!("0000000000000000000000000000000000000009");
+        let forwarded_gas = 50_000u64;
+
+        let result = precompiles_map.run(&mut context, &address, &inputs, true, forwarded_gas);
+        let output = result.expect("run ok").expect("Some output");
+        assert!(matches!(output.result, InstructionResult::PrecompileError));
+        assert_eq!(output.gas.limit(), forwarded_gas);
+        assert_eq!(output.gas.spent(), 0);
+        assert_eq!(context.additional_limit.borrow().get_usage().compute_gas, forwarded_gas);
     }
 
     /// End-to-end verification that the REX5+ `Gas` normalization on `PrecompileOOG` does NOT
