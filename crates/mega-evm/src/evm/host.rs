@@ -509,6 +509,32 @@ fn inspect_account<DB: revm::Database>(
     }
 }
 
+/// Cold read of an account's balance and emptiness that loads the account into the journal (so it
+/// appears in the returned `EvmState` / witness) but — unlike [`inspect_account`] — never hydrates
+/// `info.code`, even when the account is already resident. The REX6 fee-reward snapshots need only
+/// balance / emptiness (`AccountInfo::is_empty` decides via `code_hash`, not the bytecode);
+/// forcing `code_by_hash` on a contract fee recipient would require its bytecode in a stateless
+/// witness that need only carry the account proof, failing a valid fee payment on replay.
+pub(crate) fn inspect_account_balance_and_emptiness<DB: revm::Database>(
+    journal: &mut Journal<DB>,
+    address: Address,
+) -> Result<(U256, bool), <DB as revm::Database>::Error> {
+    let transaction_id = journal.transaction_id;
+    let info = match journal.inner.state.entry(address) {
+        Entry::Occupied(entry) => &entry.into_mut().info,
+        Entry::Vacant(entry) => {
+            let mut account = journal
+                .database
+                .basic(address)?
+                .map(|info| info.into())
+                .unwrap_or_else(|| Account::new_not_existing(transaction_id));
+            account.mark_cold();
+            &entry.insert(account).info
+        }
+    };
+    Ok((info.balance, info.is_empty()))
+}
+
 /// Cold occupancy read that returns an account's `code_hash` and loads it into the journal (so it
 /// appears in the returned `EvmState` / witness) but — unlike [`inspect_account`] — never hydrates
 /// `info.code`, even when the account is already resident (`inspect_account`'s already-loaded
