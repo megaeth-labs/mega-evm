@@ -231,6 +231,62 @@ mod tests {
         }
     }
 
+    /// The unscaled helpers are REX-family API: pin the debug assert exactly at the REX
+    /// boundary (the first spec where the `base × (multiplier − 1)` formula exists), so a
+    /// tightened gate (e.g. REX1) fails here.
+    #[test]
+    fn test_unscaled_gas_is_available_from_rex_exactly() {
+        let cost = cost_with_capacity(MegaSpecId::REX, MIN_BUCKET_SIZE as u64);
+        assert_eq!(cost.sstore_set_gas_unscaled(), 0);
+        assert_eq!(cost.new_account_gas_unscaled(), 0);
+        assert_eq!(cost.create_contract_gas_unscaled(), 0);
+    }
+
+    /// Pre-REX callers must trip the debug assert — a loosened gate (e.g. MiniRex) would
+    /// silently serve the REX-family formula to a spec that prices storage differently.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_sstore_set_gas_unscaled_asserts_pre_rex() {
+        let _ = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64)
+            .sstore_set_gas_unscaled();
+    }
+
+    /// See [`test_sstore_set_gas_unscaled_asserts_pre_rex`].
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_new_account_gas_unscaled_asserts_pre_rex() {
+        let _ = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64)
+            .new_account_gas_unscaled();
+    }
+
+    /// See [`test_sstore_set_gas_unscaled_asserts_pre_rex`].
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_create_contract_gas_unscaled_asserts_pre_rex() {
+        let _ = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64)
+            .create_contract_gas_unscaled();
+    }
+
+    /// MiniRex prices contract creation with the flat `NEW_ACCOUNT_STORAGE_GAS × multiplier`
+    /// formula; REX switches to `CONTRACT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)`. Pin
+    /// the boundary from the MiniRex side so a loosened REX gate fails here.
+    #[test]
+    fn test_create_contract_gas_uses_mini_rex_formula_before_rex() {
+        let cost = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64);
+        assert_eq!(
+            cost.create_contract_gas_for_multiplier(3),
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(3),
+        );
+        assert_ne!(
+            constants::mini_rex::NEW_ACCOUNT_STORAGE_GAS.saturating_mul(3),
+            constants::rex::CONTRACT_CREATION_STORAGE_GAS_BASE.saturating_mul(2),
+            "the two formulas must disagree for this pin to mean anything",
+        );
+    }
+
     /// The unscaled result equals the SALT-driven result evaluated at the minimum bucket
     /// capacity, confirming the shared formula helper produces consistent values across both paths.
     #[test]

@@ -941,6 +941,36 @@ mod tests {
         );
     }
 
+    /// `resolve_eip7702_delegate_address` hydrates lazy delegation bytecode only from REX5:
+    /// pin both sides of the boundary so a shifted gate (e.g. REX4) fails here. At REX4 a
+    /// lazy-code delegator resolves to itself (its `0xef0100…` code is never loaded); at REX5
+    /// the same first cold touch loads the code and follows the hop.
+    #[test]
+    fn test_resolve_eip7702_delegate_loads_code_from_rex5_exactly() {
+        const DELEGATOR: Address = address!("00000000000000000000000000000000000000e1");
+        const DELEGATE: Address = address!("00000000000000000000000000000000000000e2");
+
+        // REX4: no hydration — the delegation is invisible and resolution degrades to identity.
+        let db = LazyCodeDatabase::default().with_eip7702_delegation(DELEGATOR, DELEGATE);
+        let mut journal = Journal::new(db);
+        let resolved = journal
+            .resolve_eip7702_delegate_address(MegaSpecId::REX4, DELEGATOR)
+            .expect("resolve must succeed");
+        assert_eq!(resolved, DELEGATOR, "REX4 must not load code, so the hop is not followed");
+        assert!(
+            journal.inner.state.get(&DELEGATOR).is_some_and(|a| a.info.code.is_none()),
+            "REX4 resolution must leave the delegator's code lazy",
+        );
+
+        // REX5: the first cold touch hydrates the delegation bytecode and follows the hop.
+        let db = LazyCodeDatabase::default().with_eip7702_delegation(DELEGATOR, DELEGATE);
+        let mut journal = Journal::new(db);
+        let resolved = journal
+            .resolve_eip7702_delegate_address(MegaSpecId::REX5, DELEGATOR)
+            .expect("resolve must succeed");
+        assert_eq!(resolved, DELEGATE, "REX5 must hydrate the code and follow the hop");
+    }
+
     /// On REX5+, `inspect_account_delegated` must follow the EIP-7702 hop on the
     /// very first cold inspection against a lazy-code database. Regression guard:
     /// any refactor that re-introduces a code-None branch silently degrades the
