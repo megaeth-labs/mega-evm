@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(cost.create_contract_gas_unscaled(), 0);
     }
 
-    /// Pre-REX callers must trip the debug assert — a loosened gate (e.g. MiniRex) would
+    /// Pre-REX callers must trip the debug assert — a loosened gate (e.g. `MiniRex`) would
     /// silently serve the REX-family formula to a spec that prices storage differently.
     #[cfg(debug_assertions)]
     #[test]
@@ -270,9 +270,9 @@ mod tests {
             .create_contract_gas_unscaled();
     }
 
-    /// MiniRex prices contract creation with the flat `NEW_ACCOUNT_STORAGE_GAS × multiplier`
+    /// `MiniRex` prices contract creation with the flat `NEW_ACCOUNT_STORAGE_GAS × multiplier`
     /// formula; REX switches to `CONTRACT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)`. Pin
-    /// the boundary from the MiniRex side so a loosened REX gate fails here.
+    /// the boundary from the `MiniRex` side so a loosened REX gate fails here.
     #[test]
     fn test_create_contract_gas_uses_mini_rex_formula_before_rex() {
         let cost = cost_with_capacity(MegaSpecId::MINI_REX, MIN_BUCKET_SIZE as u64);
