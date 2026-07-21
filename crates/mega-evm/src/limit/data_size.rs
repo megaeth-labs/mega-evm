@@ -291,7 +291,7 @@ impl TxRuntimeLimit for DataSizeTracker {
                     if self.rex6_enabled {
                         // The creator's nonce bump survives the child's revert (revm bumps it
                         // before the create checkpoint), so charge it to the parent frame —
-                        // see `FrameLimitTracker::parent_frame_mut`.
+                        // see `FrameLimitTracker::add_parent_discardable`.
                         self.record_parent_discardable(ACCOUNT_INFO_WRITE_SIZE);
                     } else {
                         // Pre-REX6: the creator nonce-bump charge is bundled into the child frame's
