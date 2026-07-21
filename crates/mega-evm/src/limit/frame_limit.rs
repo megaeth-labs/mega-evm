@@ -49,6 +49,12 @@ pub(crate) struct FrameLimitTracker<I> {
     /// `push_create_frame` and the matching unwind in `pop_frame_unwind_parent`.
     /// Other instantiations do not consult this flag.
     rex5_enabled: bool,
+    /// Whether Rex6 is active. Used by the `CallFrameInfo` specialization: a CREATE's
+    /// creator-side charge survives the child's revert (revm bumps the creator nonce before the
+    /// create checkpoint), so under Rex6 `push_create_frame` does not arm the
+    /// `charged_parent_update` unwind — a reverted-then-retried CREATE must not charge the
+    /// creator account update twice. Rex5 keeps the (over-unwinding) frozen behavior.
+    rex6_enabled: bool,
 
     /// Cached `Σ(persistent_usage + discardable_usage)` across `tx_entry` and every entry on
     /// `frame_stack`. Maintained incrementally so `net_usage()` is O(1) instead of O(depth)
@@ -112,6 +118,7 @@ impl<I> FrameLimitTracker<I> {
             frame_stack: Vec::new(),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
             rex5_enabled: spec.is_enabled(MegaSpecId::REX5),
+            rex6_enabled: spec.is_enabled(MegaSpecId::REX6),
             cached_total_used: 0,
             cached_total_refund: 0,
         }
@@ -423,7 +430,11 @@ impl FrameLimitTracker<CallFrameInfo> {
             }
             _ => false,
         };
-        let charged_parent_update = rex5_enabled && parent_needs_update;
+        // Rex6: the creator's nonce bump survives the child CREATE's revert, and its charge
+        // lives on the parent's discardable lane — do not arm the unwind, or a
+        // revert-then-retry CREATE re-charges the same creator account update. Rex5 keeps the
+        // frozen unwind (its charge lived on the child lane and was dropped with it).
+        let charged_parent_update = rex5_enabled && parent_needs_update && !self.rex6_enabled;
         self.push_call_frame_info(CallFrameInfo {
             target_address: None,
             target_updated: true,
