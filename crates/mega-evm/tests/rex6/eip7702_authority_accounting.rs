@@ -1025,3 +1025,24 @@ fn test_rex6_authority_scan_skipped_when_pre_frame_limit_latched() {
         r.result
     );
 }
+
+/// A net-new authority priced in a saturated SALT bucket must be rejected at validation
+/// (`initial_gas` folds the authority's dynamic account-creation gas, which here saturates
+/// toward `u64::MAX`), not wrap `initial_gas` around and execute with too little prepaid gas.
+#[test]
+fn test_rex6_saturated_authority_salt_gas_rejects_instead_of_wrapping() {
+    let mut db = funded_db();
+    let bucket = SimpleBucketHasher::bucket_id(AUTHORITY_A.as_slice());
+    let envs: Envs = TestExternalEnvs::new().with_bucket_capacity(bucket, u64::MAX);
+
+    let r = try_transact(
+        MegaSpecId::REX6,
+        &mut db,
+        &envs,
+        tx_with_auths(vec![auth(AUTHORITY_A, 0, 0)]),
+    );
+    assert!(
+        r.is_err(),
+        "a saturated authority SALT price must fail validation, not execute: {r:?}"
+    );
+}

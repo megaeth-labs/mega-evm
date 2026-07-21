@@ -802,7 +802,12 @@ where
                             "Failed to get storage gas for EIP-7702 authority: {authority}",
                         ))
                     })?;
-                initial_and_floor_gas.initial_gas += authority_storage_gas;
+                // Saturating: a heavy-SALT authority can price near `u64::MAX`; a plain add
+                // could wrap `initial_gas` in release builds and let an intrinsically
+                // unaffordable authorization list pass the gas-limit / affordability checks
+                // below. Saturation keeps the total huge so those checks reject it.
+                initial_and_floor_gas.initial_gas =
+                    initial_and_floor_gas.initial_gas.saturating_add(authority_storage_gas);
             }
 
             // REX5+: charge dynamic new-account storage gas for a deposit-driven caller
@@ -825,8 +830,12 @@ where
                 let caller = ctx.tx().caller();
                 let system_address = ctx.system_address;
                 if is_deposit_like_transaction(&ctx.inner.tx, system_address) {
-                    let caller_is_empty =
-                        ctx.journal_mut().inspect_account(caller, false)?.info.is_empty();
+                    // Non-hydrating read: only balance/emptiness are needed, and a caller
+                    // already resident with lazy contract code (e.g. an EIP-7702 delegated
+                    // EOA touched earlier in validation) must not force its bytecode into a
+                    // stateless witness.
+                    let (_, caller_is_empty) =
+                        crate::inspect_account_balance_and_emptiness(ctx.journal_mut(), caller)?;
                     if caller_is_empty {
                         // Self-call corner: if the deposit is a `TxKind::Call(caller)` with
                         // non-zero `value` AND the same empty caller as callee, the existing

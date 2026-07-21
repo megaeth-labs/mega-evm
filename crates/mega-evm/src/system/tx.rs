@@ -122,16 +122,20 @@ pub fn is_deposit_like_transaction(tx: &MegaTransaction, system_address: Address
 /// The exemption is evaluated in `MegaContext::on_new_tx`, which runs *after* `before_run` has
 /// already deposit-promoted a mega system tx (stamping [`MEGA_SYSTEM_TRANSACTION_SOURCE_HASH`] and
 /// flipping `tx_type()` to a deposit). The source-hash branch below therefore carries the match for
-/// promoted txs; the `is_mega_system_transaction_with` branch covers the pre-promotion shape for
-/// any other caller. Both the source hash and the system-address+whitelist gate are protocol-set,
-/// so a user deposit (different source hash, non-system caller) is never matched — unlike
-/// [`is_deposit_like_transaction`].
+/// promoted txs and additionally requires the system caller (the sentinel alone is not trusted —
+/// replay / t8n inputs can arrive already deposit-typed with an arbitrary source hash); the
+/// `is_mega_system_transaction_with` branch covers the pre-promotion shape. A user deposit
+/// (non-system caller) is therefore never matched — unlike [`is_deposit_like_transaction`].
 pub fn is_system_originated(tx: &MegaTransaction, system_address: Address) -> bool {
     // Internal pre-block system calls (EIP-2935 / EIP-4788 / SequencerRegistry) use `0xff..fe` and
     // run via `run_system_call`, so they are never deposit-promoted.
     tx.caller() == alloy_eips::eip4788::SYSTEM_ADDRESS ||
-        // A mega system tx that `before_run` has already promoted to a deposit.
-        tx.deposit.source_hash == MEGA_SYSTEM_TRANSACTION_SOURCE_HASH ||
+        // A mega system tx that `before_run` has already promoted to a deposit. The sentinel
+        // alone is not trusted: replay / t8n inputs can arrive already deposit-typed with an
+        // arbitrary source hash, so require the system caller that every legitimate
+        // promotion carries.
+        (tx.deposit.source_hash == MEGA_SYSTEM_TRANSACTION_SOURCE_HASH &&
+            tx.caller() == system_address) ||
         // A mega system tx in its original (pre-promotion) legacy shape.
         is_mega_system_transaction_with(tx, system_address)
 }
@@ -190,6 +194,17 @@ mod tests {
             "the legacy-typed check no longer matches after promotion",
         );
         assert!(is_system_originated(&tx, MEGA_SYSTEM_ADDRESS), "but the source-hash branch does");
+    }
+
+    #[test]
+    fn test_is_system_originated_rejects_sentinel_hash_with_non_system_caller() {
+        // Anti-bypass: the promotion sentinel can be forged in replay / t8n inputs that accept
+        // deposit fields directly. Without the system caller it must NOT grant the metering
+        // exemption.
+        let mut tx = legacy_call_tx(USER, ORACLE_CONTRACT_ADDRESS);
+        tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+        assert_eq!(tx.tx_type(), DEPOSIT_TRANSACTION_TYPE);
+        assert!(!is_system_originated(&tx, MEGA_SYSTEM_ADDRESS));
     }
 
     #[test]
