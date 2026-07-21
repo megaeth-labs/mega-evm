@@ -28,7 +28,8 @@ cargo clippy --workspace --lib --examples --tests --benches --all-features --loc
 cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
 
 # Benchmarks
-cargo bench -p mega-evm --bench transact
+cargo bench -p mega-evm --bench transact                                  # wall-clock + HTML report
+cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
 
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
@@ -41,13 +42,14 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ## Workspace Structure
 
-| Crate                   | Path                      | Purpose                                                      |
-| ----------------------- | ------------------------- | ------------------------------------------------------------ |
-| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                      |
-| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based) |
-| `state-test`            | `crates/state-test`       | Ethereum state test runner                                   |
-| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)           |
-| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                       |
+| Crate                   | Path                      | Purpose                                                                                     |
+| ----------------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                                                     |
+| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based)                                |
+| `mega-state-test`       | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
+| `state-test`            | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
+| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)                                          |
+| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
 
 ## Architecture
 
@@ -73,8 +75,9 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 
 - **`evm/`** — Core mega-evm logic: spec definitions, context, factory, execution pipeline, modified opcodes (LOG, SELFDESTRUCT), host hooks, precompiles.
   This module collects all our modifications and customizations of EVM's behavior for mega-evm based on the revm.
-- **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement.
+- **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement, and the canonical per-chain hardfork schedules.
   This module defines how a block in MegaETH block should be executed.
+  `block/chain.rs` is the single source of truth for the mainnet/testnet chain IDs and activation-timestamp schedules (`hardfork_schedule(chain_id)`, `MAINNET_CHAIN_ID`, `TESTNET_CHAIN_ID`, `mainnet_hardforks()`, `testnet_hardforks()`); look there to find or change when a fork activates on a given chain.
 - **`limit/`** — Resource limit tracking: compute gas, data size, KV updates, state growth (each in its own module).
   MegaETH introduces additional resource metering mechanism and this module implements their logic as utility structs to be used by mega-evm.
 - **`access/`** — Block env access tracking and volatile data detection for parallel execution.
@@ -119,7 +122,7 @@ A transaction can be halted by exceeding either limit.
 
 #### Multidimensional Resource Limits
 
-Beyond the dual gas model, mega-evm enforces **four independent per-transaction resource limits** via `AdditionalLimit` (`limit/mod.rs`):
+Beyond the dual gas model, mega-evm enforces **four independent per-transaction resource limits** via `AdditionalLimit` (`limit/limit.rs`):
 
 - **Compute gas** — Computational opcode cost
 - **Data size** — Calldata + logs + storage writes + code deploy + account updates
@@ -209,6 +212,25 @@ The following paths are common sources of leakage:
 
 When adding a new per-frame gas mechanism, verify that all three paths handle it correctly and add tests for each.
 
+### Resource-Limit Check Protocol
+
+The per-opcode hot path records and checks only the compute-gas dimension (`AdditionalLimit::record_compute_gas`).
+Correctness of the other three dimensions (data size, KV updates, state growth) rests on a protocol instead of a per-opcode fan-out across all four trackers:
+
+1. **Every non-compute mutation site must latch.**
+   Any code that records data-size/KV/state-growth usage during execution (`on_sstore`, `on_log`, `record_oracle_hint_bytes`, the frame-lifecycle hooks) must run `check_limit()` itself, latching any exceed into `has_exceeded_limit`.
+   The latch is surfaced by the leading short-circuit of the next `record_compute_gas` call, so the halt lands on the same opcode as the pre-protocol fan-out did.
+2. **Pre-inner recorders must NOT latch.**
+   A site that records usage _before_ its inner instruction executes (currently only SELFDESTRUCT beneficiary creation) must record without latching: the inner instruction can still fail, the frame then discards the usage, and an early latch would stick and rewrite the frame's real result.
+   Such opcodes use a trailing all-dimension check (`record_compute_gas_all_dims`) that runs only after the inner instruction succeeds.
+3. **Compute gas is always recorded.**
+   `record_compute_gas` must record before surfacing any latched exceed — the recorded total feeds the transaction outcome and block-level compute accounting even for transactions halted on another dimension.
+
+Rule 1 is backed by a `debug_assert!` in `record_compute_gas`: if a non-compute dimension is over its limit but not yet latched, the assert trips at the exact opcode whose mutation site forgot to call `check_limit()`.
+The sub-tracker checks are non-mutating, so the guard compiles out of release builds.
+
+When adding an opcode or mutation site that touches a non-compute dimension, decide whether it records after or before its inner instruction, follow the matching case above, and add a test asserting the exceed halts at that opcode.
+
 ## Test Organization (`crates/mega-evm/tests/`)
 
 Tests are organized by spec: `equivalence/`, `mini_rex/` (12 modules), `rex/`, `rex2/`, `rex3/`, `rex4/`, `rex5/`, `rex6/`, and `block_executor/`.
@@ -269,9 +291,11 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Add benchmarks for performance-sensitive changes.**
   Changes on the EVM execution hot path must be accompanied by benchmarks.
   This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.
+  Per-PR instruction-count reports for these benchmarks are produced automatically by the CodSpeed CI workflow.
 - **Always run benchmarks locally before committing.**
   New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
   Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
+  For instruction-count deltas across a PR, use the CodSpeed report posted on the PR rather than local wall-clock numbers.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.

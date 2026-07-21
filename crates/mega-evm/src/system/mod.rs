@@ -22,6 +22,7 @@
 //! See `crate::block` module docs for the executor side of this contract.
 
 mod control;
+mod deploy;
 mod intercept;
 mod keyless_deploy;
 mod limit_control;
@@ -30,6 +31,7 @@ mod sequencer_registry;
 mod tx;
 
 pub use control::*;
+pub use deploy::*;
 pub use intercept::*;
 pub use keyless_deploy::*;
 pub use limit_control::*;

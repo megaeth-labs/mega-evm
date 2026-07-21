@@ -127,17 +127,13 @@ impl StateGrowthTracker {
 
     /// Records positive state growth in the current frame.
     pub(crate) fn record_growth(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            // For state growth, all growth in the current transaction is discardable on revert.
-            entry.discardable_usage += n;
-        }
+        // For state growth, all growth in the current transaction is discardable on revert.
+        self.frame_tracker.add_frame_discardable(n);
     }
 
     /// Records a refund (negative growth) in the current frame.
     fn record_refund(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += n;
-        }
+        self.frame_tracker.add_frame_refund(n);
     }
 
     /// REX5+: record +1 net state growth for the materialisation of an empty deposit
@@ -146,7 +142,7 @@ impl StateGrowthTracker {
     /// directly to the TX intrinsic lane (`tx_entry.persistent_usage`) — same lane
     /// `before_tx_start` uses for other intrinsic accounting.
     pub(crate) fn record_deposit_caller_creation(&mut self) {
-        self.frame_tracker.tx_mut().persistent_usage += 1;
+        self.frame_tracker.add_tx_persistent(1);
     }
 
     /// Merges external persistent usage into the TX-level entry.
@@ -154,7 +150,7 @@ impl StateGrowthTracker {
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox state growth consumption
     /// back to the parent transaction.
     pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
-        self.frame_tracker.tx_mut().persistent_usage += amount;
+        self.frame_tracker.add_tx_persistent(amount);
     }
 
     /// Records EIP-7702 authority accounts that were created by pre-execution auth processing.
@@ -162,7 +158,7 @@ impl StateGrowthTracker {
     /// This is TX-level persistent usage because authorization-list changes are applied before the
     /// first EVM frame and are not discarded by frame revert.
     pub(crate) fn record_authority_creations(&mut self, amount: u64) {
-        self.frame_tracker.tx_mut().persistent_usage += amount;
+        self.frame_tracker.add_tx_persistent(amount);
     }
 
     /// Returns the remaining state growth budget for the current call frame, capped by
@@ -363,5 +359,22 @@ impl TxRuntimeLimit for StateGrowthTracker {
     /// both the SELFDESTRUCT and the refund are discarded together.
     fn after_selfdestruct(&mut self, refund: u64) {
         self.record_refund(refund);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `reset` must clear accumulated TX-level state-growth usage so a tracker reused
+    /// across transactions does not leak growth from the previous one.
+    #[test]
+    fn test_reset_clears_accumulated_usage() {
+        let mut tracker = StateGrowthTracker::new(MegaSpecId::MINI_REX, 100);
+        tracker.record_deposit_caller_creation();
+        assert_eq!(tracker.tx_usage(), 1, "recorded growth should be reflected in tx_usage");
+
+        tracker.reset();
+        assert_eq!(tracker.tx_usage(), 0, "reset must clear accumulated state growth");
     }
 }

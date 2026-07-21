@@ -49,25 +49,19 @@ impl KVUpdateTracker {
 
     /// Records a discardable KV update in the current frame.
     fn record_discardable(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.discardable_usage += n;
-        }
+        self.frame_tracker.add_frame_discardable(n);
     }
 
     /// Records discardable usage into the PARENT frame (one below the top). Used for a
     /// child-CREATE's creator-side account-info write, whose on-chain effect (the creator
     /// nonce bump) is undone only by the parent's revert, not the child's.
     fn record_parent_discardable(&mut self, n: u64) {
-        if let Some(parent) = self.frame_tracker.parent_frame_mut() {
-            parent.discardable_usage += n;
-        }
+        self.frame_tracker.add_parent_discardable(n);
     }
 
     /// Records a KV update refund in the current frame.
     fn record_refund(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += n;
-        }
+        self.frame_tracker.add_frame_refund(n);
     }
 
     /// Records a single account update as discardable KV update in the current frame.
@@ -83,7 +77,7 @@ impl KVUpdateTracker {
     /// Used by the REX6 EIP-7702 authorization scan, which runs in `validate` before any frame
     /// exists, so the charge cannot go through the frame-scoped `record_account_update`.
     pub(crate) fn record_persistent_account_update(&mut self) {
-        self.frame_tracker.tx_mut().persistent_usage += 1;
+        self.frame_tracker.add_tx_persistent(1);
     }
 
     /// Merges external persistent usage into the TX-level entry.
@@ -91,7 +85,7 @@ impl KVUpdateTracker {
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox KV update consumption
     /// back to the parent transaction.
     pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
-        self.frame_tracker.tx_mut().persistent_usage += amount;
+        self.frame_tracker.add_tx_persistent(amount);
     }
 
     /// Returns the remaining KV update budget for the current call frame, capped by
@@ -176,13 +170,13 @@ impl TxRuntimeLimit for KVUpdateTracker {
         if !self.rex6_enabled {
             for authorization in tx.authorization_list() {
                 if authorization.authority().is_some() {
-                    self.frame_tracker.tx_mut().persistent_usage += 1;
+                    self.frame_tracker.add_tx_persistent(1);
                 }
             }
         }
 
         // Caller account update (non-discardable)
-        self.frame_tracker.tx_mut().persistent_usage += 1;
+        self.frame_tracker.add_tx_persistent(1);
     }
 
     #[inline]
@@ -284,5 +278,21 @@ impl TxRuntimeLimit for KVUpdateTracker {
         } else if store_result.is_original_eq_new() {
             self.record_refund(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `record_account_update` must charge exactly one KV update against the current frame
+    /// (used by REX5+ SELFDESTRUCT-beneficiary metering); it must not be a no-op.
+    #[test]
+    fn test_record_account_update_charges_one_kv() {
+        let mut tracker = KVUpdateTracker::new(MegaSpecId::MINI_REX, u64::MAX);
+        tracker.push_empty_frame();
+        assert_eq!(tracker.tx_usage(), 0);
+        tracker.record_account_update();
+        assert_eq!(tracker.tx_usage(), 1, "record_account_update must add exactly 1 KV update");
     }
 }

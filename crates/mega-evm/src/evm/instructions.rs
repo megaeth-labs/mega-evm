@@ -382,9 +382,11 @@ mod rex6 {
     /// Changes from Rex5: the instruction *table* is unchanged (same handler functions as Rex5).
     /// Every Rex6 behavior difference is expressed as internal `spec.is_enabled(MegaSpecId::REX6)`
     /// dispatch inside the shared handlers, never as a swapped table entry:
-    /// - the storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT)
-    ///   charge storage gas, run their body, then record compute gas exactly once (via
-    ///   [`record_storage_compute_gas!`]) with the storage gas excluded;
+    /// - the storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2) charge storage
+    ///   gas, run their body, then record compute gas exactly once (via
+    ///   [`record_storage_compute_gas!`]) with the storage gas excluded; SELFDESTRUCT keeps its
+    ///   delegation to `compute_gas_ext::selfdestruct`, whose trailing all-dimension check records
+    ///   the same single compute window while latching the pre-recorded data/KV/state usage;
     /// - `storage_gas_ext::selfdestruct` additionally records existing-target balance-update
     ///   accounting, and its outer volatile wrapper
     ///   (`volatile_data_ext::selfdestruct_with_beneficiary_guard`) additionally guards the
@@ -433,9 +435,10 @@ macro_rules! run_inner_instruction_or_abort {
 }
 
 /// Records an opcode's compute gas in a single measurement window and enforces the compute-gas
-/// limit. This is the one compute-gas recording primitive used by every opcode: plain opcodes
-/// invoke it via `compute_gas_ext::wrap_op_compute_gas` with `$storage_charged = 0`, and the REX6
-/// storage-affecting handlers invoke it directly with the storage gas they charged.
+/// limit. The REX6 storage-affecting handlers invoke it directly with the storage gas they
+/// charged; plain opcodes use the leaner inline recording in
+/// `compute_gas_ext::wrap_op_compute_gas`, which implements the same forwarded-gas exclusion
+/// without the REX6 abort-path handling (unreachable from those wrappers).
 ///
 /// `$gas_before` MUST be the interpreter gas remaining captured at the very top of the handler,
 /// before any storage-gas charge or wrapper-side EVM-gas work (e.g. CREATE2 memory expansion), so
@@ -1960,10 +1963,11 @@ pub mod storage_gas_ext {
     /// - KV update (+1)
     /// - State growth (+1)
     ///
-    /// This wrapper is the inner layer of the REX5 SELFDESTRUCT dispatch chain
-    /// (`volatile_data_ext::selfdestruct_with_beneficiary_guard` →
-    /// `storage_gas_ext::selfdestruct`), matching the layering used by SSTORE and LOG.
-    /// The beneficiary-volatile guard runs in the outer
+    /// This wrapper sits between `volatile_data_ext` and `compute_gas_ext` in the
+    /// REX5 SELFDESTRUCT dispatch chain
+    /// (`volatile_data_ext::selfdestruct_with_beneficiary_guard` → `storage_gas_ext::selfdestruct`
+    /// → `compute_gas_ext::selfdestruct`), matching the layering used by SSTORE
+    /// and LOG. The beneficiary-volatile guard runs in the outer
     /// `volatile_data_ext::selfdestruct_with_beneficiary_guard` ahead of any side effects below.
     ///
     /// REX6 additionally records the `DataSize` +40 / KV +1 of a balance credit to an existing
@@ -1976,8 +1980,21 @@ pub mod storage_gas_ext {
     >(
         context: InstructionContext<'_, H, WIRE>,
     ) {
-        // Captured at the very top so the single compute window covers the inner opcode.
-        let gas_before = context.interpreter.gas.remaining();
+        // Inside a static frame, revm's inner SELFDESTRUCT halts on the
+        // static-context check without changing state. Skip the mega host work below
+        // (two account inspections, SALT account-creation pricing, the storage-gas
+        // stipend draw and tracker write) — the frame reverts and discards all of it
+        // anyway — and let the inner instruction produce the identical halt. This is
+        // behavior-neutral: the static halt is exceptional, so the frame's gas and
+        // tracked usage are the same whether or not the host work ran first. The table
+        // installs this wrapper only for REX5+, so pre-REX5 specs never reach here.
+        if context.interpreter.runtime_flag.is_static() {
+            run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
+            // Defensive: unreachable in practice — a static SELFDESTRUCT always halts
+            // inside the inner instruction, so the macro returns early above.
+            return;
+        }
+
         let eth_spec = context.interpreter.runtime_flag.spec_id();
 
         // Peek beneficiary address from stack (SELFDESTRUCT uses stack position 0)
@@ -2002,9 +2019,7 @@ pub mod storage_gas_ext {
         };
         let has_value = !caller_account.info.balance.is_zero();
 
-        // `storage_charged` is the EVM gas actually debited for storage gas, excluded from the
-        // single compute recording below.
-        let storage_charged = if is_empty && has_value {
+        if is_empty && has_value {
             // Charge storage gas for creating a new account.
             // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
             let Some(cost) = context.host.new_account_storage_gas(target) else {
@@ -2013,12 +2028,10 @@ pub mod storage_gas_ext {
             };
             let drained =
                 context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
-            let charged = cost - drained;
-            gas!(context.interpreter, charged);
+            gas!(context.interpreter, cost - drained);
 
             // Record resource usage for new beneficiary account
             context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
-            charged
         } else if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
             has_value &&
             caller != target
@@ -2031,18 +2044,11 @@ pub mod storage_gas_ext {
             // is a distinct-target credit, so record nothing. Pre-REX6 records nothing
             // for any existing target.
             context.host.additional_limit().borrow_mut().on_selfdestruct_existing_account();
-            0
-        } else {
-            0
-        };
+        }
 
-        // Run the raw opcode and record compute gas once after the body completes (canonical
-        // metering order). Byte-equivalent to the pre-REX6 `compute_gas_ext::selfdestruct`
-        // layering on REX5 because nothing between `gas_before` and the storage charge above
-        // consumes EVM gas. The beneficiary-volatile guard ran in the outer
-        // `volatile_data_ext::selfdestruct_with_beneficiary_guard` wrapper.
-        run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
-        record_storage_compute_gas!(context, gas_before, storage_charged);
+        // Delegate to compute_gas_ext::selfdestruct (the volatile-disabled guard
+        // ran in the outer `volatile_data_ext::selfdestruct_with_beneficiary_guard` wrapper).
+        run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
     }
 }
 
@@ -2051,6 +2057,15 @@ pub mod compute_gas_ext {
     use super::*;
 
     /// Macro to wrap the original instruction implementation with compute gas tracking.
+    ///
+    /// Two variants:
+    /// - default: "simple" opcodes that can never spawn a child frame. The compute gas used is
+    ///   simply `gas_before - gas_after`. These opcodes never set an `InterpreterAction::NewFrame`,
+    ///   so the child-gas-subtraction match (below) would always fall through to `_` — it is
+    ///   omitted entirely to keep the per-opcode hot path lean.
+    /// - `@frame`: the call/create family (`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL`/
+    ///   `CREATE`/`CREATE2`), the only opcodes that set `NewFrame`. These must subtract the gas
+    ///   forwarded to the child frame so the parent's compute gas is not over-counted.
     macro_rules! wrap_op_compute_gas {
         ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
             #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
@@ -2065,10 +2080,51 @@ pub mod compute_gas_ext {
                 // Call the original instruction
                 run_inner_instruction_or_abort!($original_fn, context);
 
-                // Record compute gas via the shared primitive (storage gas charged = 0). The
-                // forwarded-child-gas exclusion, including the spec-aware `CALL_STIPEND` handling,
-                // lives in `record_storage_compute_gas!`.
-                record_storage_compute_gas!(context, gas_before, 0);
+                let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, gas_used);
+            }
+        };
+        (@frame $fn_name:ident, $opcode_name:expr, $original_fn:path) => {
+            #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
+            #[inline]
+            pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+                context: InstructionContext<'_, H, WIRE>,
+            ) {
+                let gas_before = context.interpreter.gas.remaining();
+
+                // Call the original instruction
+                run_inner_instruction_or_abort!($original_fn, context);
+
+                let mut gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                // Subtract the gas forwarded to the child. REX5 excludes the revm-side
+                // `CALL_STIPEND` (added by value-transferring CALL/CALLCODE without
+                // deducting from the parent) so parent compute-gas is not under-counted.
+                // Pre-REX5 keeps the legacy raw-`gas_limit` subtraction for replay parity.
+                match context.interpreter.bytecode.action() {
+                    Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
+                        let stipend_from_revm = if context
+                            .host
+                            .spec_id()
+                            .is_enabled(MegaSpecId::REX5) &&
+                            matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode) &&
+                            call_inputs.transfers_value()
+                        {
+                            gas::CALL_STIPEND
+                        } else {
+                            0
+                        };
+                        let parent_contributed =
+                            call_inputs.gas_limit.saturating_sub(stipend_from_revm);
+                        gas_used = gas_used.saturating_sub(parent_contributed);
+                    }
+                    Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
+                        gas_used = gas_used.saturating_sub(create_inputs.gas_limit);
+                    }
+                    _ => {}
+                }
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, gas_used);
             }
         };
     }
@@ -2216,14 +2272,37 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(swap15, "SWAP15", instructions::stack::swap::<15, _, _>);
     wrap_op_compute_gas!(swap16, "SWAP16", instructions::stack::swap::<16, _, _>);
 
-    wrap_op_compute_gas!(call_code, "CALLCODE", instructions::contract::call_code);
+    wrap_op_compute_gas!(@frame call_code, "CALLCODE", instructions::contract::call_code);
     wrap_op_compute_gas!(ret, "RETURN", instructions::control::ret);
-    wrap_op_compute_gas!(delegate_call, "DELEGATECALL", instructions::contract::delegate_call);
-    wrap_op_compute_gas!(static_call, "STATICCALL", instructions::contract::static_call);
+    wrap_op_compute_gas!(@frame delegate_call, "DELEGATECALL", instructions::contract::delegate_call);
+    wrap_op_compute_gas!(@frame static_call, "STATICCALL", instructions::contract::static_call);
 
     wrap_op_compute_gas!(revert, "REVERT", instructions::control::revert);
     wrap_op_compute_gas!(invalid, "INVALID", instructions::control::invalid);
-    wrap_op_compute_gas!(selfdestruct, "SELFDESTRUCT", instructions::host::selfdestruct);
+
+    /// `SELFDESTRUCT` opcode with compute gas tracking.
+    ///
+    /// Unlike the default wrapper, the trailing check fans out across all four limit
+    /// dimensions (`record_compute_gas_all_dims`): the REX5 storage wrapper records
+    /// beneficiary data/KV/state usage *before* the inner instruction runs, without
+    /// latching, and those dimensions must latch (and halt) here — only once the inner
+    /// instruction has succeeded. Latching at the recording site instead would stick
+    /// even when the inner instruction subsequently fails and the frame's discardable
+    /// usage is rolled back.
+    pub fn selfdestruct<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) {
+        let gas_before = context.interpreter.gas.remaining();
+
+        // Call the original instruction
+        run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
+
+        let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        if !additional_limit.record_compute_gas_all_dims(gas_used) {
+            context.interpreter.halt(additional_limit.exceeding_instruction_result());
+        }
+    }
 }
 
 /// Trait to inspect the stack elements.

@@ -12,10 +12,8 @@ use mega_evm::{
         context::{block::BlockEnv, cfg::CfgEnv},
         primitives::eip4844,
     },
-    MegaContext, MegaSpecId, TestExternalEnvs,
+    AHashBucketHasher, MegaContext, MegaSpecId, TestExternalEnvs,
 };
-
-use crate::hasher::AHashBucketHasher;
 
 /// External environment type for mega-evme using the real AHash-based SALT bucket hasher.
 pub type EvmeExternalEnvs = TestExternalEnvs<Infallible, AHashBucketHasher>;

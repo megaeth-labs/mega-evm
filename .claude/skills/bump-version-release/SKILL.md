@@ -98,8 +98,20 @@ Use `git config user.name` to determine the username (lowercase first name).
 
 ### 2b. Update Cargo.toml
 
-Edit the `version` field under `[workspace.package]` in the root `Cargo.toml`.
-Only change the version line — do not modify anything else.
+Two places in the root `Cargo.toml` carry the workspace version, and both must move together — bumping only the first desyncs the published crates.
+
+1. The `version` field under `[workspace.package]`.
+2. The `version` requirement of every in-repo path dependency under `[workspace.dependencies]` — currently `mega-evm`, `mega-state-test`, and `mega-system-contracts` (each written as `{ path = "...", version = "X.Y.Z", ... }`).
+
+These crates are published to crates.io.
+When publishing, Cargo resolves a path dependency by its `version` requirement rather than the path, so a stale requirement lets a published `{new_version}` crate resolve against an older sibling instead of the coordinated set.
+Bump the package version and these path-dependency requirements in lockstep, and do not modify anything else.
+
+Before committing, confirm no stale version string remains:
+
+```bash
+grep -n '{old_version}' Cargo.toml   # should print nothing
+```
 
 ### 2c. Update Cargo.lock
 

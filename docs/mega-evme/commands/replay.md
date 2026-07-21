@@ -86,6 +86,61 @@ Replay the captured transaction fully offline:
 mega-evme replay --rpc.replay-file ./fixtures/tx.json 0xabc123...
 ```
 
+## Self-Validating Fixture Dump
+
+`--dump-fixture <FILE>` turns a single replay into a self-validating regression fixture.
+The fixture is written in the same EEST state-test schema that the `state-test` runner consumes (`TestUnit { env, pre, transaction, post, out }`), so re-running it through `state-test` re-executes the transaction and checks the result — no RPC access required.
+
+### `--dump-fixture <FILE>`
+
+Dump a self-validating fixture for the replayed transaction to `<FILE>`.
+
+The fixture captures everything needed to deterministically re-execute the target transaction in isolation:
+
+- `pre` — the pre-state read closure (every account and storage slot the transaction touched), with their pre-transaction values.
+- `env` — the block environment (number, timestamp, coinbase, base fee, gas limit, prevrandao, excess blob gas).
+- `transaction` — the target transaction.
+- `megaEnv` — a MegaETH-specific extension carrying the SALT bucket capacities and oracle storage in effect, so dynamic storage-gas pricing reproduces exactly. Pure-Ethereum fixtures omit this field.
+- `post` — the expected result for the executed spec: state-root and logs-root, plus explicit `megaGasUsed` and `megaStatus` expectations that produce readable diffs on mismatch.
+
+The `post` expectation is computed by the `state-test` runner itself — the exact code path that later validates the fixture — so a dumped fixture is self-consistent by construction.
+
+**Fidelity gate.** Before building the fixture, the dump fetches the transaction's on-chain receipt and requires the local replay to reproduce the receipt's `gasUsed`, success status, and logs root exactly.
+Logs are compared explicitly rather than inferred from gas: `LOG` gas depends on topic count and data length, never content, so two executions can burn identical gas yet emit different log payloads.
+A mismatch aborts the dump (no file is written) with a clear error — this catches a wrong spec or hardfork config, which self-validation alone cannot, because the fixture is validated under the same spec it was dumped with.
+It then additionally cross-checks the isolated execution against the full replay (gas, status — including the exact halt reason for halted transactions — output, and logs root), so any gas-, output-, or log-visible divergence — including across the L1 data fee, which the isolated run zeroes but the full replay charges — aborts the dump.
+One channel stays open by construction: the isolated run's sender balance is shifted by the zeroed L1 fee, so a contract that stores a balance-derived value bakes that shifted value into `post` (and the sender's final balance in `post` likewise differs from the chain).
+The fixture still self-validates and reproduces gas exactly; only such balance-derived state values differ.
+
+`--dump-fixture` cannot be combined with transaction overrides or `--override.spec` (a forced spec would record a what-if, not the on-chain transaction), and deposit transactions are not supported.
+A target transaction that reads a block hash via `BLOCKHASH` is also rejected: fixtures carry no historical block hashes, so the isolated re-execution could not reproduce the values the replay observed.
+Block hash reads by preceding transactions in the same block do not matter — only the target transaction's reads are checked.
+Because the fidelity gate reads the receipt, an offline dump (`--rpc.replay-file`) requires the receipt to be present in the capture — so capture and dump together in the online run, then re-dump offline reproducibly.
+When combined with `--rpc.capture-file`, the capture file is written even if execution or the fidelity gate fails, so the captured RPC responses remain available for debugging the failure offline.
+
+```bash
+# Online: fetch + dump in one shot (records the receipt into the capture file):
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
+  --rpc.capture-file ./cap.json --dump-fixture ./fixtures/0xabc123.json 0xabc123...
+
+# Offline: re-dump reproducibly from the capture (receipt already captured):
+mega-evme replay --rpc.replay-file ./cap.json --dump-fixture ./fixtures/0xabc123.json 0xabc123...
+
+# Validate the fixture (and detect any gas/status/result drift):
+state-test ./fixtures/0xabc123.json
+```
+
+## Throughput Benchmark
+
+To benchmark a replayed transaction, dump it to a fixture and time the fixture with the `state-test` runner — there is no `replay`-side benchmark flag:
+
+```bash
+mega-evme replay --rpc <url> --dump-fixture /tmp/tx.json 0xabc123...
+state-test --bench /tmp/tx.json
+```
+
+`state-test --bench` reports `min` / `median` / `mean` time and throughput (Mgas/s), timing only the EVM `transact` call. A committed corpus of characteristic transactions and a base-vs-PR comparison driver build on this to track real-transaction throughput across changes; see `bench/replay/` and the `replay-bench` CI workflow.
+
 ## Spec Auto-Detection
 
 The EVM spec controls which opcodes, gas rules, and MegaETH-specific behaviors are active during execution.
@@ -95,7 +150,7 @@ Hardcoded hardfork configs exist for:
 - **Chain 6343** — MegaETH testnet v2
 - **Chain 4326** — MegaETH mainnet
 
-For any other chain, `replay` enables all hardforks at genesis (currently equivalent to `Rex4`).
+For any other chain, `replay` enables all hardforks at genesis (currently equivalent to `Rex5`).
 
 ### `--override.spec <SPEC>`
 
@@ -133,10 +188,14 @@ See the linked pages for full details.
   See [State Management](../configuration/state-management.md).
 - **RPC cache file** — Single-file JSON-RPC capture and offline replay via `--rpc.capture-file` / `--rpc.replay-file`.
   See [RPC Cache File](#rpc-cache-file) above.
-- **RPC cache / retry** — Per-chain response cache, chain-id override, retry and rate-limit settings.
+- **RPC cache / retry** — Per-chain response cache, retry, and rate-limit settings.
   See [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry).
 - **Tracing** — Emit execution traces (call traces, opcode traces, gas profiles, etc.).
   See [Tracing Overview](../tracing/overview.md).
+- **Fixture dump** — Write a self-validating EEST state-test fixture via `--dump-fixture`.
+  See [Self-Validating Fixture Dump](#self-validating-fixture-dump) above.
+- **Throughput benchmark** — Dump a fixture (`--dump-fixture`) and time it with `state-test --bench`.
+  See [Throughput Benchmark](#throughput-benchmark) above.
 
 ## Examples
 

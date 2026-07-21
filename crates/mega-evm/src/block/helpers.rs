@@ -2,11 +2,13 @@ use alloy_consensus::{transaction::Recovered, Transaction};
 use alloy_eips::{eip2930::AccessList, eip7702::SignedAuthorization, Encodable2718, Typed2718};
 use alloy_evm::{IntoTxEnv, RecoveredTx};
 use alloy_primitives::{Address, Bytes, ChainId, Selector, TxHash, TxKind, B256, U256};
+use auto_impl::auto_impl;
 use delegate::delegate;
 
 use crate::MegaTxEnvelope;
 
 /// Helper trait that allows attaching extra information to a transaction.
+#[auto_impl(&)]
 pub trait MegaTransactionExt {
     /// Get the estimated data availability size of the transaction.
     ///
@@ -32,6 +34,12 @@ pub trait MegaTransactionExt {
 }
 
 impl MegaTransactionExt for Recovered<MegaTxEnvelope> {
+    fn tx_hash(&self) -> TxHash {
+        self.inner().tx_hash()
+    }
+}
+
+impl MegaTransactionExt for Recovered<&MegaTxEnvelope> {
     fn tx_hash(&self) -> TxHash {
         self.inner().tx_hash()
     }
@@ -66,6 +74,14 @@ pub struct EnrichedMegaTx<T> {
 
 impl<T> EnrichedMegaTx<T> {
     /// Create a new `WithDASize` wrapper with a known data availability size.
+    ///
+    /// `da_size`/`tx_size` are trusted as-is and not validated against `inner`'s actual
+    /// encoding. When this wrapper reaches [`crate::MegaBlockExecutor::run_transaction`], these
+    /// values are read via [`MegaTransactionExt`] and used directly for
+    /// `tx_da_size_limit`/`tx_encode_size_limit`/block cumulative-size enforcement, so an
+    /// inaccurate value can let a transaction bypass a limit it should have been rejected by.
+    /// Only pass values computed from `inner` itself (e.g. by a trusted mempool at insertion
+    /// time); prefer [`EnrichedMegaTx::new_slow`] when in doubt.
     pub fn new(inner: T, tx_hash: TxHash, da_size: u64, tx_size: u64) -> Self {
         Self { inner, tx_hash, da_size, tx_size }
     }
@@ -80,6 +96,16 @@ impl<T: Encodable2718> EnrichedMegaTx<T> {
             da_size: op_alloy_flz::tx_estimated_size_fjord_bytes(inner.encoded_2718().as_slice()),
             tx_size: inner.encode_2718_len() as u64,
             inner,
+        }
+    }
+}
+
+impl<T: Encodable2718> Encodable2718 for EnrichedMegaTx<T> {
+    delegate! {
+        to self.inner {
+            fn type_flag(&self) -> Option<u8>;
+            fn encode_2718_len(&self) -> usize;
+            fn encode_2718(&self, out: &mut dyn alloy_primitives::bytes::BufMut);
         }
     }
 }

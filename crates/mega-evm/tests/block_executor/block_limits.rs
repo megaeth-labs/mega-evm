@@ -12,8 +12,8 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, EnrichedMegaTx, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory,
+    MegaHardforkConfig, MegaSpecId, MegaTransactionExt, MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{ADD, DUP1, LOG0, PUSH0, SLOAD, SSTORE},
@@ -41,6 +41,22 @@ fn create_transaction(
     let signed = Signed::new_unchecked(tx_legacy, Signature::test_signature(), Default::default());
     let tx = MegaTxEnvelope::Legacy(signed);
     alloy_consensus::transaction::Recovered::new_unchecked(tx, CALLER)
+}
+
+/// Like [`create_transaction`], but returns the bare envelope so callers can build a
+/// `Recovered<&MegaTxEnvelope>` (needed for `EnrichedMegaTx<T>: Copy`, which requires `T: Copy`).
+fn create_envelope(nonce: u64, gas_limit: u64) -> MegaTxEnvelope {
+    let tx_legacy = TxLegacy {
+        chain_id: Some(8453), // Base mainnet
+        nonce,
+        gas_price: 1_000_000,
+        gas_limit,
+        to: TxKind::Call(CONTRACT),
+        value: U256::ZERO,
+        input: Bytes::new(),
+    };
+    let signed = Signed::new_unchecked(tx_legacy, Signature::test_signature(), Default::default());
+    MegaTxEnvelope::Legacy(signed)
 }
 
 /// Creates a contract that generates a log with specified data size.
@@ -178,6 +194,137 @@ fn test_block_custom_data_limit() {
         "Error should mention TransactionDataLimit, got: {}",
         err_msg
     );
+}
+
+/// `MegaBlockExecutor::run_transaction` resolves `tx_size`/`da_size` through `MegaTransactionExt`,
+/// so an `EnrichedMegaTx` feeds its cached values into the pre-execution limit check instead of a
+/// fresh recompute (see the method's "Correctness" doc section). Its `debug_assert` cross-checks
+/// the resolved values against a fresh recompute, so a caller bug — here a deliberately understated
+/// stored `da_size` — is caught immediately in debug/test builds instead of silently letting a
+/// transaction bypass a limit it should have been rejected by.
+///
+/// A freshly recomputed DA size for any legacy tx is always >= 100 bytes (the `op_alloy_flz`
+/// minimum-size floor), so a `tx_da_size_limit` of 80 rejects a bare `Recovered<&MegaTxEnvelope>`
+/// (which uses the recomputing default). An `EnrichedMegaTx` carrying a deliberately understated
+/// stored `da_size` of 50 would pass that same limit using the cached value, but the `debug_assert`
+/// trips on the mismatch first.
+///
+/// `#[cfg(debug_assertions)]`: this test exercises the `debug_assert` itself, which is compiled
+/// out in release builds — under `cargo test --release` the same call would not panic and would
+/// instead silently succeed using the understated cached value. That is the documented,
+/// deliberate trade-off on `run_transaction` (see its "Correctness" doc section): the cache
+/// contract is enforced in debug/test builds only, at zero cost in release.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "does not match a fresh recompute")]
+fn test_run_transaction_rejects_understated_cached_da_size() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    const TX_DA_SIZE_LIMIT: u64 = 80;
+    const STORED_DA_SIZE: u64 = 50;
+
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        None,
+        Bytes::new(),
+        BlockLimits::no_limits().with_tx_da_size_limit(TX_DA_SIZE_LIMIT),
+    );
+
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let envelope = create_envelope(0, 100_000);
+    let real_da_size = MegaTransactionExt::estimated_da_size(&envelope);
+    assert!(
+        real_da_size > TX_DA_SIZE_LIMIT,
+        "test setup requires the freshly recomputed da_size ({real_da_size}) to exceed the limit"
+    );
+    const { assert!(STORED_DA_SIZE < TX_DA_SIZE_LIMIT, "stored da_size must pass the limit") };
+
+    let recovered = alloy_consensus::transaction::Recovered::new_unchecked(&envelope, CALLER);
+
+    // A bare (non-enriched) transaction uses the recomputing default and is rejected.
+    let plain_result = executor.run_transaction(&recovered);
+    assert!(
+        plain_result.is_err(),
+        "bare transaction should be rejected: real da_size exceeds the limit"
+    );
+
+    // An `EnrichedMegaTx` with an understated stored `da_size` would pass the limit using the
+    // cached value, but `run_transaction`'s debug_assert catches the mismatch and panics instead
+    // of silently letting it through. `tx_size` is stored accurately here so the assert trips on
+    // `da_size` alone.
+    let real_tx_size = MegaTransactionExt::tx_size(&envelope);
+    let enriched =
+        EnrichedMegaTx::new(recovered, envelope.trie_hash(), STORED_DA_SIZE, real_tx_size);
+    let _ = executor.run_transaction(enriched);
+}
+
+/// `MegaBlockExecutor::execute_mega_transaction` (the alias for
+/// [`MegaBlockExecutor::run_transaction`]) must succeed and produce an outcome carrying the cached
+/// fields when they accurately reflect the wrapped transaction — the intended, common-case usage,
+/// as opposed to the deliberately mismatched cache exercised above.
+#[test]
+fn test_execute_mega_transaction_succeeds_with_accurate_cache() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    let block_ctx =
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), BlockLimits::no_limits());
+
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let envelope = create_envelope(0, 1_000_000);
+    let expected_da_size = MegaTransactionExt::estimated_da_size(&envelope);
+    let expected_tx_size = MegaTransactionExt::tx_size(&envelope);
+    let recovered = alloy_consensus::transaction::Recovered::new_unchecked(&envelope, CALLER);
+    let enriched = EnrichedMegaTx::new_slow(recovered);
+
+    let outcome = executor
+        .execute_mega_transaction(enriched)
+        .expect("accurate cached values must satisfy the debug_assert and succeed normally");
+    assert_eq!(outcome.da_size, expected_da_size, "outcome da_size must match the accurate cache");
+    assert_eq!(outcome.tx_size, expected_tx_size, "outcome tx_size must match the accurate cache");
 }
 
 #[test]

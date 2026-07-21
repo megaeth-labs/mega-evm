@@ -66,7 +66,8 @@ impl MegaPrecompiles {
 
 /// Precompiles for the `REX` spec.
 pub fn rex() -> &'static Precompiles {
-    mini_rex()
+    static INSTANCE: OnceBox<Precompiles> = OnceBox::new();
+    INSTANCE.get_or_init(|| Box::new(mini_rex().clone()))
 }
 
 /// Precompiles for the `MINI_REX` spec.
@@ -153,8 +154,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
     type Output = InterpreterResult;
 
     #[inline]
-    fn set_spec(&mut self, spec: OpSpecId) -> bool {
-        PrecompileProvider::<OpContext<DB>>::set_spec(self, spec)
+    fn set_spec(&mut self, _spec: OpSpecId) -> bool {
+        // The table is already correct and unchanged: MegaEvm bakes it at construction
+        // from MegaSpecId. Rebuilding from OpSpecId would lose Mega-specific overrides
+        // because all current Mega specs map to the same OpSpecId.
+        false
     }
 
     #[inline]
@@ -273,7 +277,7 @@ mod tests {
     use alloc as std;
     use std::{rc::Rc, vec::Vec};
 
-    use super::{kzg_point_evaluation::GAS_COST, MegaPrecompiles};
+    use super::{kzg_point_evaluation::GAS_COST, mini_rex, rex, MegaPrecompiles};
     use crate::{
         test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId,
     };
@@ -330,6 +334,22 @@ mod tests {
         inputs
     }
 
+    fn set_spec_for_context<DB: alloy_evm::Database, ExtEnvs: crate::ExternalEnvTypes>(
+        precompiles_map: &mut PrecompilesMap,
+        _context: &MegaContext<DB, ExtEnvs>,
+        spec: op_revm::OpSpecId,
+    ) -> bool {
+        <PrecompilesMap as PrecompileProvider<MegaContext<DB, ExtEnvs>>>::set_spec(
+            precompiles_map,
+            spec,
+        )
+    }
+
+    #[test]
+    fn test_rex_and_mini_rex_precompiles_have_distinct_statics() {
+        assert!(!core::ptr::eq(rex(), mini_rex()));
+    }
+
     #[test]
     fn test_kzg_precompile_sufficient_gas() {
         let mut db = MemoryDatabase::default();
@@ -361,6 +381,26 @@ mod tests {
         assert!(result.is_ok(), "Precompile should succeed with exact GAS_COST");
         let output = result.unwrap().unwrap();
         assert!(matches!(output.result, InstructionResult::Return), "Result should be Return");
+        assert_eq!(output.gas.spent(), GAS_COST);
+    }
+
+    #[test]
+    fn test_set_spec_preserves_mega_kzg_override() {
+        let mut db = MemoryDatabase::default();
+        let mut context = MegaContext::new(&mut db, MegaSpecId::MINI_REX);
+        let mut precompiles_map = PrecompilesMap::from_static(
+            MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX).precompiles(),
+        );
+
+        let changed =
+            set_spec_for_context(&mut precompiles_map, &context, op_revm::OpSpecId::ISTHMUS);
+        assert!(!changed, "Mega precompile table must remain unchanged");
+
+        let inputs = generate_kzg_test_input();
+        let address = revm::precompile::kzg_point_evaluation::ADDRESS;
+        let result = precompiles_map.run(&mut context, &address, &inputs, true, 200_000);
+        let output = result.expect("run ok").expect("Some output");
+        assert!(matches!(output.result, InstructionResult::Return));
         assert_eq!(output.gas.spent(), GAS_COST);
     }
 

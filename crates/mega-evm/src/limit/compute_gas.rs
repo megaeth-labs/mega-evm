@@ -139,11 +139,10 @@ impl ComputeGasTracker {
     /// records to the `tx_entry`.
     ///
     /// Compute gas is always persistent because CPU cycles cannot be undone.
+    #[inline]
     pub(crate) fn record_gas_used(&mut self, gas: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.persistent_usage += gas;
-        } else {
-            self.frame_tracker.tx_mut().persistent_usage += gas;
+        if !self.frame_tracker.add_frame_persistent(gas) {
+            self.frame_tracker.add_tx_persistent(gas);
         }
     }
 
@@ -152,7 +151,7 @@ impl ComputeGasTracker {
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox compute gas consumption
     /// back to the parent transaction.
     pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
-        self.frame_tracker.tx_mut().persistent_usage += amount;
+        self.frame_tracker.add_tx_persistent(amount);
     }
 }
 
@@ -242,5 +241,30 @@ impl TxRuntimeLimit for ComputeGasTracker {
     fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
         assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
         self.frame_tracker.pop_frame(result.instruction_result().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Usage exactly equal to the detained limit must NOT count as a detained exceed:
+    /// the predicate is strictly-greater-than (`used > detained_limit`), not `>=`.
+    #[test]
+    fn test_is_detained_exceed_is_strict_at_boundary() {
+        // tx_limit = 100, detained lowered to 50 (< tx_limit, so detention is binding).
+        let mut tracker = ComputeGasTracker::new(MegaSpecId::MINI_REX, 100);
+        tracker.set_detained_limit(50);
+
+        // Usage exactly at the detained limit: not exceeded.
+        tracker.record_gas_used(50);
+        assert!(
+            !tracker.is_detained_exceed(),
+            "usage == detained_limit must not be a detained exceed"
+        );
+
+        // One unit over the limit: exceeded.
+        tracker.record_gas_used(1);
+        assert!(tracker.is_detained_exceed(), "usage > detained_limit must be a detained exceed");
     }
 }

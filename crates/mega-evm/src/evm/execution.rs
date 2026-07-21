@@ -1,6 +1,6 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{string::ToString, vec::Vec};
+use std::{collections::BTreeMap, string::ToString, vec::Vec};
 
 use alloy_evm::{precompiles::PrecompilesMap, Database};
 use alloy_primitives::{Address, Bytes, TxKind, U256};
@@ -198,19 +198,6 @@ where
     EVM: EvmTr<Context = MegaContext<DB, ExtEnvs>>,
     ERROR: From<DB::Error> + FromStringError,
 {
-    /// Returns the authority nonce from the transaction-local simulated auth-list state.
-    ///
-    /// Used to mirror revm's sequential EIP-7702 auth processing when the same authority appears
-    /// multiple times in one transaction.
-    fn simulated_authority_nonce(
-        simulated_authorities: &[(Address, u64)],
-        authority: Address,
-    ) -> Option<u64> {
-        simulated_authorities.iter().find_map(|(simulated_authority, nonce)| {
-            (*simulated_authority == authority).then_some(*nonce)
-        })
-    }
-
     /// Read-only scan of a transaction's EIP-7702 authorization list, mirroring revm's auth-list
     /// application order: the chain-id / `u64::MAX`-nonce / non-empty-non-7702-code gates, the
     /// per-authority account-nonce match, and the sequential simulated-nonce tracking for repeated
@@ -235,7 +222,13 @@ where
         let chain_id = ctx.cfg().chain_id;
         let (tx, journal) = ctx.tx_journal_mut();
         let caller = tx.caller();
-        let mut simulated_authorities = Vec::<(Address, u64)>::new();
+        // Transaction-local simulated auth-list state, mirroring revm's sequential processing
+        // when the same authority appears multiple times in one tx. A `BTreeMap` keeps
+        // per-authorization lookup/update at O(log N) instead of the O(N) linear scan a `Vec`
+        // would need, bounding the whole pass at O(N log N) (an attacker could otherwise drive
+        // O(N²) node CPU with many unique authorities in one tx). The map is only ever keyed,
+        // never iterated for output, so the produced `applied` list is unchanged.
+        let mut simulated_authorities = BTreeMap::<Address, u64>::new();
         let mut applied = Vec::new();
         for authorization in tx.authorization_list() {
             let auth_chain_id = authorization.chain_id();
@@ -250,7 +243,7 @@ where
             };
 
             let (authority_nonce, creates_authority) = if let Some(nonce) =
-                Self::simulated_authority_nonce(&simulated_authorities, authority)
+                simulated_authorities.get(&authority).copied()
             {
                 (nonce, false)
             } else {
@@ -285,14 +278,9 @@ where
 
             applied.push(AppliedAuthorization { authority, creates_authority });
             let next_nonce = authority_nonce.saturating_add(1);
-            if let Some((_, nonce)) = simulated_authorities
-                .iter_mut()
-                .find(|(simulated_authority, _)| *simulated_authority == authority)
-            {
-                *nonce = next_nonce;
-            } else {
-                simulated_authorities.push((authority, next_nonce));
-            }
+            // insert overwrites an existing entry and inserts a new one otherwise,
+            // matching the prior find-or-push.
+            simulated_authorities.insert(authority, next_nonce);
         }
         Ok(applied)
     }
@@ -713,9 +701,9 @@ where
                 .borrow_mut()
                 .record_compute_gas(initial_and_floor_gas.initial_gas);
 
-            // MegaETH MiniRex modification: calldata storage gas costs
-            // - Standard tokens: 400 gas per token (vs 4)
-            // - EIP-7623 floor: 100x increase for transaction data floor cost
+            // MegaETH MiniRex modification: calldata storage gas costs (10x the standard EVM rates)
+            // - Standard tokens: 40 gas per token (vs 4)
+            // - EIP-7623 floor: 100 gas per token (vs 10)
             let tokens_in_calldata = get_tokens_in_calldata(ctx.tx().input(), true);
             let calldata_storage_gas =
                 constants::mini_rex::CALLDATA_STANDARD_TOKEN_STORAGE_GAS * tokens_in_calldata;

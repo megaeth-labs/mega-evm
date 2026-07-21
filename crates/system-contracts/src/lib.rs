@@ -8,7 +8,9 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
-#![warn(unused_crate_dependencies)]
+// `not(test)`: dev-dependencies (e.g. `serde_json`, used only by integration tests) are linked
+// into test builds but not referenced by the library crate, which would otherwise trip this lint.
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![deny(unused_must_use)]
 
 pub use alloy_primitives;

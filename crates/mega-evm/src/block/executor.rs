@@ -26,13 +26,10 @@ use revm::{
 };
 
 use crate::{
-    block::eips, is_apply_pending_changes_due, resolve_system_address,
-    transact_apply_pending_changes, transact_deploy_access_control_contract,
-    transact_deploy_high_precision_timestamp_oracle, transact_deploy_keyless_deploy_contract,
-    transact_deploy_limit_control_contract, transact_deploy_oracle_contract,
-    transact_deploy_sequencer_registry, BlockLimiter, BlockMegaTransactionOutcome, BucketId,
-    MegaBlockExecutionCtx, MegaHardforks, MegaSystemCallOutcome, MegaTransaction,
-    MegaTransactionExt, MegaTransactionOutcome,
+    block::eips, flat_system_contract_specs, is_apply_pending_changes_due, resolve_system_address,
+    transact_apply_pending_changes, transact_deploy, transact_deploy_sequencer_registry,
+    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
+    MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -230,64 +227,13 @@ where
         // already activated and the create2 deployer is already deployed, so we can safely assume
         // that `ensure_create2_deployer` function will never be called.
 
-        // MiniRex hardfork: oracle contract
-        let result_and_state =
-            transact_deploy_oracle_contract(&self.hardforks, block_timestamp, self.evm.db_mut())
-                .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
-            outcomes.push(MegaSystemCallOutcome {
-                // We tentatively use `StateChangeSource::Transaction(0)` as state change source as
-                // there is no specific source defined for this oracle contract in alloy. This may
-                // change in the future.
-                source: StateChangeSource::Transaction(0),
-                state,
-            });
-        }
-
-        // MiniRex hardfork: high precision timestamp oracle contract
-        let result_and_state = transact_deploy_high_precision_timestamp_oracle(
-            &self.hardforks,
-            block_timestamp,
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
-            outcomes
-                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
-        }
-
-        // Rex2 hardfork: keyless deploy contract
-        let result_and_state = transact_deploy_keyless_deploy_contract(
-            &self.hardforks,
-            block_timestamp,
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
-            outcomes
-                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
-        }
-
-        // Rex4 hardfork: access control contract
-        let result_and_state = transact_deploy_access_control_contract(
-            &self.hardforks,
-            block_timestamp,
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
-            outcomes
-                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
-        }
-
-        // Rex4 hardfork: MegaLimitControl contract
-        let result_and_state = transact_deploy_limit_control_contract(
-            &self.hardforks,
-            block_timestamp,
-            self.evm.db_mut(),
-        )
-        .map_err(BlockExecutionError::other)?;
-        if let Some(state) = result_and_state {
+        // Flat system contracts (Oracle, high-precision timestamp Oracle, KeylessDeploy,
+        // MegaAccessControl, MegaLimitControl) share one deploy path via the canonical
+        // registry. We tentatively use `StateChangeSource::Transaction(0)` as the state
+        // change source, as alloy defines no specific source for these predeploys.
+        for spec in flat_system_contract_specs(&self.hardforks, block_timestamp) {
+            let state =
+                transact_deploy(self.evm.db_mut(), &spec).map_err(BlockExecutionError::other)?;
             outcomes
                 .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
         }
@@ -389,13 +335,48 @@ where
         tx: Tx,
     ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
     where
-        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+        Tx: IntoTxEnv<MegaTransaction>
+            + RecoveredTx<R::Transaction>
+            + MegaTransactionExt
+            + Encodable2718
+            + Copy,
     {
         self.run_transaction(tx)
     }
 
     /// Execute a transaction with a commit condition function without committing the execution
     /// result to the block executor's inner state.
+    ///
+    /// `tx_size`/`da_size` are resolved from `Tx` through [`MegaTransactionExt`]: a `Tx` that
+    /// carries precomputed values (e.g. [`crate::EnrichedMegaTx`]) reuses them, while any other
+    /// `Tx` falls back to the trait's default, which recomputes them from the EIP-2718 encoding.
+    /// The choice is resolved at compile time by trait dispatch, so callers do not pick a
+    /// variant — this is the single execution entry point regardless of whether the transaction
+    /// carries a size cache.
+    ///
+    /// The `alloy_evm` block-execution path
+    /// ([`alloy_evm::block::BlockExecutor::execute_transaction_with_commit_condition`]) does not
+    /// route through this method: its `tx: impl ExecutableTx<Self>` parameter cannot be required
+    /// to implement [`MegaTransactionExt`], so it recomputes the sizes itself and calls
+    /// [`MegaBlockExecutor::run_transaction_with_sizes`] directly.
+    ///
+    /// # Correctness
+    ///
+    /// `tx_size`/`da_size` feed directly into [`BlockLimiter::pre_execution_check`]'s
+    /// `tx_encode_size_limit`/`tx_da_size_limit`/block cumulative-size checks. When `Tx`
+    /// overrides the defaults with cached values, those values are trusted with no validation
+    /// against the real encoded transaction: callers MUST ensure `Tx::tx_size()`/
+    /// `Tx::estimated_da_size()` accurately reflect `tx`'s actual EIP-2718 encoding — an
+    /// understated value lets a transaction bypass a limit it should have been rejected by.
+    /// This is safe for the sequencer's own block-building path (the cache is computed by the
+    /// same trusted process, e.g. at mempool insertion), but a `Tx` whose cached sizes could
+    /// come from an untrusted or stale source (e.g. block validation of another party's block)
+    /// must not be fed here without first re-establishing that invariant. A `Tx` that uses the
+    /// recomputing default (e.g. a bare `Recovered<...>`) is unconditionally safe.
+    ///
+    /// A `debug_assert` cross-checks the resolved values against a fresh recompute, so a caller
+    /// bug is caught in tests/CI; it is compiled out in release builds. For the recomputing
+    /// default it is a no-op; for a cached override it is the real safety net.
     ///
     /// # Parameters
     ///
@@ -410,11 +391,47 @@ where
         tx: Tx,
     ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
     where
+        Tx: IntoTxEnv<MegaTransaction>
+            + RecoveredTx<R::Transaction>
+            + MegaTransactionExt
+            + Encodable2718
+            + Copy,
+    {
+        let tx_size = tx.tx_size();
+        let da_size = tx.estimated_da_size();
+        debug_assert_eq!(
+            tx_size,
+            tx.encode_2718_len() as u64,
+            "run_transaction: Tx-reported tx_size does not match a fresh recompute from the \
+             encoded transaction"
+        );
+        debug_assert_eq!(
+            da_size,
+            op_alloy_flz::tx_estimated_size_fjord_bytes(tx.encoded_2718().as_slice()),
+            "run_transaction: Tx-reported da_size does not match a fresh recompute from the \
+             encoded transaction"
+        );
+        self.run_transaction_with_sizes(tx, tx_size, da_size)
+    }
+
+    /// Shared body of [`MegaBlockExecutor::run_transaction`] and the `alloy_evm`
+    /// block-execution path: `tx_size`/`da_size` are resolved by the caller (recomputed or read
+    /// from a cache), this only consumes them.
+    ///
+    /// This is the escape hatch for callers whose `Tx` cannot implement [`MegaTransactionExt`]
+    /// (e.g. the `alloy_evm` `ExecutableTx`-constrained path): they resolve the sizes themselves
+    /// and pass them in. Prefer [`MegaBlockExecutor::run_transaction`] otherwise, which resolves
+    /// the sizes for you and cross-checks any cached values.
+    pub fn run_transaction_with_sizes<Tx>(
+        &mut self,
+        tx: Tx,
+        tx_size: u64,
+        da_size: u64,
+    ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
+    where
         Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
     {
         let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
-        let tx_size = tx.tx().encode_2718_len() as u64;
-        let da_size = tx.tx().estimated_da_size();
 
         // Check transaction-level and block-level limits before transaction execution
         self.block_limiter.pre_execution_check(
@@ -558,6 +575,18 @@ where
     pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
         self.evm.db().block_hashes.clone()
     }
+
+    /// Clears the recorded block hash accesses.
+    ///
+    /// Block hash reads accumulate in the executor's database across every
+    /// transaction executed so far. Callers that need to attribute BLOCKHASH
+    /// reads to a single transaction (e.g. replay fixture dumping) clear the
+    /// record before executing it. The record is a cache: a cleared hash is
+    /// simply re-fetched from the underlying database on the next access, so
+    /// execution results are unaffected.
+    pub fn clear_accessed_block_hashes(&mut self) {
+        self.evm.db_mut().block_hashes.clear();
+    }
 }
 
 /// Implementation of `alloy_evm::block::BlockExecutor` for `MegaETH` block executor.
@@ -614,7 +643,12 @@ where
         tx: impl ExecutableTx<Self>,
         f: impl FnOnce(&ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>) -> CommitChanges,
     ) -> Result<Option<u64>, BlockExecutionError> {
-        let outcome = self.run_transaction(tx)?;
+        // `tx: impl ExecutableTx<Self>` cannot be required to implement `MegaTransactionExt`, so
+        // this path recomputes the sizes from the raw inner transaction and bypasses
+        // `run_transaction` (which reads them via the trait). See `run_transaction`'s docs.
+        let tx_size = tx.tx().encode_2718_len() as u64;
+        let da_size = tx.tx().estimated_da_size();
+        let outcome = self.run_transaction_with_sizes(tx, tx_size, da_size)?;
         if f(&outcome.result).should_commit() {
             let gas_used = self.commit_execution_outcome(outcome)?;
             Ok(Some(gas_used))

@@ -110,6 +110,21 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
+    /// Test/bench-only public wrapper over [`new_with_shared_ext_envs`] so a
+    /// bench can build a context over a configurable external environment
+    /// (e.g. `TestExternalEnvs` with crowded buckets or oracle storage).
+    pub fn new_with_ext_envs(
+        db: DB,
+        spec: MegaSpecId,
+        salt_env: Rc<ExtEnvs::SaltEnv>,
+        oracle_env: Rc<RefCell<ExtEnvs::OracleEnv>>,
+    ) -> Self {
+        Self::new_with_shared_ext_envs(db, spec, salt_env, oracle_env)
+    }
+}
+
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Creates a new `MegaContext` with shared external environment references.
     ///
@@ -839,5 +854,29 @@ mod tests {
 
         assert_eq!(parent.accessed_bucket_ids(), parent_bucket_ids);
         assert_ne!(sandbox.accessed_bucket_ids(), parent_bucket_ids);
+    }
+
+    /// The test/bench-only `new_with_ext_envs` wrapper builds a `MegaContext`
+    /// over a caller-supplied external environment (`TestExternalEnvs`), at the
+    /// requested spec and wired to the given SALT/oracle handles.
+    #[test]
+    fn test_new_with_ext_envs_builds_over_configurable_env() {
+        let env = TestExternalEnvs::<std::convert::Infallible>::new();
+        let context =
+            MegaContext::<_, TestExternalEnvs<std::convert::Infallible>>::new_with_ext_envs(
+                EmptyDB::default(),
+                MegaSpecId::REX5,
+                Rc::new(env.clone()),
+                Rc::new(RefCell::new(env)),
+            );
+
+        assert_eq!(context.mega_spec(), MegaSpecId::REX5);
+        // The supplied SALT env is wired through: a bucket lookup against the
+        // dynamic-gas cache succeeds.
+        context
+            .dynamic_storage_gas_cost
+            .borrow_mut()
+            .new_account_gas(address!("0000000000000000000000000000000000100003"))
+            .expect("bucket lookup against the supplied env should succeed");
     }
 }

@@ -43,11 +43,18 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
+# CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so
+# `use criterion::...` in the benches is unchanged. Under a normal `cargo bench`
+# it behaves exactly like criterion; under `cargo codspeed` it runs each bench
+# once under valgrind and reports layout-insensitive instruction counts.
+criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
 hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
+op-revm-latest = { package = "op-revm", version = "20.0.0", default-features = false, features = ["dev", "serde", "std"] }
 rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors = { workspace = true, features = ["std"] }
+# Pin to the revm version `op-revm-latest` depends on so both `_latest` baselines share one revm tree.
+revm-latest = { package = "revm", version = "38.0.0", default-features = false, features = ["dev", "serde", "std"] }
 serde_json.workspace = true
 sha2.workspace = true
 
@@ -55,6 +62,10 @@ sha2.workspace = true
 default = ["std", "revm/default", "op-revm/default"]
 std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
 test-utils = []
+
+[[bench]]
+name = "attack_replay"
+harness = false
 
 [[bench]]
 name = "block_bench"
@@ -66,6 +77,10 @@ harness = false
 
 [[bench]]
 name = "ctt"
+harness = false
+
+[[bench]]
+name = "enriched_tx"
 harness = false
 
 [[bench]]

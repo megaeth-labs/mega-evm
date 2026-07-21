@@ -414,9 +414,65 @@ impl AdditionalLimit {
 /* Hooks for transaction execution lifecycle. */
 impl AdditionalLimit {
     /// Records the compute gas used and returns `false` if the limit has been exceeded.
+    ///
+    /// This runs on every metered opcode, so it is the hottest hook in the whole tracker.
+    /// `#[inline]` lets the record + within-limit check fold directly into the per-opcode
+    /// wrapper, removing a call across the `RefMut<AdditionalLimit>` boundary.
+    #[inline]
     pub(crate) fn record_compute_gas(&mut self, compute_gas_used: u64) -> bool {
+        // Record unconditionally, even when another dimension has already latched an exceed:
+        // the compute work was performed, and the recorded total feeds the transaction outcome
+        // and block-level compute accounting. Skipping the record would under-report compute
+        // usage for transactions halted on a non-compute dimension (e.g. intrinsic data size
+        // latched in `before_tx_start` before `validate` records the initial gas).
         self.compute_gas.record_gas_used(compute_gas_used);
+        // Sticky short-circuit, mirroring `check_limit`: an already-latched `ExceedsLimit` is
+        // surfaced immediately, and `Exempt` (REX6+ system-originated tx) suppresses the halt
+        // decision — including the compute-gas / detained check below — while the recording
+        // above still feeds `get_usage` and block-level accounting.
+        if !self.has_exceeded_limit.within_limit() {
+            return !self.has_exceeded_limit.exceeded_limit();
+        }
+        // Debug-only guard for the latch protocol: the compute-only fast path below is sound
+        // only if every non-compute mutation site already latched its own exceed. If a
+        // non-compute dimension is over limit but not yet latched, some mutation site is missing
+        // its `check_limit()` — catch it here in tests, not in production. The sub-tracker
+        // `check_limit()` calls are non-mutating, so this compiles out of release builds. (The
+        // one pre-inner recorder, SELFDESTRUCT, routes through `record_compute_gas_all_dims`, not
+        // this method, so it never trips this.)
+        debug_assert!(
+            !self.data_size.check_limit().exceeded_limit() &&
+                !self.kv_update.check_limit().exceeded_limit() &&
+                !self.state_growth.check_limit().exceeded_limit(),
+            "non-compute limit exceeded without latching: a mutation site is missing check_limit()",
+        );
+        // Recording compute gas can only change the compute-gas dimension, so check just that one
+        // (`compute_gas.check_limit()` covers both the Rex4+ per-frame budget and the TX-level
+        // detained limit) instead of fanning out to all four sub-trackers. The other three
+        // dimensions only change at their own mutation sites (`on_sstore`, `on_log`,
+        // `record_oracle_hint_bytes`, `on_selfdestruct_new_account`, the frame-lifecycle hooks),
+        // each of which runs `check_limit()` itself and latches any exceed into
+        // `has_exceeded_limit` — which the short-circuit above then surfaces here.
+        let check = self.compute_gas.check_limit();
+        if check.exceeded_limit() {
+            self.has_exceeded_limit = check;
+            return false;
+        }
+        true
+    }
 
+    /// Records the compute gas used and checks ALL four limit dimensions (the
+    /// pre-optimization fan-out), returning `false` if any has been exceeded.
+    ///
+    /// Retained for SELFDESTRUCT: its REX5 storage wrapper records beneficiary
+    /// data/KV/state usage *before* the inner instruction runs, without latching
+    /// (the inner instruction may still fail, in which case the frame pops that
+    /// discardable usage). The fan-out here latches those dimensions only after the
+    /// inner instruction has succeeded, with `check_limit`'s dimension priority.
+    /// Hot-path opcodes use [`Self::record_compute_gas`] instead.
+    #[inline]
+    pub(crate) fn record_compute_gas_all_dims(&mut self, compute_gas_used: u64) -> bool {
+        self.compute_gas.record_gas_used(compute_gas_used);
         !self.check_limit().exceeded_limit()
     }
 
@@ -988,5 +1044,108 @@ mod metering_exemption_tests {
             "reset must restore the WithinLimit baseline"
         );
         assert!(!al.record_compute_gas(1_000_000), "after reset, metering is enforced again");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use revm::context::tx::TxEnvBuilder;
+
+    use super::{super::LimitKind, *};
+
+    fn test_limits() -> EvmTxRuntimeLimits {
+        EvmTxRuntimeLimits {
+            tx_data_size_limit: 100,
+            tx_kv_updates_limit: 1_000,
+            tx_compute_gas_limit: 1_000_000,
+            tx_state_growth_limit: 1_000,
+            block_env_access_compute_gas_limit: 1_000_000,
+            oracle_access_compute_gas_limit: 1_000_000,
+        }
+    }
+
+    /// Returns the latched limit kind, or `None` when within limit.
+    fn latched_kind(limit: &AdditionalLimit) -> Option<LimitKind> {
+        match limit.has_exceeded_limit {
+            LimitCheck::ExceedsLimit { kind, .. } => Some(kind),
+            LimitCheck::WithinLimit | LimitCheck::Exempt => None,
+        }
+    }
+
+    /// Compute gas must be recorded even when another dimension has already latched an
+    /// exceed: the work was performed, and the recorded total feeds the transaction outcome
+    /// and block-level compute accounting. A skipped record would under-report compute usage
+    /// for transactions halted on a non-compute dimension.
+    ///
+    /// This pins the `validate()` path: `before_tx_start` latches intrinsic data-size
+    /// overflow before any frame exists, then the initial gas is recorded.
+    #[test]
+    fn test_record_compute_gas_records_after_other_dimension_latched() {
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, test_limits());
+
+        // Latch the data-size dimension at its mutation site: intrinsic transaction data
+        // (110-byte base + 200 bytes of calldata) exceeds the 100-byte limit.
+        let tx = MegaTransaction::new(
+            TxEnvBuilder::new()
+                .caller(Address::ZERO)
+                .call(Address::ZERO)
+                .data(vec![0u8; 200].into())
+                .build_fill(),
+        );
+        limit.before_tx_start(&tx);
+        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
+
+        // The trailing compute-gas record of the same opcode must still surface the latched
+        // exceed AND record the gas.
+        assert!(!limit.record_compute_gas(5_000), "latched exceed must surface as false");
+        assert_eq!(
+            limit.get_usage().compute_gas,
+            5_000,
+            "compute gas must be recorded even after another dimension latched",
+        );
+
+        // The latched kind is preserved (not overwritten by the compute-gas check).
+        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
+    }
+
+    /// SELFDESTRUCT's beneficiary usage is recorded *before* the inner instruction runs and
+    /// must NOT latch at the recording site: the inner instruction can still fail (out of
+    /// gas, DB error), in which case the frame pops the discardable usage and a latch taken
+    /// at recording time would stick and misattribute the failure. The latch belongs to the
+    /// trailing all-dimension check, which only runs after the inner instruction succeeds.
+    #[test]
+    fn test_selfdestruct_usage_latches_only_at_trailing_check() {
+        let mut limits = test_limits();
+        // Below the 40-byte account-info write, so the beneficiary creation exceeds it.
+        limits.tx_data_size_limit = 10;
+        let mut limit = AdditionalLimit::new(MegaSpecId::REX5, limits);
+        // Simulate an active call frame (SELFDESTRUCT always runs inside one).
+        limit.push_empty_frame();
+
+        // Recording site: usage recorded, but no latch yet (inner instruction may still fail).
+        limit.on_selfdestruct_new_account();
+        assert_eq!(latched_kind(&limit), None, "recording site must not latch");
+
+        // Trailing all-dimension check (runs only after inner success): latches and halts.
+        assert!(!limit.record_compute_gas_all_dims(100), "trailing check must surface exceed");
+        assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
+    }
+
+    /// `intrinsic_check_for_tx` is a REX5-only preflight (EIP-7702 authority growth);
+    /// its `debug_assert!(spec.is_enabled(REX5))` precondition must reject a pre-REX5
+    /// spec. Calling it at REX4 must trip the assert.
+    ///
+    /// Kills the spec-gate mutant `is_enabled(MegaSpecId::REX5) -> is_enabled(REX4)` at
+    /// limit.rs:203: under the mutant the precondition would silently accept REX4 and the
+    /// call would return a `LimitCheck` instead of panicking.
+    #[test]
+    #[should_panic(expected = "REX5")]
+    #[cfg(debug_assertions)]
+    fn test_intrinsic_check_for_tx_requires_rex5_spec() {
+        let tx = MegaTransaction::new(
+            TxEnvBuilder::new().caller(Address::ZERO).call(Address::ZERO).build_fill(),
+        );
+        // REX4 < REX5: the precondition assert must fire.
+        let _ = AdditionalLimit::intrinsic_check_for_tx(MegaSpecId::REX4, &tx, test_limits());
     }
 }

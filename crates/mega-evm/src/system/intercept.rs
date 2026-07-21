@@ -241,6 +241,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> SystemContractInterceptor<DB, ExtE
             // the freshly-flipped `has_exceeded_limit` and produce the canonical
             // TX-level `OutOfGas` halt via `create_exceeded_limit_result`. The failure
             // shape (and rescued-gas refund) matches every other data-size overflow.
+            //
+            // Direct top-level Oracle transactions intentionally pay both the normal
+            // intrinsic calldata charge and this hint-side-channel charge.
             let within = ctx
                 .additional_limit
                 .borrow_mut()

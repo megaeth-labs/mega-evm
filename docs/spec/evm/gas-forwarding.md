@@ -62,12 +62,19 @@ The child call frame gas for value-transferring `CALL` and `CALLCODE` MUST be:
 
 For `DELEGATECALL`, `STATICCALL`, `CREATE`, and `CREATE2`, no call stipend applies.
 
-### Opcode Scope by Spec Version
-
-For [MiniRex](../upgrades/minirex.md), the 98/100 rule applied only to `CALL`, `CREATE`, and `CREATE2`.
-For [Rex](../upgrades/rex.md) and later stable specs, the 98/100 rule applies to all CALL-like opcodes and both contract-creation opcodes.
-
 ### [Storage Gas Stipend](../glossary.md#storage-gas-stipend) Interaction
+
+For internal (call depth greater than zero) value-transferring `CALL` and `CALLCODE`, the callee frame receives a `STORAGE_CALL_STIPEND` allowance.
+This allowance MUST NOT inflate the callee's `gas_limit`: the child-frame gas limit is exactly `min(requested_forwarded_gas, forwarded_gas_cap) + CALL_STIPEND`, with no `STORAGE_CALL_STIPEND` term.
+
+The allowance is a per-frame budget reserved exclusively for the storage-gas surcharges that MegaETH adds on top of standard EVM opcode costs.
+A node MUST apply the allowance only to the following storage-gas surcharge sites incurred within the callee frame:
+
+- empty-account creation via value-transferring `CALL` / `CALLCODE`,
+- contract creation via `CREATE` / `CREATE2`,
+- the first-time zero-to-non-zero `SSTORE` write,
+- `LOG` topic and data storage gas, and
+- empty-beneficiary creation via `SELFDESTRUCT`.
 
 For internal (call depth greater than zero) value-transferring `CALL` and `CALLCODE`, the callee frame receives a `STORAGE_CALL_STIPEND` allowance.
 This allowance MUST NOT inflate the callee's `gas_limit`: the child-frame gas limit is exactly `min(requested_forwarded_gas, forwarded_gas_cap) + CALL_STIPEND`, with no `STORAGE_CALL_STIPEND` term.

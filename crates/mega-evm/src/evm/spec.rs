@@ -96,10 +96,11 @@ impl MegaSpecId {
         }
     }
 
-    /// Checks if one given [`SpecId`] is enabled in the current [`SpecId`].
+    /// Returns `true` if `other` is enabled under `self` — i.e. `other` is at or below `self`
+    /// in [`SpecId`] order.
     ///
-    /// Evm versions are backward compatible, so a higher version is always enabled in a lower
-    /// version.
+    /// Evm versions are backward compatible: the current spec (`self`) enables every version at
+    /// or below it, so a lower-or-equal version is always enabled under a higher one.
     pub const fn is_enabled(self, other: Self) -> bool {
         other as u8 <= self as u8
     }

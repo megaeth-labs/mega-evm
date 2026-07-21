@@ -84,25 +84,19 @@ impl DataSizeTracker {
 
     /// Records discardable data in the current frame.
     fn record_discardable(&mut self, size: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.discardable_usage += size;
-        }
+        self.frame_tracker.add_frame_discardable(size);
     }
 
     /// Records discardable usage into the PARENT frame (one below the top). Used for a
     /// child-CREATE's creator-side account-info write, whose on-chain effect (the creator
     /// nonce bump) is undone only by the parent's revert, not the child's.
     fn record_parent_discardable(&mut self, size: u64) {
-        if let Some(parent) = self.frame_tracker.parent_frame_mut() {
-            parent.discardable_usage += size;
-        }
+        self.frame_tracker.add_parent_discardable(size);
     }
 
     /// Records a refund (negative data) in the current frame.
     fn record_refund(&mut self, size: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += size;
-        }
+        self.frame_tracker.add_frame_refund(size);
     }
 
     /// REX5+: meter an oracle-hint payload against the TX intrinsic data-size lane.
@@ -112,7 +106,7 @@ impl DataSizeTracker {
     /// flowed out), so we record into `tx_entry.persistent_usage` — the same lane as calldata
     /// — rather than the current frame's discardable usage.
     pub(crate) fn record_oracle_hint_bytes(&mut self, len: u64) {
-        self.frame_tracker.tx_mut().persistent_usage += len;
+        self.frame_tracker.add_tx_persistent(len);
     }
 
     /// Records an account info write (40 bytes) as discardable data in the current frame.
@@ -128,7 +122,7 @@ impl DataSizeTracker {
     /// Used by the REX6 EIP-7702 authorization scan, which runs in `validate` before any frame
     /// exists, so the charge cannot go through the frame-scoped `record_account_write`.
     pub(crate) fn record_persistent_account_write(&mut self) {
-        self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+        self.frame_tracker.add_tx_persistent(ACCOUNT_INFO_WRITE_SIZE);
     }
 
     /// Merges external persistent usage into the TX-level entry.
@@ -136,7 +130,7 @@ impl DataSizeTracker {
     /// Used by `KeylessDeploy` (REX5+) to propagate sandbox data size consumption
     /// back to the parent transaction.
     pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
-        self.frame_tracker.tx_mut().persistent_usage += amount;
+        self.frame_tracker.add_tx_persistent(amount);
     }
 
     /// Returns the remaining data size budget for the current call frame, capped by
@@ -229,7 +223,7 @@ impl TxRuntimeLimit for DataSizeTracker {
             .map(|item| item.map(|access| access.size() as u64).sum::<u64>())
             .unwrap_or_default();
         size += tx.authorization_list_len() as u64 * AUTHORIZATION_SIZE;
-        self.frame_tracker.tx_mut().persistent_usage += size;
+        self.frame_tracker.add_tx_persistent(size);
 
         // EIP-7702 authority account updates (non-discardable).
         //
@@ -240,13 +234,13 @@ impl TxRuntimeLimit for DataSizeTracker {
         if !self.rex6_enabled {
             for authorization in tx.authorization_list() {
                 if authorization.authority().is_some() {
-                    self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+                    self.frame_tracker.add_tx_persistent(ACCOUNT_INFO_WRITE_SIZE);
                 }
             }
         }
 
         // Caller account update (non-discardable)
-        self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+        self.frame_tracker.add_tx_persistent(ACCOUNT_INFO_WRITE_SIZE);
     }
 
     /// Called when inspector intercepts and skips a call/create.
@@ -385,5 +379,28 @@ impl TxRuntimeLimit for DataSizeTracker {
         let base = if self.rex6_enabled { LOG_BASE_SIZE } else { 0 };
         let size = base + num_topics * LOG_TOPIC_SIZE + data_size;
         self.record_discardable(size);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The originated data-size constants are *sums* of their salt key/value components,
+    /// not products. Pin the values against independent literals so an arithmetic slip
+    /// (e.g. `+` -> `*`) is caught (8 + 32 = 40, not 8 * 32 = 256).
+    #[test]
+    fn test_originated_data_size_constants() {
+        assert_eq!(STORAGE_SLOT_WRITE_SIZE, 40);
+        assert_eq!(ACCOUNT_INFO_WRITE_SIZE, 40);
+    }
+
+    /// `has_active_frame` must reflect the underlying frame stack, not a constant.
+    #[test]
+    fn test_has_active_frame_reflects_frame_stack() {
+        let mut tracker = DataSizeTracker::new(MegaSpecId::MINI_REX, u64::MAX);
+        assert!(!tracker.has_active_frame(), "no frame pushed yet");
+        tracker.push_empty_frame();
+        assert!(tracker.has_active_frame(), "a frame is on the stack");
     }
 }

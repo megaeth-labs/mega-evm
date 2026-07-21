@@ -11,8 +11,6 @@ pub mod cmd;
 /// Shared building blocks: RPC provider/session, state, env, error, output
 /// formatting, tracing, transaction utilities.
 pub mod common;
-/// Custom hasher used by the env-derived bucket capacity tables.
-pub mod hasher;
 /// Historical transaction replay command.
 pub mod replay;
 /// Arbitrary EVM bytecode execution command.

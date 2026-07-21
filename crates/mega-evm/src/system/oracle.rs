@@ -3,12 +3,9 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, b256, bytes, Address, Bytes, B256};
-use revm::{
-    database::State,
-    state::{Account, Bytecode, EvmState},
-};
+use revm::{database::State, state::EvmState};
 
-use crate::MegaHardforks;
+use crate::{MegaHardforks, SystemContractSpec};
 
 /// The address of the oracle system contract.
 pub const ORACLE_CONTRACT_ADDRESS: Address = address!("0x6342000000000000000000000000000000000001");
@@ -48,16 +45,29 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
+    oracle_spec(&hardforks, block_timestamp).map(|s| crate::transact_deploy(db, &s)).transpose()
+}
+
+/// Builds the [`SystemContractSpec`] for the Oracle contract active at the given
+/// timestamp, or `None` if `MiniRex` is not yet active.
+///
+/// Single source of the Oracle's gate, bytecode-version selection, and upgrade
+/// semantics — shared by [`transact_deploy_oracle_contract`] and the deploy
+/// registry ([`flat_system_contract_specs`](crate::flat_system_contract_specs)).
+pub(crate) fn oracle_spec(
+    hardforks: &impl MegaHardforks,
+    block_timestamp: u64,
+) -> Option<SystemContractSpec> {
     if !hardforks.is_mini_rex_active_at_timestamp(block_timestamp) {
-        return Ok(None);
+        return None;
     }
 
     // Select the appropriate bytecode based on hardfork.
     // - Pre-Rex2: v1.0.0 (without `sendHint`)
     // - Rex2-Rex4: v1.1.0 (with `sendHint`)
     // - Rex5+: v2.0.0 (reads system address from SequencerRegistry)
-    let (target_code, target_code_hash) = if hardforks.is_rex_5_active_at_timestamp(block_timestamp)
-    {
+    let rex5 = hardforks.is_rex_5_active_at_timestamp(block_timestamp);
+    let (target_code, target_code_hash) = if rex5 {
         (ORACLE_CONTRACT_CODE_REX5, ORACLE_CONTRACT_CODE_HASH_REX5)
     } else if hardforks.is_rex_2_active_at_timestamp(block_timestamp) {
         (ORACLE_CONTRACT_CODE_REX2, ORACLE_CONTRACT_CODE_HASH_REX2)
@@ -65,39 +75,14 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
         (ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH)
     };
 
-    // Load the oracle contract account from the cache
-    let acc = db.load_cache_account(ORACLE_CONTRACT_ADDRESS)?;
-
-    // If the contract is already deployed with the correct code, return early
-    let existing_info = acc.account_info();
-    if let Some(account_info) = &existing_info {
-        if account_info.code_hash == target_code_hash {
-            // Although we do not need to update the account, we need to mark it as read
-            return Ok(Some(EvmState::from_iter([(
-                ORACLE_CONTRACT_ADDRESS,
-                Account { info: account_info.clone(), ..Default::default() },
-            )])));
-        }
-    }
-
-    // Update the account info with the contract code
-    let account_existed = existing_info.is_some();
-    let mut acc_info = existing_info.unwrap_or_default();
-    acc_info.code_hash = target_code_hash;
-    acc_info.code = Some(Bytecode::new_raw(target_code));
-
-    // Convert the cache account back into a revm account and mark it as touched.
     // Starting from Rex5 we stop marking the account as created on in-place bytecode upgrades so
     // that the existing Oracle storage is preserved across the upgrade. Pre-Rex5 the old behaviour
     // is preserved to maintain canonical mainnet state at the Rex2 activation boundary (where
     // mainnet had non-zero DB-backed Oracle storage that was cleared by the old code).
-    let mut revm_acc: revm::state::Account = acc_info.into();
-    revm_acc.mark_touch();
-    if !account_existed || !hardforks.is_rex_5_active_at_timestamp(block_timestamp) {
-        revm_acc.mark_created();
-    }
-
-    Ok(Some(EvmState::from_iter([(ORACLE_CONTRACT_ADDRESS, revm_acc)])))
+    Some(
+        SystemContractSpec::new(ORACLE_CONTRACT_ADDRESS, target_code, target_code_hash)
+            .with_force_create_on_upgrade(!rex5),
+    )
 }
 
 /// The address of the high precision timestamp oracle contract.
@@ -120,41 +105,24 @@ pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    if !hardforks.is_mini_rex_active_at_timestamp(block_timestamp) {
-        return Ok(None);
-    }
+    high_precision_timestamp_oracle_spec(&hardforks, block_timestamp)
+        .map(|s| crate::transact_deploy(db, &s))
+        .transpose()
+}
 
-    // Load the high precision timestamp oracle contract account from the cache
-    let acc = db.load_cache_account(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS)?;
-
-    // If the contract is already deployed, return early
-    let existing_info = acc.account_info();
-    if let Some(account_info) = &existing_info {
-        if account_info.code_hash == HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH {
-            // Although we do not need to update the account, we need to mark it as read
-            return Ok(Some(EvmState::from_iter([(
-                HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-                Account { info: account_info.clone(), ..Default::default() },
-            )])));
-        }
-    }
-
-    // Update the account info with the contract code
-    let account_existed = existing_info.is_some();
-    let mut acc_info = existing_info.unwrap_or_default();
-    acc_info.code_hash = HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH;
-    acc_info.code = Some(Bytecode::new_raw(HIGH_PRECISION_TIMESTAMP_ORACLE_CODE));
-
-    // Convert the cache account back into a revm account and mark it as touched.
-    // Only mark it as created when the account did not previously exist; an in-place
-    // bytecode upgrade of an existing account must not clear its storage.
-    let mut revm_acc: revm::state::Account = acc_info.into();
-    revm_acc.mark_touch();
-    if !account_existed {
-        revm_acc.mark_created();
-    }
-
-    Ok(Some(EvmState::from_iter([(HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, revm_acc)])))
+/// Builds the [`SystemContractSpec`] for the high-precision timestamp Oracle
+/// active at the given timestamp, or `None` if `MiniRex` is not yet active.
+pub(crate) fn high_precision_timestamp_oracle_spec(
+    hardforks: &impl MegaHardforks,
+    block_timestamp: u64,
+) -> Option<SystemContractSpec> {
+    hardforks.is_mini_rex_active_at_timestamp(block_timestamp).then(|| {
+        SystemContractSpec::new(
+            HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
+            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE_HASH,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -163,7 +131,10 @@ mod tests {
 
     use super::*;
     use alloy_primitives::keccak256;
-    use revm::{database::InMemoryDB, state::AccountInfo};
+    use revm::{
+        database::InMemoryDB,
+        state::{AccountInfo, Bytecode},
+    };
 
     #[test]
     fn test_oracle_contract_code_hash_matches() {

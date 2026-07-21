@@ -616,42 +616,65 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         // the delegate's flag instead would mistakenly short-circuit storage reads when the
         // delegate happens to be a freshly-CREATEd contract in the same tx, corrupting
         // SSTORE accounting (gas / kv_updates / data_size) on the delegator's slots.
-        let is_newly_created = inspect_account(self, address, false)?.is_created();
-        // REX4+: storage belongs to the original address, not the delegate — do not follow
-        // EIP-7702 delegation here (matching upstream revm's sload behavior).
-        // Pre-REX4: follows delegation (original behavior).
+        // Fold two inspect_account calls into one hydrating load on REX4 path.
+        // inspect_account's occupied branch hydrates lazy code unconditionally,
+        // so the old second (always-occupied) pass hydrated the same code that
+        // load_code=true hydrates inline here — identical final account state,
+        // identical DB-call sequence and error position, one fewer state.entry lookup.
+        // Newly-created accounts must short-circuit storage misses to ZERO before any DB call.
+        // Querying here would otherwise trigger a witness lookup for a slot with no meaningful
+        // pre-state value, which breaks stateless replay when CREATE lands on a pre-funded
+        // address: its `Loaded` cache status bypasses revm's `State::storage` short-circuit and
+        // exposes the call to the witness backend.
+        let is_newly_created;
         let account = if is_rex4_enabled {
-            inspect_account(self, address, false)?
+            let account = inspect_account(self, address, true)?;
+            is_newly_created = account.is_created();
+            debug_assert!(account.info.code_hash == KECCAK_EMPTY || account.info.code.is_some());
+            account
         } else {
+            // Non-REX4: is_created must be read on the original address (an EOA delegating
+            // via 7702 is never CREATEd), but the storage account follows delegation —
+            // genuinely two different accounts, so the two loads cannot be folded.
+            is_newly_created = inspect_account(self, address, false)?.is_created();
             self.inspect_account_delegated(spec, address)?
         };
-        if account.storage.contains_key(&key) {
-            // Slot already exists, return reference to it.
-            // Need to reload account to satisfy borrow checker.
-            let account = if is_rex4_enabled {
-                inspect_account(self, address, false)?
-            } else {
-                self.inspect_account_delegated(spec, address)?
+        // REX4/REX5 hot path: use entry() API for a single HashMap probe.
+        // The prologue guarantees the account is in inner.state; reload via get_mut
+        // to narrow the borrow from &mut self to &mut inner.state, keeping
+        // self.database reachable for the miss path.
+        if is_rex4_enabled {
+            let account = self.inner.state.get_mut(&address).unwrap();
+            return match account.storage.entry(key) {
+                Entry::Occupied(entry) => Ok(entry.into_mut()),
+                Entry::Vacant(entry) => {
+                    let slot_value = if is_newly_created {
+                        U256::ZERO
+                    } else {
+                        self.database.storage(address, key)?
+                    };
+                    let mut slot = EvmStorageSlot::new(slot_value, transaction_id);
+                    slot.mark_cold();
+                    Ok(entry.insert(slot))
+                }
             };
+        }
+
+        // Pre-REX4: original contains_key + reload pattern (genuinely two different accounts).
+        if account.storage.contains_key(&key) {
+            // Need to reload account to satisfy borrow checker.
+            let account = self.inspect_account_delegated(spec, address)?;
             return Ok(account.storage.get(&key).unwrap());
         }
         // Slot doesn't exist. For newly-created accounts, post-CREATE storage is
         // guaranteed empty (EIP-161 / EIP-6780), so return ZERO without touching the DB.
-        // Querying here would otherwise generate a witness lookup for a slot that has no
-        // meaningful pre-state value — which fails for stateless replay when CREATE lands
-        // on a pre-funded address (its `Loaded` cache status bypasses revm's
-        // `State::storage` short-circuit and exposes the call to the witness backend).
         let slot_value =
             if is_newly_created { U256::ZERO } else { self.database.storage(address, key)? };
         let mut slot = EvmStorageSlot::new(slot_value, transaction_id);
         // deliberately mark the slot as cold since we are only inspecting it, not warming it
         slot.mark_cold();
         // Load account again to bypass the borrow checker and insert the slot
-        let account = if is_rex4_enabled {
-            inspect_account(self, address, false)?
-        } else {
-            self.inspect_account_delegated(spec, address)?
-        };
+        let account = self.inspect_account_delegated(spec, address)?;
         account.storage.insert(key, slot);
         // Return reference to the newly inserted slot
         Ok(account.storage.get(&key).expect("slot should exist"))
@@ -705,6 +728,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> JournalInspectTr for MegaContext<D
 mod tests {
     use super::*;
     use alloy_primitives::{address, keccak256};
+    use core::cell::Cell;
     use revm::{
         primitives::HashMap,
         state::{AccountInfo, Bytecode},
@@ -722,6 +746,7 @@ mod tests {
     struct LazyCodeDatabase {
         accounts: HashMap<Address, AccountInfo>,
         codes: HashMap<B256, Bytecode>,
+        storage_calls: Cell<usize>,
     }
 
     impl LazyCodeDatabase {
@@ -746,6 +771,10 @@ mod tests {
             self.codes.insert(code_hash, code);
             self
         }
+
+        fn storage_calls(&self) -> usize {
+            self.storage_calls.get()
+        }
     }
 
     impl revm::Database for LazyCodeDatabase {
@@ -762,6 +791,7 @@ mod tests {
         }
 
         fn storage(&mut self, _address: Address, _index: U256) -> Result<U256, Self::Error> {
+            self.storage_calls.set(self.storage_calls.get() + 1);
             Ok(U256::ZERO)
         }
 
@@ -1023,5 +1053,200 @@ mod tests {
 
         assert_eq!(db.storage(KNOWN, U256::ZERO).unwrap(), U256::ZERO);
         assert_eq!(db.block_hash(0).unwrap(), B256::ZERO);
+    }
+
+    // === inspect_storage coverage tests (PR #334) ===
+
+    #[test]
+    fn test_inspect_storage_rex4_slot_hit_returns_existing_value() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000bb");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        let key = U256::from(3);
+        let expected_value = U256::from(42);
+        {
+            let tid = journal.transaction_id;
+            let account = inspect_account(&mut journal, ADDR, false).unwrap();
+            let mut slot = EvmStorageSlot::new(expected_value, tid);
+            slot.mark_cold();
+            account.storage.insert(key, slot);
+        }
+
+        let spec = MegaSpecId::REX4;
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed on existing slot");
+
+        assert_eq!(
+            slot.present_value, expected_value,
+            "REX4 slot hit must return the pre-seeded value"
+        );
+        assert!(slot.is_cold, "inspected slot must remain cold");
+    }
+
+    #[test]
+    fn test_inspect_storage_rex4_slot_miss_inserts_and_returns_db_value() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000cc");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        let key = U256::from(7);
+        let spec = MegaSpecId::REX4;
+
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed on absent slot");
+
+        assert_eq!(
+            slot.present_value,
+            U256::ZERO,
+            "absent slot on non-created account must return ZERO from database"
+        );
+        assert!(slot.is_cold, "newly inserted slot must be marked cold");
+
+        let calls_after_first = journal.database.storage_calls();
+        let slot2 =
+            journal.inspect_storage(spec, ADDR, key).expect("second inspect_storage must succeed");
+
+        assert_eq!(slot2.present_value, U256::ZERO, "second call must return the same value");
+        assert_eq!(
+            journal.database.storage_calls(),
+            calls_after_first,
+            "second inspect_storage on the same slot must hit the cache, not the DB",
+        );
+    }
+
+    #[test]
+    fn test_inspect_storage_rex4_newly_created_short_circuits_db() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000dd");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        {
+            let account = inspect_account(&mut journal, ADDR, false).unwrap();
+            account.mark_created();
+        }
+
+        let key = U256::from(1);
+        let spec = MegaSpecId::REX4;
+
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed on newly-created account");
+
+        assert_eq!(
+            slot.present_value,
+            U256::ZERO,
+            "newly-created account must return ZERO without querying database"
+        );
+        assert!(slot.is_cold, "slot must be marked cold");
+    }
+
+    #[test]
+    fn test_inspect_storage_pre_rex4_uses_delegation_path() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000ee");
+        const DELEGATE: Address = address!("00000000000000000000000000000000000000ed");
+        let delegate_code = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default()
+            .with_eip7702_delegation(ADDR, DELEGATE)
+            .with_account_code(DELEGATE, delegate_code);
+        let mut journal = Journal::new(db);
+
+        let key = U256::from(5);
+        let expected = U256::from(123);
+        let spec = MegaSpecId::MINI_REX;
+
+        // Preload the delegator so the subsequent occupied-branch inspection hydrates the
+        // EIP-7702 designation and the pre-REX4 delegated walk can follow it.
+        let _ = inspect_account(&mut journal, ADDR, false).unwrap();
+        {
+            let tid = journal.transaction_id;
+            let account = inspect_account(&mut journal, DELEGATE, false).unwrap();
+            let mut slot = EvmStorageSlot::new(expected, tid);
+            slot.mark_cold();
+            account.storage.insert(key, slot);
+        }
+
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed pre-REX4");
+
+        assert_eq!(
+            slot.present_value, expected,
+            "pre-REX4 storage inspection must follow the delegator to the delegate's slot",
+        );
+        assert!(slot.is_cold, "slot must be marked cold");
+        assert_eq!(
+            journal.database.storage_calls(),
+            0,
+            "delegate slot pre-seeded in the cache must be returned without hitting the DB",
+        );
+    }
+
+    #[test]
+    fn test_inspect_storage_pre_rex4_newly_created_short_circuits_db() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000ef");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        {
+            let account = inspect_account(&mut journal, ADDR, false).unwrap();
+            account.mark_created();
+        }
+
+        let key = U256::from(6);
+        let spec = MegaSpecId::MINI_REX;
+
+        let slot = journal
+            .inspect_storage(spec, ADDR, key)
+            .expect("inspect_storage must succeed pre-REX4 on newly-created account");
+
+        assert_eq!(
+            slot.present_value,
+            U256::ZERO,
+            "pre-REX4 newly-created account must return ZERO without querying database"
+        );
+        assert!(slot.is_cold, "slot must be marked cold");
+        assert_eq!(
+            journal.database.storage_calls(),
+            0,
+            "newly-created pre-REX4 path must not hit the database storage lookup",
+        );
+    }
+
+    #[test]
+    fn test_inspect_storage_rex4_ignores_eip7702_delegation() {
+        const DELEGATOR: Address = address!("0000000000000000000000000000000000000d01");
+        const DELEGATE: Address = address!("0000000000000000000000000000000000000d02");
+        let delegate_code = Bytes::from_static(&[0x60, 0x01, 0x60, 0x01, 0x01]);
+        let db = LazyCodeDatabase::default()
+            .with_eip7702_delegation(DELEGATOR, DELEGATE)
+            .with_account_code(DELEGATE, delegate_code);
+        let mut journal = Journal::new(db);
+
+        let key = U256::from(2);
+        let expected = U256::from(99);
+        {
+            let tid = journal.transaction_id;
+            let account = inspect_account(&mut journal, DELEGATOR, false).unwrap();
+            let mut slot = EvmStorageSlot::new(expected, tid);
+            slot.mark_cold();
+            account.storage.insert(key, slot);
+        }
+
+        let spec = MegaSpecId::REX4;
+        let slot = journal
+            .inspect_storage(spec, DELEGATOR, key)
+            .expect("inspect_storage must succeed for REX4 delegator");
+
+        assert_eq!(
+            slot.present_value, expected,
+            "REX4 must read storage from delegator (original address), not delegate"
+        );
     }
 }
