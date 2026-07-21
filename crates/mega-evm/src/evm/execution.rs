@@ -786,11 +786,16 @@ where
                     (address, storage_gas)
                 }
             };
-            initial_and_floor_gas.initial_gas += storage_gas.ok_or_else(|| {
-                let err_str =
-                    format!("Failed to get storage gas for callee address: {callee_address}",);
-                Self::Error::from_string(err_str)
-            })?;
+            // Saturating: `storage_gas` is SALT-priced and can saturate to `u64::MAX` under a
+            // full bucket; a plain add could wrap `initial_gas` in release and slip an
+            // intrinsically unaffordable tx past the gas-limit check below. Matches the
+            // authority fold and the unconditional `saturating_mul` in the SALT formula itself.
+            initial_and_floor_gas.initial_gas =
+                initial_and_floor_gas.initial_gas.saturating_add(storage_gas.ok_or_else(|| {
+                    let err_str =
+                        format!("Failed to get storage gas for callee address: {callee_address}",);
+                    Self::Error::from_string(err_str)
+                })?);
 
             // REX6: dynamic SALT account-creation gas for each net-new EIP-7702 authority,
             // folded into initial_gas so it is enforced against gas_limit / fee affordability.
@@ -856,7 +861,9 @@ where
                                     );
                                     Self::Error::from_string(err_str)
                                 })?;
-                            initial_and_floor_gas.initial_gas += storage_gas;
+                            // Saturating for the same reason as the callee/authority folds.
+                            initial_and_floor_gas.initial_gas =
+                                initial_and_floor_gas.initial_gas.saturating_add(storage_gas);
                         }
                         ctx.additional_limit.borrow_mut().record_deposit_caller_creation();
                     }

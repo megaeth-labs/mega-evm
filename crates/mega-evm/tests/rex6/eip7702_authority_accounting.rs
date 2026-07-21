@@ -25,6 +25,7 @@ use revm::{
         BlockEnv, TxEnv,
     },
     handler::EvmTr,
+    primitives::TxKind,
 };
 
 // ============================================================================
@@ -1024,6 +1025,29 @@ fn test_rex6_authority_scan_skipped_when_pre_frame_limit_latched() {
         "must halt on the data-size limit: {:?}",
         r.result
     );
+}
+
+/// A top-level `CREATE` whose deploy address falls in a saturated SALT bucket must be rejected at
+/// validation (the SALT-priced creation gas saturates toward `u64::MAX` and is folded into
+/// `initial_gas`), not wrap `initial_gas` and execute underpaid. Guards the callee/create SALT
+/// fold that is a sibling of the authority fold.
+#[test]
+fn test_rex6_saturated_create_salt_gas_rejects_instead_of_wrapping() {
+    let mut db =
+        MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000_000_000_000u64));
+    // The top-level CREATE from CALLER (nonce 0) deploys to this address; saturate its bucket.
+    let created = CALLER.create(0);
+    let bucket = SimpleBucketHasher::bucket_id(created.as_slice());
+    let envs: Envs = TestExternalEnvs::new().with_bucket_capacity(bucket, u64::MAX);
+
+    let create_tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .kind(TxKind::Create)
+        .gas_limit(10_000_000)
+        .data(Bytes::from_static(&[0x00])) // STOP initcode
+        .build_fill();
+    let r = try_transact(MegaSpecId::REX6, &mut db, &envs, create_tx);
+    assert!(r.is_err(), "a saturated CREATE SALT price must fail validation, not execute: {r:?}",);
 }
 
 /// A net-new authority priced in a saturated SALT bucket must be rejected at validation
