@@ -450,9 +450,11 @@ impl AdditionalLimit {
         // (`compute_gas.check_limit()` covers both the Rex4+ per-frame budget and the TX-level
         // detained limit) instead of fanning out to all four sub-trackers. The other three
         // dimensions only change at their own mutation sites (`on_sstore`, `on_log`,
-        // `record_oracle_hint_bytes`, `on_selfdestruct_new_account`, the frame-lifecycle hooks),
-        // each of which runs `check_limit()` itself and latches any exceed into
-        // `has_exceeded_limit` — which the short-circuit above then surfaces here.
+        // `record_oracle_hint_bytes`, the frame-lifecycle hooks), each of which runs
+        // `check_limit()` itself and latches any exceed into `has_exceeded_limit` — which the
+        // short-circuit above then surfaces here. The one exception is SELFDESTRUCT's pre-inner
+        // `on_selfdestruct_new_account` / `on_selfdestruct_existing_account`, which deliberately
+        // do not latch; their dimensions latch in the trailing `record_compute_gas_all_dims`.
         let check = self.compute_gas.check_limit();
         if check.exceeded_limit() {
             self.has_exceeded_limit = check;
