@@ -145,17 +145,15 @@ use revm::{
 ///     `storage_gas_ext::selfdestruct` (new-account storage gas, beneficiary-volatile guard
 ///     outermost)
 /// - **REX6** (extends REX5): unifies the per-opcode gas-metering order. The table wiring is
-///   unchanged. Storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2) all follow a
-///   canonical order: charge storage gas → run the raw opcode body → record compute gas exactly
-///   once via `record_storage_compute_gas!` after the body completes, excluding the storage gas.
-///   For SSTORE / LOG / CALL-family this is byte-equivalent to the pre-REX6 layering (nothing
-///   between `gas_before` and the storage charge debits EVM gas), so `storage_gas_ext::*` records
-///   compute inline on every spec — no `if REX6` branch is needed. SELFDESTRUCT keeps its
-///   delegation to `compute_gas_ext::selfdestruct`, whose trailing `record_compute_gas_all_dims`
-///   check records the same single compute window while latching the pre-recorded data/KV/state
-///   usage. CREATE2 is the one real behavior change: REX6+ short-circuits to `create_rex6`, which
-///   folds the memory-expansion gas into the single post-body recording instead of recording it as
-///   a separate eager entry as REX5 did.
+///   unchanged. Storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT)
+///   all follow a canonical order: charge storage gas → run the raw opcode body → record compute
+///   gas exactly once via `record_storage_compute_gas!` after the body completes, excluding the
+///   storage gas. For SSTORE / LOG / CALL-family / SELFDESTRUCT this is byte-equivalent to the
+///   pre-REX6 layering (nothing between `gas_before` and the storage charge debits EVM gas), so
+///   `storage_gas_ext::*` records compute inline on every spec — no `if REX6` branch is needed.
+///   CREATE2 is the one real behavior change: REX6+ short-circuits to `create_rex6`, which folds
+///   the memory-expansion gas into the single post-body recording instead of recording it as a
+///   separate eager entry as REX5 did.
 ///
 /// Note: chains terminating at `storage_gas_ext` (rather than `compute_gas_ext`) reflect the
 /// canonical metering order above — `storage_gas_ext::*` records compute gas internally via

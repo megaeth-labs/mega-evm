@@ -21,7 +21,7 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, keccak256, Address, Bytes, U256};
+use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
@@ -621,62 +621,4 @@ fn test_rex6_fee_recipient_db_error_surfaces_as_custom() {
             "expected EVMError::Custom for fee-recipient inspect_account DB error, got {other:?}",
         ),
     }
-}
-
-/// A REX6 deposit-style tx must not read the fee vaults at all: op-revm's reward path credits
-/// nothing for deposits, so the snapshot / diff pass is skipped and a stateless witness that
-/// carries no fee-vault entries stays sufficient. Pinned by injecting a DB error on the
-/// `BASE_FEE_RECIPIENT` read — before the deposit guard, `snapshot_fee_recipients` tripped it.
-#[test]
-fn test_rex6_deposit_skips_fee_recipient_snapshots() {
-    let inner = MemoryDatabase::default().account_balance(CALLER, U256::from(CALLER_BALANCE));
-    let mut db = ErrorInjectingDatabase::new(inner);
-    db.fail_on_account = Some(BASE_FEE_RECIPIENT);
-
-    let mut context = MegaContext::new(db, MegaSpecId::REX6);
-    context.set_block(BlockEnv {
-        gas_limit: 1_000_000_000,
-        basefee: BASEFEE,
-        beneficiary: COINBASE,
-        ..Default::default()
-    });
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-    let r = alloy_evm::Evm::transact_raw(&mut evm, make_deposit_tx())
-        .expect("a deposit must not read any fee vault");
-    assert!(r.result.is_success(), "deposit must succeed: {:?}", r.result);
-}
-
-/// Fee-reward snapshots must not hydrate a contract recipient's bytecode: only balance and
-/// emptiness are read, so a stateless witness needs the recipient's account proof, not its code.
-/// Pinned by giving the beneficiary lazy code and injecting a DB error on its `code_by_hash` —
-/// before the non-hydrating read, the post-reward re-read hit `inspect_account`'s
-/// occupied-branch hydration.
-#[test]
-fn test_rex6_fee_recipient_snapshot_does_not_hydrate_code() {
-    let code_hash = keccak256([0x5b]); // JUMPDEST — never executed, only referenced by hash
-    let inner = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(CALLER_BALANCE))
-        .account_lazy_code(COINBASE, code_hash);
-    let mut db = ErrorInjectingDatabase::new(inner);
-    db.fail_on_code_by_hash = Some(code_hash);
-
-    let mut context = MegaContext::new(db, MegaSpecId::REX6);
-    context.set_block(BlockEnv {
-        gas_limit: 1_000_000_000,
-        basefee: BASEFEE,
-        beneficiary: COINBASE,
-        ..Default::default()
-    });
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-    let r = alloy_evm::Evm::transact_raw(&mut evm, make_tip_tx())
-        .expect("fee-reward accounting must not load the recipient's bytecode");
-    assert!(r.result.is_success(), "tip tx must succeed: {:?}", r.result);
 }

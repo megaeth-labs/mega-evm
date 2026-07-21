@@ -193,15 +193,7 @@ impl<I> FrameLimitTracker<I> {
                 } else {
                     // Revert: child's discardable_usage and refund vanish entirely. Subtract them
                     // from the cache to maintain the `Σ(persistent + discardable) - Σ refund`
-                    // invariant. By construction every add to any entry also added to the cache,
-                    // so the child's share can never exceed the cached totals — pin that here so
-                    // a future cache-bypassing write fails at the pop, not at a later
-                    // `net_usage()` cross-check.
-                    debug_assert!(
-                        child.discardable_usage <= self.cached_total_used &&
-                            child.refund <= self.cached_total_refund,
-                        "child usage exceeds cached totals: a write bypassed the cache-aware helpers",
-                    );
+                    // invariant.
                     self.cached_total_used -= child.discardable_usage;
                     self.cached_total_refund -= child.refund;
                 }
@@ -213,11 +205,6 @@ impl<I> FrameLimitTracker<I> {
                     self.tx_entry.discardable_usage += child.discardable_usage;
                     self.tx_entry.refund += child.refund;
                 } else {
-                    debug_assert!(
-                        child.discardable_usage <= self.cached_total_used &&
-                            child.refund <= self.cached_total_refund,
-                        "child usage exceeds cached totals: a write bypassed the cache-aware helpers",
-                    );
                     self.cached_total_used -= child.discardable_usage;
                     self.cached_total_refund -= child.refund;
                 }

@@ -310,21 +310,23 @@ where
 
     /// Side-effect-free read of a fee recipient's balance and emptiness.
     ///
-    /// Uses the cold, non-hydrating `inspect_account_balance_and_emptiness` (no warming, no
-    /// `code_by_hash`) so reading the recipients to account the post-execution reward neither
-    /// perturbs gas / the access list nor demands a contract recipient's bytecode in a stateless
-    /// witness that need only carry the account proof.
+    /// Uses `inspect_account` (no warming) so reading the recipients to account the
+    /// post-execution reward does not perturb gas or the access list.
     fn fee_recipient_balance_and_emptiness(
         evm: &mut EVM,
         address: Address,
     ) -> Result<(U256, bool), ERROR> {
-        crate::inspect_account_balance_and_emptiness(evm.ctx_mut().journal_mut(), address).map_err(
-            |e| {
+        let info = &evm
+            .ctx_mut()
+            .journal_mut()
+            .inspect_account(address, false)
+            .map_err(|e| {
                 ERROR::from_string(format!(
                     "Failed to inspect fee recipient {address} for REX6 reward accounting: {e:?}",
                 ))
-            },
-        )
+            })?
+            .info;
+        Ok((info.balance, info.is_empty()))
     }
 
     /// Snapshots the distinct accounts op-revm credits in the post-execution reward path,
@@ -680,14 +682,7 @@ where
         // check. Pre-REX6 / non-EIP-7702 produces `Vec::new()` and the SALT-gas loop is a no-op.
         let record_rex6_accounting = {
             let ctx = evm.ctx();
-            ctx.spec.is_enabled(MegaSpecId::REX6) &&
-                ctx.tx().tx_type() == TransactionType::Eip7702 &&
-                // A pre-frame limit latched in `on_new_tx` (e.g. calldata alone exceeding the
-                // data-size limit) already dooms the tx to the first-frame halt, and
-                // `pre_execution` skips the whole authorization list for it. Skip the scan too:
-                // loading authorities here would demand witness entries in stateless replay for
-                // accounts whose authorizations will never be applied.
-                !ctx.additional_limit.borrow().limit_exceeded()
+            ctx.spec.is_enabled(MegaSpecId::REX6) && ctx.tx().tx_type() == TransactionType::Eip7702
         };
         let materialized_authorities = if record_rex6_accounting {
             self.record_rex6_eip7702_authority_accounting(evm)?
@@ -921,17 +916,10 @@ where
             return self.op.reward_beneficiary(evm, exec_result);
         }
 
-        // Deposit-style transactions (op deposits, promoted system txs, the keyless sandbox)
-        // credit no fee recipient — op-revm's reward path early-returns for them — so skip the
-        // snapshots too: loading the beneficiary + fee vaults here would demand witness entries
-        // for accounts the reward step never touches.
-        if evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE {
-            return self.op.reward_beneficiary(evm, exec_result);
-        }
-
         // REX6: op-revm credits the beneficiary + fee vaults HERE, after `last_frame_result`
         // finalised the trackers — so these writes escape DataSize / KV / StateGrowth unless
-        // accounted now.
+        // accounted now. Deposit / keyless-sandbox txs credit nothing (op-revm early-returns),
+        // so the diff naturally records nothing for them.
         let snapshots = Self::snapshot_fee_recipients(evm)?;
 
         self.op.reward_beneficiary(evm, exec_result)?;

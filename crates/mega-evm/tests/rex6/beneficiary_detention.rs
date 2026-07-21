@@ -17,8 +17,8 @@
 //! - **Existing-target SELFDESTRUCT** — REX5 `storage_gas_ext::selfdestruct` only charged
 //!   DataSize/KV/StateGrowth for SELFDESTRUCT to a *new* beneficiary. When the target already
 //!   exists, the balance update went through `host.selfdestruct` without flowing through any
-//!   frame-init or `target_updated` path, so DataSize/KV stayed at zero. Under REX6 the REX6-gated
-//!   arm inside `storage_gas_ext::selfdestruct` records `DataSize` +40 / KV +1 (no `StateGrowth` —
+//!   frame-init or `target_updated` path, so DataSize/KV stayed at zero. Under REX6 that handler
+//!   dispatches to `selfdestruct_rex6`, which records `DataSize` +40 / KV +1 (no `StateGrowth` —
 //!   the target already exists) for the existing-target balance credit.
 //!
 //! Each scenario is paired with a REX5 baseline that freeze-guards the pre-REX6 behavior.

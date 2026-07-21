@@ -533,7 +533,7 @@ fn test_rex6_authority_state_growth_overflow_detected_even_when_kv_limit_reporte
 
     // KV is checked before StateGrowth in the priority order and its limit (0) is exceeded by
     // intrinsic usage alone, so the reported halt reason is KVUpdateLimitExceeded, not
-    // StateGrowthLimitExceeded.
+    // StateGrowthLimitExceeded — even though state growth (2) also exceeds its own limit (1).
     assert!(
         matches!(
             &res.result,
@@ -541,11 +541,7 @@ fn test_rex6_authority_state_growth_overflow_detected_even_when_kv_limit_reporte
         ),
         "expected the KV dimension to be the reported halt reason: {res:?}",
     );
-    // The intrinsic KV exceed latched in `on_new_tx` short-circuits the validate-time authority
-    // scan entirely (no authority account is even loaded — see
-    // `test_rex6_authority_scan_skipped_when_pre_frame_limit_latched`), so no per-authority
-    // state growth is recorded for the doomed transaction.
-    assert_eq!(usage.state_growth, 0, "the latched pre-frame exceed must skip the authority scan");
+    assert_eq!(usage.state_growth, 2, "both authority creations are still recorded");
     for authority in [AUTHORITY_A, AUTHORITY_B] {
         let after = res.state.get(&authority);
         assert!(
@@ -981,47 +977,5 @@ fn test_rex6_unrecoverable_authority_skipped() {
         u_applied.kv_updates - u_skip.kv_updates,
         1,
         "an applied authority charges exactly one more KV update than an unrecoverable one",
-    );
-}
-
-/// A type-4 tx whose intrinsic data alone exceeds the TX data-size limit is doomed to the
-/// first-frame `DataLimitExceeded` halt before any authorization applies; the REX6
-/// validate-time authority scan must not load authority accounts for it (stateless replay
-/// carries no witness entries for authorizations that will never be applied). Pinned by
-/// injecting a DB error on the authority read.
-#[test]
-fn test_rex6_authority_scan_skipped_when_pre_frame_limit_latched() {
-    use mega_evm::test_utils::ErrorInjectingDatabase;
-
-    let inner = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(1_000_000_000_000_000_000u64))
-        .account_balance(CALLEE, U256::from(1u64));
-    let mut db = ErrorInjectingDatabase::new(inner);
-    db.fail_on_account = Some(AUTHORITY_A);
-
-    // A data-size limit smaller than the base TX size: `on_new_tx` latches the exceed before
-    // `validate()` reaches the authorization scan.
-    let mut context = MegaContext::new(db, MegaSpecId::REX6)
-        .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(10));
-    context.modify_chain(|chain| {
-        chain.operator_fee_scalar = Some(U256::from(0));
-        chain.operator_fee_constant = Some(U256::from(0));
-    });
-    let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx_with_auths(vec![auth(AUTHORITY_A, 0, 0)]));
-    tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx).expect(
-        "the latched pre-frame exceed must skip the authority scan, not surface a DB error",
-    );
-    assert!(
-        matches!(
-            r.result,
-            revm::context::result::ExecutionResult::Halt {
-                reason: MegaHaltReason::DataLimitExceeded { .. },
-                ..
-            }
-        ),
-        "must halt on the data-size limit: {:?}",
-        r.result
     );
 }
