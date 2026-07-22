@@ -263,6 +263,18 @@ For each role, if a change is pending and due, `applyPendingChanges()` MUST upda
 The system call MUST be issued with `gas_limit = max(block.gas_limit, 30_000_000)` instead of revm's upstream-fixed 30M default, matching the EIP-2935 / EIP-4788 pre-block calls.
 This gas floor is necessary because the slot-rotation cost scales with REX dynamic storage gas (SALT bucket capacity), and a fixed 30M is no longer guaranteed to be sufficient on activation blocks.
 
+<details>
+<summary>Rex6 (unstable): apply/deploy commit order at the activation block</summary>
+
+Pre-block outcomes commit in execution order, and the apply call always executes against the not-yet-committed pre-block state, so its recorded outcome carries the registry account info as of the start of the block.
+From Rex6 the execution layer MUST run the `applyPendingChanges()` pre-block call (including its due-check) before the registry deploy step, so the deploy outcome commits last.
+At the Rex6 activation block, when a version 1.0.0 registry exists, the deploy performs the in-place version 1.0.0 → 2.0.0 upgrade; an apply outcome committed after it would overwrite the upgraded account info with the stale pre-upgrade bytecode.
+(On a chain whose registry never existed, the deploy installs version 2.0.0 directly and the order is not observable, but the same order MUST be used.)
+The `applyPendingChanges()` logic is identical in versions 1.0.0 and 2.0.0 — the version 2.0.0 changes touch only rotation scheduling — so its semantics do not depend on which side of the deploy it executes.
+Pre-Rex6 blocks keep the original deploy-then-apply order.
+
+</details>
+
 ### Two-Step Admin Transfer
 
 Admin handoff is a two-step process to prevent permanent loss of admin authority through a single mistyped, phished, or clipboard-substituted address.

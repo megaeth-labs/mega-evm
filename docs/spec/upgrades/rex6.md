@@ -330,6 +330,8 @@ A typo'd or unheld address deadlocked block production at the activation block w
 A node MUST deploy `SequencerRegistry` version 2.0.0 from Rex6.
 At the Rex6 activation block, a node MUST upgrade an existing version 1.0.0 registry in place — swapping the bytecode, writing only the new `_minRotationDelay` slot (slot 13) from `SequencerRegistryRex6Config.rex6_min_rotation_delay`, and preserving all other storage — so pending changes and histories survive, and a rotation scheduled under version 1.0.0 still activates normally under version 2.0.0.
 On a chain whose registry never existed, a node MUST deploy version 2.0.0 directly with the full seed (the six bootstrap slots plus `_minRotationDelay`).
+From Rex6 the pre-block `applyPendingChanges()` call MUST run before the registry deploy step: pre-block outcomes commit in execution order and the apply call executes against not-yet-committed state, so an apply outcome committed after the in-place upgrade would overwrite the upgraded account info with the stale version 1.0.0 bytecode.
+Pre-Rex6 blocks keep the original deploy-then-apply order, where both outcomes record the same version 1.0.0 code and the order is irrelevant.
 
 Version 2.0.0's `scheduleNextSequencerChange(newSequencer, activationBlock, newSequencerSignature)`:
 

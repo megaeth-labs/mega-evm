@@ -11,7 +11,10 @@
 use alloy_hardforks::ForkCondition;
 use alloy_primitives::address;
 
-use crate::{MegaHardfork, MegaHardforkConfig, SequencerRegistryConfig, MEGA_SYSTEM_ADDRESS};
+use crate::{
+    MegaHardfork, MegaHardforkConfig, SequencerRegistryConfig, SequencerRegistryRex6Config,
+    MEGA_SYSTEM_ADDRESS,
+};
 
 /// `MegaETH` mainnet chain ID.
 pub const MAINNET_CHAIN_ID: u64 = 4326;
@@ -72,11 +75,20 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// placeholder. The placeholder only matters when bootstrapping a fresh
 /// registry: on a chain whose registry is already deployed, the live roles are
 /// read from the registry's storage.
+///
+/// Rex6 (active at genesis here too) likewise requires a
+/// [`SequencerRegistryRex6Config`] for the v2.0.0 registry deploy. The fallback
+/// seeds the smallest valid rotation delay (1 block) so local and dev chains can
+/// exercise rotations without friction; a real network must attach a
+/// governance-approved value in its published schedule when it schedules Rex6.
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
-    MegaHardforkConfig::new().with_all_activated().with_params(SequencerRegistryConfig {
-        rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
-        rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
-    })
+    MegaHardforkConfig::new()
+        .with_all_activated()
+        .with_params(SequencerRegistryConfig {
+            rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
+            rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
+        })
+        .with_params(SequencerRegistryRex6Config { rex6_min_rotation_delay: 1 })
 }
 
 /// Returns the canonical hardfork schedule for a chain ID.
@@ -138,5 +150,12 @@ mod tests {
             .expect("fallback schedule must carry a SequencerRegistryConfig");
         assert_eq!(params.rex5_initial_sequencer, MEGA_SYSTEM_ADDRESS);
         assert_eq!(params.rex5_initial_admin, MEGA_SYSTEM_ADDRESS);
+        // Rex6 is also active at genesis in the fallback, and the v2.0.0 registry
+        // deploy fails pre-block without a SequencerRegistryRex6Config — without
+        // this, every unknown-chain block aborts before the registry can deploy.
+        let rex6_params = hf
+            .fork_params::<SequencerRegistryRex6Config>()
+            .expect("fallback schedule must carry a SequencerRegistryRex6Config");
+        assert!(rex6_params.rex6_min_rotation_delay > 0);
     }
 }

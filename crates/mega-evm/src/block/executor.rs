@@ -257,11 +257,12 @@ where
             // apply system call always executes against the not-yet-committed state and thus
             // carries the pre-deploy account info in its result. Pre-Rex6 both record the
             // same v1.0.0 code, so the order is irrelevant; at the Rex6 activation block the
-            // deploy performs the in-place v1 → v2 bytecode upgrade, and an apply outcome
-            // committed after it would overwrite the upgraded account info with the stale
-            // pre-upgrade code. From Rex6 the apply call therefore runs BEFORE the deploy so
-            // the upgrade outcome commits last; `applyPendingChanges()` is byte-identical
-            // across v1/v2, so its semantics do not depend on which side of the deploy it
+            // deploy performs the in-place v1 → v2 bytecode upgrade (when a v1 registry
+            // exists), and an apply outcome committed after it would overwrite the upgraded
+            // account info with the stale pre-upgrade code. From Rex6 the apply call
+            // therefore runs BEFORE the deploy so the upgrade outcome commits last; the
+            // `applyPendingChanges()` logic is identical in v1/v2 (v2 changes only rotation
+            // scheduling), so its semantics do not depend on which side of the deploy it
             // executes. Pre-Rex6 blocks keep the original deploy-then-apply order untouched.
             let is_rex_6 = self.hardforks.is_rex_6_active_at_timestamp(block_timestamp);
 

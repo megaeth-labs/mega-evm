@@ -20,7 +20,8 @@ use std::{io::ErrorKind, path::Path, process::Command};
 use mega_system_contracts::{alloy_primitives::U256, sequencer_registry::storage_slots};
 
 /// The Solidity field name ↔ Rust slot constant pairs that must agree with Foundry's reported
-/// layout. These cover the flat (non-array) fields, i.e. Solidity slots 0..=10.
+/// layout. These cover the flat (non-array) fields: Solidity slots 0..=10 plus the v2.0.0
+/// `_minRotationDelay` at slot 13.
 const FIELD_CONSTANTS: &[(&str, U256)] = &[
     ("_currentSystemAddress", storage_slots::CURRENT_SYSTEM_ADDRESS),
     ("_currentSequencer", storage_slots::CURRENT_SEQUENCER),
@@ -33,15 +34,16 @@ const FIELD_CONSTANTS: &[(&str, U256)] = &[
     ("_systemAddressActivationBlock", storage_slots::SYSTEM_ADDRESS_ACTIVATION_BLOCK),
     ("_pendingSequencer", storage_slots::PENDING_SEQUENCER),
     ("_sequencerActivationBlock", storage_slots::SEQUENCER_ACTIVATION_BLOCK),
+    ("_minRotationDelay", storage_slots::MIN_ROTATION_DELAY),
 ];
 
 /// Total number of storage fields Foundry reports for `SequencerRegistry`.
 ///
-/// This is the 11 flat fields in [`FIELD_CONSTANTS`] (slots 0..=10) plus the two dynamic-array
-/// history fields `_systemAddressHistory` (slot 11) and `_sequencerHistory` (slot 12). The arrays
-/// have no flat slot constant — Rust never reads them directly (see `storage_slots`) — but they are
-/// still part of the layout, so counting them lets this test catch an added or removed Solidity
-/// field of any kind.
+/// This is the 12 flat fields in [`FIELD_CONSTANTS`] (slots 0..=10 and 13) plus the two
+/// dynamic-array history fields `_systemAddressHistory` (slot 11) and `_sequencerHistory`
+/// (slot 12). The arrays have no flat slot constant — Rust never reads them directly (see
+/// `storage_slots`) — but they are still part of the layout, so counting them lets this test
+/// catch an added or removed Solidity field of any kind.
 const EXPECTED_FIELD_COUNT: usize = FIELD_CONSTANTS.len() + 2;
 
 #[test]
