@@ -34,6 +34,7 @@ This is the single most important correctness concern in mega-evm.
 - `no_std` compatibility must be maintained in the `mega-evm` crate — no direct `std::` usage.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;`.
 - New workspace dependencies should use `default-features = false` — features are opted-in explicitly.
+- **Release-blocking dependencies.** A crate that gets published must not depend on an unpublished crate; `cargo publish -p <crate> --locked` has to resolve at release time. Flag a new dependency that would break the next release's resolution.
 
 ## Tests
 
@@ -44,6 +45,8 @@ This is the single most important correctness concern in mega-evm.
   Their comments — especially the `file:line:col` mutation-location references — must be kept up to date when the referenced source moves.
   Flag any PR that shifts lines in a mutated source file but leaves a now-stale location reference (or an orphaned/renamed test) in `tests/mutation/`; a reference that no longer points at its mutant defeats the purpose of the linkage.
   These tests should not be hand-edited otherwise — see `crates/mega-evm/tests/mutation/main.rs`.
+- **Benchmark methodology.** A perf-comparison PR must pin comparable hardforks on both arms (a hard-coded `OpSpecId` that ignores the enum default silently benches the wrong fork), use an even round count (odd defeats A/B alternation), and adjudicate quantitatively. Don't drop a `saturating_sub`/guard "for speed" without a measured, attributable gain.
+- **Storage-layout parity.** Where Rust mirrors a Solidity storage layout, add a parity test against that layout so a field reordering fails a test instead of drifting silently into a consensus bug.
 
 ## mega-evm tooling and scope
 
