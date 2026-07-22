@@ -293,8 +293,8 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     // with the matching code hash. (The Rex6 storage-preserving upgrade never
     // reaches this point — it is handled above.)
     let spec = SystemContractSpec::new(SEQUENCER_REGISTRY_ADDRESS, target_code, target_code_hash)
-    .with_seed(seed)
-    .with_force_create_on_upgrade(true);
+        .with_seed(seed)
+        .with_force_create_on_upgrade(true);
     let state = crate::transact_deploy(db, &spec).map_err(BlockExecutionError::other)?;
     Ok(Some(state))
 }
