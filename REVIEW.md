@@ -36,7 +36,7 @@ This is the single most important correctness concern in mega-evm.
 - New workspace dependencies should use `default-features = false` — features are opted-in explicitly.
 - **Release-blocking dependencies.**
   A crate that gets published must not depend on an unpublished crate.
-  `cargo publish -p <crate> --locked` has to resolve at release time.
+  `cargo publish -p <crate> --locked --dry-run` has to resolve at release time.
   Flag a new dependency that would break the next release's resolution.
 
 ## Tests
@@ -50,9 +50,10 @@ This is the single most important correctness concern in mega-evm.
   These tests should not be hand-edited otherwise — see `crates/mega-evm/tests/mutation/main.rs`.
 - **Benchmark methodology.**
   A perf-comparison PR must pin comparable hardforks on both arms.
-  A hard-coded `OpSpecId` that ignores the enum default silently benches the wrong fork.
-  Use an even round count.
-  Odd defeats A/B alternation.
+  Missing the required explicit hardfork pin can silently bench the wrong fork when a shared bench subject defaults to a different one.
+  For the paired Criterion-style harness, use an even round count.
+  Odd defeats A/B alternation there.
+  Do not apply that even-round rule to the replay ABBA harness.
   Adjudicate quantitatively.
   Don't drop a `saturating_sub`/guard "for speed" without a measured, attributable gain.
 - **Storage-layout parity.**
