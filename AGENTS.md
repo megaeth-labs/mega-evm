@@ -226,6 +226,9 @@ Correctness of the other three dimensions (data size, KV updates, state growth) 
 3. **Compute gas is always recorded.**
    `record_compute_gas` must record before surfacing any latched exceed — the recorded total feeds the transaction outcome and block-level compute accounting even for transactions halted on another dimension.
 
+The protocol governs mutation sites that run during execution; the REX6+ post-execution fee-reward accounting is deliberately outside it.
+That accounting merges usage into the transaction's reported totals and the block-level cumulative counters after the execution result is final, without latching, and never retroactively fails the transaction.
+
 Rule 1 is backed by a `debug_assert!` in `record_compute_gas`: if a non-compute dimension is over its limit but not yet latched, the assert trips at the exact opcode whose mutation site forgot to call `check_limit()`.
 The sub-tracker checks are non-mutating, so the guard compiles out of release builds.
 
