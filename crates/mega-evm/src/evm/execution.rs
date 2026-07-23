@@ -770,6 +770,17 @@ where
                     (created_address, storage_gas)
                 }
                 TxKind::Call(address) => {
+                    // Reading emptiness through the journal (instead of the raw DB) is
+                    // observationally equivalent on every spec, relying on two invariants:
+                    // pre-REX6 the journal holds no entries when `validate` runs (each
+                    // transaction's journal is drained at finalize, and access-list warming /
+                    // `deduct_caller` only run in `pre_execution`, after `validate`), so the
+                    // read observes exactly the DB value; and the cold entry the read inserts
+                    // is the call target, which frame init loads for every call transaction
+                    // anyway, so the transaction's returned state gains no new account.
+                    // Under REX6 the authority scan above may have journaled applied
+                    // authorities already; for those the read observes the applied
+                    // delegation, which is the intended REX6 semantics.
                     let new_account = !ctx.tx().value().is_zero() &&
                         ctx.journal_mut().inspect_account(address, false)?.info.is_empty() &&
                         // If an applied EIP-7702 authorization materializes this recipient, its
@@ -820,6 +831,11 @@ where
                 let caller = ctx.tx().caller();
                 let system_address = ctx.system_address;
                 if is_deposit_like_transaction(&ctx.inner.tx, system_address) {
+                    // Journal read equivalence: as for the recipient emptiness check above,
+                    // the journal is empty at `validate` time on frozen specs (drained at the
+                    // previous transaction's finalize, warmed only in `pre_execution`), so
+                    // this observes the raw DB value, and the inserted cold entry is the
+                    // caller, which `deduct_caller` loads for every transaction anyway.
                     let caller_is_empty =
                         ctx.journal_mut().inspect_account(caller, false)?.info.is_empty();
                     if caller_is_empty {

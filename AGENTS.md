@@ -221,7 +221,7 @@ Correctness of the other three dimensions (data size, KV updates, state growth) 
    Any code that records data-size/KV/state-growth usage during execution (`on_sstore`, `on_log`, `record_oracle_hint_bytes`, the frame-lifecycle hooks) must run `check_limit()` itself, latching any exceed into `has_exceeded_limit`.
    The latch is surfaced by the leading short-circuit of the next `record_compute_gas` call, so the halt lands on the same opcode as the pre-protocol fan-out did.
 2. **Pre-inner recorders must NOT latch.**
-   A site that records usage _before_ its inner instruction executes (currently only SELFDESTRUCT beneficiary creation) must record without latching: the inner instruction can still fail, the frame then discards the usage, and an early latch would stick and rewrite the frame's real result.
+   A site that records usage _before_ its inner instruction executes (currently SELFDESTRUCT's two beneficiary recorders: empty-beneficiary creation and the REX6+ existing-beneficiary credit) must record without latching: the inner instruction can still fail, the frame then discards the usage, and an early latch would stick and rewrite the frame's real result.
    Such opcodes use a trailing all-dimension check (`record_compute_gas_all_dims`) that runs only after the inner instruction succeeds.
 3. **Compute gas is always recorded.**
    `record_compute_gas` must record before surfacing any latched exceed — the recorded total feeds the transaction outcome and block-level compute accounting even for transactions halted on another dimension.
