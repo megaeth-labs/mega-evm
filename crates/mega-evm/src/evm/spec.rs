@@ -22,6 +22,11 @@ use serde::{Deserialize, Serialize};
 /// - [`SpecId::REX3`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX4`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX5`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::REX6`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+///
+/// The `Default` variant tracks the latest spec, which may still be unstable;
+/// callers that need a stable spec must select it explicitly instead of
+/// relying on `Default::default()`.
 #[repr(u8)]
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
@@ -45,8 +50,10 @@ pub enum MegaSpecId {
     /// The EVM version for the *Rex4* hardfork of `MegaETH`.
     REX4,
     /// The EVM version for the *Rex5* hardfork of `MegaETH`.
-    #[default]
     REX5,
+    /// The EVM version for the *Rex6* hardfork of `MegaETH`.
+    #[default]
+    REX6,
 }
 
 /// String identifiers for `MegaETH` EVM versions.
@@ -68,6 +75,8 @@ pub mod name {
     pub const REX4: &str = "Rex4";
     /// The string identifier for the *Rex5* version of the `MegaETH` EVM.
     pub const REX5: &str = "Rex5";
+    /// The string identifier for the *Rex6* version of the `MegaETH` EVM.
+    pub const REX6: &str = "Rex6";
 }
 
 impl MegaSpecId {
@@ -86,7 +95,8 @@ impl MegaSpecId {
             Self::REX2 |
             Self::REX3 |
             Self::REX4 |
-            Self::REX5 => OpSpecId::ISTHMUS,
+            Self::REX5 |
+            Self::REX6 => OpSpecId::ISTHMUS,
         }
     }
 
@@ -112,6 +122,7 @@ impl From<MegaSpecId> for &'static str {
             MegaSpecId::REX3 => name::REX3,
             MegaSpecId::REX4 => name::REX4,
             MegaSpecId::REX5 => name::REX5,
+            MegaSpecId::REX6 => name::REX6,
         }
     }
 }
@@ -130,6 +141,7 @@ impl FromStr for MegaSpecId {
             name::REX3 => Ok(Self::REX3),
             name::REX4 => Ok(Self::REX4),
             name::REX5 => Ok(Self::REX5),
+            name::REX6 => Ok(Self::REX6),
             _ => Err(UnknownHardfork),
         }
     }
@@ -160,7 +172,7 @@ impl Display for MegaSpecId {
 mod tests {
     use super::*;
 
-    const ALL_SPECS: [(MegaSpecId, &str); 8] = [
+    const ALL_SPECS: [(MegaSpecId, &str); 9] = [
         (MegaSpecId::EQUIVALENCE, name::EQUIVALENCE),
         (MegaSpecId::MINI_REX, name::MINI_REX),
         (MegaSpecId::REX, name::REX),
@@ -169,6 +181,7 @@ mod tests {
         (MegaSpecId::REX3, name::REX3),
         (MegaSpecId::REX4, name::REX4),
         (MegaSpecId::REX5, name::REX5),
+        (MegaSpecId::REX6, name::REX6),
     ];
 
     #[test]
@@ -179,7 +192,7 @@ mod tests {
             assert_eq!(spec.to_string(), expected_name);
         }
 
-        assert_eq!(MegaSpecId::default(), MegaSpecId::REX5);
+        assert_eq!(MegaSpecId::default(), MegaSpecId::REX6);
         assert_eq!(MegaSpecId::from_str("unknown"), Err(UnknownHardfork));
     }
 
@@ -201,10 +214,13 @@ mod tests {
         assert!(MegaSpecId::REX2.is_enabled(MegaSpecId::REX1));
         assert!(MegaSpecId::REX5.is_enabled(MegaSpecId::REX4));
         assert!(MegaSpecId::REX5.is_enabled(MegaSpecId::EQUIVALENCE));
+        assert!(MegaSpecId::REX6.is_enabled(MegaSpecId::REX5));
+        assert!(MegaSpecId::REX6.is_enabled(MegaSpecId::EQUIVALENCE));
 
         assert!(!MegaSpecId::EQUIVALENCE.is_enabled(MegaSpecId::MINI_REX));
         assert!(!MegaSpecId::REX1.is_enabled(MegaSpecId::REX2));
         assert!(!MegaSpecId::REX3.is_enabled(MegaSpecId::REX4));
         assert!(!MegaSpecId::REX4.is_enabled(MegaSpecId::REX5));
+        assert!(!MegaSpecId::REX5.is_enabled(MegaSpecId::REX6));
     }
 }

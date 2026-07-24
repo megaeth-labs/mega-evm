@@ -213,7 +213,7 @@ RPC Options:
       --rpc.rate-limit <CU/S>            Retry-layer compute-units-per-second budget [default: 660]
 
 Chain Options:
-      --spec <SPEC>                Spec [default: Rex5]
+      --spec <SPEC>                Spec [default: Rex6]
       --chain-id <CHAIN_ID>       Chain ID [default: 6342] [aliases: --chainid]
 
 Block Options:

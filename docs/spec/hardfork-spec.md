@@ -25,12 +25,12 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6
 ```
 
 Each newer spec includes all previous behaviors.
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
-All specs are stable (frozen).
+All specs through REX5 are stable (frozen); REX6 is **unstable** and under active development.
 
 ### Backward Compatibility
 
@@ -127,3 +127,19 @@ _See [Rex4 Network Upgrade](upgrades/rex4.md) for full details._
 - **KeylessDeploy empty-code log forwarding** — An empty-runtime-code deployment success forwards the constructor's logs before returning.
 
 _See [Rex5 Network Upgrade](upgrades/rex5.md) for full details._
+
+### REX6
+
+REX6 is the current **unstable** spec under active development; its semantics may still change before network activation.
+
+- **Unified per-opcode gas metering order** — Every storage-affecting opcode charges storage gas before its body and records compute gas exactly once after the body completes; the `CREATE2` memory-expansion gas is folded into that single recording.
+- **Consolidated EIP-7702 authorization accounting** — Per-authorization data-size and KV-update charges are narrowed to applied authorizations, authority state growth resolves during validation, net-new authorities pay dynamic SALT account-creation gas, and an applied authority equal to the block beneficiary triggers beneficiary gas detention.
+- **CREATE-frame resource accounting** — The creator nonce-bump write is booked to the parent frame's discardable lane, and `CREATE` records state growth only for net-new addresses.
+- **[KeylessDeploy](system-contracts/keyless-deploy.md) sandbox hardening** — Unused gas is rescued on a transaction-level compute-gas halt, and a self-destructing constructor is classified as an empty-code deployment.
+- **Post-execution fee-reward accounting** — Account writes performed by the post-execution fee-reward step count toward resource accounting.
+- **System-originated transaction metering exemption** — Pre-block system calls and [Mega System Transactions](system-contracts/system-tx.md) charge storage gas at minimum bucket capacity and are not halted by resource limits or gas detention.
+- **Beneficiary detention / volatile-access coverage** — A `SELFDESTRUCT` executed by the beneficiary and CALL-family targets whose EIP-7702 delegate resolves to the beneficiary come under detention and `disableVolatileDataAccess`; a `SELFDESTRUCT` balance credit to an existing beneficiary counts toward resource accounting.
+- **Additional resource-accounting corrections** — A per-log data-size base is charged for the log address, and forwarded gas returns to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
+- **Value self-transfer dedup** — A value transfer whose target equals the caller is counted as a single account-info write.
+
+_See [Rex6 Network Upgrade](upgrades/rex6.md) for full details._

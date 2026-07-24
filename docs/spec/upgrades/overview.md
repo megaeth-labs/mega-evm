@@ -1,5 +1,5 @@
 ---
-description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex5 with activation dates and behavioral deltas.
+description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex6 with activation dates and behavioral deltas.
 ---
 
 # Overview
@@ -127,6 +127,11 @@ Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas deten
 {% endtabs %}
 
 [SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [storage gas stipend](../glossary.md#storage-gas-stipend) separated-allowance model, value-transfer CALL/CALLCODE parent [compute gas](../glossary.md#compute-gas) attribution, CREATE code-deposit compute-gas atomicity, EIP-2935/EIP-4788 pre-block gas floor with fail-closed block rejection, CREATE2 empty-initcode short-circuit, [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection, sandbox resource accounting, and empty-code log forwarding, precompile compute gas correction, EIP-7702 [state growth](../evm/resource-accounting.md#state-growth) tracking, non-delegating metering inspection, SELFDESTRUCT beneficiary accounting.
+
+### [Rex6](rex6.md)
+
+Unstable; not yet activated.
+Unified per-opcode [gas metering order](../evm/dual-gas-model.md#gas-metering-order), consolidated EIP-7702 authorization accounting with dynamic SALT account-creation gas for net-new authorities, CREATE-frame accounting corrections, [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox hardening, post-execution fee-reward accounting, [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) metering exemption, extended beneficiary detention / volatile-access coverage, per-log [data size](../evm/resource-accounting.md#data-size) base, forwarded-gas return on compute-limit halts, value self-transfer account-info dedup.
 
 ## How to Read These Pages
 

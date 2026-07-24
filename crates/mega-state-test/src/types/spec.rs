@@ -77,6 +77,8 @@ pub enum SpecName {
     Rex4,
     /// `MegaETH` `Rex5` spec
     Rex5,
+    /// `MegaETH` `Rex6` spec
+    Rex6,
     /// Unknown or unsupported specification
     #[serde(other)]
     Unknown,
@@ -100,6 +102,7 @@ impl SpecName {
             Self::Rex3 => Ok(MegaSpecId::REX3),
             Self::Rex4 => Ok(MegaSpecId::REX4),
             Self::Rex5 => Ok(MegaSpecId::REX5),
+            Self::Rex6 => Ok(MegaSpecId::REX6),
             Self::Unknown => Err(UnknownSpecError),
             // All Ethereum specs (and `Equivalence`) map to the equivalent baseline.
             _ => Ok(MegaSpecId::EQUIVALENCE),
@@ -120,6 +123,7 @@ impl SpecName {
             MegaSpecId::REX3 => Self::Rex3,
             MegaSpecId::REX4 => Self::Rex4,
             MegaSpecId::REX5 => Self::Rex5,
+            MegaSpecId::REX6 => Self::Rex6,
             _ => Self::Unknown,
         }
     }
@@ -139,6 +143,7 @@ mod tests {
         assert_eq!(SpecName::Rex3.to_spec_id(), Ok(MegaSpecId::REX3));
         assert_eq!(SpecName::Rex4.to_spec_id(), Ok(MegaSpecId::REX4));
         assert_eq!(SpecName::Rex5.to_spec_id(), Ok(MegaSpecId::REX5));
+        assert_eq!(SpecName::Rex6.to_spec_id(), Ok(MegaSpecId::REX6));
         // Every Ethereum spec (and `Equivalence`) maps to the equivalent
         // baseline — sample the oldest, a transition, and the newest.
         for eth in [
@@ -178,6 +183,7 @@ mod tests {
             MegaSpecId::REX3,
             MegaSpecId::REX4,
             MegaSpecId::REX5,
+            MegaSpecId::REX6,
         ] {
             assert_eq!(SpecName::from_mega_spec(spec).to_spec_id(), Ok(spec));
         }

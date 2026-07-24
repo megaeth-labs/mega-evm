@@ -190,6 +190,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
 
     fn load_account_delegated(&mut self, address: Address) -> Option<StateLoad<AccountLoad>> {
         self.check_and_mark_beneficiary_balance_access(&address);
+        // Rex6+: also mark the EIP-7702 delegate of `address` if any, so a CALL whose
+        // target delegates to the beneficiary triggers detention even though the raw stack
+        // operand doesn't match. The Rex4 path only marked the raw input. A resolve DB error
+        // falls back to the raw address (no delegate mark) — the `load_account_delegated` below
+        // remains responsible for surfacing the failure.
+        if self.spec.is_enabled(MegaSpecId::REX6) {
+            let resolved = self.best_effort_resolve_eip7702_delegate_address(address);
+            if resolved != address {
+                self.check_and_mark_beneficiary_balance_access(&resolved);
+            }
+        }
         self.inner.load_account_delegated(address)
     }
 
@@ -248,6 +259,18 @@ pub trait HostExt: Host {
     /// Returns the block beneficiary address without triggering volatile data tracking.
     /// Used by instruction handlers to pre-check whether an opcode targets the beneficiary.
     fn beneficiary_address(&self) -> Address;
+
+    /// Resolves the EIP-7702 delegate of `address` one hop on a best-effort basis, returning
+    /// `address` itself when there is no delegate or when the resolve hits a DB error.
+    ///
+    /// Unlike [`JournalInspectTr::resolve_eip7702_delegate_address`], a DB failure here is NOT
+    /// stashed in `self.error()`. This is for prechecks and side-marks (the beneficiary-volatile
+    /// guard, the detention side-mark) that compare the delegate against a known address and must
+    /// never turn a transaction into an error on their own — e.g. a malformed CALL that underflows
+    /// before it ever runs the target must keep its `StackUnderflow`, not a spurious DB error from
+    /// eagerly loading a delegate's code it never needs. The opcode's real execution path reads the
+    /// account again and owns surfacing any genuine DB error.
+    fn best_effort_resolve_eip7702_delegate_address(&mut self, address: Address) -> Address;
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnvs> {
@@ -265,6 +288,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn sstore_set_storage_gas(&mut self, address: Address, key: U256) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
+        // System-tx exemption (REX6+ `LimitCheck::Exempt` stamp): charge un-scaled (min-bucket)
+        // storage gas so the write never depends on SALT bucket capacity and can never OOG as
+        // buckets grow. This path also avoids querying the SALT env.
+        if self.additional_limit.borrow().has_exceeded_limit.is_exempt() {
+            return Some(self.dynamic_storage_gas_cost.borrow().sstore_set_gas_unscaled());
+        }
         let result = self.dynamic_storage_gas_cost.borrow_mut().sstore_set_gas(address, key);
         result
             .map_err(|e| {
@@ -276,6 +305,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn new_account_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));
+        if self.additional_limit.borrow().has_exceeded_limit.is_exempt() {
+            return Some(self.dynamic_storage_gas_cost.borrow().new_account_gas_unscaled());
+        }
         let result = self.dynamic_storage_gas_cost.borrow_mut().new_account_gas(address);
         result
             .map_err(|e| {
@@ -287,6 +319,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     #[inline]
     fn create_contract_storage_gas(&mut self, address: Address) -> Option<u64> {
         debug_assert!(self.spec.is_enabled(MegaSpecId::REX));
+        if self.additional_limit.borrow().has_exceeded_limit.is_exempt() {
+            return Some(self.dynamic_storage_gas_cost.borrow().create_contract_gas_unscaled());
+        }
         let result = self.dynamic_storage_gas_cost.borrow_mut().create_contract_gas(address);
         result
             .map_err(|e| {
@@ -310,10 +345,42 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
     fn beneficiary_address(&self) -> Address {
         self.inner.block.beneficiary
     }
+
+    #[inline]
+    fn best_effort_resolve_eip7702_delegate_address(&mut self, address: Address) -> Address {
+        // Resolve through the journal directly so a DB error propagates as `Err` here (and is
+        // discarded) rather than being stashed into `self.error()` by
+        // `MegaContext::inspect_account`.
+        let spec = self.spec;
+        self.inner
+            .journaled_state
+            .resolve_eip7702_delegate_address(spec, address)
+            .unwrap_or(address)
+    }
 }
 
 /// Trait to inspect the journal's internal state without marking any accounts or storage slots as
 /// warm.
+///
+/// # EIP-7702 address semantics
+///
+/// Address handling is intentionally split by call-site purpose. The guiding rule: follow the
+/// delegate ONLY to (1) execute the delegate's code and (2) decide whether an operand observes the
+/// block beneficiary's state. Everything that *attributes* balance / nonce / storage / state-growth
+/// / data-size uses the ORIGINAL address — a delegated account's state is its own, not the
+/// delegate's. Before adding a new 7702-touching call site, find its row in this table and use the
+/// listed address; do not re-derive the raw-vs-delegate decision ad-hoc.
+///
+/// | Purpose | Address | Mechanism | Spec gate |
+/// | --- | --- | --- | --- |
+/// | Code / execution target | delegate | revm's `load_account_delegated` (not these primitives) | revm-owned |
+/// | Storage / SALT / state-growth / account-write accounting | original | `inspect_account` | REX5+ original; pre-REX5 followed the delegate (frozen) |
+/// | CALL-family beneficiary / volatile-access check | delegate | `resolve_eip7702_delegate_address` | REX6+ only; `<=` REX5 compares the raw operand (frozen) |
+/// | Validate-time authorization accounting | original authority | `inspect_account` with `load_code = true` (EIP-7702 / EIP-3607 detection) | scan-wide |
+///
+/// `inspect_account_delegated` follows the delegate; it backs the frozen pre-REX5 accounting path
+/// and any caller that genuinely needs the delegate's account. New accounting call sites should use
+/// `inspect_account` (original address), not this.
 ///
 /// To improve performance, when journal does not have the account or storage slot, it will be
 /// loaded from the database and cached in the journal.
@@ -374,6 +441,32 @@ pub trait JournalInspectTr {
         address: Address,
         key: StorageKey,
     ) -> Result<&EvmStorageSlot, Self::DBError>;
+
+    /// Resolve the EIP-7702 delegate of `address` one hop and return the target address.
+    ///
+    /// Returns `address` itself when the account is not EIP-7702-delegated. Hydrates `info.code`
+    /// on REX5+ so EIP-7702 detection works against lazy-code databases (mirrors
+    /// `inspect_account_delegated`'s rule for stable-spec freeze).
+    ///
+    /// Callers gate this on REX6 (the only place it is used). EIP-7702 does not exist on earlier
+    /// specs, so an account there simply has no delegate code and resolves to `address` — no
+    /// pre-REX4 special case is needed.
+    ///
+    /// Useful for instruction-wrapper checks that need to compare the effective code-running
+    /// address against a known target (e.g., the block beneficiary) before delegating to revm.
+    fn resolve_eip7702_delegate_address(
+        &mut self,
+        spec: MegaSpecId,
+        address: Address,
+    ) -> Result<Address, Self::DBError> {
+        let load_code = spec.is_enabled(MegaSpecId::REX5);
+        let account = self.inspect_account(address, load_code)?;
+        let delegate = account.info.code.as_ref().and_then(|code| match code {
+            Bytecode::Eip7702(c) => Some(c.address()),
+            _ => None,
+        });
+        Ok(delegate.unwrap_or(address))
+    }
 }
 
 /// Load an account into the journal cache without following EIP-7702 delegation
@@ -412,6 +505,35 @@ fn inspect_account<DB: revm::Database>(
             // it.
             account.mark_cold();
             Ok(entry.insert(account))
+        }
+    }
+}
+
+/// Cold occupancy read that returns an account's `code_hash` and loads it into the journal (so it
+/// appears in the returned `EvmState` / witness) but — unlike [`inspect_account`] — never hydrates
+/// `info.code`, even when the account is already resident (`inspect_account`'s already-loaded
+/// branch force-loads code via `code_by_hash` regardless of its `load_code` argument). An occupancy
+/// check needs only the hash; forcing `code_by_hash` on an already-warmed occupied address would
+/// require its bytecode in a stateless witness that need only carry the account proof, turning the
+/// expected revert into a spurious DB error on replay.
+///
+/// Only [`Journal`] needs this (the REX6 keyless-deploy occupancy check calls it on
+/// `ctx.journal_mut()`), so it is a free function rather than a `JournalInspectTr` method.
+pub(crate) fn inspect_account_code_hash<DB: revm::Database>(
+    journal: &mut Journal<DB>,
+    address: Address,
+) -> Result<B256, <DB as revm::Database>::Error> {
+    let transaction_id = journal.transaction_id;
+    match journal.inner.state.entry(address) {
+        Entry::Occupied(entry) => Ok(entry.get().info.code_hash),
+        Entry::Vacant(entry) => {
+            let mut account = journal
+                .database
+                .basic(address)?
+                .map(|info| info.into())
+                .unwrap_or_else(|| Account::new_not_existing(transaction_id));
+            account.mark_cold();
+            Ok(entry.insert(account).info.code_hash)
         }
     }
 }
@@ -780,6 +902,73 @@ mod tests {
             "EOA code must stay `None`; the `code_hash != KECCAK_EMPTY` guard keeps \
              `code_by_hash` off the hot path for accounts without on-chain code",
         );
+    }
+
+    /// `inspect_account_code_hash` returns the account's `code_hash` but must NEVER hydrate
+    /// `info.code` — on either branch. In particular the occupied branch must not fall through to
+    /// `code_by_hash` the way `inspect_account(.., false)` does (see
+    /// `test_inspect_account_occupied_branch_hydrates_on_second_inspection`). This is what lets the
+    /// REX6 keyless-deploy occupancy check decide on the hash alone, without demanding an
+    /// already-warmed occupied address's bytecode in a stateless witness carrying only its proof.
+    #[test]
+    fn test_inspect_account_code_hash_never_hydrates_code() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000dd");
+        let bytecode = Bytes::from_static(&[0x5b]); // JUMPDEST
+        let expected_hash = keccak256(&bytecode);
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode);
+        let mut journal = Journal::new(db);
+
+        // Vacant cache-miss: returns the hash from `basic()` without hydrating code.
+        let vacant_hash =
+            inspect_account_code_hash(&mut journal, ADDR).expect("vacant read must succeed");
+        assert_eq!(vacant_hash, expected_hash, "vacant branch must return the code_hash");
+        assert!(
+            journal.inner.state.get(&ADDR).is_some_and(|a| a.info.code.is_none()),
+            "vacant branch must not hydrate info.code",
+        );
+
+        // The address is now resident with `code == None`. `inspect_account` would hydrate on this
+        // occupied branch; `inspect_account_code_hash` must not.
+        let occupied_hash =
+            inspect_account_code_hash(&mut journal, ADDR).expect("occupied read must succeed");
+        assert_eq!(
+            occupied_hash, expected_hash,
+            "occupied branch must return the cached code_hash"
+        );
+        assert!(
+            journal.inner.state.get(&ADDR).is_some_and(|a| a.info.code.is_none()),
+            "inspect_account_code_hash must NOT hydrate info.code on the occupied branch",
+        );
+    }
+
+    /// `resolve_eip7702_delegate_address` hydrates lazy delegation bytecode only from REX5:
+    /// pin both sides of the boundary so a shifted gate (e.g. REX4) fails here. At REX4 a
+    /// lazy-code delegator resolves to itself (its `0xef0100…` code is never loaded); at REX5
+    /// the same first cold touch loads the code and follows the hop.
+    #[test]
+    fn test_resolve_eip7702_delegate_loads_code_from_rex5_exactly() {
+        const DELEGATOR: Address = address!("00000000000000000000000000000000000000e1");
+        const DELEGATE: Address = address!("00000000000000000000000000000000000000e2");
+
+        // REX4: no hydration — the delegation is invisible and resolution degrades to identity.
+        let db = LazyCodeDatabase::default().with_eip7702_delegation(DELEGATOR, DELEGATE);
+        let mut journal = Journal::new(db);
+        let resolved = journal
+            .resolve_eip7702_delegate_address(MegaSpecId::REX4, DELEGATOR)
+            .expect("resolve must succeed");
+        assert_eq!(resolved, DELEGATOR, "REX4 must not load code, so the hop is not followed");
+        assert!(
+            journal.inner.state.get(&DELEGATOR).is_some_and(|a| a.info.code.is_none()),
+            "REX4 resolution must leave the delegator's code lazy",
+        );
+
+        // REX5: the first cold touch hydrates the delegation bytecode and follows the hop.
+        let db = LazyCodeDatabase::default().with_eip7702_delegation(DELEGATOR, DELEGATE);
+        let mut journal = Journal::new(db);
+        let resolved = journal
+            .resolve_eip7702_delegate_address(MegaSpecId::REX5, DELEGATOR)
+            .expect("resolve must succeed");
+        assert_eq!(resolved, DELEGATE, "REX5 must hydrate the code and follow the hop");
     }
 
     /// On REX5+, `inspect_account_delegated` must follow the EIP-7702 hop on the

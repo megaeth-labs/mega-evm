@@ -55,9 +55,9 @@ use revm::{
 use tracing::{error, warn};
 
 use crate::{
-    constants, mark_frame_result_as_exceeding_limit, AdditionalLimit, EvmTxRuntimeLimits,
-    ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitUsage, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit, VolatileDataAccess,
+    constants, inspect_account_code_hash, mark_frame_result_as_exceeding_limit, AdditionalLimit,
+    EvmTxRuntimeLimits, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitUsage, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit, VolatileDataAccess,
     SANDBOX_TX_SOURCE_HASH,
 };
 
@@ -177,10 +177,10 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
         return make_halt!();
     }
     if ctx.spec.is_enabled(MegaSpecId::REX3) {
-        let mut limit = ctx.additional_limit.borrow_mut();
-        if !limit.record_compute_gas(cost) {
+        let mut additional_limit = ctx.additional_limit.borrow_mut();
+        if !additional_limit.record_compute_gas(cost) {
             let crate::LimitCheck::ExceedsLimit { limit, used, frame_local, .. } =
-                limit.compute_gas.check_limit()
+                additional_limit.compute_gas.check_limit()
             else {
                 unreachable!()
             };
@@ -189,6 +189,17 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                 make_error!(KeylessDeployError::InsufficientComputeGas { limit, used })
             } else {
                 // TX-level: halt with OOG, marked as exceeding.
+                //
+                // REX6+: rescue the outer `Gas`'s unspent portion (after the
+                // `KEYLESS_DEPLOY_OVERHEAD_GAS` charge) so it is refunded to the sender,
+                // matching the per-opcode `compute_gas!` path's TX-level-exceed rescue.
+                // The eventual `make_halt!` still spends `gas.limit()` for replay-stable
+                // receipts; the rescued amount is added back in `last_frame_result` via
+                // `rescued_gas`. Pre-REX6 specs leave the un-rescued full-spend in place
+                // for replay parity.
+                if ctx.spec.is_enabled(MegaSpecId::REX6) {
+                    additional_limit.try_rescue_gas(&gas);
+                }
                 let mut result = make_halt!();
                 mark_frame_result_as_exceeding_limit(
                     &mut result,
@@ -351,7 +362,45 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     };
 
     // Step 7: check the deterministic deploy address isn't already occupied.
-    {
+    //
+    // REX6 reads occupancy through the journaled, cold `inspect_account_code_hash` so the deploy
+    // address lands in the returned `EvmState` / witness; pre-REX6 keeps the raw `database.basic`
+    // read that bypasses the journal. The gate is load-bearing: the pre-REX5 legacy merge
+    // (`apply_sandbox_state_legacy`, `merge_status = false`) does not carry `AccountStatus` through
+    // an already-`Occupied` journal entry, so journaling this read there would drop a deployed
+    // address's `Created|Touched` status and let `commit()` discard it — silently losing successful
+    // pre-REX5 deploys (guarded by
+    // `test_keyless_deploy_pre_rex6_success_still_commits_deployed_code`). Only the witness
+    // changes, not the `ContractAlreadyExists` decision — the interceptor fires only at
+    // `depth == 0`, so while access-list warming may already have journaled `deploy_address`
+    // (read-only, same `code_hash` as the database), no reachable path can have changed its
+    // `code_hash` before this check (writing EIP-7702 delegation code to it would require the
+    // deploy address's own signing key, which does not exist for a CREATE-derived address).
+    //
+    // `inspect_account_code_hash` (not `inspect_account(.., false)`) because the occupancy decision
+    // needs only `code_hash`: `inspect_account`'s already-resident branch force-loads `info.code`
+    // via `code_by_hash` regardless of `load_code`, so if the outer tx's access list pre-warmed an
+    // occupied `deploy_address`, that read would demand the address's bytecode in a stateless
+    // witness carrying only its account proof and turn the expected revert into a spurious DB
+    // error.
+    if ctx.spec.is_enabled(MegaSpecId::REX6) {
+        let deploy_code_hash = inspect_account_code_hash(ctx.journal_mut(), deploy_address)
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    deploy_address = ?deploy_address,
+                    "keyless deploy deploy-address state read failed",
+                );
+                KeylessDeployError::InternalError
+            });
+        match deploy_code_hash {
+            Ok(code_hash) if code_hash != KECCAK_EMPTY => {
+                return make_error!(KeylessDeployError::ContractAlreadyExists);
+            }
+            Err(e) => return make_error!(e),
+            _ => {}
+        }
+    } else {
         let deploy_account = ctx.journal_mut().database.basic(deploy_address).map_err(|e| {
             error!(
                 error = %e,
@@ -596,12 +645,19 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     };
     let sandbox_ctx = sandbox_ctx.with_block(block).with_chain(chain).with_inside_sandbox(true);
     let is_rex5_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX5);
+    let is_rex6_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX6);
     let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
     let result = sandbox_evm.transact_raw(sandbox_tx);
     let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
     let volatile_accesses =
         sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
-    process_sandbox_transact_result(result, limit_usage, volatile_accesses, is_rex5_enabled)
+    process_sandbox_transact_result(
+        result,
+        limit_usage,
+        volatile_accesses,
+        is_rex5_enabled,
+        is_rex6_enabled,
+    )
 }
 
 /// Outcome of sandbox execution.
@@ -719,11 +775,23 @@ impl SandboxCompletion {
 /// the parent receipt per the keyless-deploy spec), pre-REX5 collapses to
 /// [`SandboxCompletion::ExecutionFailed`] with `EmptyCodeDeployed` so logs are dropped
 /// for replay parity.
+///
+/// `is_rex6_enabled` enables the EIP-6780 SELFDESTRUCT check: when revm reports
+/// `Success { Output::Create(bytecode, addr) }` but the sandbox-state account at `addr` has
+/// `is_selfdestructed() == true` (same-tx create + SELFDESTRUCT), `apply_sandbox_state`'s
+/// `apply_sandbox_created_selfdestruct` will zero balance/storage and leave no code at the
+/// merged address — so reporting `Deployed { addr }` would surface a non-zero
+/// `deployedAddress` for an address that has no on-chain code after merge. REX6 collapses
+/// this case onto the same empty-code branch as `bytecode.is_empty()` (REX6 implies REX5,
+/// so logs forward via `SandboxCompletion::EmptyCode`); the outer caller returns
+/// `EmptyCodeDeployed` with `deployedAddress = 0x0`. Pre-REX6 specs preserve the original
+/// surface (`Deployed { addr }` returned for create+SELFDESTRUCT) for replay parity.
 fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
     result: Result<ResultAndState<MegaHaltReason>, E>,
     limit_usage: LimitUsage,
     volatile_accesses: VolatileDataAccess,
     is_rex5_enabled: bool,
+    is_rex6_enabled: bool,
 ) -> SandboxOutcome {
     let completed = |state, completion| SandboxOutcome::Completed {
         state,
@@ -742,7 +810,17 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
                     // a Rejected outcome instead of panicking to avoid crashing the node.
                     return SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated);
                 };
-                if bytecode.is_empty() {
+                // REX6: also treat same-tx create + SELFDESTRUCT as empty-code. revm reports
+                // `Success` with the constructor's returned bytecode, but
+                // `apply_sandbox_created_selfdestruct` zeroes the account on merge — so the
+                // parent-visible code at `created_addr` is empty. Folding into the same arm
+                // as `bytecode.is_empty()` produces a consistent `EmptyCodeDeployed` outcome
+                // (logs forwarded under REX5+).
+                let selfdestructed = is_rex6_enabled &&
+                    sandbox_state
+                        .get(&created_addr)
+                        .is_some_and(|account| account.is_selfdestructed());
+                if bytecode.is_empty() || selfdestructed {
                     // REX5+: surface as `EmptyCode` so the outer caller forwards the
                     // constructor's logs into the parent receipt before returning
                     // success-style `EmptyCodeDeployed` errorData. Pre-REX5 collapses
@@ -1006,7 +1084,9 @@ fn sandbox_intrinsic_overflow_error(
         LimitCheck::ExceedsLimit { kind, limit, used, .. } => {
             Some(KeylessDeployError::ParentBudgetExceeded { kind, limit, used })
         }
-        LimitCheck::WithinLimit => None,
+        // `intrinsic_check_for_tx` builds a fresh trial tracker that never has `Exempt` stamped,
+        // so only the two real outcomes are reachable here.
+        LimitCheck::WithinLimit | LimitCheck::Exempt => None,
     }
 }
 
@@ -1173,6 +1253,7 @@ mod tests {
             LimitUsage::default(),
             VolatileDataAccess::empty(),
             true,
+            false,
         );
         assert!(
             matches!(out, SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated)),
@@ -1199,6 +1280,7 @@ mod tests {
             LimitUsage::default(),
             VolatileDataAccess::empty(),
             true,
+            false,
         );
         assert!(
             matches!(out, SandboxOutcome::Rejected(KeylessDeployError::NoContractCreated)),
@@ -1219,6 +1301,7 @@ mod tests {
             LimitUsage::default(),
             VolatileDataAccess::empty(),
             true,
+            false,
         );
         assert!(
             matches!(out, SandboxOutcome::Rejected(KeylessDeployError::InternalError)),
@@ -1237,6 +1320,7 @@ mod tests {
             LimitUsage::default(),
             VolatileDataAccess::empty(),
             true,
+            false,
         );
         assert!(
             matches!(out, SandboxOutcome::Rejected(KeylessDeployError::InvalidTransaction)),

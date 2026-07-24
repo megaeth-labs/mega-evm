@@ -32,6 +32,10 @@ pub const SPEC_IDS: &[(&str, MegaSpecId)] = &[
     ("mini_rex", MegaSpecId::MINI_REX),
     ("rex4", MegaSpecId::REX4),
     ("rex5", MegaSpecId::REX5),
+    // REX5 vs REX6 isolates the cost of the unified gas-metering order: REX6 routes the
+    // storage-affecting opcodes (SSTORE, CALL, etc.) through the canonical
+    // charge-storage / run-body / record-compute-once path.
+    ("rex6", MegaSpecId::REX6),
 ];
 
 type Group<'a> = criterion::BenchmarkGroup<'a, criterion::measurement::WallTime>;

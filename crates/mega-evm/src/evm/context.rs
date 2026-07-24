@@ -29,9 +29,9 @@ use revm::{
 };
 
 use crate::{
-    constants, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
-    ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit, VolatileDataAccess,
-    VolatileDataAccessTracker, VolatileDataAccessType,
+    constants, is_system_originated, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv,
+    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit,
+    VolatileDataAccess, VolatileDataAccessTracker, VolatileDataAccessType,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -594,10 +594,18 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub(crate) fn on_new_tx(&mut self) {
         self.reset_volatile_data_access();
 
-        // Apply the additional limits only when the `MINI_REX` spec is enabled.
+        // The additional-limit lifecycle (reset → intrinsic accounting) exists only for MINI_REX+.
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
             self.additional_limit.borrow_mut().reset();
             self.additional_limit.borrow_mut().before_tx_start(&self.inner.tx);
+        }
+
+        // REX6+: exempt system-originated transactions (see `crate::is_system_originated`) from
+        // MegaETH per-tx resource metering.
+        if self.spec.is_enabled(MegaSpecId::REX6) &&
+            is_system_originated(&self.inner.tx, self.system_address)
+        {
+            self.additional_limit.borrow_mut().mark_exempt();
         }
 
         // Mark beneficiary access AFTER additional_limit.reset() so that the volatile

@@ -55,14 +55,14 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5`
+Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6`
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _All specs through `REX5` are currently stable (frozen); there is no unstable spec under active development at this time._
-    When a future unstable spec is introduced, it must be the latest one, and this line should be updated to name it as the current unstable spec.
+  - _`REX6` is the current unstable spec under active development._
+    When a new spec is introduced, this line should be updated to indicate the unstable spec.
   - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Multiple hardforks can map to one spec.
@@ -111,7 +111,7 @@ Consequently:
 MegaETH separates EVM gas into two independent dimensions tracked during execution:
 
 - **Compute gas**: Measures pure computational cost.
-  Every opcode's gas consumption is recorded via wrapped instructions (`compute_gas_ext` in `evm/instructions.rs`).
+  Every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` — `compute_gas_ext::*` for plain opcodes and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) — both invoking the shared `record_storage_compute_gas!` primitive after the opcode body completes.
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).
@@ -221,10 +221,13 @@ Correctness of the other three dimensions (data size, KV updates, state growth) 
    Any code that records data-size/KV/state-growth usage during execution (`on_sstore`, `on_log`, `record_oracle_hint_bytes`, the frame-lifecycle hooks) must run `check_limit()` itself, latching any exceed into `has_exceeded_limit`.
    The latch is surfaced by the leading short-circuit of the next `record_compute_gas` call, so the halt lands on the same opcode as the pre-protocol fan-out did.
 2. **Pre-inner recorders must NOT latch.**
-   A site that records usage _before_ its inner instruction executes (currently only SELFDESTRUCT beneficiary creation) must record without latching: the inner instruction can still fail, the frame then discards the usage, and an early latch would stick and rewrite the frame's real result.
+   A site that records usage _before_ its inner instruction executes (currently SELFDESTRUCT's two beneficiary recorders: empty-beneficiary creation and the REX6+ existing-beneficiary credit) must record without latching: the inner instruction can still fail, the frame then discards the usage, and an early latch would stick and rewrite the frame's real result.
    Such opcodes use a trailing all-dimension check (`record_compute_gas_all_dims`) that runs only after the inner instruction succeeds.
 3. **Compute gas is always recorded.**
    `record_compute_gas` must record before surfacing any latched exceed — the recorded total feeds the transaction outcome and block-level compute accounting even for transactions halted on another dimension.
+
+The protocol governs mutation sites that run during execution; the REX6+ post-execution fee-reward accounting is deliberately outside it.
+That accounting merges usage into the transaction's reported totals and the block-level cumulative counters after the execution result is final, without latching, and never retroactively fails the transaction.
 
 Rule 1 is backed by a `debug_assert!` in `record_compute_gas`: if a non-compute dimension is over its limit but not yet latched, the assert trips at the exact opcode whose mutation site forgot to call `check_limit()`.
 The sub-tracker checks are non-mutating, so the guard compiles out of release builds.
@@ -233,7 +236,7 @@ When adding an opcode or mutation site that touches a non-compute dimension, dec
 
 ## Test Organization (`crates/mega-evm/tests/`)
 
-Tests are organized by spec: `equivalence/`, `mini_rex/` (12 modules), `rex/`, `rex2/`, `rex3/`, `rex4/`, `rex5/`, and `block_executor/`.
+Tests are organized by spec: `equivalence/`, `mini_rex/` (12 modules), `rex/`, `rex2/`, `rex3/`, `rex4/`, `rex5/`, `rex6/`, and `block_executor/`.
 Each module tests specific features of that spec.
 
 ## Version Control
@@ -300,9 +303,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **Do NOT modify behavior for existing stable specs.**
-  All specs in `MegaSpecId` are currently stable (frozen).
-  New EVM behavior, gas cost changes, or opcode modifications **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
-  Never change what an existing spec does.
+  All specs through `REX5` are stable (frozen); `REX6` is the unstable spec under active development.
+  New EVM behavior, gas cost changes, or opcode modifications for stable specs **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
+  Never change what an existing stable spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
 - **Override `HardforkParams::validate()` for every new params type.**

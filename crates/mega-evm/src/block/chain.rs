@@ -123,8 +123,8 @@ mod tests {
     fn test_schedule_dispatch_by_chain_id() {
         assert_eq!(hardfork_schedule(MAINNET_CHAIN_ID).spec_id(1780632000), MegaSpecId::REX5);
         assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(1780459200), MegaSpecId::REX5);
-        // Unknown chain: everything active at genesis.
-        assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX5);
+        // Unknown chain: everything active at genesis, including the unstable REX6.
+        assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX6);
     }
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
         // Rex5 block execution fails pre-block without a SequencerRegistryConfig,
         // so the all-activated fallback must attach placeholder roles.
         let hf = hardfork_schedule(999_999);
-        assert_eq!(hf.spec_id(0), MegaSpecId::REX5);
+        assert_eq!(hf.spec_id(0), MegaSpecId::REX6);
         let params = hf
             .fork_params::<SequencerRegistryConfig>()
             .expect("fallback schedule must carry a SequencerRegistryConfig");

@@ -180,10 +180,29 @@ Under the fee-free sandbox, the inner signer is NOT debited for sandbox gas: the
 
 When the inner CREATE succeeds but produces empty runtime bytecode, the node MUST forward the constructor's emitted logs — emitted by the outer call — before returning the `EmptyCodeDeployed(uint64 gasUsed)` result, so that the receipt logs agree with the merged state.
 
+<details>
+<summary>Rex6 (unstable): self-destructing constructor classified as an empty-code deployment</summary>
+
+Under Rex6, when the inner CREATE reports success with non-empty returned bytecode but the created account was self-destructed during its own construction ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) — a constructor that executes `SELFDESTRUCT`, directly or through a delegate), the node MUST classify the result as an empty-code deployment rather than a successful one.
+The call MUST return `deployedAddress = 0x0000000000000000000000000000000000000000` with `errorData = EmptyCodeDeployed(uint64 gasUsed)`, and MUST forward the constructor's emitted logs, exactly as for a constructor that returns empty runtime code.
+Only the reported result changes: the merged state is the same as pre-Rex6 — the created account is merged without code, and the signer's nonce-based replay barrier is still consumed.
+Pre-Rex6, this case is reported as a successful deployment (`deployedAddress = expected_address`) even though the merged on-chain account holds no code.
+
+</details>
+
 Two cases do NOT use the success-style return:
 
 - If the sandbox's known intrinsic usage alone exceeds the parent's remaining resource budget, the preflight check fails before any sandbox starts: no state is merged, and the outer call reverts with `ParentBudgetExceeded`.
 - If the sandbox's merged transaction-level usage overflows the parent's envelope after sandbox execution has already run, the outer call halts with `OutOfGas` and no sandbox state is merged.
+
+<details>
+<summary>Rex6 (unstable): unused gas rescued on a transaction-level compute-gas halt</summary>
+
+Under Rex6, when the KeylessDeploy dispatch path halts because recording its usage exceeds the transaction-level compute-gas limit, the node MUST rescue the outer transaction's unspent gas for the sender, aligning this path with the ordinary opcode-dispatch paths that already rescue on a transaction-level limit exceed.
+The halt itself still records a full spend for replay stability; the rescued amount is refunded to the sender.
+Pre-Rex6, this path halted with a full-spend `OutOfGas` without rescuing, so the sender lost the entire unused gas envelope for a halt that performed little work.
+
+</details>
 
 ### Error Classes
 
@@ -262,3 +281,4 @@ Allowing nonce `1` preserves deployability in that case while still preventing a
 - [Rex2](../upgrades/rex2.md) introduced KeylessDeploy and its stable top-level interception model.
 - [Rex3](../upgrades/rex3.md) makes the overhead gas count toward compute gas accounting.
 - [Rex5](../upgrades/rex5.md) rejects encodings with trailing bytes after the signed RLP payload by reverting with `MalformedEncoding()`; propagates sandbox resource usage and volatile-access footprint to the parent transaction, charges sandbox EVM gas to the outer gas meter, caps `gasLimitOverride` to remaining gas, caps sandbox resource budgets to the parent's remaining limits before execution, preflights known sandbox intrinsic usage, and rejects the outer call without merging sandbox state on the residual overflow path; refactors `InternalError` to selector-only and adds the new selector-only `InvalidTransaction()` validation error; and forwards the constructor's logs when an inner deployment succeeds with empty runtime code.
+- Rex6 (**unstable**) — rescues the outer sender's unspent gas when the dispatch path halts on the transaction-level compute-gas limit, and classifies a create-then-`SELFDESTRUCT` constructor that returns non-empty bytecode as an `EmptyCodeDeployed` result (`deployedAddress = 0x0`) matching the merged on-chain state.

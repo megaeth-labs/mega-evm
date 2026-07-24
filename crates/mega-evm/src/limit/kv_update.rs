@@ -34,6 +34,7 @@ use crate::{MegaSpecId, MegaTransaction};
 #[derive(Debug, Clone)]
 pub(crate) struct KVUpdateTracker {
     rex4_enabled: bool,
+    rex6_enabled: bool,
     frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
@@ -41,6 +42,7 @@ impl KVUpdateTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
+            rex6_enabled: spec.is_enabled(MegaSpecId::REX6),
             frame_tracker: FrameLimitTracker::new(spec, tx_limit),
         }
     }
@@ -48,6 +50,13 @@ impl KVUpdateTracker {
     /// Records a discardable KV update in the current frame.
     fn record_discardable(&mut self, n: u64) {
         self.frame_tracker.add_frame_discardable(n);
+    }
+
+    /// Records discardable usage into the PARENT frame (one below the top). Used for a
+    /// child-CREATE's creator-side account-info write, whose on-chain effect (the creator
+    /// nonce bump) is undone only by the parent's revert, not the child's.
+    fn record_parent_discardable(&mut self, n: u64) {
+        self.frame_tracker.add_parent_discardable(n);
     }
 
     /// Records a KV update refund in the current frame.
@@ -61,6 +70,14 @@ impl KVUpdateTracker {
     /// creating a new beneficiary account.
     pub(crate) fn record_account_update(&mut self) {
         self.record_discardable(1);
+    }
+
+    /// Records a single account update as TX-level persistent (non-discardable) KV usage.
+    ///
+    /// Used by the REX6 EIP-7702 authorization scan, which runs in `validate` before any frame
+    /// exists, so the charge cannot go through the frame-scoped `record_account_update`.
+    pub(crate) fn record_persistent_account_update(&mut self) {
+        self.frame_tracker.add_tx_persistent(1);
     }
 
     /// Merges external persistent usage into the TX-level entry.
@@ -145,10 +162,16 @@ impl TxRuntimeLimit for KVUpdateTracker {
     ///
     /// All recorded as pre-frame (non-discardable) since no frame exists yet.
     fn before_tx_start(&mut self, tx: &MegaTransaction) {
-        // EIP-7702 authority account updates (non-discardable)
-        for authorization in tx.authorization_list() {
-            if authorization.authority().is_some() {
-                self.frame_tracker.add_tx_persistent(1);
+        // EIP-7702 authority account updates (non-discardable).
+        //
+        // Pre-REX6: charged here for every recoverable authority, including ones that fail the
+        // application gates. REX6+ moves this into the journal-aware authorization scan in
+        // `validate` so only *applied* authorities are charged; skip here.
+        if !self.rex6_enabled {
+            for authorization in tx.authorization_list() {
+                if authorization.authority().is_some() {
+                    self.frame_tracker.add_tx_persistent(1);
+                }
             }
         }
 
@@ -184,15 +207,29 @@ impl TxRuntimeLimit for KVUpdateTracker {
                         // Parent's account info update goes to child's discardable.
                         self.record_discardable(1);
                     }
-                    // Record target account info update in child's discardable.
-                    self.record_discardable(1);
+                    // A value transfer to the caller itself touches a single account, already
+                    // accounted by the caller-side write above (or, at the top level, by the
+                    // transaction-start caller record). Recording the target side again would
+                    // double-count that one account, so skip it under REX6.
+                    if !(self.rex6_enabled && call_inputs.target_address == call_inputs.caller) {
+                        // Record target account info update in child's discardable.
+                        self.record_discardable(1);
+                    }
                 }
             }
             FrameInput::Create(_) => {
                 let parent_needs_update = self.frame_tracker.push_create_frame();
                 if parent_needs_update {
-                    // Parent's account info update goes to child's discardable.
-                    self.record_discardable(1);
+                    if self.rex6_enabled {
+                        // The creator's nonce bump survives the child's revert (revm bumps it
+                        // before the create checkpoint), so charge it to the parent frame —
+                        // see `FrameLimitTracker::add_parent_discardable`.
+                        self.record_parent_discardable(1);
+                    } else {
+                        // Pre-REX6: the creator nonce-bump charge is bundled into the child frame's
+                        // discardable lane (frozen behavior).
+                        self.record_discardable(1);
+                    }
                 }
             }
             FrameInput::Empty => unreachable!(),

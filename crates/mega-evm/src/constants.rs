@@ -157,6 +157,9 @@ pub mod rex5 {
     pub const SYSTEM_CALL_GAS_LIMIT_FLOOR: u64 = 30_000_000;
 }
 
+/// Constants for the `REX6` spec.
+pub mod rex6 {}
+
 /// Constants for the `REX` spec.
 pub mod rex {
     /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.

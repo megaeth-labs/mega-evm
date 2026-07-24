@@ -60,6 +60,31 @@ Before applying the special semantics above, a node MUST validate the transactio
 A transaction failing any of these checks MUST be rejected with the corresponding canonical invalid-transaction error (missing chain id, invalid chain id, nonce too low, nonce too high, or caller-has-code rejection) before any state mutation, signature bypass, or fee bypass takes effect.
 The remaining bypasses (signature, gas-fee charging, balance) MUST still apply once these checks pass.
 
+<details>
+<summary>Rex6 (unstable): System-originated transaction metering exemption</summary>
+
+#### System-Originated Transaction Metering Exemption
+
+A transaction is **system-originated** when either:
+
+- its caller is the [EIP-2935](https://eips.ethereum.org/EIPS/eip-2935) / [EIP-4788](https://eips.ethereum.org/EIPS/eip-4788) system address `0xfffffffffffffffffffffffffffffffffffffffe`, which is how the protocol issues its pre-block system calls (block-hash and beacon-root updates, and `SequencerRegistry.applyPendingChanges()`); or
+- it is a Mega System Transaction, recognized both before and after its deposit promotion.
+
+Ordinary user transactions — including user deposit transactions — are never system-originated.
+
+Under Rex6, a node MUST exempt a system-originated transaction from MegaETH's per-transaction resource metering:
+
+- Dynamic storage gas MUST be charged at the [minimum bucket capacity](../evm/dual-gas-model.md#dynamic-salt-multiplier) (`multiplier = 1`), so the cost does not depend on actual SALT bucket capacity.
+- The four [runtime transaction-level resource limits](../evm/resource-limits.md#runtime-transaction-level-limits) (compute gas, data size, KV updates, state growth) MUST NOT halt the transaction.
+- The [gas detention](../evm/gas-detention.md) compute-gas cap MUST NOT halt the transaction.
+- Resource usage MUST still be recorded; only the per-transaction halt decision is suppressed.
+
+The transaction's standard EVM `gas_limit` — for the pre-block system calls, floored at `SYSTEM_CALL_GAS_LIMIT_FLOOR` (30,000,000) — remains the only bound that can halt a system-originated transaction.
+
+Pre-Rex6 specs meter every transaction, including the protocol's own, identically to user transactions.
+
+</details>
+
 ### Scope
 
 This page specifies the execution semantics of Mega System Transactions.
@@ -107,3 +132,4 @@ Allowing fee-exempt contract creation would let `MEGA_SYSTEM_ADDRESS` deploy arb
 - [Rex5](../upgrades/rex5.md) dynamized the system address — it is no longer a compile-time constant but is resolved per block from `SequencerRegistry.currentSystemAddress()` — and restored the canonical chain-id, nonce, and EIP-3607 sender-code checks that earlier specs bypassed via deposit promotion.
   Blocks before Rex5 continue to use the legacy `MEGA_SYSTEM_ADDRESS` constant and the deposit-promotion bypasses.
   The system transaction identification logic and whitelist are unchanged.
+- Rex6 (**unstable**) — exempts system-originated transactions (pre-block system calls and Mega System Transactions) from per-transaction resource metering: dynamic storage gas is charged at minimum bucket capacity, and the four resource-limit dimensions plus gas detention no longer halt them; usage is still recorded and the standard `gas_limit` remains the only halting bound.

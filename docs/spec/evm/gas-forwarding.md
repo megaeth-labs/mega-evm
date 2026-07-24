@@ -40,6 +40,17 @@ The child call frame gas limit MUST be the minimum of:
 - the gas requested by the caller, and
 - `forwarded_gas_cap`.
 
+<details>
+<summary>Rex6 (unstable): forwarded gas returned on a compute-gas-limit halt</summary>
+
+When a `CALL`-family or `CREATE` / `CREATE2` opcode records its compute gas after its body and the recording exceeds the [compute gas limit](resource-limits.md), the opcode halts and its pending child frame is discarded before the child runs.
+
+Pre-Rex6, the gas already forwarded to that discarded child is not returned to the parent frame, so the transaction's `gas_used` is inflated by the forwarded amount even though the child never executed.
+
+Under Rex6, the node MUST return the forwarded gas to the parent frame before halting, so `gas_used` reflects only the gas actually consumed.
+
+</details>
+
 ### Value Transfer Stipend
 
 For `CALL` and `CALLCODE` with non-zero value transfer, the standard EVM `CALL_STIPEND` MUST be preserved.
@@ -106,3 +117,4 @@ The 63/64 rule inherited from Ethereum was designed for much lower gas budgets; 
 - [Rex](../upgrades/rex.md) extended the rule to all CALL-like opcodes.
 - [Rex4](../upgrades/rex4.md) — added storage-gas stipend for value-transferring `CALL` and `CALLCODE`.
 - [Rex5](../upgrades/rex5.md) — recast the storage-gas stipend as a per-frame allowance that no longer inflates the child's gas limit (so it cannot be spent on compute), and corrected the parent's compute-gas attribution to exclude the `CALL_STIPEND` for value-transferring `CALL` / `CALLCODE`; the 23,000 grant amount and admission conditions are unchanged.
+- [Rex6](../upgrades/rex6.md) (**unstable**) — returns forwarded gas to the parent when a `CALL` or `CREATE` halts on the compute-gas limit: pre-Rex6, when the opcode recorded its compute gas and exceeded the limit, the pending child frame was discarded but the gas already forwarded to it was not returned, inflating `gas_used`; Rex6 returns the forwarded gas to the parent before halting.

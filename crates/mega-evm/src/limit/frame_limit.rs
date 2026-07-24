@@ -328,6 +328,28 @@ impl<I> FrameLimitTracker<I> {
             self.cached_total_refund += n;
         }
     }
+
+    /// Adds `n` to the parent frame's `discardable_usage` (the frame directly beneath the
+    /// current top) and keeps the cache in sync. No-op when the current frame is top-level.
+    ///
+    /// Used by REX6 CREATE accounting to charge the creator's nonce-bump account-info write to
+    /// the parent (creator) frame instead of the child (created) frame. revm increments the
+    /// creator's nonce *before* it takes the create checkpoint, so the nonce bump survives the
+    /// created contract's revert and is undone only if the creator's own frame reverts.
+    /// Recording the charge on the parent's discardable lane matches that lifetime: it is kept
+    /// when the child reverts and dropped only with the parent.
+    ///
+    /// This is the opposite of a value-transferring CALL, whose balance moves *are* rolled back
+    /// when the callee reverts — those are correctly charged to the child's discardable lane.
+    #[inline]
+    pub(crate) fn add_parent_discardable(&mut self, n: u64) {
+        if let Some((_current, below)) = self.frame_stack.split_last_mut() {
+            if let Some(parent) = below.last_mut() {
+                parent.discardable_usage += n;
+                self.cached_total_used += n;
+            }
+        }
+    }
 }
 
 impl FrameLimitTracker<CallFrameInfo> {

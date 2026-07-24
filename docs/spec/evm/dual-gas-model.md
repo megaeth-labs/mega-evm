@@ -42,6 +42,33 @@ The `gas_used` field in the transaction receipt MUST reflect the combined total.
 Unless explicitly overridden elsewhere in this specification, each opcode MUST use the same compute gas cost as in the inherited EVM semantics.
 The dual gas model itself does not redefine opcode compute gas costs; it adds the storage gas dimension on top of them.
 
+### Gas Metering Order
+
+<details>
+
+<summary>Rex6 (unstable): canonical per-opcode gas metering order</summary>
+
+Each opcode consumes [compute gas](../glossary.md#compute-gas) and may additionally charge [storage gas](../glossary.md#storage-gas).
+Because the compute gas a transaction has consumed is itself a metered resource bounded by the [compute gas limit](resource-limits.md), the order in which an opcode charges storage gas relative to recording compute gas is consensus-visible: it determines, when an opcode halts partway through, how much compute gas has been recorded and which limit is reached first.
+
+A node MUST meter every storage-affecting opcode — `SSTORE`, `LOG0` through `LOG4`, `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2`, and `SELFDESTRUCT` — in the following fixed order:
+
+1. Validate the opcode's operands.
+   A validation failure (for example, stack underflow) MUST halt before any gas is charged or recorded.
+2. Charge the opcode's storage gas against the transaction's gas budget.
+   If the budget is insufficient, the node MUST halt with `OutOfGas` before executing the opcode body.
+3. Execute the opcode body, including every standard EVM dynamic cost such as memory expansion, account access, and child-frame gas forwarding.
+4. Record the opcode's compute gas as a single amount equal to the total EVM gas consumed by steps 2 and 3, minus the storage gas charged in step 2, minus any gas forwarded to a child frame.
+   The node MUST then enforce the compute gas limit, halting if it is exceeded.
+5. Apply the opcode's resource-limit accounting (data size, key-value updates, state growth).
+
+A node MUST record an opcode's compute gas in exactly one step, after the opcode body has fully executed.
+A node MUST NOT record any portion of an opcode's compute gas before the body has run to completion.
+If the body does not run to completion — because operand validation fails, the storage-gas charge exhausts the budget, or the body itself halts — the node MUST NOT record compute gas for that opcode, even when EVM gas was already consumed by work performed before the halt.
+The EVM gas consumed by such work remains deducted from the transaction's gas budget.
+
+</details>
+
 ### Storage Gas
 
 [Storage gas](../glossary.md#storage-gas) is an additional charge for operations that impose persistent storage burden on nodes.
@@ -114,6 +141,15 @@ The following rules MUST apply:
 - When `multiplier = 1` (bucket at minimum size): storage gas for the operation MUST be zero, since `base × (1 − 1) = 0`.
 - When `multiplier > 1`: storage gas MUST scale linearly as `base × (multiplier − 1)`.
 - The multiplier MUST be determined from the SALT bucket state of the **parent block**, not the current transaction's intermediate state.
+
+<details>
+<summary>Rex6 (unstable): system-originated transactions charge storage gas at minimum bucket capacity</summary>
+
+Under Rex6, a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) MUST be charged dynamic storage gas as if every target bucket were at minimum capacity (`multiplier = 1`), regardless of the bucket's actual capacity.
+Under the `base × (multiplier − 1)` formula this makes the dynamic storage gas zero, so a protocol-mandated storage write costs only its standard EVM gas and cannot run out of gas as SALT buckets grow.
+User transactions are unaffected and continue to pay capacity-scaled storage gas.
+
+</details>
 
 #### Bucket ID Calculation
 
@@ -242,3 +278,4 @@ For the historical evolution of storage gas formulas and constants across specs:
 - [Rex](../upgrades/rex.md) — revised to `base × (multiplier − 1)` with current base costs, added transaction intrinsic storage gas
 - [Rex4](../upgrades/rex4.md) — storage gas stipend for value transfers
 - [Rex5](../upgrades/rex5.md) — reworked the storage gas stipend into a separated-allowance model, derived the top-level contract-creation storage-gas address from the sender's current state nonce, and made contract-creation code-deposit compute gas atomic with the deployment commit
+- [Rex6](../upgrades/rex6.md) (**unstable**) — unified per-opcode gas metering order (compute gas recorded once, after the opcode body); system-originated transactions charge dynamic storage gas at minimum bucket capacity

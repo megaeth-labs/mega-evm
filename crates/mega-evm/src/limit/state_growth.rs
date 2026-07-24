@@ -8,8 +8,8 @@
 //!
 //! State growth is measured in discrete units, where each unit represents:
 //!
-//! - **+1** for creating a new account (via `CREATE`, `CREATE2`, or `CALL` with value to empty
-//!   account)
+//! - **+1** for creating a new account via `CREATE` / `CREATE2` (net-new address under REX6+;
+//!   unconditional under pre-REX6) or via `CALL` with value transfer to an empty account
 //! - **+1** for each valid EIP-7702 authorization that creates a previously non-existent authority
 //!   account (Rex5+)
 //! - **+1** for writing a storage slot from zero to non-zero for the first time
@@ -90,8 +90,8 @@ use crate::{FrameLimitTracker, JournalInspectTr, MegaSpecId, TxRuntimeLimit};
 /// State growth measures the expansion of blockchain state by counting new accounts and
 /// storage slots created, offset by any that are cleared:
 ///
-/// - **+1** for creating a new account (via `CREATE`, `CREATE2`, or `CALL` with value to empty
-///   account per EIP-161)
+/// - **+1** for creating a new account via `CREATE` / `CREATE2` (net-new address under REX6+;
+///   unconditional under pre-REX6) or via `CALL` with value transfer to an empty account (EIP-161)
 /// - **+1** for each valid EIP-7702 authorization that creates a previously non-existent authority
 ///   account (Rex5+)
 /// - **+1** for writing a storage slot from zero to non-zero for the first time
@@ -249,7 +249,8 @@ impl TxRuntimeLimit for StateGrowthTracker {
     /// - **Call with value transfer to empty account**: +1 growth (EIP-161 compliant). Only
     ///   `CALL`-like opcodes with value transfer to empty accounts count as creating an account.
     ///   `CALL` without value transfer does not count (empty account remains empty).
-    /// - **Create** (`CREATE` / `CREATE2`): +1 growth for the new account.
+    /// - **Create** (`CREATE` / `CREATE2`): +1 growth when deploying to a net-new address (REX6+);
+    ///   unconditional +1 for pre-REX6 specs.
     /// - **Call without value transfer** or **call to non-empty account**: no growth.
     fn before_frame_init<JOURNAL: JournalInspectTr<DBError: core::fmt::Debug>>(
         &mut self,
@@ -274,8 +275,22 @@ impl TxRuntimeLimit for StateGrowthTracker {
                     }
                 }
             }
-            FrameInput::Create(_) => {
-                self.record_growth(1);
+            FrameInput::Create(create_inputs) => {
+                if self.spec.is_enabled(MegaSpecId::REX6) {
+                    // REX6: count only net-new accounts. `before_frame_init` runs before revm bumps
+                    // the caller nonce, so the caller's current state nonce is the `old_nonce` the
+                    // deployment uses; derive the target and skip the +1 when it already exists
+                    // (e.g. a pre-funded balance-only account).
+                    let caller_nonce =
+                        journal.inspect_account(create_inputs.caller, false)?.info.nonce;
+                    let created_address = create_inputs.created_address(caller_nonce);
+                    let to_account = journal.inspect_account(created_address, false)?;
+                    if to_account.state_clear_aware_is_empty(SpecId::PRAGUE) {
+                        self.record_growth(1);
+                    }
+                } else {
+                    self.record_growth(1);
+                }
             }
             FrameInput::Empty => unreachable!(),
         }
