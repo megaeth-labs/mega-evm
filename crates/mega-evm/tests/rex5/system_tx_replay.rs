@@ -62,10 +62,13 @@ type PocExecutor<'a> = MegaBlockExecutor<
 >;
 
 fn rex5_hardforks() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().with_params(SequencerRegistryConfig {
-        rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
-        rex5_initial_admin: BOOTSTRAP_ADMIN,
-    })
+    // Rex6 is excluded: this suite pins Rex5 semantics (v1.0.0 registry, REX5 spec).
+    MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6).with_params(
+        SequencerRegistryConfig {
+            rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
+            rex5_initial_admin: BOOTSTRAP_ADMIN,
+        },
+    )
 }
 
 /// Per-test cfg toggles that affect the REX5 system-tx guards. Defaults match the

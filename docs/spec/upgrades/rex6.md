@@ -1,5 +1,5 @@
 ---
-description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, the authorization list skipped in full when a pre-frame resource limit is already exceeded, CREATE2 halting on oversized initcode — and any static-frame CREATE or CREATE2 — before its address-computation prework runs, CREATE-frame resource accounting corrected (creator nonce-bump booked to the parent frame and CREATE state growth recorded only for net-new addresses), KeylessDeploy sandbox hardened (outer sender's unused gas rescued on a transaction-level compute-gas halt, a self-destructing constructor reported as an empty-code deployment, and the deploy-address occupancy check reading through the journal so the address is captured in the transaction's returned state), post-execution fee-reward account materializations counted toward resource accounting, beneficiary detention and disableVolatileDataAccess coverage extended to source-side SELFDESTRUCT and EIP-7702-delegated CALLs (with existing-target SELFDESTRUCT balance credits counted toward resource accounting and Oracle sendHint forwarding suppressed while volatile data access is disabled), system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow, and two smaller resource-accounting corrections (a per-log data-size base so an empty log is no longer free in the data-size lane, and forwarded gas returned to the parent frame when a CALL or CREATE halts on the compute-gas limit).
+description: Rex6 network upgrade — unified per-opcode gas metering order (storage gas charged before the opcode body, compute gas recorded exactly once after it completes), EIP-7702 authorization accounting consolidated into validation with per-authorization data-size and KV-update charges narrowed to applied authorizations, dynamic SALT account-creation gas for net-new authorities, beneficiary gas detention triggered when an applied authority equals the block beneficiary, the authorization list skipped in full when a pre-frame resource limit is already exceeded, CREATE2 halting on oversized initcode — and any static-frame CREATE or CREATE2 — before its address-computation prework runs, CREATE-frame resource accounting corrected (creator nonce-bump booked to the parent frame and CREATE state growth recorded only for net-new addresses), KeylessDeploy sandbox hardened (outer sender's unused gas rescued on a transaction-level compute-gas halt, a self-destructing constructor reported as an empty-code deployment, and the deploy-address occupancy check reading through the journal so the address is captured in the transaction's returned state), post-execution fee-reward account materializations counted toward resource accounting, beneficiary detention and disableVolatileDataAccess coverage extended to source-side SELFDESTRUCT and EIP-7702-delegated CALLs (with existing-target SELFDESTRUCT balance credits counted toward resource accounting and Oracle sendHint forwarding suppressed while volatile data access is disabled), system-originated transactions exempted from per-transaction resource metering (SALT-scaled storage gas, the four resource-limit dimensions, and gas detention) so protocol-mandated state changes cannot fail as SALT buckets grow, two smaller resource-accounting corrections (a per-log data-size base so an empty log is no longer free in the data-size lane, and forwarded gas returned to the parent frame when a CALL or CREATE halts on the compute-gas limit), and SequencerRegistry v2.0.0 rotation hardening (sequencer rotation requires the new key’s EIP-712 possession proof and a config-seeded minimum scheduling-to-activation delay, shipped as an in-place storage-preserving bytecode upgrade).
 ---
 
 # Rex6 Network Upgrade
@@ -14,8 +14,8 @@ Its semantics may still change before network activation.
 
 ## Summary
 
-Rex6 bundles thirteen changes to gas metering, resource accounting, and execution behavior.
-All are consensus-visible except the `CREATE`-family early-halt ordering, which changes only the trace-visible halt reason, and the KeylessDeploy occupancy read, which changes only the transaction's returned read set:
+Rex6 bundles fourteen changes to gas metering, resource accounting, execution behavior, and system contracts.
+All are consensus-visible except the `CREATE`-family early-halt ordering, which changes only the trace-visible halt reason, and the KeylessDeploy occupancy read, which changes only the transaction’s returned read set:
 
 1. **Unified per-opcode gas metering order.** Rex6 defines a single, canonical order in which every storage-affecting opcode charges [storage gas](../glossary.md#storage-gas) and records [compute gas](../glossary.md#compute-gas), and brings `CREATE2` under it.
 2. **Consolidated EIP-7702 authorization accounting.** Rex6 derives every per-authorization effect from a single applied-authorization scan that runs during transaction validation.
@@ -30,6 +30,7 @@ All are consensus-visible except the `CREATE`-family early-halt ordering, which 
 11. **CREATE2 oversized-initcode and static-frame early halts.** Rex6 halts a `CREATE2` whose initcode exceeds the max initcode size — and any `CREATE` or `CREATE2` executed inside a static call frame — before the address-computation prework runs, instead of only once the inner opcode reaches its own checks.
 12. **Oracle `sendHint` forwarding respects volatile-access-disable.** Rex6 stops forwarding a `sendHint` call's payload to the oracle backend when the calling frame's volatile data access is disabled.
 13. **KeylessDeploy occupancy check reads through the journal.** Rex6 routes the KeylessDeploy deploy-address occupancy check through the parent journal as a cold, code-hash-only read, so the deploy address is captured in the transaction's returned state.
+14. **SequencerRegistry rotation hardening.** Rex6 upgrades the [SequencerRegistry](../system-contracts/sequencer-registry.md) to version 2.0.0: scheduling a sequencer change requires an EIP-712 possession proof signed by the new sequencer key and an activation block at least a config-seeded minimum delay in the future.
 
 ### Unified Gas Metering Order
 
@@ -158,6 +159,16 @@ The read MUST NOT load the account's bytecode, and the deploy address remains co
 This change affects only the transaction's returned state (the stateless-witness read set); it does not change the occupancy decision, committed gas, or committed state.
 
 Pre-Rex6, the occupancy check reads the database directly, bypassing the journal, so the deploy address is absent from the transaction's returned state.
+
+### SequencerRegistry Rotation Hardening
+
+Scheduling a sequencer rotation to an address whose private key nobody holds is an unrecoverable liveness failure: the activation block requires the new key's signature to produce mini-blocks, and the admin transaction that could fix the registry itself requires block production.
+Rex6 closes this hole at the contract entry point with `SequencerRegistry` version 2.0.0: `scheduleNextSequencerChange` gains a third parameter carrying the new key's [EIP-712](https://eips.ethereum.org/EIPS/eip-712) signature over the exact rotation being scheduled, and the activation block must be at least `minRotationDelay()` blocks in the future, giving operators a reaction window to detect and cancel a bad registration before it goes live.
+Cancellation requires no proof, so a rotation to a lost key can always be withdrawn.
+The system-address role's scheduling path is unchanged.
+
+The upgrade is an in-place, storage-preserving bytecode swap at the Rex6 activation block, following the Oracle's versioned-bytecode precedent: slots 0–12 (roles, pending changes, histories) are preserved, and the one new slot (`_minRotationDelay`, slot 13) is seeded from the chain configuration.
+A rotation scheduled under version 1.0.0 whose activation block lands at or after the upgrade still activates normally.
 
 All consensus-visible changes are gated on the Rex6 spec.
 Pre-Rex6 specs retain their existing metering order and the CREATE family's initcode-size and static-context check ordering relative to its address-computation prework, per-authorization accounting including unconditional application of the authorization list regardless of pre-frame limit state, CREATE-frame accounting, KeylessDeploy sandbox behavior including the deploy-address occupancy check's direct database read, post-execution fee-reward accounting, beneficiary-detention and volatile-access coverage including Oracle sendHint forwarding that does not consult the volatile-access-disabled state, full metering of system transactions, log data-size, forwarded-gas handling on a compute-limit halt, and the value self-transfer account-info double-count unchanged.
@@ -308,6 +319,30 @@ The exempted dimensions either cannot grow unboundedly from external state or ar
 
 User transactions are unaffected: they remain subject to SALT-scaled storage gas, all four resource-limit dimensions, and gas detention, preserving the anti-state-bloat purpose of SALT pricing.
 
+### SequencerRegistry Rotation Hardening
+
+#### Previous behavior (Rex5)
+
+`SequencerRegistry` version 1.0.0's `scheduleNextSequencerChange(newSequencer, activationBlock)` accepted any non-zero `newSequencer` from the admin with no evidence that anyone holds the corresponding private key, and any activation block strictly in the future.
+A typo'd or unheld address deadlocked block production at the activation block with no on-chain recovery.
+
+#### New behavior (Rex6)
+
+A node MUST deploy `SequencerRegistry` version 2.0.0 from Rex6.
+At the Rex6 activation block, a node MUST upgrade an existing version 1.0.0 registry in place — swapping the bytecode, writing only the new `_minRotationDelay` slot (slot 13) from `SequencerRegistryRex6Config.rex6_min_rotation_delay`, and preserving all other storage — so pending changes and histories survive, and a rotation scheduled under version 1.0.0 still activates normally under version 2.0.0.
+On a chain whose registry never existed, a node MUST deploy version 2.0.0 directly with the full seed (the six bootstrap slots plus `_minRotationDelay`).
+From Rex6 the pre-block `applyPendingChanges()` call MUST run before the registry deploy step: pre-block outcomes commit in execution order and the apply call executes against not-yet-committed state, so an apply outcome committed after the in-place upgrade would overwrite the upgraded account info with the stale version 1.0.0 bytecode.
+Pre-Rex6 blocks keep the original deploy-then-apply order, where both outcomes record the same version 1.0.0 code and the order is irrelevant.
+
+Version 2.0.0's `scheduleNextSequencerChange(newSequencer, activationBlock, newSequencerSignature)`:
+
+- MUST revert with `RotationDelayTooShort()` unless `activationBlock >= block.number + minRotationDelay()`.
+- MUST revert with `InvalidRotationProof()` unless `newSequencerSignature` is a well-formed 65-byte low-`s` signature by `newSequencer` over the EIP-712 digest of `SequencerRotation(address newSequencer,uint256 activationBlock)` under the domain `("MegaETH SequencerRegistry", "1", block.chainid, address(this))`.
+- MUST keep the cancellation case (`newSequencer = address(0)`, `activationBlock = type(uint256).max`) exempt from both checks.
+
+`scheduleNextSystemAddressChange` and `applyPendingChanges` are unchanged.
+The full signature-validation, replay-protection, and seeding rules are specified in [SequencerRegistry](../system-contracts/sequencer-registry.md).
+
 ## Developer Impact
 
 For transactions that succeed, the unified metering order does not change `gas_used` or the compute gas a `CREATE2` records.
@@ -330,6 +365,9 @@ A `CALL` or `CREATE` that halts on the compute-gas limit no longer inflates `gas
 
 System-originated transactions are not user-constructible, so the exemption does not change any user-facing transaction outcome; it only removes a SALT-driven failure mode from protocol-mandated execution.
 
+Sequencer-rotation tooling and runbooks must be updated for the version 2.0.0 `scheduleNextSequencerChange` ABI: every schedule call needs the new key's EIP-712 signature (the `rotationDigest()` view returns the exact message to sign) and an activation block at least `minRotationDelay()` blocks ahead.
+The minimum delay applies uniformly — including to emergency key-compromise rotations — with no fast-path bypass, because a bypass would reopen the unverified-registration race this change exists to close.
+
 ## Safety and Compatibility
 
 All consensus-visible changes in Rex6 are gated on `MegaSpecId::REX6`.
@@ -349,6 +387,9 @@ For the system-originated transaction exemption, pre-Rex6 specs continue to mete
 
 For the additional resource-accounting corrections, pre-Rex6 specs keep their existing log data-size charge (topic and data bytes only, no per-log base) and leave forwarded gas unreturned when a `CALL` / `CREATE` halts on the compute-gas limit; both changes apply only under `MegaSpecId::REX6`.
 
+For the `SequencerRegistry`, pre-Rex6 blocks keep deploying and running the version 1.0.0 bytecode with its two-parameter scheduling entry point.
+The version 2.0.0 upgrade preserves the storage layout (slots 0–12 are byte-identical; slot 13 is appended per the layout's append-only rule) and changes no behavior of `applyPendingChanges`, so validators' role resolution and the pre-block apply flow are unaffected.
+
 Rex6 is the current unstable spec under active development; its semantics may still change before network activation.
 
 ## References
@@ -357,6 +398,7 @@ Rex6 is the current unstable spec under active development; its semantics may st
 - [Resource Accounting](../evm/resource-accounting.md) — EIP-7702 authority data-size and KV-update narrowing; SALT-scaled storage gas.
 - [Resource Limits](../evm/resource-limits.md) — the compute gas limit enforced after each opcode records its compute gas; authority state-growth resolution and dynamic SALT account-creation gas; the four resource-limit dimensions exempted for system transactions.
 - [Gas Detention](../evm/gas-detention.md) — beneficiary detention trigger on applied authority; the volatile-data compute-gas cap exempted for system transactions.
+- [SequencerRegistry](../system-contracts/sequencer-registry.md) — version 2.0.0 rotation hardening: possession proof, minimum delay, storage layout, and seeding.
 - [Hardforks and Specs](../hardfork-spec.md) — spec progression and backward-compatibility model.
 - [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) — Set Code transaction type.
 - [Compute gas](../glossary.md#compute-gas)

@@ -244,24 +244,35 @@ where
         if is_rex_5 {
             // Deploy: seeds system address, sequencer, admin, and initialFromBlock
             // into storage on first deploy.
+            // Cloned so the helper below can take `&mut self`; two addresses, once per block.
             let params = self
                 .hardforks
                 .fork_params::<crate::SequencerRegistryConfig>()
                 .ok_or_else(|| BlockValidationError::BlockHashContractCall {
                     message: "Rex5 active but SequencerRegistryConfig not configured".into(),
-                })?;
-            let result_and_state = transact_deploy_sequencer_registry(
-                &self.hardforks,
-                block_timestamp,
-                block_number,
-                self.evm.db_mut(),
-                params,
-            )?;
-            if let Some(state) = result_and_state {
-                outcomes.push(MegaSystemCallOutcome {
-                    source: StateChangeSource::Transaction(0),
-                    state,
-                });
+                })?
+                .clone();
+
+            // The deploy and apply-pending-changes outcomes commit in push order, while the
+            // apply system call always executes against the not-yet-committed state and thus
+            // carries the pre-deploy account info in its result. Pre-Rex6 both record the
+            // same v1.0.0 code, so the order is irrelevant; at the Rex6 activation block the
+            // deploy performs the in-place v1 → v2 bytecode upgrade (when a v1 registry
+            // exists), and an apply outcome committed after it would overwrite the upgraded
+            // account info with the stale pre-upgrade code. From Rex6 the apply call
+            // therefore runs BEFORE the deploy so the upgrade outcome commits last; the
+            // `applyPendingChanges()` logic is identical in v1/v2 (v2 changes only rotation
+            // scheduling), so its semantics do not depend on which side of the deploy it
+            // executes. Pre-Rex6 blocks keep the original deploy-then-apply order untouched.
+            let is_rex_6 = self.hardforks.is_rex_6_active_at_timestamp(block_timestamp);
+
+            if !is_rex_6 {
+                self.push_deploy_sequencer_registry_outcome(
+                    block_timestamp,
+                    block_number,
+                    &params,
+                    &mut outcomes,
+                )?;
             }
 
             // Apply pending role changes if any are due.
@@ -284,9 +295,41 @@ where
                     state,
                 });
             }
+
+            if is_rex_6 {
+                self.push_deploy_sequencer_registry_outcome(
+                    block_timestamp,
+                    block_number,
+                    &params,
+                    &mut outcomes,
+                )?;
+            }
         }
 
         Ok(outcomes)
+    }
+
+    /// Runs the `SequencerRegistry` deploy (bootstrap, in-place upgrade, or idempotent no-op)
+    /// and pushes its outcome.
+    fn push_deploy_sequencer_registry_outcome(
+        &mut self,
+        block_timestamp: u64,
+        block_number: u64,
+        params: &crate::SequencerRegistryConfig,
+        outcomes: &mut Vec<MegaSystemCallOutcome>,
+    ) -> Result<(), BlockExecutionError> {
+        let result_and_state = transact_deploy_sequencer_registry(
+            &self.hardforks,
+            block_timestamp,
+            block_number,
+            self.evm.db_mut(),
+            params,
+        )?;
+        if let Some(state) = result_and_state {
+            outcomes
+                .push(MegaSystemCallOutcome { source: StateChangeSource::Transaction(0), state });
+        }
+        Ok(())
     }
 
     /// Make post-execution changes on the state. Note that the execution result is not

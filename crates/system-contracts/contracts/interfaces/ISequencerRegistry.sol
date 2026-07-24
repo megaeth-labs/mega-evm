@@ -33,6 +33,14 @@ interface ISequencerRegistry {
     /// @notice Thrown when activationBlock exceeds uint96 range (packed ChangeRecord).
     error ActivationBlockTooLarge();
 
+    /// @notice Thrown when a sequencer change is scheduled fewer than `minRotationDelay` blocks
+    ///         before its activation block.
+    error RotationDelayTooShort();
+
+    /// @notice Thrown when the new sequencer's possession proof is malformed or was not signed
+    ///         by the new sequencer key over the exact rotation being scheduled.
+    error InvalidRotationProof();
+
     // ========================= System Address Role =========================
 
     /// @notice Emitted when a system address change is scheduled.
@@ -67,7 +75,26 @@ interface ISequencerRegistry {
     function sequencerAt(uint256 blockNumber) external view returns (address);
 
     /// @notice Schedules a sequencer change.
-    function scheduleNextSequencerChange(address newSequencer, uint256 activationBlock) external;
+    /// @dev `newSequencerSignature` must be a 65-byte `(r, s, v)` EIP-712 signature by
+    ///      `newSequencer` over `SequencerRotation(address newSequencer,uint256 activationBlock)`,
+    ///      proving the scheduled key exists and consents to this exact rotation. The activation
+    ///      block must be at least `minRotationDelay()` blocks in the future. Cancelling
+    ///      (`newSequencer == address(0)`, `activationBlock == type(uint256).max`) requires no
+    ///      signature.
+    function scheduleNextSequencerChange(
+        address newSequencer,
+        uint256 activationBlock,
+        bytes calldata newSequencerSignature
+    ) external;
+
+    /// @notice Returns the minimum number of blocks between scheduling a sequencer change and
+    ///         its activation block.
+    function minRotationDelay() external view returns (uint256);
+
+    /// @notice Returns the EIP-712 digest the new sequencer key must sign to authorize the given
+    ///         rotation. Exposed so tooling can build the exact message without replicating the
+    ///         domain parameters.
+    function rotationDigest(address newSequencer, uint256 activationBlock) external view returns (bytes32);
 
     // ============================== Shared ==============================
 

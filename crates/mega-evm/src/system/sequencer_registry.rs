@@ -21,14 +21,14 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
-    INITIAL_SYSTEM_ADDRESS, PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS, SEQUENCER_ACTIVATION_BLOCK,
-    SYSTEM_ADDRESS_ACTIVATION_BLOCK,
+    INITIAL_SYSTEM_ADDRESS, MIN_ROTATION_DELAY, PENDING_SEQUENCER, PENDING_SYSTEM_ADDRESS,
+    SEQUENCER_ACTIVATION_BLOCK, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
 };
 use revm::{
     context_interface::result::ResultAndState,
     database::State,
     primitives::KECCAK_EMPTY,
-    state::{Account, EvmState, EvmStorageSlot},
+    state::{Account, Bytecode, EvmState, EvmStorageSlot},
     Database as RevmDatabase,
 };
 
@@ -45,11 +45,19 @@ use crate::{
 pub const SEQUENCER_REGISTRY_ADDRESS: Address =
     address!("0x6342000000000000000000000000000000000006");
 
-/// The code of the `SequencerRegistry` contract (version 1.0.0).
+/// The code of the `SequencerRegistry` contract (version 1.0.0, pre-Rex6).
 pub use mega_system_contracts::sequencer_registry::V1_0_0_CODE as SEQUENCER_REGISTRY_CODE;
 
-/// The code hash of the `SequencerRegistry` contract (version 1.0.0).
+/// The code hash of the `SequencerRegistry` contract (version 1.0.0, pre-Rex6).
 pub use mega_system_contracts::sequencer_registry::V1_0_0_CODE_HASH as SEQUENCER_REGISTRY_CODE_HASH;
+
+/// The code of the `SequencerRegistry` contract (version 2.0.0, Rex6+).
+/// This version requires an EIP-712 possession proof by the new sequencer key and a minimum
+/// scheduling-to-activation delay when scheduling a sequencer change.
+pub use mega_system_contracts::sequencer_registry::V2_0_0_CODE as SEQUENCER_REGISTRY_CODE_REX6;
+
+/// The code hash of the `SequencerRegistry` contract (version 2.0.0, Rex6+).
+pub use mega_system_contracts::sequencer_registry::V2_0_0_CODE_HASH as SEQUENCER_REGISTRY_CODE_HASH_REX6;
 
 pub use mega_system_contracts::sequencer_registry::ISequencerRegistry;
 
@@ -84,6 +92,39 @@ impl HardforkParams for SequencerRegistryConfig {
         if self.rex5_initial_admin.is_zero() {
             return Err(HardforkParamsError {
                 message: "SequencerRegistryConfig.rex5_initial_admin must not be zero".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Rotation-hardening configuration for `SequencerRegistry` v2.0.0 (attached to Rex6 via
+/// [`HardforkParams`]).
+///
+/// The value seeds the registry's `_minRotationDelay` storage slot when Rex6 activates:
+/// on a fresh Rex6 bootstrap it is written alongside the other seeded slots, and on the
+/// in-place v1.0.0 → v2.0.0 upgrade it is the only slot written. The contract exposes no
+/// setter, so this is the effective delay until a future bytecode upgrade.
+///
+/// Kept separate from the Rex5-pinned [`SequencerRegistryConfig`], with the same
+/// fork-prefixed field-naming convention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequencerRegistryRex6Config {
+    /// The minimum number of blocks between scheduling a sequencer change and its activation
+    /// block, seeded into the registry at Rex6 activation.
+    pub rex6_min_rotation_delay: u64,
+}
+
+impl HardforkParams for SequencerRegistryRex6Config {
+    const FORK: MegaHardfork = MegaHardfork::Rex6;
+
+    fn validate(&self) -> Result<(), HardforkParamsError> {
+        // A zero delay disables the reaction window the field exists to guarantee, so it is a
+        // structural invariant rather than a policy choice.
+        if self.rex6_min_rotation_delay == 0 {
+            return Err(HardforkParamsError {
+                message: "SequencerRegistryRex6Config.rex6_min_rotation_delay must not be zero"
+                    .into(),
             });
         }
         Ok(())
@@ -127,9 +168,19 @@ fn is_role_due<DB: Database>(
 
 /// Deploys the `SequencerRegistry` contract and seeds initial storage.
 ///
-/// On first deploy, writes 6 flat storage slots:
+/// The installed bytecode depends on the active hardfork:
+/// - Rex5 (pre-Rex6): v1.0.0.
+/// - Rex6+: v2.0.0 (rotation hardening: EIP-712 possession proof + minimum rotation delay).
+///
+/// On first deploy, writes the flat storage slots:
 /// - `_currentSystemAddress`, `_currentSequencer`, `_admin`
 /// - `_initialSystemAddress`, `_initialSequencer`, `_initialFromBlock`
+/// - `_minRotationDelay` (v2.0.0 only)
+///
+/// At the Rex6 boundary, an already-deployed v1.0.0 registry is upgraded **in place**: the
+/// bytecode is swapped to v2.0.0 and only the new `_minRotationDelay` slot is written, while
+/// all live state (roles, pending changes, histories) is preserved. A pending sequencer change
+/// scheduled under v1.0.0 therefore still activates normally under v2.0.0.
 ///
 /// The dynamic change-history arrays remain empty on bootstrap and grow only when
 /// `applyPendingChanges()` commits a due change.
@@ -152,22 +203,65 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
          this should have been caught by with_params()"
     );
 
-    // Guard against silently overwriting a foreign stateful contract. This is
-    // specific to the registry (which carries change history); the generic
-    // deploy below otherwise overwrites bytecode in place.
+    // Select the bytecode version and, for v2.0.0, resolve the seeded minimum rotation delay.
+    // The Rex6 params are required as soon as Rex6 is active: failing fast here surfaces a
+    // misconfigured chain at the activation block instead of deploying an unseeded registry.
+    let rex6 = hardforks.is_rex_6_active_at_timestamp(block_timestamp);
+    let (target_code, target_code_hash) = if rex6 {
+        (SEQUENCER_REGISTRY_CODE_REX6, SEQUENCER_REGISTRY_CODE_HASH_REX6)
+    } else {
+        (SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH)
+    };
+    let min_rotation_delay = if rex6 {
+        let params = hardforks.fork_params::<SequencerRegistryRex6Config>().ok_or_else(|| {
+            BlockValidationError::BlockHashContractCall {
+                message: "Rex6 active but SequencerRegistryRex6Config not configured".into(),
+            }
+        })?;
+        debug_assert!(
+            params.validate().is_ok(),
+            "SequencerRegistryRex6Config::validate() failed at deploy time — \
+             this should have been caught by with_params()"
+        );
+        Some(U256::from(params.rex6_min_rotation_delay))
+    } else {
+        None
+    };
+
+    // Guard against silently overwriting a foreign stateful contract, and handle
+    // the Rex6 v1.0.0 → v2.0.0 in-place upgrade. Both are specific to the registry
+    // (which carries change history); the generic deploy below otherwise
+    // overwrites bytecode in place.
     let acc =
         db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
     if let Some(account_info) = acc.account_info() {
-        if account_info.code_hash != SEQUENCER_REGISTRY_CODE_HASH &&
-            account_info.code_hash != KECCAK_EMPTY
-        {
+        if rex6 && account_info.code_hash == SEQUENCER_REGISTRY_CODE_HASH {
+            // Rex6 boundary: in-place, storage-preserving v1.0.0 → v2.0.0 upgrade. The account
+            // is intentionally NOT marked created (that would clear live roles, pending changes
+            // and histories on commit), so it cannot go through the generic force-create
+            // deploy below; the only storage write is the new `_minRotationDelay` slot, which
+            // no v1.0.0 code path has ever touched.
+            let mut acc_info = account_info;
+            acc_info.code_hash = target_code_hash;
+            acc_info.code = Some(Bytecode::new_raw(target_code));
+
+            let mut revm_acc: Account = acc_info.into();
+            revm_acc.mark_touch();
+
+            let original = read_registry_storage(db, MIN_ROTATION_DELAY)?;
+            let delay = min_rotation_delay.expect("Rex6 upgrade path implies Rex6 params");
+            revm_acc
+                .storage
+                .insert(MIN_ROTATION_DELAY, EvmStorageSlot::new_changed(original, delay, 0));
+
+            return Ok(Some(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, revm_acc)])));
+        }
+        if account_info.code_hash != target_code_hash && account_info.code_hash != KECCAK_EMPTY {
             return Err(BlockValidationError::BlockHashContractCall {
                 message: format!(
                     "SequencerRegistry at {} has unexpected code hash {} (expected {}); \
                      refusing to overwrite stateful contract storage without migration",
-                    SEQUENCER_REGISTRY_ADDRESS,
-                    account_info.code_hash,
-                    SEQUENCER_REGISTRY_CODE_HASH,
+                    SEQUENCER_REGISTRY_ADDRESS, account_info.code_hash, target_code_hash,
                 ),
             }
             .into());
@@ -181,7 +275,7 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     let initial_sequencer = address_to_storage_value(config.rex5_initial_sequencer);
     let initial_admin = address_to_storage_value(config.rex5_initial_admin);
     let initial_from_block = U256::from(current_block_number);
-    let seed = Vec::from([
+    let mut seed = Vec::from([
         (CURRENT_SYSTEM_ADDRESS, initial_system_address),
         (CURRENT_SEQUENCER, initial_sequencer),
         (ADMIN, initial_admin),
@@ -189,17 +283,18 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
         (INITIAL_SEQUENCER, initial_sequencer),
         (INITIAL_FROM_BLOCK, initial_from_block),
     ]);
+    // v2.0.0 fresh deploys additionally seed the minimum rotation delay.
+    if let Some(delay) = min_rotation_delay {
+        seed.push((MIN_ROTATION_DELAY, delay));
+    }
 
     // The registry is always a fresh, seeded deploy (force_create), and the
     // generic deploy returns the account read-only when it is already present
-    // with the matching code hash.
-    let spec = SystemContractSpec::new(
-        SEQUENCER_REGISTRY_ADDRESS,
-        SEQUENCER_REGISTRY_CODE,
-        SEQUENCER_REGISTRY_CODE_HASH,
-    )
-    .with_seed(seed)
-    .with_force_create_on_upgrade(true);
+    // with the matching code hash. (The Rex6 storage-preserving upgrade never
+    // reaches this point — it is handled above.)
+    let spec = SystemContractSpec::new(SEQUENCER_REGISTRY_ADDRESS, target_code, target_code_hash)
+        .with_seed(seed)
+        .with_force_create_on_upgrade(true);
     let state = crate::transact_deploy(db, &spec).map_err(BlockExecutionError::other)?;
     Ok(Some(state))
 }
@@ -324,12 +419,19 @@ pub fn resolve_system_address<DB: Database>(
         .into());
     };
 
-    // Unreachable: deploy verifies the code hash before seeding storage.
-    if info.code_hash != SEQUENCER_REGISTRY_CODE_HASH {
+    // Unreachable: deploy verifies the code hash before seeding storage. The expected version
+    // follows the spec: the pre-block deploy has already swapped the bytecode to v2.0.0 at the
+    // Rex6 activation block, so an exact per-spec match holds on every block.
+    let expected_code_hash = if spec.is_enabled(crate::MegaSpecId::REX6) {
+        SEQUENCER_REGISTRY_CODE_HASH_REX6
+    } else {
+        SEQUENCER_REGISTRY_CODE_HASH
+    };
+    if info.code_hash != expected_code_hash {
         return Err(BlockValidationError::BlockHashContractCall {
             message: format!(
                 "SequencerRegistry code hash mismatch: expected {}, got {}",
-                SEQUENCER_REGISTRY_CODE_HASH, info.code_hash
+                expected_code_hash, info.code_hash
             ),
         }
         .into());
@@ -374,6 +476,8 @@ mod tests {
     /// genesis so tests can tell the two apart.
     const TEST_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
+    const TEST_MIN_ROTATION_DELAY: u64 = 100;
+
     fn test_config() -> SequencerRegistryConfig {
         SequencerRegistryConfig {
             rex5_initial_sequencer: TEST_SEQUENCER,
@@ -381,14 +485,32 @@ mod tests {
         }
     }
 
+    fn test_rex6_config() -> SequencerRegistryRex6Config {
+        SequencerRegistryRex6Config { rex6_min_rotation_delay: TEST_MIN_ROTATION_DELAY }
+    }
+
+    /// All hardforks up to and including Rex5, but NOT Rex6: the pre-upgrade world where the
+    /// registry runs v1.0.0.
     fn rex5_hardforks() -> MegaHardforkConfig {
-        MegaHardforkConfig::default().with_all_activated().with_params(test_config())
+        MegaHardforkConfig::default()
+            .with_all_activated()
+            .without(MegaHardfork::Rex6)
+            .with_params(test_config())
+    }
+
+    /// All hardforks including Rex6, with both registry param sets attached.
+    fn rex6_hardforks() -> MegaHardforkConfig {
+        MegaHardforkConfig::default()
+            .with_all_activated()
+            .with_params(test_config())
+            .with_params(test_rex6_config())
     }
 
     #[test]
     fn test_code_hash_matches() {
-        let computed_hash = keccak256(&SEQUENCER_REGISTRY_CODE);
-        assert_eq!(computed_hash, SEQUENCER_REGISTRY_CODE_HASH);
+        assert_eq!(keccak256(&SEQUENCER_REGISTRY_CODE), SEQUENCER_REGISTRY_CODE_HASH);
+        assert_eq!(keccak256(&SEQUENCER_REGISTRY_CODE_REX6), SEQUENCER_REGISTRY_CODE_HASH_REX6);
+        assert_ne!(SEQUENCER_REGISTRY_CODE_HASH, SEQUENCER_REGISTRY_CODE_HASH_REX6);
     }
 
     /// Verifies that Rust slot constants match the Solidity storage layout.
@@ -416,6 +538,7 @@ mod tests {
             "_sequencerActivationBlock = slot 10"
         );
         // Slots 11 (_systemAddressHistory) and 12 (_sequencerHistory) are dynamic arrays.
+        assert_eq!(MIN_ROTATION_DELAY, U256::from(13), "_minRotationDelay = slot 13 (v2.0.0+)");
     }
 
     #[test]
@@ -462,7 +585,8 @@ mod tests {
     fn test_deploy_seeds_storage() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
@@ -510,7 +634,8 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 2000, &mut state, &test_config())
@@ -535,7 +660,8 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
 
         let err =
             transact_deploy_sequencer_registry(&hardforks, 0, 2000, &mut state, &test_config())
@@ -558,7 +684,8 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks = MegaHardforkConfig::default().with_all_activated();
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
@@ -570,6 +697,299 @@ mod tests {
         assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
         // Pre-existing balance is preserved.
         assert_eq!(account.info.balance, U256::from(1_000_000));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_min_rotation_delay() {
+        let config = SequencerRegistryRex6Config { rex6_min_rotation_delay: 0 };
+        let err = config.validate().expect_err("zero rex6_min_rotation_delay must be rejected");
+        assert!(
+            err.message.contains("rex6_min_rotation_delay must not be zero"),
+            "unexpected message: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn test_deploy_fresh_at_rex6_seeds_v2_with_min_rotation_delay() {
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let result = transact_deploy_sequencer_registry(
+            &rex6_hardforks(),
+            0,
+            1000,
+            &mut state,
+            &test_config(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
+        assert!(account.is_created());
+        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH_REX6);
+        assert_eq!(
+            account.storage.len(),
+            7,
+            "fresh Rex6 deploy writes the 6 bootstrap slots plus _minRotationDelay"
+        );
+        assert_eq!(
+            account.storage.get(&MIN_ROTATION_DELAY).unwrap().present_value(),
+            U256::from(TEST_MIN_ROTATION_DELAY),
+        );
+        assert_eq!(
+            account.storage.get(&ADMIN).unwrap().present_value(),
+            U256::from_be_bytes(TEST_ADMIN.into_word().0),
+        );
+        assert_eq!(
+            account.storage.get(&INITIAL_FROM_BLOCK).unwrap().present_value(),
+            U256::from(1000),
+        );
+    }
+
+    #[test]
+    fn test_deploy_rex6_upgrades_v1_in_place_preserving_storage() {
+        // A live V1 registry with a pending sequencer change and a non-empty history. The Rex6
+        // upgrade must swap only the bytecode and write only the new _minRotationDelay slot.
+        let pending_sequencer = address!("0x1111111111111111111111111111111111111111");
+        let sequencer_history_length_slot = U256::from(12);
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            CURRENT_SEQUENCER,
+            TEST_SEQUENCER.into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            PENDING_SEQUENCER,
+            pending_sequencer.into_word().into(),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            SEQUENCER_ACTIVATION_BLOCK,
+            U256::from(2000),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            sequencer_history_length_slot,
+            U256::from(1),
+        )
+        .unwrap();
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let result = transact_deploy_sequencer_registry(
+            &rex6_hardforks(),
+            0,
+            1500,
+            &mut state,
+            &test_config(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
+        assert!(!account.is_created(), "in-place upgrade must not recreate the account");
+        assert!(account.is_touched());
+        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH_REX6);
+        assert_eq!(account.storage.len(), 1, "only _minRotationDelay is written on upgrade");
+        let slot = account.storage.get(&MIN_ROTATION_DELAY).unwrap();
+        assert_eq!(slot.original_value(), U256::ZERO);
+        assert_eq!(slot.present_value(), U256::from(TEST_MIN_ROTATION_DELAY));
+
+        // After commit, the live pre-upgrade storage must be intact next to the new slot.
+        revm::DatabaseCommit::commit(&mut state, result);
+        assert_eq!(
+            read_registry_storage(&mut state, PENDING_SEQUENCER).unwrap(),
+            U256::from_be_bytes(pending_sequencer.into_word().0),
+        );
+        assert_eq!(
+            read_registry_storage(&mut state, SEQUENCER_ACTIVATION_BLOCK).unwrap(),
+            U256::from(2000),
+        );
+        assert_eq!(
+            read_registry_storage(&mut state, sequencer_history_length_slot).unwrap(),
+            U256::from(1),
+        );
+        assert_eq!(
+            read_registry_storage(&mut state, MIN_ROTATION_DELAY).unwrap(),
+            U256::from(TEST_MIN_ROTATION_DELAY),
+        );
+        assert_eq!(
+            read_registry_storage(&mut state, CURRENT_SEQUENCER).unwrap(),
+            U256::from_be_bytes(TEST_SEQUENCER.into_word().0),
+        );
+    }
+
+    #[test]
+    fn test_deploy_rex6_is_idempotent_when_v2_present() {
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH_REX6,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE_REX6)),
+                ..Default::default()
+            },
+        );
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let result = transact_deploy_sequencer_registry(
+            &rex6_hardforks(),
+            0,
+            2000,
+            &mut state,
+            &test_config(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
+        assert!(!account.is_created(), "idempotent deploy should not re-create");
+        assert!(!account.is_touched(), "idempotent deploy should not touch the account");
+        assert!(account.storage.is_empty(), "idempotent deploy should not write storage");
+    }
+
+    #[test]
+    fn test_deploy_rex6_missing_config_errors() {
+        // Rex6 active but only the Rex5 params attached: deploy must fail fast instead of
+        // installing a v2.0.0 registry with an unseeded _minRotationDelay.
+        let hardforks =
+            MegaHardforkConfig::default().with_all_activated().with_params(test_config());
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let err =
+            transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
+                .expect_err("missing Rex6 params must fail closed");
+        assert!(
+            err.to_string().contains("SequencerRegistryRex6Config not configured"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_deploy_rex6_on_top_of_eoa_with_balance() {
+        let mut db = InMemoryDB::default();
+        // Simulate an EOA that received ETH before the registry was ever deployed. Even at
+        // Rex6 this is a fresh bootstrap, not a storage-preserving upgrade: the full seed
+        // (including _minRotationDelay) must be written.
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo { balance: U256::from(1_000_000), ..Default::default() },
+        );
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let result = transact_deploy_sequencer_registry(
+            &rex6_hardforks(),
+            0,
+            1000,
+            &mut state,
+            &test_config(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let account = result.get(&SEQUENCER_REGISTRY_ADDRESS).unwrap();
+        assert!(account.is_created());
+        assert_eq!(account.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH_REX6);
+        assert_eq!(account.info.balance, U256::from(1_000_000));
+        assert_eq!(account.storage.len(), 7);
+        assert_eq!(
+            account.storage.get(&MIN_ROTATION_DELAY).unwrap().present_value(),
+            U256::from(TEST_MIN_ROTATION_DELAY),
+        );
+    }
+
+    #[test]
+    fn test_deploy_rex6_wrong_existing_code_hash_errors() {
+        let wrong_code = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: wrong_code.hash_slow(),
+                code: Some(wrong_code),
+                ..Default::default()
+            },
+        );
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let err = transact_deploy_sequencer_registry(
+            &rex6_hardforks(),
+            0,
+            2000,
+            &mut state,
+            &test_config(),
+        )
+        .expect_err("wrong code hash must fail closed");
+
+        let msg = err.to_string();
+        assert!(msg.contains("unexpected code hash"), "unexpected message: {msg}");
+        assert!(msg.contains("refusing to overwrite"), "unexpected message: {msg}");
+    }
+
+    #[test]
+    fn test_resolve_rex6_expects_v2_code_hash() {
+        // A V2 registry resolves normally at REX6.
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH_REX6,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE_REX6)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            CURRENT_SYSTEM_ADDRESS,
+            TEST_SYSTEM_ADDRESS.into_word().into(),
+        )
+        .unwrap();
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let (addr, witness) =
+            resolve_system_address(&rex6_hardforks(), MegaSpecId::REX6, &mut state).unwrap();
+        assert_eq!(addr, TEST_SYSTEM_ADDRESS);
+        assert!(witness.is_some());
+    }
+
+    #[test]
+    fn test_resolve_rex6_rejects_v1_code_hash() {
+        // At REX6 the pre-block deploy has already upgraded the bytecode, so a V1 code hash at
+        // resolve time is a broken pipeline and must fail closed.
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            SEQUENCER_REGISTRY_ADDRESS,
+            AccountInfo {
+                code_hash: SEQUENCER_REGISTRY_CODE_HASH,
+                code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(
+            SEQUENCER_REGISTRY_ADDRESS,
+            CURRENT_SYSTEM_ADDRESS,
+            TEST_SYSTEM_ADDRESS.into_word().into(),
+        )
+        .unwrap();
+        let mut state = State::builder().with_database(&mut db).build();
+
+        let err = resolve_system_address(&rex6_hardforks(), MegaSpecId::REX6, &mut state)
+            .expect_err("V1 code hash at REX6 must fail closed");
+        assert!(err.to_string().contains("code hash mismatch"));
     }
 
     #[test]

@@ -50,12 +50,30 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
     /// @notice Historical sequencer changes, ordered by activation block.
     ChangeRecord[] private _sequencerHistory;
 
+    /// @notice The minimum number of blocks between scheduling a sequencer change and its
+    ///         activation block. Seeded at deploy/upgrade time (no constructor execution);
+    ///         the contract exposes no setter, so changing it requires a bytecode upgrade.
+    uint256 private _minRotationDelay;
+
+    /// @notice EIP-712 domain type hash used for sequencer rotation proofs.
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    /// @notice EIP-712 struct type hash of the rotation message signed by the new sequencer key.
+    bytes32 private constant SEQUENCER_ROTATION_TYPEHASH =
+        keccak256("SequencerRotation(address newSequencer,uint256 activationBlock)");
+
+    /// @notice Upper bound for the `s` value of a valid signature (secp256k1n / 2). Signatures
+    ///         with a higher `s` are malleable duplicates and are rejected.
+    uint256 private constant SECP256K1N_HALF =
+        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+
     // =========================================================================
     // ISemver
     // =========================================================================
 
     function version() external pure returns (string memory) {
-        return "1.0.0";
+        return "2.0.0";
     }
 
     // =========================================================================
@@ -133,11 +151,14 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
     /// @inheritdoc ISequencerRegistry
     function scheduleNextSequencerChange(
         address newSequencer,
-        uint256 activationBlock
+        uint256 activationBlock,
+        bytes calldata newSequencerSignature
     ) external onlyAdmin {
         if (activationBlock <= block.number) revert InvalidActivationBlock();
 
         if (activationBlock == type(uint256).max) {
+            // Cancel: clears the pending change without requiring a possession proof — the
+            // signature parameter is ignored so a lost new key can never block a cancel.
             if (newSequencer != address(0)) revert ZeroAddress();
             delete _pendingSequencer;
             delete _sequencerActivationBlock;
@@ -147,11 +168,58 @@ contract SequencerRegistry is ISemver, ISequencerRegistry {
 
         if (activationBlock > type(uint96).max) revert ActivationBlockTooLarge();
         if (newSequencer == address(0)) revert ZeroAddress();
+        if (activationBlock < block.number + _minRotationDelay) revert RotationDelayTooShort();
+
+        // Possession proof: the new sequencer key must have signed this exact rotation.
+        // `ecrecover` runs last so every cheap validation failure is caught first.
+        address signer =
+            _recoverRotationSigner(rotationDigest(newSequencer, activationBlock), newSequencerSignature);
+        if (signer != newSequencer) revert InvalidRotationProof();
 
         _pendingSequencer = newSequencer;
         _sequencerActivationBlock = activationBlock;
 
         emit SequencerChangeScheduled(currentSequencer(), newSequencer, activationBlock);
+    }
+
+    /// @inheritdoc ISequencerRegistry
+    function minRotationDelay() external view returns (uint256) {
+        return _minRotationDelay;
+    }
+
+    /// @inheritdoc ISequencerRegistry
+    /// @dev The domain separator is computed on demand instead of being cached at construction
+    ///      because this contract is installed via raw state patch and no constructor ever runs.
+    function rotationDigest(address newSequencer, uint256 activationBlock) public view returns (bytes32) {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("MegaETH SequencerRegistry")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(this)
+            )
+        );
+        bytes32 structHash = keccak256(abi.encode(SEQUENCER_ROTATION_TYPEHASH, newSequencer, activationBlock));
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    /// @dev Recovers the signer of `digest` from a 65-byte `(r, s, v)` signature. Reverts with
+    ///      `InvalidRotationProof` on any malformed input: wrong length, malleable high-`s`,
+    ///      `v` outside `{27, 28}`, or a failed recovery.
+    function _recoverRotationSigner(bytes32 digest, bytes calldata signature) private pure returns (address) {
+        if (signature.length != 65) revert InvalidRotationProof();
+
+        bytes32 r = bytes32(signature[0:32]);
+        bytes32 s = bytes32(signature[32:64]);
+        uint8 v = uint8(signature[64]);
+
+        if (uint256(s) > SECP256K1N_HALF) revert InvalidRotationProof();
+        if (v != 27 && v != 28) revert InvalidRotationProof();
+
+        address signer = ecrecover(digest, v, r, s);
+        if (signer == address(0)) revert InvalidRotationProof();
+        return signer;
     }
 
     // =========================================================================
