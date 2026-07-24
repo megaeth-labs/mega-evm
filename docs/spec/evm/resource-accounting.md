@@ -309,6 +309,7 @@ Under Rex6, for each **distinct** fee-recipient account whose balance the fee-re
 If the write materializes a previously non-existent account (empty before the credit, non-empty after), the node MUST additionally record `+1` state growth.
 
 A fee recipient that coincides with another (for example, a block beneficiary that is also a fee vault) MUST be counted once.
+This usage is recorded after the transaction's execution result is final: it feeds the transaction's reported usage and the block-level cumulative counters, and it MUST NOT retroactively change the transaction's outcome — a transaction-level limit crossed only by the fee-reward writes does not fail the transaction.
 Transactions that credit no fees (deposit transactions and sandboxed executions) record nothing in this step.
 The deposit-mint counterpart of this gap — a deposit materializing its sender — was already accounted in Rex5.
 

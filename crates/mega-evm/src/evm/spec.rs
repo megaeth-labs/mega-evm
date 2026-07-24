@@ -23,6 +23,10 @@ use serde::{Deserialize, Serialize};
 /// - [`SpecId::REX4`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX5`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX6`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+///
+/// The `Default` variant tracks the latest spec, which may still be unstable;
+/// callers that need a stable spec must select it explicitly instead of
+/// relying on `Default::default()`.
 #[repr(u8)]
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,

@@ -322,3 +322,74 @@ fn test_rex6_create_net_new_inspect_db_error_surfaces() {
     let res = alloy_evm::Evm::transact_raw(&mut evm, tx);
     assert!(res.is_err(), "DB error during REX6 CREATE net-new inspect must surface as Err");
 }
+
+/// Bytecode like [`outer_creator_code`] but with the reverting CREATE performed TWICE
+/// (revert-then-retry). The creator's account-info write must be charged once, not once per
+/// attempt: the first CREATE's parent-lane charge survives the child's revert (the nonce bump
+/// does too), so the unwind must not re-arm the dedup flag.
+fn outer_double_creator_code() -> Bytes {
+    Bytes::from_static(&[
+        0x64, 0x60, 0x00, 0x60, 0x00, 0xFD, // PUSH5 <reverting init code>
+        0x60, 0x00, // PUSH1 0 (mem offset)
+        0x52, // MSTORE
+        0x60, 0x05, // PUSH1 5 (create length)
+        0x60, 0x1b, // PUSH1 27 (create offset)
+        0x60, 0x00, // PUSH1 0 (create value)
+        0xf0, // CREATE (#1 — reverts)
+        0x50, // POP
+        0x60, 0x05, // PUSH1 5
+        0x60, 0x1b, // PUSH1 27
+        0x60, 0x00, // PUSH1 0
+        0xf0, // CREATE (#2 — reverts again)
+        0x50, // POP
+        0x00, // STOP
+    ])
+}
+
+/// REX6: a reverted-then-retried nested CREATE charges the creator's account-info write exactly
+/// once. Before the unwind gate, `pop_frame_unwind_parent` reset the parent's dedup flag while
+/// the parent-lane charge survived — the retry charged the same creator update again.
+#[test]
+fn test_rex6_nested_create_revert_then_retry_charges_creator_once() {
+    let build_db = || {
+        MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(CALLER_BALANCE))
+            .account_code(OUTER_CREATOR, outer_double_creator_code())
+    };
+    let make_call = || {
+        let mut tx = MegaTransaction::new(TxEnv {
+            caller: CALLER,
+            kind: TxKind::Call(OUTER_CREATOR),
+            gas_limit: TX_GAS_LIMIT,
+            gas_price: 0,
+            ..Default::default()
+        });
+        tx.enveloped_tx = Some(Bytes::new());
+        tx
+    };
+    let usage = |spec: MegaSpecId| {
+        let mut evm = make_evm(spec, build_db());
+        let r = alloy_evm::Evm::transact_raw(&mut evm, make_call());
+        assert!(r.expect("ok").result.is_success(), "outer call must succeed (spec {spec:?})");
+        let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
+        usage
+    };
+    let rex5 = usage(MegaSpecId::REX5);
+    let rex6 = usage(MegaSpecId::REX6);
+    assert_eq!(
+        rex6.data_size.saturating_sub(rex5.data_size),
+        ACCOUNT_INFO_WRITE_SIZE,
+        "double reverted CREATE must charge the creator write ONCE under REX6 \
+         (rex5={}, rex6={})",
+        rex5.data_size,
+        rex6.data_size,
+    );
+    assert_eq!(
+        rex6.kv_updates.saturating_sub(rex5.kv_updates),
+        1,
+        "double reverted CREATE must charge the creator KV update ONCE under REX6 \
+         (rex5={}, rex6={})",
+        rex5.kv_updates,
+        rex6.kv_updates,
+    );
+}
