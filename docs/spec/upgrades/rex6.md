@@ -77,6 +77,7 @@ op-revm credits fee recipients (the priority-fee beneficiary and the base-fee / 
 Pre-Rex6, the account writes this step performs were never counted toward [resource accounting](../evm/resource-accounting.md), because the trackers had already been read out.
 
 Rex6 accounts for these post-execution writes: each distinct fee recipient whose balance the reward step changes is counted as one account-info write toward data-size and KV-update accounting, and a fee recipient that the step materializes for the first time additionally counts toward state growth, the same as any other new account. The deposit-mint half of this gap was already closed in Rex5; Rex6 covers the remaining non-deposit fee-credit paths.
+The recorded usage feeds the transaction's reported totals and the block-level cumulative counters only; the transaction's execution result is already final when the reward step runs, and a transaction-level limit crossed solely by these writes does not retroactively fail the transaction.
 
 ### System-Originated Transaction Exemption
 
