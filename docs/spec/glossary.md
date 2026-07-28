@@ -37,6 +37,8 @@ Every opcode costs the same compute gas as it does on mainnet Ethereum (e.g., `A
 
 One of the two components of total gas cost in MegaETH's [dual gas model](evm/dual-gas-model.md).
 
+How much of an operation's inherited EVM gas is recorded as compute gas is defined in [Compute Gas Accounting](evm/compute-gas.md).
+
 ## Storage gas
 
 Additional gas charged for operations that impose persistent storage burden on nodes (SSTORE, account creation, contract creation, code deposit, LOG, calldata).

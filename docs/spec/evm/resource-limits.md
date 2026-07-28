@@ -38,7 +38,8 @@ MegaETH enforces seven distinct resource limits:
 Limits 1–3 are checked before execution.
 Limits 4–7 are enforced during execution and accumulated at block level after execution.
 
-For exact counting rules of compute gas, data size, KV updates, and state growth, see [Resource Accounting](resource-accounting.md).
+For exact counting rules of data size, KV updates, and state growth, see [Resource Accounting](resource-accounting.md).
+For compute gas — the measurement window, metering classes, recording sites, and exceed behavior — see [Compute Gas Accounting](compute-gas.md).
 For the relationship between total gas, compute gas, and storage gas, see [Dual Gas Model](dual-gas-model.md).
 
 ### Limit Set

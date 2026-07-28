@@ -34,13 +34,19 @@ total_gas_used = compute_gas_used + storage_gas_used
 
 Both compute gas and storage gas MUST be deducted from the transaction's `gas_limit` budget.
 If the combined total exceeds `gas_limit`, the transaction MUST halt with `OutOfGas`.
-The `gas_used` field in the transaction receipt MUST reflect the combined total.
+The `gas_used` field in the transaction receipt MUST reflect the combined total, less any standard EVM gas refund settled at the end of the transaction.
+
+The equation above is the pre-refund total.
+It is not an identity between the receipt's `gas_used` and the tracked compute-gas usage: the receipt applies EVM refunds, while the tracked compute-gas total never has refunds subtracted from it (see [Compute Gas Accounting](compute-gas.md#refund-exclusion)).
+A transaction that earns a refund therefore reports a `gas_used` lower than `compute_gas_used + storage_gas_used`, by exactly the settled refund.
 
 ### Compute Gas
 
 [Compute gas](../glossary.md#compute-gas) is based on standard EVM gas semantics inherited from Optimism Isthmus / Ethereum Prague.
 Unless explicitly overridden elsewhere in this specification, each opcode MUST use the same compute gas cost as in the inherited EVM semantics.
 The dual gas model itself does not redefine opcode compute gas costs; it adds the storage gas dimension on top of them.
+
+How much of an operation's inherited EVM gas a node records as compute gas — the measurement window, its exclusions, and the recording sites — is specified in [Compute Gas Accounting](compute-gas.md).
 
 ### Gas Metering Order
 
@@ -58,7 +64,8 @@ A node MUST meter every storage-affecting opcode — `SSTORE`, `LOG0` through `L
 2. Charge the opcode's storage gas against the transaction's gas budget.
    If the budget is insufficient, the node MUST halt with `OutOfGas` before executing the opcode body.
 3. Execute the opcode body, including every standard EVM dynamic cost such as memory expansion, account access, and child-frame gas forwarding.
-4. Record the opcode's compute gas as a single amount equal to the total EVM gas consumed by steps 2 and 3, minus the storage gas charged in step 2, minus any gas forwarded to a child frame.
+4. Record the opcode's compute gas as a single amount, measured over a window spanning steps 2 and 3.
+   The recorded amount and its exclusions are defined in [Compute Gas Accounting](compute-gas.md#measurement-window).
    The node MUST then enforce the compute gas limit, halting if it is exceeded.
 5. Apply the opcode's resource-limit accounting (data size, key-value updates, state growth).
 

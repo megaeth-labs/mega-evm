@@ -63,37 +63,14 @@ Under Rex6, a node MUST record the creator nonce-bump account-info write (`ACCOU
 
 ### Compute Gas
 
-#### Definition
+Compute gas accounting is specified in full on its own page: see [Compute Gas Accounting](compute-gas.md).
 
-A node MUST track compute gas as the cumulative gas consumed by EVM execution, independent of [storage gas](dual-gas-model.md).
+That page defines the measurement window that derives compute gas from inherited EVM gas, the per-opcode metering classes, the non-opcode recording sites, and the exceed behavior.
 
-#### Included Usage
+Two properties matter for this page's purposes:
 
-A node MUST include the following in compute gas usage:
-
-- gas consumed by EVM instruction execution,
-- memory expansion costs,
-- and precompile costs.
-
-#### Excluded Usage
-
-A node MUST NOT subtract gas refunds from compute gas usage.
-Refunds affect final gas settlement but do not reduce the tracked compute gas consumed during execution.
-
-#### Revert Behavior
-
-Compute gas usage MUST NOT be reverted when a child call frame reverts.
-All compute gas spent by all executed call frames contributes to the transaction's total compute gas usage.
-
-#### Enforcement Reference
-
-If `compute_gas_used > effective_compute_gas_limit`, the transaction MUST halt.
-The effective limit MAY be reduced by [gas detention](gas-detention.md).
-
-#### Contract Creation Code Deposit
-
-For any contract creation (`CREATE`, `CREATE2`, or a contract-creation transaction), the code-deposit compute gas (`code_length × 200`, the standard EVM per-byte code-deposit cost inherited from Ethereum) MUST be recorded atomically with the deployment commit: it is recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract.
-A node MUST NOT additionally record this code-deposit compute gas during post-execution compute-gas accounting; double-counting it is prohibited.
+- A node MUST track compute gas as the cumulative gas consumed by EVM execution, independent of [storage gas](dual-gas-model.md).
+- Compute gas MUST accumulate globally and MUST NOT be reverted — the sole exception to the [revert behavior](#revert-behavior) that governs the other three dimensions.
 
 ### Data Size
 
