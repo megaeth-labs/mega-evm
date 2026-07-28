@@ -53,8 +53,8 @@ const CALLEE: Address = address!("0000000000000000000000000000000000200004");
 const PRECOMPILE_IDENTITY: Address = address!("0000000000000000000000000000000000000004");
 /// The SHA-256 precompile.
 const PRECOMPILE_SHA256: Address = address!("0000000000000000000000000000000000000002");
-/// The KZG point-evaluation precompile. MegaETH replaces it with a fixed-cost variant from
-/// MiniRex onward, and Rex5 gives it a dedicated compute-gas recording case.
+/// The KZG point-evaluation precompile. `MegaETH` replaces it with a fixed-cost variant from
+/// `MiniRex` onward, and Rex5 gives it a dedicated compute-gas recording case.
 const PRECOMPILE_KZG: Address = address!("000000000000000000000000000000000000000a");
 
 /// Initcode that returns 32 zero bytes as the deployed runtime code: `PUSH1 0x20; PUSH0; RETURN`.

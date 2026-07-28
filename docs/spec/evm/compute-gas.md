@@ -461,52 +461,70 @@ The gas detention caps that lower the effective compute gas limit are defined in
 ## Rationale
 
 **Why define a measurement window instead of a per-opcode gas table?**
+
 MegaETH inherits its opcode gas schedule unchanged from Optimism Isthmus / Ethereum Prague.
 Restating 256 absolute gas costs would duplicate the inherited specification, would need re-verification on every upstream EVM revision, and would still leave the consensus-critical question unanswered — namely, how much of an opcode's inherited cost counts as compute gas and when it is recorded.
 The measurement window is the part MegaETH actually defines, so it is the part this page specifies.
 
 **Why is the window's opening point normative rather than an implementation detail?**
+
 Compute gas is bounded by a limit, so the amount recorded at the moment of a halt is consensus-visible.
 Moving the opening point changes how much has been recorded when an opcode halts partway through, which changes which limit is reached first and at which opcode the transaction fails.
 Two nodes with identical gas schedules but different window placement will disagree on transaction outcomes.
 
 **Why are two forms of storage gas exclusion permitted?**
+
 Subtracting the charge from a spanning window and placing the window after the charge produce identical results.
 Permitting both lets an implementation choose whichever is cheaper at a given site without a spec change, and makes explicit that they must not be combined — a window placed after the charge must treat `storage_gas_charged` as zero.
 
 **Why does the Rex5+ forwarded-gas exclusion subtract the `CALL_STIPEND`?**
+
 For a value-transferring `CALL` or `CALLCODE`, the inherited EVM adds `CALL_STIPEND` to the child's gas limit without deducting it from the parent's remaining gas.
 Treating the child's full gas limit as forwarded would therefore subtract gas the parent never contributed, under-counting the parent's compute gas by the stipend.
 
 **Why does MiniRex exclude three call opcodes from the forwarding cap?**
+
 The MiniRex instruction table omitted the forwarding wrapper for `CALLCODE`, `DELEGATECALL`, and `STATICCALL`.
 Rex corrected the omission.
 MiniRex behavior remains frozen for replay compatibility.
 
 **Why is compute gas the only non-revertible dimension?**
+
 CPU cycles cannot be undone.
 If compute gas were scoped to call frames like the other dimensions, an attacker could execute and revert expensive subcalls repeatedly within a single transaction, consuming negligible apparent compute gas while imposing real execution cost on nodes.
 
 **Why is the per-frame budget a guardrail rather than a guarantee?**
+
 Making per-frame budgets protective would require reverting a failed child's compute gas, which reintroduces the attack above.
 Keeping compute gas persistent while still bounding each frame gives early termination of runaway frames without creating a revert-based escape from transaction-level accounting.
 
 **Why does intrinsic compute gas exclude MegaETH's intrinsic storage gas?**
+
 Both are added to the same intrinsic total charged against the transaction's gas limit, but the storage components price persistent storage burden, not computation.
 Recording them as compute gas would consume the compute budget for work that performs no computation, and would make the compute limit sensitive to calldata length.
 
 ## Security Considerations
 
-**If the measurement window is opened after work that consumes EVM gas**, that gas escapes compute-gas accounting entirely.
+**If the measurement window is opened after work that consumes EVM gas**
+
+That gas escapes compute-gas accounting entirely.
 An attacker could then construct a transaction whose real execution cost far exceeds its recorded compute gas, defeating the compute gas limit as a bound on node CPU time.
 
-**If storage gas is recorded as compute gas**, storage-heavy transactions exhaust the compute limit prematurely and halt while still holding gas, and the compute limit stops measuring computation.
+**If storage gas is recorded as compute gas**
 
-**If forwarded child gas is not excluded**, it is counted twice — once by the parent's window and again by the child's own recording — so deep call chains exhaust the compute limit at a fraction of their true computational cost.
+Storage-heavy transactions exhaust the compute limit prematurely and halt while still holding gas, and the compute limit stops measuring computation.
 
-**If a recording is skipped when another dimension has already latched an exceed**, block-level compute accounting under-reports the work the node actually performed, and a transaction can impose uncounted CPU cost by first tripping a cheaper dimension.
+**If forwarded child gas is not excluded**
 
-**If rescued gas includes the storage gas stipend**, system-granted gas leaks to the sender, who recovers gas that was never theirs to spend.
+It is counted twice — once by the parent's window and again by the child's own recording — so deep call chains exhaust the compute limit at a fraction of their true computational cost.
+
+**If a recording is skipped when another dimension has already latched an exceed**
+
+Block-level compute accounting under-reports the work the node actually performed, and a transaction can impose uncounted CPU cost by first tripping a cheaper dimension.
+
+**If rescued gas includes the storage gas stipend**
+
+System-granted gas leaks to the sender, who recovers gas that was never theirs to spend.
 
 ## Spec History
 

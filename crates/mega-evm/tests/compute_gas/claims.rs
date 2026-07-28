@@ -234,16 +234,16 @@ fn test_refunds_do_not_reduce_compute_gas() {
 /// KZG point-evaluation precompile and its effective gas limit was at least
 /// `KZG_POINT_EVALUATION_GAS_COST`".
 ///
-/// The constant is a **MegaETH override**, not the inherited EVM value. This test pins the number
+/// The constant is a **`MegaETH` override**, not the inherited EVM value. This test pins the number
 /// itself rather than merely its presence: on the KZG non-out-of-gas error path, Rex4 records the
 /// spent amount (zero, because the precompile never charged) while Rex5 records the fixed cost.
 /// The difference between the two specs is therefore exactly the constant.
 ///
 /// Had this test existed earlier, the spec page could not have shipped the inherited 50,000 in
-/// place of MegaETH's 100,000.
+/// place of `MegaETH`'s 100,000.
 #[test]
 fn test_kzg_error_path_records_the_megaeth_fixed_cost() {
-    /// MegaETH's override, defined in `crates/mega-evm/src/evm/precompiles.rs`.
+    /// `MegaETH`'s override, defined in `crates/mega-evm/src/evm/precompiles.rs`.
     /// Deliberately NOT imported from the crate: hard-coding it here means a change to the
     /// implementation constant fails this test instead of silently following it.
     const KZG_POINT_EVALUATION_GAS_COST: u64 = 100_000;
