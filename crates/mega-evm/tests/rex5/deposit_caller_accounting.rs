@@ -16,18 +16,18 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
+    BucketHasher, BucketId, EmptyExternalEnv, MEGA_SYSTEM_ADDRESS,
+    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, ORACLE_CONTRACT_ADDRESS, TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BucketHasher, BucketId, EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
     context::{
-        result::{EVMError, ResultAndState},
         BlockEnv, ContextSetters, TxEnv,
+        result::{EVMError, ResultAndState},
     },
     handler::EvmTr,
     primitives::TxKind,
@@ -121,7 +121,7 @@ fn build_evm(
 
 type TestEvm = MegaEvm<MemoryDatabase, revm::inspector::NoOpInspector, EmptyExternalEnv>;
 type TestEvmResult =
-    Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>>;
+    Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>>;
 
 fn transact_with(
     spec: MegaSpecId,
@@ -129,7 +129,7 @@ fn transact_with(
     tx: MegaTransaction,
 ) -> (TestEvmResult, TestEvm) {
     let mut evm = build_evm(spec, db);
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     (r, evm)
 }
 
@@ -155,7 +155,8 @@ fn test_rex5_deposit_caller_creation_records_state_growth_plus_one() {
         growth_empty.saturating_sub(growth_funded),
         1,
         "empty-caller deposit must record exactly +1 state_growth vs funded baseline (empty={}, funded={})",
-        growth_empty, growth_funded,
+        growth_empty,
+        growth_funded,
     );
 }
 
@@ -212,7 +213,7 @@ fn test_rex5_non_empty_caller_no_extra_charge() {
         ..Default::default()
     };
     let (res_normal, _) = transact_with(MegaSpecId::REX5, db_normal, tx_normal);
-    let gas_normal = res_normal.expect("ok").result.gas_used();
+    let gas_normal = res_normal.expect("ok").result.tx_gas_used();
 
     // Deposit variant with the same already-non-empty caller.
     let db_deposit = MemoryDatabase::default()
@@ -257,8 +258,8 @@ fn test_rex4_baseline_behaviour() {
     // REX4: empty vs funded must produce identical gas usage on the deposit-caller path
     // (the only legitimate gas delta would come from the deposit-caller rule, which is REX5-gated).
     assert_eq!(
-        res_empty.result.gas_used(),
-        res_funded.result.gas_used(),
+        res_empty.result.tx_gas_used(),
+        res_funded.result.tx_gas_used(),
         "REX4 deposit gas must be identical between empty and funded caller",
     );
     // REX4: state_growth must be unaffected by the deposit caller materialisation.
@@ -319,7 +320,7 @@ fn test_rex5_storage_gas_charge_blocks_undergassed_empty_caller() {
     let mut tx_empty = make_op_deposit_tx(EMPTY_CALLER, 1u128, TARGET_CONTRACT);
     tx_empty.base.gas_limit = TIGHT_GAS_LIMIT;
     let mut evm_empty = MegaEvm::new(context_empty);
-    let res_empty = alloy_evm::Evm::transact_raw(&mut evm_empty, tx_empty);
+    let res_empty = alloy_evm::Evm::transact_raw(&mut evm_empty, alloy_op_evm::OpTx(tx_empty));
 
     // Funded-caller variant under same tight gas — the deposit-caller branch doesn't fire, so the
     // intrinsic alone fits and execution proceeds (may or may not succeed depending
@@ -337,7 +338,7 @@ fn test_rex5_storage_gas_charge_blocks_undergassed_empty_caller() {
     let mut tx_funded = make_op_deposit_tx(FUNDED_CALLER, 1u128, TARGET_CONTRACT);
     tx_funded.base.gas_limit = TIGHT_GAS_LIMIT;
     let mut evm_funded = MegaEvm::new(context_funded);
-    let res_funded = alloy_evm::Evm::transact_raw(&mut evm_funded, tx_funded);
+    let res_funded = alloy_evm::Evm::transact_raw(&mut evm_funded, alloy_op_evm::OpTx(tx_funded));
 
     // Expected failure class: `validate()` adds the deposit-caller charge AFTER its
     // `initial_gas > tx.gas_limit` early-check (which sees only intrinsic + calldata
@@ -450,7 +451,8 @@ fn test_rex5_self_call_caller_eq_callee_does_not_double_charge() {
     // the tx would halt with OOG via `before_execution`.
     tx_self.base.gas_limit = 90_000;
     let mut evm_self = MegaEvm::new(context_self);
-    let r_self = alloy_evm::Evm::transact_raw(&mut evm_self, tx_self).expect("transact ok");
+    let r_self = alloy_evm::Evm::transact_raw(&mut evm_self, alloy_op_evm::OpTx(tx_self))
+        .expect("transact ok");
     assert!(
         r_self.result.is_success(),
         "self-call deposit must succeed under single-charge gas budget — \

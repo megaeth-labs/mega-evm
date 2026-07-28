@@ -10,14 +10,14 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use mega_evm::{
+    ACCOUNT_INFO_WRITE_SIZE, EmptyExternalEnv, EvmTxRuntimeLimits, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction,
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
-    EmptyExternalEnv, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, ACCOUNT_INFO_WRITE_SIZE,
 };
 use revm::{
     context::{
-        result::{ExecutionResult, ResultAndState},
         BlockEnv, ContextSetters, TxEnv,
+        result::{ExecutionResult, ResultAndState},
     },
     handler::EvmTr,
     primitives::TxKind,
@@ -75,7 +75,8 @@ fn run(spec: MegaSpecId, db: MemoryDatabase, init_code: Bytes) -> (TestResult, T
     let mut tx = MegaTransaction::new(tx_env);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("tx should not surface EVMError");
     (r, evm)
 }
 
@@ -152,7 +153,7 @@ fn test_rex6_nested_create_revert_charges_creator_nonce_bump_to_parent() {
     };
     let usage = |spec: MegaSpecId| {
         let mut evm = make_evm(spec, build_db());
-        let r = alloy_evm::Evm::transact_raw(&mut evm, make_call());
+        let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(make_call()));
         assert!(r.expect("ok").result.is_success(), "outer call must succeed (spec {spec:?})");
         let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
         usage
@@ -214,7 +215,8 @@ fn run_create_with_limits(
     };
     let mut tx = MegaTransaction::new(tx_env);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError")
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("tx should not surface EVMError")
 }
 
 /// A CREATE whose Mega code-deposit-storage charge runs out of gas while the frame's data-size
@@ -255,12 +257,12 @@ fn test_rex6_create_oog_over_limit_matches_rex5_frozen() {
 
     // Same result class → same returned gas; no REX6 burn-vs-refund divergence on this path.
     assert_eq!(
-        r6.result.gas_used(),
-        r5.result.gas_used(),
+        r6.result.tx_gas_used(),
+        r5.result.tx_gas_used(),
         "REX6 must return the absorbed CREATE's gas identically to REX5 \
          (rex5_gas_used={}, rex6_gas_used={})",
-        r5.result.gas_used(),
-        r6.result.gas_used(),
+        r5.result.tx_gas_used(),
+        r6.result.tx_gas_used(),
     );
 }
 
@@ -319,7 +321,7 @@ fn test_rex6_create_net_new_inspect_db_error_surfaces() {
     let mut tx = MegaTransaction::new(tx_env);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let res = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(res.is_err(), "DB error during REX6 CREATE net-new inspect must surface as Err");
 }
 
@@ -369,7 +371,7 @@ fn test_rex6_nested_create_revert_then_retry_charges_creator_once() {
     };
     let usage = |spec: MegaSpecId| {
         let mut evm = make_evm(spec, build_db());
-        let r = alloy_evm::Evm::transact_raw(&mut evm, make_call());
+        let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(make_call()));
         assert!(r.expect("ok").result.is_success(), "outer call must succeed (spec {spec:?})");
         let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
         usage

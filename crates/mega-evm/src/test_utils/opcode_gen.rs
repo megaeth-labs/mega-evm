@@ -169,8 +169,8 @@ mod tests {
     };
 
     use crate::{
-        test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-        MegaTransaction, MegaTransactionError,
+        MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
+        test_utils::MemoryDatabase,
     };
 
     use super::*;
@@ -190,7 +190,7 @@ mod tests {
         let tx = TxEnvBuilder::default().call(contract).gas_limit(1_000_000_000).build_fill();
         let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());
-        alloy_evm::Evm::transact_raw(&mut evm, tx)
+        evm.execute_transaction(tx).map(|outcome| outcome.inner)
     }
 
     #[test]

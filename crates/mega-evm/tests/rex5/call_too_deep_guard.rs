@@ -14,23 +14,24 @@
 //! depth boundary, since recursing 1025 deep through real bytecode is prohibitively
 //! expensive.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    test_utils::MemoryDatabase, IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId,
-    ACCESS_CONTROL_ADDRESS,
+    ACCESS_CONTROL_ADDRESS, IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId,
+    test_utils::MemoryDatabase,
 };
 use revm::{
+    Inspector,
+    bytecode::Bytecode,
     context::ContextTr,
     handler::{EvmTr, FrameResult, ItemOrResult},
     inspector::InspectorEvmTr,
     interpreter::{
-        interpreter::SharedMemory, interpreter_action::FrameInit,
-        interpreter_types::InterpreterTypes, CallInput, CallInputs, CallOutcome, CallScheme,
-        CallValue, FrameInput, Gas, InstructionResult, InterpreterResult,
+        CallInput, CallInputs, CallOutcome, CallScheme, CallValue, FrameInput, Gas,
+        InstructionResult, InterpreterResult, interpreter::SharedMemory,
+        interpreter_action::FrameInit, interpreter_types::InterpreterTypes,
     },
     primitives::CALL_STACK_LIMIT,
-    Inspector,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000300010");
@@ -44,12 +45,15 @@ fn make_call_frame_init(target: Address, selector: [u8; 4], depth: usize) -> Fra
             input: CallInput::Bytes(Bytes::copy_from_slice(&selector)),
             return_memory_offset: 0..0,
             gas_limit: GAS_LIMIT,
+            reservoir: 0,
             bytecode_address: target,
+            known_bytecode: (B256::ZERO, Bytecode::default()),
             target_address: target,
             caller: CALLER,
             value: CallValue::Transfer(U256::ZERO),
             scheme: CallScheme::Call,
             is_static: false,
+            charged_new_account_state_gas: false,
         })),
     }
 }
@@ -63,7 +67,7 @@ fn assert_call_too_deep(outcome_result: &FrameResult) {
         InstructionResult::CallTooDeep,
         "depth guard should produce CallTooDeep"
     );
-    assert_eq!(outcome.result.gas.spent(), 0, "no gas should be spent on CallTooDeep");
+    assert_eq!(outcome.result.gas.total_gas_spent(), 0, "no gas should be spent on CallTooDeep");
     assert_eq!(
         outcome.result.gas.remaining(),
         GAS_LIMIT,
@@ -202,14 +206,14 @@ struct AlwaysInterceptInspector {
 impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for AlwaysInterceptInspector {
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         self.call_count += 1;
-        Some(CallOutcome {
-            result: InterpreterResult {
+        Some(CallOutcome::new(
+            InterpreterResult {
                 result: InstructionResult::Stop,
                 output: Bytes::new(),
                 gas: Gas::new(inputs.gas_limit),
             },
-            memory_offset: inputs.return_memory_offset.clone(),
-        })
+            inputs.return_memory_offset.clone(),
+        ))
     }
 
     fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, _outcome: &mut CallOutcome) {

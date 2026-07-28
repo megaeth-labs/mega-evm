@@ -1,12 +1,12 @@
 //! Tests for the SELFDESTRUCT opcode behavior in Rex2.
 
-use alloy_primitives::{address, Bytes, U256};
+use alloy_primitives::{Bytes, U256, address};
 use mega_evm::{
     revm::{
         bytecode::opcode::{PUSH0, SELFDESTRUCT},
         context::result::{ExecutionResult, ResultAndState},
     },
-    test_utils::{transact, MemoryDatabase},
+    test_utils::{MemoryDatabase, transact},
     *,
 };
 

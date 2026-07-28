@@ -7,17 +7,17 @@
 use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{block::BlockExecutor, EvmEnv};
+use alloy_evm::{EvmEnv, block::BlockExecutor};
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, IOracle, ISequencerRegistry, MegaBlockExecutionCtx,
+    BlockLimits, IOracle, ISequencerRegistry, MEGA_SYSTEM_ADDRESS, MegaBlockExecutionCtx,
     MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
-    SEQUENCER_REGISTRY_CODE_HASH,
+    MegaTxEnvelope, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+    SEQUENCER_REGISTRY_CODE_HASH, SequencerRegistryConfig, TestExternalEnvs,
+    test_utils::MemoryDatabase,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, PENDING_ADMIN, PENDING_SEQUENCER,
@@ -44,6 +44,7 @@ fn sequencer_registry_config() -> SequencerRegistryConfig {
 
 fn create_evm_env() -> EvmEnv<MegaSpecId> {
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::REX5;
     cfg_env.chain_id = 8453;
     let block_env = BlockEnv {
@@ -586,7 +587,7 @@ fn test_admin_handoff_via_block_executor() {
     let receipt = executor
         .execute_transaction(&tx)
         .expect("transferAdmin tx should be accepted by the executor");
-    assert!(receipt > 0, "transferAdmin tx should report non-zero gas used");
+    assert!(receipt.tx_gas_used() > 0, "transferAdmin tx should report non-zero gas used");
 
     // tx#2: NEW_ADMIN completes the handoff.
     let calldata = ISequencerRegistry::acceptAdminCall {}.abi_encode();
@@ -600,7 +601,7 @@ fn test_admin_handoff_via_block_executor() {
     let receipt = executor
         .execute_transaction(&tx)
         .expect("acceptAdmin tx should be accepted by the executor");
-    assert!(receipt > 0, "acceptAdmin tx should report non-zero gas used");
+    assert!(receipt.tx_gas_used() > 0, "acceptAdmin tx should report non-zero gas used");
 
     // Drop the executor to release the &mut borrow on `state`, then read the post-state.
     drop(executor);

@@ -29,12 +29,12 @@
 
 #![allow(missing_docs)]
 
-use alloy_primitives::{address, bytes, Address, Bytes, U256};
-use criterion::{criterion_group, criterion_main, Criterion};
+use alloy_primitives::{Address, Bytes, U256, address, bytes};
+use criterion::{Criterion, criterion_group, criterion_main};
 use revm::bytecode::opcode;
 
 mod common;
-use common::{register_all, Account, TxSpec, Workload};
+use common::{Account, TxSpec, Workload, register_all};
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000100002");

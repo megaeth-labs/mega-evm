@@ -19,10 +19,10 @@
 //! the "observe offset, resize, slice, hash" sequence verbatim for replay
 //! parity.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::{CREATE2, STOP},
@@ -53,8 +53,8 @@ fn transact_create2_with_code(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("tx should not surface EVMError");
     let compute = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
     (result.result, compute)
 }

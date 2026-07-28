@@ -8,13 +8,13 @@
 use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
+use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
     MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::{BLOCKHASH, POP},
@@ -62,6 +62,7 @@ fn test_accessed_block_hashes_track_and_clear_per_transaction() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),

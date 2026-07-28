@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
 
-use alloy_hardforks::{hardfork, EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork};
+use alloy_hardforks::{EthereumHardfork, EthereumHardforks, ForkCondition, Hardfork, hardfork};
 use alloy_op_hardforks::{OpHardfork, OpHardforks};
 use alloy_primitives::{BlockTimestamp, U256};
 use auto_impl::auto_impl;

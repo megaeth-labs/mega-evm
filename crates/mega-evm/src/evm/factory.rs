@@ -1,10 +1,14 @@
-use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
+use alloy_evm::{Database, EvmEnv, precompiles::PrecompilesMap};
+use alloy_op_evm::{OpTx, OpTxError};
 use op_revm::L1BlockInfo;
-use revm::{context::result::EVMError, Inspector};
+use revm::{
+    Inspector,
+    context::{BlockEnv, DBErrorMarker, result::EVMError},
+};
 
 use crate::{
     DynPrecompilesBuilder, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory, MegaContext,
-    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 
 /// Factory for creating `MegaETH` EVM instances.
@@ -121,11 +125,11 @@ impl<ExtEnvFactory: ExternalEnvFactory + Clone> alloy_evm::EvmFactory
     type Evm<DB: Database, I: Inspector<Self::Context<DB>>> =
         MegaEvm<DB, I, ExtEnvFactory::EnvTypes>;
     type Context<DB: Database> = MegaContext<DB, ExtEnvFactory::EnvTypes>;
-    type Tx = MegaTransaction;
-    type Error<DBError: core::error::Error + Send + Sync + 'static> =
-        EVMError<DBError, MegaTransactionError>;
+    type Tx = OpTx;
+    type Error<DBError: DBErrorMarker> = EVMError<DBError, OpTxError>;
     type HaltReason = MegaHaltReason;
     type Spec = MegaSpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
 
     /// Creates a new `Evm` instance with the provided database and EVM environment.

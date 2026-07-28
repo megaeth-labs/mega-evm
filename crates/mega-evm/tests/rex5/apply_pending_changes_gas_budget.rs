@@ -30,26 +30,26 @@
 
 use std::convert::Infallible;
 
-use alloy_evm::{block::BlockExecutor, Evm, EvmEnv};
+use alloy_evm::{Evm, EvmEnv, block::BlockExecutor};
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, BucketHasher, BucketId, EthHaltReason,
-    MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory,
-    MegaHaltReason, MegaHardfork, MegaHardforkConfig, MegaSpecId, OpHaltReason,
-    SequencerRegistryConfig, TestExternalEnvs, MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
-    SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
+    BlockLimits, BucketHasher, BucketId, EthHaltReason, MEGA_SYSTEM_ADDRESS, MegaBlockExecutionCtx,
+    MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory, MegaHaltReason, MegaHardfork,
+    MegaHardforkConfig, MegaSpecId, OpHaltReason, SEQUENCER_REGISTRY_ADDRESS,
+    SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH, SequencerRegistryConfig,
+    TestExternalEnvs, test_utils::MemoryDatabase,
 };
 use mega_system_contracts::sequencer_registry::{
+    ISequencerRegistry,
     storage_slots::{
         CURRENT_SYSTEM_ADDRESS, PENDING_SYSTEM_ADDRESS, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
     },
-    ISequencerRegistry,
 };
 use revm::{
-    context::{result::ExecutionResult, BlockEnv},
+    context::{BlockEnv, result::ExecutionResult},
     database::{Database as _, State},
     handler::EvmTr,
     state::{AccountInfo, Bytecode},

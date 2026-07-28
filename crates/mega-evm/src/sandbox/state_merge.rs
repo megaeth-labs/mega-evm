@@ -9,11 +9,11 @@ use std::vec::Vec;
 
 use alloy_evm::Database as AlloyDatabase;
 use alloy_primitives::{Address, U256};
-use revm::{context::ContextTr, primitives::KECCAK_EMPTY, state::EvmState, Journal, JournalEntry};
+use revm::{Journal, JournalEntry, context::ContextTr, primitives::KECCAK_EMPTY, state::EvmState};
 use tracing::error;
 
 use crate::{
-    merge_evm_state_optional_status, ExternalEnvTypes, JournalInspectTr, MegaContext, MegaSpecId,
+    ExternalEnvTypes, JournalInspectTr, MegaContext, MegaSpecId, merge_evm_state_optional_status,
 };
 
 use super::error::KeylessDeployError;
@@ -147,7 +147,10 @@ fn apply_sandbox_state_journaled_inner<DB: AlloyDatabase>(
         // Nonce diff (one NonceChange entry per increment for correct revert).
         let nonce_diff = sandbox_account.info.nonce - parent_nonce;
         for _ in 0..nonce_diff {
-            journal.inner.journal.push(JournalEntry::NonceChange { address: *address });
+            journal.inner.journal.push(JournalEntry::NonceChange {
+                address: *address,
+                previous_nonce: parent_nonce,
+            });
         }
         if nonce_diff > 0 {
             journal.inner.state.get_mut(address).unwrap().info.nonce = sandbox_account.info.nonce;
@@ -347,20 +350,21 @@ fn apply_sandbox_created_selfdestruct<DB: AlloyDatabase>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, Bytes};
+    use alloy_primitives::{Bytes, address};
     use revm::{
+        Database, DatabaseCommit,
         context_interface::journaled_state::JournalTr,
         database::EmptyDB,
-        state::{Account, AccountInfo, EvmStorageSlot},
-        Database, DatabaseCommit,
+        state::{Account, AccountInfo, EvmStorageSlot, TransactionId},
     };
 
-    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
+    use crate::{EmptyExternalEnv, test_utils::MemoryDatabase};
 
     fn sandbox_created_account(code: Bytes) -> Account {
         let code = revm::bytecode::Bytecode::new_raw(code);
         let code_hash = revm::primitives::keccak256(code.bytes_slice());
         let mut account = Account::from(AccountInfo {
+            account_id: Default::default(),
             balance: U256::ZERO,
             nonce: 1,
             code_hash,
@@ -381,9 +385,10 @@ mod tests {
         let mut sandbox_state = EvmState::default();
         sandbox_state.insert(deploy_addr, {
             let mut account = sandbox_created_account(Bytes::from_static(&[0x60, 0x00]));
-            account
-                .storage
-                .insert(U256::from(0), EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0));
+            account.storage.insert(
+                U256::from(0),
+                EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), TransactionId::ZERO),
+            );
             account
         });
 
@@ -419,6 +424,7 @@ mod tests {
         // Seed signer in parent state with known balance and nonce.
         journal.inner.state.insert(signer, {
             let mut acc = Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: original_balance,
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
@@ -431,6 +437,7 @@ mod tests {
         let getter_code_hash = revm::primitives::keccak256(getter_code.bytes_slice());
         journal.inner.state.insert(getter_addr, {
             let mut acc = Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::ZERO,
                 nonce: 1,
                 code_hash: getter_code_hash,
@@ -450,6 +457,7 @@ mod tests {
         // Signer: balance decreased, nonce = 1.
         sandbox_state.insert(signer, {
             let mut acc = Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::from(500_000u64),
                 nonce: 1,
                 code_hash: KECCAK_EMPTY,
@@ -462,18 +470,22 @@ mod tests {
         // Deploy address: new account with code and storage.
         sandbox_state.insert(deploy_addr, {
             let mut acc = sandbox_created_account(Bytes::from_static(&[0x60, 0x00]));
-            acc.storage
-                .insert(U256::from(0), EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0));
+            acc.storage.insert(
+                U256::from(0),
+                EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), TransactionId::ZERO),
+            );
             acc
         });
         sandbox_state.insert(getter_addr, {
             let mut acc = Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::ZERO,
                 nonce: 1,
                 code_hash: getter_code_hash,
                 code: Some(getter_code),
             });
-            acc.storage.insert(read_only_slot, EvmStorageSlot::new(read_only_value, 0));
+            acc.storage
+                .insert(read_only_slot, EvmStorageSlot::new(read_only_value, TransactionId::ZERO));
             acc
         });
 
@@ -598,6 +610,7 @@ mod tests {
         let journal = ctx.journal_mut();
         journal.inner.state.insert(target, {
             Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: original_balance,
                 nonce: 1,
                 code_hash: KECCAK_EMPTY,
@@ -610,6 +623,7 @@ mod tests {
         let mut sandbox_state = EvmState::default();
         sandbox_state.insert(target, {
             let mut account = Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::from(500_000u64),
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
@@ -655,9 +669,10 @@ mod tests {
         let mut sandbox_state = EvmState::default();
         sandbox_state.insert(deploy_addr, {
             let mut account = sandbox_created_account(Bytes::from_static(&[0x60, 0x00]));
-            account
-                .storage
-                .insert(deployed_slot, EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0));
+            account.storage.insert(
+                deployed_slot,
+                EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), TransactionId::ZERO),
+            );
             account
         });
 
@@ -689,12 +704,15 @@ mod tests {
         let journal = ctx.journal_mut();
         journal.inner.state.insert(deploy_addr, {
             let mut account = Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: original_balance,
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
             });
-            account.storage.insert(storage_slot, EvmStorageSlot::new(original_storage, 0));
+            account
+                .storage
+                .insert(storage_slot, EvmStorageSlot::new(original_storage, TransactionId::ZERO));
             account
         });
         let checkpoint = JournalTr::checkpoint(journal);
@@ -760,6 +778,7 @@ mod tests {
         let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(EmptyDB::default(), MegaSpecId::REX5);
         ctx.journal_mut().inner.state.insert(target, {
             Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::ZERO,
                 nonce: 0,
                 code_hash: parent_code_hash,
@@ -773,6 +792,7 @@ mod tests {
         let mut sandbox_state = EvmState::default();
         sandbox_state.insert(target, {
             let mut acc = Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::ZERO,
                 nonce: 0,
                 code_hash: sandbox_code_hash,
@@ -801,6 +821,7 @@ mod tests {
         let mut sandbox_state = EvmState::default();
         sandbox_state.insert(target, {
             let mut acc = Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::ZERO,
                 nonce: 0,
                 // Non-empty code_hash but `code: None` — exactly the invariant violation.
@@ -828,6 +849,7 @@ mod tests {
         let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(EmptyDB::default(), MegaSpecId::REX5);
         ctx.journal_mut().inner.state.insert(deploy_addr, {
             Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::ZERO,
                 // Non-zero nonce triggers the rejection.
                 nonce: 5,
@@ -887,6 +909,7 @@ mod tests {
         let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(EmptyDB::default(), MegaSpecId::REX5);
         ctx.journal_mut().inner.state.insert(target, {
             Account::from(AccountInfo {
+                account_id: Default::default(),
                 balance: U256::from(1u64),
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,

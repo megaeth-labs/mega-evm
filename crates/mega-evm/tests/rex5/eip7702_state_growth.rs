@@ -6,17 +6,17 @@
 //! Pre-REX5, EIP-7702 authority accounts are not counted toward state growth.
 
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
     MegaTransaction,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     context::{
+        TxEnv,
         result::{ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        TxEnv,
     },
     handler::EvmTr,
     state::Bytecode,
@@ -38,9 +38,10 @@ const AUTHORITY_B: Address = address!("0000000000000000000000000000000000800011"
 fn transact_with_limits(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
-    tx: TxEnv,
+    mut tx: TxEnv,
     limits: EvmTxRuntimeLimits,
 ) -> (ResultAndState<MegaHaltReason>, LimitUsage) {
+    tx.chain_id = Some(1);
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(limits);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -49,7 +50,7 @@ fn transact_with_limits(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     (r, usage)
 }

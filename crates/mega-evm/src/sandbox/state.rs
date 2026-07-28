@@ -12,13 +12,13 @@ use std::{
     string::{String, ToString},
 };
 
-use alloy_primitives::{map::HashMap, Address, B256};
+use alloy_primitives::{Address, B256, map::HashMap};
 use core::cell::RefCell;
 use revm::{
-    database::DBErrorMarker,
-    primitives::{StorageKey, StorageValue, KECCAK_EMPTY},
-    state::{AccountInfo, Bytecode, EvmState},
     Database,
+    database::DBErrorMarker,
+    primitives::{KECCAK_EMPTY, StorageKey, StorageValue},
+    state::{AccountInfo, Bytecode, EvmState},
 };
 
 /// Error type for sandbox database operations.
@@ -240,12 +240,12 @@ impl Database for SandboxDb<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, keccak256, Bytes, U256};
+    use alloy_primitives::{Bytes, U256, address, keccak256};
     use revm::{
+        Journal,
         context::JournalTr,
         database::EmptyDB,
-        state::{AccountStatus, EvmStorageSlot},
-        Journal,
+        state::{EvmStorageSlot, TransactionId},
     };
 
     const TEST_ADDR_1: Address = address!("1111111111111111111111111111111111111111");
@@ -255,17 +255,13 @@ mod tests {
     fn create_test_journal() -> Journal<EmptyDB> {
         let mut journal = Journal::<EmptyDB>::new(EmptyDB::default());
         // Add a test account to the journal
-        let account = revm::state::Account {
-            info: AccountInfo {
-                balance: U256::from(1000),
-                nonce: 1,
-                code_hash: KECCAK_EMPTY,
-                code: None,
-            },
-            transaction_id: 0,
-            storage: Default::default(),
-            status: AccountStatus::empty(),
-        };
+        let account = revm::state::Account::default().with_info(AccountInfo {
+            account_id: Default::default(),
+            balance: U256::from(1000),
+            nonce: 1,
+            code_hash: KECCAK_EMPTY,
+            code: None,
+        });
         journal.inner.state.insert(TEST_ADDR_1, account);
         journal
     }
@@ -279,12 +275,13 @@ mod tests {
         let code_hash = keccak256(&bytecode_bytes);
 
         // Add contract account with bytecode
-        let contract_account = revm::state::Account {
-            info: AccountInfo { balance: U256::ZERO, nonce: 1, code_hash, code: Some(bytecode) },
-            transaction_id: 0,
-            storage: Default::default(),
-            status: AccountStatus::empty(),
-        };
+        let contract_account = revm::state::Account::default().with_info(AccountInfo {
+            account_id: Default::default(),
+            balance: U256::ZERO,
+            nonce: 1,
+            code_hash,
+            code: Some(bytecode),
+        });
         journal.inner.state.insert(TEST_ADDR_2, contract_account);
         journal
     }
@@ -294,21 +291,23 @@ mod tests {
 
         // Add account with storage
         let mut storage = HashMap::default();
-        storage.insert(U256::from(1), EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0));
-        storage
-            .insert(U256::from(100), EvmStorageSlot::new_changed(U256::ZERO, U256::from(999), 0));
+        storage.insert(
+            U256::from(1),
+            EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), TransactionId::ZERO),
+        );
+        storage.insert(
+            U256::from(100),
+            EvmStorageSlot::new_changed(U256::ZERO, U256::from(999), TransactionId::ZERO),
+        );
 
-        let account = revm::state::Account {
-            info: AccountInfo {
-                balance: U256::from(5000),
-                nonce: 10,
-                code_hash: KECCAK_EMPTY,
-                code: None,
-            },
-            transaction_id: 0,
-            storage,
-            status: AccountStatus::empty(),
-        };
+        let mut account = revm::state::Account::default().with_info(AccountInfo {
+            account_id: Default::default(),
+            balance: U256::from(5000),
+            nonce: 10,
+            code_hash: KECCAK_EMPTY,
+            code: None,
+        });
+        account.storage = storage;
         journal.inner.state.insert(TEST_ADDR_1, account);
         journal
     }
@@ -474,17 +473,13 @@ mod tests {
 
         // Add multiple accounts
         for (i, addr) in [TEST_ADDR_1, TEST_ADDR_2, TEST_ADDR_3].iter().enumerate() {
-            let account = revm::state::Account {
-                info: AccountInfo {
-                    balance: U256::from((i + 1) * 1000),
-                    nonce: i as u64,
-                    code_hash: KECCAK_EMPTY,
-                    code: None,
-                },
-                transaction_id: 0,
-                storage: Default::default(),
-                status: AccountStatus::empty(),
-            };
+            let account = revm::state::Account::default().with_info(AccountInfo {
+                account_id: Default::default(),
+                balance: U256::from((i + 1) * 1000),
+                nonce: i as u64,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+            });
             journal.inner.state.insert(*addr, account);
         }
 

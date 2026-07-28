@@ -17,20 +17,20 @@
 
 use std::{cell::RefCell, convert::Infallible, rc::Rc};
 
-use crate::common::{transact, transact_default, CALLER, CONTRACT, EMPTY_TARGET};
+use crate::common::{CALLER, CONTRACT, EMPTY_TARGET, transact, transact_default};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
-    constants::mini_rex::MAX_INITCODE_SIZE,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketHasher, BucketId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     TestExternalEnvs,
+    constants::mini_rex::MAX_INITCODE_SIZE,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::{CREATE, CREATE2, STATICCALL, STOP},
-    context::{tx::TxEnvBuilder, ContextTr},
+    context::{ContextTr, tx::TxEnvBuilder},
     inspector::Inspector,
     interpreter::{
-        interpreter_types::InterpreterTypes, CallInputs, CallOutcome, InstructionResult,
+        CallInputs, CallOutcome, InstructionResult, interpreter_types::InterpreterTypes,
     },
 };
 
@@ -108,7 +108,8 @@ fn static_halt_reason_for_bytecode(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context).with_inspector(capture.clone());
-    alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("tx should not surface EVMError");
     let reason = *capture.0.borrow();
     reason
 }

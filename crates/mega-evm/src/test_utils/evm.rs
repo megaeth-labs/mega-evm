@@ -1,11 +1,11 @@
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use core::fmt::Debug;
 use revm::{
-    context::{
-        result::{EVMError, ResultAndState},
-        TxEnv,
-    },
     Database,
+    context::{
+        TxEnv,
+        result::{EVMError, ResultAndState},
+    },
 };
 
 use crate::{
@@ -41,5 +41,5 @@ where
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    evm.execute_transaction(tx).map(|outcome| outcome.inner)
 }

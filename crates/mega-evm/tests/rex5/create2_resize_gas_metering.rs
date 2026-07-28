@@ -18,10 +18,10 @@
 //! retaining `resize_gas`, pre-REX5 skipping via the trailing block) is
 //! delicate to engineer with stable gas tuning and is left to a follow-up.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::{CREATE2, STOP},
@@ -65,8 +65,8 @@ fn transact_create2(spec: MegaSpecId, initcode_len: u64) -> (ExecutionResult<Meg
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("tx should not surface EVMError");
     let compute = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
     (result.result, compute)
 }
@@ -140,8 +140,8 @@ fn transact_create2_with_code(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("tx should not surface EVMError");
     let compute = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
     (result.result, compute)
 }

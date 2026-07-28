@@ -3,19 +3,18 @@ use alloc as std;
 use std::{boxed::Box, string::ToString};
 
 use alloy_evm::{
-    block::{BlockExecutionError, BlockValidationError},
     Evm,
+    block::{BlockExecutionError, BlockValidationError},
 };
 use alloy_primitives::{Address, B256, U256};
 use revm::{
-    context_interface::result::ResultAndState,
-    database::State,
-    state::{Account, EvmState},
     Database, Inspector,
+    context_interface::result::ResultAndState,
+    state::{Account, EvmState},
 };
 
 use crate::{
-    block::hardfork::MegaHardforks, ExternalEnvTypes, MegaContext, MegaEvm, MegaHaltReason,
+    ExternalEnvTypes, MegaContext, MegaEvm, MegaHaltReason, block::hardfork::MegaHardforks,
 };
 
 /// Applies the pre-block call to the [EIP-2935] blockhashes contract, using the given block,
@@ -68,12 +67,14 @@ where
             parent_block_hash.0.into(),
             gas_limit,
         )
+        .map_err(|err| err.to_string())
     } else {
         evm.transact_system_call(
             alloy_eips::eip4788::SYSTEM_ADDRESS,
             alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
             parent_block_hash.0.into(),
         )
+        .map_err(|err| err.to_string())
     };
 
     match res {
@@ -137,12 +138,14 @@ where
             parent_beacon_block_root.0.into(),
             gas_limit,
         )
+        .map_err(|err| err.to_string())
     } else {
         evm.transact_system_call(
             alloy_eips::eip4788::SYSTEM_ADDRESS,
             alloy_eips::eip4788::BEACON_ROOTS_ADDRESS,
             parent_beacon_block_root.0.into(),
         )
+        .map_err(|err| err.to_string())
     };
 
     match res {
@@ -159,7 +162,7 @@ where
 /// committed to the given db.
 pub(crate) fn transact_balance_increments<DB: Database>(
     balances: impl IntoIterator<Item = (Address, u128)>,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
     let balances = balances.into_iter();
     let mut state = EvmState::default();
@@ -168,8 +171,7 @@ pub(crate) fn transact_balance_increments<DB: Database>(
         if balance_increment == 0 {
             continue;
         }
-        let cache_account = db.load_cache_account(address)?;
-        let account_info = cache_account.account_info().unwrap_or_default();
+        let account_info = revm::Database::basic(db, address)?.unwrap_or_default();
         let mut account = Account::default().with_info(account_info);
         account.info.balance += U256::from(balance_increment);
         account.mark_touch();
@@ -183,7 +185,12 @@ pub(crate) fn transact_balance_increments<DB: Database>(
 mod tests {
     use super::*;
     use alloy_primitives::address;
-    use revm::{database::InMemoryDB, state::AccountInfo, DatabaseCommit};
+    use revm::{
+        DatabaseCommit,
+        database::{InMemoryDB, State},
+        database_interface::DatabaseCommitExt,
+        state::AccountInfo,
+    };
 
     #[test]
     fn test_balance_increment_commit_equivalence() {
@@ -201,10 +208,12 @@ mod tests {
                 db.insert_account_info(
                     addr,
                     AccountInfo {
+                        account_id: Default::default(),
                         balance: U256::from(balance),
                         nonce,
                         code_hash: alloy_primitives::B256::ZERO,
                         code: None,
+                        ..Default::default()
                     },
                 );
             }

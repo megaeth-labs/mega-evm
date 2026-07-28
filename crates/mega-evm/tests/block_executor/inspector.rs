@@ -6,15 +6,16 @@
 use std::{cell::Cell, convert::Infallible};
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{block::BlockExecutor, EvmEnv};
+use alloy_evm::{EvmEnv, block::BlockExecutor};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
     MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
 };
 use revm::{
+    Inspector,
     bytecode::opcode::{ADD, CALL, GAS, PUSH0, SLOAD, SSTORE},
     context::{BlockEnv, ContextTr, JournalTr},
     database::State,
@@ -22,7 +23,6 @@ use revm::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas, InstructionResult,
         InterpreterResult, InterpreterTypes,
     },
-    Inspector,
 };
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
@@ -103,6 +103,7 @@ fn test_inspector_works_with_block_executor() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -178,14 +179,14 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipNested
             // Return early for nested calls - this triggers the bug scenario where
             // inspector skips `frame_init` but `frame_return_result` is still called
             self.calls_intercepted.set(self.calls_intercepted.get() + 1);
-            Some(CallOutcome {
-                result: InterpreterResult {
+            Some(CallOutcome::new(
+                InterpreterResult {
                     result: InstructionResult::Stop,
                     output: Bytes::new(),
                     gas: Gas::new(inputs.gas_limit),
                 },
-                memory_offset: 0..0,
-            })
+                0..0,
+            ))
         } else {
             None
         }
@@ -263,6 +264,7 @@ fn test_inspector_early_return_with_additional_limits() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -331,7 +333,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipCreate
             result: InterpreterResult {
                 result: InstructionResult::Stop,
                 output: Bytes::new(),
-                gas: Gas::new(inputs.gas_limit),
+                gas: Gas::new(inputs.gas_limit()),
             },
             address: None,
         })
@@ -371,6 +373,7 @@ fn test_inspector_early_return_create_with_additional_limits() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),

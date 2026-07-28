@@ -4,15 +4,14 @@
 //! `inspect_storage`, the EVM properly halts with `FatalExternalError` and surfaces the error
 //! as `EVMError::Custom`.
 
-use alloy_primitives::{address, Bytes, TxKind, U256};
+use alloy_primitives::{Bytes, TxKind, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::CALL,
-    context::{result::ResultAndState, TxEnv},
+    context::{TxEnv, result::ResultAndState},
     primitives::Address,
 };
 
@@ -28,7 +27,7 @@ fn transact(
     data: Bytes,
     value: U256,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, alloy_op_evm::OpTxError>> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -45,7 +44,7 @@ fn transact(
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 /// When `inspect_storage` fails during SSTORE (in `additional_limit_ext::sstore`),

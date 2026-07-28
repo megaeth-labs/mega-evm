@@ -14,10 +14,10 @@
 //! reads the on-chain `SequencerRegistry` state for REX5+.
 
 use alloy_evm::{
-    block::{BlockExecutionError, BlockValidationError},
     Database,
+    block::{BlockExecutionError, BlockValidationError},
 };
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::SolCall;
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
@@ -25,11 +25,10 @@ use mega_system_contracts::sequencer_registry::storage_slots::{
     SEQUENCER_ACTIVATION_BLOCK, SYSTEM_ADDRESS_ACTIVATION_BLOCK,
 };
 use revm::{
-    context_interface::result::ResultAndState,
-    database::State,
-    primitives::KECCAK_EMPTY,
-    state::{Account, Bytecode, EvmState, EvmStorageSlot},
     Database as RevmDatabase,
+    context_interface::result::ResultAndState,
+    primitives::KECCAK_EMPTY,
+    state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
 
 #[cfg(not(feature = "std"))]
@@ -37,8 +36,8 @@ use alloc as std;
 use std::vec::Vec;
 
 use crate::{
-    HardforkParams, HardforkParamsError, MegaHardfork, MegaHardforks, SystemContractSpec,
-    MEGA_SYSTEM_ADDRESS,
+    HardforkParams, HardforkParamsError, MEGA_SYSTEM_ADDRESS, MegaHardfork, MegaHardforks,
+    SystemContractSpec,
 };
 
 /// The address of the `SequencerRegistry` system contract.
@@ -138,7 +137,7 @@ fn address_to_storage_value(address: Address) -> U256 {
 
 /// Reads a committed `SequencerRegistry` storage slot.
 fn read_registry_storage<DB: Database>(
-    db: &mut State<DB>,
+    db: &mut DB,
     slot: U256,
 ) -> Result<U256, BlockExecutionError> {
     RevmDatabase::storage(db, SEQUENCER_REGISTRY_ADDRESS, slot).map_err(BlockExecutionError::other)
@@ -147,7 +146,7 @@ fn read_registry_storage<DB: Database>(
 /// Returns whether a pending role change is due and records every storage read into the witness
 /// account.
 fn is_role_due<DB: Database>(
-    db: &mut State<DB>,
+    db: &mut DB,
     account: &mut Account,
     pending_slot: U256,
     activation_slot: U256,
@@ -155,13 +154,15 @@ fn is_role_due<DB: Database>(
 ) -> Result<bool, BlockExecutionError> {
     let pending = read_registry_storage(db, pending_slot)?;
     // Read-only witness entry: record the slot access without marking it as changed.
-    account.storage.insert(pending_slot, EvmStorageSlot::new(pending, 0));
+    account.storage.insert(pending_slot, EvmStorageSlot::new(pending, TransactionId::ZERO));
     if pending.is_zero() {
         return Ok(false);
     }
 
     let activation_block = read_registry_storage(db, activation_slot)?;
-    account.storage.insert(activation_slot, EvmStorageSlot::new(activation_block, 0));
+    account
+        .storage
+        .insert(activation_slot, EvmStorageSlot::new(activation_block, TransactionId::ZERO));
 
     Ok(block_number >= activation_block.saturating_to::<u64>())
 }
@@ -189,7 +190,7 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
     current_block_number: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
     config: &SequencerRegistryConfig,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
     if !hardforks.is_rex_5_active_at_timestamp(block_timestamp) {
@@ -232,9 +233,9 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     // the Rex6 v1.0.0 → v2.0.0 in-place upgrade. Both are specific to the registry
     // (which carries change history); the generic deploy below otherwise
     // overwrites bytecode in place.
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-    if let Some(account_info) = acc.account_info() {
+    if let Some(account_info) =
+        RevmDatabase::basic(db, SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?
+    {
         if rex6 && account_info.code_hash == SEQUENCER_REGISTRY_CODE_HASH {
             // Rex6 boundary: in-place, storage-preserving v1.0.0 → v2.0.0 upgrade. The account
             // is intentionally NOT marked created (that would clear live roles, pending changes
@@ -250,9 +251,10 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
 
             let original = read_registry_storage(db, MIN_ROTATION_DELAY)?;
             let delay = min_rotation_delay.expect("Rex6 upgrade path implies Rex6 params");
-            revm_acc
-                .storage
-                .insert(MIN_ROTATION_DELAY, EvmStorageSlot::new_changed(original, delay, 0));
+            revm_acc.storage.insert(
+                MIN_ROTATION_DELAY,
+                EvmStorageSlot::new_changed(original, delay, TransactionId::ZERO),
+            );
 
             return Ok(Some(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, revm_acc)])));
         }
@@ -306,21 +308,20 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
 /// The executor MUST push this into outcomes regardless of `due` so that the reads enter
 /// the stateless witness via `system_caller.on_state()`.
 pub(crate) fn is_apply_pending_changes_due<DB: Database>(
-    db: &mut State<DB>,
+    db: &mut DB,
     block_number: u64,
 ) -> Result<(bool, EvmState), BlockExecutionError> {
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-
-    let Some(info) = acc.account_info() else {
+    let Some(info) =
+        RevmDatabase::basic(db, SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?
+    else {
         // Account does not exist — record a not-existing account entry for the witness.
-        let account = Account::new_not_existing(0);
+        let account = Account::new_not_existing(TransactionId::ZERO);
         let state = EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, account)]);
         return Ok((false, state));
     };
 
     // Account exists — build a read-only account entry to record all slot reads.
-    let mut account = Account { info, ..Default::default() };
+    let mut account = Account::default().with_info(info);
 
     let system_address_due = is_role_due(
         db,
@@ -395,7 +396,7 @@ where
 pub fn resolve_system_address<DB: Database>(
     hardforks: impl MegaHardforks,
     spec: crate::MegaSpecId,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<(Address, Option<EvmState>), BlockExecutionError> {
     if !spec.is_enabled(crate::MegaSpecId::REX5) {
         return Ok((MEGA_SYSTEM_ADDRESS, None));
@@ -408,11 +409,10 @@ pub fn resolve_system_address<DB: Database>(
         }
     })?;
 
-    let acc =
-        db.load_cache_account(SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?;
-
     // Unreachable: deploy always runs and commits before resolve.
-    let Some(info) = acc.account_info() else {
+    let Some(info) =
+        RevmDatabase::basic(db, SEQUENCER_REGISTRY_ADDRESS).map_err(BlockExecutionError::other)?
+    else {
         return Err(BlockValidationError::BlockHashContractCall {
             message: "Rex5 active but SequencerRegistry account does not exist".into(),
         }
@@ -438,10 +438,10 @@ pub fn resolve_system_address<DB: Database>(
     }
 
     // Build read-only witness: account entry + slot read.
-    let mut account = Account { info, ..Default::default() };
+    let mut account = Account::default().with_info(info);
     let value = read_registry_storage(db, CURRENT_SYSTEM_ADDRESS)?;
     // Read-only witness entry: record the slot access without marking it as changed.
-    account.storage.insert(CURRENT_SYSTEM_ADDRESS, EvmStorageSlot::new(value, 0));
+    account.storage.insert(CURRENT_SYSTEM_ADDRESS, EvmStorageSlot::new(value, TransactionId::ZERO));
 
     // Unreachable: deploy seeds a non-zero initial system address.
     if value.is_zero() {
@@ -459,11 +459,11 @@ pub fn resolve_system_address<DB: Database>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, keccak256, B256};
+    use alloy_primitives::{B256, address, keccak256};
     use mega_system_contracts::sequencer_registry::storage_slots::PENDING_ADMIN;
     use revm::{
         context::BlockEnv,
-        database::InMemoryDB,
+        database::{InMemoryDB, State},
         state::{AccountInfo, Bytecode},
     };
 
@@ -628,6 +628,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -654,6 +655,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: wrong_code.hash_slow(),
                 code: Some(wrong_code),
                 ..Default::default()
@@ -679,6 +681,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 balance: U256::from(1_000_000),
                 ..Default::default() // code_hash = KECCAK_EMPTY
             },
@@ -758,6 +761,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -838,6 +842,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH_REX6,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE_REX6)),
                 ..Default::default()
@@ -887,7 +892,11 @@ mod tests {
         // (including _minRotationDelay) must be written.
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
-            AccountInfo { balance: U256::from(1_000_000), ..Default::default() },
+            AccountInfo {
+                account_id: Default::default(),
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
         );
         let mut state = State::builder().with_database(&mut db).build();
 
@@ -919,6 +928,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: wrong_code.hash_slow(),
                 code: Some(wrong_code),
                 ..Default::default()
@@ -947,6 +957,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH_REX6,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE_REX6)),
                 ..Default::default()
@@ -974,6 +985,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1009,6 +1021,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1046,6 +1059,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1074,6 +1088,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: B256::ZERO,
                 code: Some(Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]))),
                 ..Default::default()
@@ -1106,6 +1121,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1135,6 +1151,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1178,6 +1195,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1215,6 +1233,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1279,6 +1298,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1390,6 +1410,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1417,6 +1438,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: SEQUENCER_REGISTRY_CODE_HASH,
                 code: Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE)),
                 ..Default::default()
@@ -1447,6 +1469,7 @@ mod tests {
         db.insert_account_info(
             SEQUENCER_REGISTRY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 code_hash: revert_code.hash_slow(),
                 code: Some(revert_code),
                 ..Default::default()

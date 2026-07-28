@@ -31,20 +31,19 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    ACCESS_CONTROL_ADDRESS, EvmTxRuntimeLimits, IMegaAccessControl, IMegaLimitControl,
+    LIMIT_CONTROL_ADDRESS, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IMegaAccessControl, IMegaLimitControl, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, ACCESS_CONTROL_ADDRESS,
-    LIMIT_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
     context::{
+        BlockEnv, TxEnv,
         result::{EVMError, ResultAndState},
         tx::TxEnvBuilder,
-        BlockEnv, TxEnv,
     },
     handler::EvmTr,
 };
@@ -73,7 +72,7 @@ fn transact_with_spec(
     compute_gas_limit: u64,
     block_env_access_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let block = BlockEnv { beneficiary, ..Default::default() };
 
     let mut context = MegaContext::new(db, spec).with_block(block).with_tx_runtime_limits(
@@ -88,7 +87,7 @@ fn transact_with_spec(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))?;
 
     let detained_limit = evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
     Ok((r, detained_limit))
@@ -101,7 +100,7 @@ fn transact(
     compute_gas_limit: u64,
     block_env_access_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, alloy_op_evm::OpTxError>> {
     transact_with_spec(
         MegaSpecId::REX4,
         db,
@@ -708,7 +707,7 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     // Must halt with DataLimitExceeded despite detention being active.
     assert!(
@@ -729,7 +728,7 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
     );
 
     // Gas rescue should have returned most gas since no execution happened.
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     assert!(
         gas_remaining > 900_000_000,
         "Expected >900M gas remaining from rescue (not inflated by detention), got {gas_remaining}"
@@ -794,7 +793,7 @@ fn test_detention_does_not_interfere_with_data_size_limit() {
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     // Detained compute gas cap is active, but the TX should fail on data size.
     assert!(

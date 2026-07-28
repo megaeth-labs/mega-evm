@@ -7,13 +7,13 @@ use std::convert::Infallible;
 
 use alloy_consensus::{Signed, Transaction, TxLegacy};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
+use alloy_evm::{Evm, EvmEnv, EvmFactory, block::BlockExecutor};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{B256, Bytes, Signature, TxKind, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, EnrichedMegaTx, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory,
     MegaHardforkConfig, MegaSpecId, MegaTransactionExt, MegaTxEnvelope, TestExternalEnvs,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::{ADD, DUP1, LOG0, PUSH0, SLOAD, SSTORE},
@@ -142,6 +142,7 @@ fn test_block_custom_data_limit() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -176,13 +177,19 @@ fn test_block_custom_data_limit() {
     let tx1 = create_transaction(0, 1_000_000);
     let result1 = executor.execute_transaction(&tx1);
     assert!(result1.is_ok(), "First transaction should succeed");
-    assert!(result1.unwrap() < tx1.gas_limit(), "Gas used should be less than gas limit");
+    assert!(
+        result1.unwrap().tx_gas_used() < tx1.gas_limit(),
+        "Gas used should be less than gas limit"
+    );
 
     // Execute second transaction (should succeed, causing block to exceed limit)
     let tx2 = create_transaction(1, 1_000_000);
     let result2 = executor.execute_transaction(&tx2);
     assert!(result2.is_ok(), "Second transaction should succeed (last tx can exceed limit)");
-    assert!(result2.unwrap() < tx2.gas_limit(), "Gas used should be less than gas limit");
+    assert!(
+        result2.unwrap().tx_gas_used() < tx2.gas_limit(),
+        "Gas used should be less than gas limit"
+    );
 
     // Execute third transaction (should fail due to block data limit already exceeded)
     let tx3 = create_transaction(2, 1_000_000);
@@ -226,6 +233,7 @@ fn test_run_transaction_rejects_understated_cached_da_size() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -294,6 +302,7 @@ fn test_execute_mega_transaction_succeeds_with_accurate_cache() {
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
 
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -345,6 +354,7 @@ fn test_block_custom_kv_update_limit() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -408,6 +418,7 @@ fn test_block_multiple_transactions_within_limits() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -443,7 +454,10 @@ fn test_block_multiple_transactions_within_limits() {
         let tx = create_transaction(nonce, 1_000_000);
         let result = executor.execute_transaction(&tx);
         assert!(result.is_ok(), "Transaction {} should succeed", nonce);
-        assert!(result.unwrap() < tx.gas_limit(), "Gas used should be less than gas limit");
+        assert!(
+            result.unwrap().tx_gas_used() < tx.gas_limit(),
+            "Gas used should be less than gas limit"
+        );
     }
 
     // Finish the block and get receipts
@@ -472,6 +486,7 @@ fn test_block_data_limit_exceeded_mid_block() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -544,6 +559,7 @@ fn test_block_kv_limit_exceeded_mid_block() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -579,7 +595,10 @@ fn test_block_kv_limit_exceeded_mid_block() {
     let tx1 = create_transaction(0, 10_000_000);
     let result1 = executor.execute_transaction(&tx1);
     assert!(result1.is_ok(), "First transaction should succeed (last tx can exceed limit)");
-    assert!(result1.unwrap() < tx1.gas_limit(), "Gas used should be less than gas limit");
+    assert!(
+        result1.unwrap().tx_gas_used() < tx1.gas_limit(),
+        "Gas used should be less than gas limit"
+    );
 
     // Execute second transaction (should fail due to KV limit already exceeded)
     let tx2 = create_transaction(1, 10_000_000);
@@ -617,6 +636,7 @@ fn test_block_no_state_commit_on_limit_exceeded() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -685,6 +705,7 @@ fn test_block_tx_size_limit_default_unlimited() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -751,6 +772,7 @@ fn test_block_tx_size_limit_allows_multiple_transactions() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -816,6 +838,7 @@ fn test_block_tx_size_limit_exceeded_first_transaction() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -881,6 +904,7 @@ fn test_block_tx_size_limit_exceeded_mid_block() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -999,6 +1023,7 @@ fn test_commit_time_pre_execution_check_parallel_simulation() {
     // So we set block_gas_limit = 150_000 (allows 2 txs, rejects 3rd)
     let block_gas_limit = 150_000u64;
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -1101,6 +1126,7 @@ fn test_block_tx_size_limit_with_varying_sizes() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),

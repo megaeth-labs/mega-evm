@@ -14,13 +14,13 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Bytes, TxKind, U256};
+use alloy_primitives::{Bytes, TxKind, U256, address};
 use mega_evm::{
-    test_utils::MemoryDatabase, EVMError, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-    MegaTransactionError, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
+    EVMError, MIN_BUCKET_SIZE, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, SaltEnv,
+    TestExternalEnvs, test_utils::MemoryDatabase,
 };
 use revm::{
-    context::{result::ResultAndState, TxEnv},
+    context::{TxEnv, result::ResultAndState},
     primitives::Address,
 };
 
@@ -48,11 +48,12 @@ fn run_tx(
     db: &mut MemoryDatabase,
     external_envs: TestExternalEnvs<Infallible>,
     tx: TxEnv,
-) -> Result<ResultAndState<mega_evm::MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<mega_evm::MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>>
+{
     let mut evm = build_evm(db, spec, external_envs);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 fn external_envs_with_hot_account(
@@ -251,7 +252,7 @@ fn test_rex4_preserves_legacy_oog_after_full_gas_charge() {
     assert!(!res.result.is_success(), "REX4 must still produce a halt, not success");
     assert!(res.result.is_halt(), "REX4 must still produce a halt-shaped result");
     assert_eq!(
-        res.result.gas_used(),
+        res.result.tx_gas_used(),
         insufficient_gas_limit,
         "REX4 must still consume the entire gas limit (bug-shape preserved)"
     );

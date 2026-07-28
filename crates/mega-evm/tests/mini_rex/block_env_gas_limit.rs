@@ -10,18 +10,18 @@
 //! 4. Without block env access, no limiting occurs (`gas_used` reflects full work)
 
 use alloy_evm::Evm;
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use mega_evm::{
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
     constants::mini_rex::{BLOCK_ENV_ACCESS_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use revm::{
+    Inspector,
     bytecode::opcode::*,
-    context::{result::ExecutionResult, TxEnv},
+    context::{TxEnv, result::ExecutionResult},
     handler::EvmTr,
     inspector::NoOpInspector,
-    Inspector,
 };
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
@@ -69,7 +69,7 @@ fn execute_bytecode_with_inspector<
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(inspector);
-    let result = Evm::transact_commit(&mut evm, tx).unwrap();
+    let result = Evm::transact_commit(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     (result, evm)
 }
@@ -108,7 +108,7 @@ fn test_timestamp_limits_gas() {
     // With detained gas restoration, gas_used should be much less than gas_limit
     // The contract does minimal work (TIMESTAMP, MSTORE, RETURN), so should use < 30K gas
     // If detained gas wasn't restored, gas_used would be ~29M
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(
         gas_used < 30_000,
         "gas_used should only reflect real work after TIMESTAMP limiting, but got {}. \
@@ -140,7 +140,7 @@ fn test_number_limits_gas() {
     );
 
     assert!(result.is_success(), "Transaction should succeed");
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(
         gas_used < 100_000,
         "gas_used should only reflect real work after NUMBER limiting, got {}",
@@ -170,7 +170,7 @@ fn test_coinbase_limits_gas() {
         BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(
         gas_used < 100_000,
         "gas_used should only reflect real work after COINBASE limiting, got {}",
@@ -200,7 +200,7 @@ fn test_difficulty_limits_gas() {
         BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(
         gas_used < 100_000,
         "gas_used should only reflect real work after DIFFICULTY limiting, got {}",
@@ -230,7 +230,7 @@ fn test_gaslimit_limits_gas() {
         BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(
         gas_used < 100_000,
         "gas_used should only reflect real work after GASLIMIT limiting, got {}",
@@ -260,7 +260,7 @@ fn test_basefee_limits_gas() {
         BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
 
     assert!(
         gas_used < 100_000,
@@ -292,7 +292,7 @@ fn test_blockhash_limits_gas() {
     );
     assert!(result.is_success(), "Transaction should succeed");
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(
         gas_used < 100_000,
         "gas_used should only reflect real work after BLOCKHASH limiting, got {}",
@@ -327,7 +327,7 @@ fn test_multiple_block_env_accesses() {
     );
 
     assert!(result.is_success());
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     // After first block env access, gas should be limited (verified by small gas_used)
     assert!(
         gas_used < 100_000,
@@ -367,7 +367,7 @@ fn test_block_env_access_with_nested_calls() {
         BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(
         gas_used < 100_000,
         "gas_used should be small after block env access limiting, got {}",
@@ -402,7 +402,7 @@ fn test_no_gas_limit_without_block_env_access() {
 
     assert!(result.is_success());
     // Without block env access, gas should NOT be limited
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(
         gas_used < 50_000,
         "Regular opcodes should use minimal gas, expected < 50000, got {}",
@@ -442,9 +442,9 @@ fn test_out_of_gas_after_block_env_access() {
         "Should run out of gas due to volatile data access"
     );
     assert!(
-        result.gas_used() < total_gas,
+        result.tx_gas_used() < total_gas,
         "gas_used should be less than {total_gas}, got {}",
-        result.gas_used()
+        result.tx_gas_used()
     );
 }
 
@@ -497,9 +497,9 @@ fn test_nested_call_block_env_access_child_oog() {
         "Parent should run out of gas due to volatile data access"
     );
     assert!(
-        result.gas_used() < total_gas,
+        result.tx_gas_used() < total_gas,
         "gas_used should be less than {total_gas}, got {}",
-        result.gas_used()
+        result.tx_gas_used()
     );
 }
 
@@ -551,7 +551,7 @@ fn test_deeply_nested_call_block_env_access() {
     );
 
     let success = result.is_success();
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(success, "Transaction should succeed");
     // With multiple call frames (2+ levels deep), the gas limit DOES propagate correctly
     assert!(
@@ -614,15 +614,18 @@ fn test_parent_block_env_access_oog_after_nested_call() {
         BLOCK_ENV_ACCESS_COMPUTE_GAS
     );
 
-    assert!(!result.is_success(), "Parent should run out of gas when attempting 1000 SSTOREs (22.1M compute gas) after accessing block env itself (20M compute limit).");
+    assert!(
+        !result.is_success(),
+        "Parent should run out of gas when attempting 1000 SSTOREs (22.1M compute gas) after accessing block env itself (20M compute limit)."
+    );
     assert!(
         is_volatile_data_access_oog(&result),
         "Parent should run out of gas due to volatile data access"
     );
     assert!(
-        result.gas_used() < total_gas,
+        result.tx_gas_used() < total_gas,
         "gas_used should be less than {total_gas}, got {}",
-        result.gas_used()
+        result.tx_gas_used()
     );
 }
 
@@ -708,6 +711,6 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
         "Transaction should fail due to volatile data access"
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     assert!(gas_used < total_gas, "gas_used should be less than {total_gas}, got {}", gas_used);
 }

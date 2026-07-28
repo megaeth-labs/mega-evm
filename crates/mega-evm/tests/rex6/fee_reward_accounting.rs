@@ -21,18 +21,18 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
+    ACCOUNT_INFO_WRITE_SIZE, EmptyExternalEnv, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 use op_revm::constants::BASE_FEE_RECIPIENT;
 use revm::{
     bytecode::opcode::*,
     context::{
-        result::{EVMError, ResultAndState},
         BlockEnv, ContextSetters, TxEnv,
+        result::{EVMError, ResultAndState},
     },
     handler::EvmTr,
     primitives::TxKind,
@@ -73,7 +73,7 @@ const CALLER_BALANCE: u128 = 1_000_000_000_000_000_000; // 1 ETH
 
 type TestEvm = MegaEvm<MemoryDatabase, revm::inspector::NoOpInspector, EmptyExternalEnv>;
 type TestEvmResult =
-    Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>>;
+    Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>>;
 
 /// Deploys a trivial `RETURN` bytecode at `TARGET_CONTRACT`.
 fn simple_return_contract() -> Bytes {
@@ -133,7 +133,7 @@ fn transact_with_spec(
     tx: MegaTransaction,
 ) -> (TestEvmResult, TestEvm) {
     let mut evm = build_evm(spec, db, basefee);
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     (r, evm)
 }
 
@@ -194,7 +194,7 @@ fn transact_rex6_with_beneficiary(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let res = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(
         res.expect("tx must not produce a validation error").result.is_success(),
         "tx must succeed",
@@ -610,7 +610,7 @@ fn test_rex6_fee_recipient_db_error_surfaces_as_custom() {
     });
 
     let mut evm = MegaEvm::new(context);
-    let res = alloy_evm::Evm::transact_raw(&mut evm, make_call_tx());
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(make_call_tx()));
 
     match res {
         Err(EVMError::Custom(msg)) => assert!(

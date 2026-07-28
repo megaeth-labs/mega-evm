@@ -12,26 +12,26 @@
 
 #![allow(missing_docs)]
 
-use alloy_primitives::{address, bytes, Address, Bytes, U256};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use alloy_primitives::{Address, Bytes, U256, address, bytes};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
+    Context as RevmContext, ExecuteEvm, MainBuilder as _, MainContext as _,
     bytecode::opcode::{ADD, ADDRESS, EXP, GAS, KECCAK256, POP, STATICCALL},
     context::{
         result::{ExecResultAndState, ExecutionResult},
         tx::TxEnvBuilder,
     },
     precompile::{
-        blake2, bls12_381, bn128,
+        blake2, bls12_381, bn254,
         hash::{RIPEMD160, SHA256},
         kzg_point_evaluation, modexp,
         secp256k1::ECRECOVER,
     },
     primitives::hardfork::SpecId,
-    Context as RevmContext, ExecuteEvm, MainBuilder as _, MainContext as _,
 };
 use sha2::{Digest, Sha256 as Sha256Hash};
 
@@ -76,13 +76,13 @@ fn execute_bytecode(
 
     let r = evm.transact(mega_tx).expect("transaction should succeed");
     assert!(r.result.is_success(), "transaction should succeed: {:?}", r.result);
-    assert!(r.result.gas_used() > 21000, "transaction should spend more than 21000 gas");
+    assert!(r.result.tx_gas_used() > 21000, "transaction should spend more than 21000 gas");
     r
 }
 
 /// Execute bytecode with the given spec and return gas used.
 fn execute_and_get_gas(bytecode: &Bytes, spec: MegaSpecId) -> u64 {
-    execute_bytecode(bytecode, spec).result.gas_used()
+    execute_bytecode(bytecode, spec).result.tx_gas_used()
 }
 
 /// Run `bytecode` on vanilla revm at PRAGUE (has all precompiles incl. BLS12-381,
@@ -546,7 +546,7 @@ fn generate_ecadd_bytecode(iterations: usize) -> Bytes {
         builder = builder.push_number(128_u64); // retOffset
         builder = builder.push_number(128_u64); // argsSize (two points = 128 bytes)
         builder = builder.push_number(0_u64); // argsOffset
-        builder = builder.push_address(bn128::add::ADDRESS);
+        builder = builder.push_address(bn254::add::ADDRESS);
         builder = builder.append(GAS); // gas
         builder = builder.append(STATICCALL);
         // assert call success
@@ -590,7 +590,7 @@ fn generate_ecmul_bytecode(iterations: usize) -> Bytes {
         builder = builder.push_number(96_u64); // retOffset
         builder = builder.push_number(96_u64); // argsSize (point + scalar = 96 bytes)
         builder = builder.push_number(0_u64); // argsOffset
-        builder = builder.push_address(bn128::mul::ADDRESS);
+        builder = builder.push_address(bn254::mul::ADDRESS);
         builder = builder.append(GAS); // gas
         builder = builder.append(STATICCALL);
         // assert call success
@@ -657,7 +657,7 @@ fn generate_ecpairing_bytecode(iterations: usize) -> Bytes {
         builder = builder.push_number(input_size as u64 + 32); // retOffset
         builder = builder.push_number(input_size as u64); // argsSize
         builder = builder.push_number(0_u64); // argsOffset
-        builder = builder.push_address(bn128::pair::ADDRESS);
+        builder = builder.push_address(bn254::pair::ADDRESS);
         builder = builder.append(GAS); // gas (pairing needs more gas)
         builder = builder.append(STATICCALL);
         // assert call success
@@ -753,12 +753,16 @@ fn generate_kzg_point_evaluation_bytecode(iterations: usize) -> Bytes {
     // - proof (48 bytes)
 
     // Sample data from EIP-4844 test vectors
-    let commitment = bytes!("8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7");
+    let commitment = bytes!(
+        "8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7"
+    );
     let mut versioned_hash = Sha256Hash::digest(&commitment).to_vec();
     versioned_hash[0] = 0x01; // VERSIONED_HASH_VERSION_KZG
     let z = bytes!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000");
     let y = bytes!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9");
-    let proof = bytes!("a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c");
+    let proof = bytes!(
+        "a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c"
+    );
 
     // Store KZG input in memory
     builder = builder.mstore(0, versioned_hash);
@@ -805,7 +809,9 @@ fn generate_bls12_381_g1add_bytecode(iterations: usize) -> Bytes {
 
     // G1ADD input: two G1 points (128 bytes each = 256 bytes total)
     // Official EIP-2537 test vector
-    let g1_add_input = bytes!("0000000000000000000000000000000012196c5a43d69224d8713389285f26b98f86ee910ab3dd668e413738282003cc5b7357af9a7af54bb713d62255e80f560000000000000000000000000000000006ba8102bfbeea4416b710c73e8cce3032c31c6269c44906f8ac4f7874ce99fb17559992486528963884ce429a992fee000000000000000000000000000000000001101098f5c39893765766af4512a0c74e1bb89bc7e6fdf14e3e7337d257cc0f94658179d83320b99f31ff94cd2bac0000000000000000000000000000000003e1a9f9f44ca2cdab4f43a1a3ee3470fdf90b2fc228eb3b709fcd72f014838ac82a6d797aeefed9a0804b22ed1ce8f7");
+    let g1_add_input = bytes!(
+        "0000000000000000000000000000000012196c5a43d69224d8713389285f26b98f86ee910ab3dd668e413738282003cc5b7357af9a7af54bb713d62255e80f560000000000000000000000000000000006ba8102bfbeea4416b710c73e8cce3032c31c6269c44906f8ac4f7874ce99fb17559992486528963884ce429a992fee000000000000000000000000000000000001101098f5c39893765766af4512a0c74e1bb89bc7e6fdf14e3e7337d257cc0f94658179d83320b99f31ff94cd2bac0000000000000000000000000000000003e1a9f9f44ca2cdab4f43a1a3ee3470fdf90b2fc228eb3b709fcd72f014838ac82a6d797aeefed9a0804b22ed1ce8f7"
+    );
 
     // Store the input
     builder = builder.mstore(0, &g1_add_input);
@@ -848,7 +854,9 @@ fn generate_bls12_381_g1msm_bytecode(iterations: usize) -> Bytes {
 
     // G1MSM input: G1 point (128 bytes) + scalar (32 bytes) = 160 bytes per pair
     // Official EIP-2537 test vector (double-and-add worst case)
-    let g1_msm_input = bytes!("0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    let g1_msm_input = bytes!(
+        "0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    );
 
     // Store the input
     builder = builder.mstore(0, &g1_msm_input);
@@ -891,7 +899,9 @@ fn generate_bls12_381_g2add_bytecode(iterations: usize) -> Bytes {
 
     // G2ADD input: two G2 points (256 bytes each = 512 bytes total)
     // Official EIP-2537 test vector
-    let g2_add_input = bytes!("0000000000000000000000000000000018c0ada6351b70661f053365deae56910798bd2ace6e2bf6ba4192d1a229967f6af6ca1c9a8a11ebc0a232344ee0f6d6000000000000000000000000000000000cc70a587f4652039d8117b6103858adcd9728f6aebe230578389a62da0042b7623b1c0436734f463cfdd187d20903240000000000000000000000000000000009f50bd7beedb23328818f9ffdafdb6da6a4dd80c5a9048ab8b154df3cad938ccede829f1156f769d9e149791e8e0cd900000000000000000000000000000000079ba50d2511631b20b6d6f3841e616e9d11b68ec3368cd60129d9d4787ab56c4e9145a38927e51c9cd6271d493d938800000000000000000000000000000000192fa5d8732ff9f38e0b1cf12eadfd2608f0c7a39aced7746837833ae253bb57ef9c0d98a4b69eeb2950901917e99d1e0000000000000000000000000000000009aeb10c372b5ef1010675c6a4762fda33636489c23b581c75220589afbc0cc46249f921eea02dd1b761e036ffdbae220000000000000000000000000000000002d225447600d49f932b9dd3ca1e6959697aa603e74d8666681a2dca8160c3857668ae074440366619eb8920256c4e4a00000000000000000000000000000000174882cdd3551e0ce6178861ff83e195fecbcffd53a67b6f10b4431e423e28a480327febe70276036f60bb9c99cf7633");
+    let g2_add_input = bytes!(
+        "0000000000000000000000000000000018c0ada6351b70661f053365deae56910798bd2ace6e2bf6ba4192d1a229967f6af6ca1c9a8a11ebc0a232344ee0f6d6000000000000000000000000000000000cc70a587f4652039d8117b6103858adcd9728f6aebe230578389a62da0042b7623b1c0436734f463cfdd187d20903240000000000000000000000000000000009f50bd7beedb23328818f9ffdafdb6da6a4dd80c5a9048ab8b154df3cad938ccede829f1156f769d9e149791e8e0cd900000000000000000000000000000000079ba50d2511631b20b6d6f3841e616e9d11b68ec3368cd60129d9d4787ab56c4e9145a38927e51c9cd6271d493d938800000000000000000000000000000000192fa5d8732ff9f38e0b1cf12eadfd2608f0c7a39aced7746837833ae253bb57ef9c0d98a4b69eeb2950901917e99d1e0000000000000000000000000000000009aeb10c372b5ef1010675c6a4762fda33636489c23b581c75220589afbc0cc46249f921eea02dd1b761e036ffdbae220000000000000000000000000000000002d225447600d49f932b9dd3ca1e6959697aa603e74d8666681a2dca8160c3857668ae074440366619eb8920256c4e4a00000000000000000000000000000000174882cdd3551e0ce6178861ff83e195fecbcffd53a67b6f10b4431e423e28a480327febe70276036f60bb9c99cf7633"
+    );
 
     // Store the input
     builder = builder.mstore(0, &g2_add_input);
@@ -934,7 +944,9 @@ fn generate_bls12_381_g2msm_bytecode(iterations: usize) -> Bytes {
 
     // G2MSM input: G2 point (256 bytes) + scalar (32 bytes) = 288 bytes per pair
     // Official EIP-2537 test vector (double-and-add worst case)
-    let g2_msm_input = bytes!("00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79beffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    let g2_msm_input = bytes!(
+        "00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79beffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    );
 
     // Store the input
     builder = builder.mstore(0, &g2_msm_input);
@@ -977,7 +989,9 @@ fn generate_bls12_381_pairing_bytecode(iterations: usize) -> Bytes {
 
     // PAIRING input: 2 pairs (G1 point + G2 point) * 2 = 768 bytes
     // Official EIP-2537 test vector for 2 pairs
-    let pairing_input = bytes!("0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e100000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e100000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be");
+    let pairing_input = bytes!(
+        "0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e100000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e100000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be"
+    );
 
     // Store the input
     builder = builder.mstore(0, &pairing_input);

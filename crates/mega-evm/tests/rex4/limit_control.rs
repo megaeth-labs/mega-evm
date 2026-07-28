@@ -5,24 +5,24 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    EvmTxRuntimeLimits, IMegaLimitControl, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IMegaLimitControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
 };
 use revm::{
+    Inspector,
     bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, MSTORE, POP, RETURN, STATICCALL, TIMESTAMP},
     context::{
+        ContextTr, TxEnv,
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        ContextTr, TxEnv,
     },
     handler::EvmTr,
     interpreter::{CallInputs, CallOutcome, InterpreterTypes},
-    Inspector,
 };
 
 // Test addresses
@@ -46,7 +46,7 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -55,7 +55,7 @@ fn transact(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 /// Builds a default transaction calling a contract.
@@ -95,7 +95,7 @@ fn transact_with_compute_limit(
     db: &mut MemoryDatabase,
     tx_compute_gas_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, alloy_op_evm::OpTxError>>
 {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(tx_compute_gas_limit),
@@ -107,7 +107,7 @@ fn transact_with_compute_limit(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))?;
     let additional_limit = evm.ctx_ref().additional_limit.borrow();
     let usage = additional_limit.get_usage().compute_gas;
     let effective_limit = additional_limit.compute_gas_limit();
@@ -593,7 +593,7 @@ fn test_remaining_compute_gas_clamped_by_detention_limit() {
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(default_tx(CONTRACT));
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     assert!(result.result.is_success(), "query transaction should succeed");
 
@@ -645,7 +645,7 @@ fn test_inspector_sees_remaining_compute_gas_system_call() {
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
     let mut tx = MegaTransaction::new(default_tx(CONTRACT));
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     assert!(result.result.is_success(), "transaction should succeed");
 

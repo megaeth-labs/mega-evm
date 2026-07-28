@@ -7,7 +7,7 @@
 //! 2. Contract 2: Uses multiple block environment accesses (NUMBER, TIMESTAMP, BASEFEE opcodes)
 //! 3. Contract 3: Does NOT use block environment (CALLER opcode)
 
-use alloy_primitives::{address, Bytes, U256};
+use alloy_primitives::{Bytes, U256, address};
 use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction, VolatileDataAccess};
 use revm::{
     bytecode::opcode::{BASEFEE, CALLER, NUMBER, POP, STOP, TIMESTAMP},
@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1)?;
+    let result1 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx1))?;
     println!("  Transaction result: {:?}", result1.result.is_success());
 
     let accesses1 = evm.get_block_env_accesses();
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let result2 = alloy_evm::Evm::transact_raw(&mut evm, tx2)?;
+    let result2 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx2))?;
     println!("  Transaction result: {:?}", result2.result.is_success());
 
     let accesses2 = evm.get_block_env_accesses();
@@ -159,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let result3 = alloy_evm::Evm::transact_raw(&mut evm, tx3)?;
+    let result3 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx3))?;
     println!("  Transaction result: {:?}", result3.result.is_success());
 
     let accesses3 = evm.get_block_env_accesses();

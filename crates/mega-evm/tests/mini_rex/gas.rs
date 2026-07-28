@@ -2,19 +2,19 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, keccak256, Bytes, TxKind, U256};
+use alloy_primitives::{Bytes, TxKind, U256, address, keccak256};
 use mega_evm::{
+    EVMError, MIN_BUCKET_SIZE, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    SaltEnv, TestExternalEnvs,
     constants::{self, mini_rex::SSTORE_SET_STORAGE_GAS},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
+    Inspector,
     bytecode::opcode::{CALL, CREATE, CREATE2, GAS, LOG0, PUSH0},
-    context::{result::ResultAndState, ContextTr, JournalTr, TxEnv},
+    context::{ContextTr, JournalTr, TxEnv, result::ResultAndState},
     interpreter::{CallInputs, CallOutcome},
     primitives::Address,
-    Inspector,
 };
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
@@ -30,7 +30,7 @@ fn transact(
     callee: Option<Address>,
     data: Bytes,
     value: U256,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_external_envs(external_envs.clone().into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -47,7 +47,7 @@ fn transact(
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 enum UpdateMode {
@@ -113,7 +113,7 @@ fn sstore_test_case(
     )
     .unwrap();
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
 
@@ -248,7 +248,7 @@ fn test_sstore_cold_then_warm_access() {
         + constants::equivalence::SSTORE_SET
         + constants::equivalence::COLD_SLOAD_COST
         + constants::equivalence::WARM_STORAGE_READ_COST;
-    assert_eq!(res.result.gas_used(), expected_gas);
+    assert_eq!(res.result.tx_gas_used(), expected_gas);
 }
 
 /// Executes an ether transfer test case, verifying gas usage for account creation and bucket
@@ -300,7 +300,7 @@ fn ether_transfer_test_case(
     .unwrap();
 
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
 
@@ -397,7 +397,7 @@ fn nested_ether_transfer_test_case(
     )
     .unwrap();
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
 
@@ -466,7 +466,7 @@ fn create_contract_test_case(spec: MegaSpecId, expansion_times: u64, expected_ga
     let res = transact(spec, &mut db, &external_envs, CALLER, None, constructor_code, U256::ZERO)
         .unwrap();
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
 
@@ -565,7 +565,7 @@ fn nested_create_contract_test_case(
     )
     .unwrap();
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
 
@@ -671,7 +671,7 @@ fn calldata_test_case<const CALLDATA_LEN: usize>(spec: MegaSpecId, expected_gas_
     )
     .unwrap();
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
 
@@ -726,7 +726,7 @@ fn log_test_case<const TOPIC_COUNT: usize, const DATA_LEN: usize>(
     )
     .unwrap();
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
 
@@ -789,8 +789,8 @@ fn gas_forward_test_case(spec: MegaSpecId, is_create: bool, approx_expected_forw
                 self.reached = true;
                 // inner create
                 assert!(
-                    inputs.gas_limit >= self.approx_expected_forwarded_gas * 99 / 100 &&
-                        inputs.gas_limit <= self.approx_expected_forwarded_gas * 101 / 100,
+                    inputs.gas_limit() >= self.approx_expected_forwarded_gas * 99 / 100 &&
+                        inputs.gas_limit() <= self.approx_expected_forwarded_gas * 101 / 100,
                     "expected forwarded gas is not correct"
                 );
             }
@@ -832,7 +832,7 @@ fn gas_forward_test_case(spec: MegaSpecId, is_create: bool, approx_expected_forw
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let res = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(res.is_ok());
     assert!(inspector.reached);
 }
@@ -887,7 +887,7 @@ fn floor_gas_test_case(spec: MegaSpecId, calldata_size: usize, expected_gas_used
     )
     .unwrap();
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     assert_eq!(gas_used, expected_gas_used);
 }
 
@@ -963,12 +963,12 @@ fn test_mini_rex_insufficient_storage_gas_for_new_account_oog() {
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let res = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     // Transaction should succeed but execution should be OOG
     assert!(!res.result.is_success());
     assert!(res.result.is_halt());
-    assert_eq!(res.result.gas_used(), insufficient_gas_limit);
+    assert_eq!(res.result.tx_gas_used(), insufficient_gas_limit);
 }
 
 /// Tests that insufficient gas for contract creation storage gas results in OOG (not invalid tx).
@@ -1010,10 +1010,10 @@ fn test_mini_rex_insufficient_storage_gas_for_contract_creation_oog() {
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let res = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     // Transaction should succeed but execution should be OOG
     assert!(!res.result.is_success());
     assert!(res.result.is_halt());
-    assert_eq!(res.result.gas_used(), insufficient_gas_limit);
+    assert_eq!(res.result.tx_gas_used(), insufficient_gas_limit);
 }

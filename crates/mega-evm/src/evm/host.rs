@@ -6,19 +6,24 @@ use mega_system_contracts::access_control::IMegaAccessControl::VolatileDataAcces
 use std::{format, rc::Rc};
 
 use crate::{
-    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, OracleEnv,
-    VolatileDataAccessTracker, ORACLE_CONTRACT_ADDRESS,
+    AdditionalLimit, ExternalEnvTypes, MegaContext, MegaSpecId, ORACLE_CONTRACT_ADDRESS, OracleEnv,
+    VolatileDataAccessTracker,
 };
 use alloy_evm::Database;
-use alloy_primitives::{Address, Bytes, Log, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Log, U256};
 use delegate::delegate;
 use revm::{
-    context::{ContextTr, JournalTr},
-    context_interface::{context::ContextError, journaled_state::AccountLoad},
-    interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
-    primitives::{hash_map::Entry, StorageKey, KECCAK_EMPTY},
-    state::{Account, Bytecode, EvmStorageSlot},
     Journal,
+    context::{ContextTr, JournalTr},
+    context_interface::{
+        cfg::GasParams,
+        context::ContextError,
+        host::LoadError,
+        journaled_state::{AccountInfoLoad, AccountLoad},
+    },
+    interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad},
+    primitives::{KECCAK_EMPTY, StorageKey, hash_map::Entry},
+    state::{Account, Bytecode, EvmStorageSlot},
 };
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> {
@@ -78,6 +83,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         to self.inner {
             fn chain_id(&self) -> U256;
             fn effective_gas_price(&self) -> U256;
+            fn gas_params(&self) -> &GasParams;
+            fn is_amsterdam_eip8037_enabled(&self) -> bool;
             fn log(&mut self, log: Log);
             fn caller(&self) -> Address;
             fn max_initcode_size(&self) -> usize;
@@ -92,11 +99,16 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         }
     }
 
+    fn slot_num(&self) -> U256 {
+        self.inner.slot_num()
+    }
+
     fn selfdestruct(
         &mut self,
         address: Address,
         target: Address,
-    ) -> Option<StateLoad<SelfDestructResult>> {
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
         // Rex4+: Mark beneficiary balance access when SELFDESTRUCT targets the beneficiary.
         // This enables gas detention and the disableVolatileDataAccess check in the instruction
         // wrapper.
@@ -133,13 +145,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
             None
         };
 
-        let result = self.inner.selfdestruct(address, target);
+        let result = self.inner.selfdestruct(address, target, skip_cold_load);
 
         // Record state growth refund only on the first effective destruction.
         // Repeated SELFDESTRUCT on the same account still returns a result but with
         // `previously_destroyed == true` — refunding again would double-count.
         if let Some(refund) = selfdestruct_refund {
-            if let Some(ref state_load) = result {
+            if let Ok(ref state_load) = result {
                 if !state_load.data.previously_destroyed {
                     self.additional_limit.borrow_mut().on_selfdestruct(refund);
                 }
@@ -149,38 +161,55 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         result
     }
 
-    fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
+    fn sstore_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: U256,
+        value: U256,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SStoreResult>, LoadError> {
+        self.inner.sstore_skip_cold_load(address, key, value, skip_cold_load)
+    }
+
+    fn sload_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: U256,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<U256>, LoadError> {
         if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
-            // Rex3+: Mark oracle access for gas detention on SLOAD rather than CALL.
-            // The actual gas limit enforcement happens in the SLOAD instruction wrapper
-            // (detain_gas_ext::sload in instructions.rs).
-            // Mega system address transactions are exempted from oracle gas detention.
-            // Note: This checks the transaction sender (from TxEnv) via Host::caller(),
-            // unlike the pre-Rex3 CALL-based path which checked the frame-level caller.
             if self.spec.is_enabled(MegaSpecId::REX3) && self.caller() != self.system_address {
                 self.volatile_data_tracker.borrow_mut().check_and_mark_oracle_access(&address);
             }
 
-            // if the oracle env provides a value, return it. Otherwise, fallback to the inner
-            // context.
             if let Some(value) = self.oracle_env.borrow().get_oracle_storage(key) {
-                // Accessing oracle contract storage is forced to be cold access, since it always
-                // reads from the outside world (oracle_env).
-                return Some(StateLoad::new(value, true));
+                if skip_cold_load {
+                    return Err(LoadError::ColdLoadSkipped);
+                }
+                return Ok(StateLoad::new(value, true));
             }
         }
-        let state_load = self.inner.sload(address, key);
-        state_load.map(|mut state_load| {
+
+        self.inner.sload_skip_cold_load(address, key, skip_cold_load).map(|mut state_load| {
             if self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS {
-                // It is indistinguishable to tell whether a storage access of oracle contract is
-                // warm or not even if it is loaded from the inner journal state. This is because
-                // the current execution may be a replay of existing blocks and we cannot know
-                // whether the payload builder read from the oracle_env or not. So we force such
-                // sload always to be cold access to ensure consistent gas cost.
                 state_load.is_cold = true;
             }
             state_load
         })
+    }
+
+    fn load_account_info_skip_cold_load(
+        &mut self,
+        address: Address,
+        load_code: bool,
+        skip_cold_load: bool,
+    ) -> Result<AccountInfoLoad<'_>, LoadError> {
+        self.check_and_mark_beneficiary_balance_access(&address);
+        self.inner.load_account_info_skip_cold_load(address, load_code, skip_cold_load)
+    }
+
+    fn sload(&mut self, address: Address, key: U256) -> Option<StateLoad<U256>> {
+        self.sload_skip_cold_load(address, key, false).ok()
     }
 
     fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
@@ -461,10 +490,7 @@ pub trait JournalInspectTr {
     ) -> Result<Address, Self::DBError> {
         let load_code = spec.is_enabled(MegaSpecId::REX5);
         let account = self.inspect_account(address, load_code)?;
-        let delegate = account.info.code.as_ref().and_then(|code| match code {
-            Bytecode::Eip7702(c) => Some(c.address()),
-            _ => None,
-        });
+        let delegate = account.info.code.as_ref().and_then(Bytecode::eip7702_address);
         Ok(delegate.unwrap_or(address))
     }
 }
@@ -560,10 +586,7 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
 
         let account = inspect_account(self, address, is_rex5_enabled)?;
 
-        let delegated_address = account.info.code.as_ref().and_then(|code| match code {
-            Bytecode::Eip7702(code) => Some(code.address()),
-            _ => None,
-        });
+        let delegated_address = account.info.code.as_ref().and_then(Bytecode::eip7702_address);
         let Some(delegated_address) = delegated_address else {
             // Not delegated — reload to satisfy borrow checker and return.
             let account = self.inner.state.get_mut(&address).unwrap();
@@ -583,10 +606,7 @@ impl<DB: revm::Database> JournalInspectTr for Journal<DB> {
         let mut visited = std::vec![address];
         loop {
             let account = inspect_account(self, current, false)?;
-            let next = account.info.code.as_ref().and_then(|code| match code {
-                Bytecode::Eip7702(code) => Some(code.address()),
-                _ => None,
-            });
+            let next = account.info.code.as_ref().and_then(Bytecode::eip7702_address);
             let Some(next) = next else {
                 // End of chain — reload and return.
                 let account = self.inner.state.get_mut(&current).unwrap();
@@ -730,15 +750,15 @@ mod tests {
     use alloy_primitives::{address, keccak256};
     use core::cell::Cell;
     use revm::{
+        Database,
         primitives::HashMap,
         state::{AccountInfo, Bytecode},
-        Database,
     };
 
     /// Minimal `revm::Database` implementation that mimics the production
     /// `reth`-style `StateProviderDatabase` contract: `basic()` returns
-    /// `AccountInfo { code: None, code_hash: <real hash> }` for accounts with
-    /// on-chain bytecode, and the bytecode itself is lazy-loaded on demand via
+    /// `AccountInfo { account_id: Default::default(), code: None, code_hash: <real hash> }` for
+    /// accounts with on-chain bytecode, and the bytecode itself is lazy-loaded on demand via
     /// `code_by_hash()`. The workspace's `MemoryDatabase` cannot model this —
     /// it eagerly populates `AccountInfo.code` inside `basic()`, so any cache
     /// miss against it would always see the code already hydrated.
@@ -755,7 +775,14 @@ mod tests {
             let code_hash = code.hash_slow();
             self.accounts.insert(
                 address,
-                AccountInfo { balance: U256::ZERO, nonce: 0, code_hash, code: None },
+                AccountInfo {
+                    account_id: Default::default(),
+                    balance: U256::ZERO,
+                    nonce: 0,
+                    code_hash,
+                    code: None,
+                    ..Default::default()
+                },
             );
             self.codes.insert(code_hash, code);
             self
@@ -766,7 +793,14 @@ mod tests {
             let code_hash = code.hash_slow();
             self.accounts.insert(
                 address,
-                AccountInfo { balance: U256::ZERO, nonce: 0, code_hash, code: None },
+                AccountInfo {
+                    account_id: Default::default(),
+                    balance: U256::ZERO,
+                    nonce: 0,
+                    code_hash,
+                    code: None,
+                    ..Default::default()
+                },
             );
             self.codes.insert(code_hash, code);
             self
@@ -886,10 +920,12 @@ mod tests {
         db.accounts.insert(
             EOA,
             AccountInfo {
+                account_id: Default::default(),
                 balance: U256::from(1_000_000u64),
                 nonce: 5,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                ..Default::default()
             },
         );
         let mut journal = Journal::new(db);
@@ -1002,7 +1038,7 @@ mod tests {
              code as None and any subsequent EIP-7702 walk would see a wrongly-empty target",
         );
         assert!(
-            !matches!(hydrated, Bytecode::Eip7702(_)),
+            !hydrated.is_eip7702(),
             "resolved account must NOT be the delegator (whose code is the EIP-7702 \
              designation); got: {hydrated:?}",
         );

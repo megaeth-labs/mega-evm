@@ -4,12 +4,12 @@ use alloy_primitives::{Address, U256};
 use revm::{
     handler::{EthFrame, FrameResult},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, InterpreterAction, SStoreResult,
+        InterpreterAction, SStoreResult, interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
 };
 use std::vec::Vec;
 
-use crate::{constants, JournalInspectTr, MegaSpecId, MegaTransaction};
+use crate::{JournalInspectTr, MegaSpecId, MegaTransaction, constants};
 
 use super::{LimitCheck, LimitKind};
 

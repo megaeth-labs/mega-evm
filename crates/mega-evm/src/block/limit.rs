@@ -189,8 +189,8 @@ use std::boxed::Box;
 
 use alloy_consensus::Transaction;
 use alloy_evm::{
-    block::{BlockExecutionError, BlockValidationError},
     RecoveredTx,
+    block::{BlockExecutionError, BlockValidationError},
 };
 use alloy_primitives::TxHash;
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
@@ -948,7 +948,7 @@ impl BlockLimiter {
         let is_deposit = outcome.tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
 
         self.post_execution_update_raw(
-            outcome.result.gas_used(),
+            outcome.result.tx_gas_used(),
             outcome.tx_size,
             outcome.da_size,
             outcome.data_size,

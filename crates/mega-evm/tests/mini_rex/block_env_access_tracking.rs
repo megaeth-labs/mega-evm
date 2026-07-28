@@ -1,7 +1,7 @@
 //! Tests for the block environment access tracking functionality.
 
-use ::revm::{context::BlockEnv, ExecuteEvm};
-use alloy_primitives::{address, Bytes, U256};
+use ::revm::{ExecuteEvm, context::BlockEnv};
+use alloy_primitives::{Bytes, U256, address};
 use mega_evm::{
     revm::{
         bytecode::opcode::{
@@ -81,7 +81,7 @@ fn test_block_env_tracking_with_evm() {
         };
 
         // Execute transaction
-        let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
+        let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
         assert!(result.is_ok(), "Transaction should succeed for {}", opcode_name);
 
         // Check if block env was accessed
@@ -195,7 +195,7 @@ fn test_multiple_block_env_accesses() {
         ..Default::default()
     };
 
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(result.is_ok());
 
     // Should have accessed 3 different types
@@ -242,7 +242,7 @@ fn test_block_env_reset_between_transactions() {
         ..Default::default()
     };
 
-    let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1);
+    let result1 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx1));
     assert!(result1.is_ok());
     assert!(!evm.get_block_env_accesses().is_empty(), "First transaction should access block env");
 

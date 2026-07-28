@@ -5,16 +5,16 @@
 //! the resulting new account creation should be metered for state growth, data size,
 //! and KV updates.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    ACCESS_CONTROL_ADDRESS, EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, VolatileDataAccessType,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
-    context::{result::ResultAndState, tx::TxEnvBuilder, TxEnv},
+    context::{TxEnv, result::ResultAndState, tx::TxEnvBuilder},
     handler::EvmTr,
 };
 
@@ -52,7 +52,7 @@ fn transact(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     (r, usage)
 }
@@ -456,7 +456,7 @@ fn test_rex5_selfdestruct_beneficiary_creation_fails_on_state_growth_limit() {
             .build_fill();
         let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());
-        let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+        let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
         let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
         (r, usage)
     };

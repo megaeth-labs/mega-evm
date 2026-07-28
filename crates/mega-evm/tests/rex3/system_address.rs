@@ -1,10 +1,10 @@
 //! Tests for `MEGA_SYSTEM_ADDRESS` exemption from Rex3 SLOAD-based oracle gas detention.
 
-use alloy_primitives::{address, Bytes, TxKind, U256};
+use alloy_primitives::{Bytes, TxKind, U256, address};
 use mega_evm::{
+    MEGA_SYSTEM_ADDRESS, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    ORACLE_CONTRACT_ADDRESS, TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, POP, PUSH0, SLOAD, STOP},
@@ -63,7 +63,7 @@ fn test_mega_system_address_exempted_from_rex3_sload_detention() {
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
 
     // Verify transaction succeeded
@@ -137,7 +137,7 @@ fn test_non_system_address_subject_to_rex3_sload_detention() {
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
 
     assert!(result.is_success(), "Transaction should succeed");

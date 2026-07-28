@@ -8,11 +8,11 @@
 //!
 //! This module contains constants, types, and utilities related to mega system transactions.
 
-use alloy_primitives::{address, b256, Address, TxKind, B256};
+use alloy_primitives::{Address, B256, TxKind, address, b256};
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::context::Transaction;
 
-use crate::{types::MegaTransaction, ORACLE_CONTRACT_ADDRESS};
+use crate::{ORACLE_CONTRACT_ADDRESS, types::MegaTransaction};
 
 /// The `MegaETH` system address for deposit-like transaction processing.
 /// Normal transactions sent from this address are processed as deposit transactions,

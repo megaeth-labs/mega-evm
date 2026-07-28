@@ -12,8 +12,8 @@ use alloy_hardforks::ForkCondition;
 use alloy_primitives::address;
 
 use crate::{
-    MegaHardfork, MegaHardforkConfig, SequencerRegistryConfig, SequencerRegistryRex6Config,
-    MEGA_SYSTEM_ADDRESS,
+    MEGA_SYSTEM_ADDRESS, MegaHardfork, MegaHardforkConfig, SequencerRegistryConfig,
+    SequencerRegistryRex6Config,
 };
 
 /// `MegaETH` mainnet chain ID.

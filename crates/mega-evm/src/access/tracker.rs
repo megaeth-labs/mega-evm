@@ -1,4 +1,4 @@
-use crate::{VolatileDataAccess, VolatileDataAccessType, ORACLE_CONTRACT_ADDRESS};
+use crate::{ORACLE_CONTRACT_ADDRESS, VolatileDataAccess, VolatileDataAccessType};
 use alloy_primitives::Address;
 
 /// A tracker for volatile data access with compute gas limit enforcement.

@@ -9,11 +9,11 @@
 //! These tests pin that equivalence. CREATE2's intended divergence on the failure path is covered
 //! in [`super::create2_metering_order`].
 
-use crate::common::{transact, transact_default, CALLER, CONTRACT, EMPTY_TARGET};
+use crate::common::{CALLER, CONTRACT, EMPTY_TARGET, transact, transact_default};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaSpecId,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::bytecode::opcode::{
     CALL, CALLCODE, CREATE, DELEGATECALL, LOG1, SELFDESTRUCT, SSTORE, STATICCALL, STOP,

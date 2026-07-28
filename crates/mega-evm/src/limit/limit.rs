@@ -6,9 +6,9 @@ use revm::{
     context::result::{HaltReason, OutOfGasError},
     handler::{EthFrame, FrameResult, ItemOrResult},
     interpreter::{
-        gas::calculate_initial_tx_gas_for_tx, interpreter::EthInterpreter,
-        interpreter_action::FrameInit, CallOutcome, CreateOutcome, FrameInput, Gas,
-        InstructionResult, InterpreterAction, InterpreterResult, SStoreResult,
+        CallOutcome, CreateOutcome, FrameInput, Gas, InstructionResult, InterpreterAction,
+        InterpreterResult, SStoreResult, gas::calculate_initial_tx_gas_for_tx,
+        interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
 };
 
@@ -160,6 +160,15 @@ impl AdditionalLimit {
         }
     }
 
+    #[inline]
+    pub(crate) fn exceeding_instruction_result_for_halt(&mut self, gas: &Gas) -> InstructionResult {
+        let result = self.exceeding_instruction_result();
+        if result == InstructionResult::OutOfGas {
+            self.rescue_gas(gas);
+        }
+        result
+    }
+
     /// Resets the internal state for a new transaction or block.
     ///
     /// This method clears both the data size tracker and KV update counter,
@@ -247,7 +256,7 @@ impl AdditionalLimit {
         trial.before_tx_start(tx);
 
         let initial_and_floor_gas = calculate_initial_tx_gas_for_tx(tx, spec.into_eth_spec());
-        trial.record_compute_gas(initial_and_floor_gas.initial_gas);
+        trial.record_compute_gas(initial_and_floor_gas.initial_regular_gas);
 
         trial.check_limit()
     }
@@ -632,7 +641,7 @@ impl AdditionalLimit {
             FrameInput::Call(inputs) => {
                 (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
             }
-            FrameInput::Create(inputs) => (inputs.gas_limit, None),
+            FrameInput::Create(inputs) => (inputs.gas_limit(), None),
             FrameInput::Empty => unreachable!(),
         };
         let output = self.has_exceeded_limit.revert_data();

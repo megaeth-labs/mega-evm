@@ -1,22 +1,22 @@
 //! Tests for oracle contract access detection.
 #![allow(clippy::doc_markdown)]
 
-use alloy_primitives::{address, Bytes, TxKind, U256};
+use alloy_primitives::{Bytes, TxKind, U256, address};
 use mega_evm::{
+    BlockLimits, MegaContext, MegaEvm, MegaHaltReason, MegaHardforkConfig, MegaSpecId,
+    MegaTransaction, ORACLE_CONTRACT_ADDRESS, TestExternalEnvs,
     constants::mini_rex::{ORACLE_ACCESS_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaContext, MegaEvm, MegaHaltReason, MegaHardforkConfig, MegaSpecId,
-    MegaTransaction, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
+    Inspector,
     bytecode::opcode::{
         CALL, CALLCODE, DELEGATECALL, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY,
         RETURNDATASIZE, SLOAD, SSTORE, STATICCALL, TIMESTAMP,
     },
-    context::{result::ExecutionResult, TxEnv},
+    context::{TxEnv, result::ExecutionResult},
     handler::EvmTr,
     inspector::NoOpInspector,
-    Inspector,
 };
 
 const CALLER: alloy_primitives::Address = address!("2000000000000000000000000000000000000002");
@@ -57,7 +57,7 @@ fn execute_transaction<
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(inspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
     // Get oracle_accessed before returning to avoid RefCell borrow conflicts
     let oracle_accessed = evm
@@ -554,7 +554,7 @@ fn test_oracle_storage_sload_direct_call() {
 /// This exercises the deployment logic in block.rs:284-292.
 #[test]
 fn test_oracle_contract_deployed_on_mini_rex_activation() {
-    use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
+    use alloy_evm::{Evm, EvmEnv, EvmFactory, block::BlockExecutor};
     use alloy_primitives::B256;
     use mega_evm::{
         MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaSpecId,
@@ -700,8 +700,8 @@ fn test_oracle_sload_determinism_between_oracle_env_and_state() {
     assert!(result1.is_success(), "Execution 1 (oracle_env) should succeed");
     assert!(result2.is_success(), "Execution 2 (state) should succeed");
     assert_eq!(
-        result1.gas_used(),
-        result2.gas_used(),
+        result1.tx_gas_used(),
+        result2.tx_gas_used(),
         "Gas used should be identical regardless of data source (oracle_env vs state)"
     );
 
@@ -864,7 +864,7 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
         "Transaction should fail due to volatile data access out of gas"
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
 
     // Key assertion: gas_used should be much less than gas_limit
     assert!(
@@ -916,7 +916,7 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
         "Transaction should fail due to volatile data access out of gas"
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     // Key assertion: gas_used should be much less than gas_limit
     assert!(
         gas_used < 1_000_000_000,
@@ -961,7 +961,7 @@ fn test_mega_system_address_exempted_from_oracle_tracking() {
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
 
     // Get oracle_accessed flag

@@ -4,15 +4,15 @@
 //! Any action which causes `ResultAndState` to contain the beneficiary should mark beneficiary
 //! access and trigger gas detention.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MsgCallMeta},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, STOP},
-    context::{result::ResultAndState, BlockEnv, ContextSetters, ContextTr, TxEnv},
+    context::{BlockEnv, ContextSetters, ContextTr, TxEnv, result::ResultAndState},
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
     primitives::TxKind,
@@ -71,7 +71,7 @@ fn execute_tx(
         ..Default::default()
     };
 
-    alloy_evm::Evm::transact_raw(evm, tx).unwrap()
+    alloy_evm::Evm::transact_raw(evm, alloy_op_evm::OpTx(tx)).unwrap()
 }
 
 fn assert_beneficiary_detection(
@@ -530,13 +530,13 @@ fn test_detained_gas_is_restored() {
         ..Default::default()
     };
 
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     assert!(result.result.is_success());
     assert!(evm.ctx_ref().volatile_data_tracker.borrow().has_accessed_beneficiary_balance());
 
     // The gas_used should be much less than the gas_limit because detained gas is refunded.
     // We expect gas_used to be only a few thousand (for the actual work done), not close to 1M.
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     assert!(
         gas_used < 50_000,
         "Gas used should be low after detained gas restoration, got {}",

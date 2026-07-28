@@ -1,5 +1,8 @@
-use alloy_evm::InvalidTxError;
-use revm::state::AccountInfo;
+use alloy_evm::{InvalidTxError, block::TxResult};
+use revm::{
+    context::result::{InvalidTransaction, ResultAndState},
+    state::AccountInfo,
+};
 
 use crate::MegaTransactionOutcome;
 
@@ -21,6 +24,21 @@ pub struct BlockMegaTransactionOutcome<T> {
     #[deref]
     #[deref_mut]
     pub inner: MegaTransactionOutcome,
+}
+
+impl<T> TxResult for BlockMegaTransactionOutcome<T>
+where
+    T: Send + 'static,
+{
+    type HaltReason = crate::MegaHaltReason;
+
+    fn result(&self) -> &ResultAndState<Self::HaltReason> {
+        &self.inner.inner
+    }
+
+    fn into_result(self) -> ResultAndState<Self::HaltReason> {
+        self.inner.inner
+    }
 }
 
 /// Error type for additional reasons of an invalid transaction. If one transaction is invalid, it
@@ -45,9 +63,7 @@ pub enum MegaTxLimitExceededError {
     },
 
     /// Transaction data availability size limit exceeded.
-    #[error(
-        "Transaction data availability size limit exceeded: da_size={da_size} > limit={limit}"
-    )]
+    #[error("Transaction data availability size limit exceeded: da_size={da_size} > limit={limit}")]
     DataAvailabilitySizeLimit {
         /// Data availability size used by current transaction
         da_size: u64,
@@ -77,8 +93,8 @@ impl MegaTxLimitExceededError {
 }
 
 impl InvalidTxError for MegaTxLimitExceededError {
-    fn is_nonce_too_low(&self) -> bool {
-        false
+    fn as_invalid_tx_err(&self) -> Option<&InvalidTransaction> {
+        None
     }
 }
 
@@ -114,7 +130,9 @@ pub enum MegaBlockLimitExceededError {
     },
 
     /// Block transactions encode size limit exceeded.
-    #[error("Block transactions encode size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    #[error(
+        "Block transactions encode size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}"
+    )]
     TransactionEncodeSizeLimit {
         /// Transaction encode size used by block so far
         block_used: u64,
@@ -125,7 +143,9 @@ pub enum MegaBlockLimitExceededError {
     },
 
     /// Block data availability size limit exceeded.
-    #[error("Block data availability size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}")]
+    #[error(
+        "Block data availability size limit exceeded: block_used={block_used} + tx_used={tx_used} > limit={limit}"
+    )]
     DataAvailabilitySizeLimit {
         /// Data availability size used by block so far
         block_used: u64,
@@ -172,8 +192,8 @@ impl MegaBlockLimitExceededError {
 }
 
 impl InvalidTxError for MegaBlockLimitExceededError {
-    fn is_nonce_too_low(&self) -> bool {
-        false
+    fn as_invalid_tx_err(&self) -> Option<&InvalidTransaction> {
+        None
     }
 }
 

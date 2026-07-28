@@ -9,15 +9,15 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use mega_evm::{
-    test_utils::MemoryDatabase, EthHaltReason, EvmTxRuntimeLimits, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, OpHaltReason, TestExternalEnvs,
+    EthHaltReason, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, OpHaltReason, TestExternalEnvs, test_utils::MemoryDatabase,
 };
 use revm::{
     context::{
-        result::{ExecutionResult, Output, ResultAndState},
         TxEnv,
+        result::{ExecutionResult, Output, ResultAndState},
     },
     state::EvmState,
 };
@@ -102,11 +102,12 @@ fn run_create_with_gas_limit(
     if inspector {
         // Default no-op inspector — forces inspect_frame_run path.
         let mut evm = MegaEvm::new(context).with_inspector(revm::inspector::NoOpInspector {});
-        alloy_evm::Evm::transact_raw(&mut evm, tx)
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
             .expect("transact (inspector) should not surface EVMError")
     } else {
         let mut evm = MegaEvm::new(context);
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact should not surface EVMError")
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+            .expect("transact should not surface EVMError")
     }
 }
 

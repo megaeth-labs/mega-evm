@@ -8,19 +8,20 @@
 use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
+use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor};
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs,
-    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-    HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
-    LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, BlockLimits,
+    HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
+    KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
+    MEGA_SYSTEM_ADDRESS, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardfork,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, ORACLE_CONTRACT_ADDRESS,
     ORACLE_CONTRACT_CODE_REX5, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+    SequencerRegistryConfig, TestExternalEnvs,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,

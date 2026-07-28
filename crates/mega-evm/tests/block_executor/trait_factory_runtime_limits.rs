@@ -21,16 +21,16 @@
 use std::convert::Infallible;
 
 use alloy_evm::{
-    block::{BlockExecutor, BlockExecutorFactory},
     EvmEnv, EvmFactory,
+    block::{BlockExecutor, BlockExecutorFactory},
 };
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{Bytes, B256, U256};
+use alloy_primitives::{B256, Bytes, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx,
-    MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
-    TestExternalEnvs,
+    BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
+    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId, TestExternalEnvs,
+    test_utils::MemoryDatabase,
 };
 use revm::{context::BlockEnv, database::State, handler::EvmTr};
 
@@ -41,8 +41,8 @@ const NON_DEFAULT_TX_COMPUTE_GAS_LIMIT: u64 = 1_234_567;
 
 fn evm_env_for_spec(spec: MegaSpecId) -> EvmEnv<MegaSpecId> {
     let mut cfg_env = revm::context::CfgEnv::default();
-    cfg_env.spec = spec;
     cfg_env.chain_id = 8453;
+    cfg_env.spec = spec;
     let block_env = BlockEnv {
         number: U256::from(1000),
         timestamp: U256::from(1_800_000_000),

@@ -30,12 +30,11 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use mega_evm::{
-    constants,
+    MIN_BUCKET_SIZE, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
+    TestExternalEnvs, VolatileDataAccess, VolatileDataAccessTracker, constants,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv, TestExternalEnvs,
-    VolatileDataAccess, VolatileDataAccessTracker, MIN_BUCKET_SIZE,
 };
 use revm::context::{BlockEnv, TxEnv};
 
@@ -228,7 +227,7 @@ fn test_get_accessed_bucket_ids_reports_touched_non_zero_bucket() {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     assert!(result.result.is_success(), "SSTORE transaction should succeed: {:?}", result.result);
 
     // The SSTORE-set records the slot's bucket. Predict it from the same hasher the EVM uses.
@@ -288,7 +287,7 @@ fn beneficiary_balance_after_transfer(disable: bool) -> U256 {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     assert!(result.result.is_success(), "transfer should succeed: {:?}", result.result);
 
     result.state.get(&BENEFICIARY).map(|acct| acct.info.balance).unwrap_or(U256::ZERO)
@@ -335,7 +334,7 @@ fn intrinsic_boundary_result(
     gas_limit: u64,
 ) -> Result<
     revm::context::result::ResultAndState<MegaHaltReason>,
-    revm::context::result::EVMError<Infallible, mega_evm::MegaTransactionError>,
+    revm::context::result::EVMError<Infallible, alloy_op_evm::OpTxError>,
 > {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000_u64));
     // Callee already exists (has code) and just STOPs, so the call adds no new-account storage gas
@@ -361,7 +360,7 @@ fn intrinsic_boundary_result(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 /// `before_execution` must allow a tx whose `gas_limit` equals its (fully Mega-adjusted) intrinsic
@@ -389,7 +388,7 @@ fn test_before_execution_allows_exact_intrinsic_gas() {
         exact.result
     );
     assert_eq!(
-        exact.result.gas_used(),
+        exact.result.tx_gas_used(),
         intrinsic,
         "the exact-gas call must consume exactly the intrinsic gas"
     );

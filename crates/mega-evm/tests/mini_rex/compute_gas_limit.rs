@@ -5,23 +5,22 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::*,
     context::{
+        TxEnv,
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        TxEnv,
     },
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
     precompile::{
-        bn128::pair,
+        bn254::pair,
         hash::{RIPEMD160, SHA256},
         secp256k1::ECRECOVER,
     },
@@ -45,7 +44,7 @@ fn transact(
     db: &mut CacheDB<EmptyDB>,
     compute_gas_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(compute_gas_limit),
     );
@@ -56,7 +55,7 @@ fn transact(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))?;
 
     let ctx = evm.ctx_ref();
     let compute_gas_used = ctx.additional_limit.borrow().get_usage().compute_gas;
@@ -103,7 +102,7 @@ fn test_empty_contract_compute_gas() {
     // Should have some gas from transaction intrinsic cost and opcodes
     assert!(compute_gas_used > 0);
     assert!(compute_gas_used < 50_000); // Should be small for simple operations
-    assert_eq!(compute_gas_used, result.result.gas_used());
+    assert_eq!(compute_gas_used, result.result.tx_gas_used());
 }
 
 #[test]
@@ -132,7 +131,7 @@ fn test_simple_arithmetic_compute_gas() {
     assert!(result.result.is_success());
     // Should track gas for all arithmetic operations
     assert!(compute_gas_used > 0);
-    assert_eq!(compute_gas_used, result.result.gas_used());
+    assert_eq!(compute_gas_used, result.result.tx_gas_used());
 }
 
 // ============================================================================
@@ -269,8 +268,8 @@ fn test_compute_gas_refund_on_limit_exceeded() {
 
     // Should halt with compute gas limit exceeded, but remaining gas is refunded
     assert!(is_compute_gas_limit_exceeded(&result));
-    assert_eq!(compute_gas_used, result.result.gas_used());
-    assert!(result.result.gas_used() < 43_000);
+    assert_eq!(compute_gas_used, result.result.tx_gas_used());
+    assert!(result.result.tx_gas_used() < 43_000);
 }
 
 // ============================================================================
@@ -451,7 +450,7 @@ fn test_compute_gas_limit_exceed_in_nested_call() {
 
     // Should halt with compute gas limit exceeded
     assert!(is_compute_gas_limit_exceeded(&result));
-    assert!(result.result.gas_used() < 1_000_000);
+    assert!(result.result.tx_gas_used() < 1_000_000);
 }
 
 // ============================================================================
@@ -550,7 +549,7 @@ fn test_compute_gas_resets_across_transactions() {
 #[test]
 fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
     use mega_evm::{
-        constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
+        MegaTransaction, ORACLE_CONTRACT_ADDRESS, constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS,
     };
     use revm::ExecuteEvm;
 
@@ -609,7 +608,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
         enveloped_tx: Some(Bytes::new()),
         ..Default::default()
     };
-    let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1).unwrap();
+    let result1 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx1)).unwrap();
     assert!(result1.result.is_success(), "TX1 should succeed");
 
     // Verify TX1 lowered the compute_gas_limit to oracle limit
@@ -666,7 +665,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
 #[test]
 fn test_compute_gas_limit_not_reset_pre_rex1() {
     use mega_evm::{
-        constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
+        MegaTransaction, ORACLE_CONTRACT_ADDRESS, constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS,
     };
     use revm::ExecuteEvm;
 
@@ -717,7 +716,7 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
         enveloped_tx: Some(Bytes::new()),
         ..Default::default()
     };
-    let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1).unwrap();
+    let result1 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx1)).unwrap();
     assert!(result1.result.is_success(), "TX1 should succeed");
 
     // Verify TX1 lowered the compute_gas_limit to oracle limit

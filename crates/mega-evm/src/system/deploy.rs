@@ -20,10 +20,10 @@
 use alloc as std;
 
 use alloy_evm::Database;
-use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use revm::{
-    database::State,
-    state::{Account, Bytecode, EvmState, EvmStorageSlot},
+    Database as RevmDatabase,
+    state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
 use std::vec::Vec;
 
@@ -83,7 +83,7 @@ impl SystemContractSpec {
 /// is returned read-only (marked neither touched nor created, no seeding) so it
 /// is recorded in the witness without changing state.
 pub fn transact_deploy<DB: Database>(
-    db: &mut State<DB>,
+    db: &mut DB,
     spec: &SystemContractSpec,
 ) -> Result<EvmState, DB::Error> {
     // The spec's `code_hash` must be the hash of its `code`. The per-contract
@@ -96,15 +96,13 @@ pub fn transact_deploy<DB: Database>(
         spec.address
     );
 
-    let acc = db.load_cache_account(spec.address)?;
-
     // Already deployed with the correct code — record the read, change nothing.
-    let existing_info = acc.account_info();
+    let existing_info = RevmDatabase::basic(db, spec.address)?;
     if let Some(account_info) = &existing_info {
         if account_info.code_hash == spec.code_hash {
             return Ok(EvmState::from_iter([(
                 spec.address,
-                Account { info: account_info.clone(), ..Default::default() },
+                Account::default().with_info(account_info.clone()),
             )]));
         }
     }
@@ -124,7 +122,10 @@ pub fn transact_deploy<DB: Database>(
         // preserved (an in-place upgrade) would mix genesis slots into live
         // storage and record a wrong `original_value` for an already-set slot.
         for (slot, value) in &spec.seed {
-            revm_acc.storage.insert(*slot, EvmStorageSlot::new_changed(U256::ZERO, *value, 0));
+            revm_acc.storage.insert(
+                *slot,
+                EvmStorageSlot::new_changed(U256::ZERO, *value, TransactionId::ZERO),
+            );
         }
     }
 
@@ -170,7 +171,11 @@ mod tests {
     };
     use alloy_hardforks::ForkCondition;
     use alloy_primitives::address;
-    use revm::{database::InMemoryDB, state::AccountInfo, Database as _, DatabaseCommit};
+    use revm::{
+        DatabaseCommit,
+        database::{InMemoryDB, State},
+        state::AccountInfo,
+    };
 
     fn addrs(specs: &[SystemContractSpec]) -> Vec<Address> {
         specs.iter().map(|s| s.address).collect()
@@ -204,6 +209,7 @@ mod tests {
         db.insert_account_info(
             SEEDED_ADDR,
             AccountInfo {
+                account_id: Default::default(),
                 balance: U256::from(1),
                 nonce: 1,
                 code_hash: keccak256(&existing_code),
@@ -241,6 +247,7 @@ mod tests {
         db.insert_account_info(
             SEEDED_ADDR,
             AccountInfo {
+                account_id: Default::default(),
                 balance: U256::from(1),
                 nonce: 1,
                 code_hash: keccak256(&existing_code),

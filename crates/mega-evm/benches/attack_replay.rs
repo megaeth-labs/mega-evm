@@ -44,25 +44,25 @@ use std::{
     collections::HashMap,
     str::FromStr,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
-use alloy_primitives::{hex, Address, Bytes, B256, U256};
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use alloy_primitives::{Address, B256, Bytes, U256, hex};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use mega_evm::{
-    test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, test_utils::MemoryDatabase,
 };
 use revm::{
+    Context, ExecuteEvm, InspectEvm, Inspector, MainBuilder, MainContext,
     context::{
+        TxEnv,
         result::{ExecResultAndState, ExecutionResult, Output},
         tx::TxEnvBuilder,
-        TxEnv,
     },
-    interpreter::{interpreter::EthInterpreter, Interpreter},
+    interpreter::{Interpreter, interpreter::EthInterpreter},
     primitives::TxKind,
-    Context, ExecuteEvm, InspectEvm, Inspector, MainBuilder, MainContext,
 };
 use serde_json::Value;
 
@@ -299,7 +299,7 @@ fn sanity_check_mega(
     let slot_count: usize = state.values().map(|a| a.storage.len()).sum();
     eprintln!(
         "sanity[{name}]: gas_used={}  variant={}  accounts={}  storage_slots={}",
-        result.gas_used(),
+        result.tx_gas_used(),
         variant,
         state.len(),
         slot_count,
@@ -357,7 +357,7 @@ fn sanity_check_pure_revm(
         ExecutionResult::Revert { output, .. } => format!("Revert(output_len={})", output.len()),
         ExecutionResult::Halt { reason, .. } => format!("Halt({reason:?})"),
     };
-    eprintln!("sanity[pure_revm]: gas_used={}  variant={}", res.gas_used(), variant);
+    eprintln!("sanity[pure_revm]: gas_used={}  variant={}", res.tx_gas_used(), variant);
     assert!(
         variant.starts_with("Success(Create"),
         "pure revm did not deploy successfully: {variant}",

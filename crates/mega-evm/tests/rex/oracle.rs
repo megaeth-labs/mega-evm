@@ -4,17 +4,17 @@
 //! CALLCODE and DELEGATECALL remain undetected because they execute in the caller's
 //! state context (not the oracle's), so they don't constitute oracle access.
 
-use alloy_primitives::{address, Bytes, TxKind, U256};
+use alloy_primitives::{Bytes, TxKind, U256, address};
 use mega_evm::{
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
+    TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
-    bytecode::opcode::{CALLCODE, DELEGATECALL, GAS, PUSH0, STATICCALL},
-    context::{result::ExecutionResult, TxEnv},
-    inspector::NoOpInspector,
     Inspector,
+    bytecode::opcode::{CALLCODE, DELEGATECALL, GAS, PUSH0, STATICCALL},
+    context::{TxEnv, result::ExecutionResult},
+    inspector::NoOpInspector,
 };
 
 const CALLER: alloy_primitives::Address = address!("2000000000000000000000000000000000000002");
@@ -51,7 +51,7 @@ fn execute_transaction<
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(inspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
     let oracle_accessed = evm
         .ctx

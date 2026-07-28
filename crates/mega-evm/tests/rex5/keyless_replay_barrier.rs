@@ -14,21 +14,20 @@
 
 use std::vec::Vec;
 
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address, hex};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransaction, SaltEnv, TestExternalEnvs,
     alloy_consensus::{Signed, TxLegacy},
     revm::context::result::ExecutionResult,
     sandbox::{
-        calculate_keyless_deploy_address, decode_error_result,
+        KeylessDeployError, calculate_keyless_deploy_address, decode_error_result,
         tests::{CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
-        KeylessDeployError,
     },
     test_utils::MemoryDatabase,
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
-use revm::{context::TxEnv, inspector::NoOpInspector, Database as _};
+use revm::{Database as _, context::TxEnv, inspector::NoOpInspector};
 
 const RELAYER: Address = address!("0000000000000000000000000000000000990000");
 const SIGNED_GAS_PRICE: u128 = 100_000_000_000; // 100 gwei, matches CREATE2_FACTORY_TX
@@ -80,7 +79,7 @@ fn run_keyless_outer(
     // Use `transact_commit` (not `transact_raw`) so the result's state is committed back into
     // the database — that lets the test query parent-visible state via `db.basic(...)` after
     // the call. `transact_raw` returns state without committing.
-    alloy_evm::Evm::transact_commit(&mut evm, tx)
+    alloy_evm::Evm::transact_commit(&mut evm, alloy_op_evm::OpTx(tx))
         .expect("outer keyless call should not fail at the EVM-error level")
 }
 

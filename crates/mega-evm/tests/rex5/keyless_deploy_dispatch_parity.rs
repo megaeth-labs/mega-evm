@@ -6,12 +6,12 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    revm::context::result::ExecutionResult, test_utils::MemoryDatabase, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
-    KEYLESS_DEPLOY_CODE,
+    KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, TestExternalEnvs, revm::context::result::ExecutionResult,
+    test_utils::MemoryDatabase,
 };
 use revm::context::{result::ResultAndState, tx::TxEnvBuilder};
 
@@ -44,7 +44,8 @@ fn run_dispatch(spec: MegaSpecId, calldata: Bytes) -> ResultAndState<MegaHaltRea
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);
-    alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact must not surface a fatal EVMError")
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("transact must not surface a fatal EVMError")
 }
 
 // Result tag + payload bytes only — gas counters are excluded so the parity

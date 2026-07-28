@@ -1,15 +1,15 @@
 //! Tests for the Rex3 oracle access compute gas limit (1M -> 20M) and
 //! the Rex3 change to trigger oracle gas detention on SLOAD instead of CALL.
 
-use alloy_primitives::{address, Bytes, TxKind, U256};
+use alloy_primitives::{Bytes, TxKind, U256, address};
 use mega_evm::{
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
+    TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, POP, PUSH0, SLOAD, SSTORE, STOP, TIMESTAMP},
-    context::{result::ExecutionResult, TxEnv},
+    context::{TxEnv, result::ExecutionResult},
     handler::EvmTr,
     inspector::NoOpInspector,
 };
@@ -46,7 +46,7 @@ fn execute_transaction(
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
     let compute_gas_limit = evm.ctx_ref().additional_limit.borrow().compute_gas_limit();
 

@@ -23,7 +23,7 @@ use core::{
 };
 use std::{rc::Rc, vec::Vec};
 
-use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, BlockNumber, Bytes, U256};
 use revm::primitives::HashMap;
 
 use crate::{BucketId, ExternalEnvFactory, ExternalEnvTypes, ExternalEnvs, OracleEnv, SaltEnv};

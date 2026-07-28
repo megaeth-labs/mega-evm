@@ -1,9 +1,9 @@
 //! Tests for the EVM state.
 
-use alloy_primitives::{address, Bytes, U256};
+use alloy_primitives::{Bytes, U256, address};
 use mega_evm::{
     revm::bytecode::opcode::{INVALID, PUSH0, SLOAD},
-    test_utils::{transact, MemoryDatabase},
+    test_utils::{MemoryDatabase, transact},
     *,
 };
 use revm::database::StateBuilder;
@@ -84,7 +84,7 @@ fn test_state_clear_with_noop_call() {
     assert!(result.state.get(&empty_account).unwrap().is_touched());
 
     // apply the state changes and get the transitions
-    let transitions = state.cache.apply_evm_state(result.state);
+    let transitions = state.cache.apply_evm_state(result.state, |_, _| {});
     let (_, transition) =
         transitions.iter().find(|(address, _)| *address == empty_account).unwrap();
     // assert that the storage is marked as destroyed

@@ -11,15 +11,15 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     TestExternalEnvs,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::*,
-    context::{result::ExecutionResult, TxEnv},
+    context::{TxEnv, result::ExecutionResult},
     handler::EvmTr,
     state::{AccountInfo, Bytecode},
 };
@@ -73,8 +73,8 @@ fn test_create2_with_oversize_initcode_len_does_not_panic() {
     };
     let mut tx = MegaTransaction::new(tx_env);
     tx.enveloped_tx = Some(Bytes::new());
-    let res =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact should not surface EVMError");
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("transact should not surface EVMError");
 
     assert!(
         matches!(
@@ -144,7 +144,8 @@ fn run_create2_and_get_compute_gas(
     };
     let mut tx = MegaTransaction::new(tx_env);
     tx.enveloped_tx = Some(Bytes::new());
-    let res = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact should not fail");
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("transact should not fail");
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
     (res.result, compute_gas)
 }

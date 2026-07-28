@@ -17,17 +17,16 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use mega_evm::{
+    BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MIN_BUCKET_SIZE,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv, TestExternalEnvs,
     constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
-    BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv, TestExternalEnvs,
-    MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, STOP},
-    context::{result::ResultAndState, TxEnv},
+    context::{TxEnv, result::ResultAndState},
     database::AccountState,
     state::Bytecode,
 };
@@ -92,7 +91,7 @@ fn transact(
     callee: Address,
     value: U256,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let mut context =
         MegaContext::new(db, spec).with_external_envs(external_envs.into()).with_tx_runtime_limits(
             EvmTxRuntimeLimits::no_limits()
@@ -114,7 +113,7 @@ fn transact(
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 /// Runs the given bytecode on `spec` with a configurable bucket multiplier for the
@@ -132,7 +131,7 @@ fn run_with_target_multiplier(spec: MegaSpecId, bytecode: Bytes, target_multipli
     let result = transact(spec, &mut db, &external_envs, CALLER, CALLEE, U256::ZERO, 10_000_000)
         .expect("transaction must succeed");
     assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
-    result.result.gas_used()
+    result.result.tx_gas_used()
 }
 
 // ============================================================================
@@ -206,7 +205,7 @@ fn test_rex5_callcode_from_eip7702_authority_no_storage_gas() {
         )
         .expect("transaction must succeed");
         assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
-        result.result.gas_used()
+        result.result.tx_gas_used()
     };
 
     let gas_baseline = run(1, 1);
@@ -313,7 +312,7 @@ fn transact_with_error_db(
     caller: Address,
     callee: Address,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, alloy_op_evm::OpTxError>> {
     let external_envs = TestExternalEnvs::<Infallible>::new();
     let mut context =
         MegaContext::new(db, spec).with_external_envs(external_envs.into()).with_tx_runtime_limits(
@@ -336,7 +335,7 @@ fn transact_with_error_db(
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 fn transact_with_failing_salt(
@@ -345,7 +344,7 @@ fn transact_with_failing_salt(
     caller: Address,
     callee: Address,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let envs: ExternalEnvs<(FailingSaltEnv, EmptyExternalEnv)> =
         ExternalEnvs { salt_env: FailingSaltEnv, oracle_env: EmptyExternalEnv };
     let mut context = MegaContext::new(db, spec).with_external_envs(envs).with_tx_runtime_limits(
@@ -368,7 +367,7 @@ fn transact_with_failing_salt(
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 /// When `inspect_account_delegated` fails during CALLCODE (in `storage_gas_ext::call_code`),

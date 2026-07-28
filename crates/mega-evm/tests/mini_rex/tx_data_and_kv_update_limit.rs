@@ -9,25 +9,25 @@ use alloy_eips::{
     eip2930::{AccessList, AccessListItem},
     eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization},
 };
-use alloy_primitives::{address, bytes, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, address, bytes};
 use mega_evm::{
+    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, EvmTxRuntimeLimits, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, STORAGE_SLOT_WRITE_SIZE,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
+    DatabaseCommit, Inspector,
     bytecode::opcode::{
         CALL, CREATE, DELEGATECALL, GAS, INVALID, PUSH0, PUSH1, SLOAD, SSTORE, STOP,
     },
     context::{
+        ContextTr, TxEnv,
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        ContextTr, TxEnv,
     },
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
     interpreter::{CallInputs, CallOutcome},
-    DatabaseCommit, Inspector,
 };
 
 /// Executes a transaction on the `MegaETH` EVM with configurable data limits.
@@ -39,7 +39,7 @@ fn transact(
     data_limit: u64,
     kv_update_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, alloy_op_evm::OpTxError>>
 {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits()
@@ -53,7 +53,7 @@ fn transact(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))?;
 
     let ctx = evm.ctx_ref();
     Ok((r, ctx.generated_data_size(), ctx.kv_update_count()))
@@ -121,7 +121,9 @@ const LIBRARY: Address = address!("0000000000000000000000000000000000100002");
 ///      stop()
 ///  }
 /// ```
-const LOG_FACTORY_CODE: Bytes = bytes!("5f3560203590805f146050578060011460475780600214603d5780600314603257600414602857fe5b5f8080809381a45b005b505f80809281a36030565b505f809181a26030565b505f9081a16030565b505fa0603056");
+const LOG_FACTORY_CODE: Bytes = bytes!(
+    "5f3560203590805f146050578060011460475780600214603d5780600314603257600414602857fe5b5f8080809381a45b005b505f80809281a36030565b505f809181a26030565b505f9081a16030565b505fa0603056"
+);
 
 /// The factory code of a contract that creates a contract.
 ///
@@ -519,7 +521,7 @@ fn test_delegated_call() {
     // 1 kv update for the caller account (tx nonce increase)
     assert_eq!(kv_updates, 1);
     assert_eq!(data_size, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE); // no update on either contract
-                                                                   // or library
+    // or library
 }
 
 /// Test that caller account updates are not double-counted in nested transfers.
@@ -934,7 +936,7 @@ fn test_state_revert_when_exceeding_limit() {
     assert!(res.result.is_halt());
     assert!(is_data_limit_exceeded(&res));
     assert_eq!(kv_updates, 1); // only 1 kv update for the caller account (tx nonce increase)
-                               // base tx + sender write, no update on the contract
+    // base tx + sender write, no update on the contract
     assert_eq!(data_size, BASE_TX_SIZE + ACCOUNT_INFO_WRITE_SIZE);
     // the contract should not be changed (touched)
     assert!(res.state.get(&CALLEE).is_none_or(|contract| !contract.is_touched()));
@@ -974,7 +976,7 @@ fn test_limits_reset_across_multiple_transactions() {
     let tx1 = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
     let mut mega_tx1 = MegaTransaction::new(tx1);
     mega_tx1.enveloped_tx = Some(Bytes::new());
-    let res1 = alloy_evm::Evm::transact_raw(&mut evm, mega_tx1).unwrap();
+    let res1 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(mega_tx1)).unwrap();
     let data_size_after_tx1 = evm.ctx_ref().generated_data_size();
     let kv_updates_after_tx1 = evm.ctx_ref().kv_update_count();
 
@@ -989,7 +991,7 @@ fn test_limits_reset_across_multiple_transactions() {
     let tx2 = TxEnvBuilder::new().caller(CALLER).call(CALLEE).build_fill();
     let mut mega_tx2 = MegaTransaction::new(tx2);
     mega_tx2.enveloped_tx = Some(Bytes::new());
-    let _ = alloy_evm::Evm::transact_raw(&mut evm, mega_tx2).unwrap();
+    let _ = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(mega_tx2)).unwrap();
     let data_size_after_tx2 = evm.ctx_ref().generated_data_size();
     let kv_updates_after_tx2 = evm.ctx_ref().kv_update_count();
 
@@ -1034,7 +1036,7 @@ fn test_data_limit_exceeded_preserves_remaining_gas() {
     assert!(is_data_limit_exceeded(&result), "Expected data limit exceeded");
 
     // Verify gas accounting - remaining gas should be significant
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     // Most gas should remain since we barely started execution
     assert!(
         gas_remaining > 990_000_000,
@@ -1073,7 +1075,7 @@ fn test_kv_update_limit_exceeded_preserves_remaining_gas() {
     assert!(is_kv_update_limit_exceeded(&result), "Expected KV update limit exceeded");
 
     // Verify gas accounting - most gas should remain
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     // Transaction barely started before hitting limit
     assert!(
         gas_remaining > 997_000_000,
@@ -1117,7 +1119,7 @@ fn test_nested_call_data_limit_exceeded_preserves_gas() {
     assert!(is_data_limit_exceeded(&result), "Expected data limit exceeded");
 
     // Verify significant gas remains from both parent and child
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     // Should have most of the gas remaining (stopped very early)
     assert!(
         gas_remaining > 990_000_000,
@@ -1161,7 +1163,7 @@ fn test_multiple_operations_with_limit_exceeded_preserves_gas() {
     assert!(is_data_limit_exceeded(&result), "Expected data limit exceeded");
 
     // Verify gas is preserved
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     // Should have significant gas remaining (stopped after 1 write instead of 3)
     assert!(
         gas_remaining > 990_000_000,
@@ -1379,11 +1381,11 @@ fn test_rescue_gas_with_gas_spending_inspector_frame_init() {
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     assert!(is_kv_update_limit_exceeded(&result), "Expected KV update limit exceeded");
 
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     assert!(
         gas_remaining > 997_000_000,
         "Expected >997m gas remaining (rescue_gas should capture gas before inspector spend_all), got {}",
@@ -1433,11 +1435,11 @@ fn test_rescue_gas_with_gas_spending_inspector_frame_run() {
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     assert!(is_data_limit_exceeded(&result), "Expected data limit exceeded");
 
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     assert!(
         gas_remaining > 990_000_000,
         "Expected >990m gas remaining (rescue_gas should capture gas before inspector spend_all), got {}",

@@ -1,21 +1,22 @@
 use core::cmp::min;
 
 use crate::{
-    constants::{self},
     ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId,
+    constants::{self},
 };
 use alloy_evm::Database;
-use alloy_primitives::{keccak256, Bytes, U256};
+use alloy_primitives::{Bytes, U256, keccak256};
 use revm::{
+    bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL, STOP},
     context::ContextTr,
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
-        as_usize_or_fail, as_usize_or_fail_ret, gas, gas_or_fail,
-        instructions::{self, control, utility::IntoAddress},
+        CallScheme, FrameInput, Instruction, InstructionContext, InstructionExecResult,
+        InstructionResult, InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult,
+        Stack, gas,
+        instructions::{self, control, gas_table_spec, utility::IntoAddress},
         interpreter::EthInterpreter,
-        interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
-        resize_memory, CallScheme, FrameInput, Instruction, InstructionContext, InstructionResult,
-        InstructionTable, InterpreterAction, InterpreterTypes, SStoreResult, Stack,
+        interpreter_types::{InputsTr, Jumps, LegacyBytecode, LoopControl, MemoryTr, RuntimeFlag},
     },
     primitives::KECCAK_EMPTY,
 };
@@ -180,36 +181,45 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> core::fmt::Debug for MegaInstructi
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
     /// Create a new `MegaethInstructions` with the given spec id.
     pub fn new(spec: MegaSpecId) -> Self {
+        let eth_spec = spec.into_eth_spec();
+        let gas_table = gas_table_spec(eth_spec);
         let instruction_table = match spec {
-            MegaSpecId::EQUIVALENCE => EthInstructions::new_mainnet(),
-            MegaSpecId::MINI_REX => EthInstructions::new(mini_rex::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX | MegaSpecId::REX1 => EthInstructions::new(rex::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX2 => EthInstructions::new(rex2::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX3 => EthInstructions::new(rex3::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX4 => EthInstructions::new(rex4::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX5 => EthInstructions::new(rex5::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX6 => EthInstructions::new(rex6::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
+            MegaSpecId::EQUIVALENCE => EthInstructions::new_mainnet_with_spec(eth_spec),
+            MegaSpecId::MINI_REX => EthInstructions::new(
+                mini_rex::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX | MegaSpecId::REX1 => EthInstructions::new(
+                rex::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX2 => EthInstructions::new(
+                rex2::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX3 => EthInstructions::new(
+                rex3::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX4 => EthInstructions::new(
+                rex4::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX5 => EthInstructions::new(
+                rex5::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX6 => EthInstructions::new(
+                rex6::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
         };
         Self { spec, inner: instruction_table }
     }
@@ -223,6 +233,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> InstructionProvider
 
     fn instruction_table(&self) -> &InstructionTable<Self::InterpreterTypes, Self::Context> {
         self.inner.instruction_table()
+    }
+
+    fn gas_table(&self) -> &revm::interpreter::instructions::GasTable {
+        self.inner.gas_table()
     }
 }
 
@@ -246,9 +260,9 @@ mod rex {
         let mut table = mini_rex::instruction_table::<WIRE, H>();
 
         // Mini-Rex mistakenly not modifying these three call-like opcodes. They are fixed in Rex
-        table[CALLCODE as usize] = forward_gas_ext::call_code;
-        table[DELEGATECALL as usize] = forward_gas_ext::delegate_call;
-        table[STATICCALL as usize] = forward_gas_ext::static_call;
+        table[CALLCODE as usize] = Instruction::new(forward_gas_ext::call_code);
+        table[DELEGATECALL as usize] = Instruction::new(forward_gas_ext::delegate_call);
+        table[STATICCALL as usize] = Instruction::new(forward_gas_ext::static_call);
 
         table
     }
@@ -271,7 +285,7 @@ mod rex2 {
         use revm::bytecode::opcode::*;
         let mut table = rex::instruction_table::<WIRE, H>();
 
-        table[SELFDESTRUCT as usize] = compute_gas_ext::selfdestruct;
+        table[SELFDESTRUCT as usize] = Instruction::new(compute_gas_ext::selfdestruct);
 
         table
     }
@@ -298,7 +312,7 @@ mod rex3 {
         // Rex3: SLOAD triggers gas detention for oracle contract access.
         // The host's sload() method marks oracle access in the volatile data tracker,
         // then the detain_gas_ext wrapper applies the compute gas limit.
-        table[SLOAD as usize] = volatile_data_ext::sload;
+        table[SLOAD as usize] = Instruction::new(volatile_data_ext::sload);
 
         table
     }
@@ -330,17 +344,17 @@ mod rex4 {
         let mut table = rex3::instruction_table::<WIRE, H>();
 
         // Rex4: CALL-like opcodes check for beneficiary volatile access disabled.
-        table[CALL as usize] = volatile_data_ext::call;
-        table[STATICCALL as usize] = volatile_data_ext::static_call;
-        table[DELEGATECALL as usize] = volatile_data_ext::delegate_call;
-        table[CALLCODE as usize] = volatile_data_ext::call_code;
+        table[CALL as usize] = Instruction::new(volatile_data_ext::call);
+        table[STATICCALL as usize] = Instruction::new(volatile_data_ext::static_call);
+        table[DELEGATECALL as usize] = Instruction::new(volatile_data_ext::delegate_call);
+        table[CALLCODE as usize] = Instruction::new(volatile_data_ext::call_code);
 
         // Rex4: SELFDESTRUCT checks for beneficiary volatile access.
-        table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct;
+        table[SELFDESTRUCT as usize] = Instruction::new(volatile_data_ext::selfdestruct);
 
         // Rex4: SELFBALANCE checks for beneficiary volatile access (when the executing
         // contract is the beneficiary, SELFBALANCE triggers gas detention).
-        table[SELFBALANCE as usize] = volatile_data_ext::selfbalance;
+        table[SELFBALANCE as usize] = Instruction::new(volatile_data_ext::selfbalance);
 
         table
     }
@@ -370,7 +384,8 @@ mod rex5 {
 
         // REX5: SELFDESTRUCT charges storage gas for new beneficiary accounts,
         // gated behind the beneficiary-volatile guard.
-        table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct_with_beneficiary_guard;
+        table[SELFDESTRUCT as usize] =
+            Instruction::new(volatile_data_ext::selfdestruct_with_beneficiary_guard);
 
         table
     }
@@ -411,10 +426,40 @@ mod rex6 {
 macro_rules! compute_gas {
     ($interpreter:expr, $additional_limit:expr, $gas_used:expr $(,$ret:expr)?) => {
         if !$additional_limit.record_compute_gas($gas_used) {
-            $interpreter.halt($additional_limit.exceeding_instruction_result());
+            let result = $additional_limit.exceeding_instruction_result_for_halt(&$interpreter.gas);
+            halt_replacing_action!($interpreter, result);
             return $($ret)?;
         }
     };
+}
+
+macro_rules! halt_replacing_action {
+    ($interpreter:expr, $result:expr) => {{
+        if $interpreter.bytecode.action().is_some() {
+            let _ = $interpreter.take_next_action();
+        }
+        $interpreter.halt($result);
+    }};
+}
+
+macro_rules! mega_gas {
+    ($interpreter:expr, $gas:expr) => {
+        if !$interpreter.gas.record_regular_cost($gas) {
+            $interpreter.halt(InstructionResult::OutOfGas);
+            return;
+        }
+    };
+}
+
+macro_rules! legacy_instruction {
+    ($context:ident, $body:block) => {{
+        (|| $body)();
+        match $context.interpreter.bytecode.action().as_ref() {
+            Some(InterpreterAction::NewFrame(_)) => Err(InstructionResult::Suspend),
+            Some(InterpreterAction::Return(result)) => Err(result.result),
+            None => Ok(()),
+        }
+    }};
 }
 
 /// Macro to run the inner instruction and abort if the instruction result is an error.
@@ -424,16 +469,30 @@ macro_rules! run_inner_instruction_or_abort {
             interpreter: &mut *$context.interpreter,
             host: &mut *$context.host,
         };
-        $inner_fn(ctx);
-        if $context
-            .interpreter
-            .bytecode
-            .instruction_result()
-            .is_some_and(|result| result.is_error())
-        {
-            return;
+        if let Err(result) = $inner_fn(ctx) {
+            if $context.interpreter.bytecode.action().is_none() {
+                $context.interpreter.halt(result);
+            }
+            if result.is_halt() {
+                return;
+            }
         }
     };
+}
+
+#[inline]
+fn gas_before_current_instruction<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+    context: &InstructionContext<'_, H, WIRE>,
+) -> u64 {
+    let bytecode = &context.interpreter.bytecode;
+    let opcode = bytecode
+        .pc()
+        .checked_sub(1)
+        .and_then(|pc| bytecode.bytecode_slice().get(pc))
+        .copied()
+        .unwrap_or(STOP);
+    let static_gas = gas_table_spec(context.host.spec_id().into_eth_spec())[opcode as usize];
+    context.interpreter.gas.remaining().saturating_add(u64::from(static_gas))
 }
 
 /// Records an opcode's compute gas in a single measurement window and enforces the compute-gas
@@ -486,8 +545,8 @@ macro_rules! record_storage_compute_gas {
                 gas_used = gas_used.saturating_sub(parent_contributed);
             }
             Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
-                forwarded_child_gas = create_inputs.gas_limit;
-                gas_used = gas_used.saturating_sub(create_inputs.gas_limit);
+                forwarded_child_gas = create_inputs.gas_limit();
+                gas_used = gas_used.saturating_sub(create_inputs.gas_limit());
             }
             _ => {}
         }
@@ -495,19 +554,20 @@ macro_rules! record_storage_compute_gas {
         // but revm already deducted the forwarded gas and the outer `forward_gas_ext` erase is
         // skipped on this abort path. REX6+: return that gas to the parent before halting.
         let is_rex6 = $context.host.spec_id().is_enabled(MegaSpecId::REX6);
-        let exceeding_result = {
+        let exceeds_limit = {
             let mut additional_limit = $context.host.additional_limit().borrow_mut();
-            if additional_limit.record_compute_gas(gas_used) {
-                None
-            } else {
-                Some(additional_limit.exceeding_instruction_result())
-            }
+            !additional_limit.record_compute_gas(gas_used)
         };
-        if let Some(result) = exceeding_result {
+        if exceeds_limit {
             if is_rex6 {
                 $context.interpreter.gas.erase_cost(forwarded_child_gas);
             }
-            $context.interpreter.halt(result);
+            let result = $context
+                .host
+                .additional_limit()
+                .borrow_mut()
+                .exceeding_instruction_result_for_halt(&$context.interpreter.gas);
+            halt_replacing_action!($context.interpreter, result);
             return;
         }
     }};
@@ -515,6 +575,20 @@ macro_rules! record_storage_compute_gas {
 
 mod mini_rex {
     use super::*;
+
+    type InstructionFn<WIRE, H> = fn(InstructionContext<'_, H, WIRE>) -> InstructionExecResult;
+
+    const fn into_instruction_table<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        functions: [InstructionFn<WIRE, H>; 256],
+    ) -> [Instruction<WIRE, H>; 256] {
+        let mut table = [Instruction::unknown(); 256];
+        let mut index = 0;
+        while index < functions.len() {
+            table[index] = Instruction::new(functions[index]);
+            index += 1;
+        }
+        table
+    }
 
     /// Returns the instruction table for the `MINI_REX` spec.
     ///
@@ -534,7 +608,7 @@ mod mini_rex {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >() -> [Instruction<WIRE, H>; 256] {
         use revm::bytecode::opcode::*;
-        let mut table = [control::unknown as Instruction<WIRE, H>; 256];
+        let mut table = [control::unknown as InstructionFn<WIRE, H>; 256];
 
         table[STOP as usize] = compute_gas_ext::stop;
         table[ADD as usize] = compute_gas_ext::add;
@@ -698,7 +772,7 @@ mod mini_rex {
         table[REVERT as usize] = compute_gas_ext::revert;
         table[SELFDESTRUCT as usize] = control::invalid;
 
-        table
+        into_instruction_table(table)
     }
 }
 
@@ -741,82 +815,84 @@ pub mod forward_gas_ext {
                 H: HostExt + ContextTr + JournalInspectTr + ?Sized,
             >(
                 context: InstructionContext<'_, H, WIRE>,
-            ) {
-                // Determine if there's a value transfer (only applies to CALL opcode).
-                let has_transfer = $has_transfer_logic(&context);
+            ) -> InstructionExecResult {
+                legacy_instruction!(context, {
+                    // Determine if there's a value transfer (only applies to CALL opcode).
+                    let has_transfer = $has_transfer_logic(&context);
 
-                // Call the wrapped opcode handler.
-                run_inner_instruction_or_abort!($wrapped_fn, context);
+                    // Call the wrapped opcode handler.
+                    run_inner_instruction_or_abort!($wrapped_fn, context);
 
-                // Cap the forwarded gas to the child call/create to the 98/100 of the remaining
-                // gas.
-                match context.interpreter.bytecode.action() {
-                    Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
-                        // The forwarded gas to the child call should be further restricted to the
-                        // 98/100 of the remaining gas. Here, we first recover the total
-                        // gas left in the parent call and then cap the child call gas
-                        // limit if necessary.
+                    // Cap the forwarded gas to the child call/create to the 98/100 of the remaining
+                    // gas.
+                    match context.interpreter.bytecode.action() {
+                        Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
+                            // The forwarded gas to the child call should be further restricted to
+                            // the 98/100 of the remaining gas. Here, we first
+                            // recover the total gas left in the parent call and
+                            // then cap the child call gas limit if necessary.
 
-                        // We recover the forwarded gas to the child call from the parent call.
-                        let child_gas = call_inputs.gas_limit as u128;
-                        // There may be a call stipend if there is value to be transferred.
-                        let transfer_gas_stipend =
-                            if has_transfer { gas::CALL_STIPEND as u128 } else { 0 };
-                        let forwarded_gas = child_gas - transfer_gas_stipend; // Safe from underflow
+                            // We recover the forwarded gas to the child call from the parent call.
+                            let child_gas = call_inputs.gas_limit as u128;
+                            // There may be a call stipend if there is value to be transferred.
+                            let transfer_gas_stipend =
+                                if has_transfer { gas::CALL_STIPEND as u128 } else { 0 };
+                            let forwarded_gas = child_gas - transfer_gas_stipend; // Safe from underflow
 
-                        // Recover the remaining gas in the parent call before forwarding to the
-                        // child call.
-                        let parent_original_gas_left =
-                            context.interpreter.gas.remaining() as u128 + forwarded_gas;
+                            // Recover the remaining gas in the parent call before forwarding to the
+                            // child call.
+                            let parent_original_gas_left =
+                                context.interpreter.gas.remaining() as u128 + forwarded_gas;
 
-                        // Calculate the amount of gas that should be returned to the parent call
-                        // under the 98/100 rule.
-                        let forwarded_gas_cap =
-                            parent_original_gas_left - parent_original_gas_left * 2 / 100;
-                        let capped_forwarded_gas = min(forwarded_gas, forwarded_gas_cap);
-                        let gas_to_return = forwarded_gas - capped_forwarded_gas; // Safe from underflow
+                            // Calculate the amount of gas that should be returned to the parent
+                            // call under the 98/100 rule.
+                            let forwarded_gas_cap =
+                                parent_original_gas_left - parent_original_gas_left * 2 / 100;
+                            let capped_forwarded_gas = min(forwarded_gas, forwarded_gas_cap);
+                            let gas_to_return = forwarded_gas - capped_forwarded_gas; // Safe from underflow
 
-                        // Recalculate the child gas
-                        let new_child_gas = capped_forwarded_gas + transfer_gas_stipend;
+                            // Recalculate the child gas
+                            let new_child_gas = capped_forwarded_gas + transfer_gas_stipend;
 
-                        //  Return the gas to the parent call.
-                        context.interpreter.gas.erase_cost(gas_to_return as u64);
+                            //  Return the gas to the parent call.
+                            context.interpreter.gas.erase_cost(gas_to_return as u64);
 
-                        // Set the child call gas limit to the capped value.
-                        // Note: REX4+ STORAGE_CALL_STIPEND is applied later in
-                        // AdditionalLimit::before_frame_init, which owns the full
-                        // stipend lifecycle (grant → compute cap → burn on return).
-                        call_inputs.gas_limit = new_child_gas as u64;
+                            // Set the child call gas limit to the capped value.
+                            // Note: REX4+ STORAGE_CALL_STIPEND is applied later in
+                            // AdditionalLimit::before_frame_init, which owns the full
+                            // stipend lifecycle (grant → compute cap → burn on return).
+                            call_inputs.gas_limit = new_child_gas as u64;
+                        }
+                        Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
+                            // The forwarded gas to the child create should be further restricted to
+                            // the 98/100 of the remaining gas. CREATE opcodes don't
+                            // have a call stipend, so the logic is simpler.
+
+                            // We recover the forwarded gas from the parent call.
+                            let child_gas = create_inputs.gas_limit() as u128;
+                            let forwarded_gas = child_gas; // No stipend for CREATE
+
+                            // Recover the remaining gas in the parent call before forwarding to the
+                            // child create.
+                            let parent_original_gas_left =
+                                context.interpreter.gas.remaining() as u128 + forwarded_gas;
+
+                            // Calculate the amount of gas that should be returned to the parent
+                            // call under the 98/100 rule.
+                            let forwarded_gas_cap =
+                                parent_original_gas_left - parent_original_gas_left * 2 / 100;
+                            let capped_forwarded_gas = min(forwarded_gas, forwarded_gas_cap);
+                            let gas_to_return = forwarded_gas - capped_forwarded_gas; // Safe from underflow
+
+                            //  Return the gas to the parent call.
+                            context.interpreter.gas.erase_cost(gas_to_return as u64);
+
+                            // Set the child create gas limit to the capped value.
+                            create_inputs.set_gas_limit(capped_forwarded_gas as u64);
+                        }
+                        _ => {}
                     }
-                    Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
-                        // The forwarded gas to the child create should be further restricted to the
-                        // 98/100 of the remaining gas. CREATE opcodes don't have a call
-                        // stipend, so the logic is simpler.
-
-                        // We recover the forwarded gas from the parent call.
-                        let child_gas = create_inputs.gas_limit as u128;
-                        let forwarded_gas = child_gas; // No stipend for CREATE
-
-                        // Recover the remaining gas in the parent call before forwarding to the
-                        // child create.
-                        let parent_original_gas_left =
-                            context.interpreter.gas.remaining() as u128 + forwarded_gas;
-
-                        // Calculate the amount of gas that should be returned to the parent call
-                        // under the 98/100 rule.
-                        let forwarded_gas_cap =
-                            parent_original_gas_left - parent_original_gas_left * 2 / 100;
-                        let capped_forwarded_gas = min(forwarded_gas, forwarded_gas_cap);
-                        let gas_to_return = forwarded_gas - capped_forwarded_gas; // Safe from underflow
-
-                        //  Return the gas to the parent call.
-                        context.interpreter.gas.erase_cost(gas_to_return as u64);
-
-                        // Set the child create gas limit to the capped value.
-                        create_inputs.gas_limit = capped_forwarded_gas as u64;
-                    }
-                    _ => {}
-                }
+                })
             }
         };
     }
@@ -903,7 +979,7 @@ pub mod volatile_data_ext {
     use alloy_primitives::Address;
 
     use crate::{
-        volatile_data_access_disabled_revert_data, VolatileDataAccessType, ORACLE_CONTRACT_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS, VolatileDataAccessType, volatile_data_access_disabled_revert_data,
     };
 
     /// Applies the compute gas limit from the volatile data tracker to the additional limit.
@@ -935,7 +1011,8 @@ pub mod volatile_data_ext {
         #[inline]
         pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
             context: InstructionContext<'_, H, WIRE>,
-        ) {
+        ) -> InstructionExecResult {
+            legacy_instruction!(context, {
             // Rex4+: revert before executing if volatile data access is disabled.
             if context.host.volatile_access_disabled() {
                 context.interpreter.bytecode.set_action(InterpreterAction::new_return(
@@ -948,6 +1025,7 @@ pub mod volatile_data_ext {
 
             run_inner_instruction_or_abort!($original_fn, context);
             apply_compute_gas_limit!(context);
+            })
         }
     };
     }
@@ -971,7 +1049,8 @@ pub mod volatile_data_ext {
             H: HostExt + ContextTr + JournalInspectTr + ?Sized,
         >(
             context: InstructionContext<'_, H, WIRE>,
-        ) {
+        ) -> InstructionExecResult {
+            legacy_instruction!(context, {
             // Peek the target address from the stack to check if it's the beneficiary.
             // Rex4+: If targeting the beneficiary while volatile access is disabled, revert
             // before executing the opcode to avoid polluting the tracker.
@@ -992,6 +1071,7 @@ pub mod volatile_data_ext {
 
             run_inner_instruction_or_abort!($original_fn, context);
             apply_compute_gas_limit!(context);
+            })
         }
     };
     }
@@ -1079,45 +1159,48 @@ pub mod volatile_data_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        if context.host.volatile_access_disabled() {
-            let beneficiary = context.host.beneficiary_address();
-            // Confirm the SELFDESTRUCT has a target operand first: a stack-underflow SELFDESTRUCT
-            // must keep revm's `StackUnderflow` halt and not be pre-empted by a beneficiary revert.
-            // The guards apply only once the opcode actually acts on a target.
-            if let Some(addr_word) = context.interpreter.stack.inspect::<0>() {
-                let target: Address = addr_word.into_address();
-                // REX6: the executing contract (source) reading and zeroing its own balance is
-                // itself a beneficiary observation. Frozen off pre-REX6, where only the stack
-                // target below was guarded.
-                if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
-                    context.interpreter.input.target_address() == beneficiary
-                {
-                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                        InstructionResult::Revert,
-                        volatile_data_access_disabled_revert_data(
-                            VolatileDataAccessType::Beneficiary,
-                        ),
-                        context.interpreter.gas,
-                    ));
-                    return;
-                }
-                // All specs: the stack target (the value-transfer destination).
-                if target == beneficiary {
-                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                        InstructionResult::Revert,
-                        volatile_data_access_disabled_revert_data(
-                            VolatileDataAccessType::Beneficiary,
-                        ),
-                        context.interpreter.gas,
-                    ));
-                    return;
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            if context.host.volatile_access_disabled() {
+                let beneficiary = context.host.beneficiary_address();
+                // Confirm the SELFDESTRUCT has a target operand first: a stack-underflow
+                // SELFDESTRUCT must keep revm's `StackUnderflow` halt and not be
+                // pre-empted by a beneficiary revert. The guards apply only once
+                // the opcode actually acts on a target.
+                if let Some(addr_word) = context.interpreter.stack.inspect::<0>() {
+                    let target: Address = addr_word.into_address();
+                    // REX6: the executing contract (source) reading and zeroing its own balance is
+                    // itself a beneficiary observation. Frozen off pre-REX6, where only the stack
+                    // target below was guarded.
+                    if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
+                        context.interpreter.input.target_address() == beneficiary
+                    {
+                        context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                            InstructionResult::Revert,
+                            volatile_data_access_disabled_revert_data(
+                                VolatileDataAccessType::Beneficiary,
+                            ),
+                            context.interpreter.gas,
+                        ));
+                        return;
+                    }
+                    // All specs: the stack target (the value-transfer destination).
+                    if target == beneficiary {
+                        context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                            InstructionResult::Revert,
+                            volatile_data_access_disabled_revert_data(
+                                VolatileDataAccessType::Beneficiary,
+                            ),
+                            context.interpreter.gas,
+                        ));
+                        return;
+                    }
                 }
             }
-        }
 
-        run_inner_instruction_or_abort!(super::storage_gas_ext::selfdestruct, context);
-        apply_compute_gas_limit!(context);
+            run_inner_instruction_or_abort!(super::storage_gas_ext::selfdestruct, context);
+            apply_compute_gas_limit!(context);
+        })
     }
 
     /// `SELFBALANCE` opcode with compute gas limit enforcement on volatile data access.
@@ -1129,20 +1212,22 @@ pub mod volatile_data_ext {
     #[inline]
     pub fn selfbalance<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        let target = context.interpreter.input.target_address();
-        let beneficiary = context.host.beneficiary_address();
-        if target == beneficiary && context.host.volatile_access_disabled() {
-            context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                InstructionResult::Revert,
-                volatile_data_access_disabled_revert_data(VolatileDataAccessType::Beneficiary),
-                context.interpreter.gas,
-            ));
-            return;
-        }
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            let target = context.interpreter.input.target_address();
+            let beneficiary = context.host.beneficiary_address();
+            if target == beneficiary && context.host.volatile_access_disabled() {
+                context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                    InstructionResult::Revert,
+                    volatile_data_access_disabled_revert_data(VolatileDataAccessType::Beneficiary),
+                    context.interpreter.gas,
+                ));
+                return;
+            }
 
-        run_inner_instruction_or_abort!(compute_gas_ext::selfbalance, context);
-        apply_compute_gas_limit!(context);
+            run_inner_instruction_or_abort!(compute_gas_ext::selfbalance, context);
+            apply_compute_gas_limit!(context);
+        })
     }
 
     /// `SLOAD` opcode with compute gas limit enforcement on volatile data access.
@@ -1156,21 +1241,23 @@ pub mod volatile_data_ext {
     #[inline]
     pub fn sload<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        // Rex4+: If SLOAD targets the oracle contract and volatile access is disabled,
-        // revert before executing to avoid polluting the tracker.
-        let target = context.interpreter.input.target_address();
-        if target == ORACLE_CONTRACT_ADDRESS && context.host.volatile_access_disabled() {
-            context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                InstructionResult::Revert,
-                volatile_data_access_disabled_revert_data(VolatileDataAccessType::Oracle),
-                context.interpreter.gas,
-            ));
-            return;
-        }
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            // Rex4+: If SLOAD targets the oracle contract and volatile access is disabled,
+            // revert before executing to avoid polluting the tracker.
+            let target = context.interpreter.input.target_address();
+            if target == ORACLE_CONTRACT_ADDRESS && context.host.volatile_access_disabled() {
+                context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                    InstructionResult::Revert,
+                    volatile_data_access_disabled_revert_data(VolatileDataAccessType::Oracle),
+                    context.interpreter.gas,
+                ));
+                return;
+            }
 
-        run_inner_instruction_or_abort!(compute_gas_ext::sload, context);
-        apply_compute_gas_limit!(context);
+            run_inner_instruction_or_abort!(compute_gas_ext::sload, context);
+            apply_compute_gas_limit!(context);
+        })
     }
 
     /// Macro to create opcode handlers for **conditionally volatile CALL-like** opcodes.
@@ -1195,7 +1282,8 @@ pub mod volatile_data_ext {
             H: HostExt + ContextTr + JournalInspectTr + ?Sized,
         >(
             context: InstructionContext<'_, H, WIRE>,
-        ) {
+        ) -> InstructionExecResult {
+            legacy_instruction!(context, {
             // Rex4+: If targeting the beneficiary while volatile access is disabled, revert before
             // executing the opcode to avoid polluting the tracker. Only this disabled path can
             // revert and only it needs the EIP-7702 delegate resolved, so the resolve (a DB read)
@@ -1239,13 +1327,7 @@ pub mod volatile_data_ext {
 
             // Delegate to the existing forward_gas_ext handler via reborrow so that
             // `context` remains usable for `apply_compute_gas_limit!` afterward.
-            {
-                let ctx = InstructionContext::<'_, H, WIRE> {
-                    interpreter: &mut *context.interpreter,
-                    host: &mut *context.host,
-                };
-                $inner_fn(ctx);
-            }
+            run_inner_instruction_or_abort!($inner_fn, context);
 
             // Propagate the detained compute gas limit if the CALL triggered beneficiary
             // access (via `host.load_account_delegated()` inside the CALL handler).
@@ -1253,6 +1335,7 @@ pub mod volatile_data_ext {
             // not interpreter state, so it is safe in any interpreter state (including
             // `NewFrame` after a successful CALL).
             apply_compute_gas_limit!(context);
+            })
         }
     };
     }
@@ -1292,36 +1375,40 @@ pub mod additional_limit_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        // Load storage slot values before executing the instruction
-        let target_address = context.interpreter.input.target_address();
-        let Some(index) = context.interpreter.stack.inspect::<0>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        let mega_spec = context.host.spec_id();
-        let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        let (original_value, present_value) = (slot.original_value(), slot.present_value());
-        let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        let loaded_data = SStoreResult { original_value, present_value, new_value };
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            // Load storage slot values before executing the instruction
+            let target_address = context.interpreter.input.target_address();
+            let Some(index) = context.interpreter.stack.inspect::<0>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+            let mega_spec = context.host.spec_id();
+            let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            let (original_value, present_value) = (slot.original_value(), slot.present_value());
+            let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+            let loaded_data = SStoreResult { original_value, present_value, new_value };
 
-        // Execute the original SSTORE instruction
-        run_inner_instruction_or_abort!(storage_gas_ext::sstore, context);
+            // Execute the original SSTORE instruction
+            run_inner_instruction_or_abort!(storage_gas_ext::sstore, context);
 
-        // KV update bomb and data bomb (only when first writing non-zero value to originally zero
-        // slot): check if the number of key-value updates or the total data size will exceed the
-        // limit, if so, halt.
-        let additional_limit = context.host.additional_limit();
-        let mut additional_limit = additional_limit.borrow_mut();
-        if !additional_limit.on_sstore(target_address, index, &loaded_data) {
-            context.interpreter.halt(additional_limit.exceeding_instruction_result());
-        }
+            // KV update bomb and data bomb (only when first writing non-zero value to originally
+            // zero slot): check if the number of key-value updates or the total data
+            // size will exceed the limit, if so, halt.
+            let additional_limit = context.host.additional_limit();
+            let mut additional_limit = additional_limit.borrow_mut();
+            if !additional_limit.on_sstore(target_address, index, &loaded_data) {
+                let result = additional_limit
+                    .exceeding_instruction_result_for_halt(&context.interpreter.gas);
+                halt_replacing_action!(context.interpreter, result);
+            }
+        })
     }
 
     /// `LOG` opcode implementation with data size limit enforcement.
@@ -1339,24 +1426,31 @@ pub mod additional_limit_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        // Get the log data length before executing the instruction
-        let Some(len) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        let len = as_usize_or_fail!(context.interpreter, len);
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            // Get the log data length before executing the instruction
+            let Some(len) = context.interpreter.stack.inspect::<1>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+            let Ok(len) = usize::try_from(len) else {
+                context.interpreter.halt(InstructionResult::InvalidOperandOOG);
+                return;
+            };
 
-        // Execute the original LOG instruction
-        run_inner_instruction_or_abort!(storage_gas_ext::log::<N, WIRE, H>, context);
+            // Execute the original LOG instruction
+            run_inner_instruction_or_abort!(storage_gas_ext::log::<N, WIRE, H>, context);
 
-        // Record the size of the log topics and data. If the total data size exceeds the limit, we
-        // halt.
-        let additional_limit = context.host.additional_limit();
-        let mut additional_limit = additional_limit.borrow_mut();
-        if !additional_limit.on_log(N as u64, len as u64) {
-            context.interpreter.halt(additional_limit.exceeding_instruction_result());
-        }
+            // Record the size of the log topics and data. If the total data size exceeds the limit,
+            // we halt.
+            let additional_limit = context.host.additional_limit();
+            let mut additional_limit = additional_limit.borrow_mut();
+            if !additional_limit.on_log(N as u64, len as u64) {
+                let result = additional_limit
+                    .exceeding_instruction_result_for_halt(&context.interpreter.gas);
+                halt_replacing_action!(context.interpreter, result);
+            }
+        })
     }
 }
 
@@ -1375,11 +1469,7 @@ pub mod storage_gas_ext {
     /// executes borrowed code in the caller's own storage context; pre-Rex5 preserves the frozen
     /// behavior of metering against the code-source (stack `to`).
     fn storage_addr_for_callcode(mega_spec: MegaSpecId, current: Address, to: Address) -> Address {
-        if mega_spec.is_enabled(MegaSpecId::REX5) {
-            current
-        } else {
-            to
-        }
+        if mega_spec.is_enabled(MegaSpecId::REX5) { current } else { to }
     }
 
     /// Macro to charge storage gas for new account creation before calling the wrapped instruction.
@@ -1433,10 +1523,11 @@ pub mod storage_gas_ext {
                 H: HostExt + ContextTr + JournalInspectTr + ?Sized,
             >(
                 context: InstructionContext<'_, H, WIRE>,
-            ) {
+            ) -> InstructionExecResult {
+                legacy_instruction!(context, {
                 // Captured at the very top so the single compute window covers all of the
                 // opcode's compute work.
-                let gas_before = context.interpreter.gas.remaining();
+                let gas_before = gas_before_current_instruction(&context);
                 let spec = context.interpreter.runtime_flag.spec_id();
                 let Some(to) = context.interpreter.stack.inspect::<1>() else {
                     context.interpreter.halt(InstructionResult::StackUnderflow);
@@ -1481,7 +1572,7 @@ pub mod storage_gas_ext {
                         .borrow_mut()
                         .try_consume_storage_stipend(new_account_storage_gas);
                     let charged = new_account_storage_gas - drained;
-                    gas!(context.interpreter, charged);
+                    mega_gas!(context.interpreter, charged);
                     charged
                 } else {
                     0
@@ -1493,27 +1584,28 @@ pub mod storage_gas_ext {
                 // above consumes EVM gas.
                 run_inner_instruction_or_abort!($raw_fn, context);
                 record_storage_compute_gas!(context, gas_before, storage_charged);
+                })
             }
         };
     }
 
-    wrap_call_with_storage_gas!(call, "CALL", instructions::contract::call, true);
+    wrap_call_with_storage_gas!(call, "CALL", instructions::contract::call::<CALL, _, _>, true);
     wrap_call_with_storage_gas!(
         delegate_call,
         "DELEGATECALL",
-        instructions::contract::delegate_call,
+        instructions::contract::call::<DELEGATECALL, _, _>,
         false
     );
     wrap_call_with_storage_gas!(
         static_call,
         "STATICCALL",
-        instructions::contract::static_call,
+        instructions::contract::call::<STATICCALL, _, _>,
         false
     );
     wrap_call_with_storage_gas!(
         call_code,
         "CALLCODE",
-        instructions::contract::call_code,
+        instructions::contract::call::<CALLCODE, _, _>,
         true,
         storage_addr_for_callcode
     );
@@ -1595,7 +1687,10 @@ pub mod storage_gas_ext {
                 // below, which must run before `initcode_offset` is ever touched so that an
                 // oversized `initcode_len` halts with `CreateInitCodeSizeLimit` even when
                 // `initcode_offset` does not fit in a `usize` either.
-                let initcode_len = as_usize_or_fail_ret!(context.interpreter, initcode_len, None);
+                let Ok(initcode_len) = usize::try_from(initcode_len) else {
+                    context.interpreter.halt(InstructionResult::InvalidOperandOOG);
+                    return None;
+                };
 
                 // REX6: EIP-3860 initcode-size halt, matching revm's canonical
                 // ordering intent (`revm::interpreter::instructions::contract::create`) — halt
@@ -1617,13 +1712,22 @@ pub mod storage_gas_ext {
                     return None;
                 }
 
-                let initcode_offset =
-                    as_usize_or_fail_ret!(context.interpreter, initcode_offset, None);
+                let Ok(initcode_offset) = usize::try_from(initcode_offset) else {
+                    context.interpreter.halt(InstructionResult::InvalidOperandOOG);
+                    return None;
+                };
 
                 // Expand memory before slicing so the read can never go out of bounds. The inner
                 // CREATE2 also calls `resize_memory!`, which is a no-op once memory already fits.
                 let gas_before_resize = context.interpreter.gas.remaining();
-                resize_memory!(context.interpreter, initcode_offset, initcode_len, None);
+                if let Err(result) = context.interpreter.resize_memory(
+                    context.host.gas_params(),
+                    initcode_offset,
+                    initcode_len,
+                ) {
+                    context.interpreter.halt(result);
+                    return None;
+                }
                 resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
 
                 // Eager recording (pre-REX6 / REX5): record the expansion gas immediately to align
@@ -1678,69 +1782,76 @@ pub mod storage_gas_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         mut context: InstructionContext<'_, H, WIRE>,
-    ) {
-        let spec = context.host.spec_id();
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            let spec = context.host.spec_id();
 
-        // REX6+: canonical metering order — fold the CREATE2 memory-expansion gas into a single
-        // compute-gas recording taken after the body completes (see `create_rex6`), instead of
-        // the pre-REX6 split `resize_gas` recording handled below.
-        if spec.is_enabled(MegaSpecId::REX6) {
-            create_rex6::<WIRE, IS_CREATE2, H>(context);
-            return;
-        }
+            // REX6+: canonical metering order — fold the CREATE2 memory-expansion gas into a single
+            // compute-gas recording taken after the body completes (see `create_rex6`), instead of
+            // the pre-REX6 split `resize_gas` recording handled below.
+            if spec.is_enabled(MegaSpecId::REX6) {
+                create_rex6::<WIRE, IS_CREATE2, H>(InstructionContext {
+                    interpreter: &mut *context.interpreter,
+                    host: &mut *context.host,
+                });
+                return;
+            }
 
-        // Inspect the creator and compute the created address. REX5+ records the CREATE2
-        // memory-expansion gas eagerly inside the helper (the same position and timing as the
-        // original inline code); pre-REX5 leaves it in `resize_gas` for the late-record path below.
-        let Some((created_address, resize_gas)) = compute_created_address::<WIRE, IS_CREATE2, H>(
-            &mut context,
-            spec,
-            spec.is_enabled(MegaSpecId::REX5),
-        ) else {
-            return;
-        };
+            // Inspect the creator and compute the created address. REX5+ records the CREATE2
+            // memory-expansion gas eagerly inside the helper (the same position and timing as the
+            // original inline code); pre-REX5 leaves it in `resize_gas` for the late-record path
+            // below.
+            let Some((created_address, resize_gas)) = compute_created_address::<WIRE, IS_CREATE2, H>(
+                &mut context,
+                spec,
+                spec.is_enabled(MegaSpecId::REX5),
+            ) else {
+                return;
+            };
 
-        // Charge storage gas cost for creating a new contract
-        let create_contract_storage_gas = if spec.is_enabled(MegaSpecId::REX) {
-            // Rex spec distinguishes between contract creation and account creation.
-            context.host.create_contract_storage_gas(created_address)
-        } else {
-            // Mini-Rex spec does not distinguish between contract creation and account creation.
-            context.host.new_account_storage_gas(created_address)
-        };
-        let Some(create_contract_storage_gas) = create_contract_storage_gas else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
-        let drained = context
-            .host
-            .additional_limit()
-            .borrow_mut()
-            .try_consume_storage_stipend(create_contract_storage_gas);
-        gas!(context.interpreter, create_contract_storage_gas - drained);
+            // Charge storage gas cost for creating a new contract
+            let create_contract_storage_gas = if spec.is_enabled(MegaSpecId::REX) {
+                // Rex spec distinguishes between contract creation and account creation.
+                context.host.create_contract_storage_gas(created_address)
+            } else {
+                // Mini-Rex spec does not distinguish between contract creation and account
+                // creation.
+                context.host.new_account_storage_gas(created_address)
+            };
+            let Some(create_contract_storage_gas) = create_contract_storage_gas else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+            let drained = context
+                .host
+                .additional_limit()
+                .borrow_mut()
+                .try_consume_storage_stipend(create_contract_storage_gas);
+            mega_gas!(context.interpreter, create_contract_storage_gas - drained);
 
-        // Capture, run raw, record — `gas_before` here is captured after the storage debit and
-        // after `compute_created_address`'s eager `resize_gas` record (REX5+), so the recorded
-        // amount equals the inner opcode's body gas. Byte-equivalent to the old per-`IS_CREATE2`
-        // dispatch through `compute_gas_ext::{create, create2}`, which captured at the same
-        // point.
-        let gas_before = context.interpreter.gas.remaining();
-        run_inner_instruction_or_abort!(
-            instructions::contract::create::<_, IS_CREATE2, _>,
-            context
-        );
-        record_storage_compute_gas!(context, gas_before, 0);
+            // Capture, run raw, record — `gas_before` here is captured after the storage debit and
+            // after `compute_created_address`'s eager `resize_gas` record (REX5+), so the recorded
+            // amount equals the inner opcode's body gas. Byte-equivalent to the old
+            // per-`IS_CREATE2` dispatch through `compute_gas_ext::{create, create2}`,
+            // which captured at the same point.
+            let gas_before = gas_before_current_instruction(&context);
+            run_inner_instruction_or_abort!(
+                instructions::contract::create::<IS_CREATE2, _, _>,
+                context
+            );
+            record_storage_compute_gas!(context, gas_before, 0);
 
-        // Pre-REX5 late-record path for the CREATE2 initcode memory-expansion gas.
-        // Preserved verbatim for replay parity: pre-REX5 keeps the original "skip on inner
-        // error" semantics where storage-gas OOG and inner-CREATE2 failure both skip this
-        // recording. REX5+ already recorded `resize_gas` above (and zeroed it), so this
-        // branch is a no-op under REX5.
-        if resize_gas > 0 {
-            let mut additional_limit = context.host.additional_limit().borrow_mut();
-            compute_gas!(context.interpreter, additional_limit, resize_gas);
-        }
+            // Pre-REX5 late-record path for the CREATE2 initcode memory-expansion gas.
+            // Preserved verbatim for replay parity: pre-REX5 keeps the original "skip on inner
+            // error" semantics where storage-gas OOG and inner-CREATE2 failure both skip this
+            // recording. REX5+ already recorded `resize_gas` above (and zeroed it), so this
+            // branch is a no-op under REX5.
+            if resize_gas > 0 {
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, resize_gas);
+            }
+        })
     }
 
     /// `CREATE`/`CREATE2` under the REX6+ canonical metering order.
@@ -1783,7 +1894,7 @@ pub mod storage_gas_ext {
 
         // Captured before any gas movement so the single compute window covers the wrapper-side
         // CREATE2 memory expansion as well as the inner opcode.
-        let gas_before = context.interpreter.gas.remaining();
+        let gas_before = gas_before_current_instruction(&context);
         let spec = context.host.spec_id();
 
         // Inspect the creator and compute the created address. `record_resize_eagerly = false`:
@@ -1811,14 +1922,14 @@ pub mod storage_gas_ext {
             .borrow_mut()
             .try_consume_storage_stipend(create_contract_storage_gas);
         let storage_charged = create_contract_storage_gas - drained;
-        gas!(context.interpreter, storage_charged);
+        mega_gas!(context.interpreter, storage_charged);
 
         // Run the raw inner create opcode (no `compute_gas_ext` wrapper — REX6 records compute gas
         // once below).
         if IS_CREATE2 {
-            run_inner_instruction_or_abort!(instructions::contract::create::<_, true, _>, context);
+            run_inner_instruction_or_abort!(instructions::contract::create::<true, _, _>, context);
         } else {
-            run_inner_instruction_or_abort!(instructions::contract::create::<_, false, _>, context);
+            run_inner_instruction_or_abort!(instructions::contract::create::<false, _, _>, context);
         }
 
         record_storage_compute_gas!(context, gas_before, storage_charged);
@@ -1842,44 +1953,55 @@ pub mod storage_gas_ext {
         H: HostExt + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        // Captured at the very top so the single compute window covers the inner opcode.
-        let gas_before = context.interpreter.gas.remaining();
-        let Some(len) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        let len = as_usize_or_fail!(context.interpreter, len);
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            // Captured at the very top so the single compute window covers the inner opcode.
+            let gas_before = gas_before_current_instruction(&context);
+            let Some(len) = context.interpreter.stack.inspect::<1>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+            let Ok(len) = usize::try_from(len) else {
+                context.interpreter.halt(InstructionResult::InvalidOperandOOG);
+                return;
+            };
 
-        // Charge storage gas cost for log topics and data before instruction execution.
-        // REX5 drains the allowance on the `Some(amount)` arm; the `None` (overflow) arm
-        // is passed through unchanged to preserve the OOG halt.
-        let log_storage_cost = {
-            let topic_cost = constants::mini_rex::LOG_TOPIC_STORAGE_GAS.checked_mul(N as u64);
-            let data_cost = constants::mini_rex::LOG_DATA_STORAGE_GAS.checked_mul(len as u64);
-            topic_cost.and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
-        };
-        let log_storage_cost = log_storage_cost.map(|amount| {
-            let drained =
-                context.host.additional_limit().borrow_mut().try_consume_storage_stipend(amount);
-            amount - drained
-        });
-        gas_or_fail!(context.interpreter, log_storage_cost);
-        // `gas_or_fail!` halts and returns on the `None` (overflow) arm, so reaching here means the
-        // cost was `Some`; this is the storage gas actually charged, excluded from the compute
-        // recording below. Assert the invariant with `expect` rather than `unwrap_or(0)`: a silent
-        // `0` here would make `record_storage_compute_gas!` over-count compute gas by the full LOG
-        // storage cost.
-        let storage_charged =
-            log_storage_cost.expect("gas_or_fail! above halts and returns on None");
-
-        // Run the raw opcode and record compute gas once after the body completes (canonical
-        // metering order). Byte-equivalent to the pre-REX6 per-`N` `compute_gas_ext::logK`
-        // dispatch on every spec because nothing between `gas_before` and the `gas_or_fail!` above
-        // consumes EVM gas. The wrapper is only ever instantiated for `N` in `0..=4`, so the
-        // generic `instructions::host::log::<N, _>` covers every valid call site.
-        run_inner_instruction_or_abort!(instructions::host::log::<N, _>, context);
-        record_storage_compute_gas!(context, gas_before, storage_charged);
+            // Charge storage gas cost for log topics and data before instruction execution.
+            // REX5 drains the allowance on the `Some(amount)` arm; the `None` (overflow) arm
+            // is passed through unchanged to preserve the OOG halt.
+            let log_storage_cost = {
+                let topic_cost = constants::mini_rex::LOG_TOPIC_STORAGE_GAS.checked_mul(N as u64);
+                let data_cost = constants::mini_rex::LOG_DATA_STORAGE_GAS.checked_mul(len as u64);
+                topic_cost.and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
+            };
+            let log_storage_cost = log_storage_cost.map(|amount| {
+                let drained = context
+                    .host
+                    .additional_limit()
+                    .borrow_mut()
+                    .try_consume_storage_stipend(amount);
+                amount - drained
+            });
+            let Some(storage_charged) = log_storage_cost else {
+                context.interpreter.halt(InstructionResult::OutOfGas);
+                return;
+            };
+            mega_gas!(context.interpreter, storage_charged);
+            // `gas_or_fail!` halts and returns on the `None` (overflow) arm, so reaching here means
+            // the cost was `Some`; this is the storage gas actually charged, excluded
+            // from the compute recording below. Assert the invariant with `expect`
+            // rather than `unwrap_or(0)`: a silent `0` here would make
+            // `record_storage_compute_gas!` over-count compute gas by the full LOG
+            // storage cost.
+            // Run the raw opcode and record compute gas once after the body completes (canonical
+            // metering order). Byte-equivalent to the pre-REX6 per-`N` `compute_gas_ext::logK`
+            // dispatch on every spec because nothing between `gas_before` and the `gas_or_fail!`
+            // above consumes EVM gas. The wrapper is only ever instantiated for `N` in
+            // `0..=4`, so the generic `instructions::host::log::<N, _>` covers every
+            // valid call site.
+            run_inner_instruction_or_abort!(instructions::host::log::<N, _>, context);
+            record_storage_compute_gas!(context, gas_before, storage_charged);
+        })
     }
 
     /// `SSTORE` opcode implementation modified from `revm` with compute gas tracking and
@@ -1902,58 +2024,60 @@ pub mod storage_gas_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        // Captured at the very top so the single compute window covers the inner opcode.
-        let gas_before = context.interpreter.gas.remaining();
-        // The address to the underlying execution contract state
-        let target_address = context.interpreter.input.target_address();
-        // The storage slot to write
-        let Some(index) = context.interpreter.stack.inspect::<0>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        // The storage slot values
-        let mega_spec = context.host.spec_id();
-        let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        let (original_value, present_value) = (slot.original_value(), slot.present_value());
-        let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-
-        // Charge storage gas cost before the instruction is executed.
-        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
-        // `storage_charged` is the EVM gas actually debited for storage gas, excluded from the
-        // single compute recording below.
-        let storage_charged =
-            if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
-                let Some(sstore_set_storage_gas) =
-                    context.host.sstore_set_storage_gas(target_address, index)
-                else {
-                    context.interpreter.halt(InstructionResult::FatalExternalError);
-                    return;
-                };
-                let drained = context
-                    .host
-                    .additional_limit()
-                    .borrow_mut()
-                    .try_consume_storage_stipend(sstore_set_storage_gas);
-                let charged = sstore_set_storage_gas - drained;
-                gas!(context.interpreter, charged);
-                charged
-            } else {
-                0
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            // Captured at the very top so the single compute window covers the inner opcode.
+            let gas_before = gas_before_current_instruction(&context);
+            // The address to the underlying execution contract state
+            let target_address = context.interpreter.input.target_address();
+            // The storage slot to write
+            let Some(index) = context.interpreter.stack.inspect::<0>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+            // The storage slot values
+            let mega_spec = context.host.spec_id();
+            let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            let (original_value, present_value) = (slot.original_value(), slot.present_value());
+            let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
             };
 
-        // Run the raw opcode and record compute gas once after the body completes (canonical
-        // metering order). Byte-equivalent to the pre-REX6 `compute_gas_ext::sstore` layering on
-        // every spec because nothing between `gas_before` and the storage charge above consumes
-        // EVM gas.
-        run_inner_instruction_or_abort!(instructions::host::sstore, context);
-        record_storage_compute_gas!(context, gas_before, storage_charged);
+            // Charge storage gas cost before the instruction is executed.
+            // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+            // `storage_charged` is the EVM gas actually debited for storage gas, excluded from the
+            // single compute recording below.
+            let storage_charged =
+                if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
+                    let Some(sstore_set_storage_gas) =
+                        context.host.sstore_set_storage_gas(target_address, index)
+                    else {
+                        context.interpreter.halt(InstructionResult::FatalExternalError);
+                        return;
+                    };
+                    let drained = context
+                        .host
+                        .additional_limit()
+                        .borrow_mut()
+                        .try_consume_storage_stipend(sstore_set_storage_gas);
+                    let charged = sstore_set_storage_gas - drained;
+                    mega_gas!(context.interpreter, charged);
+                    charged
+                } else {
+                    0
+                };
+
+            // Run the raw opcode and record compute gas once after the body completes (canonical
+            // metering order). Byte-equivalent to the pre-REX6 `compute_gas_ext::sstore` layering
+            // on every spec because nothing between `gas_before` and the storage charge
+            // above consumes EVM gas.
+            run_inner_instruction_or_abort!(instructions::host::sstore, context);
+            record_storage_compute_gas!(context, gas_before, storage_charged);
+        })
     }
 
     /// `SELFDESTRUCT` opcode implementation with storage gas metering for
@@ -1981,76 +2105,79 @@ pub mod storage_gas_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        // Inside a static frame, revm's inner SELFDESTRUCT halts on the
-        // static-context check without changing state. Skip the mega host work below
-        // (two account inspections, SALT account-creation pricing, the storage-gas
-        // stipend draw and tracker write) — the frame reverts and discards all of it
-        // anyway — and let the inner instruction produce the identical halt. This is
-        // behavior-neutral: the static halt is exceptional, so the frame's gas and
-        // tracked usage are the same whether or not the host work ran first. The table
-        // installs this wrapper only for REX5+, so pre-REX5 specs never reach here.
-        if context.interpreter.runtime_flag.is_static() {
-            run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
-            // Defensive: unreachable in practice — a static SELFDESTRUCT always halts
-            // inside the inner instruction, so the macro returns early above.
-            return;
-        }
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            // Inside a static frame, revm's inner SELFDESTRUCT halts on the
+            // static-context check without changing state. Skip the mega host work below
+            // (two account inspections, SALT account-creation pricing, the storage-gas
+            // stipend draw and tracker write) — the frame reverts and discards all of it
+            // anyway — and let the inner instruction produce the identical halt. This is
+            // behavior-neutral: the static halt is exceptional, so the frame's gas and
+            // tracked usage are the same whether or not the host work ran first. The table
+            // installs this wrapper only for REX5+, so pre-REX5 specs never reach here.
+            if context.interpreter.runtime_flag.is_static() {
+                run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
+                // Defensive: unreachable in practice — a static SELFDESTRUCT always halts
+                // inside the inner instruction, so the macro returns early above.
+                return;
+            }
 
-        let eth_spec = context.interpreter.runtime_flag.spec_id();
+            let eth_spec = context.interpreter.runtime_flag.spec_id();
 
-        // Peek beneficiary address from stack (SELFDESTRUCT uses stack position 0)
-        let Some(target) = context.interpreter.stack.inspect::<0>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
-        };
-        let target = target.into_address();
+            // Peek beneficiary address from stack (SELFDESTRUCT uses stack position 0)
+            let Some(target) = context.interpreter.stack.inspect::<0>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return;
+            };
+            let target = target.into_address();
 
-        // Use non-delegating inspection (REX5+)
-        let Ok(target_account) = context.host.inspect_account(target, false) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        let is_empty = target_account.state_clear_aware_is_empty(eth_spec);
-
-        // Check if caller has balance (value will be transferred to beneficiary)
-        let caller = context.interpreter.input.target_address();
-        let Ok(caller_account) = context.host.inspect_account(caller, false) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
-        let has_value = !caller_account.info.balance.is_zero();
-
-        if is_empty && has_value {
-            // Charge storage gas for creating a new account.
-            // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
-            let Some(cost) = context.host.new_account_storage_gas(target) else {
+            // Use non-delegating inspection (REX5+)
+            let Ok(target_account) = context.host.inspect_account(target, false) else {
                 context.interpreter.halt(InstructionResult::FatalExternalError);
                 return;
             };
-            let drained =
-                context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
-            gas!(context.interpreter, cost - drained);
+            let is_empty = target_account.state_clear_aware_is_empty(eth_spec);
 
-            // Record resource usage for new beneficiary account
-            context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
-        } else if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
-            has_value &&
-            caller != target
-        {
-            // REX6: a balance credit to an existing *distinct* beneficiary performs an account-info
-            // write the frame-init / `target_updated` path never sees — record DataSize +40 / KV +1
-            // (no `StateGrowth`, the account already exists; no storage gas, the bucket is paid).
-            // SELFDESTRUCT to self (`caller == target`) is an EIP-6780 balance no-op on a
-            // non-same-tx-created account (and a burn-to-self on a same-tx-created one) — neither
-            // is a distinct-target credit, so record nothing. Pre-REX6 records nothing
-            // for any existing target.
-            context.host.additional_limit().borrow_mut().on_selfdestruct_existing_account();
-        }
+            // Check if caller has balance (value will be transferred to beneficiary)
+            let caller = context.interpreter.input.target_address();
+            let Ok(caller_account) = context.host.inspect_account(caller, false) else {
+                context.interpreter.halt(InstructionResult::FatalExternalError);
+                return;
+            };
+            let has_value = !caller_account.info.balance.is_zero();
 
-        // Delegate to compute_gas_ext::selfdestruct (the volatile-disabled guard
-        // ran in the outer `volatile_data_ext::selfdestruct_with_beneficiary_guard` wrapper).
-        run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
+            if is_empty && has_value {
+                // Charge storage gas for creating a new account.
+                // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+                let Some(cost) = context.host.new_account_storage_gas(target) else {
+                    context.interpreter.halt(InstructionResult::FatalExternalError);
+                    return;
+                };
+                let drained =
+                    context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
+                mega_gas!(context.interpreter, cost - drained);
+
+                // Record resource usage for new beneficiary account
+                context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
+            } else if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
+                has_value &&
+                caller != target
+            {
+                // REX6: a balance credit to an existing *distinct* beneficiary performs an
+                // account-info write the frame-init / `target_updated` path never
+                // sees — record DataSize +40 / KV +1 (no `StateGrowth`, the account
+                // already exists; no storage gas, the bucket is paid). SELFDESTRUCT
+                // to self (`caller == target`) is an EIP-6780 balance no-op on a
+                // non-same-tx-created account (and a burn-to-self on a same-tx-created one) —
+                // neither is a distinct-target credit, so record nothing. Pre-REX6
+                // records nothing for any existing target.
+                context.host.additional_limit().borrow_mut().on_selfdestruct_existing_account();
+            }
+
+            // Delegate to compute_gas_ext::selfdestruct (the volatile-disabled guard
+            // ran in the outer `volatile_data_ext::selfdestruct_with_beneficiary_guard` wrapper).
+            run_inner_instruction_or_abort!(compute_gas_ext::selfdestruct, context);
+        })
     }
 }
 
@@ -2074,17 +2201,20 @@ pub mod compute_gas_ext {
             #[inline]
             pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
                 context: InstructionContext<'_, H, WIRE>,
-            ) {
-                // Captured before the inner opcode runs. Plain opcodes charge no storage gas, so
-                // the measurement window starting here covers exactly the opcode's compute work.
-                let gas_before = context.interpreter.gas.remaining();
+            ) -> InstructionExecResult {
+                legacy_instruction!(context, {
+                    // Captured before the inner opcode runs. Plain opcodes charge no storage gas,
+                    // so the measurement window starting here covers exactly the opcode's
+                    // compute work.
+                    let gas_before = gas_before_current_instruction(&context);
 
-                // Call the original instruction
-                run_inner_instruction_or_abort!($original_fn, context);
+                    // Call the original instruction
+                    run_inner_instruction_or_abort!($original_fn, context);
 
-                let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
-                let mut additional_limit = context.host.additional_limit().borrow_mut();
-                compute_gas!(context.interpreter, additional_limit, gas_used);
+                    let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                    let mut additional_limit = context.host.additional_limit().borrow_mut();
+                    compute_gas!(context.interpreter, additional_limit, gas_used);
+                })
             }
         };
         (@frame $fn_name:ident, $opcode_name:expr, $original_fn:path) => {
@@ -2092,41 +2222,45 @@ pub mod compute_gas_ext {
             #[inline]
             pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
                 context: InstructionContext<'_, H, WIRE>,
-            ) {
-                let gas_before = context.interpreter.gas.remaining();
+            ) -> InstructionExecResult {
+                legacy_instruction!(context, {
+                    let gas_before = gas_before_current_instruction(&context);
 
-                // Call the original instruction
-                run_inner_instruction_or_abort!($original_fn, context);
+                    // Call the original instruction
+                    run_inner_instruction_or_abort!($original_fn, context);
 
-                let mut gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
-                // Subtract the gas forwarded to the child. REX5 excludes the revm-side
-                // `CALL_STIPEND` (added by value-transferring CALL/CALLCODE without
-                // deducting from the parent) so parent compute-gas is not under-counted.
-                // Pre-REX5 keeps the legacy raw-`gas_limit` subtraction for replay parity.
-                match context.interpreter.bytecode.action() {
-                    Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
-                        let stipend_from_revm = if context
-                            .host
-                            .spec_id()
-                            .is_enabled(MegaSpecId::REX5) &&
-                            matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode) &&
-                            call_inputs.transfers_value()
-                        {
-                            gas::CALL_STIPEND
-                        } else {
-                            0
-                        };
-                        let parent_contributed =
-                            call_inputs.gas_limit.saturating_sub(stipend_from_revm);
-                        gas_used = gas_used.saturating_sub(parent_contributed);
+                    let mut gas_used =
+                        gas_before.saturating_sub(context.interpreter.gas.remaining());
+                    // Subtract the gas forwarded to the child. REX5 excludes the revm-side
+                    // `CALL_STIPEND` (added by value-transferring CALL/CALLCODE without
+                    // deducting from the parent) so parent compute-gas is not under-counted.
+                    // Pre-REX5 keeps the legacy raw-`gas_limit` subtraction for replay parity.
+                    match context.interpreter.bytecode.action() {
+                        Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
+                            let stipend_from_revm =
+                                if context.host.spec_id().is_enabled(MegaSpecId::REX5) &&
+                                    matches!(
+                                        call_inputs.scheme,
+                                        CallScheme::Call | CallScheme::CallCode
+                                    ) &&
+                                    call_inputs.transfers_value()
+                                {
+                                    gas::CALL_STIPEND
+                                } else {
+                                    0
+                                };
+                            let parent_contributed =
+                                call_inputs.gas_limit.saturating_sub(stipend_from_revm);
+                            gas_used = gas_used.saturating_sub(parent_contributed);
+                        }
+                        Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
+                            gas_used = gas_used.saturating_sub(create_inputs.gas_limit());
+                        }
+                        _ => {}
                     }
-                    Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
-                        gas_used = gas_used.saturating_sub(create_inputs.gas_limit);
-                    }
-                    _ => {}
-                }
-                let mut additional_limit = context.host.additional_limit().borrow_mut();
-                compute_gas!(context.interpreter, additional_limit, gas_used);
+                    let mut additional_limit = context.host.additional_limit().borrow_mut();
+                    compute_gas!(context.interpreter, additional_limit, gas_used);
+                })
             }
         };
     }
@@ -2274,10 +2408,10 @@ pub mod compute_gas_ext {
     wrap_op_compute_gas!(swap15, "SWAP15", instructions::stack::swap::<15, _, _>);
     wrap_op_compute_gas!(swap16, "SWAP16", instructions::stack::swap::<16, _, _>);
 
-    wrap_op_compute_gas!(@frame call_code, "CALLCODE", instructions::contract::call_code);
+    wrap_op_compute_gas!(@frame call_code, "CALLCODE", instructions::contract::call::<CALLCODE, _, _>);
     wrap_op_compute_gas!(ret, "RETURN", instructions::control::ret);
-    wrap_op_compute_gas!(@frame delegate_call, "DELEGATECALL", instructions::contract::delegate_call);
-    wrap_op_compute_gas!(@frame static_call, "STATICCALL", instructions::contract::static_call);
+    wrap_op_compute_gas!(@frame delegate_call, "DELEGATECALL", instructions::contract::call::<DELEGATECALL, _, _>);
+    wrap_op_compute_gas!(@frame static_call, "STATICCALL", instructions::contract::call::<STATICCALL, _, _>);
 
     wrap_op_compute_gas!(revert, "REVERT", instructions::control::revert);
     wrap_op_compute_gas!(invalid, "INVALID", instructions::control::invalid);
@@ -2293,17 +2427,21 @@ pub mod compute_gas_ext {
     /// usage is rolled back.
     pub fn selfdestruct<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
-        let gas_before = context.interpreter.gas.remaining();
+    ) -> InstructionExecResult {
+        legacy_instruction!(context, {
+            let gas_before = gas_before_current_instruction(&context);
 
-        // Call the original instruction
-        run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
+            // Call the original instruction
+            run_inner_instruction_or_abort!(instructions::host::selfdestruct, context);
 
-        let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
-        let mut additional_limit = context.host.additional_limit().borrow_mut();
-        if !additional_limit.record_compute_gas_all_dims(gas_used) {
-            context.interpreter.halt(additional_limit.exceeding_instruction_result());
-        }
+            let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+            let mut additional_limit = context.host.additional_limit().borrow_mut();
+            if !additional_limit.record_compute_gas_all_dims(gas_used) {
+                let result = additional_limit
+                    .exceeding_instruction_result_for_halt(&context.interpreter.gas);
+                halt_replacing_action!(context.interpreter, result);
+            }
+        })
     }
 }
 

@@ -3,15 +3,14 @@
 //! Rex3 adds compute gas recording for the keyless deploy overhead (100K gas).
 //! Before Rex3, keyless deploy bypassed compute gas tracking entirely.
 
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    constants,
+    EvmTxRuntimeLimits, IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs, constants,
     revm::context::result::ExecutionResult,
     sandbox::tests::{CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
     test_utils::MemoryDatabase,
-    EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{context::TxEnv, handler::EvmTr, inspector::NoOpInspector};
 
@@ -55,7 +54,7 @@ fn execute_keyless_deploy(
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
     let compute_gas_used = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
 
@@ -150,7 +149,7 @@ fn test_rex3_keyless_deploy_exceeds_compute_gas_limit() {
         EvmTxRuntimeLimits::from_spec(MegaSpecId::REX3).with_tx_compute_gas_limit(50_000);
     let mut evm =
         MegaEvm::new(context).with_tx_runtime_limits(runtime_limits).with_inspector(NoOpInspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
 
     // The transaction should fail because 100K overhead exceeds the 50K compute gas limit

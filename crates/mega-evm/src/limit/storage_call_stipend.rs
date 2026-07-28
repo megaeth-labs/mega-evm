@@ -22,11 +22,11 @@ use std::vec::Vec;
 
 use revm::{
     handler::FrameResult,
-    interpreter::{interpreter_action::FrameInit, CallScheme, FrameInput, Gas},
+    interpreter::{CallScheme, FrameInput, Gas, interpreter_action::FrameInit},
 };
 
 use super::compute_gas;
-use crate::{constants, MegaSpecId};
+use crate::{MegaSpecId, constants};
 
 /// Tracks per-frame `STORAGE_CALL_STIPEND` grants.
 ///
@@ -67,11 +67,7 @@ impl StorageCallStipendTracker {
 
     /// Returns the stipend amount for the given spec. Zero for pre-REX4.
     fn stipend_for_spec(spec: MegaSpecId) -> u64 {
-        if spec.is_enabled(MegaSpecId::REX4) {
-            constants::rex4::STORAGE_CALL_STIPEND
-        } else {
-            0
-        }
+        if spec.is_enabled(MegaSpecId::REX4) { constants::rex4::STORAGE_CALL_STIPEND } else { 0 }
     }
 
     pub(crate) fn reset(&mut self) {
@@ -165,7 +161,7 @@ impl StorageCallStipendTracker {
             let original_limit = gas.limit().saturating_sub(self.stipend_amount);
             let burn = gas.remaining().saturating_sub(original_limit);
             if burn > 0 {
-                let _ = gas.record_cost(burn);
+                let _ = gas.record_regular_cost(burn);
             }
         }
     }

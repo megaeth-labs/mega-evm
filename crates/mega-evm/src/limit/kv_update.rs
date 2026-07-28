@@ -1,9 +1,9 @@
 use alloy_primitives::{Address, U256};
 use revm::{
-    context::{transaction::AuthorizationTr, Transaction},
+    context::{Transaction, transaction::AuthorizationTr},
     handler::{EthFrame, FrameResult},
     interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, SStoreResult,
+        FrameInput, SStoreResult, interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
 };
 

@@ -2,13 +2,13 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Bytes, TxKind, U256};
+use alloy_primitives::{Bytes, TxKind, U256, address};
 use mega_evm::{
-    constants, test_utils::MemoryDatabase, EVMError, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, MegaTransactionError, TestExternalEnvs,
+    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
+    constants, test_utils::MemoryDatabase,
 };
 use revm::{
-    context::{result::ResultAndState, TxEnv},
+    context::{TxEnv, result::ResultAndState},
     primitives::Address,
 };
 
@@ -29,7 +29,7 @@ fn transact(
     data: Bytes,
     value: U256,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -46,7 +46,7 @@ fn transact(
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 /// Tests that Rex hardfork adds 39,000 gas to base transaction cost for simple transfer.
@@ -69,7 +69,7 @@ fn test_rex_intrinsic_gas_simple_transfer() {
     .unwrap();
 
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     // Rex: 21,000 (base) + 39,000 (Rex intrinsic storage gas) = 60,000
     assert_eq!(gas_used, BASE_INTRINSIC_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS);
 }
@@ -94,7 +94,7 @@ fn test_mini_rex_no_additional_intrinsic_gas() {
     .unwrap();
 
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     // `MiniRex`: only 21,000 (base) - no additional intrinsic gas
     assert_eq!(gas_used, BASE_INTRINSIC_GAS);
 }
@@ -119,7 +119,7 @@ fn test_equivalence_no_additional_intrinsic_gas() {
     .unwrap();
 
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     // `Equivalence`: only 21,000 (base) - no additional intrinsic gas
     assert_eq!(gas_used, BASE_INTRINSIC_GAS);
 }
@@ -147,7 +147,7 @@ fn test_rex_intrinsic_gas_with_calldata() {
     .unwrap();
 
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
 
     // `Rex` inherits `MiniRex` calldata costs and adds 39,000 intrinsic storage gas
     // For 100 bytes of non-zero calldata:
@@ -205,7 +205,7 @@ fn test_rex_intrinsic_gas_contract_creation() {
     .unwrap();
 
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
 
     // Should include the Rex intrinsic storage gas + other costs
     // At minimum, it should be more than base + Rex intrinsic
@@ -253,8 +253,8 @@ fn test_rex_vs_mini_rex_gas_difference() {
     assert!(res_rex.result.is_success());
     assert!(res_mini_rex.result.is_success());
 
-    let gas_used_rex = res_rex.result.gas_used();
-    let gas_used_mini_rex = res_mini_rex.result.gas_used();
+    let gas_used_rex = res_rex.result.tx_gas_used();
+    let gas_used_mini_rex = res_mini_rex.result.tx_gas_used();
 
     // For transactions without calldata, the difference should be exactly
     // the Rex intrinsic storage gas (39,000)
@@ -281,7 +281,7 @@ fn test_rex_intrinsic_gas_zero_value_transfer() {
     .unwrap();
 
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
     // Rex: 21,000 (base) + 39,000 (Rex intrinsic storage gas) = 60,000
     assert_eq!(gas_used, BASE_INTRINSIC_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS);
 }
@@ -306,7 +306,7 @@ fn test_rex_intrinsic_gas_new_account_creation() {
     .unwrap();
 
     assert!(res.result.is_success());
-    let gas_used = res.result.gas_used();
+    let gas_used = res.result.tx_gas_used();
 
     // Rex charges:
     // - Base: 21,000

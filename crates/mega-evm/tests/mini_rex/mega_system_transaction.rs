@@ -4,21 +4,21 @@
 //! as deposit-like transactions, bypassing signature validation, nonce verification,
 //! and fee deduction while maintaining normal execution behavior.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
+    EmptyExternalEnv, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
     is_deposit_like_transaction, is_mega_system_transaction_with,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
 };
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
+    Database,
     bytecode::opcode::{CALLER, MSTORE, RETURN},
-    context::{result::ResultAndState, BlockEnv, ContextSetters, ContextTr, Transaction, TxEnv},
+    context::{BlockEnv, ContextSetters, ContextTr, Transaction, TxEnv, result::ResultAndState},
     handler::EvmTr,
     inspector::NoOpInspector,
     primitives::TxKind,
-    Database,
 };
 
 const REGULAR_CALLER: Address = address!("0000000000000000000000000000000000100000");
@@ -83,7 +83,7 @@ fn execute_transaction(
         ..Default::default()
     };
 
-    alloy_evm::Evm::transact_raw(evm, tx).expect("Transaction should execute")
+    alloy_evm::Evm::transact_raw(evm, alloy_op_evm::OpTx(tx)).expect("Transaction should execute")
 }
 
 /// Tests the utility functions for detecting mega system address transactions and deposit-like
@@ -276,7 +276,7 @@ fn test_mega_system_transaction_sets_source_hash() {
 
     // Execute the transaction which will trigger pre_execution and set the source hash
     let tx_clone = evm.ctx().tx().clone();
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx_clone);
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx_clone));
     assert!(result.is_ok(), "Transaction should execute successfully");
 
     // Check that the source hash was set
@@ -620,7 +620,7 @@ fn test_mega_system_transaction_to_non_whitelisted_address_fails() {
     };
 
     // Transaction should fail due to whitelist check
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(result.is_err(), "Mega system transaction to non-whitelisted address should fail");
 
     // Check that the error message contains whitelist-related text
@@ -660,7 +660,7 @@ fn test_mega_system_transaction_create_fails() {
     };
 
     // Transaction should fail since CREATE is not supported for system transactions
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(result.is_err(), "Mega system CREATE transaction should fail");
 }
 

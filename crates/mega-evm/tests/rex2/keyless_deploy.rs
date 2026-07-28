@@ -3,30 +3,29 @@
 //! This module provides comprehensive tests for the keyless deployment system contract,
 //! including success cases, error conditions, and edge cases.
 
-use alloy_primitives::{address, hex, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address, hex, keccak256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE, MegaSpecId,
     alloy_consensus::{Signed, TxEip1559, TxLegacy},
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{
-        decode_error_result,
+        KeylessDeployError, decode_error_result,
         tests::{
             CREATE2_FACTORY_CODE_HASH, CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER,
             CREATE2_FACTORY_TX, EIP1820_CODE_HASH, EIP1820_CONTRACT, EIP1820_DEPLOYER, EIP1820_TX,
             NON_CONTRACT_CREATION_TX, POST_EIP155_CHAIN_1_TX,
         },
-        KeylessDeployError,
     },
-    test_utils::{transact, BytecodeBuilder, MemoryDatabase},
-    IKeylessDeploy, MegaSpecId, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+    test_utils::{BytecodeBuilder, MemoryDatabase, transact},
 };
 use revm::{
+    Database, DatabaseCommit,
     bytecode::opcode::{
         CALL, CALLDATACOPY, CALLDATASIZE, CODECOPY, CREATE, GAS, ISZERO, JUMPDEST, JUMPI, LOG0,
         MLOAD, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT,
         SSTORE, STATICCALL, STOP,
     },
-    Database, DatabaseCommit,
 };
 
 // =============================================================================
@@ -143,8 +142,8 @@ fn create_pre_eip155_deploy_tx(init_code: Bytes) -> (Bytes, Address) {
 /// Calculate the deployed contract address for a keyless deploy transaction.
 fn calculate_deploy_address_for_tx(tx_bytes: &[u8]) -> Address {
     use mega_evm::{
-        sandbox::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer},
         MegaSpecId,
+        sandbox::{calculate_keyless_deploy_address, decode_keyless_tx, recover_signer},
     };
     let signed = decode_keyless_tx(tx_bytes, MegaSpecId::REX2).expect("should decode tx");
     let signer = recover_signer(&signed).expect("should recover signer");
@@ -1137,13 +1136,13 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
 /// This exercises the deployment logic in block/executor.rs `pre_execution_changes`.
 #[test]
 fn test_keyless_deploy_contract_deployed_on_rex2_activation() {
-    use alloy_evm::{block::BlockExecutor, Evm, EvmEnv, EvmFactory};
+    use alloy_evm::{Evm, EvmEnv, EvmFactory, block::BlockExecutor};
     use alloy_hardforks::ForkCondition;
     use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
     use alloy_primitives::B256;
     use mega_evm::{
-        BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardfork,
-        MegaHardforkConfig, TestExternalEnvs, KEYLESS_DEPLOY_CODE_HASH,
+        BlockLimits, KEYLESS_DEPLOY_CODE_HASH, MegaBlockExecutionCtx, MegaBlockExecutor,
+        MegaEvmFactory, MegaHardfork, MegaHardforkConfig, TestExternalEnvs,
     };
     use revm::{context::BlockEnv, database::State};
 

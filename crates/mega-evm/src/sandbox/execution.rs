@@ -39,26 +39,26 @@ use alloy_evm::{Database as AlloyDatabase, Evm};
 use alloy_primitives::{Address, Bytes, Log, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_system_contracts::keyless_deploy::IKeylessDeploy;
-use op_revm::{handler::IsTxError, L1BlockInfo};
+use op_revm::{L1BlockInfo, handler::IsTxError};
 use revm::{
+    Database as RevmDatabase,
     context::{
-        result::{ExecutionResult, ResultAndState},
         BlockEnv, Cfg, ContextTr, TxEnv,
+        result::{ExecutionResult, ResultAndState},
     },
     context_interface::Transaction,
     handler::FrameResult,
     interpreter::{CallOutcome, Gas, Host, InstructionResult, InterpreterResult},
     primitives::KECCAK_EMPTY,
     state::{AccountInfo, EvmState},
-    Database as RevmDatabase,
 };
 use tracing::{error, warn};
 
 use crate::{
-    constants, inspect_account_code_hash, mark_frame_result_as_exceeding_limit, AdditionalLimit,
-    EvmTxRuntimeLimits, ExternalEnvTypes, JournalInspectTr, LimitCheck, LimitUsage, MegaContext,
-    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TxRuntimeLimit, VolatileDataAccess,
-    SANDBOX_TX_SOURCE_HASH,
+    AdditionalLimit, EvmTxRuntimeLimits, ExternalEnvTypes, JournalInspectTr, LimitCheck,
+    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    SANDBOX_TX_SOURCE_HASH, TxRuntimeLimit, VolatileDataAccess, constants,
+    inspect_account_code_hash, mark_frame_result_as_exceeding_limit,
 };
 
 use super::{
@@ -67,7 +67,7 @@ use super::{
 };
 
 use super::{
-    error::{encode_error_result, KeylessDeployError},
+    error::{KeylessDeployError, encode_error_result},
     state::SandboxDb,
 };
 
@@ -172,7 +172,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // Step 1: charge the fixed dispatch overhead (100K covers RLP decoding, sig recovery,
     // state filtering). Rex3+ also records it as compute gas.
     let cost = constants::rex2::KEYLESS_DEPLOY_OVERHEAD_GAS;
-    let has_sufficient_gas = gas.record_cost(cost);
+    let has_sufficient_gas = gas.record_regular_cost(cost);
     if !has_sufficient_gas {
         return make_halt!();
     }
@@ -433,7 +433,7 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
     // `gas_limit_override.min(gas.remaining())` cap — there is no intervening gas
     // movement between the cap and this debit.
     if ctx.spec.is_enabled(MegaSpecId::REX5) {
-        let ok = gas.record_cost(gas_limit_override_u64);
+        let ok = gas.record_regular_cost(gas_limit_override_u64);
         debug_assert!(
             ok,
             "Rex5+ sandbox pre-debit must succeed: gas_limit_override is capped to gas.remaining()",
@@ -647,7 +647,7 @@ fn run_sandbox_ctx<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>(
     let is_rex5_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX5);
     let is_rex6_enabled = sandbox_ctx.mega_spec().is_enabled(MegaSpecId::REX6);
     let mut sandbox_evm = MegaEvm::new(sandbox_ctx);
-    let result = sandbox_evm.transact_raw(sandbox_tx);
+    let result = sandbox_evm.transact_raw(alloy_op_evm::OpTx(sandbox_tx));
     let limit_usage = sandbox_evm.ctx.additional_limit.borrow().get_usage();
     let volatile_accesses =
         sandbox_evm.ctx.volatile_data_tracker.borrow().get_volatile_data_accessed();
@@ -802,7 +802,8 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
 
     match result {
         Ok(ResultAndState { result: exec_result, state: sandbox_state }) => match exec_result {
-            ExecutionResult::Success { gas_used, output, logs, .. } => {
+            ExecutionResult::Success { gas, output, logs, .. } => {
+                let gas_used = gas.tx_gas_used();
                 let revm::context::result::Output::Create(bytecode, Some(created_addr)) = output
                 else {
                     // Contract creation didn't return an address — should never happen
@@ -845,14 +846,18 @@ fn process_sandbox_transact_result<E: core::fmt::Display + IsTxError>(
                     SandboxCompletion::Deployed { gas_used, deploy_address: created_addr, logs },
                 )
             }
-            ExecutionResult::Revert { gas_used, output } => completed(
-                sandbox_state,
-                SandboxCompletion::ExecutionFailed {
-                    gas_used,
-                    error: KeylessDeployError::ExecutionReverted { gas_used, output },
-                },
-            ),
-            ExecutionResult::Halt { gas_used, reason } => {
+            ExecutionResult::Revert { gas, output, .. } => {
+                let gas_used = gas.tx_gas_used();
+                completed(
+                    sandbox_state,
+                    SandboxCompletion::ExecutionFailed {
+                        gas_used,
+                        error: KeylessDeployError::ExecutionReverted { gas_used, output },
+                    },
+                )
+            }
+            ExecutionResult::Halt { gas, reason, .. } => {
+                let gas_used = gas.tx_gas_used();
                 // `FailedDeposit` on this path means op-revm's deposit `catch_error` wrapped a
                 // sandbox tx-validation failure into a synthetic halt. Runtime halts under the
                 // deposit-style sandbox tx are intercepted in `MegaHandler::execution_result`
@@ -982,7 +987,7 @@ fn charge_caller_materialization_pre_sandbox<DB: AlloyDatabase, ExtEnvs: Externa
             );
             KeylessDeployError::InternalError
         })?;
-    if !gas.record_cost(caller_storage_gas) {
+    if !gas.record_regular_cost(caller_storage_gas) {
         return Ok(Some(oog_frame_result(gas.limit(), return_memory_offset)));
     }
     // `record_deposit_caller_creation` can latch `has_exceeded_limit` to a non-frame-local
@@ -1059,7 +1064,7 @@ fn oog_frame_result(gas_limit: u64, return_memory_offset: &core::ops::Range<usiz
         InterpreterResult::new(
             InstructionResult::OutOfGas,
             Bytes::new(),
-            Gas::new_spent(gas_limit),
+            Gas::new_spent_with_reservoir(gas_limit, 0),
         ),
         return_memory_offset.clone(),
     ))
@@ -1241,8 +1246,7 @@ mod tests {
         let result: Result<ResultAndState<MegaHaltReason>, FakeTxErr> = Ok(ResultAndState {
             result: ExecutionResult::Success {
                 reason: revm::context::result::SuccessReason::Stop,
-                gas_used: 1,
-                gas_refunded: 0,
+                gas: revm::context::result::ResultGas::new_with_state_gas(1, 0, 0, 0),
                 logs: Vec::new(),
                 output: Output::Call(Bytes::new()),
             },
@@ -1268,8 +1272,7 @@ mod tests {
         let result: Result<ResultAndState<MegaHaltReason>, FakeTxErr> = Ok(ResultAndState {
             result: ExecutionResult::Success {
                 reason: revm::context::result::SuccessReason::Stop,
-                gas_used: 1,
-                gas_refunded: 0,
+                gas: revm::context::result::ResultGas::new_with_state_gas(1, 0, 0, 0),
                 logs: Vec::new(),
                 output: Output::Create(Bytes::from_static(&[0x60, 0x00]), None),
             },
@@ -1336,8 +1339,8 @@ mod tests {
     #[test]
     fn test_get_account_nonce_db_error_maps_to_internal_error() {
         use crate::{
-            test_utils::{ErrorInjectingDatabase, MemoryDatabase},
             EmptyExternalEnv,
+            test_utils::{ErrorInjectingDatabase, MemoryDatabase},
         };
         use alloy_primitives::address;
 
@@ -1359,8 +1362,8 @@ mod tests {
     #[test]
     fn test_get_account_nonce_returns_cached_nonce_without_touching_database() {
         use crate::{
-            test_utils::{ErrorInjectingDatabase, MemoryDatabase},
             EmptyExternalEnv,
+            test_utils::{ErrorInjectingDatabase, MemoryDatabase},
         };
         use alloy_primitives::address;
         use revm::{primitives::KECCAK_EMPTY, state::AccountInfo};
@@ -1375,8 +1378,13 @@ mod tests {
         let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(db, MegaSpecId::REX5);
         // Seed the journal cache directly so `get_account_nonce` finds the signer in
         // `journal.inner.state` and short-circuits before reaching the DB fallback.
-        let cached_info =
-            AccountInfo { nonce: 7, balance: U256::ZERO, code_hash: KECCAK_EMPTY, code: None };
+        let cached_info = AccountInfo {
+            account_id: Default::default(),
+            nonce: 7,
+            balance: U256::ZERO,
+            code_hash: KECCAK_EMPTY,
+            code: None,
+        };
         ctx.journal_mut().inner.state.insert(signer, cached_info.into());
 
         let nonce = get_account_nonce(&mut ctx, signer).expect("cache hit must not error");
@@ -1392,8 +1400,8 @@ mod tests {
     #[test]
     fn test_inspect_signer_parent_state_db_error_maps_to_internal_error() {
         use crate::{
-            test_utils::{ErrorInjectingDatabase, MemoryDatabase},
             EmptyExternalEnv,
+            test_utils::{ErrorInjectingDatabase, MemoryDatabase},
         };
         use alloy_primitives::address;
 
@@ -1429,7 +1437,7 @@ mod tests {
     /// `StateProviderDatabase::basic` contract (`code: None`, real `code_hash`).
     #[test]
     fn test_inspect_signer_parent_state_skips_code_by_hash_on_vacant_when_eip3607_disabled() {
-        use alloy_primitives::{address, keccak256, B256};
+        use alloy_primitives::{B256, address, keccak256};
         use revm::{bytecode::Bytecode, primitives::Bytes as PrimitivesBytes};
 
         #[derive(Debug, Default)]
@@ -1471,7 +1479,13 @@ mod tests {
         let signer = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001");
         let bytecode = PrimitivesBytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xf3]);
         let code_hash = keccak256(&bytecode);
-        let signer_info = AccountInfo { nonce: 0, balance: U256::ZERO, code_hash, code: None };
+        let signer_info = AccountInfo {
+            account_id: Default::default(),
+            nonce: 0,
+            balance: U256::ZERO,
+            code_hash,
+            code: None,
+        };
         let db = LazyCodeSignerDb { signer, signer_info };
 
         let mut ctx = MegaContext::<_, crate::EmptyExternalEnv>::new(db, MegaSpecId::REX5);
@@ -1492,15 +1506,16 @@ mod tests {
     /// semantics and pins the early-return contract.
     #[test]
     fn test_validate_signer_code_disable_eip3607_short_circuits() {
-        use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
+        use crate::{EmptyExternalEnv, test_utils::MemoryDatabase};
         use revm::{
             bytecode::Bytecode,
-            primitives::{keccak256, Bytes as PrimitivesBytes},
+            primitives::{Bytes as PrimitivesBytes, keccak256},
         };
 
         let code_bytes = PrimitivesBytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xf3]);
         let code_hash = keccak256(&code_bytes);
         let signer_info = AccountInfo {
+            account_id: Default::default(),
             nonce: 0,
             balance: U256::ZERO,
             code_hash,
@@ -1530,10 +1545,10 @@ mod tests {
     /// pre-sandbox charge path must therefore call `DynamicGasCost::new_account_gas`
     /// directly and keep the error local.
     #[test]
-    fn test_charge_caller_materialization_salt_failure_returns_internal_error_without_ctx_pollution(
-    ) {
-        use crate::{test_utils::MemoryDatabase, BucketId, OracleEnv, SaltEnv};
-        use alloy_primitives::{address, B256};
+    fn test_charge_caller_materialization_salt_failure_returns_internal_error_without_ctx_pollution()
+     {
+        use crate::{BucketId, OracleEnv, SaltEnv, test_utils::MemoryDatabase};
+        use alloy_primitives::{B256, address};
         use core::fmt::{self, Display, Formatter};
 
         // Minimal `SaltEnv` whose `get_bucket_capacity` always fails. This drives

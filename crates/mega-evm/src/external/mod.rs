@@ -98,8 +98,8 @@ impl ExternalEnvFactory for EmptyExternalEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OracleEnv, SaltEnv, MIN_BUCKET_SIZE};
-    use alloy_primitives::{Address, Bytes, B256, U256};
+    use crate::{MIN_BUCKET_SIZE, OracleEnv, SaltEnv};
+    use alloy_primitives::{Address, B256, Bytes, U256};
 
     #[test]
     fn test_empty_external_env_factory_returns_minimum_bucket_and_no_oracle() {

@@ -54,17 +54,15 @@
 use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{
-    block::{BlockExecutor, StateChangePostBlockSource, StateChangeSource},
-    EvmEnv, EvmFactory,
-};
+use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor};
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     AHashBucketHasher, BlockLimits, BucketHasher, MegaBlockExecutionCtx, MegaBlockExecutor,
-    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTxEnvelope,
+    StateChangePostBlockSource, StateChangeSource, TestExternalEnvs,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{context::BlockEnv, database::State};
 
@@ -104,6 +102,7 @@ macro_rules! build_executor {
 
         let mut cfg_env = revm::context::CfgEnv::default();
         cfg_env.spec = MegaSpecId::MINI_REX;
+        cfg_env.chain_id = 8453;
         let block_env = BlockEnv {
             number: U256::from(1000),
             timestamp: U256::from(1_800_000_000),

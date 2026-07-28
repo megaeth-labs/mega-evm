@@ -16,18 +16,17 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    EVMError, IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS, MegaContext, MegaEvm,
+    MegaSpecId, MegaTransaction, ORACLE_CONTRACT_ADDRESS, TestExternalEnvs,
     revm::context::result::ExecutionResult,
     sandbox::{
-        decode_error_result,
+        KeylessDeployError, decode_error_result,
         tests::{CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
-        KeylessDeployError,
     },
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
-    EVMError, IKeylessDeploy, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{context::TxEnv, inspector::NoOpInspector};
 
@@ -77,7 +76,8 @@ fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert() {
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let res = alloy_evm::Evm::transact(&mut evm, tx).expect("outer EVM error not expected");
+    let res = alloy_evm::Evm::transact(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("outer EVM error not expected");
 
     let revert_output = match res.result {
         ExecutionResult::Revert { output, .. } => output,
@@ -146,7 +146,8 @@ fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert_rex6() {
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let res = alloy_evm::Evm::transact(&mut evm, tx).expect("outer EVM error not expected");
+    let res = alloy_evm::Evm::transact(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("outer EVM error not expected");
 
     let revert_output = match res.result {
         ExecutionResult::Revert { output, .. } => output,
@@ -213,7 +214,8 @@ fn test_keyless_signer_nonce_db_error_maps_to_internal_error_revert() {
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let res = alloy_evm::Evm::transact(&mut evm, tx).expect("outer EVM error not expected");
+    let res = alloy_evm::Evm::transact(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("outer EVM error not expected");
 
     let revert_output = match res.result {
         ExecutionResult::Revert { output, .. } => output,
@@ -276,7 +278,7 @@ fn test_system_tx_validate_inspect_account_db_error_surfaces_as_custom() {
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let res = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let res = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
 
     match res {
         Err(EVMError::Custom(msg)) => {

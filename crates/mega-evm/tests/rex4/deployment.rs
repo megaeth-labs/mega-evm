@@ -1,13 +1,13 @@
 //! Tests for Rex4 system contract deployment wiring.
 
-use alloy_evm::{block::BlockExecutor, Database, Evm, EvmEnv, EvmFactory};
+use alloy_evm::{Database, Evm, EvmEnv, EvmFactory, block::BlockExecutor};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
-    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH, LIMIT_CONTROL_ADDRESS,
-    LIMIT_CONTROL_CODE, LIMIT_CONTROL_CODE_HASH,
+    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH, BlockLimits,
+    EmptyExternalEnv, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, LIMIT_CONTROL_CODE_HASH,
+    MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardfork,
+    MegaHardforkConfig, MegaSpecId, test_utils::MemoryDatabase,
 };
 use revm::{
     context::BlockEnv,

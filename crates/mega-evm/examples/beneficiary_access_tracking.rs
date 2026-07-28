@@ -7,7 +7,7 @@
 //! 2. Contract 2: Does NOT access beneficiary data (should not trigger detection)
 //! 3. Contract 3: Accesses beneficiary via different operations (should trigger detection)
 
-use alloy_primitives::{address, Bytes, U256};
+use alloy_primitives::{Bytes, U256, address};
 use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
 use revm::{
     bytecode::opcode::{BALANCE, CALLER, POP, PUSH20, STOP},
@@ -91,9 +91,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1)?;
+    let result1 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx1))?;
     println!("  Transaction successful: {}", result1.result.is_success());
-    println!("  Gas used: {}", result1.result.gas_used());
+    println!("  Gas used: {}", result1.result.tx_gas_used());
 
     // Verify that beneficiary access was detected
     let beneficiary_accessed =
@@ -130,9 +130,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let result2 = alloy_evm::Evm::transact_raw(&mut evm, tx2)?;
+    let result2 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx2))?;
     println!("  Transaction successful: {}", result2.result.is_success());
-    println!("  Gas used: {}", result2.result.gas_used());
+    println!("  Gas used: {}", result2.result.tx_gas_used());
 
     // Verify that beneficiary was NOT accessed
     let beneficiary_accessed =
@@ -166,9 +166,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let result3 = alloy_evm::Evm::transact_raw(&mut evm, tx3)?;
+    let result3 = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx3))?;
     println!("  Transaction successful: {}", result3.result.is_success());
-    println!("  Gas used: {}", result3.result.gas_used());
+    println!("  Gas used: {}", result3.result.tx_gas_used());
 
     // Verify that beneficiary access was detected
     let beneficiary_accessed =

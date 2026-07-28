@@ -2,34 +2,47 @@
 use alloc as std;
 use std::{boxed::Box, collections::BTreeMap, vec::Vec};
 
-use alloy_consensus::{Eip658Value, Header, Transaction, TxReceipt};
+use alloy_consensus::{Eip658Value, Header, Transaction, TransactionEnvelope, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};
 pub use alloy_evm::block::CommitChanges;
 use alloy_evm::{
+    Database, Evm as _, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv, RecoveredTx,
     block::{
-        state_changes::post_block_balance_increments, BlockExecutionError, BlockExecutionResult,
-        BlockValidationError, ExecutableTx, OnStateHook, StateChangePostBlockSource,
-        StateChangePreBlockSource, StateChangeSource, SystemCaller,
+        BlockExecutionError, BlockExecutionResult, BlockValidationError, ExecutableTx, GasOutput,
+        state_changes::post_block_balance_increments,
     },
     eth::receipt_builder::ReceiptBuilderCtx,
-    Database, Evm as _, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv, RecoveredTx,
 };
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::B256;
 use op_alloy_consensus::OpDepositReceipt;
 use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
-    context::result::{ExecResultAndState, ExecutionResult},
-    database::State,
-    handler::EvmTr,
-    DatabaseCommit, Inspector,
+    DatabaseCommit, Inspector, context::result::ExecResultAndState, database::State,
+    handler::EvmTr, state::EvmState,
 };
 
+/// Receives state changes together with their Mega-specific execution source.
+pub trait MegaOnStateHook: Send + 'static {
+    /// Handles a state change immediately before it is committed.
+    fn on_state(&mut self, source: StateChangeSource, state: &EvmState);
+}
+
+impl<F> MegaOnStateHook for F
+where
+    F: FnMut(StateChangeSource, &EvmState) + Send + 'static,
+{
+    fn on_state(&mut self, source: StateChangeSource, state: &EvmState) {
+        self(source, state)
+    }
+}
+
 use crate::{
-    block::eips, flat_system_contract_specs, is_apply_pending_changes_due, resolve_system_address,
-    transact_apply_pending_changes, transact_deploy, transact_deploy_sequencer_registry,
     BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
-    MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
+    MegaSystemCallOutcome, MegaTransactionExt, MegaTransactionOutcome, StateChangePostBlockSource,
+    StateChangePreBlockSource, StateChangeSource, block::eips, flat_system_contract_specs,
+    is_apply_pending_changes_due, resolve_system_address, transact_apply_pending_changes,
+    transact_deploy, transact_deploy_sequencer_registry,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -55,7 +68,7 @@ pub struct MegaBlockExecutor<H, E, R: OpReceiptBuilder> {
     hardforks: H,
     receipt_builder: R,
     ctx: MegaBlockExecutionCtx,
-    system_caller: SystemCaller<H>,
+    state_hook: Option<Box<dyn MegaOnStateHook>>,
 
     /// The inner evm instance.
     pub evm: E,
@@ -71,13 +84,12 @@ impl<C, E, R: OpReceiptBuilder> core::fmt::Debug for MegaBlockExecutor<C, E, R> 
     }
 }
 
-impl<'db, DB, H, R, INSP, ExtEnvs>
-    MegaBlockExecutor<H, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
+impl<DB, H, R, INSP, ExtEnvs> MegaBlockExecutor<H, crate::MegaEvm<DB, INSP, ExtEnvs>, R>
 where
-    DB: Database + 'db,
+    DB: Database + DatabaseCommit,
     H: MegaHardforks + Clone,
     ExtEnvs: crate::ExternalEnvTypes,
-    INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
+    INSP: Inspector<crate::MegaContext<DB, ExtEnvs>>,
     R: OpReceiptBuilder,
 {
     /// Create a new block executor.
@@ -93,7 +105,7 @@ where
     ///
     /// A new `BlockExecutor` instance configured with the provided parameters.
     pub fn new(
-        evm: crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>,
+        evm: crate::MegaEvm<DB, INSP, ExtEnvs>,
         ctx: MegaBlockExecutionCtx,
         hardforks: H,
         receipt_builder: R,
@@ -137,7 +149,7 @@ where
             block_limiter: ctx.block_limits.to_block_limiter(),
             ctx,
             evm,
-            system_caller: SystemCaller::new(hardforks),
+            state_hook: None,
         }
     }
 
@@ -152,17 +164,16 @@ where
     }
 }
 
-impl<'db, DB, C, R, INSP, ExtEnvs>
-    MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
+impl<DB, C, R, INSP, ExtEnvs> MegaBlockExecutor<C, crate::MegaEvm<DB, INSP, ExtEnvs>, R>
 where
-    DB: Database + 'db,
-    C: MegaHardforks,
+    DB: Database + DatabaseCommit,
+    C: MegaHardforks + Clone,
     ExtEnvs: crate::ExternalEnvTypes,
-    INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
+    INSP: Inspector<crate::MegaContext<DB, ExtEnvs>>,
     R: OpReceiptBuilder<
-        Transaction: Transaction + Encodable2718 + MegaTransactionExt,
-        Receipt: TxReceipt,
-    >,
+            Transaction: Transaction + Encodable2718 + MegaTransactionExt,
+            Receipt: TxReceipt,
+        >,
 {
     /// Make pre-execution changes on the state. Note that the execution result is not
     /// committed to the block executor's inner state.
@@ -173,8 +184,6 @@ where
 
         // In MegaETH, the Spurious Dragon hardfork is always active, so we can safely set the state
         // clear flag to true.
-        self.evm.db_mut().set_state_clear_flag(true);
-
         let block_timestamp: u64 = self.evm.block().timestamp.saturating_to();
         let is_rex_5 = self.hardforks.is_rex_5_active_at_timestamp(block_timestamp);
 
@@ -365,7 +374,9 @@ where
         outcomes: Vec<MegaSystemCallOutcome>,
     ) -> Result<(), BlockExecutionError> {
         for outcome in outcomes {
-            self.system_caller.on_state(outcome.source, &outcome.state);
+            if let Some(hook) = self.state_hook.as_mut() {
+                hook.on_state(outcome.source, &outcome.state);
+            }
             self.evm.db_mut().commit(outcome.state);
         }
 
@@ -378,7 +389,7 @@ where
         tx: Tx,
     ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
     where
-        Tx: IntoTxEnv<MegaTransaction>
+        Tx: IntoTxEnv<alloy_op_evm::OpTx>
             + RecoveredTx<R::Transaction>
             + MegaTransactionExt
             + Encodable2718
@@ -434,7 +445,7 @@ where
         tx: Tx,
     ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
     where
-        Tx: IntoTxEnv<MegaTransaction>
+        Tx: IntoTxEnv<alloy_op_evm::OpTx>
             + RecoveredTx<R::Transaction>
             + MegaTransactionExt
             + Encodable2718
@@ -472,7 +483,7 @@ where
         da_size: u64,
     ) -> Result<BlockMegaTransactionOutcome<Tx>, BlockExecutionError>
     where
-        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+        Tx: IntoTxEnv<alloy_op_evm::OpTx> + RecoveredTx<R::Transaction> + Copy,
     {
         let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
 
@@ -492,10 +503,8 @@ where
         // nonces, so we don't need to touch the DB for those.
         let depositor = is_deposit
             .then(|| {
-                self.evm
-                    .db_mut()
-                    .load_cache_account(*tx.signer())
-                    .map(|acc| acc.account_info().unwrap_or_default())
+                revm::Database::basic(self.evm.db_mut(), *tx.signer())
+                    .map(Option::unwrap_or_default)
             })
             .transpose()
             .map_err(BlockExecutionError::other)?;
@@ -505,8 +514,8 @@ where
         // Execute transaction.
         let outcome = self
             .evm
-            .execute_transaction(tx.into_tx_env())
-            .map_err(move |err| BlockExecutionError::evm(err, hash))?;
+            .execute_transaction(tx.into_tx_env().into())
+            .map_err(move |err| BlockExecutionError::evm(alloy_op_evm::map_op_err(err), hash))?;
 
         Ok(BlockMegaTransactionOutcome { tx, tx_size, da_size, depositor, inner: outcome })
     }
@@ -517,7 +526,7 @@ where
         outcome: BlockMegaTransactionOutcome<Tx>,
     ) -> Result<u64, BlockExecutionError>
     where
-        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+        Tx: RecoveredTx<R::Transaction> + Copy,
     {
         self.commit_transaction_outcome(outcome)
     }
@@ -539,7 +548,7 @@ where
         outcome: BlockMegaTransactionOutcome<Tx>,
     ) -> Result<u64, BlockExecutionError>
     where
-        Tx: IntoTxEnv<MegaTransaction> + RecoveredTx<R::Transaction> + Copy,
+        Tx: RecoveredTx<R::Transaction> + Copy,
     {
         // Re-validate limits at commit time to handle parallel execution race conditions.
         // Between run_transaction() and commit_transaction_outcome(), other transactions
@@ -558,15 +567,17 @@ where
         self.block_limiter.post_execution_update(&outcome)?;
 
         let BlockMegaTransactionOutcome { tx, depositor, inner, .. } = outcome;
-        let MegaTransactionOutcome { result, state, .. } = inner;
-        let gas_used = result.gas_used();
+        let revm::context::result::ResultAndState { result, state } = inner.inner;
+        let gas_used = result.tx_gas_used();
 
-        self.system_caller.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
+        if let Some(hook) = self.state_hook.as_mut() {
+            hook.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
+        }
 
         let block_gas_used = self.block_limiter.block_gas_used;
         self.receipts.push(
             match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
-                tx: tx.tx(),
+                tx_type: tx.tx().tx_type(),
                 result,
                 cumulative_gas_used: block_gas_used,
                 evm: &self.evm,
@@ -610,25 +621,28 @@ where
         self.evm.ctx_ref().dynamic_storage_gas_cost.borrow().get_bucket_ids()
     }
 
-    /// Get the block hashes used during transaction execution.
-    ///
-    /// # Returns
-    ///
-    /// Returns the block hashes used during transaction execution.
+    /// Sets the hook invoked immediately before each state commit.
+    pub fn set_state_hook(&mut self, hook: Option<Box<dyn MegaOnStateHook>>) {
+        self.state_hook = hook;
+    }
+}
+
+impl<'db, DB, H, R, INSP, ExtEnvs>
+    MegaBlockExecutor<H, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
+where
+    DB: Database,
+    R: OpReceiptBuilder,
+    ExtEnvs: crate::ExternalEnvTypes,
+    INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
+{
+    /// Returns the block hashes read during execution.
     pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
-        self.evm.db().block_hashes.clone()
+        self.evm.db().block_hashes.iter().collect()
     }
 
-    /// Clears the recorded block hash accesses.
-    ///
-    /// Block hash reads accumulate in the executor's database across every
-    /// transaction executed so far. Callers that need to attribute BLOCKHASH
-    /// reads to a single transaction (e.g. replay fixture dumping) clear the
-    /// record before executing it. The record is a cache: a cleared hash is
-    /// simply re-fetched from the underlying database on the next access, so
-    /// execution results are unaffected.
+    /// Clears block-hash reads recorded by the state cache.
     pub fn clear_accessed_block_hashes(&mut self) {
-        self.evm.db_mut().block_hashes.clear();
+        self.evm.db_mut().block_hashes = Default::default();
     }
 }
 
@@ -637,24 +651,31 @@ where
 /// This implementation delegates all block execution operations to the underlying
 /// Optimism block executor while providing MegaETH-specific customizations through
 /// the configured chain specification and EVM factory.
-impl<'db, DB, C, R, INSP, ExtEnvs> alloy_evm::block::BlockExecutor
-    for MegaBlockExecutor<C, crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>, R>
+impl<DB, C, R, INSP, ExtEnvs> alloy_evm::block::BlockExecutor
+    for MegaBlockExecutor<C, crate::MegaEvm<DB, INSP, ExtEnvs>, R>
 where
-    DB: Database + 'db,
-    C: MegaHardforks,
+    DB: alloy_evm::block::StateDB,
+    C: MegaHardforks + Clone,
     ExtEnvs: crate::ExternalEnvTypes,
-    INSP: Inspector<crate::MegaContext<&'db mut State<DB>, ExtEnvs>>,
+    INSP: Inspector<crate::MegaContext<DB, ExtEnvs>>,
     R: OpReceiptBuilder<
-        Transaction: Transaction + Encodable2718 + MegaTransactionExt,
-        Receipt: TxReceipt,
-    >,
-    crate::MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
+            Transaction: Transaction + Encodable2718 + MegaTransactionExt,
+            Receipt: TxReceipt,
+        >,
+    alloy_op_evm::OpTx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
 {
     type Transaction = R::Transaction;
 
     type Receipt = R::Receipt;
 
-    type Evm = crate::MegaEvm<&'db mut State<DB>, INSP, ExtEnvs>;
+    type Evm = crate::MegaEvm<DB, INSP, ExtEnvs>;
+
+    type Result = BlockMegaTransactionOutcome<(
+        <R::Transaction as TransactionEnvelope>::TxType,
+        B256,
+        u64,
+        bool,
+    )>;
 
     /// NOTE: this function resembles the one in
     /// `alloy_op_evm::OpBlockExecutor::apply_pre_execution_changes`. Changes there should be
@@ -670,7 +691,9 @@ where
         let (system_address, read_state) =
             resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;
         if let Some(state) = read_state {
-            self.system_caller.on_state(StateChangeSource::Transaction(0), &state);
+            if let Some(hook) = self.state_hook.as_mut() {
+                hook.on_state(StateChangeSource::Transaction(0), &state);
+            }
             self.evm.db_mut().commit(state);
         }
         self.evm.ctx_mut().set_system_address(system_address);
@@ -684,20 +707,108 @@ where
     fn execute_transaction_with_commit_condition(
         &mut self,
         tx: impl ExecutableTx<Self>,
-        f: impl FnOnce(&ExecutionResult<<Self::Evm as alloy_evm::Evm>::HaltReason>) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError> {
-        // `tx: impl ExecutableTx<Self>` cannot be required to implement `MegaTransactionExt`, so
-        // this path recomputes the sizes from the raw inner transaction and bypasses
-        // `run_transaction` (which reads them via the trait). See `run_transaction`'s docs.
-        let tx_size = tx.tx().encode_2718_len() as u64;
-        let da_size = tx.tx().estimated_da_size();
-        let outcome = self.run_transaction_with_sizes(tx, tx_size, da_size)?;
-        if f(&outcome.result).should_commit() {
-            let gas_used = self.commit_execution_outcome(outcome)?;
-            Ok(Some(gas_used))
+        f: impl FnOnce(&Self::Result) -> CommitChanges,
+    ) -> Result<Option<GasOutput>, BlockExecutionError> {
+        let outcome = self.execute_transaction_without_commit(tx)?;
+        if f(&outcome).should_commit() {
+            Ok(Some(self.commit_transaction(outcome)))
         } else {
             Ok(None)
         }
+    }
+
+    fn execute_transaction_without_commit(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+    ) -> Result<Self::Result, BlockExecutionError> {
+        let (tx_env, tx) = tx.into_parts();
+        let tx_size = tx.tx().encode_2718_len() as u64;
+        let da_size = tx.tx().estimated_da_size();
+        let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
+
+        self.block_limiter.pre_execution_check(
+            tx.tx().tx_hash(),
+            tx.tx().gas_limit(),
+            tx_size,
+            da_size,
+            is_deposit,
+        )?;
+
+        let depositor = is_deposit
+            .then(|| {
+                revm::Database::basic(self.evm.db_mut(), *tx.signer())
+                    .map(Option::unwrap_or_default)
+            })
+            .transpose()
+            .map_err(BlockExecutionError::other)?;
+        let tx_hash = tx.tx().trie_hash();
+        let tx_gas_limit = tx.tx().gas_limit();
+        let tx_type = tx.tx().tx_type();
+        let inner = self
+            .evm
+            .execute_transaction(tx_env.into())
+            .map_err(|err| BlockExecutionError::evm(alloy_op_evm::map_op_err(err), tx_hash))?;
+
+        Ok(BlockMegaTransactionOutcome {
+            tx: (tx_type, tx_hash, tx_gas_limit, is_deposit),
+            tx_size,
+            da_size,
+            depositor,
+            inner,
+        })
+    }
+
+    fn commit_transaction(&mut self, outcome: Self::Result) -> GasOutput {
+        let BlockMegaTransactionOutcome {
+            tx: (tx_type, _, _, is_deposit),
+            tx_size,
+            da_size,
+            depositor,
+            inner,
+        } = outcome;
+        self.block_limiter.post_execution_update_raw(
+            inner.result.tx_gas_used(),
+            tx_size,
+            da_size,
+            inner.data_size,
+            inner.kv_updates,
+            inner.compute_gas_used,
+            inner.state_growth_used,
+            is_deposit,
+        );
+
+        let MegaTransactionOutcome { inner, .. } = inner;
+        let revm::context::result::ResultAndState { result, state } = inner;
+        let gas_used = result.tx_gas_used();
+        if let Some(hook) = self.state_hook.as_mut() {
+            hook.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
+        }
+        let cumulative_gas_used = self.block_limiter.block_gas_used;
+        self.receipts.push(
+            match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
+                tx_type,
+                result,
+                cumulative_gas_used,
+                evm: &self.evm,
+                state: &state,
+            }) {
+                Ok(receipt) => receipt,
+                Err(ctx) => {
+                    let receipt = alloy_consensus::Receipt {
+                        status: Eip658Value::Eip658(ctx.result.is_success()),
+                        cumulative_gas_used,
+                        logs: ctx.result.into_logs(),
+                    };
+                    self.receipt_builder.build_deposit_receipt(OpDepositReceipt {
+                        inner: receipt,
+                        deposit_receipt_version: depositor.is_some().then_some(1),
+                        deposit_nonce: depositor.map(|account| account.nonce),
+                    })
+                }
+            },
+        );
+        self.evm.db_mut().commit(state);
+        GasOutput::new(gas_used)
     }
 
     /// NOTE: this function resembles the one in
@@ -716,12 +827,9 @@ where
                 receipts: self.receipts,
                 requests: Default::default(),
                 gas_used,
+                blob_gas_used: 0,
             },
         ))
-    }
-
-    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
-        self.system_caller.with_state_hook(hook);
     }
 
     fn evm_mut(&mut self) -> &mut Self::Evm {
@@ -730,5 +838,9 @@ where
 
     fn evm(&self) -> &Self::Evm {
         &self.evm
+    }
+
+    fn receipts(&self) -> &[Self::Receipt] {
+        &self.receipts
     }
 }

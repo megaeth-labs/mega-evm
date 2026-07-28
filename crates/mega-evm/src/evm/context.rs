@@ -22,16 +22,16 @@ use core::cell::RefCell;
 use delegate::delegate;
 use op_revm::{DefaultOp, L1BlockInfo, OpContext, OpSpecId};
 use revm::{
+    Journal,
     context::{BlockEnv, CfgEnv, ContextSetters, ContextTr, LocalContext},
     context_interface::context::ContextError,
     database::EmptyDB,
-    Journal,
 };
 
 use crate::{
-    constants, is_system_originated, AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv,
-    EvmTxRuntimeLimits, ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit,
-    VolatileDataAccess, VolatileDataAccessTracker, VolatileDataAccessType,
+    AdditionalLimit, BucketId, DynamicGasCost, EmptyExternalEnv, EvmTxRuntimeLimits,
+    ExternalEnvTypes, ExternalEnvs, MegaSpecId, TxRuntimeLimit, VolatileDataAccess,
+    VolatileDataAccessTracker, VolatileDataAccessType, constants, is_system_originated,
 };
 
 /// `MegaETH` EVM context type. This struct wraps [`OpContext`] and implements the [`ContextTr`]
@@ -42,6 +42,7 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
     #[deref]
     #[deref_mut]
     pub(crate) inner: OpContext<DB>,
+    pub(crate) mega_cfg: CfgEnv<MegaSpecId>,
     /// The `MegaETH` spec id. The inner context contains the `OpSpecId`.
     /// The `OpSpec` in the `inner` context should be the corresponding [`OpSpecId`] for the
     /// [`SpecId`].
@@ -156,6 +157,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
             inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
         }
+        let mega_cfg = inner.cfg.clone().into_megaeth_cfg(spec);
 
         let tx_limits = EvmTxRuntimeLimits::from_spec(spec);
         Self {
@@ -175,6 +177,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
+            mega_cfg,
             inner,
         }
     }
@@ -218,6 +221,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                     Some(constants::mini_rex::MAX_INITCODE_SIZE);
             }
         }
+        let mega_cfg = inner.cfg.clone().into_megaeth_cfg(spec);
 
         let tx_limits = EvmTxRuntimeLimits::from_spec(spec);
         let salt_env = Rc::new(external_envs.salt_env);
@@ -238,6 +242,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
             ))),
             inside_sandbox: Rc::new(RefCell::new(false)),
             system_address: crate::MEGA_SYSTEM_ADDRESS,
+            mega_cfg,
             inner,
         }
     }
@@ -257,6 +262,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     pub fn with_db<ODB: Database>(self, db: ODB) -> MegaContext<ODB, ExtEnvTypes> {
         MegaContext {
             inner: self.inner.with_db(db),
+            mega_cfg: self.mega_cfg,
             spec: self.spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
@@ -320,6 +326,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     /// Returns `self` for method chaining.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
         self.spec = cfg.spec;
+        self.mega_cfg = cfg.clone();
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
         if self.spec.is_enabled(MegaSpecId::MINI_REX) {
             if self.inner.cfg.limit_contract_code_size.is_none() {
@@ -331,7 +338,17 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
                     Some(constants::mini_rex::MAX_INITCODE_SIZE);
             }
         }
+        self.mega_cfg = self.inner.cfg.clone().into_megaeth_cfg(self.spec);
         self
+    }
+
+    /// Updates both the upstream OP configuration and the Mega-specific view.
+    pub fn modify_cfg<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut CfgEnv<OpSpecId>),
+    {
+        self.inner.modify_cfg(f);
+        self.mega_cfg = self.inner.cfg.clone().into_megaeth_cfg(self.spec);
     }
 
     /// Sets the external environments for the EVM.
@@ -357,6 +374,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
         let salt_env = Rc::new(external_envs.salt_env);
         MegaContext {
             inner: self.inner,
+            mega_cfg: self.mega_cfg,
             spec,
             disable_beneficiary: self.disable_beneficiary,
             additional_limit: self.additional_limit,
@@ -639,6 +657,20 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     type Chain = L1BlockInfo;
     type Local = LocalContext;
 
+    fn all(
+        &self,
+    ) -> (&Self::Block, &Self::Tx, &Self::Cfg, &Self::Db, &Self::Journal, &Self::Chain, &Self::Local)
+    {
+        self.inner.all()
+    }
+
+    fn all_mut(
+        &mut self,
+    ) -> (&Self::Block, &Self::Tx, &Self::Cfg, &mut Self::Journal, &mut Self::Chain, &mut Self::Local)
+    {
+        self.inner.all_mut()
+    }
+
     delegate! {
         to self.inner {
             fn tx(&self) -> &Self::Tx;
@@ -713,6 +745,7 @@ impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
     /// to include the new fields.
     fn into_op_cfg(self) -> CfgEnv<OpSpecId> {
         let mut op_cfg = CfgEnv::new_with_spec(OpSpecId::from(self.spec));
+        op_cfg.gas_params = self.gas_params;
         op_cfg.chain_id = self.chain_id;
         op_cfg.tx_chain_id_check = self.tx_chain_id_check;
         op_cfg.limit_contract_code_size = self.limit_contract_code_size;
@@ -726,7 +759,12 @@ impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
         op_cfg.disable_block_gas_limit = self.disable_block_gas_limit;
         op_cfg.disable_eip3541 = self.disable_eip3541;
         op_cfg.disable_eip3607 = self.disable_eip3607;
+        op_cfg.disable_eip7623 = self.disable_eip7623;
         op_cfg.disable_base_fee = self.disable_base_fee;
+        op_cfg.enable_amsterdam_eip8037 = self.enable_amsterdam_eip8037;
+        op_cfg.amsterdam_eip7708_disabled = self.amsterdam_eip7708_disabled;
+        op_cfg.amsterdam_eip7708_delayed_burn_disabled =
+            self.amsterdam_eip7708_delayed_burn_disabled;
         op_cfg
     }
 }
@@ -755,6 +793,7 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
     /// to include the new fields.
     fn into_megaeth_cfg(self, spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
         let mut cfg = CfgEnv::new_with_spec(spec);
+        cfg.gas_params = self.gas_params;
         cfg.chain_id = self.chain_id;
         cfg.tx_chain_id_check = self.tx_chain_id_check;
         cfg.limit_contract_code_size = self.limit_contract_code_size;
@@ -768,7 +807,11 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
         cfg.disable_block_gas_limit = self.disable_block_gas_limit;
         cfg.disable_eip3541 = self.disable_eip3541;
         cfg.disable_eip3607 = self.disable_eip3607;
+        cfg.disable_eip7623 = self.disable_eip7623;
         cfg.disable_base_fee = self.disable_base_fee;
+        cfg.enable_amsterdam_eip8037 = self.enable_amsterdam_eip8037;
+        cfg.amsterdam_eip7708_disabled = self.amsterdam_eip7708_disabled;
+        cfg.amsterdam_eip7708_delayed_burn_disabled = self.amsterdam_eip7708_delayed_burn_disabled;
         cfg
     }
 }

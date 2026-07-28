@@ -6,11 +6,11 @@
 //!   detained `OutOfGas` branch — returns the forwarded gas to the parent instead of swallowing it
 //!   into `gas_used` (pre-REX6 leaves it swallowed).
 
-use crate::common::{transact, transact_default, CALLER, CONTRACT};
+use crate::common::{CALLER, CONTRACT, transact, transact_default};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaSpecId,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, LOG0, LOG1, POP, TIMESTAMP},

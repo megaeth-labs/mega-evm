@@ -8,24 +8,24 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, EvmTxRuntimeLimits, IMegaLimitControl,
+    LIMIT_CONTROL_ADDRESS, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    STORAGE_SLOT_WRITE_SIZE,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IMegaLimitControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE,
-    LIMIT_CONTROL_ADDRESS, STORAGE_SLOT_WRITE_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
     context::{
+        ContextTr, TxEnv,
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        ContextTr, TxEnv,
     },
     handler::EvmTr,
     inspector::Inspector,
-    interpreter::{interpreter_types::InterpreterTypes, CallInputs, CallOutcome, Gas},
+    interpreter::{CallInputs, CallOutcome, Gas, interpreter_types::InterpreterTypes},
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");
@@ -41,7 +41,7 @@ fn transact_data_kv(
     data_limit: u64,
     kv_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, alloy_op_evm::OpTxError>>
 {
     let mut context = MegaContext::new(db, MegaSpecId::REX4).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits()
@@ -55,7 +55,7 @@ fn transact_data_kv(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))?;
 
     let ctx = evm.ctx_ref();
     let usage = ctx.additional_limit.borrow().get_usage();
@@ -392,14 +392,14 @@ struct SkipAllCallsInspector;
 
 impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipAllCallsInspector {
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        Some(CallOutcome {
-            result: revm::interpreter::InterpreterResult {
+        Some(CallOutcome::new(
+            revm::interpreter::InterpreterResult {
                 result: revm::interpreter::InstructionResult::Stop,
                 output: Bytes::new(),
                 gas: Gas::new(inputs.gas_limit),
             },
-            memory_offset: 0..0,
-        })
+            0..0,
+        ))
     }
 }
 
@@ -431,7 +431,7 @@ fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
     let mut tx = MegaTransaction::new(default_tx_builder(CALLEE).build_fill());
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
 
     assert!(
         result.result.is_halt(),
@@ -444,7 +444,7 @@ fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
     ));
 
     // Verify gas rescue: most gas should be refunded since no execution happened.
-    let gas_remaining = 100_000_000 - result.result.gas_used();
+    let gas_remaining = 100_000_000 - result.result.tx_gas_used();
     assert!(
         gas_remaining > 99_000_000,
         "Expected >99M gas remaining from rescue, got {gas_remaining}"

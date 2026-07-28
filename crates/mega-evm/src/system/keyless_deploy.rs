@@ -18,15 +18,15 @@
 //! The deployment address is deterministic: `keccak256(rlp([signer, 0]))[12:]`
 
 use alloy_evm::Database;
-use alloy_primitives::{address, Address};
+use alloy_primitives::{Address, address};
 use revm::{database::State, state::EvmState};
 
 use crate::{MegaHardforks, SystemContractSpec};
 
 // Re-export error types and transaction functions from sandbox
 pub use crate::sandbox::{
-    calculate_keyless_deploy_address, decode_keyless_tx, encode_error_result, recover_signer,
-    KeylessDeployError,
+    KeylessDeployError, calculate_keyless_deploy_address, decode_keyless_tx, encode_error_result,
+    recover_signer,
 };
 
 /// The address of the keyless deploy system contract.
@@ -47,7 +47,7 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
     db: &mut State<DB>,
-) -> Result<Option<EvmState>, DB::Error> {
+) -> Result<Option<EvmState>, <State<DB> as revm::Database>::Error> {
     keyless_deploy_spec(&hardforks, block_timestamp)
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
@@ -104,6 +104,7 @@ mod tests {
         db.insert_account_info(
             KEYLESS_DEPLOY_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 balance: revm::primitives::U256::ZERO,
                 nonce: 0,
                 code_hash: wrong_code_hash,

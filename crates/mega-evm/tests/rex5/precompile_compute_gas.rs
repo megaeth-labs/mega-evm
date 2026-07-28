@@ -19,17 +19,16 @@
 //! produce byte-identical receipts. The `test_rex4_kzg_*` test below is a
 //! stable-spec replay-preservation guard.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use core::cell::RefCell;
 use mega_evm::{
-    kzg_point_evaluation,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction,
+    MegaTransaction, kzg_point_evaluation,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::*,
-    context::{result::ResultAndState, tx::TxEnvBuilder, TxEnv},
+    context::{TxEnv, result::ResultAndState, tx::TxEnvBuilder},
     handler::EvmTr,
 };
 use sha2::{Digest, Sha256};
@@ -91,7 +90,7 @@ fn transact_with_compute_limit(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
     (r, compute_gas)
 }

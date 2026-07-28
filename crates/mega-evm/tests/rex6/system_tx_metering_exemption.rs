@@ -14,29 +14,27 @@
 
 use std::convert::Infallible;
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_consensus::{Signed, TxLegacy, transaction::Recovered};
 use alloy_evm::{
-    block::{
-        BlockExecutor, BlockValidationError, OnStateHook, StateChangePreBlockSource,
-        StateChangeSource,
-    },
     Evm as _, EvmEnv,
+    block::{BlockExecutor, BlockValidationError},
 };
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, BucketHasher, BucketId, IOracle,
-    MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig,
-    SequencerRegistryRex6Config, TestExternalEnvs, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    BlockLimits, BucketHasher, BucketId, IOracle, MEGA_SYSTEM_ADDRESS, MegaBlockExecutionCtx,
+    MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaOnStateHook,
+    MegaSpecId, MegaTxEnvelope, ORACLE_CONTRACT_ADDRESS, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, StateChangePreBlockSource, StateChangeSource, TestExternalEnvs,
+    test_utils::MemoryDatabase,
 };
 use revm::{
+    Database as _,
     context::{BlockEnv, CfgEnv, ContextTr as _},
     database::State,
     state::{AccountInfo, Bytecode, EvmState},
-    Database as _,
 };
 use std::sync::{Arc, Mutex};
 
@@ -139,7 +137,7 @@ struct RecordingStateHook {
     events: Arc<Mutex<Vec<StateChangeSource>>>,
 }
 
-impl OnStateHook for RecordingStateHook {
+impl MegaOnStateHook for RecordingStateHook {
     fn on_state(&mut self, source: StateChangeSource, _state: &EvmState) {
         self.events.lock().unwrap().push(source);
     }
@@ -205,7 +203,7 @@ fn test_rex6_pre_block_calls_accepted_under_heavy_salt() {
 
     let recorder = RecordingStateHook::default();
     let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+    executor.set_state_hook(Some(Box::new(recorder)));
 
     executor
         .apply_pre_execution_changes()
@@ -351,7 +349,7 @@ fn test_rex6_system_tx_storage_gas_independent_of_bucket_capacity() {
         let tx = oracle_system_tx(0, ORACLE_SLOT, value);
         let outcome = executor.run_transaction(&tx).expect("oracle system tx must execute");
         assert!(outcome.result.is_success(), "must succeed: {:?}", outcome.result);
-        let gas_used = outcome.result.gas_used();
+        let gas_used = outcome.result.tx_gas_used();
         executor.commit_transaction_outcome(outcome).expect("commit");
         let slot = executor
             .evm

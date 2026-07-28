@@ -5,12 +5,12 @@
 //! contract. The EVM intercepts these calls and forwards them to the oracle service via
 //! `OracleEnv::on_hint`.
 
-use alloy_primitives::{address, bytes, Bytes, TxKind, B256, U256};
-use alloy_sol_types::{sol, SolCall};
+use alloy_primitives::{B256, Bytes, TxKind, U256, address, bytes};
+use alloy_sol_types::{SolCall, sol};
 use mega_evm::{
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX2, TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
-    ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, MSTORE, PUSH0},
@@ -74,7 +74,7 @@ fn execute_transaction_with_data_and_value(
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     result_envelope.result
 }
 

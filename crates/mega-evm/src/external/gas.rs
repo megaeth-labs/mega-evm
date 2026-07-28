@@ -8,7 +8,7 @@ use revm::primitives::hash_map::Entry;
 use alloy_primitives::{Address, BlockNumber, U256};
 use revm::{context::BlockEnv, primitives::HashMap};
 
-use crate::{constants, BucketId, MegaSpecId, SaltEnv, MIN_BUCKET_SIZE};
+use crate::{BucketId, MIN_BUCKET_SIZE, MegaSpecId, SaltEnv, constants};
 
 /// Calculator for dynamic gas costs based on bucket capacity.
 #[derive(Debug)]

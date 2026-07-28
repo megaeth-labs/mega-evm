@@ -10,17 +10,17 @@
 
 use std::{convert::Infallible, vec::Vec};
 
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address, hex};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    BucketHasher, IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, SimpleBucketHasher, TestExternalEnvs,
     alloy_consensus::{Signed, TxLegacy},
     revm::context::result::ExecutionResult,
-    sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
+    sandbox::{KeylessDeployError, calculate_keyless_deploy_address, decode_error_result},
     test_utils::MemoryDatabase,
-    BucketHasher, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, SimpleBucketHasher, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
-use revm::{context::TxEnv, inspector::NoOpInspector, Database as _};
+use revm::{Database as _, context::TxEnv, inspector::NoOpInspector};
 
 const RELAYER: Address = address!("0000000000000000000000000000000000990000");
 const SIGNED_GAS_PRICE: u128 = 100_000_000_000; // 100 gwei
@@ -118,7 +118,7 @@ fn run_keyless_outer_with_envs(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    alloy_evm::Evm::transact_commit(&mut evm, tx)
+    alloy_evm::Evm::transact_commit(&mut evm, alloy_op_evm::OpTx(tx))
         .expect("outer keyless call should not surface EVMError")
 }
 

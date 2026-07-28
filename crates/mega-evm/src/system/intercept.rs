@@ -16,10 +16,10 @@ use revm::{
 };
 
 use crate::{
-    sandbox::execute_keyless_deploy_call, ExternalEnvTypes, IKeylessDeploy, IMegaAccessControl,
-    IMegaLimitControl, IOracle, MegaContext, MegaSpecId, OracleEnv, ACCESS_CONTROL_ADDRESS,
-    DISABLED_BY_PARENT_REVERT_DATA, KEYLESS_DEPLOY_ADDRESS, LIMIT_CONTROL_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
+    ACCESS_CONTROL_ADDRESS, DISABLED_BY_PARENT_REVERT_DATA, ExternalEnvTypes, IKeylessDeploy,
+    IMegaAccessControl, IMegaLimitControl, IOracle, KEYLESS_DEPLOY_ADDRESS, LIMIT_CONTROL_ADDRESS,
+    MegaContext, MegaSpecId, ORACLE_CONTRACT_ADDRESS, OracleEnv,
+    sandbox::execute_keyless_deploy_call,
 };
 
 /// The result of a system contract call interception attempt.
@@ -517,9 +517,9 @@ mod tests {
     };
 
     use crate::{
+        IMegaAccessControl, IMegaLimitControl, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
+        MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
         test_utils::{BytecodeBuilder, MemoryDatabase},
-        IMegaAccessControl, IMegaLimitControl, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-        LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
     };
 
     const REMAINING_COMPUTE_GAS_SELECTOR: [u8; 4] =
@@ -605,7 +605,7 @@ mod tests {
         let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());
 
-        let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+        let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
         assert!(result.result.is_success(), "outer tx should succeed");
 
         let output = result.result.output().expect("should have output");

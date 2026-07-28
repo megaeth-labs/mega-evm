@@ -4,13 +4,13 @@ use std::{rc::Rc, vec::Vec};
 
 use core::cell::RefCell;
 use revm::{
+    Inspector,
     bytecode::OpCode,
     context::{ContextTr, JournalTr},
     interpreter::{
-        interpreter_types::Jumps, CallInputs, CallOutcome, CreateInputs, Interpreter,
-        InterpreterTypes,
+        CallInputs, CallOutcome, CreateInputs, Interpreter, InterpreterTypes,
+        interpreter_types::Jumps,
     },
-    Inspector,
 };
 
 /// A smart pointer wrapper around `Rc<RefCell<T>>` that provides shared mutable access.

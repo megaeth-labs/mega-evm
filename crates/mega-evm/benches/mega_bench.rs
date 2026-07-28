@@ -19,26 +19,26 @@
 #![allow(missing_docs)]
 
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
-use alloy_primitives::{address, Address, Bytes, U256};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use alloy_primitives::{Address, Bytes, U256, address};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use mega_evm::{
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     revm::inspector::NoOpInspector,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use revm::{
+    ExecuteEvm as _,
     bytecode::opcode::{
         ADD, CALL, COINBASE, CREATE, CREATE2, DELEGATECALL, GAS, LOG0, LOG1, LOG2, LOG4, NUMBER,
         POP, PUSH0, SELFDESTRUCT, SLOAD, SSTORE, STATICCALL, STOP, TIMESTAMP,
     },
     context::tx::TxEnvBuilder,
-    ExecuteEvm as _,
 };
 
 mod common;
 use common::{
-    register_all, register_all_suffixed, register_mega_specs, register_mega_specs_suffixed,
-    register_mega_suffixed, Account, TxSpec, Workload,
+    Account, TxSpec, Workload, register_all, register_all_suffixed, register_mega_specs,
+    register_mega_specs_suffixed, register_mega_suffixed,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000100000");

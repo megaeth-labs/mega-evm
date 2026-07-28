@@ -6,13 +6,12 @@
 use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
+use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
-    MegaEvmFactory, MegaHardforkConfig, MegaSpecId, MegaTransactionExt, MegaTxEnvelope,
-    TestExternalEnvs,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
+    MegaSpecId, MegaTransactionExt, MegaTxEnvelope, TestExternalEnvs, test_utils::MemoryDatabase,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{context::BlockEnv, database::State};
@@ -45,8 +44,8 @@ fn create_regular_transaction_with_large_calldata(
 }
 
 /// Helper function to create a deposit transaction with large calldata.
-fn create_deposit_transaction_with_large_calldata(
-) -> alloy_consensus::transaction::Recovered<MegaTxEnvelope> {
+fn create_deposit_transaction_with_large_calldata()
+-> alloy_consensus::transaction::Recovered<MegaTxEnvelope> {
     // Create calldata with non-compressible data (sequential bytes) to ensure it exceeds
     // DA_SIZE_LIMIT
     let large_calldata =
@@ -101,6 +100,7 @@ fn test_deposit_transaction_exempt_from_single_tx_da_limit() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -164,6 +164,7 @@ fn test_regular_transaction_rejected_by_single_tx_da_limit() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -226,6 +227,7 @@ fn test_deposit_exempt_from_block_da_limit() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),
@@ -289,6 +291,7 @@ fn test_mixed_deposit_and_regular_transactions() {
 
     // Create EVM environment
     let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.chain_id = 8453;
     cfg_env.spec = MegaSpecId::MINI_REX;
     let block_env = BlockEnv {
         number: U256::from(1000),

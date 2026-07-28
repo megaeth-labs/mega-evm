@@ -21,15 +21,15 @@
 
 use std::vec::Vec;
 
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address, hex};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    EvmTxRuntimeLimits, IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
     alloy_consensus::{Signed, TxLegacy},
     revm::context::result::ExecutionResult,
-    sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
+    sandbox::{KeylessDeployError, calculate_keyless_deploy_address, decode_error_result},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{DELEGATECALL, MSTORE8, POP, RETURN, SELFDESTRUCT},
@@ -130,7 +130,7 @@ fn run_keyless_outer(
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    alloy_evm::Evm::transact_commit(&mut evm, tx)
+    alloy_evm::Evm::transact_commit(&mut evm, alloy_op_evm::OpTx(tx))
         .expect("outer keyless call should not fail at the EVM-error level")
 }
 
@@ -317,8 +317,8 @@ fn test_rex6_keyless_overhead_oog_rescues_parent_gas() {
         None,
     );
 
-    let gas_used_rex5 = result_rex5.gas_used();
-    let gas_used_rex6 = result_rex6.gas_used();
+    let gas_used_rex5 = result_rex5.tx_gas_used();
+    let gas_used_rex6 = result_rex6.tx_gas_used();
     assert!(
         gas_used_rex6 < gas_used_rex5,
         "REX6 must rescue parent gas on tx-level compute exceed: REX6={gas_used_rex6} \

@@ -1,8 +1,7 @@
-use alloy_evm::block::StateChangeSource;
 pub use alloy_evm::InvalidTxError;
 use alloy_primitives::Address;
 pub use op_revm::{OpHaltReason, OpTransactionError};
-use revm::{context::result::ExecutionResult, state::EvmState};
+use revm::{context::result::ResultAndState, state::EvmState};
 pub use revm::{
     context::result::{EVMError, InvalidTransaction},
     context_interface::{
@@ -17,12 +16,12 @@ use crate::VolatileDataAccess;
 ///
 /// This struct contains additional information about the transaction execution on top of the
 /// standard EVM's execution result and state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::Deref, derive_more::DerefMut)]
 pub struct MegaTransactionOutcome {
-    /// The transaction execution result.
-    pub result: ExecutionResult<MegaHaltReason>,
-    /// The post-execution evm state.
-    pub state: EvmState,
+    /// The transaction execution result and post-execution state.
+    #[deref]
+    #[deref_mut]
+    pub inner: ResultAndState<MegaHaltReason>,
     /// The data size usage in bytes.
     pub data_size: u64,
     /// The number of KV updates.
@@ -40,6 +39,33 @@ pub struct MegaSystemCallOutcome {
     pub source: StateChangeSource,
     /// The post-call evm state
     pub state: EvmState,
+}
+
+/// Source of a MegaETH system-call state change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChangeSource {
+    /// A pre-block system call.
+    PreBlock(StateChangePreBlockSource),
+    /// A transaction-indexed state change.
+    Transaction(usize),
+    /// A post-block state change.
+    PostBlock(StateChangePostBlockSource),
+}
+
+/// Source of a pre-block state change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChangePreBlockSource {
+    /// EIP-2935 block-hash history contract.
+    BlockHashesContract,
+    /// EIP-4788 beacon-root contract.
+    BeaconRootContract,
+}
+
+/// Source of a post-block state change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChangePostBlockSource {
+    /// Protocol balance increments.
+    BalanceIncrements,
 }
 
 /// `MegaETH` transaction validation error type.
@@ -148,11 +174,11 @@ mod tests {
     #[test]
     fn test_base_halt_reasons_convert_roundtrip() {
         let eth_reason = EthHaltReason::OutOfGas(OutOfGasError::Basic);
-        let mega_from_eth = MegaHaltReason::from(eth_reason);
-        let mega_from_op = MegaHaltReason::from(OpHaltReason::Base(eth_reason));
+        let mega_from_eth = MegaHaltReason::from(eth_reason.clone());
+        let mega_from_op = MegaHaltReason::from(OpHaltReason::Base(eth_reason.clone()));
 
-        assert_eq!(mega_from_eth, MegaHaltReason::Base(OpHaltReason::Base(eth_reason)));
-        assert_eq!(mega_from_op, MegaHaltReason::Base(OpHaltReason::Base(eth_reason)));
+        assert_eq!(mega_from_eth, MegaHaltReason::Base(OpHaltReason::Base(eth_reason.clone())));
+        assert_eq!(mega_from_op, MegaHaltReason::Base(OpHaltReason::Base(eth_reason.clone())));
         assert_eq!(EthHaltReason::try_from(mega_from_eth).unwrap(), eth_reason);
         assert_eq!(EthHaltReason::try_from(mega_from_op).unwrap(), eth_reason);
     }

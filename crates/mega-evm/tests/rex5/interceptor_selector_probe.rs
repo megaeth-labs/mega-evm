@@ -21,20 +21,20 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, IMegaAccessControl, IOracle, MegaContext, MegaEvm,
+    MegaHaltReason, MegaSpecId, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX2, TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaAccessControl, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, TestExternalEnvs, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
-    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::*,
     context::{
+        TxEnv,
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        TxEnv,
     },
 };
 
@@ -47,7 +47,7 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -56,7 +56,7 @@ fn transact(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 /// Builds bytecode that:
@@ -267,7 +267,8 @@ fn test_oracle_hint_malformed_args_does_not_record_under_both_specs() {
         let mut evm = MegaEvm::new(context);
         let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());
-        let _ = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
+        let _ =
+            alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).expect("transact ok");
 
         assert!(
             external_envs.recorded_hints().is_empty(),

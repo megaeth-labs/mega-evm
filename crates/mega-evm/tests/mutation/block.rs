@@ -15,13 +15,13 @@
 //! * `chain.rs` — `hardfork_schedule` mainnet / testnet match arms (deleting an arm falls through
 //!   to the all-activated fallback, which has different activation conditions).
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_consensus::{Signed, TxLegacy, transaction::Recovered};
 use alloy_hardforks::ForkCondition;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, U256};
+use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, address};
 use mega_evm::{
-    constants, hardfork_schedule, mainnet_hardforks, testnet_hardforks, BlockLimits,
-    EnrichedMegaTx, MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaTransactionExt,
-    MegaTxEnvelope, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
+    BlockLimits, EnrichedMegaTx, MAINNET_CHAIN_ID, MegaHardfork, MegaHardforkConfig, MegaHardforks,
+    MegaTransactionExt, MegaTxEnvelope, TESTNET_CHAIN_ID, constants, hardfork_schedule,
+    mainnet_hardforks, testnet_hardforks,
 };
 
 const CALLER: Address = address!("2000000000000000000000000000000000000001");
@@ -327,7 +327,7 @@ use alloy_consensus::transaction::Recovered as MegaRecovered;
 use alloy_primitives::B256;
 use mega_evm::{BlockLimiter, BlockMegaTransactionOutcome, MegaHaltReason, MegaTransactionOutcome};
 use revm::{
-    context::result::{ExecutionResult, Output, SuccessReason},
+    context::result::{ExecutionResult, Output, ResultAndState, ResultGas, SuccessReason},
     state::EvmState,
 };
 
@@ -344,14 +344,15 @@ fn outcome_for(
         da_size,
         depositor: None,
         inner: MegaTransactionOutcome {
-            result: ExecutionResult::<MegaHaltReason>::Success {
-                reason: SuccessReason::Stop,
-                gas_used: 0,
-                gas_refunded: 0,
-                logs: Vec::new(),
-                output: Output::Call(Bytes::new()),
-            },
-            state: EvmState::default(),
+            inner: ResultAndState::new(
+                ExecutionResult::<MegaHaltReason>::Success {
+                    reason: SuccessReason::Stop,
+                    gas: ResultGas::new_with_state_gas(0, 0, 0, 0),
+                    logs: Vec::new(),
+                    output: Output::Call(Bytes::new()),
+                },
+                EvmState::default(),
+            ),
             data_size: 0,
             kv_updates: 0,
             compute_gas_used: 0,

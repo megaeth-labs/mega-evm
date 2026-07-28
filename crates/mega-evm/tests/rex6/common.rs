@@ -1,9 +1,9 @@
 //! Shared helpers for the REX6 gas-metering-order test suite.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
-    test_utils::MemoryDatabase, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    test_utils::MemoryDatabase,
 };
 use revm::{
     context::{result::ExecutionResult, tx::TxEnvBuilder},
@@ -51,10 +51,10 @@ pub(crate) fn transact(
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
-    let result =
-        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
+        .expect("tx should not surface EVMError");
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     Outcome {
         result: result.result,
         compute_gas: usage.compute_gas,

@@ -9,19 +9,18 @@ use std::{boxed::Box, string::String, sync::Arc};
 
 use crate::{ExternalEnvTypes, MegaContext, MegaSpecId};
 use alloy_evm::{
-    precompiles::{DynPrecompile, PrecompilesMap},
     Database,
+    precompiles::{DynPrecompile, PrecompilesMap},
 };
-use delegate::delegate;
 use once_cell::race::OnceBox;
 use op_revm::{OpContext, OpSpecId};
 use revm::{
     context::Cfg,
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
-    interpreter::{Gas, InputsImpl, InterpreterResult},
+    interpreter::{CallInputs, Gas, InterpreterResult},
     precompile::Precompiles,
-    primitives::{Address, HashMap},
+    primitives::{Address, AddressSet, HashMap},
 };
 
 /// `MegaETH` precompile provider with custom gas cost overrides.
@@ -85,7 +84,9 @@ pub fn mini_rex() -> &'static Precompiles {
 /// Customized KZG point evaluation precompile module.
 pub mod kzg_point_evaluation {
     use revm::{
-        precompile::{PrecompileError, PrecompileWithAddress},
+        precompile::{
+            Precompile, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
+        },
         primitives::Address,
     };
 
@@ -99,15 +100,20 @@ pub mod kzg_point_evaluation {
 
     /// KZG point evaluation precompile. This is the modified version of the original precompile
     /// with a custom gas cost.
-    pub const KZG_POINT_EVALUATION: PrecompileWithAddress =
-        PrecompileWithAddress(ADDRESS, |input, gas_limit| {
-            if gas_limit < GAS_COST {
-                return Err(PrecompileError::OutOfGas);
-            }
-            let mut output = revm::precompile::kzg_point_evaluation::run(input, gas_limit)?;
+    pub const KZG_POINT_EVALUATION: Precompile =
+        Precompile::new(PrecompileId::KzgPointEvaluation, ADDRESS, run);
+
+    fn run(input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileResult {
+        if gas_limit < GAS_COST {
+            return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, reservoir));
+        }
+        let result = revm::precompile::kzg_point_evaluation::run(input, gas_limit);
+        let mut output = PrecompileOutput::from_eth_result(result, reservoir);
+        if output.status.is_success() {
             output.gas_used = GAS_COST;
-            Ok(output)
-        });
+        }
+        Ok(output)
+    }
 }
 
 impl<CTX> PrecompileProvider<CTX> for MegaPrecompiles
@@ -126,19 +132,20 @@ where
         true
     }
 
-    delegate! {
-        to self.inner {
-            fn run(
-                &mut self,
-                context: &mut CTX,
-                address: &Address,
-                inputs: &InputsImpl,
-                is_static: bool,
-                gas_limit: u64,
-            ) -> Result<Option<Self::Output>, String>;
-            fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>>;
-            fn contains(&self, address: &Address) -> bool;
-        }
+    fn run(
+        &mut self,
+        context: &mut CTX,
+        inputs: &CallInputs,
+    ) -> Result<Option<Self::Output>, String> {
+        self.inner.run(context, inputs)
+    }
+
+    fn warm_addresses(&self) -> &AddressSet {
+        self.inner.warm_addresses()
+    }
+
+    fn contains(&self, address: &Address) -> bool {
+        self.inner.contains(address)
     }
 }
 
@@ -165,10 +172,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
     fn run(
         &mut self,
         context: &mut MegaContext<DB, ExtEnvs>,
-        address: &Address,
-        inputs: &InputsImpl,
-        is_static: bool,
-        gas_limit: u64,
+        inputs: &CallInputs,
     ) -> Result<Option<Self::Output>, String> {
         // REX5+: cap forwarded gas at the current compute-gas remaining so a precompile
         // cannot spend more compute gas than the per-frame / TX-level budget permits.
@@ -176,21 +180,24 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
         let is_rex5_enabled = context.spec.is_enabled(MegaSpecId::REX5);
         let effective_gas_limit = if is_rex5_enabled {
             let remaining = context.additional_limit.borrow().current_call_remaining_compute_gas();
-            gas_limit.min(remaining)
+            inputs.gas_limit.min(remaining)
         } else {
-            gas_limit
+            inputs.gas_limit
         };
 
-        let maybe_output = PrecompileProvider::<OpContext<DB>>::run(
-            self,
-            context,
-            address,
-            inputs,
-            is_static,
-            effective_gas_limit,
-        )?;
+        let mut effective_inputs = inputs.clone();
+        effective_inputs.gas_limit = effective_gas_limit;
+
+        let maybe_output =
+            PrecompileProvider::<OpContext<DB>>::run(self, context, &effective_inputs)?;
 
         Ok(maybe_output.map(|mut output| {
+            if !output.result.is_ok_or_revert() {
+                output.gas = Gas::new_with_regular_gas_and_reservoir(
+                    effective_gas_limit,
+                    effective_inputs.reservoir,
+                );
+            }
             // Normalize the returned Gas back to the caller's original `gas_limit` budget
             // ONLY on `is_ok_or_revert` paths — those are the paths where the caller's
             // refund logic (`EthFrame::return_result` and `Handler::last_frame_result`,
@@ -212,9 +219,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             // the caller-interpreter's responsibility and is settled before the
             // precompile is invoked.
             if is_rex5_enabled && output.result.is_ok_or_revert() {
-                let spent = output.gas.spent();
+                let spent = output.gas.total_gas_spent();
                 let refunded = output.gas.refunded();
-                let mut normalized = Gas::new(gas_limit);
+                let mut normalized = Gas::new(inputs.gas_limit);
                 normalized.set_spent(spent);
                 normalized.record_refund(refunded);
                 output.gas = normalized;
@@ -233,8 +240,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
             //   amount, so record `limit()` to match the EVM-gas burn.
             if is_rex5_enabled {
                 let compute_gas = if output.result.is_ok_or_revert() {
-                    output.gas.spent()
-                } else if address == &kzg_point_evaluation::ADDRESS &&
+                    output.gas.total_gas_spent()
+                } else if inputs.bytecode_address == kzg_point_evaluation::ADDRESS &&
                     output.gas.limit() >= kzg_point_evaluation::GAS_COST
                 {
                     // KZG with the wrapper's `gas_limit < GAS_COST` pre-check passed: upstream
@@ -250,14 +257,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
                 };
                 context.additional_limit.borrow_mut().record_compute_gas(compute_gas);
             } else if context.spec.is_enabled(MegaSpecId::MINI_REX) {
-                context.additional_limit.borrow_mut().record_compute_gas(output.gas.spent());
+                context
+                    .additional_limit
+                    .borrow_mut()
+                    .record_compute_gas(output.gas.total_gas_spent());
             }
             output
         }))
     }
 
     #[inline]
-    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
+    fn warm_addresses(&self) -> &AddressSet {
         PrecompileProvider::<OpContext<DB>>::warm_addresses(self)
     }
 
@@ -277,18 +287,57 @@ mod tests {
     use alloc as std;
     use std::{rc::Rc, vec::Vec};
 
-    use super::{kzg_point_evaluation::GAS_COST, mini_rex, rex, MegaPrecompiles};
+    use super::{MegaPrecompiles, kzg_point_evaluation::GAS_COST, mini_rex, rex};
     use crate::{
-        test_utils::MemoryDatabase, AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId,
+        AdditionalLimit, EvmTxRuntimeLimits, MegaContext, MegaSpecId, test_utils::MemoryDatabase,
     };
     use alloy_evm::precompiles::PrecompilesMap;
-    use alloy_primitives::Bytes;
+    use alloy_primitives::{Address, Bytes};
     use core::cell::RefCell;
     use revm::{
         handler::PrecompileProvider,
-        interpreter::{InputsImpl, InstructionResult},
+        interpreter::{CallInputs, CallScheme, CallValue, InputsImpl, InstructionResult},
+        state::Bytecode,
     };
     use sha2::{Digest, Sha256};
+
+    trait PrecompileRunCompat {
+        fn run_compat<DB: alloy_evm::Database, ExtEnvs: crate::ExternalEnvTypes>(
+            &mut self,
+            context: &mut MegaContext<DB, ExtEnvs>,
+            address: &Address,
+            inputs: &InputsImpl,
+            is_static: bool,
+            gas_limit: u64,
+        ) -> Result<Option<revm::interpreter::InterpreterResult>, String>;
+    }
+
+    impl PrecompileRunCompat for PrecompilesMap {
+        fn run_compat<DB: alloy_evm::Database, ExtEnvs: crate::ExternalEnvTypes>(
+            &mut self,
+            context: &mut MegaContext<DB, ExtEnvs>,
+            address: &Address,
+            inputs: &InputsImpl,
+            is_static: bool,
+            gas_limit: u64,
+        ) -> Result<Option<revm::interpreter::InterpreterResult>, String> {
+            let call_inputs = CallInputs {
+                input: inputs.input.clone(),
+                return_memory_offset: 0..0,
+                gas_limit,
+                reservoir: 0,
+                bytecode_address: *address,
+                known_bytecode: (Default::default(), Bytecode::default()),
+                target_address: inputs.target_address,
+                caller: inputs.caller_address,
+                value: CallValue::Transfer(inputs.call_value),
+                scheme: CallScheme::Call,
+                is_static,
+                charged_new_account_state_gas: false,
+            };
+            PrecompileProvider::run(self, context, &call_inputs)
+        }
+    }
 
     /// Generate valid KZG Point Evaluation test data from EIP-4844 test vectors.
     fn generate_kzg_test_input() -> InputsImpl {
@@ -360,11 +409,11 @@ mod tests {
         let inputs = generate_kzg_test_input();
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, 200_000);
+        let result = precompiles_map.run_compat(&mut context, &address, &inputs, true, 200_000);
         assert!(result.is_ok(), "Precompile should succeed with sufficient gas");
         let output = result.unwrap().unwrap();
         assert!(matches!(output.result, InstructionResult::Return), "Result should be Return");
-        assert_eq!(output.gas.spent(), GAS_COST);
+        assert_eq!(output.gas.total_gas_spent(), GAS_COST);
     }
 
     #[test]
@@ -377,11 +426,11 @@ mod tests {
         let inputs = generate_kzg_test_input();
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, GAS_COST);
+        let result = precompiles_map.run_compat(&mut context, &address, &inputs, true, GAS_COST);
         assert!(result.is_ok(), "Precompile should succeed with exact GAS_COST");
         let output = result.unwrap().unwrap();
         assert!(matches!(output.result, InstructionResult::Return), "Result should be Return");
-        assert_eq!(output.gas.spent(), GAS_COST);
+        assert_eq!(output.gas.total_gas_spent(), GAS_COST);
     }
 
     #[test]
@@ -398,10 +447,10 @@ mod tests {
 
         let inputs = generate_kzg_test_input();
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, 200_000);
+        let result = precompiles_map.run_compat(&mut context, &address, &inputs, true, 200_000);
         let output = result.expect("run ok").expect("Some output");
         assert!(matches!(output.result, InstructionResult::Return));
-        assert_eq!(output.gas.spent(), GAS_COST);
+        assert_eq!(output.gas.total_gas_spent(), GAS_COST);
     }
 
     #[test]
@@ -414,7 +463,7 @@ mod tests {
         let inputs = generate_kzg_test_input();
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, 50_000);
+        let result = precompiles_map.run_compat(&mut context, &address, &inputs, true, 50_000);
         assert!(result.is_ok(), "Should not panic");
         let output = result.unwrap();
         assert!(output.is_some(), "Precompile should return Some(result)");
@@ -435,7 +484,8 @@ mod tests {
         let inputs = generate_kzg_test_input();
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, GAS_COST - 1);
+        let result =
+            precompiles_map.run_compat(&mut context, &address, &inputs, true, GAS_COST - 1);
         assert!(result.is_ok(), "Should not panic");
         let output = result.unwrap();
         assert!(output.is_some(), "Precompile should return Some(result)");
@@ -456,7 +506,7 @@ mod tests {
         let inputs = generate_kzg_test_input();
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, 0);
+        let result = precompiles_map.run_compat(&mut context, &address, &inputs, true, 0);
         assert!(result.is_ok(), "Should not panic");
         let output = result.unwrap();
         assert!(output.is_some(), "Precompile should return Some(result)");
@@ -497,11 +547,12 @@ mod tests {
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
         let forwarded_gas = 500_000u64;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, forwarded_gas);
+        let result =
+            precompiles_map.run_compat(&mut context, &address, &inputs, true, forwarded_gas);
         let output = result.expect("run ok").expect("Some output");
         assert!(matches!(output.result, InstructionResult::Return));
         // Spent reflects the precompile's actual cost.
-        assert_eq!(output.gas.spent(), GAS_COST);
+        assert_eq!(output.gas.total_gas_spent(), GAS_COST);
         // Limit was normalized back to the caller's forwarded gas so the caller sees the
         // correct refund (forwarded_gas - GAS_COST) instead of (effective_gas_limit - GAS_COST).
         assert_eq!(output.gas.limit(), forwarded_gas);
@@ -524,10 +575,10 @@ mod tests {
         let inputs = generate_kzg_test_input();
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, 1_000_000);
+        let result = precompiles_map.run_compat(&mut context, &address, &inputs, true, 1_000_000);
         let output = result.expect("run ok").expect("Some output");
         assert!(matches!(output.result, InstructionResult::PrecompileOOG));
-        assert_eq!(output.gas.spent(), 0);
+        assert_eq!(output.gas.total_gas_spent(), 0);
         assert_eq!(context.additional_limit.borrow().get_usage().compute_gas, compute_gas_limit);
     }
 
@@ -544,10 +595,11 @@ mod tests {
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
         let forwarded_gas = 200_000u64;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, forwarded_gas);
+        let result =
+            precompiles_map.run_compat(&mut context, &address, &inputs, true, forwarded_gas);
         let output = result.expect("run ok").expect("Some output");
         assert!(matches!(output.result, InstructionResult::Return));
-        assert_eq!(output.gas.spent(), GAS_COST);
+        assert_eq!(output.gas.total_gas_spent(), GAS_COST);
         assert_eq!(output.gas.limit(), forwarded_gas);
         assert_eq!(output.gas.remaining(), forwarded_gas - GAS_COST);
     }
@@ -567,10 +619,11 @@ mod tests {
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
         let forwarded_gas = 500_000u64;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, forwarded_gas);
+        let result =
+            precompiles_map.run_compat(&mut context, &address, &inputs, true, forwarded_gas);
         let output = result.expect("run ok").expect("Some output");
         assert!(matches!(output.result, InstructionResult::Return));
-        assert_eq!(output.gas.spent(), GAS_COST);
+        assert_eq!(output.gas.total_gas_spent(), GAS_COST);
         assert_eq!(output.gas.limit(), forwarded_gas);
         assert_eq!(output.gas.remaining(), forwarded_gas - GAS_COST);
         assert_eq!(context.additional_limit.borrow().get_usage().compute_gas, GAS_COST);
@@ -591,7 +644,7 @@ mod tests {
     /// cannot reliably hit `remaining == GAS_COST` at the precompile call site:
     /// opcode-level compute-gas consumed by a wrapper contract's MSTORE / PUSH /
     /// CALL sequence shifts the actual `remaining` below `tx_compute_gas_limit`
-    /// by a brittle amount. Direct `precompiles_map.run()` bypasses that
+    /// by a brittle amount. Direct `precompiles_map.run_compat()` bypasses that
     /// pre-work and gives an exact boundary.
     #[test]
     fn test_kzg_precompile_rex5_cap_at_exact_gas_cost_fail() {
@@ -605,7 +658,8 @@ mod tests {
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
         let forwarded_gas = 500_000u64;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, forwarded_gas);
+        let result =
+            precompiles_map.run_compat(&mut context, &address, &inputs, true, forwarded_gas);
         let output = result.expect("run ok").expect("Some output");
         // Upstream rejects the invalid proof with `BlobVerifyKzgProofFailed` →
         // `InstructionResult::PrecompileError` (NOT `PrecompileOOG`).
@@ -619,7 +673,7 @@ mod tests {
         // exactly GAS_COST, so limit() == GAS_COST. spent() is 0 because revm did not
         // call record_cost on the error path.
         assert_eq!(output.gas.limit(), GAS_COST);
-        assert_eq!(output.gas.spent(), 0);
+        assert_eq!(output.gas.total_gas_spent(), 0);
         // Joint invariant pinned here: result variant (PrecompileError) + limit value
         // (GAS_COST) + recorded compute-gas (GAS_COST) at the exact boundary where the
         // fixed-cost arm's `limit() >= GAS_COST` predicate transitions.
@@ -648,8 +702,8 @@ mod tests {
     #[test]
     fn test_kzg_precompile_rex5_oog_via_cap_burns_full_tx_gas() {
         use crate::{MegaEvm, MegaTransaction};
-        use alloy_primitives::{address, Bytes as BytesT, U256};
-        use revm::context::{tx::TxEnvBuilder, BlockEnv, ContextSetters};
+        use alloy_primitives::{Bytes as BytesT, U256, address};
+        use revm::context::{BlockEnv, ContextSetters, tx::TxEnvBuilder};
 
         let caller = address!("0000000000000000000000000000000000600000");
 
@@ -687,7 +741,8 @@ mod tests {
         let mut evm = MegaEvm::new(context);
         let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(BytesT::new());
-        let result = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
+        let result =
+            alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).expect("transact ok");
 
         // The TX must halt (precompile OOG'd because cap forced effective_gas_limit < GAS_COST).
         assert!(!result.result.is_success(), "tx must halt: cap forced precompile OOG",);
@@ -695,7 +750,7 @@ mod tests {
         // the Gas-normalization breaks refund accounting on the OOG path, gas_used would
         // be far smaller (sender refunded most of tx.gas_limit despite the halt).
         assert_eq!(
-            result.result.gas_used(),
+            result.result.tx_gas_used(),
             tx_gas_limit,
             "OOG'd precompile call must burn the full tx.gas_limit (normalization must NOT \
              leak a refund through the halt path)",
@@ -718,13 +773,14 @@ mod tests {
         let address = revm::precompile::kzg_point_evaluation::ADDRESS;
         let forwarded_gas = 500_000u64;
 
-        let result = precompiles_map.run(&mut context, &address, &inputs, true, forwarded_gas);
+        let result =
+            precompiles_map.run_compat(&mut context, &address, &inputs, true, forwarded_gas);
         let output = result.expect("run ok").expect("Some output");
         // Precompile runs with full forwarded gas and succeeds, spending GAS_COST.
         // The post-hoc record_compute_gas call pushes the tracker over the limit, but
         // that detection happens via check_limit elsewhere, not in this path.
         assert!(matches!(output.result, InstructionResult::Return));
-        assert_eq!(output.gas.spent(), GAS_COST);
+        assert_eq!(output.gas.total_gas_spent(), GAS_COST);
         assert_eq!(output.gas.limit(), forwarded_gas);
     }
 }

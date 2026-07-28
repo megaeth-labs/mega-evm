@@ -10,12 +10,12 @@
 //! state). REX5 and earlier keep forwarding regardless of disabled state, preserving replay
 //! determinism on sealed specs.
 
-use alloy_primitives::{address, Address, Bytes, B256, U256};
-use alloy_sol_types::{sol, SolCall};
+use alloy_primitives::{Address, B256, Bytes, U256, address};
+use alloy_sol_types::{SolCall, sol};
 use mega_evm::{
+    ACCESS_CONTROL_ADDRESS, IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX5, RecordedHint, TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaAccessControl, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, RecordedHint,
-    TestExternalEnvs, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX5,
 };
 use revm::{
     bytecode::opcode::*,
@@ -118,7 +118,8 @@ fn run_with_oracle(
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
+    let envelope =
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).expect("transact ok");
     (envelope.result, external_envs.recorded_hints())
 }
 
@@ -149,7 +150,8 @@ fn run_with_oracle_and_data_size_limit(
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
+    let envelope =
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).expect("transact ok");
     (envelope.result, external_envs.recorded_hints())
 }
 

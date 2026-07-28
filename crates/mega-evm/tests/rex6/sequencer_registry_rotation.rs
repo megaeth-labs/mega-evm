@@ -17,17 +17,17 @@ use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
-use alloy_evm::{block::BlockExecutor, EvmEnv};
+use alloy_evm::{EvmEnv, block::BlockExecutor};
 use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address, keccak256};
 use alloy_sol_types::{SolCall, SolValue};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, ISequencerRegistry, MegaBlockExecutionCtx,
+    BlockLimits, ISequencerRegistry, MEGA_SYSTEM_ADDRESS, MegaBlockExecutionCtx,
     MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, SequencerRegistryConfig, SequencerRegistryRex6Config, TestExternalEnvs,
-    MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
-    SEQUENCER_REGISTRY_CODE_HASH, SEQUENCER_REGISTRY_CODE_HASH_REX6,
+    MegaTxEnvelope, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+    SEQUENCER_REGISTRY_CODE_HASH, SEQUENCER_REGISTRY_CODE_HASH_REX6, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, TestExternalEnvs, test_utils::MemoryDatabase,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, MIN_ROTATION_DELAY, PENDING_SEQUENCER,

@@ -15,10 +15,10 @@
 
 #![allow(missing_docs)]
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
+use alloy_consensus::{Signed, TxLegacy, transaction::Recovered};
 use alloy_evm::RecoveredTx;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, U256};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, address};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use mega_evm::{EnrichedMegaTx, MegaTransactionExt, MegaTxEnvelope};
 
 const CALLER: Address = address!("2000000000000000000000000000000000000001");

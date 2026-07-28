@@ -12,17 +12,17 @@ use std::{
 };
 
 use alloy_evm::{
-    block::{BlockExecutor, BlockValidationError, OnStateHook, StateChangeSource},
     Evm, EvmEnv,
+    block::{BlockExecutor, BlockValidationError},
 };
 use alloy_hardforks::{EthereumHardfork, ForkCondition};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use mega_evm::{
-    test_utils::{ErrorInjectingDatabase, MemoryDatabase},
     BlockLimits, BucketHasher, BucketId, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
-    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId, SequencerRegistryConfig,
-    TestExternalEnvs,
+    MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaOnStateHook, MegaSpecId,
+    SequencerRegistryConfig, StateChangeSource, TestExternalEnvs,
+    test_utils::{ErrorInjectingDatabase, MemoryDatabase},
 };
 use revm::{
     context::BlockEnv,
@@ -136,7 +136,7 @@ struct RecordingStateHook {
     events: Arc<Mutex<Vec<StateChangeSource>>>,
 }
 
-impl OnStateHook for RecordingStateHook {
+impl MegaOnStateHook for RecordingStateHook {
     fn on_state(&mut self, source: StateChangeSource, _state: &EvmState) {
         self.events.lock().unwrap().push(source);
     }
@@ -180,7 +180,7 @@ fn test_rex5_block_rejected_when_blockhashes_pre_block_call_halts() {
     // Recording state hook so we can also pin the witness-path invariant.
     let recorder = RecordingStateHook::default();
     let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+    executor.set_state_hook(Some(Box::new(recorder)));
 
     let err = executor
         .apply_pre_execution_changes()
@@ -200,9 +200,7 @@ fn test_rex5_block_rejected_when_blockhashes_pre_block_call_halts() {
     let saw_block_hashes = recorded.iter().any(|s| {
         matches!(
             s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
-            )
+            StateChangeSource::PreBlock(mega_evm::StateChangePreBlockSource::BlockHashesContract)
         )
     });
     assert!(
@@ -314,7 +312,7 @@ fn test_rex5_block_aware_budget_accepts_pre_block_call_above_30m() {
 
     let recorder = RecordingStateHook::default();
     let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+    executor.set_state_hook(Some(Box::new(recorder)));
 
     executor
         .apply_pre_execution_changes()
@@ -324,17 +322,13 @@ fn test_rex5_block_aware_budget_accepts_pre_block_call_above_30m() {
     let saw_block_hashes = recorded.iter().any(|s| {
         matches!(
             s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
-            )
+            StateChangeSource::PreBlock(mega_evm::StateChangePreBlockSource::BlockHashesContract)
         )
     });
     let saw_beacon_root = recorded.iter().any(|s| {
         matches!(
             s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BeaconRootContract
-            )
+            StateChangeSource::PreBlock(mega_evm::StateChangePreBlockSource::BeaconRootContract)
         )
     });
     assert!(
@@ -372,7 +366,7 @@ fn test_rex5_successful_pre_block_call_commits_normally() {
 
     let recorder = RecordingStateHook::default();
     let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+    executor.set_state_hook(Some(Box::new(recorder)));
 
     executor
         .apply_pre_execution_changes()
@@ -383,17 +377,13 @@ fn test_rex5_successful_pre_block_call_commits_normally() {
     let saw_block_hashes = recorded.iter().any(|s| {
         matches!(
             s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
-            )
+            StateChangeSource::PreBlock(mega_evm::StateChangePreBlockSource::BlockHashesContract)
         )
     });
     let saw_beacon_root = recorded.iter().any(|s| {
         matches!(
             s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BeaconRootContract
-            )
+            StateChangeSource::PreBlock(mega_evm::StateChangePreBlockSource::BeaconRootContract)
         )
     });
     assert!(
@@ -473,7 +463,7 @@ fn test_prague_inactive_skips_blockhashes_pre_block_call() {
 
     let recorder = RecordingStateHook::default();
     let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+    executor.set_state_hook(Some(Box::new(recorder)));
 
     executor
         .apply_pre_execution_changes()
@@ -483,9 +473,7 @@ fn test_prague_inactive_skips_blockhashes_pre_block_call() {
     let saw_block_hashes = recorded.iter().any(|s| {
         matches!(
             s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BlockHashesContract
-            )
+            StateChangeSource::PreBlock(mega_evm::StateChangePreBlockSource::BlockHashesContract)
         )
     });
     assert!(
@@ -516,7 +504,7 @@ fn test_cancun_inactive_skips_beacon_root_pre_block_call() {
 
     let recorder = RecordingStateHook::default();
     let events = recorder.events.clone();
-    BlockExecutor::set_state_hook(&mut executor, Some(Box::new(recorder)));
+    executor.set_state_hook(Some(Box::new(recorder)));
 
     executor
         .apply_pre_execution_changes()
@@ -526,9 +514,7 @@ fn test_cancun_inactive_skips_beacon_root_pre_block_call() {
     let saw_beacon_root = recorded.iter().any(|s| {
         matches!(
             s,
-            StateChangeSource::PreBlock(
-                alloy_evm::block::StateChangePreBlockSource::BeaconRootContract
-            )
+            StateChangeSource::PreBlock(mega_evm::StateChangePreBlockSource::BeaconRootContract)
         )
     });
     assert!(

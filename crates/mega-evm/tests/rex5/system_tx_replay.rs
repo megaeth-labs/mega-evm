@@ -23,22 +23,21 @@
 
 use std::convert::Infallible;
 
-use alloy_consensus::{transaction::Recovered, Signed, TxLegacy};
-use alloy_evm::{block::BlockExecutor, Evm as _, EvmEnv};
+use alloy_consensus::{Signed, TxLegacy, transaction::Recovered};
+use alloy_evm::{Evm as _, EvmEnv, block::BlockExecutor};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, EVMError, IOracle, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory,
-    MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTransactionError,
-    MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
+    BlockLimits, EVMError, IOracle, MEGA_SYSTEM_ADDRESS, MegaBlockExecutionCtx, MegaBlockExecutor,
+    MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory, MegaHardfork,
+    MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTxEnvelope, ORACLE_CONTRACT_ADDRESS,
+    SequencerRegistryConfig, TestExternalEnvs, test_utils::MemoryDatabase,
 };
 use revm::{
-    context::{result::InvalidTransaction, BlockEnv, CfgEnv, ContextTr as _, TxEnv},
-    database::State,
     Database as _,
+    context::{BlockEnv, CfgEnv, ContextTr as _, TxEnv, result::InvalidTransaction},
+    database::State,
 };
 
 const REGULAR_CALLER: Address = address!("0000000000000000000000000000000000100000");
@@ -551,6 +550,7 @@ fn test_normal_user_legacy_tx_is_unaffected() {
     db.set_account_balance(recipient, U256::from(1u64));
 
     let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    context.modify_cfg(|cfg| cfg.chain_id = MEGA_CHAIN_ID);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::ZERO);
         chain.operator_fee_constant = Some(U256::ZERO);
@@ -571,8 +571,8 @@ fn test_normal_user_legacy_tx_is_unaffected() {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let result: Result<_, EVMError<Infallible, MegaTransactionError>> =
-        alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let result: Result<_, EVMError<Infallible, alloy_op_evm::OpTxError>> =
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(result.is_ok(), "normal user legacy tx must still execute successfully under REX5");
     assert!(result.unwrap().result.is_success());
 }
@@ -619,8 +619,8 @@ fn test_actual_op_deposit_tx_is_unaffected() {
     tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     tx.enveloped_tx = Some(Bytes::new());
 
-    let result: Result<_, EVMError<Infallible, MegaTransactionError>> =
-        alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let result: Result<_, EVMError<Infallible, alloy_op_evm::OpTxError>> =
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(
         result.is_ok(),
         "deposit-typed tx with non-system caller must execute successfully under REX5",

@@ -1,13 +1,13 @@
 //! Tests for the increased contract size limit and initcode size limit.
 
-use alloy_primitives::{address, Bytes, U256};
+use alloy_primitives::{Bytes, U256, address};
 use core::convert::Infallible;
 use mega_evm::{
     revm::{
         bytecode::opcode::{CREATE, INVALID, ISZERO, JUMPDEST, JUMPI, PUSH1, RETURN, STOP},
         context::result::{EVMError, ExecutionResult, InvalidTransaction, ResultAndState},
     },
-    test_utils::{right_pad_bytes, transact, BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, MemoryDatabase, right_pad_bytes, transact},
     *,
 };
 

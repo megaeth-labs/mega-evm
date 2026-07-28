@@ -6,22 +6,21 @@
 
 use std::vec::Vec;
 
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address, hex};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    ACCOUNT_INFO_WRITE_SIZE, AUTHORIZATION_SIZE, BASE_TX_SIZE, EvmTxRuntimeLimits, IKeylessDeploy,
+    IOracle, KEYLESS_DEPLOY_ADDRESS, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransaction, ORACLE_CONTRACT_ADDRESS, TestExternalEnvs, VolatileDataAccess,
     alloy_consensus::{Signed, TxLegacy},
     constants,
     revm::context::result::{ExecutionResult, ResultAndState},
-    sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
+    sandbox::{KeylessDeployError, calculate_keyless_deploy_address, decode_error_result},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, IKeylessDeploy, IOracle, LimitKind, LimitUsage, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs, VolatileDataAccess,
-    ACCOUNT_INFO_WRITE_SIZE, AUTHORIZATION_SIZE, BASE_TX_SIZE, KEYLESS_DEPLOY_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
-    context::{transaction::AuthorizationTr, Transaction, TxEnv},
+    context::{Transaction, TxEnv, transaction::AuthorizationTr},
     handler::EvmTr,
     inspector::NoOpInspector,
 };
@@ -166,7 +165,7 @@ fn intrinsic_compute_gas(tx: &MegaTransaction) -> u64 {
         tx,
         MegaSpecId::REX5.into_eth_spec(),
     )
-    .initial_gas
+    .initial_regular_gas
 }
 
 /// Computes the intrinsic data-size usage recorded before the first frame.
@@ -220,7 +219,7 @@ fn execute_keyless_deploy(
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(keyless_deployment_tx, gas_limit_override);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     (result_envelope.result, usage)
 }
@@ -242,7 +241,7 @@ fn execute_keyless_deploy_with_volatile(
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(keyless_deployment_tx, gas_limit_override);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     let volatile = evm.ctx_ref().volatile_data_tracker.borrow().get_volatile_data_accessed();
     (result_envelope.result, usage, volatile)
@@ -431,7 +430,7 @@ fn execute_keyless_deploy_with_limits(
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let tx = keyless_deploy_call_tx(keyless_deployment_tx, gas_limit_override);
-    alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap()
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap()
 }
 
 fn assert_preflight_failure_without_sandbox_state(
@@ -591,9 +590,9 @@ fn test_rex5_pre_sandbox_materialization_state_growth_overflow_halts_immediately
     // Gas was rescued — the unspent outer budget is returned to the sender; only the
     // dispatch overhead, materialization charge, and tx intrinsic are reported as used.
     assert!(
-        result_and_state.result.gas_used() < OUTER_TX_GAS_LIMIT / 2,
+        result_and_state.result.tx_gas_used() < OUTER_TX_GAS_LIMIT / 2,
         "outer caller must be rescued; gas_used={} should be well below tx limit {}",
-        result_and_state.result.gas_used(),
+        result_and_state.result.tx_gas_used(),
         OUTER_TX_GAS_LIMIT,
     );
 }
@@ -783,9 +782,9 @@ fn test_rex5_sandbox_compute_gas_overflow_rejects_cleanly() {
     // The halt must NOT consume the full parent tx gas: the safety net rescues remaining
     // gas and only charges the caller for the KeylessDeploy overhead plus sandbox gas.
     assert!(
-        result_and_state.result.gas_used() < OUTER_TX_GAS_LIMIT / 2,
+        result_and_state.result.tx_gas_used() < OUTER_TX_GAS_LIMIT / 2,
         "outer caller must be rescued; gas_used={} should be well below tx limit {}",
-        result_and_state.result.gas_used(),
+        result_and_state.result.tx_gas_used(),
         OUTER_TX_GAS_LIMIT,
     );
 
@@ -835,9 +834,9 @@ fn test_rex5_sandbox_data_size_overflow_rejects_cleanly() {
     // the safety net must have rescued gas and prevented state survival.
     if result_and_state.result.is_halt() {
         assert!(
-            result_and_state.result.gas_used() < OUTER_TX_GAS_LIMIT / 2,
+            result_and_state.result.tx_gas_used() < OUTER_TX_GAS_LIMIT / 2,
             "outer caller must be rescued; gas_used={} should be well below tx limit {}",
-            result_and_state.result.gas_used(),
+            result_and_state.result.tx_gas_used(),
             OUTER_TX_GAS_LIMIT,
         );
         let deployed_account = result_and_state.state.get(&deploy_address);
@@ -1144,7 +1143,7 @@ fn test_rex5_sandbox_outer_gas_used_includes_sandbox_gas_used_on_success() {
         tx_bytes,
         LARGE_GAS_LIMIT_OVERRIDE,
     );
-    let outer_gas_used = result.gas_used();
+    let outer_gas_used = result.tx_gas_used();
     let decoded = decode_keyless_deploy_return(&result);
     let sandbox_gas_used = decoded.gasUsed;
 
@@ -1170,7 +1169,7 @@ fn test_rex4_sandbox_outer_gas_used_excludes_sandbox_gas_used() {
         tx_bytes,
         LARGE_GAS_LIMIT_OVERRIDE,
     );
-    let outer_gas_used = result.gas_used();
+    let outer_gas_used = result.tx_gas_used();
     let decoded = decode_keyless_deploy_return(&result);
     let sandbox_gas_used = decoded.gasUsed;
 
@@ -1197,7 +1196,7 @@ fn test_rex5_sandbox_outer_gas_used_includes_sandbox_gas_used_on_in_sandbox_fail
         tx_bytes,
         LARGE_GAS_LIMIT_OVERRIDE,
     );
-    let outer_gas_used = result.gas_used();
+    let outer_gas_used = result.tx_gas_used();
     let decoded = decode_keyless_deploy_return(&result);
     let sandbox_gas_used = decoded.gasUsed;
     assert!(!decoded.errorData.is_empty(), "in-sandbox failure should be encoded");
@@ -1259,7 +1258,8 @@ fn test_rex5_sandbox_volatile_bitmap_survives_residual_overflow_halt() {
     });
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let outer_tx = keyless_deploy_call_tx(tx_bytes, LARGE_GAS_LIMIT_OVERRIDE);
-    let result_and_state = alloy_evm::Evm::transact_raw(&mut evm, outer_tx).unwrap();
+    let result_and_state =
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(outer_tx)).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     let volatile = evm.ctx_ref().volatile_data_tracker.borrow().get_volatile_data_accessed();
     let result = result_and_state.result;

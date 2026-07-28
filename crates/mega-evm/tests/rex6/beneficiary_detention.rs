@@ -26,20 +26,19 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, address};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    ACCESS_CONTROL_ADDRESS, EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext,
+    MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, VolatileDataAccessType,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
-    EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, MegaTransactionError, VolatileDataAccessType,
-    ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
     context::{
+        BlockEnv, TxEnv,
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        BlockEnv, TxEnv,
     },
     database::AccountState,
     handler::EvmTr,
@@ -90,7 +89,7 @@ const DETENTION_CAP: u64 = 20_000_000;
 /// limit, whether the beneficiary balance was marked accessed)`.
 type BeneficiaryTransactResult = Result<
     (ResultAndState<MegaHaltReason>, LimitUsage, u64, bool),
-    EVMError<Infallible, MegaTransactionError>,
+    EVMError<Infallible, alloy_op_evm::OpTxError>,
 >;
 
 /// Executes `tx` under `spec` with the block beneficiary set to `BENEFICIARY`
@@ -112,7 +111,7 @@ fn transact_with_beneficiary(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+    let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))?;
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     let detained = evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
     let beneficiary_marked =
@@ -581,7 +580,7 @@ fn test_rex6_selfdestruct_db_error_on_target_surfaces() {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, tx) {
+    let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)) {
         Err(_) => true,                            // propagated as EVMError
         Ok(result) => !result.result.is_success(), // or a non-success halt
     };
@@ -717,7 +716,7 @@ fn test_rex6_call_db_error_on_target_surfaces() {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, tx) {
+    let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)) {
         Err(_) => true,
         Ok(result) => !result.result.is_success(),
     };
@@ -782,7 +781,7 @@ fn test_call_partial_stack_db_error_on_target_surfaces_rex5_eq_rex6() {
             TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
         let mut tx = MegaTransaction::new(tx);
         tx.enveloped_tx = Some(Bytes::new());
-        match alloy_evm::Evm::transact_raw(&mut evm, tx) {
+        match alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)) {
             Err(_) => true,
             Ok(result) => !result.result.is_success(),
         }
@@ -834,7 +833,7 @@ fn test_rex6_call_partial_stack_code_load_failure_keeps_stack_underflow() {
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
-    match alloy_evm::Evm::transact_raw(&mut evm, tx) {
+    match alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)) {
         Ok(result) => assert!(
             matches!(&result.result, ExecutionResult::Halt { reason, .. }
                 if format!("{reason:?}").contains("StackUnderflow")),

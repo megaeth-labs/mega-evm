@@ -6,9 +6,12 @@
 
 use std::vec::Vec;
 
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
-use alloy_sol_types::{sol, SolCall};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address, hex};
+use alloy_sol_types::{SolCall, sol};
 use mega_evm::{
+    IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransaction, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2, SaltEnv,
+    TestExternalEnvs,
     alloy_consensus::{Signed, TxLegacy},
     revm::context::result::ExecutionResult,
     sandbox::{
@@ -16,9 +19,6 @@ use mega_evm::{
         tests::{CREATE2_FACTORY_CONTRACT, CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
     },
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE, ORACLE_CONTRACT_ADDRESS,
-    ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, MSTORE, POP, PUSH0, RETURN},
@@ -78,7 +78,7 @@ fn execute_keyless_deploy_with_envs(
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let result_envelope = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let result = result_envelope.result;
 
     // Extract sandbox gas_used from the ABI-encoded return data

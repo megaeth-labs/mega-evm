@@ -5,7 +5,7 @@
 //! The runtime result is produced by EVM interception, not by executing on-chain bytecode.
 
 use alloy_evm::Database;
-use alloy_primitives::{address, Address};
+use alloy_primitives::{Address, address};
 use revm::{database::State, state::EvmState};
 
 use crate::{MegaHardforks, SystemContractSpec};
@@ -28,7 +28,7 @@ pub fn transact_deploy_limit_control_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
     db: &mut State<DB>,
-) -> Result<Option<EvmState>, DB::Error> {
+) -> Result<Option<EvmState>, <State<DB> as revm::Database>::Error> {
     limit_control_spec(&hardforks, block_timestamp)
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
@@ -48,7 +48,7 @@ pub(crate) fn limit_control_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{keccak256, B256};
+    use alloy_primitives::{B256, keccak256};
     use revm::{
         database::InMemoryDB,
         state::{AccountInfo, Bytecode},
@@ -96,6 +96,7 @@ mod tests {
         db.insert_account_info(
             LIMIT_CONTROL_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 balance: Default::default(),
                 nonce: 0,
                 code_hash: LIMIT_CONTROL_CODE_HASH,
@@ -140,6 +141,7 @@ mod tests {
         db.insert_account_info(
             LIMIT_CONTROL_ADDRESS,
             AccountInfo {
+                account_id: Default::default(),
                 balance: Default::default(),
                 nonce: 0,
                 code_hash: B256::ZERO,

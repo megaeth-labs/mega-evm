@@ -15,15 +15,15 @@
 //! - **REX5** (`inspect_account`): inspects the authority directly, sees it has EIP-7702 delegation
 //!   bytecode (non-empty), and correctly skips the premium.
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
+    LimitUsage, MIN_BUCKET_SIZE, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    SaltEnv, TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
-    TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
-    context::{result::ResultAndState, tx::TxEnvBuilder, TxEnv},
+    context::{TxEnv, result::ResultAndState, tx::TxEnvBuilder},
     database::AccountState,
     handler::EvmTr,
     state::Bytecode,
@@ -57,7 +57,7 @@ fn transact(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
     (r, usage)
 }
@@ -282,9 +282,9 @@ fn test_rex5_create_inside_delegated_frame_uses_authority_nonce() {
     let mut evm_rex5 = MegaEvm::new(ctx_rex5);
     let mut tx_rex5 = MegaTransaction::new(tx.clone());
     tx_rex5.enveloped_tx = Some(Bytes::new());
-    let r5 = alloy_evm::Evm::transact_raw(&mut evm_rex5, tx_rex5).unwrap();
+    let r5 = alloy_evm::Evm::transact_raw(&mut evm_rex5, alloy_op_evm::OpTx(tx_rex5)).unwrap();
     assert!(r5.result.is_success(), "REX5 should succeed: {:?}", r5.result);
-    let gas_rex5 = r5.result.gas_used();
+    let gas_rex5 = r5.result.tx_gas_used();
 
     // REX4: uses delegate's nonce → wrong bucket (high capacity, 3x multiplier).
     let mut db_rex4 = build_db();
@@ -297,9 +297,9 @@ fn test_rex5_create_inside_delegated_frame_uses_authority_nonce() {
     let mut evm_rex4 = MegaEvm::new(ctx_rex4);
     let mut tx_rex4 = MegaTransaction::new(tx);
     tx_rex4.enveloped_tx = Some(Bytes::new());
-    let r4 = alloy_evm::Evm::transact_raw(&mut evm_rex4, tx_rex4).unwrap();
+    let r4 = alloy_evm::Evm::transact_raw(&mut evm_rex4, alloy_op_evm::OpTx(tx_rex4)).unwrap();
     assert!(r4.result.is_success(), "REX4 should succeed: {:?}", r4.result);
-    let gas_rex4 = r4.result.gas_used();
+    let gas_rex4 = r4.result.tx_gas_used();
 
     // REX4 queries the high-capacity bucket (3x multiplier) → more gas.
     // REX5 queries the correct bucket (1x multiplier) → less gas.

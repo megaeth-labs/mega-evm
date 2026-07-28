@@ -7,15 +7,15 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, address};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv,
+    MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::{SSTORE, STOP},
-    context::{result::ResultAndState, TxEnv},
+    context::{TxEnv, result::ResultAndState},
 };
 
 const CALLER: Address = address!("2000000000000000000000000000000000000011");
@@ -56,7 +56,7 @@ fn sstore_fresh_slot_bytecode() -> Bytes {
 fn transact_with_failing_salt(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, alloy_op_evm::OpTxError>> {
     let envs: ExternalEnvs<(FailingSaltEnv, EmptyExternalEnv)> =
         ExternalEnvs { salt_env: FailingSaltEnv, oracle_env: EmptyExternalEnv };
     let mut context = MegaContext::new(db, spec)
@@ -77,7 +77,7 @@ fn transact_with_failing_salt(
     };
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    alloy_evm::Evm::transact_raw(&mut evm, tx)
+    alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))
 }
 
 /// A failing SALT pricing on a first-time SSTORE write must halt the instruction with

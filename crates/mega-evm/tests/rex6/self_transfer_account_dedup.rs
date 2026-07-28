@@ -14,11 +14,11 @@
 //! - `A -> A`, `value=1` (REX6): target write suppressed → delta = 0.
 //! - `A -> A`, `value=1` (REX5): target write recorded → delta = one account-info write (frozen).
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use mega_evm::{
+    ACCOUNT_INFO_WRITE_SIZE, EmptyExternalEnv, LimitUsage, MegaContext, MegaEvm, MegaSpecId,
+    MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, LimitUsage, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-    ACCOUNT_INFO_WRITE_SIZE,
 };
 use revm::{
     bytecode::opcode::*,
@@ -87,7 +87,7 @@ fn call_tx(to: Address, value: u128) -> MegaTransaction {
 /// Runs `tx` under `spec` against a fresh `db`, asserts success, and returns the limiter usage.
 fn usage_of(spec: MegaSpecId, db: MemoryDatabase, tx: MegaTransaction) -> LimitUsage {
     let mut evm = build_evm(spec, db);
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx);
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx));
     assert!(
         r.expect("no validation error").result.is_success(),
         "tx must succeed for a clean usage reading",

@@ -18,15 +18,15 @@
 
 use std::vec::Vec;
 
-use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address, hex};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, TestExternalEnvs,
     alloy_consensus::{Signed, TxLegacy},
     revm::context::result::ExecutionResult,
-    sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
+    sandbox::{KeylessDeployError, calculate_keyless_deploy_address, decode_error_result},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{LOG1, MSTORE, RETURN, STOP},
@@ -160,7 +160,7 @@ fn run_keyless_outer(
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    alloy_evm::Evm::transact_commit(&mut evm, tx)
+    alloy_evm::Evm::transact_commit(&mut evm, alloy_op_evm::OpTx(tx))
         .expect("outer keyless call should not fail at the EVM-error level")
 }
 

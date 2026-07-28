@@ -1,20 +1,23 @@
-use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
+use alloy_evm::{Database, EvmEnv, precompiles::PrecompilesMap};
+use alloy_op_evm::{OpTx, OpTxError, map_op_err};
 use alloy_primitives::{Address, Bytes};
 use revm::{
+    DatabaseCommit, InspectEvm, Inspector,
     context::{
-        result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
         BlockEnv, ContextSetters, ContextTr,
+        result::{EVMError, ExecResultAndState, ExecutionResult, ResultAndState},
     },
     handler::{EthFrame, EvmTr, SystemCallTx},
     interpreter::interpreter::EthInterpreter,
     state::EvmState,
-    DatabaseCommit, InspectEvm, Inspector, SystemCallEvm,
 };
 
 use crate::{
-    ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason, MegaHandler,
-    MegaSpecId, MegaTransaction, MegaTransactionError,
+    ExternalEnvTypes, MegaContext, MegaEvm, MegaHaltReason, MegaHandler, MegaSpecId,
+    MegaTransaction, MegaTransactionError,
 };
+
+const MEGA_SYSTEM_CALL_GAS_LIMIT: u64 = 30_000_000;
 
 /// Implementation of [`alloy_evm::Evm`] for `MegaETH` EVM.
 ///
@@ -27,15 +30,20 @@ where
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
     type DB = DB;
-    type Tx = MegaTransaction;
-    type Error = EVMError<DB::Error, MegaTransactionError>;
+    type Tx = OpTx;
+    type Error = EVMError<DB::Error, OpTxError>;
     type HaltReason = MegaHaltReason;
     type Spec = MegaSpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
     type Inspector = INSP;
 
     fn block(&self) -> &BlockEnv {
         self.block_env_ref()
+    }
+
+    fn cfg_env(&self) -> &revm::context::CfgEnv<Self::Spec> {
+        &self.ctx_ref().mega_cfg
     }
 
     fn chain_id(&self) -> u64 {
@@ -46,10 +54,11 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        let tx = tx.into();
         if self.inspect {
-            InspectEvm::inspect_tx(self, tx)
+            InspectEvm::inspect_tx(self, tx).map_err(map_op_err)
         } else {
-            revm::ExecuteEvm::transact(self, tx)
+            revm::ExecuteEvm::transact(self, tx).map_err(map_op_err)
         }
     }
 
@@ -74,7 +83,7 @@ where
     ///
     /// This function copies the logic from `alloy_op_evm::OpEvm::transact_system_call`
     /// to maintain compatibility with the Optimism EVM system call interface. The
-    /// transaction's gas limit follows revm's upstream-fixed 30M default. Callers that
+    /// transaction's gas limit keeps Mega's fixed 30M system-call default. Callers that
     /// need to use the live block gas budget — e.g. REX5 pre-block helpers whose cost is
     /// sensitive to dynamic storage gas — should use
     /// [`MegaEvm::transact_system_call_with_gas_limit`] instead.
@@ -84,17 +93,17 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.transact_system_call_with_caller_finalize(caller, contract, data)
+        self.transact_system_call_with_gas_limit(caller, contract, data, MEGA_SYSTEM_CALL_GAS_LIMIT)
+            .map_err(map_op_err)
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>)
     where
         Self: Sized,
     {
-        let spec = self.inner.ctx.mega_spec();
-        let revm::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
+        let cfg_env = self.inner.ctx.mega_cfg.clone();
+        let revm::Context { block: block_env, cfg: _, journaled_state, .. } =
             self.inner.ctx.into_inner();
-        let cfg_env = cfg_env.into_megaeth_cfg(spec);
         (journaled_state.database, EvmEnv { block_env, cfg_env })
     }
 
@@ -188,15 +197,16 @@ impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::SystemCallEvm for MegaEvm<DB, IN
 where
     DB: Database,
 {
-    fn transact_system_call_with_caller(
+    fn system_call_one_with_caller(
         &mut self,
         caller: Address,
         contract: Address,
         data: Bytes,
     ) -> Result<Self::ExecutionResult, Self::Error> {
-        self.ctx().set_tx(<MegaTransaction as SystemCallTx>::new_system_tx_with_caller(
-            caller, contract, data,
-        ));
+        let mut tx =
+            <MegaTransaction as SystemCallTx>::new_system_tx_with_caller(caller, contract, data);
+        tx.base.gas_limit = MEGA_SYSTEM_CALL_GAS_LIMIT;
+        self.ctx().set_tx(tx);
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run_system_call(&mut h, self)
     }
@@ -209,7 +219,7 @@ where
     /// Transact a system call with an explicit gas limit and finalize.
     ///
     /// Behaves like [`alloy_evm::Evm::transact_system_call`] but lets the caller specify
-    /// the gas limit instead of relying on revm's upstream-fixed 30M default. This is
+    /// the gas limit instead of relying on Mega's fixed 30M default. This is
     /// intended for REX5+ pre-block helpers (e.g. `transact_apply_pending_changes` in
     /// `system::sequencer_registry`) whose real cost is sensitive to dynamic storage gas
     /// and is no longer guaranteed to fit within 30M on activation blocks.

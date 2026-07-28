@@ -17,19 +17,19 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{address, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::SolError;
 use mega_evm::{
-    test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
-    MegaTransaction, MegaTransactionError,
+    MegaTransaction,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
 };
 use revm::{
     bytecode::opcode::*,
     context::{
+        TxEnv,
         result::{EVMError, ExecutionResult, ResultAndState},
         tx::TxEnvBuilder,
-        TxEnv,
     },
     handler::EvmTr,
 };
@@ -65,7 +65,7 @@ fn transact_with_spec(
     compute_gas_limit: u64,
     block_env_access_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, alloy_op_evm::OpTxError>>
 {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits()
@@ -79,7 +79,7 @@ fn transact_with_spec(
     let mut evm = MegaEvm::new(context);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
+    let r = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx))?;
 
     let ctx = evm.ctx_ref();
     let additional_limit = ctx.additional_limit.borrow();

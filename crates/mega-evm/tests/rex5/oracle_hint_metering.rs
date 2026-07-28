@@ -17,12 +17,12 @@
 //! 3. If recording overflows, `on_hint` is NOT invoked; the next `before_frame_init` step produces
 //!    the canonical TX-level `OutOfGas` halt via `create_exceeded_limit_result`.
 
-use alloy_primitives::{address, Address, Bytes, B256, U256};
-use alloy_sol_types::{sol, SolCall};
+use alloy_primitives::{Address, B256, Bytes, U256, address};
+use alloy_sol_types::{SolCall, sol};
 use mega_evm::{
+    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId,
+    MegaTransaction, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2, TestExternalEnvs,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::*,
@@ -110,7 +110,8 @@ fn run_with_oracle(
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
+    let envelope =
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).expect("transact ok");
     use revm::handler::EvmTr;
     let data_size = evm.ctx_ref().additional_limit.borrow().get_usage().data_size;
     (envelope.result, external_envs.recorded_hints(), data_size)
@@ -145,7 +146,8 @@ fn run_direct_oracle_tx(
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
+    let envelope =
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).expect("transact ok");
     use revm::handler::EvmTr;
     let data_size = evm.ctx_ref().additional_limit.borrow().get_usage().data_size;
     (envelope.result, external_envs.recorded_hints(), data_size)
@@ -569,7 +571,8 @@ fn test_rex5_hint_charge_persists_across_initiating_frame_revert() {
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
-    let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
+    let envelope =
+        alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(tx)).expect("transact ok");
     use revm::handler::EvmTr;
     let data_size = evm.ctx_ref().additional_limit.borrow().get_usage().data_size;
 

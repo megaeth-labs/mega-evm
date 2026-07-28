@@ -56,16 +56,16 @@ pub use spec::*;
 pub use state::*;
 
 use alloy_evm::{
-    precompiles::{DynPrecompile, PrecompilesMap},
     Database,
+    precompiles::{DynPrecompile, PrecompilesMap},
 };
 use revm::{
-    context::{result::ResultAndState, BlockEnv, ContextTr},
+    ExecuteEvm, InspectEvm, Inspector, Journal,
+    context::{BlockEnv, ContextTr, result::ResultAndState},
     handler::{EthFrame, EvmTr},
     inspector::NoOpInspector,
     interpreter::interpreter::EthInterpreter,
     primitives::HashMap,
-    ExecuteEvm, InspectEvm, Inspector, Journal,
 };
 
 use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
@@ -329,8 +329,7 @@ where
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
-            result,
-            state,
+            inner: ResultAndState { result, state },
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
@@ -361,8 +360,7 @@ where
         let LimitUsage { data_size, kv_updates, compute_gas, state_growth } =
             additional_limit.get_usage();
         Ok(MegaTransactionOutcome {
-            result,
-            state,
+            inner: ResultAndState { result, state },
             data_size,
             kv_updates,
             compute_gas_used: compute_gas,
@@ -394,17 +392,17 @@ impl<DB: Database + BlockHashes, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, IN
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
-    use alloy_primitives::{address, Bytes, U256};
+    use crate::{EmptyExternalEnv, test_utils::MemoryDatabase};
+    use alloy_primitives::{Bytes, U256, address};
     use revm::{
+        ExecuteCommitEvm, ExecuteEvm, InspectEvm, SystemCallEvm,
         context::{
-            result::{ExecResultAndState, ExecutionResult},
             ContextSetters, TxEnv,
+            result::{ExecResultAndState, ExecutionResult},
         },
         database::State,
         inspector::NoOpInspector,
         state::EvmState,
-        ExecuteCommitEvm, ExecuteEvm, InspectEvm, SystemCallEvm,
     };
 
     const CALLER: Address = address!("4000000000000000000000000000000000000001");
@@ -472,7 +470,7 @@ mod tests {
         let (_db_ref_mut, _inspector_mut, _precompiles_mut) =
             alloy_evm::Evm::components_mut(&mut evm);
 
-        let result = alloy_evm::Evm::transact_raw(&mut evm, mega_tx()).unwrap();
+        let result = alloy_evm::Evm::transact_raw(&mut evm, alloy_op_evm::OpTx(mega_tx())).unwrap();
         assert!(result.result.is_success());
 
         let system_call =
@@ -531,7 +529,7 @@ mod tests {
             .account_code(CALLEE, Bytes::new());
         let mut evm = MegaEvm::new(configure_context(&mut db));
         let system_call: ExecutionResult<MegaHaltReason> =
-            SystemCallEvm::transact_system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
+            SystemCallEvm::system_call_one_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
                 .unwrap();
         assert!(system_call.is_success());
     }
@@ -552,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_system_call_keeps_upstream_30m_gas_limit() {
+    fn test_default_system_call_keeps_mega_gas_limit() {
         let mut db = MemoryDatabase::default()
             .account_balance(CALLER, U256::from(1_000_000))
             .account_code(CALLEE, Bytes::new());
@@ -564,15 +562,11 @@ mod tests {
         context.block.gas_limit = 100_000_000;
         let mut evm = MegaEvm::new(context);
 
-        // The default system-call entry point must NOT be widened by REX5 — only the
+        // The default system-call entry point must NOT use the block budget under REX5 — only the
         // explicit `transact_system_call_with_gas_limit` path should pick up the live
         // block budget. This preserves byte-level behavior of EIP-2935 / EIP-4788
         // pre-block calls across all specs.
-        SystemCallEvm::transact_system_call_with_caller(&mut evm, CALLER, CALLEE, Bytes::new())
-            .unwrap();
-        // Literal, not `SYSTEM_CALL_GAS_LIMIT_FLOOR`: this assertion verifies revm's
-        // upstream hardcoded default. If upstream ever drifts from our floor, this
-        // test should fail loudly rather than be auto-aligned by our constant.
+        SystemCallEvm::system_call_one_with_caller(&mut evm, CALLER, CALLEE, Bytes::new()).unwrap();
         assert_eq!(evm.inner.ctx.tx.base.gas_limit, 30_000_000);
     }
 
