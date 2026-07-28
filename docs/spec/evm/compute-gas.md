@@ -153,7 +153,28 @@ Every other opcode records its non-compute dimensions after its inner instructio
 
 #### Class Assignment
 
+The current assignment, which Rex5 and Rex6 share, is:
+
+| Class            | Opcodes                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Plain**        | `STOP`; `ADD`–`SIGNEXTEND`; `LT`–`CLZ`; `KECCAK256`; `ADDRESS`, `ORIGIN`, `CALLER`, `CALLVALUE`, `CALLDATALOAD`, `CALLDATASIZE`, `CALLDATACOPY`, `CODESIZE`, `CODECOPY`, `GASPRICE`, `RETURNDATASIZE`, `RETURNDATACOPY`, `CHAINID`; `POP`, `MLOAD`, `MSTORE`, `MSTORE8`, `JUMP`, `JUMPI`, `PC`, `MSIZE`, `GAS`, `JUMPDEST`, `TLOAD`, `TSTORE`, `MCOPY`; `PUSH0`–`PUSH32`; `DUP1`–`DUP16`; `SWAP1`–`SWAP16`; `RETURN`, `REVERT`, `INVALID`              |
+| **Volatile**     | Unconditional: `BLOCKHASH`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `DIFFICULTY`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `BLOBHASH`.<br>Volatile when the stack target is the [beneficiary](../glossary.md#beneficiary): `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`.<br>Volatile when the executing contract is the beneficiary: `SELFBALANCE`.<br>Volatile when the executing contract is the [oracle](../system-contracts/oracle.md): `SLOAD`. |
+| **Storage**      | `SSTORE`, `LOG0`–`LOG4`                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **Call**         | `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **Create**       | `CREATE`, `CREATE2`                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **SelfDestruct** | `SELFDESTRUCT`                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Untracked**    | Every opcode undefined in the inherited EVM                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+Under Equivalence every opcode is Untracked, because compute gas is not tracked at all.
+
+Class membership is not the only volatility-related property an opcode can carry.
+`CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, and `SELFDESTRUCT` remain in their own classes but additionally apply a beneficiary volatile-access guard before executing.
+Their measurement windows follow their class; the guard only decides whether the opcode runs at all.
+
+##### How the assignment evolved
+
 Class assignment is defined by inheritance: each spec inherits the previous spec's assignment and overrides only the opcodes listed.
+A node implementing replay for historical blocks needs every spec's assignment, so the base and each delta are given below.
 
 **MiniRex** (base assignment):
 
@@ -166,7 +187,7 @@ Class assignment is defined by inheritance: each spec inherits the previous spec
 | **Create**    | `CREATE`, `CREATE2`                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Untracked** | `SELFDESTRUCT` (disabled — halts with an invalid-opcode result); every opcode undefined in the inherited EVM                                                                                                                                                                                                                                                                                                                                                      |
 
-Per-spec overrides:
+Per-spec overrides, applied in order on top of the MiniRex base to reach the current assignment above:
 
 | Spec     | Override                                                                                                                                                                                                             |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
