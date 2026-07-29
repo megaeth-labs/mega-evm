@@ -17,7 +17,7 @@ use mega_evm::{
     MIN_BUCKET_SIZE,
 };
 use revm::bytecode::opcode::{
-    CALL, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, SELFDESTRUCT, STATICCALL,
+    CALL, CREATE, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, SELFDESTRUCT, STATICCALL,
 };
 
 use crate::{
@@ -510,4 +510,61 @@ fn test_minirex_staticcall_is_not_subject_to_the_forwarding_cap() {
         "Rex should forward ~98/100 (9800 bp), got {} bp",
         ratio_bp(rex, base)
     );
+}
+
+/// Pins "Code Deposit": the deposit's compute gas is recorded exactly once when the deposit
+/// occurs, and nothing is recorded when it does not.
+///
+/// The two initcodes have identical length and opcode sequence and differ only in the byte they
+/// store, so every other cost in the transaction cancels and the difference between the two
+/// recorded totals is the code-deposit charge alone. `0xEF` makes EIP-3541 reject the runtime
+/// code, so the deposit never happens.
+///
+/// Two different mechanisms produce this number — MiniRex through Rex4 measure it over the
+/// frame-action window, Rex5+ pre-charge the canonical amount before the checkpoint commits — so
+/// the assertion runs on every tracked spec to keep them agreeing.
+#[test]
+fn test_code_deposit_recorded_only_when_deposit_occurs() {
+    /// `PUSH1 <first>, PUSH0, MSTORE8, PUSH1 32, PUSH0, RETURN` — returns 32 bytes of runtime
+    /// code whose first byte is `first`.
+    fn initcode(first: u8) -> [u8; 8] {
+        [0x60, first, 0x5f, 0x53, 0x60, 0x20, 0x5f, 0xf3]
+    }
+
+    fn creator(first: u8) -> MemoryDatabase {
+        let code = initcode(first);
+        base_db(
+            BytecodeBuilder::default()
+                .mstore(0, code)
+                .push_number(code.len() as u64) // length
+                .push_number(0_u64) // offset
+                .push_number(0_u64) // value
+                .append(CREATE)
+                .stop()
+                .build(),
+        )
+    }
+
+    /// 32 bytes of deployed runtime code at the inherited `CODEDEPOSIT` rate of 200 gas per byte.
+    const EXPECTED_DEPOSIT_GAS: u64 = 32 * 200;
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::MINI_REX) {
+            continue; // Equivalence records no compute gas at all.
+        }
+        let deposited = transact(spec, creator(0x00)).compute_gas;
+        let skipped = transact(spec, creator(0xef)).compute_gas;
+
+        let delta = deposited.checked_sub(skipped).unwrap_or_else(|| {
+            panic!(
+                "{spec_name}: depositing run must record at least as much compute gas as the \
+                 skipped run (deposited={deposited} skipped={skipped})"
+            )
+        });
+        assert_eq!(
+            delta, EXPECTED_DEPOSIT_GAS,
+            "{spec_name}: the only compute gas separating a deposit from an EIP-3541 rejection \
+             must be the code-deposit charge (deposited={deposited} skipped={skipped})"
+        );
+    }
 }
