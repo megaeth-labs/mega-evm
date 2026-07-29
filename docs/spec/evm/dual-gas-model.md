@@ -40,34 +40,27 @@ It is not the receipt, and a node MUST NOT derive the receipt by summing the two
 
 #### Gas Charged to the Transaction
 
-The gas deducted from the transaction's budget has a third component that neither counter holds:
+The two counters are metering state.
+The gas charged to a transaction is the EVM gas meter's own accounting, maintained alongside them.
 
-```
-gas_charged = total_gas_used + unmetered_gas
-```
+A node MUST charge the transaction from the gas meter, and MUST NOT compute the charge from the two counters.
+No equation relates them: the counters can total more than the transaction is charged, or less, and both happen in ordinary transactions.
 
-`unmetered_gas` is whatever the transaction is charged beyond `total_gas_used`.
-It is a remainder, not a sum: a node MUST derive it from the gas budget the transaction actually consumed, and MUST NOT compute it by adding up the cases below.
-It is zero for most transactions.
-
-The cases that produce it are:
+They total **less** than the charge when the transaction pays for gas neither counter records:
 
 - Gas an operation consumed before halting partway through, which is deliberately never recorded as compute gas (see [Single-Record Rule](compute-gas.md#single-record-rule)).
 - The difference between the gas limit a caller forwards into a failing precompile and the compute gas recorded for it, which from Rex5 is capped at the remaining compute budget (see [Precompiles](compute-gas.md#precompiles)).
 - Before Rex6, gas forwarded to a child frame that a compute-gas halt discarded before the child ran, which is not returned to the parent (see [Gas Forwarding](gas-forwarding.md)).
 - Before Rex6, the unused envelope a transaction forfeits when the [KeylessDeploy](compute-gas.md#keyless-deploy-exceed) dispatch overhead crosses the transaction-level compute limit, which that path spends in full rather than rescuing.
 
+They total **more** than the charge when compute gas records gas the transaction never paid.
+From Rex5 this happens on every value-transferring `CALL` or `CALLCODE`: the inherited EVM hands the callee `CALL_STIPEND` without deducting it from the caller, and the parent's compute gas records it regardless, so the counters run 2,300 ahead of the charge for each such call (see [Forwarded Gas Exclusion](compute-gas.md#forwarded-gas-exclusion)).
+
 #### Receipt Gas
 
-The `gas_used` field in the transaction receipt MUST be `gas_charged`, less any standard EVM gas refund settled at the end of the transaction, and then raised to the [calldata floor cost](#calldata-floor-cost) if that floor is higher.
+The `gas_used` field in the transaction receipt MUST be the gas charged to the transaction, less any standard EVM gas refund settled at the end of the transaction, and then raised to the [calldata floor cost](#calldata-floor-cost) if that floor is higher.
 
-Three effects therefore separate the receipt from `total_gas_used`:
-
-- **Refunds lower it.** The receipt applies EVM refunds; the tracked compute-gas total never has refunds subtracted from it (see [Refund Exclusion](compute-gas.md#refund-exclusion)).
-- **`unmetered_gas` raises it**, as defined above.
-- **The calldata floor raises it**, whenever a calldata-heavy transaction executes too little to reach that floor.
-
-A node MUST derive the receipt from the gas budget actually consumed, and MUST NOT compute it by summing the tracked compute-gas and storage-gas counters.
+Refunds and the calldata floor apply to the charge, not to either counter: a node MUST NOT subtract a refund from tracked compute gas, and MUST NOT raise it to a floor.
 
 ### Compute Gas
 
