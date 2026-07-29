@@ -62,7 +62,9 @@ Each subtraction is saturating: the recorded amount MUST NOT underflow below zer
 
 #### Window Boundaries
 
-For an opcode, the window MUST open before any EVM gas movement attributable to that opcode, and MUST close after the opcode body has fully executed.
+The window MUST cover all of the opcode's compute work: it MUST open before any EVM gas movement that will be recorded as compute gas, and MUST close after the opcode body has fully executed.
+
+A storage-gas charge is the one movement that MAY fall on either side of the opening point, because it is excluded from the recorded amount either way — see [Storage Gas Exclusion](#storage-gas-exclusion).
 
 <details>
 
@@ -360,6 +362,11 @@ Before Rex4, compute gas is enforced at the transaction level only, and no per-f
 How a frame's budget is derived — the top-level frame's budget net of pre-frame usage, and the `FRAME_LIMIT_NUMERATOR` / `FRAME_LIMIT_DENOMINATOR` share forwarded to each nested frame — is specified for all four resource dimensions in [Per-Call-Frame Runtime Budgets](resource-limits.md#per-call-frame-runtime-budgets).
 For compute gas, the pre-frame usage deducted from the top-level budget is the [transaction intrinsic gas](#transaction-intrinsic-gas).
 
+Under Rex4 only, an internal value-transferring `CALL` or `CALLCODE` carries one further constraint.
+Rex4 grants the [storage gas stipend](../glossary.md#storage-gas-stipend) by inflating the child's gas limit, so the child's compute gas budget MUST additionally be capped at the pre-inflation gas limit — otherwise the system-granted stipend becomes spendable on computation.
+The child's budget is therefore the minimum of the forwarded share and that pre-inflation limit.
+Rex5 replaced the inflation with a separated allowance that never enters the child's gas limit, so no such cap applies from Rex5 onward.
+
 The per-frame check uses the same strict comparison as the transaction-level one, and a node MUST evaluate it before the transaction-level check.
 A node MUST NOT skip the transaction-level check when the per-frame check is within limit: the intrinsic recording lies outside every frame budget, and the detained limit may be lowered at any point during execution.
 
@@ -380,7 +387,8 @@ A compute gas exceed is either _frame-local_ or _transaction-level_, and the two
 | Detained limit exceeded                   | Transaction-level | The transaction MUST halt with `OutOfGas`, reported as a detention halt  | Remaining gas is rescued and refunded to the sender                                 |
 | Keyless-deploy dispatch overhead exceeded | See below         | The frame MUST revert, or the transaction MUST halt with `OutOfGas`      | Rescued only from Rex6 onward — see [Keyless Deploy Exceed](#keyless-deploy-exceed) |
 
-A frame-local exceed does not fail the transaction: the parent frame MAY continue execution.
+A frame-local exceed in a nested frame does not fail the transaction: the parent frame MAY continue execution.
+The top-level frame also carries a budget, and a frame-local exceed there has no parent to return to — the transaction's own result becomes the revert, and the receipt reports failure.
 
 On a transaction-level exceed reached through opcode dispatch, a node MUST preserve the frame's remaining gas for refund to the sender.
 The rescued amount MUST exclude any portion contributed by the [storage gas stipend](../glossary.md#storage-gas-stipend), so that system-granted gas is not recovered by the sender.
@@ -389,8 +397,10 @@ The keyless-deploy dispatch path is the one exception to the rescue rule; it is 
 
 #### Keyless Deploy Exceed
 
-When recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispatch overhead exceeds a compute gas limit, the outcome follows the frame-local / transaction-level split above: a frame-local exceed MUST revert, and a transaction-level exceed MUST halt with `OutOfGas`.
-Both report the failure as `InsufficientComputeGas`.
+When recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispatch overhead exceeds a compute gas limit, the outcome follows the frame-local / transaction-level split above, but the two branches are not observably the same:
+
+- A frame-local exceed MUST revert with an ABI-encoded `InsufficientComputeGas` error carrying the limit and the usage.
+- A transaction-level exceed MUST halt with `OutOfGas` and empty output. A node MUST NOT attach `InsufficientComputeGas` to this branch; the caller cannot distinguish it from any other out-of-gas halt.
 
 Gas rescue on this path is spec-dependent:
 
@@ -468,6 +478,14 @@ Treating the child's full gas limit as forwarded would therefore subtract gas th
 The MiniRex instruction table omitted the forwarding wrapper for `CALLCODE`, `DELEGATECALL`, and `STATICCALL`.
 Rex corrected the omission.
 MiniRex behavior remains frozen for replay compatibility.
+
+**Why does this page carry per-spec behavior in the main specification?**
+
+Concept pages normally describe only the latest stable spec and leave earlier behavior to the Spec History and upgrade pages.
+This page departs from that.
+Compute gas is not a fixed rule that happened to change; it is a measurement whose definition differs at MiniRex, Rex, Rex3, Rex4, and Rex5, and a node replaying historical blocks must implement every one of those definitions simultaneously.
+Splitting them across pages would force an implementer to reassemble the measurement from a changelog before they could execute a single pre-Rex5 block.
+The current assignment is therefore stated first and directly, with the earlier definitions kept alongside it rather than relocated.
 
 **Why is compute gas the only non-revertible dimension?**
 

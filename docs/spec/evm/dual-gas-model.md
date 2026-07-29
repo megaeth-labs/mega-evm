@@ -34,11 +34,15 @@ total_gas_used = compute_gas_used + storage_gas_used
 
 Both compute gas and storage gas MUST be deducted from the transaction's `gas_limit` budget.
 If the combined total exceeds `gas_limit`, the transaction MUST halt with `OutOfGas`.
-The `gas_used` field in the transaction receipt MUST reflect the combined total, less any standard EVM gas refund settled at the end of the transaction.
+The `gas_used` field in the transaction receipt MUST reflect the EVM gas actually consumed, less any standard EVM gas refund settled at the end of the transaction.
 
-The equation above is the pre-refund total.
-It is not an identity between the receipt's `gas_used` and the tracked compute-gas usage: the receipt applies EVM refunds, while the tracked compute-gas total never has refunds subtracted from it (see [Compute Gas Accounting](compute-gas.md#refund-exclusion)).
-A transaction that earns a refund therefore reports a `gas_used` lower than `compute_gas_used + storage_gas_used`, by exactly the settled refund.
+The equation above states how a transaction's cost decomposes, not an identity between the receipt and the two tracked counters.
+Two effects separate them, and they pull in opposite directions:
+
+- **Refunds lower `gas_used` but not the tracked compute gas.** The receipt applies EVM refunds; the tracked compute-gas total never has refunds subtracted from it (see [Refund Exclusion](compute-gas.md#refund-exclusion)).
+- **Gas consumed outside a completed measurement window raises `gas_used` above the tracked compute gas.** When an operation consumes EVM gas but its measurement window never closes, that gas is deliberately not recorded as compute gas, yet it is still deducted from the transaction's budget (see [Single-Record Rule](compute-gas.md#single-record-rule)).
+
+A node MUST derive the receipt from the gas budget actually consumed, and MUST NOT compute it by summing the tracked compute-gas and storage-gas counters.
 
 ### Compute Gas
 
