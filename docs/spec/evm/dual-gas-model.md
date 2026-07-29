@@ -71,7 +71,9 @@ A node MUST meter every storage-affecting opcode — `SSTORE`, `LOG0` through `L
 4. Record the opcode's compute gas as a single amount, measured over a window spanning steps 2 and 3.
    The recorded amount and its exclusions are defined in [Compute Gas Accounting](compute-gas.md#measurement-window).
    The node MUST then enforce the compute gas limit, halting if it is exceeded.
-5. Apply the opcode's resource-limit accounting (data size, key-value updates, state growth).
+5. Surface the opcode's other resource-limit dimensions (data size, key-value updates, state growth).
+   This step fixes when an exceed on those dimensions is acted on, not when their usage is recorded.
+   An opcode MAY record such usage earlier — before its body runs — provided the resulting exceed is not acted on until this step, so that a body that fails still discards the usage it would have added.
 
 A node MUST record an opcode's compute gas in exactly one step, after the opcode body has fully executed.
 A node MUST NOT record any portion of an opcode's compute gas before the body has run to completion.

@@ -230,8 +230,8 @@ fn test_refunds_do_not_reduce_compute_gas() {
     }
 }
 
-/// Spec: [Precompiles] case 2 — "`KZG_POINT_EVALUATION_GAS_COST`, when the invocation targeted the
-/// KZG point-evaluation precompile and its effective gas limit was at least
+/// Spec: [Precompiles], the KZG branch — "`KZG_POINT_EVALUATION_GAS_COST`, when the invocation
+/// targeted the KZG point-evaluation precompile and its effective gas limit was at least
 /// `KZG_POINT_EVALUATION_GAS_COST`".
 ///
 /// The constant is a **`MegaETH` override**, not the inherited EVM value. This test pins the number

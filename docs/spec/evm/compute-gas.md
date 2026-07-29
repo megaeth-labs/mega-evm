@@ -120,9 +120,9 @@ else:
 It is not the limit the child ultimately runs with: under Rex4 the [storage gas stipend](../glossary.md#storage-gas-stipend) is granted by inflating that limit after the parent's measurement window has already closed.
 A node MUST use the pre-inflation value here on every spec; subtracting the inflated one would under-record the parent by the stipend amount.
 
-All three conditions in the middle branch MUST hold together.
+All three conditions in the `CALL_STIPEND` branch MUST hold together.
 A `DELEGATECALL` or `STATICCALL` never satisfies it (wrong scheme), a zero-value `CALL` never satisfies it (no stipend is granted), and no spec before Rex5 satisfies it.
-`CREATE` and `CREATE2` always take the second branch: contract creation carries no stipend.
+`CREATE` and `CREATE2` always fall through to the final branch: contract creation carries no stipend.
 
 The `CALL_STIPEND` adjustment exists because the stipend is added to the child's gas limit without being deducted from the parent's remaining gas.
 Treating it as forwarded would under-count the parent's compute gas by the stipend amount.
@@ -243,7 +243,8 @@ compute_gas_used = intrinsic_recorded
                  + sum(keyless_deploy_recorded)
 ```
 
-Each term is a subsection below — `intrinsic_recorded` is the [transaction intrinsic gas](#transaction-intrinsic-gas), and so on — and a node MUST NOT record compute gas at any site not listed here.
+`sum(recorded(opcode window))` sums the per-opcode windows defined in [Measurement Window](#measurement-window); every other term is one of the subsections below.
+A node MUST NOT record compute gas at any site not listed here.
 `sum(recorded(opcode window))` sums over every window closed during execution — including windows in call frames that later reverted, since compute gas is not reverted.
 The `keyless_deploy_recorded` term is zero before Rex3.
 

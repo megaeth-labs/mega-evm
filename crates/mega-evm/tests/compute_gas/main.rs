@@ -471,10 +471,11 @@ pub(crate) fn corpus() -> Vec<Program> {
         Program {
             name: "create2_oversized_initcode",
             build_db: || {
-                // Initcode longer than the max initcode size. Pre-Rex6 the wrapper expands memory
-                // and records that gas before the inner opcode rejects the size; Rex6 halts on the
-                // size check first, so the expansion is never charged and never recorded. This is
-                // the failure path on which the CREATE2 window divergence is observable.
+                // Initcode longer than the max initcode size. Rex5 expands memory and records that
+                // gas eagerly, before the inner opcode rejects the size. MiniRex-Rex4 expand too
+                // but skip their trailing record once the inner opcode fails, and Rex6 halts on the
+                // size check before expanding at all. This is the failure path on which the CREATE2
+                // window divergence is observable.
                 base_db(
                     BytecodeBuilder::default()
                         .push_number(0u64) // salt
@@ -560,9 +561,9 @@ pub(crate) fn corpus() -> Vec<Program> {
             build_db: || {
                 // KZG point evaluation with a 32-byte argument (it requires exactly 192),
                 // forwarding well above the fixed cost. The precompile reaches its
-                // verification step and returns a non-out-of-gas error — the Rex5
-                // "case 2" path, which records the fixed
-                // `KZG_POINT_EVALUATION_GAS_COST` rather than the spent amount (zero).
+                // verification step and returns a non-out-of-gas error — the Rex5 KZG branch, which
+                // records the fixed `KZG_POINT_EVALUATION_GAS_COST` rather than the spent amount
+                // (zero).
                 //
                 // This is the corpus case that makes MegaETH's KZG override visible: the recorded
                 // value must be the MegaETH 100,000, not the inherited EVM 50,000.
