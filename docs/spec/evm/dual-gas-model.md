@@ -46,13 +46,16 @@ The gas deducted from the transaction's budget has a third component that neithe
 gas_charged = total_gas_used + unmetered_gas
 ```
 
-`unmetered_gas` covers gas the transaction pays for but neither counter records.
+`unmetered_gas` is whatever the transaction is charged beyond `total_gas_used`.
+It is a remainder, not a sum: a node MUST derive it from the gas budget the transaction actually consumed, and MUST NOT compute it by adding up the cases below.
 It is zero for most transactions.
-Three sources contribute to it:
+
+The cases that produce it are:
 
 - Gas an operation consumed before halting partway through, which is deliberately never recorded as compute gas (see [Single-Record Rule](compute-gas.md#single-record-rule)).
 - The difference between the gas limit a caller forwards into a failing precompile and the compute gas recorded for it, which from Rex5 is capped at the remaining compute budget (see [Precompiles](compute-gas.md#precompiles)).
 - Before Rex6, gas forwarded to a child frame that a compute-gas halt discarded before the child ran, which is not returned to the parent (see [Gas Forwarding](gas-forwarding.md)).
+- Before Rex6, the unused envelope a transaction forfeits when the [KeylessDeploy](compute-gas.md#keyless-deploy-exceed) dispatch overhead crosses the transaction-level compute limit, which that path spends in full rather than rescuing.
 
 #### Receipt Gas
 

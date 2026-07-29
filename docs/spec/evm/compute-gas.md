@@ -108,13 +108,17 @@ The child frame records its own compute gas as it executes.
 A node MUST compute `forwarded_child_gas` as:
 
 ```text
-if no child frame was spawned:
+if the opcode produced no pending child call:
     forwarded_child_gas = 0
 else if spec >= Rex5 and scheme in (CALL, CALLCODE) and child.value != 0:
     forwarded_child_gas = child.gas_limit - CALL_STIPEND
 else:
     forwarded_child_gas = child.gas_limit
 ```
+
+The condition is on what the opcode produced, not on what frame initialization later did with it.
+A pending child call may still resolve without any child EVM frame executing — as a precompile invocation, a [system contract interception](#system-contract-interception), or a too-deep call result.
+The parent has already parted with the gas in every one of those cases, so it MUST be excluded from the parent's compute gas all the same; whatever runs in the child's place accounts for its own consumption.
 
 `child.gas_limit` is the gas limit the opcode itself assigns to the pending child frame.
 It is not the limit the child ultimately runs with: under Rex4 the [storage gas stipend](../glossary.md#storage-gas-stipend) is granted by inflating that limit after the parent's measurement window has already closed.
