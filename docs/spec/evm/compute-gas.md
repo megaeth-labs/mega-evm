@@ -171,9 +171,7 @@ Class membership is not the only volatility-related property an opcode can carry
 `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, and `SELFDESTRUCT` remain in their own classes but additionally apply a beneficiary volatile-access guard before executing.
 Their measurement windows follow their class; the guard only decides whether the opcode runs at all.
 
-##### How the assignment evolved
-
-Class assignment is defined by inheritance: each spec inherits the previous spec's assignment and overrides only the opcodes listed.
+**How the assignment evolved.** Class assignment is defined by inheritance: each spec inherits the previous spec's assignment and overrides only the opcodes listed.
 A node implementing replay for historical blocks needs every spec's assignment, so the base and each delta are given below.
 
 **MiniRex** (base assignment):
@@ -239,10 +237,9 @@ compute_gas_used = intrinsic_recorded
                  + sum(keyless_deploy_recorded)
 ```
 
-Every term is defined on this page, and a node MUST NOT record compute gas at any site not listed here.
+Each term is a subsection below — `intrinsic_recorded` is the [transaction intrinsic gas](#transaction-intrinsic-gas), and so on — and a node MUST NOT record compute gas at any site not listed here.
 `sum(recorded(opcode window))` sums over every window closed during execution — including windows in call frames that later reverted, since compute gas is not reverted.
 The `keyless_deploy_recorded` term is zero before Rex3.
-Under Equivalence every term is zero, because compute gas is not tracked at all.
 
 #### Transaction Intrinsic Gas
 
@@ -262,22 +259,21 @@ A node MUST record a precompile invocation's compute gas as follows:
 | ------------ | ---------------------------- |
 | Equivalence  | Not recorded                 |
 | MiniRex–Rex4 | The gas the precompile spent |
-| Rex5+        | See the three cases below.   |
+| Rex5+        | See below                    |
 
 Under MiniRex through Rex4, "the gas the precompile spent" is the amount the precompile itself recorded as consumed.
-On a failing precompile invocation, no cost is recorded, so the amount recorded as compute gas is zero — even though the parent frame still burns the forwarded gas limit.
-Rex5 changed this; see below.
+On a failing invocation no cost is recorded, so the compute gas recorded is zero — even though the parent frame still burns the forwarded gas limit.
 
 From Rex5 onward, the gas limit a node forwards into a precompile is capped at the remaining compute gas budget, as specified in [Precompile Compute-Gas Bound](resource-limits.md#precompile-compute-gas-bound).
 Call that capped value the **effective gas limit**:
 
 ```
-effective_gas_limit = min(call_gas_limit,
-                          min(remaining(current frame),
-                              effective_limit − compute_gas_used))
+effective_gas_limit   = min(call_gas_limit, remaining_compute_gas)
+remaining_compute_gas = min(current frame's remaining budget,
+                            effective_limit − compute_gas_used)
 ```
 
-The inner minimum is the same quantity the [per-call-frame budget](#per-call-frame-budget) and [effective limit](#effective-limit) define: a precompile is bounded by whichever of the frame budget and the detained transaction budget binds first.
+A precompile is therefore bounded by whichever of the [per-call-frame budget](#per-call-frame-budget) and the detained [transaction budget](#effective-limit) binds first.
 
 A node MUST record a Rex5+ precompile invocation's compute gas as:
 
@@ -291,16 +287,12 @@ else:
     recorded = effective_gas_limit
 ```
 
-The branches are evaluated in order; the first match applies.
+The KZG branch covers that precompile reaching its verification step and returning a non-out-of-gas error.
+Its condition is expressed structurally — on the effective gas limit rather than on the specific error returned — so that it remains correct if the inherited EVM adds further non-out-of-gas error variants.
+No other precompile takes that branch.
+`KZG_POINT_EVALUATION_GAS_COST` is a MegaETH override, not an inherited value; see [Precompiles](precompiles.md).
 
-Case 2 covers the KZG point-evaluation precompile reaching its verification step and returning a non-out-of-gas error.
-The condition is expressed structurally — on the effective gas limit rather than on the specific error returned — so that it remains correct if the inherited EVM adds further non-out-of-gas error variants to that precompile.
-No other precompile is subject to case 2.
-
-`KZG_POINT_EVALUATION_GAS_COST` is a MegaETH override, not an inherited value: from MiniRex onward MegaETH replaces the KZG point-evaluation precompile with a fixed-cost variant.
-See [Precompiles](precompiles.md) for the override itself.
-
-Cases 2 and 3 reflect that the precompile never recorded a cost on those paths, so recording the spent amount — zero — would under-count the work performed.
+Both non-`gas_spent` branches exist because the precompile recorded no cost on those paths, so recording the spent amount — zero — would under-count the work performed.
 
 {% hint style="info" %}
 **Design intent.** On a halting precompile the recorded compute gas is deliberately distinct from the EVM gas the parent frame burns: the parent burns the caller-supplied call gas limit, while the compute gas recorded is the effective gas limit.
@@ -349,18 +341,8 @@ The effective transaction-level limit is the minimum of `TX_COMPUTE_GAS_LIMIT` a
 effective_limit = min(TX_COMPUTE_GAS_LIMIT, detained_limit)
 ```
 
-`detained_limit` starts at `TX_COMPUTE_GAS_LIMIT` and is lowered by each volatile-data access. It never rises again within a transaction:
-
-```text
-# on each volatile-data access
-if spec >= Rex4:
-    detained_limit = min(detained_limit, compute_gas_used + cap)
-else:
-    detained_limit = min(detained_limit, cap)
-```
-
-Because each access takes a minimum, the most restrictive cap wins regardless of access order.
-The `cap` values, and the reset of `detained_limit` between transactions, are specified in [Gas Detention](gas-detention.md).
+How `detained_limit` is lowered by volatile-data access, how competing caps combine, and when it resets between transactions are specified in [Gas Detention](gas-detention.md).
+This page only defines how the resulting limit is applied.
 
 A node MUST evaluate the transaction-level check with strict greater-than:
 
@@ -375,26 +357,10 @@ Usage exactly equal to the effective limit is within limit.
 From Rex4 onward, a node MUST additionally enforce a per-call-frame compute gas budget.
 Before Rex4, compute gas is enforced at the transaction level only, and no per-frame budget exists.
 
-The budget for a frame MUST be:
+How a frame's budget is derived — the top-level frame's budget net of pre-frame usage, and the `FRAME_LIMIT_NUMERATOR` / `FRAME_LIMIT_DENOMINATOR` share forwarded to each nested frame — is specified for all four resource dimensions in [Per-Call-Frame Runtime Budgets](resource-limits.md#per-call-frame-runtime-budgets).
+For compute gas, the pre-frame usage deducted from the top-level budget is the [transaction intrinsic gas](#transaction-intrinsic-gas).
 
-```
-budget(top-level frame) = TX_COMPUTE_GAS_LIMIT − intrinsic_recorded
-
-budget(nested frame)    = remaining(parent) × FRAME_LIMIT_NUMERATOR / FRAME_LIMIT_DENOMINATOR
-
-remaining(frame)        = max(0, budget(frame) − usage(frame))
-```
-
-Where `intrinsic_recorded` is the [transaction intrinsic gas](#transaction-intrinsic-gas) recorded before the first frame began, and `usage(frame)` is the compute gas recorded in that frame so far.
-The nested-frame division truncates toward zero.
-
-The per-frame check uses the same strict comparison as the transaction-level one:
-
-```
-frame_exceeded = usage(frame) > budget(frame)
-```
-
-A node MUST evaluate the per-frame check before the transaction-level check.
+The per-frame check uses the same strict comparison as the transaction-level one, and a node MUST evaluate it before the transaction-level check.
 A node MUST NOT skip the transaction-level check when the per-frame check is within limit: the intrinsic recording lies outside every frame budget, and the detained limit may be lowered at any point during execution.
 
 {% hint style="info" %}
@@ -457,12 +423,6 @@ Usage recorded within a call frame contributes to the transaction total whether 
 
 This makes compute gas the sole exception among the four runtime resource dimensions; the other three are call-frame-aware and discard a reverted frame's usage.
 See [Resource Accounting](resource-accounting.md#revert-behavior).
-
-### Detention Reset
-
-The detained compute gas limit is reset at the start of each transaction from Rex1 onward.
-Before Rex1, the detained limit persists across transactions within the same block.
-See [Gas Detention](gas-detention.md).
 
 ## Constants
 
