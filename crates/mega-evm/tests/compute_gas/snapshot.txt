@@ -4,8 +4,11 @@
 # Regenerate: UPDATE_COMPUTE_GAS_SNAPSHOT=1 cargo test -p mega-evm --test compute_gas
 #
 # `compute_gas` is the post-transaction compute-gas tracker reading; `gas_used` is the
-# receipt total (compute + storage EVM gas). Stable specs (Equivalence through
-# Rex5) must never change: a diff there is a replay-breaking regression.
+# receipt value, which is neither counter nor their sum: refunds lower it, gas consumed
+# outside a completed window raises it, and the calldata floor can raise it further.
+#
+# Stable specs (Equivalence through Rex5) must never change: a diff there is a
+# replay-breaking regression.
 #
 # program                       spec           compute_gas     gas_used  outcome
 

@@ -16,8 +16,11 @@
 //! the Rex5 sandbox-usage merge. Driving it needs a signed RLP payload, and it is already pinned by
 //! `tests/rex5/sandbox_accounting.rs`, so it is covered there rather than duplicated here.
 //!
-//! Any change to a recorded amount, on any spec, surfaces as a snapshot diff. Stable specs
-//! (Equivalence through Rex5) must never move; a diff there is a replay-breaking regression.
+//! Within that corpus, any change to a recorded amount on any spec surfaces as a snapshot diff.
+//! The corpus runs against minimum-capacity SALT buckets throughout, so recorded amounts that only
+//! move once a bucket grows are pinned by the claim tests in `claims.rs` rather than here.
+//! Stable specs (Equivalence through Rex5) must never move; a diff there is a replay-breaking
+//! regression.
 //!
 //! Regenerate after an intentional change:
 //!
@@ -27,12 +30,12 @@
 
 mod claims;
 
-use std::{fmt::Write as _, path::Path};
+use std::{convert::Infallible, fmt::Write as _, path::Path};
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{
@@ -100,6 +103,40 @@ struct Outcome {
 fn transact(spec: MegaSpecId, mut db: MemoryDatabase) -> Outcome {
     let mut context =
         MegaContext::new(&mut db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context);
+    let result =
+        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
+    let gas_used = result.result.gas_used();
+
+    let outcome = match &result.result {
+        ExecutionResult::Success { .. } => "success".to_string(),
+        ExecutionResult::Revert { .. } => "revert".to_string(),
+        ExecutionResult::Halt { reason, .. } => format!("halt {reason:?}"),
+    };
+
+    Outcome { compute_gas, gas_used, outcome }
+}
+
+/// Runs the same transaction as [`transact`] but against a caller-supplied external environment,
+/// so a test can raise a SALT bucket above `MIN_BUCKET_SIZE` and make dynamic storage gas non-zero.
+fn transact_with_envs(
+    spec: MegaSpecId,
+    mut db: MemoryDatabase,
+    envs: TestExternalEnvs<Infallible>,
+) -> Outcome {
+    let mut context = MegaContext::new(&mut db, spec)
+        .with_external_envs(envs.into())
+        .with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
@@ -638,9 +675,16 @@ fn render_snapshot() -> String {
         "# `compute_gas` is the post-transaction compute-gas tracker reading; `gas_used` is the\n",
     );
     out.push_str(
-        "# receipt total (compute + storage EVM gas). Stable specs (Equivalence through\n",
+        "# receipt value, which is neither counter nor their sum: refunds lower it, gas consumed\n",
     );
-    out.push_str("# Rex5) must never change: a diff there is a replay-breaking regression.\n");
+    out.push_str(
+        "# outside a completed window raises it, and the calldata floor can raise it further.\n",
+    );
+    out.push_str("#\n");
+    out.push_str(
+        "# Stable specs (Equivalence through Rex5) must never change: a diff there is a\n",
+    );
+    out.push_str("# replay-breaking regression.\n");
     out.push_str("#\n");
     out.push_str(&format!(
         "# {:<30}{:<13}{:>13}{:>13}  {}\n",

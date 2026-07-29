@@ -22,8 +22,13 @@ This allows contracts to invoke protocol-level behavior through standard Solidit
 
 ### Interception Point
 
-Interception fires during call-frame initialization, after the call opcode has been executed but before a child call frame is created.
-At this point the opcode-level gas accounting (including [gas forwarding](../evm/gas-forwarding.md) cap and new-account storage-gas charges) has already been applied.
+Interception fires during call-frame initialization, before a child call frame is created.
+
+For a call made by a `CALL`-family opcode, that point is after the opcode has executed, so the opcode-level gas accounting (including the [gas forwarding](../evm/gas-forwarding.md) cap and new-account storage-gas charges) has already been applied.
+
+A transaction whose recipient is a system contract is also intercepted, at the same frame-initialization point.
+No opcode initiates that call, so none of the opcode-level accounting above applies to it.
+A node MUST NOT make interception conditional on an initiating opcode.
 
 A system contract MAY intercept `CALL` or `STATICCALL`, but MUST NOT intercept `DELEGATECALL`, `CALLCODE`, `CREATE`, or `CREATE2`.
 
@@ -61,7 +66,7 @@ The fall-through behavior is defined by each system contract's on-chain bytecode
 
 ### Gas Semantics
 
-The call opcode's own gas costs (including the [gas forwarding](../evm/gas-forwarding.md) cap adjustment) MUST be charged before interception fires.
+Where a call opcode initiates the call, its own gas costs (including the [gas forwarding](../evm/gas-forwarding.md) cap adjustment) MUST be charged before interception fires.
 These costs are not refunded.
 
 By default, an intercepted call consumes zero gas from the forwarded gas limit.
@@ -79,7 +84,7 @@ The stipend is only applicable on fall-through.
 ## Rationale
 
 **Why intercept at frame initialization rather than call dispatch?**
-Interception fires after the call opcode has executed and gas forwarding has been applied, but before a child frame is created.
+Interception fires at frame initialization — for an opcode-initiated call, after the opcode has executed and gas forwarding has been applied — but before a child frame is created.
 This ensures that opcode-level gas accounting (including the gas forwarding cap and new-account storage-gas charges) is already settled.
 Intercepting earlier (at opcode decode) would require reimplementing gas accounting inside each interceptor; intercepting later (inside the child frame) would require creating and then discarding a frame, wasting resources.
 

@@ -34,13 +34,35 @@ total_gas_used = compute_gas_used + storage_gas_used
 
 Both compute gas and storage gas MUST be deducted from the transaction's `gas_limit` budget.
 If the combined total exceeds `gas_limit`, the transaction MUST halt with `OutOfGas`.
-The `gas_used` field in the transaction receipt MUST reflect the EVM gas actually consumed, less any standard EVM gas refund settled at the end of the transaction.
 
-The equation above states how a transaction's cost decomposes, not an identity between the receipt and the two tracked counters.
-Two effects separate them, and they pull in opposite directions:
+Total gas is the sum of the two metered dimensions.
+It is not the receipt, and a node MUST NOT derive the receipt by summing the two counters.
 
-- **Refunds lower `gas_used` but not the tracked compute gas.** The receipt applies EVM refunds; the tracked compute-gas total never has refunds subtracted from it (see [Refund Exclusion](compute-gas.md#refund-exclusion)).
-- **Gas consumed outside a completed measurement window raises `gas_used` above the tracked compute gas.** When an operation consumes EVM gas but its measurement window never closes, that gas is deliberately not recorded as compute gas, yet it is still deducted from the transaction's budget (see [Single-Record Rule](compute-gas.md#single-record-rule)).
+#### Gas Charged to the Transaction
+
+The gas deducted from the transaction's budget has a third component that neither counter holds:
+
+```
+gas_charged = total_gas_used + unmetered_gas
+```
+
+`unmetered_gas` covers gas the transaction pays for but neither counter records.
+It is zero for most transactions.
+Three sources contribute to it:
+
+- Gas an operation consumed before halting partway through, which is deliberately never recorded as compute gas (see [Single-Record Rule](compute-gas.md#single-record-rule)).
+- The difference between the gas limit a caller forwards into a failing precompile and the compute gas recorded for it, which from Rex5 is capped at the remaining compute budget (see [Precompiles](compute-gas.md#precompiles)).
+- Before Rex6, gas forwarded to a child frame that a compute-gas halt discarded before the child ran, which is not returned to the parent (see [Gas Forwarding](gas-forwarding.md)).
+
+#### Receipt Gas
+
+The `gas_used` field in the transaction receipt MUST be `gas_charged`, less any standard EVM gas refund settled at the end of the transaction, and then raised to the [calldata floor cost](#calldata-floor-cost) if that floor is higher.
+
+Three effects therefore separate the receipt from `total_gas_used`:
+
+- **Refunds lower it.** The receipt applies EVM refunds; the tracked compute-gas total never has refunds subtracted from it (see [Refund Exclusion](compute-gas.md#refund-exclusion)).
+- **`unmetered_gas` raises it**, as defined above.
+- **The calldata floor raises it**, whenever a calldata-heavy transaction executes too little to reach that floor.
 
 A node MUST derive the receipt from the gas budget actually consumed, and MUST NOT compute it by summing the tracked compute-gas and storage-gas counters.
 
@@ -74,6 +96,11 @@ A node MUST meter every storage-affecting opcode — `SSTORE`, `LOG0` through `L
 5. Surface the opcode's other resource-limit dimensions (data size, key-value updates, state growth).
    This step fixes when an exceed on those dimensions is acted on, not when their usage is recorded.
    An opcode MAY record such usage earlier — before its body runs — provided the resulting exceed is not acted on until this step, so that a body that fails still discards the usage it would have added.
+
+`SELFDESTRUCT` is the exception to the split between steps 4 and 5.
+It records its beneficiary's data-size, key-value-update, and state-growth usage before its body runs, so it MUST evaluate all four dimensions together once the body completes, rather than deciding compute gas first.
+When more than one dimension is over its limit on that opcode, the reported dimension MUST be the first of: data size, key-value updates, compute gas, state growth.
+`SELFDESTRUCT` can record all three non-compute dimensions for a newly materialized beneficiary, so this order decides the reported dimension in both directions — data size or key-value updates outrank compute gas, while compute gas outranks state growth.
 
 A node MUST record an opcode's compute gas in exactly one step, after the opcode body has fully executed.
 A node MUST NOT record any portion of an opcode's compute gas before the body has run to completion.

@@ -252,7 +252,9 @@ The `keyless_deploy_recorded` term is zero before Rex3.
 
 Before the first call frame begins, a node MUST record the transaction's standard EVM intrinsic gas as compute gas.
 
-This amount MUST comprise only the intrinsic gas defined by the inherited EVM — the base transaction cost, calldata token cost, access-list cost, and EIP-7702 authorization-list cost.
+This amount MUST be the whole of the intrinsic gas the inherited EVM defines for the transaction, and nothing beyond it.
+For every transaction that means the base transaction cost, the calldata token cost, the access-list cost, and the EIP-7702 authorization-list cost.
+A contract-creation transaction additionally carries the inherited creation surcharge and the EIP-3860 per-initcode-word charge, and both are part of this amount.
 A node MUST NOT include MegaETH's intrinsic storage gas additions — the calldata storage gas and the flat transaction intrinsic storage gas defined in [Dual Gas Model](dual-gas-model.md) — in the recorded compute gas, even though both are added to the same intrinsic gas total charged against the transaction's gas limit.
 
 This recording is made outside any call frame.
@@ -332,8 +334,11 @@ From Rex5 onward, a node MUST additionally merge the compute gas consumed inside
 
 An intercepted [system contract](../system-contracts/interception.md) call produces a synthetic frame result without executing a child EVM frame.
 
-A node MUST NOT record compute gas for the interception itself.
-The gas forwarded to the intercepted call is returned to the caller in full unless the interceptor explicitly charges it, so the interception consumes no compute gas beyond that of the `CALL`-family opcode that initiated it.
+Where an interceptor performs no metering of its own, a node MUST NOT record compute gas for the interception: the forwarded gas is returned to the caller in full, so the interception consumes nothing beyond the `CALL`-family opcode that initiated it.
+
+An interceptor that does meter its own operation is the exception, and its charges are specified with that operation rather than here.
+[KeylessDeploy](#keyless-deploy-sandbox) is the only such interceptor: it records a fixed dispatch overhead from Rex3, and merges its sandbox's compute gas from Rex5.
+A node MUST record those amounts even though the call reaches KeylessDeploy through the same interception framework, and even when the call is top-level and therefore has no initiating opcode.
 
 An interception MUST NOT perturb per-call-frame budgets: the budgets observed by frames that run after it MUST be the same as if a real child frame had been entered and returned without recording compute gas.
 

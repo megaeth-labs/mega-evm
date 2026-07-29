@@ -7,16 +7,22 @@
 //!
 //! Each test names the spec section it pins.
 
+use std::convert::Infallible;
+
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaLimitControl, MegaSpecId, LIMIT_CONTROL_ADDRESS,
+    IMegaLimitControl, MegaSpecId, SaltEnv, TestExternalEnvs, LIMIT_CONTROL_ADDRESS,
+    MIN_BUCKET_SIZE,
 };
-use revm::bytecode::opcode::{CALL, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, STATICCALL};
+use revm::bytecode::opcode::{
+    CALL, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, SELFDESTRUCT, STATICCALL,
+};
 
 use crate::{
-    base_db, transact, transact_output, CALLEE, CALLER, CONTRACT, EXISTING_TARGET, ONE_ETH,
+    base_db, transact, transact_output, transact_with_envs, CALLEE, CALLER, CONTRACT, EMPTY_TARGET,
+    EXISTING_TARGET, ONE_ETH,
 };
 
 /// `remainingComputeGas()` — the `MegaLimitControl` selector the interceptor recognizes.
@@ -42,9 +48,9 @@ fn intercepted_call(forwarded_gas: u64) -> Bytes {
         .build()
 }
 
-/// Spec: [System Contract Interception] — "A node MUST NOT record compute gas for the interception
-/// itself. The gas forwarded to the intercepted call is returned to the caller in full unless the
-/// interceptor explicitly charges it."
+/// Spec: [System Contract Interception] — "Where an interceptor performs no metering of its own, a
+/// node MUST NOT record compute gas for the interception: the forwarded gas is returned to the
+/// caller in full." `MegaLimitControl` is such an interceptor.
 ///
 /// If the interception consumed or recorded any portion of the forwarded gas, changing how much is
 /// forwarded would change the transaction's compute gas. Both operands are three bytes wide, so the
@@ -269,6 +275,53 @@ fn test_kzg_error_path_records_the_megaeth_fixed_cost() {
         rex6.compute_gas, rex5.compute_gas,
         "Rex6 inherits the Rex5 KZG recording rule unchanged (Rex5={} Rex6={})",
         rex5.compute_gas, rex6.compute_gas
+    );
+}
+
+/// Spec: [Storage Gas Exclusion], at the one surcharge site the snapshot corpus cannot reach.
+///
+/// Rex5 charges dynamic new-account storage gas when `SELFDESTRUCT` materializes an empty
+/// beneficiary. That charge is `base × (multiplier − 1)`, and the corpus runs against the empty
+/// external environment where every bucket sits at `MIN_BUCKET_SIZE` — so the multiplier is 1, the
+/// surcharge is zero, and the corpus's Rex4 and Rex5 rows are identical. A regression that let the
+/// surcharge leak into compute gas would leave the snapshot unchanged.
+///
+/// This test puts the beneficiary's bucket above the minimum so the surcharge is non-zero, then
+/// asserts the split: `gas_used` rises by exactly the surcharge while `compute_gas` does not move.
+#[test]
+fn test_selfdestruct_storage_surcharge_stays_out_of_compute_gas() {
+    /// Rex's base cost for materializing an account, scaled by `multiplier − 1`.
+    const NEW_ACCOUNT_STORAGE_GAS_BASE: u64 = 25_000;
+    /// Bucket capacity multiplier for the beneficiary's bucket.
+    const MULTIPLIER: u64 = 4;
+
+    let envs = || {
+        let bucket = TestExternalEnvs::<Infallible>::bucket_id_for_account(EMPTY_TARGET);
+        TestExternalEnvs::<Infallible>::new()
+            .with_bucket_capacity(bucket, MIN_BUCKET_SIZE as u64 * MULTIPLIER)
+    };
+    let build = || {
+        base_db(BytecodeBuilder::default().push_address(EMPTY_TARGET).append(SELFDESTRUCT).build())
+    };
+
+    let rex4 = transact_with_envs(MegaSpecId::REX4, build(), envs());
+    let rex5 = transact_with_envs(MegaSpecId::REX5, build(), envs());
+
+    let surcharge = NEW_ACCOUNT_STORAGE_GAS_BASE * (MULTIPLIER - 1);
+    assert!(surcharge > 0, "the fixture must produce a non-zero surcharge");
+
+    assert_eq!(
+        rex5.gas_used - rex4.gas_used,
+        surcharge,
+        "Rex5 must charge the empty-beneficiary storage surcharge that Rex4 does not \
+         (Rex4={} Rex5={})",
+        rex4.gas_used,
+        rex5.gas_used
+    );
+    assert_eq!(
+        rex4.compute_gas, rex5.compute_gas,
+        "the surcharge is storage gas and MUST NOT enter compute gas (Rex4={} Rex5={})",
+        rex4.compute_gas, rex5.compute_gas
     );
 }
 

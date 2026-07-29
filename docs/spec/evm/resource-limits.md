@@ -98,6 +98,10 @@ If any runtime transaction-level limit is exceeded during execution, the transac
 
 The failed transaction's actual resource usage MUST still count toward the block's cumulative resource counters.
 
+Step 2 has one exception.
+When the compute-gas limit is crossed while recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispatch overhead, remaining gas is preserved only from Rex6 onward; before Rex6 the transaction records a full spend.
+See [Keyless Deploy Exceed](compute-gas.md#keyless-deploy-exceed).
+
 <details>
 <summary>Rex6 (unstable): system-originated transactions are not halted by transaction-level limits</summary>
 
