@@ -118,16 +118,16 @@ fn test_interception_costs_the_same_as_a_plain_call() {
             .build()
     }
 
-    const GAS: u64 = 1_000_000;
+    const FORWARDED_GAS: u64 = 1_000_000;
     assert_eq!(
-        intercepted_call(GAS).len(),
-        plain_call(EXISTING_TARGET, GAS).len(),
+        intercepted_call(FORWARDED_GAS).len(),
+        plain_call(EXISTING_TARGET, FORWARDED_GAS).len(),
         "the intercepted and plain programs must be byte-identical apart from the target address"
     );
 
     for spec in [MegaSpecId::REX4, MegaSpecId::REX5, MegaSpecId::REX6] {
-        let intercepted = transact(spec, base_db(intercepted_call(GAS)));
-        let plain = transact(spec, base_db(plain_call(EXISTING_TARGET, GAS)));
+        let intercepted = transact(spec, base_db(intercepted_call(FORWARDED_GAS)));
+        let plain = transact(spec, base_db(plain_call(EXISTING_TARGET, FORWARDED_GAS)));
 
         assert_eq!(intercepted.outcome, "success", "{spec:?}: intercepted call should succeed");
         assert_eq!(plain.outcome, "success", "{spec:?}: plain call should succeed");
@@ -168,7 +168,10 @@ fn test_intrinsic_compute_gas_excludes_megaeth_storage_gas() {
         mini_rex.compute_gas, rex.compute_gas
     );
     assert_eq!(
-        rex.gas_used - mini_rex.gas_used,
+        rex.gas_used.checked_sub(mini_rex.gas_used).unwrap_or_else(|| panic!(
+            "Rex must not charge less total gas than MiniRex (MiniRex={} Rex={})",
+            mini_rex.gas_used, rex.gas_used
+        )),
         TX_INTRINSIC_STORAGE_GAS,
         "Rex must charge exactly {TX_INTRINSIC_STORAGE_GAS} more total gas than MiniRex \
          (MiniRex={} Rex={})",
@@ -220,7 +223,11 @@ fn test_refunds_do_not_reduce_compute_gas() {
         assert_eq!(overwritten.outcome, "success", "{spec:?}: slot overwrite should succeed");
 
         assert_eq!(
-            overwritten.gas_used - cleared.gas_used,
+            overwritten.gas_used.checked_sub(cleared.gas_used).unwrap_or_else(|| panic!(
+                "{spec:?}: clearing must not cost more than overwriting \
+                 (cleared={} overwritten={})",
+                cleared.gas_used, overwritten.gas_used
+            )),
             SSTORE_CLEARS_SCHEDULE,
             "{spec:?}: the refund must be settled out of gas_used \
              (cleared={} overwritten={})",
@@ -264,7 +271,10 @@ fn test_kzg_error_path_records_the_megaeth_fixed_cost() {
     let rex6 = transact(MegaSpecId::REX6, (program.build_db)());
 
     assert_eq!(
-        rex5.compute_gas - rex4.compute_gas,
+        rex5.compute_gas.checked_sub(rex4.compute_gas).unwrap_or_else(|| panic!(
+            "Rex5 must not record less compute gas than Rex4 (Rex4={} Rex5={})",
+            rex4.compute_gas, rex5.compute_gas
+        )),
         KZG_POINT_EVALUATION_GAS_COST,
         "Rex5 must record MegaETH's fixed KZG cost where Rex4 recorded the spent amount \
          (Rex4={} Rex5={})",
@@ -311,7 +321,10 @@ fn test_selfdestruct_storage_surcharge_stays_out_of_compute_gas() {
     assert!(surcharge > 0, "the fixture must produce a non-zero surcharge");
 
     assert_eq!(
-        rex5.gas_used - rex4.gas_used,
+        rex5.gas_used.checked_sub(rex4.gas_used).unwrap_or_else(|| panic!(
+            "Rex5 must not charge less total gas than Rex4 (Rex4={} Rex5={})",
+            rex4.gas_used, rex5.gas_used
+        )),
         surcharge,
         "Rex5 must charge the empty-beneficiary storage surcharge that Rex4 does not \
          (Rex4={} Rex5={})",
