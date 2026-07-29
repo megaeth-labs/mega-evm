@@ -6,16 +6,16 @@ use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
 use clap::Parser;
 use mega_evm::{
-    alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
-    alloy_op_evm::block::OpAlloyReceiptBuilder,
-    revm::{
-        context::{result::ExecutionResult, BlockEnv, ContextTr},
-        database::{states::bundle_state::BundleRetention, StateBuilder},
-        primitives::eip4844,
-        DatabaseRef,
-    },
     BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
     MegaEvmFactory, MegaHardforks, MegaSpecId,
+    alloy_evm::{Evm, EvmEnv, block::BlockExecutor},
+    alloy_op_evm::block::OpAlloyReceiptBuilder,
+    revm::{
+        DatabaseRef,
+        context::{BlockEnv, ContextTr, result::ExecutionResult},
+        database::{StateBuilder, states::bundle_state::BundleRetention},
+        primitives::eip4844,
+    },
 };
 use tracing::{debug, info, trace, warn};
 
@@ -23,13 +23,14 @@ use alloy_network::ReceiptResponse;
 use op_alloy_rpc_types::Transaction;
 
 use crate::{
+    ChainArgs, EvmeState,
     common::{
-        op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
-        print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcCacheStore, TxOverrideArgs,
+        BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome, ExecutionSummary, ExternalEnvSnapshot,
+        OpTxReceipt, RpcCacheStore, TxOverrideArgs, op_receipt_to_tx_receipt,
+        parse_bucket_capacity, print_execution_summary, print_execution_trace, print_receipt,
     },
     replay::get_hardfork_config,
-    run, ChainArgs, EvmeState,
+    run,
 };
 
 use super::{ReplayError, Result};

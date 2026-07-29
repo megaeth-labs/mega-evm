@@ -8,16 +8,16 @@ use alloy_rpc_types_trace::geth::{
 };
 use clap::{Parser, ValueEnum};
 use mega_evm::{
+    MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
     revm::{
+        ExecuteEvm, InspectEvm,
         context::{
-            result::{ExecutionResult, ResultAndState},
             ContextTr,
+            result::{ExecutionResult, ResultAndState},
         },
         database::DatabaseRef,
         state::EvmState,
-        ExecuteEvm, InspectEvm,
     },
-    MegaContext, MegaEvm, MegaHaltReason, MegaTransaction,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use tracing::{debug, info, trace};

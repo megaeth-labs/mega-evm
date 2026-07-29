@@ -1,13 +1,13 @@
 use mega_evm::{
+    Either,
     revm::{
         context::tx::TxEnv,
-        primitives::{Address, Bytes, HashMap, TxKind, B256},
+        primitives::{Address, B256, Bytes, HashMap, TxKind},
     },
-    Either,
 };
 use serde::{Deserialize, Serialize};
 
-use super::{error::TestError, transaction::TxPartIndices, AccountInfo, TestUnit};
+use super::{AccountInfo, TestUnit, error::TestError, transaction::TxPartIndices};
 use crate::utils::recover_address;
 
 /// State test indexed state result deserialization.

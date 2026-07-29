@@ -1,25 +1,25 @@
 //! Transaction configuration for mega-evme
 
-use alloy_primitives::{address, Address, Bytes, Signature, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, Signature, U256, address};
 use clap::Args;
 use mega_evm::{
+    Either, MegaTransaction, MegaTxEnvelope, MegaTxType,
     alloy_consensus::{
-        transaction::SignerRecoverable, Sealed, Signed, Transaction as _, TxEip1559, TxEip2930,
-        TxEip7702, TxLegacy,
+        Sealed, Signed, Transaction as _, TxEip1559, TxEip2930, TxEip7702, TxLegacy,
+        transaction::SignerRecoverable,
     },
     alloy_eips::{
+        Decodable2718, Encodable2718, Typed2718 as _,
         eip2930::{AccessList, AccessListItem},
         eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization, SignedAuthorization},
-        Decodable2718, Encodable2718, Typed2718 as _,
     },
     op_alloy_consensus::{OpTxEnvelope, TxDeposit},
     op_revm::transaction::deposit::DepositTransactionParts,
     revm::{context::tx::TxEnv, primitives::TxKind},
-    Either, MegaTransaction, MegaTxEnvelope, MegaTxType,
 };
 use tracing::{debug, trace};
 
-use super::{load_hex, parse_ether_value, EvmeError, Result};
+use super::{EvmeError, Result, load_hex, parse_ether_value};
 
 /// Default sender address (Hardhat account #0).
 pub const DEFAULT_SENDER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");

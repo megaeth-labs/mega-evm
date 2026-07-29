@@ -1,11 +1,11 @@
 use super::{
-    deserializer::{deserialize_maybe_empty, serialize_maybe_empty},
     TestAuthorization,
+    deserializer::{deserialize_maybe_empty, serialize_maybe_empty},
 };
 use mega_evm::revm::{
     context::TransactionType,
     context_interface::transaction::AccessList,
-    primitives::{Address, Bytes, B256, U256},
+    primitives::{Address, B256, Bytes, U256},
 };
 use serde::{Deserialize, Serialize};
 

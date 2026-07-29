@@ -1,4 +1,4 @@
-use alloy_primitives::{hex::FromHexError, BlockNumber, TxHash, B256};
+use alloy_primitives::{B256, BlockNumber, TxHash, hex::FromHexError};
 use alloy_provider::transport::TransportError;
 use mega_evm::{alloy_evm::block::BlockExecutionError, revm::bytecode::BytecodeDecodeError};
 

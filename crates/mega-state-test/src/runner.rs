@@ -2,29 +2,29 @@
 
 use crate::{
     types::{
-        tx_env_at, Env, SpecName, Test, TestError as TxBuildError, TestSuite, TestUnit,
-        TxPartIndices,
+        Env, SpecName, Test, TestError as TxBuildError, TestSuite, TestUnit, TxPartIndices,
+        tx_env_at,
     },
-    utils::{compute_test_roots, TestValidationResult},
+    utils::{TestValidationResult, compute_test_roots},
 };
 use alloy_primitives::address;
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use mega_evm::{
+    AHashBucketHasher, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaTransactionError,
     revm::{
+        ExecuteCommitEvm,
         context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
         context_interface::{
-            result::{EVMError, ExecutionResult},
             Cfg,
+            result::{EVMError, ExecutionResult},
         },
         database,
         database::State,
         database_interface::EmptyDB,
-        inspector::{inspectors::TracerEip3155, InspectCommitEvm},
-        primitives::{hardfork::SpecId, Bytes, B256},
-        ExecuteCommitEvm,
+        inspector::{InspectCommitEvm, inspectors::TracerEip3155},
+        primitives::{B256, Bytes, hardfork::SpecId},
     },
-    AHashBucketHasher, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
 };
 use serde_json::json;
 use std::{
@@ -33,8 +33,8 @@ use std::{
     io::stderr,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -755,11 +755,7 @@ impl UnitBench {
     /// Throughput in millions of gas per second, from the median time.
     pub fn mgas_per_sec(&self) -> f64 {
         let secs = self.median.as_secs_f64();
-        if secs > 0.0 {
-            self.gas_used as f64 / secs / 1.0e6
-        } else {
-            f64::INFINITY
-        }
+        if secs > 0.0 { self.gas_used as f64 / secs / 1.0e6 } else { f64::INFINITY }
     }
 }
 

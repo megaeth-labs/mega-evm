@@ -10,7 +10,7 @@
 
 use clap::Parser;
 use mega_evme::common::RpcArgs;
-use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
 /// A mock JSON-RPC server tuned for mega-evme integration tests.
 ///

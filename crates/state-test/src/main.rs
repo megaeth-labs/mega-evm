@@ -6,8 +6,8 @@
 use clap::Parser;
 use state_test::{
     runner::{
-        bench_test_suite, fill_test_suite, find_all_json_tests, run, TestError, TestErrorKind,
-        UnitBench,
+        TestError, TestErrorKind, UnitBench, bench_test_suite, fill_test_suite,
+        find_all_json_tests, run,
     },
     types::SpecName,
 };
@@ -205,15 +205,16 @@ impl Cmd {
             let u = &all[0];
             json!({ "gas_used": u.gas_used, "success": u.success, "bench": bench_json(u) })
         } else {
-            json!(all
-                .iter()
-                .map(|u| json!({
-                    "name": u.name,
-                    "gas_used": u.gas_used,
-                    "success": u.success,
-                    "bench": bench_json(u),
-                }))
-                .collect::<Vec<_>>())
+            json!(
+                all.iter()
+                    .map(|u| json!({
+                        "name": u.name,
+                        "gas_used": u.gas_used,
+                        "success": u.success,
+                        "bench": bench_json(u),
+                    }))
+                    .collect::<Vec<_>>()
+            )
         };
         println!("{}", serde_json::to_string_pretty(&output).expect("serialize bench output"));
         Ok(())

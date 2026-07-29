@@ -18,7 +18,7 @@ use mega_evme::common::{BuildProviderOutput, EvmeError, RpcArgs};
 use tempfile::tempdir;
 
 mod common;
-use common::{test_rpc_args, test_rpc_args_cached, MockRpcServer};
+use common::{MockRpcServer, test_rpc_args, test_rpc_args_cached};
 
 // ─── CLI parsing ─────────────────────────────────────────────────────────────
 

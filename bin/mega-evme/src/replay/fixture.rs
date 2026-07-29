@@ -22,13 +22,13 @@ use alloy_eips::Typed2718 as _;
 use alloy_primitives::KECCAK256_EMPTY;
 use alloy_rpc_types_eth::Block;
 use mega_evm::{
-    revm::{
-        context::result::ExecutionResult,
-        primitives::{Address, Bytes, B256, U256},
-        state::EvmState,
-        DatabaseRef,
-    },
     MegaHaltReason, MegaSpecId,
+    revm::{
+        DatabaseRef,
+        context::result::ExecutionResult,
+        primitives::{Address, B256, Bytes, U256},
+        state::EvmState,
+    },
 };
 use op_alloy_consensus::OpTxEnvelope;
 use op_alloy_rpc_types::Transaction;

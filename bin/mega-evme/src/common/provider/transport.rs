@@ -13,7 +13,7 @@ use std::{
 };
 
 use alloy_json_rpc::{RequestPacket, ResponsePacket};
-use alloy_primitives::{keccak256, B256};
+use alloy_primitives::{B256, keccak256};
 use alloy_provider::transport::{TransportError, TransportErrorKind};
 use alloy_transport::TransportFut;
 use serde::{Deserialize, Serialize};

@@ -1,4 +1,4 @@
-use mega_evm::{revm::primitives::U256, BucketHasher, TestExternalEnvs};
+use mega_evm::{BucketHasher, TestExternalEnvs, revm::primitives::U256};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 

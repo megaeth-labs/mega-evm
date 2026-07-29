@@ -2,7 +2,7 @@
 
 use std::{fs, io::Read};
 
-use alloy_primitives::{hex, Bytes};
+use alloy_primitives::{Bytes, hex};
 
 use super::{EvmeError, Result};
 

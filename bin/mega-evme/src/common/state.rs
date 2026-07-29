@@ -3,16 +3,16 @@
 use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use alloy_network::Network;
-use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, BlockNumber, Bytes, U256, map::DefaultHashBuilder};
 use alloy_provider::Provider;
 use clap::Parser;
 use op_alloy_network::Optimism;
 
 use mega_evm::revm::{
+    Database, DatabaseRef,
     database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
     primitives::HashMap,
     state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot},
-    Database, DatabaseRef,
 };
 use tracing::{debug, info, trace};
 
@@ -550,8 +550,8 @@ where
     /// Deploys system contracts based on the given spec.
     pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
         use mega_evm::{
-            flat_system_contract_specs, MegaSpecId, SEQUENCER_REGISTRY_ADDRESS,
-            SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_REX6,
+            MegaSpecId, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+            SEQUENCER_REGISTRY_CODE_REX6, flat_system_contract_specs,
         };
 
         // Flat predeploys (Oracle, high-precision timestamp Oracle, KeylessDeploy,

@@ -9,11 +9,11 @@ use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes, TxHash, U256};
 use clap::Args;
 use mega_evm::{
-    alloy_evm::{IntoTxEnv, RecoveredTx},
     MegaTransaction, MegaTransactionExt,
+    alloy_evm::{IntoTxEnv, RecoveredTx},
 };
 
-use super::{load_hex, parse_ether_value, Result};
+use super::{Result, load_hex, parse_ether_value};
 
 // Thread-local storage for input override (Bytes is not Copy, so we can't store it in TxOverrides)
 thread_local! {

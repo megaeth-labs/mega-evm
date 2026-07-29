@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use tracing::Level;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// Logging configuration arguments.
 #[derive(Debug, Clone, Default, Parser)]

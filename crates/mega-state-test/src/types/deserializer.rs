@@ -1,5 +1,5 @@
 use mega_evm::revm::primitives::Address;
-use serde::{de, Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer, de};
 
 /// Deserializes a [string][String] as a [u64].
 pub fn deserialize_str_as_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -22,11 +22,7 @@ where
     D: de::Deserializer<'de>,
 {
     let string = String::deserialize(deserializer)?;
-    if string.is_empty() {
-        Ok(None)
-    } else {
-        string.parse().map_err(de::Error::custom).map(Some)
-    }
+    if string.is_empty() { Ok(None) } else { string.parse().map_err(de::Error::custom).map(Some) }
 }
 
 /// Serializes an optional [Address], writing `""` for `None` (contract creation)

@@ -1,12 +1,12 @@
 use std::time::Instant;
 
 use clap::Parser;
-use mega_evm::revm::{context::result::ExecutionResult, state::Bytecode, DatabaseRef};
+use mega_evm::revm::{DatabaseRef, context::result::ExecutionResult, state::Bytecode};
 use tracing::{debug, info, trace, warn};
 
-use super::{load_hex, Result, RunError};
+use super::{Result, RunError, load_hex};
 use crate::common::{
-    print_execution_summary, print_execution_trace, EvmeOutcome, ExecutionSummary,
+    EvmeOutcome, ExecutionSummary, print_execution_summary, print_execution_trace,
 };
 
 // Re-export TracerType from common module

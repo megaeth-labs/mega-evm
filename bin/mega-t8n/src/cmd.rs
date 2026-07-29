@@ -2,25 +2,25 @@ use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
 use mega_evm::{
+    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     revm::{
+        ExecuteCommitEvm,
         context::{
             block::BlockEnv, cfg::CfgEnv, either::Either, result::ExecutionResult, tx::TxEnv,
         },
         database::{CacheState, EmptyDB, State},
-        primitives::{eip4844, hardfork::SpecId, Bytes, TxKind, B256},
+        primitives::{B256, Bytes, TxKind, eip4844, hardfork::SpecId},
         state::{AccountInfo, Bytecode},
-        ExecuteCommitEvm,
     },
-    MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
 };
 use state_test::types::Env;
 
 use crate::{
-    calculate_logs_bloom, calculate_logs_root, calculate_state_root,
-    extract_post_state_alloc_from_state, load_alloc, load_env, load_from_stdin, load_transactions,
-    recover_address_from_secret_key, write_alloc_to_file, write_body_output, write_result_to_file,
     RejectedTx, Result, StateAlloc, T8nError, T8nOutput, Transaction, TransactionLog,
-    TransactionReceipt, TransitionInputs, TransitionResults,
+    TransactionReceipt, TransitionInputs, TransitionResults, calculate_logs_bloom,
+    calculate_logs_root, calculate_state_root, extract_post_state_alloc_from_state, load_alloc,
+    load_env, load_from_stdin, load_transactions, recover_address_from_secret_key,
+    write_alloc_to_file, write_body_output, write_result_to_file,
 };
 
 /// Executes a full state transition

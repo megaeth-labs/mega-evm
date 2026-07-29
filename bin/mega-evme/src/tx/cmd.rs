@@ -2,17 +2,17 @@ use std::time::Instant;
 
 use clap::Parser;
 use mega_evm::{
-    revm::{
-        context::result::ExecutionResult, context_interface::transaction::Transaction as _,
-        primitives::TxKind, DatabaseRef,
-    },
     MegaTransaction, MegaTxType,
+    revm::{
+        DatabaseRef, context::result::ExecutionResult,
+        context_interface::transaction::Transaction as _, primitives::TxKind,
+    },
 };
 use tracing::{debug, info, trace, warn};
 
 use crate::common::{
-    load_hex, op_receipt_to_tx_receipt, print_execution_summary, print_execution_trace,
-    print_receipt, DecodedRawTx, EvmeError, EvmeOutcome, ExecutionSummary,
+    DecodedRawTx, EvmeError, EvmeOutcome, ExecutionSummary, load_hex, op_receipt_to_tx_receipt,
+    print_execution_summary, print_execution_trace, print_receipt,
 };
 
 use super::Result;

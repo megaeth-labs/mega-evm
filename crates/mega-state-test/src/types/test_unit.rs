@@ -1,4 +1,4 @@
-use mega_evm::{revm::primitives::eip4844, MegaSpecId};
+use mega_evm::{MegaSpecId, revm::primitives::eip4844};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -8,8 +8,8 @@ use mega_evm::revm::{
     context_interface::block::calc_excess_blob_gas,
     database::CacheState,
     primitives::{
-        eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN, hardfork::SpecId, keccak256, Address, Bytes,
-        B256,
+        Address, B256, Bytes, eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN, hardfork::SpecId,
+        keccak256,
     },
     state::Bytecode,
 };

@@ -22,7 +22,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use alloy_primitives::{hex, keccak256, Bytes, B256};
+use alloy_primitives::{B256, Bytes, hex, keccak256};
 use semver::Version;
 use serde::Deserialize;
 

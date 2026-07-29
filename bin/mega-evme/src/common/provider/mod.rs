@@ -21,12 +21,12 @@ use std::{
 };
 
 use alloy_provider::{
+    DynProvider, Provider, ProviderBuilder,
     layers::CacheLayer,
     transport::{
-        layers::{RateLimitRetryPolicy, RetryBackoffLayer},
         RpcError, TransportError, TransportErrorKind,
+        layers::{RateLimitRetryPolicy, RetryBackoffLayer},
     },
-    DynProvider, Provider, ProviderBuilder,
 };
 use alloy_rpc_client::{ClientBuilder, RpcClient};
 use clap::Parser;

@@ -7,12 +7,12 @@ use clap::{Args, Parser};
 use std::convert::Infallible;
 
 use mega_evm::{
+    AHashBucketHasher, MegaContext, MegaSpecId, TestExternalEnvs,
     alloy_evm::Database,
     revm::{
         context::{block::BlockEnv, cfg::CfgEnv},
         primitives::eip4844,
     },
-    AHashBucketHasher, MegaContext, MegaSpecId, TestExternalEnvs,
 };
 
 /// External environment type for mega-evme using the real AHash-based SALT bucket hasher.

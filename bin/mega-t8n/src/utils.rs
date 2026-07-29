@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use mega_evm::revm::{
     database::{EmptyDB, State},
-    primitives::{alloy_primitives::Bloom, Address, Log, B256},
+    primitives::{Address, B256, Log, alloy_primitives::Bloom},
 };
 use state_test::types::AccountInfo;
 

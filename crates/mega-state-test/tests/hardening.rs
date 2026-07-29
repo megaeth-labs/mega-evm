@@ -12,8 +12,8 @@ use std::{
 
 use state_test::{
     runner::{
-        bench_test_suite, execute_test_suite, execute_unit_collect, fill_test_suite, run,
-        TestError, TestErrorKind,
+        TestError, TestErrorKind, bench_test_suite, execute_test_suite, execute_unit_collect,
+        fill_test_suite, run,
     },
     types::{SpecName, TestUnit},
 };

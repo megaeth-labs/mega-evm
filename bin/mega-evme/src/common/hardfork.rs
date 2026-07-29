@@ -1,7 +1,7 @@
 use mega_evm::{
+    MegaHardfork, MegaHardforks, MegaSpecId,
     alloy_hardforks::{EthereumHardfork, ForkCondition},
     alloy_op_hardforks::{EthereumHardforks, OpHardfork, OpHardforks},
-    MegaHardfork, MegaHardforks, MegaSpecId,
 };
 
 /// Fixed hardfork configuration for replay
@@ -29,21 +29,13 @@ impl EthereumHardforks for FixedHardfork {
 
 impl OpHardforks for FixedHardfork {
     fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
-        if fork <= OpHardfork::Isthmus {
-            ForkCondition::Timestamp(0)
-        } else {
-            ForkCondition::Never
-        }
+        if fork <= OpHardfork::Isthmus { ForkCondition::Timestamp(0) } else { ForkCondition::Never }
     }
 }
 
 impl MegaHardforks for FixedHardfork {
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
         let mapped_spec = fork.spec_id();
-        if mapped_spec <= self.spec {
-            ForkCondition::Timestamp(0)
-        } else {
-            ForkCondition::Never
-        }
+        if mapped_spec <= self.spec { ForkCondition::Timestamp(0) } else { ForkCondition::Never }
     }
 }

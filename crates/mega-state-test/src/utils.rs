@@ -4,12 +4,12 @@ use alloy_rlp::{RlpEncodable, RlpMaxEncodedLen};
 use hash_db::Hasher;
 use k256::ecdsa::SigningKey;
 use mega_evm::{
+    MegaHaltReason, MegaTransactionError,
     revm::{
         context::result::{EVMError, ExecutionResult},
         database::{EmptyDB, PlainAccount, State},
-        primitives::{keccak256, Address, Log, B256, U256},
+        primitives::{Address, B256, Log, U256, keccak256},
     },
-    MegaHaltReason, MegaTransactionError,
 };
 use plain_hasher::PlainHasher;
 use std::convert::Infallible;

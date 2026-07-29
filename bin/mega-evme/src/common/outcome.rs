@@ -5,14 +5,14 @@ use std::{path::Path, time::Duration};
 use super::{EvmeError, StateDumpArgs, TraceArgs};
 
 use alloy_consensus::{Eip658Value, Receipt};
-use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash, B256};
+use alloy_primitives::{Address, B256, BlockHash, Bytes, TxHash, hex};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::{Panic, Revert, SolError};
 use clap::Parser;
 use mega_evm::{
+    MegaHaltReason, MegaTxType,
     op_revm::OpHaltReason,
     revm::{context::result::ExecutionResult, state::EvmState},
-    MegaHaltReason, MegaTxType,
 };
 use op_alloy_consensus::{OpDepositReceipt, OpReceiptEnvelope};
 use serde::Serialize;

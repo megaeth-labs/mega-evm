@@ -9,7 +9,9 @@ use thiserror::Error;
 /// yet) deserializes to. The original string is not retained by serde's
 /// `other` fallback, so callers should add the surrounding fixture context.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("unknown or unsupported spec name (an unrecognized spec string deserializes to `SpecName::Unknown`)")]
+#[error(
+    "unknown or unsupported spec name (an unrecognized spec string deserializes to `SpecName::Unknown`)"
+)]
 pub struct UnknownSpecError;
 
 /// Ethereum specification names
