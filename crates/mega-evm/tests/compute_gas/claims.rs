@@ -9,20 +9,25 @@
 
 use std::convert::Infallible;
 
-use alloy_primitives::{Bytes, U256};
-use alloy_sol_types::SolCall;
+use alloy_eips::eip2930::{AccessList, AccessListItem};
+use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaLimitControl, MegaSpecId, SaltEnv, TestExternalEnvs, LIMIT_CONTROL_ADDRESS,
-    MIN_BUCKET_SIZE,
+    EvmTxRuntimeLimits, IMegaLimitControl, LimitKind, MegaLimitExceeded, MegaSpecId, SaltEnv,
+    TestExternalEnvs, LIMIT_CONTROL_ADDRESS, MIN_BUCKET_SIZE,
 };
-use revm::bytecode::opcode::{
-    CALL, CREATE, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, SELFDESTRUCT, STATICCALL,
+use revm::{
+    bytecode::opcode::{
+        CALL, CREATE, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, SELFDESTRUCT, STATICCALL,
+    },
+    context::result::ExecutionResult,
 };
 
 use crate::{
-    base_db, transact, transact_output, transact_with_envs, CALLEE, CALLER, CONTRACT, EMPTY_TARGET,
-    EXISTING_TARGET, ONE_ETH,
+    base_db, push_call_operands, push_valueless_call_operands, transact, transact_output,
+    transact_with_access_list, transact_with_envs, transact_with_limits, Outcome, CALLEE, CALLER,
+    CONTRACT, EMPTY_TARGET, EXISTING_TARGET, ONE_ETH, PRECOMPILE_IDENTITY,
 };
 
 /// `remainingComputeGas()` — the `MegaLimitControl` selector the interceptor recognizes.
@@ -247,13 +252,11 @@ fn test_refunds_do_not_reduce_compute_gas() {
 /// targeted the KZG point-evaluation precompile and its effective gas limit was at least
 /// `KZG_POINT_EVALUATION_GAS_COST`".
 ///
-/// The constant is a **`MegaETH` override**, not the inherited EVM value. This test pins the number
-/// itself rather than merely its presence: on the KZG non-out-of-gas error path, Rex4 records the
-/// spent amount (zero, because the precompile never charged) while Rex5 records the fixed cost.
-/// The difference between the two specs is therefore exactly the constant.
-///
-/// Had this test existed earlier, the spec page could not have shipped the inherited 50,000 in
-/// place of `MegaETH`'s 100,000.
+/// The constant is a **`MegaETH` override** (100,000), not the inherited EVM value (50,000). This
+/// test pins the number itself rather than merely its presence: on the KZG non-out-of-gas error
+/// path, Rex4 records the spent amount (zero, because the precompile never charged) while Rex5
+/// records the fixed cost. The difference between the two specs is therefore exactly the
+/// constant, and a recording that fell back to the inherited value would miss by half.
 #[test]
 fn test_kzg_error_path_records_the_megaeth_fixed_cost() {
     /// `MegaETH`'s override, defined in `crates/mega-evm/src/evm/precompiles.rs`.
@@ -512,6 +515,222 @@ fn test_minirex_staticcall_is_not_subject_to_the_forwarding_cap() {
     );
 }
 
+/// The inherited EVM's cold account access cost (EIP-2929).
+const COLD_ACCOUNT_ACCESS_COST: u64 = 2_600;
+/// The inherited EVM's warm account access cost (EIP-2929 `WARM_STORAGE_READ_COST`).
+const WARM_ACCOUNT_ACCESS_COST: u64 = 100;
+/// The observable cost of a defeated warm preload: the first touch pays the cold account access
+/// cost where the inherited EVM charges the warm cost, so the first call to such an address costs
+/// exactly 2,600 − 100 = 2,500 more than the second.
+const COLD_IN_PLACE_OF_WARM: i64 = (COLD_ACCOUNT_ACCESS_COST - WARM_ACCOUNT_ACCESS_COST) as i64;
+
+/// A program of `n` identical CALL units targeting `to` with no value, each unit being the seven
+/// operand pushes, the CALL, and a POP of the status flag.
+fn repeated_call(to: Address, n: usize) -> Bytes {
+    let mut b = BytecodeBuilder::default();
+    for _ in 0..n {
+        b = push_call_operands(b, to, 0, 50_000).append(CALL).append(POP);
+    }
+    b.stop().build()
+}
+
+/// Same as [`repeated_call`] but with STATICCALL units (six operands, no value word).
+fn repeated_staticcall(to: Address, n: usize) -> Bytes {
+    let mut b = BytecodeBuilder::default();
+    for _ in 0..n {
+        b = push_valueless_call_operands(b, to, 50_000).append(STATICCALL).append(POP);
+    }
+    b.stop().build()
+}
+
+/// Measures how much more the first call in a transaction costs than the second call to the same
+/// target.
+///
+/// Runs the 0-, 1-, and 2-unit variants of `program` through `run` and differences the chosen
+/// `metric` between consecutive variants. The call units are byte-identical, so the per-unit push
+/// and POP bookkeeping cancels exactly, leaving `cost(first call) − cost(second call)`. The second
+/// call always observes a warm target (the first call loaded it), so the result is
+/// [`COLD_IN_PLACE_OF_WARM`] when the first touch was charged cold and `0` when the target's
+/// preloaded warmth was honored.
+fn first_call_extra_cost(
+    run: impl Fn(Bytes) -> Outcome,
+    program: impl Fn(usize) -> Bytes,
+    metric: impl Fn(&Outcome) -> u64,
+) -> i64 {
+    let [c0, c1, c2] = [0_usize, 1, 2].map(|n| {
+        let outcome = run(program(n));
+        assert_eq!(outcome.outcome, "success", "the {n}-call program should succeed");
+        metric(&outcome) as i64
+    });
+    (c1 - c0) - (c2 - c1)
+}
+
+/// Spec: [Inherited-Cost Exception: Preload-Warm Addresses] — "When the first access to such an
+/// address in a transaction is made by one of the opcodes below, the opcode MUST charge the cold
+/// account access cost in place of the warm cost", with `CALL` charged cold since `MiniRex`.
+///
+/// The inherited EVM treats precompile addresses as warm from the start of every transaction
+/// without loading them. From `MiniRex`, the first CALL to a precompile is charged cold anyway:
+/// the first-vs-second-call difference is exactly 2,500 on every metering spec. Under Equivalence
+/// the difference — measured on `gas_used`, since Equivalence records no compute gas — is zero,
+/// pinning that the departure is `MegaETH`'s and not inherited.
+#[test]
+fn test_first_call_to_a_precompile_is_charged_cold_from_minirex() {
+    let program = |n| repeated_call(PRECOMPILE_IDENTITY, n);
+
+    let equivalence = first_call_extra_cost(
+        |code| transact(MegaSpecId::EQUIVALENCE, base_db(code)),
+        program,
+        |o| o.gas_used,
+    );
+    assert_eq!(
+        equivalence, 0,
+        "Equivalence: the inherited EVM honors the precompile's preloaded warmth, so the first \
+         and second CALL must cost the same"
+    );
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::MINI_REX) {
+            continue;
+        }
+        let extra =
+            first_call_extra_cost(|code| transact(spec, base_db(code)), program, |o| o.compute_gas);
+        assert_eq!(
+            extra, COLD_IN_PLACE_OF_WARM,
+            "{spec_name}: the first CALL to a precompile must be charged cold in place of warm"
+        );
+    }
+}
+
+/// Spec: [Inherited-Cost Exception: Preload-Warm Addresses] — the opcode table's second row:
+/// `DELEGATECALL` and `STATICCALL` charge preload-warm addresses cold from Rex, not from
+/// `MiniRex`.
+///
+/// Under `MiniRex` these opcodes run without the account-inspecting wrapper, so the precompile's
+/// preloaded warmth is honored and the first-vs-second-call difference is zero — a frozen quirk
+/// this test pins: wiring the wrapper into `MiniRex` would break replay of MiniRex-era blocks and
+/// fail here. From Rex onward the difference is the full cold-for-warm charge.
+#[test]
+fn test_staticcall_charges_preload_warm_addresses_cold_from_rex_only() {
+    let program = |n| repeated_staticcall(PRECOMPILE_IDENTITY, n);
+    let extra = |spec| {
+        first_call_extra_cost(|code| transact(spec, base_db(code)), program, |o| o.compute_gas)
+    };
+
+    assert_eq!(
+        extra(MegaSpecId::MINI_REX),
+        0,
+        "MiniRex: STATICCALL must honor the precompile's preloaded warmth"
+    );
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::REX) {
+            continue;
+        }
+        assert_eq!(
+            extra(spec),
+            COLD_IN_PLACE_OF_WARM,
+            "{spec_name}: the first STATICCALL to a precompile must be charged cold in place of \
+             warm"
+        );
+    }
+}
+
+/// Spec: [Inherited-Cost Exception: Preload-Warm Addresses] — the access-list split: an address
+/// "listed without storage keys" is preload-warm and its first CALL is charged cold, while an
+/// address "listed with storage keys" is *loaded* rather than merely preloaded and keeps the
+/// inherited warm pricing.
+///
+/// The sender pays the EIP-2930 per-address cost for the entry either way; without storage keys
+/// the first CALL still pays the cold account access cost on top.
+#[test]
+fn test_access_list_address_without_storage_keys_is_charged_cold() {
+    let program = |n| repeated_call(EXISTING_TARGET, n);
+    let without_keys =
+        || AccessList(vec![AccessListItem { address: EXISTING_TARGET, storage_keys: vec![] }]);
+    let with_key = || {
+        AccessList(vec![AccessListItem {
+            address: EXISTING_TARGET,
+            storage_keys: vec![B256::ZERO],
+        }])
+    };
+
+    let equivalence = first_call_extra_cost(
+        |code| transact_with_access_list(MegaSpecId::EQUIVALENCE, base_db(code), without_keys()),
+        program,
+        |o| o.gas_used,
+    );
+    assert_eq!(
+        equivalence, 0,
+        "Equivalence: the inherited EVM honors the access-list preload, so the first and second \
+         CALL must cost the same"
+    );
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::MINI_REX) {
+            continue;
+        }
+        let extra_without_keys = first_call_extra_cost(
+            |code| transact_with_access_list(spec, base_db(code), without_keys()),
+            program,
+            |o| o.compute_gas,
+        );
+        assert_eq!(
+            extra_without_keys, COLD_IN_PLACE_OF_WARM,
+            "{spec_name}: the first CALL to an access-list address without storage keys must be \
+             charged cold in place of warm"
+        );
+
+        let extra_with_key = first_call_extra_cost(
+            |code| transact_with_access_list(spec, base_db(code), with_key()),
+            program,
+            |o| o.compute_gas,
+        );
+        assert_eq!(
+            extra_with_key, 0,
+            "{spec_name}: an access-list address with storage keys is loaded, not merely \
+             preloaded, so its warmth must be honored"
+        );
+    }
+}
+
+/// Spec: [Inherited-Cost Exception: Preload-Warm Addresses] — the third preload-warm address
+/// category: the block beneficiary (warmed by the inherited EIP-3651).
+///
+/// The harness leaves the block environment at its default, so the beneficiary is the zero
+/// address. Under Equivalence the first and second CALL to it cost the same (`gas_used` metric —
+/// the inherited coinbase warming). From `MiniRex` the first CALL is charged cold in place of
+/// warm on every metering spec.
+#[test]
+fn test_first_call_to_the_beneficiary_is_charged_cold_from_minirex() {
+    /// The default `BlockEnv` beneficiary every `transact` run executes under.
+    const BENEFICIARY: Address = Address::ZERO;
+    let program = |n| repeated_call(BENEFICIARY, n);
+
+    let equivalence = first_call_extra_cost(
+        |code| transact(MegaSpecId::EQUIVALENCE, base_db(code)),
+        program,
+        |o| o.gas_used,
+    );
+    assert_eq!(
+        equivalence, 0,
+        "Equivalence: the inherited EVM warms the beneficiary (EIP-3651), so the first and \
+         second CALL must cost the same"
+    );
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::MINI_REX) {
+            continue;
+        }
+        let extra =
+            first_call_extra_cost(|code| transact(spec, base_db(code)), program, |o| o.compute_gas);
+        assert_eq!(
+            extra, COLD_IN_PLACE_OF_WARM,
+            "{spec_name}: the first CALL to the beneficiary must be charged cold in place of warm"
+        );
+    }
+}
+
 /// Pins "Code Deposit": the deposit's compute gas is recorded exactly once when the deposit
 /// occurs, and nothing is recorded when it does not.
 ///
@@ -520,7 +739,7 @@ fn test_minirex_staticcall_is_not_subject_to_the_forwarding_cap() {
 /// recorded totals is the code-deposit charge alone. `0xEF` makes EIP-3541 reject the runtime
 /// code, so the deposit never happens.
 ///
-/// Two different mechanisms produce this number — MiniRex through Rex4 measure it over the
+/// Two different mechanisms produce this number — `MiniRex` through Rex4 measure it over the
 /// frame-action window, Rex5+ pre-charge the canonical amount before the checkpoint commits — so
 /// the assertion runs on every tracked spec to keep them agreeing.
 #[test]
@@ -552,8 +771,13 @@ fn test_code_deposit_recorded_only_when_deposit_occurs() {
         if !spec.is_enabled(MegaSpecId::MINI_REX) {
             continue; // Equivalence records no compute gas at all.
         }
-        let deposited = transact(spec, creator(0x00)).compute_gas;
-        let skipped = transact(spec, creator(0xef)).compute_gas;
+        let deposited = transact(spec, creator(0x00));
+        let skipped = transact(spec, creator(0xef));
+        // Both transactions succeed: the EIP-3541 rejection fails the CREATE (it pushes zero),
+        // not the transaction. A non-success outcome means the fixture itself drifted.
+        assert_eq!(deposited.outcome, "success", "{spec_name}: depositing run should succeed");
+        assert_eq!(skipped.outcome, "success", "{spec_name}: skipped-deposit run should succeed");
+        let (deposited, skipped) = (deposited.compute_gas, skipped.compute_gas);
 
         let delta = deposited.checked_sub(skipped).unwrap_or_else(|| {
             panic!(
@@ -569,10 +793,9 @@ fn test_code_deposit_recorded_only_when_deposit_occurs() {
     }
 }
 
-/// Pins "Transaction Intrinsic Gas" and the contract-creation-transaction leg of "Code Deposit"
-/// for a creation transaction, which no other test here sends — every other helper dispatches a
-/// call transaction, so the creation surcharge and the EIP-3860 per-initcode-word charge are
-/// otherwise unreachable.
+/// Pins "Transaction Intrinsic Gas" for a creation transaction, which no other test here sends —
+/// every other helper dispatches a call transaction, so the creation surcharge and the EIP-3860
+/// per-initcode-word charge are otherwise unreachable.
 ///
 /// The recorded intrinsic is asserted as a closed formula over the initcode length rather than as
 /// a handful of magic numbers, so the test states which components are in the amount:
@@ -580,7 +803,9 @@ fn test_code_deposit_recorded_only_when_deposit_occurs() {
 /// Lengths straddle a word boundary (64 and 65) so a missing or mis-rounded word charge shows up.
 ///
 /// Because the initcode is all zero bytes it executes as `STOP`, depositing no runtime code, so
-/// the amount is the intrinsic alone with no opcode or code-deposit contribution mixed in.
+/// the amount is the intrinsic alone with no opcode or code-deposit contribution mixed in. The
+/// code-deposit charge a creation transaction records when it does deploy runtime code is pinned
+/// separately by [`test_creation_transaction_records_code_deposit_compute_gas`].
 #[test]
 fn test_creation_transaction_intrinsic_compute_gas() {
     /// Inherited base cost of any transaction.
@@ -603,13 +828,173 @@ fn test_creation_transaction_intrinsic_compute_gas() {
                 STANDARD_TOKEN_COST * len +
                 INITCODE_WORD_COST * words;
 
-            let actual = crate::transact_create(spec, vec![0_u8; len as usize].into()).compute_gas;
+            let outcome = crate::transact_create(spec, vec![0_u8; len as usize].into());
             assert_eq!(
-                actual, expected,
+                outcome.outcome, "success",
+                "{spec_name}: creation transaction with {len} initcode bytes should succeed"
+            );
+            assert_eq!(
+                outcome.compute_gas, expected,
                 "{spec_name}: a creation transaction with {len} initcode bytes must record base \
                  cost + creation surcharge + calldata tokens + {words} initcode word(s) as \
                  compute gas, and nothing else"
             );
         }
+    }
+}
+
+/// Spec: [Contract Creation Code Deposit], the contract-creation-transaction leg — the deposit's
+/// `code_length × CODEDEPOSIT` compute gas is recorded for a creation *transaction*, not only for
+/// the `CREATE` / `CREATE2` opcodes the snapshot corpus exercises.
+///
+/// Two creation transactions carry byte-identical initcode except for the RETURN size operand:
+/// one deploys 32 bytes of zeroed runtime code, the other 64. Both initcodes first MSTORE a zero
+/// word at offset 32, expanding memory to 64 bytes, so neither RETURN expands memory further; and
+/// both size operands are non-zero bytes, so the calldata token cost is identical too. The only
+/// cost separating the two transactions is 32 extra deposited bytes, so the recorded compute gas
+/// must differ by exactly 32 × 200 = 6,400 on every metering spec.
+#[test]
+fn test_creation_transaction_records_code_deposit_compute_gas() {
+    /// The inherited EVM's per-byte code deposit rate.
+    const CODEDEPOSIT: u64 = 200;
+    /// The number of deployed bytes separating the two transactions.
+    const EXTRA_RUNTIME_BYTES: u64 = 32;
+
+    /// `PUSH0; PUSH1 0x20; MSTORE; PUSH1 <len>; PUSH0; RETURN` — stores a zero word at offset 32
+    /// (expanding memory to 64 bytes) and returns the first `len` bytes of memory, all zero, as
+    /// the deployed runtime code.
+    fn initcode(runtime_len: u8) -> Bytes {
+        Bytes::from(vec![0x5f, 0x60, 0x20, 0x52, 0x60, runtime_len, 0x5f, 0xf3])
+    }
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::MINI_REX) {
+            continue; // Equivalence records no compute gas at all.
+        }
+        let deploys_32 = crate::transact_create(spec, initcode(32));
+        let deploys_64 = crate::transact_create(spec, initcode(64));
+        assert_eq!(
+            deploys_32.outcome, "success",
+            "{spec_name}: the 32-byte deployment should succeed"
+        );
+        assert_eq!(
+            deploys_64.outcome, "success",
+            "{spec_name}: the 64-byte deployment should succeed"
+        );
+
+        let delta =
+            deploys_64.compute_gas.checked_sub(deploys_32.compute_gas).unwrap_or_else(|| {
+                panic!(
+                    "{spec_name}: deploying more runtime code must not record less compute gas \
+                     (32B={} 64B={})",
+                    deploys_32.compute_gas, deploys_64.compute_gas
+                )
+            });
+        assert_eq!(
+            delta,
+            EXTRA_RUNTIME_BYTES * CODEDEPOSIT,
+            "{spec_name}: the only compute gas separating the two creation transactions must be \
+             the code-deposit charge for the {EXTRA_RUNTIME_BYTES} extra deployed bytes \
+             (32B={} 64B={})",
+            deploys_32.compute_gas,
+            deploys_64.compute_gas
+        );
+    }
+}
+
+/// Spec: [Opcode Metering Classes], the `SelfDestruct` class — "When that check finds more than one
+/// dimension over its limit, the reported dimension follows the fixed priority" (data size,
+/// key-value updates, compute gas, state growth).
+///
+/// `SELFDESTRUCT` is the one opcode where two dimensions can cross in the same check: it records
+/// the empty beneficiary's data-size / KV / state-growth usage before its inner instruction runs
+/// and evaluates all four dimensions only in the trailing all-dimension check, together with its
+/// compute gas. Tuning both the data-size and the compute-gas limit to be crossed exactly at that
+/// opcode therefore makes the priority observable.
+///
+/// The limits are calibrated from a control program that is byte-identical except that
+/// `SELFDESTRUCT` is replaced by `STOP`: setting a dimension's transaction limit to the control's
+/// final usage leaves that dimension zero headroom, so whatever `SELFDESTRUCT` adds crosses it.
+/// Two single-dimension runs prove each tuned limit alone is crossed at that opcode and reports
+/// its own kind; the combined run then must report data size, not compute gas.
+///
+/// The exceed is frame-local — the top-level frame's budget is the remaining transaction budget —
+/// so per "Exceed Behavior" it surfaces as a revert carrying the ABI-encoded
+/// `MegaLimitExceeded(uint8 kind, uint64 limit)` payload, whose `kind` is the observable.
+#[test]
+fn test_data_size_exceed_is_reported_before_compute_gas_at_selfdestruct() {
+    let control_db =
+        || base_db(BytecodeBuilder::default().push_address(EMPTY_TARGET).stop().build());
+    let selfdestruct_db = || {
+        base_db(BytecodeBuilder::default().push_address(EMPTY_TARGET).append(SELFDESTRUCT).build())
+    };
+
+    // The beneficiary's pre-inner record exists from Rex5.
+    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+        // Calibration: the control's final usage is the usage standing right before SELFDESTRUCT
+        // executes, because the two programs are byte-identical up to that opcode, the control
+        // ends in a zero-cost STOP that records nothing further, and the harness charges no fees,
+        // so no post-execution fee-recipient accounting is merged into the reported totals either.
+        let (control, at_opcode) =
+            transact_with_limits(spec, control_db(), EvmTxRuntimeLimits::from_spec(spec));
+        assert!(control.is_success(), "{spec:?}: control program should succeed");
+
+        // Under the spec's default limits the SELFDESTRUCT run succeeds and consumes more of both
+        // dimensions, so each tuned limit below is crossed exactly at that opcode.
+        let (relaxed, sd_usage) =
+            transact_with_limits(spec, selfdestruct_db(), EvmTxRuntimeLimits::from_spec(spec));
+        assert!(relaxed.is_success(), "{spec:?}: SELFDESTRUCT under default limits should succeed");
+        assert!(
+            sd_usage.data_size > at_opcode.data_size &&
+                sd_usage.compute_gas > at_opcode.compute_gas,
+            "{spec:?}: SELFDESTRUCT must add usage in both dimensions (data {} -> {}, compute \
+             {} -> {})",
+            at_opcode.data_size,
+            sd_usage.data_size,
+            at_opcode.compute_gas,
+            sd_usage.compute_gas
+        );
+
+        let reported_kind = |limits: EvmTxRuntimeLimits| {
+            let (result, _) = transact_with_limits(spec, selfdestruct_db(), limits);
+            let ExecutionResult::Revert { output, .. } = result else {
+                panic!("{spec:?}: expected a frame-local limit revert, got {result:?}")
+            };
+            MegaLimitExceeded::abi_decode(&output)
+                .unwrap_or_else(|e| {
+                    panic!("{spec:?}: revert payload should decode as MegaLimitExceeded: {e}")
+                })
+                .kind
+        };
+
+        // Each tuned limit alone is crossed at SELFDESTRUCT and reports its own dimension.
+        assert_eq!(
+            reported_kind(
+                EvmTxRuntimeLimits::from_spec(spec).with_tx_data_size_limit(at_opcode.data_size)
+            ),
+            LimitKind::DataSize.as_u8(),
+            "{spec:?}: the tuned data-size limit alone must be crossed at SELFDESTRUCT"
+        );
+        assert_eq!(
+            reported_kind(
+                EvmTxRuntimeLimits::from_spec(spec)
+                    .with_tx_compute_gas_limit(at_opcode.compute_gas)
+            ),
+            LimitKind::ComputeGas.as_u8(),
+            "{spec:?}: the tuned compute-gas limit alone must be crossed at SELFDESTRUCT"
+        );
+
+        // Both dimensions cross in the same all-dimension check: the fixed priority puts data
+        // size before compute gas, so data size must be the reported dimension.
+        assert_eq!(
+            reported_kind(
+                EvmTxRuntimeLimits::from_spec(spec)
+                    .with_tx_data_size_limit(at_opcode.data_size)
+                    .with_tx_compute_gas_limit(at_opcode.compute_gas)
+            ),
+            LimitKind::DataSize.as_u8(),
+            "{spec:?}: when the data-size and compute-gas limits are both crossed at the same \
+             opcode, the data-size exceed must be the one reported"
+        );
     }
 }

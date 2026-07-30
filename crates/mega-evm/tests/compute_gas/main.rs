@@ -32,10 +32,12 @@ mod claims;
 
 use std::{convert::Infallible, fmt::Write as _, path::Path};
 
+use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
+    EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    MegaTransaction, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{
@@ -159,6 +161,69 @@ fn transact_with_envs(
     };
 
     Outcome { compute_gas, gas_used, outcome }
+}
+
+/// Runs the same transaction as [`transact`] but attaches an EIP-2930 access list, so a claim
+/// test can observe how the transaction-level warm preload interacts with the first CALL-family
+/// touch of a listed address.
+fn transact_with_access_list(
+    spec: MegaSpecId,
+    mut db: MemoryDatabase,
+    access_list: AccessList,
+) -> Outcome {
+    let mut context =
+        MegaContext::new(&mut db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .call(CONTRACT)
+        .access_list(access_list)
+        .gas_limit(100_000_000)
+        .build_fill();
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context);
+    let result =
+        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
+    let gas_used = result.result.gas_used();
+
+    let outcome = match &result.result {
+        ExecutionResult::Success { .. } => "success".to_string(),
+        ExecutionResult::Revert { .. } => "revert".to_string(),
+        ExecutionResult::Halt { reason, .. } => format!("halt {reason:?}"),
+    };
+
+    Outcome { compute_gas, gas_used, outcome }
+}
+
+/// Runs the same transaction as [`transact`] but under caller-supplied runtime limits, returning
+/// the full execution result — so revert payloads and halt reasons stay observable — together
+/// with the post-transaction tracker usage across all four resource dimensions.
+fn transact_with_limits(
+    spec: MegaSpecId,
+    mut db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+) -> (ExecutionResult<MegaHaltReason>, LimitUsage) {
+    let mut context = MegaContext::new(&mut db, spec).with_tx_runtime_limits(limits);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context);
+    let result =
+        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
+    (result.result, usage)
 }
 
 /// Runs the same transaction as [`transact`] and returns the transaction's output bytes.
