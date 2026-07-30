@@ -489,21 +489,11 @@ mod tests {
         SequencerRegistryRex6Config { rex6_min_rotation_delay: TEST_MIN_ROTATION_DELAY }
     }
 
-    /// All hardforks up to and including Rex5, but nothing above it: the pre-upgrade world where
-    /// the registry runs v1.0.0.
-    ///
-    /// Every fork above Rex5 must be removed, not just Rex6. `with_all_activated()` registers the
-    /// whole ladder including the unstable spec, and leaving one of those in place would make this
-    /// a partial-ladder config whose resolved spec is not Rex5 at all. The assertion pins that, so
-    /// introducing a new spec fails here instead of silently widening what "Rex5" means.
+    /// A chain running Rex5: the pre-upgrade world where the registry runs v1.0.0.
     fn rex5_hardforks() -> MegaHardforkConfig {
-        let config = MegaHardforkConfig::default()
-            .with_all_activated()
-            .without(MegaHardfork::Rex6)
-            .without(MegaHardfork::Rex7)
-            .with_params(test_config());
-        assert_eq!(config.spec_id(0), MegaSpecId::REX5);
-        config
+        MegaHardforkConfig::default()
+            .with_all_activated_through(MegaSpecId::REX5)
+            .with_params(test_config())
     }
 
     /// All hardforks including Rex6, with both registry param sets attached.

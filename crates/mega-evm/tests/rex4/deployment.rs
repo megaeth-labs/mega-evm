@@ -5,9 +5,9 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{Address, Bytes, B256};
 use mega_evm::{
     test_utils::MemoryDatabase, BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardfork, MegaHardforkConfig,
-    MegaHardforks as _, MegaSpecId, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
-    ACCESS_CONTROL_CODE_HASH, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, LIMIT_CONTROL_CODE_HASH,
+    MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
+    ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH, LIMIT_CONTROL_ADDRESS,
+    LIMIT_CONTROL_CODE, LIMIT_CONTROL_CODE_HASH,
 };
 use revm::{
     context::BlockEnv,
@@ -21,37 +21,12 @@ type TestEvm<'a, 'db> = MegaEvm<&'a mut TestState<'db>, NoOpInspector, EmptyExte
 type TestExecutor<'a, 'db> =
     MegaBlockExecutor<MegaHardforkConfig, TestEvm<'a, 'db>, OpAlloyReceiptBuilder>;
 
-/// A chain whose ladder stops at the named spec.
-///
-/// `with_all_activated()` registers every fork including the unstable spec, so a "spec N chain"
-/// must drop every fork above N — dropping only the next one leaves a partial-ladder config whose
-/// resolved spec is the newest registered fork, not N. The assertion pins that, so introducing a
-/// new spec fails here instead of silently changing which spec these tests exercise.
-fn chain_spec_through(keep: MegaSpecId) -> MegaHardforkConfig {
-    let mut config = MegaHardforkConfig::default().with_all_activated();
-    for fork in [
-        MegaHardfork::Rex7,
-        MegaHardfork::Rex6,
-        MegaHardfork::Rex5,
-        MegaHardfork::Rex4,
-        MegaHardfork::Rex3,
-        MegaHardfork::Rex2,
-        MegaHardfork::Rex1,
-    ] {
-        if !keep.is_enabled(fork.spec_id()) {
-            config = config.without(fork);
-        }
-    }
-    assert_eq!(config.spec_id(0), keep);
-    config
-}
-
 fn rex4_chain_spec() -> MegaHardforkConfig {
-    chain_spec_through(MegaSpecId::REX4)
+    MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4)
 }
 
 fn rex3_chain_spec() -> MegaHardforkConfig {
-    chain_spec_through(MegaSpecId::REX3)
+    MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX3)
 }
 
 fn make_block_env(timestamp: u64) -> BlockEnv {

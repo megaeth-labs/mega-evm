@@ -31,9 +31,9 @@ use alloy_sol_types::SolCall;
 use mega_evm::{
     test_utils::MemoryDatabase, BlockLimits, EVMError, IOracle, MegaBlockExecutionCtx,
     MegaBlockExecutor, MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory,
-    MegaHardfork, MegaHardforkConfig, MegaHardforks as _, MegaSpecId, MegaTransaction,
-    MegaTransactionError, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs,
-    MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTransactionError,
+    MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
+    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     context::{result::InvalidTransaction, BlockEnv, CfgEnv, ContextTr as _, TxEnv},
@@ -61,22 +61,14 @@ type PocExecutor<'a> = MegaBlockExecutor<
     OpAlloyReceiptBuilder,
 >;
 
+/// A chain running Rex5, matching the `CfgEnv.spec = REX5` these tests set.
 fn rex5_hardforks() -> MegaHardforkConfig {
-    // Every fork above Rex5 is excluded: this suite pins Rex5 semantics (v1.0.0 registry, REX5
-    // spec), and `with_all_activated()` registers the whole ladder including the unstable spec.
-    // Removing only Rex6 would leave a partial-ladder config whose resolved spec is not Rex5,
-    // while the tests still set `CfgEnv.spec = REX5` — the assertion pins the two together so a
-    // new spec fails here rather than silently changing what this suite covers.
-    let config = MegaHardforkConfig::default()
-        .with_all_activated()
-        .without(MegaHardfork::Rex6)
-        .without(MegaHardfork::Rex7)
-        .with_params(SequencerRegistryConfig {
+    MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX5).with_params(
+        SequencerRegistryConfig {
             rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
             rex5_initial_admin: BOOTSTRAP_ADMIN,
-        });
-    assert_eq!(config.spec_id(0), MegaSpecId::REX5);
-    config
+        },
+    )
 }
 
 /// Per-test cfg toggles that affect the REX5 system-tx guards. Defaults match the

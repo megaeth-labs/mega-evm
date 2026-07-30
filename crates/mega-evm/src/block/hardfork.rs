@@ -41,6 +41,27 @@ hardfork! {
 }
 
 impl MegaHardfork {
+    /// Every `MegaETH` hardfork, oldest first.
+    ///
+    /// This is the single source of the fork ladder. Everything that needs to walk it —
+    /// [`MegaHardforkConfig::with_all_activated`],
+    /// [`MegaHardforkConfig::with_all_activated_through`] — derives from this array, so
+    /// introducing a hardfork means adding one entry here rather than editing every place that
+    /// enumerates forks.
+    pub const ALL: [Self; 11] = [
+        Self::MiniRex,
+        Self::MiniRex1,
+        Self::MiniRex2,
+        Self::Rex,
+        Self::Rex1,
+        Self::Rex2,
+        Self::Rex3,
+        Self::Rex4,
+        Self::Rex5,
+        Self::Rex6,
+        Self::Rex7,
+    ];
+
     /// Gets the `MegaSpecId` associated with this hardfork.
     #[allow(clippy::match_same_arms)]
     pub fn spec_id(&self) -> MegaSpecId {
@@ -295,18 +316,26 @@ impl MegaHardforkConfig {
     }
 
     /// Sets all `MegaHardfork` to be activated at timestamp 0.
-    pub fn with_all_activated(mut self) -> Self {
-        self.insert(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::MiniRex1, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::MiniRex2, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex1, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex2, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex3, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex4, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex6, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex7, ForkCondition::Timestamp(0));
+    pub fn with_all_activated(self) -> Self {
+        self.with_all_activated_through(MegaSpecId::default())
+    }
+
+    /// Activates every `MegaHardfork` whose spec is enabled under `spec` at timestamp 0, and
+    /// leaves every later fork unregistered.
+    ///
+    /// This is how to express "a chain running spec N": the resulting config resolves to `spec`
+    /// at any timestamp. Removing only the next fork up is not equivalent — the ladder runs past
+    /// it, so the config would resolve to the newest fork still registered rather than to `spec`,
+    /// and it would silently drift again the next time a spec is introduced.
+    ///
+    /// Patch hardforks are included by their spec, not their position: `MiniRex1` maps back to
+    /// [`MegaSpecId::EQUIVALENCE`], so it is registered for every `spec`.
+    pub fn with_all_activated_through(mut self, spec: MegaSpecId) -> Self {
+        for fork in MegaHardfork::ALL {
+            if spec.is_enabled(fork.spec_id()) {
+                self.insert(fork, ForkCondition::Timestamp(0));
+            }
+        }
         self
     }
 
@@ -482,6 +511,42 @@ mod tests {
             MegaHardfork::Rex7,
         ] {
             assert_eq!(config.mega_fork_activation(hardfork), ForkCondition::Timestamp(0));
+            assert!(
+                MegaHardfork::ALL.contains(&hardfork),
+                "{hardfork:?} is missing from MegaHardfork::ALL, so the builders skip it"
+            );
+        }
+    }
+
+    #[test]
+    fn test_with_all_activated_through_resolves_to_that_spec() {
+        // The contract callers rely on: the config resolves to exactly the spec asked for, at any
+        // timestamp. Driven off `MegaSpecId`'s own progression rather than a second hand-written
+        // list, so a newly introduced spec fails here — once — instead of silently widening every
+        // "chain running spec N" config in the test suite.
+        for spec in [
+            MegaSpecId::EQUIVALENCE,
+            MegaSpecId::MINI_REX,
+            MegaSpecId::REX,
+            MegaSpecId::REX1,
+            MegaSpecId::REX2,
+            MegaSpecId::REX3,
+            MegaSpecId::REX4,
+            MegaSpecId::REX5,
+            MegaSpecId::REX6,
+            MegaSpecId::REX7,
+        ] {
+            let config = MegaHardforkConfig::default().with_all_activated_through(spec);
+            assert_eq!(config.spec_id(0), spec, "{spec:?} at genesis");
+            assert_eq!(config.spec_id(u64::MAX), spec, "{spec:?} must be terminal");
+        }
+
+        // `MegaSpecId::default()` tracks the latest spec, so the unqualified builder is the
+        // through-builder at the top of the ladder — and every fork is registered.
+        let all = MegaHardforkConfig::default().with_all_activated();
+        assert_eq!(all.spec_id(0), MegaSpecId::default());
+        for fork in MegaHardfork::ALL {
+            assert_eq!(all.mega_fork_activation(fork), ForkCondition::Timestamp(0), "{fork:?}");
         }
     }
 
