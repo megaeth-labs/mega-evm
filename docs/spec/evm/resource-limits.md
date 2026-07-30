@@ -166,8 +166,8 @@ The top-level call frame's budget MUST equal the transaction limit minus any res
 These deductions include transaction-only intrinsic usage and any DB-dependent pre-execution usage that is resolved before the first frame starts.
 Each resource dimension deducts only the pre-frame items relevant to it:
 
-- **Data size** — base transaction data (110 bytes), calldata byte length, access-list entry sizes, EIP-7702 authorization records, and the caller account update.
-- **KV updates** — EIP-7702 authority account updates and the caller account update.
+- **Data size** — base transaction data (110 bytes), calldata byte length, access-list entry sizes, EIP-7702 authorization records, applied EIP-7702 authority account updates, and the caller account update.
+- **KV updates** — applied EIP-7702 authority account updates and the caller account update.
 - **State growth** — applied EIP-7702 authorizations that create previously non-existent authority accounts.
 - **Compute gas** — standard EVM transaction intrinsic gas, enumerated normatively in [Transaction Intrinsic Gas](compute-gas.md#transaction-intrinsic-gas).
 
