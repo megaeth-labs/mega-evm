@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-# MegaSpecId progression, oldest -> newest. ALL specs through REX5 are currently
+# MegaSpecId progression, oldest -> newest. ALL specs through REX6 are currently
 # frozen (see crates/mega-evm/src/evm/spec.rs and CLAUDE.md). Keep in spec order.
 FROZEN_SPECS = [
     "EQUIVALENCE",
@@ -40,9 +40,23 @@ FROZEN_SPECS = [
     "REX3",
     "REX4",
     "REX5",
+    "REX6",
 ]
 
 # Per-spec instruction-table modules wired in evm/instructions.rs, in spec order.
+#
+# This is NOT simply the frozen progression. A module belongs here only if its
+# table actually differs from its neighbour's, because SPEC_MATCH_MISROUTE works
+# by swapping one module's table for an adjacent one: swapping in an identical
+# table produces an equivalent mutant, i.e. a guaranteed survivor that says
+# nothing about test coverage.
+#
+# `rex6` is excluded on exactly that ground: `rex6::instruction_table` returns
+# `rex5::instruction_table` verbatim. Rex6 changed no table entry — every Rex6
+# behavior difference is internal `is_enabled(MegaSpecId::REX6)` dispatch inside
+# the shared handlers, and SPEC_BOUNDARY_SHIFT (driven by FROZEN_SPECS above)
+# is what probes those gates. Add `rex6` here only if Rex6 ever gains a table
+# entry of its own.
 INSTRUCTION_MODULES = ["mini_rex", "rex", "rex2", "rex3", "rex4", "rex5"]
 
 

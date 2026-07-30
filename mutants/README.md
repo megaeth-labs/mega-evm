@@ -92,6 +92,11 @@ Adding an operator is a drop-in: create a new pack dir; the engine (`scripts/umu
 - **negate** *(opt-in, `--with-negate`)* — per-site polarity flip.
 
 Only **frozen** specs are mutated; when an unstable spec is introduced, drop it from `FROZEN_SPECS` in `generate.py` and regenerate (mutating an unstable gate only yields expected/equivalent survivors).
+When that spec is later frozen, add it back and regenerate.
+
+`INSTRUCTION_MODULES` is a separate list, not a copy of the frozen progression.
+A module belongs there only if its table differs from its neighbour's: misroute swaps one module's table for an adjacent one, so swapping in an identical table is an equivalent mutant and a guaranteed survivor.
+A spec whose table is a verbatim alias of its predecessor's — because the spec expresses its differences as `is_enabled` dispatch inside shared handlers rather than as swapped table entries — is covered by boundary shift and must stay out of `INSTRUCTION_MODULES`.
 
 ## Running
 
