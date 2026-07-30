@@ -185,6 +185,9 @@ Documentation placement follows **maturity**, not network status:
   Its content belongs in main prose like any other frozen spec; network status is conveyed by the upgrade page's activation tabs and the upgrade overview, not by hiding the specification.
 - **Glossary exception**: glossary entries for unstable-spec terms do not use `<details>` blocks.
   Instead, mark them with inline text (e.g., "_(SpecName, unstable)_") at the start of the definition.
+- **Roster-page exception**: a page whose subject is the spec ladder itself (`overview.md`, `hardfork-spec.md`, `upgrades/overview.md`, and the progression line in `glossary.md`) MUST carry the unstable spec in its progression and its per-spec summary, outside `<details>`.
+  A reader looking up which specs exist must not be shown a ladder that stops one short of reality, and a `<details>` block cannot express "this rung exists".
+  Every such entry MUST label the spec unstable where it is described, and MUST stay a summary — the normative text lives in the concept pages, still gated by `<details>` there.
 - **Replay-page exception**: a page whose subject is a cross-spec measurement that a replaying node must implement for every spec simultaneously (currently only `evm/compute-gas.md`) MAY carry per-frozen-spec behavior — spec-named rows, tables, and qualifiers — in its main Specification and Constants sections.
   Such a page MUST state the current behavior first and derive historical behavior from it, MUST justify the departure in its Rationale section, and MUST still keep unstable-spec behavior in `<details>` blocks.
   Spec names in its main content are linked on first use per page; repeats stay unlinked.
