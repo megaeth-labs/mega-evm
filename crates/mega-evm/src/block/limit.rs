@@ -396,7 +396,8 @@ impl BlockLimits {
             MegaHardfork::Rex3 |
             MegaHardfork::Rex4 |
             MegaHardfork::Rex5 |
-            MegaHardfork::Rex6 => Self {
+            MegaHardfork::Rex6 |
+            MegaHardfork::Rex7 => Self {
                 block_txs_data_limit: crate::constants::mini_rex::BLOCK_DATA_LIMIT,
                 block_kv_update_limit: crate::constants::mini_rex::BLOCK_KV_UPDATE_LIMIT,
                 block_state_growth_limit: crate::constants::rex::BLOCK_STATE_GROWTH_LIMIT,

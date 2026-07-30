@@ -79,6 +79,8 @@ pub enum SpecName {
     Rex5,
     /// `MegaETH` `Rex6` spec
     Rex6,
+    /// `MegaETH` `Rex7` spec
+    Rex7,
     /// Unknown or unsupported specification
     #[serde(other)]
     Unknown,
@@ -103,6 +105,7 @@ impl SpecName {
             Self::Rex4 => Ok(MegaSpecId::REX4),
             Self::Rex5 => Ok(MegaSpecId::REX5),
             Self::Rex6 => Ok(MegaSpecId::REX6),
+            Self::Rex7 => Ok(MegaSpecId::REX7),
             Self::Unknown => Err(UnknownSpecError),
             // All Ethereum specs (and `Equivalence`) map to the equivalent baseline.
             _ => Ok(MegaSpecId::EQUIVALENCE),
@@ -124,6 +127,7 @@ impl SpecName {
             MegaSpecId::REX4 => Self::Rex4,
             MegaSpecId::REX5 => Self::Rex5,
             MegaSpecId::REX6 => Self::Rex6,
+            MegaSpecId::REX7 => Self::Rex7,
             _ => Self::Unknown,
         }
     }
@@ -184,8 +188,22 @@ mod tests {
             MegaSpecId::REX4,
             MegaSpecId::REX5,
             MegaSpecId::REX6,
+            MegaSpecId::REX7,
         ] {
             assert_eq!(SpecName::from_mega_spec(spec).to_spec_id(), Ok(spec));
         }
+    }
+
+    #[test]
+    fn from_mega_spec_maps_the_latest_spec() {
+        // `MegaSpecId` is `#[non_exhaustive]`, so `from_mega_spec` needs a wildcard
+        // arm and a newly introduced spec silently falls through to `Unknown`
+        // instead of failing to compile. `MegaSpecId::default()` always tracks the
+        // latest spec, so pinning it here turns that silent mis-mapping — which
+        // would key a dumped replay fixture's `post` map by `Unknown` — into a test
+        // failure.
+        let latest = MegaSpecId::default();
+        assert_ne!(SpecName::from_mega_spec(latest), SpecName::Unknown);
+        assert_eq!(SpecName::from_mega_spec(latest).to_spec_id(), Ok(latest));
     }
 }

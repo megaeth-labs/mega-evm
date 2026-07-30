@@ -160,6 +160,9 @@ pub mod rex5 {
 /// Constants for the `REX6` spec.
 pub mod rex6 {}
 
+/// Constants for the `REX7` spec.
+pub mod rex7 {}
+
 /// Constants for the `REX` spec.
 pub mod rex {
     /// Additional storage gas cost added to transaction intrinsic gas for the `REX` spec.

@@ -81,6 +81,10 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// seeds the smallest valid rotation delay (1 block) so local and dev chains can
 /// exercise rotations without friction; a real network must attach a
 /// governance-approved value in its published schedule when it schedules Rex6.
+///
+/// Rex7 is also active at genesis here. It is the unstable spec under active
+/// development and carries no behavior of its own yet, so activating it costs
+/// nothing on an unknown chain while keeping the fallback on the latest spec.
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
     MegaHardforkConfig::new()
         .with_all_activated()
@@ -106,7 +110,7 @@ pub fn hardfork_schedule(chain_id: u64) -> MegaHardforkConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MegaHardforks, MegaSpecId};
+    use crate::{MegaHardfork, MegaHardforks, MegaSpecId};
 
     #[test]
     fn test_mainnet_schedule_resolves_specs_by_timestamp() {
@@ -135,8 +139,22 @@ mod tests {
     fn test_schedule_dispatch_by_chain_id() {
         assert_eq!(hardfork_schedule(MAINNET_CHAIN_ID).spec_id(1780632000), MegaSpecId::REX5);
         assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(1780459200), MegaSpecId::REX5);
-        // Unknown chain: everything active at genesis, including the unstable REX6.
-        assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX6);
+        // Unknown chain: everything active at genesis, including the unstable REX7.
+        assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX7);
+    }
+
+    #[test]
+    fn test_canonical_schedules_do_not_activate_rex6_or_rex7() {
+        // Rex6 is frozen but has no published activation date on either network,
+        // and Rex7 is still unstable. Neither may appear in a canonical schedule
+        // until governance publishes a timestamp: an accidental entry here would
+        // fork the live chains at that timestamp.
+        for hf in [mainnet_hardforks(), testnet_hardforks()] {
+            assert_eq!(hf.mega_fork_activation(MegaHardfork::Rex6), ForkCondition::Never);
+            assert_eq!(hf.mega_fork_activation(MegaHardfork::Rex7), ForkCondition::Never);
+            // Rex5 is therefore the terminal spec on both chains, at any timestamp.
+            assert_eq!(hf.spec_id(u64::MAX), MegaSpecId::REX5);
+        }
     }
 
     #[test]
@@ -144,7 +162,7 @@ mod tests {
         // Rex5 block execution fails pre-block without a SequencerRegistryConfig,
         // so the all-activated fallback must attach placeholder roles.
         let hf = hardfork_schedule(999_999);
-        assert_eq!(hf.spec_id(0), MegaSpecId::REX6);
+        assert_eq!(hf.spec_id(0), MegaSpecId::REX7);
         let params = hf
             .fork_params::<SequencerRegistryConfig>()
             .expect("fallback schedule must carry a SequencerRegistryConfig");

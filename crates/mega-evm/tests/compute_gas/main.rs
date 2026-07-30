@@ -75,7 +75,7 @@ const INITCODE_RETURNING_32_BYTES: [u8; 4] = [0x60, 0x20, 0x5f, 0xf3];
 const ONE_ETH: u128 = 1_000_000_000_000_000_000;
 
 /// Every spec in the progression, oldest first.
-const ALL_SPECS: [(MegaSpecId, &str); 9] = [
+const ALL_SPECS: [(MegaSpecId, &str); 10] = [
     (MegaSpecId::EQUIVALENCE, "Equivalence"),
     (MegaSpecId::MINI_REX, "MiniRex"),
     (MegaSpecId::REX, "Rex"),
@@ -85,6 +85,7 @@ const ALL_SPECS: [(MegaSpecId, &str); 9] = [
     (MegaSpecId::REX4, "Rex4"),
     (MegaSpecId::REX5, "Rex5"),
     (MegaSpecId::REX6, "Rex6"),
+    (MegaSpecId::REX7, "Rex7"),
 ];
 
 /// A single corpus entry: a label and the world state it runs against.
@@ -787,7 +788,7 @@ fn render_snapshot() -> String {
     );
     out.push_str("#\n");
     out.push_str(
-        "# Stable specs (Equivalence through Rex5) must never change: a diff there is a\n",
+        "# Frozen specs (Equivalence through Rex6) must never change: a diff there is a\n",
     );
     out.push_str("# replay-breaking regression.\n");
     out.push_str("#\n");
@@ -845,6 +846,36 @@ fn test_compute_gas_snapshot_matches() {
             "compute-gas snapshot mismatch.\n{diff}\n\n\
              If this change is intentional, review it against docs/spec/evm/compute-gas.md and \
              regenerate with:\n  UPDATE_COMPUTE_GAS_SNAPSHOT=1 cargo test -p mega-evm --test compute_gas"
+        );
+    }
+}
+
+/// Rex7 is the unstable spec and carries no behavior of its own yet: it delegates its instruction
+/// table, runtime limits, and precompile set to Rex6 unchanged.
+///
+/// The snapshot alone does not pin this. Its rows differ by the spec-name column, so a Rex7 row
+/// that drifted from its Rex6 counterpart would still render as a well-formed snapshot and could be
+/// blessed by a regeneration. Comparing the readings directly makes the first accidental Rex7
+/// divergence a failure. When Rex7 gains its first deliberate behavior change, this test is
+/// expected to fail and should be narrowed to the corpus entries that behavior does not reach.
+#[test]
+fn test_rex7_matches_rex6_on_every_program() {
+    for program in corpus() {
+        let rex6 = transact(MegaSpecId::REX6, (program.build_db)());
+        let rex7 = transact(MegaSpecId::REX7, (program.build_db)());
+        assert_eq!(
+            (rex7.compute_gas, rex7.gas_used, &rex7.outcome),
+            (rex6.compute_gas, rex6.gas_used, &rex6.outcome),
+            "{}: Rex7 must be behaviorally identical to Rex6 \
+             (Rex6: compute_gas={} gas_used={} outcome={}; \
+             Rex7: compute_gas={} gas_used={} outcome={})",
+            program.name,
+            rex6.compute_gas,
+            rex6.gas_used,
+            rex6.outcome,
+            rex7.compute_gas,
+            rex7.gas_used,
+            rex7.outcome,
         );
     }
 }
