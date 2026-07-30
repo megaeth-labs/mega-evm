@@ -1,6 +1,6 @@
 ---
 description: MegaETH system contract registry — addresses, whitelisting rules, and protocol-level execution constraints.
-spec: Rex5
+spec: Rex6
 ---
 
 # System Contracts

@@ -7,9 +7,18 @@ description: Rex6 network upgrade — unified per-opcode gas metering order (sto
 This page is an informative summary of the Rex6 specification.
 For the full normative definition, see the Rex6 spec in the mega-evm repository.
 
-{% hint style="warning" %}
-**Unstable** — Rex6 is under active development.
-Its semantics may still change before network activation.
+{% tabs %}
+{% tab title="Testnet" %}
+Not yet scheduled
+{% endtab %}
+{% tab title="Mainnet" %}
+Not yet scheduled
+{% endtab %}
+{% endtabs %}
+
+{% hint style="info" %}
+Rex6 is frozen: its semantics no longer change.
+It has no activation timestamp on either network, so both currently execute [Rex5](rex5.md).
 {% endhint %}
 
 ## Summary
@@ -390,7 +399,8 @@ For the additional resource-accounting corrections, pre-Rex6 specs keep their ex
 For the `SequencerRegistry`, pre-Rex6 blocks keep deploying and running the version 1.0.0 bytecode with its two-parameter scheduling entry point.
 The version 2.0.0 upgrade preserves the storage layout (slots 0–12 are byte-identical; slot 13 is appended per the layout's append-only rule) and changes no behavior of `applyPendingChanges`, so validators' role resolution and the pre-block apply flow are unaffected.
 
-Rex6 is the current unstable spec under active development; its semantics may still change before network activation.
+Rex6 is frozen: no further change to its semantics will be made.
+Because no network has scheduled it yet, none of the changes on this page is live; each takes effect on a network at the block where that network activates Rex6.
 
 ## References
 

@@ -1,6 +1,6 @@
 ---
 description: MegaETH dual gas model specification — compute gas, storage gas, SALT bucket multiplier, and per-operation storage gas schedule.
-spec: Rex5
+spec: Rex6
 ---
 
 # Dual Gas Model
@@ -50,20 +50,11 @@ They total **less** than the charge when the transaction pays for gas neither co
 
 - Gas an operation consumed before halting partway through, which is deliberately never recorded as compute gas (see [Single-Record Rule](compute-gas.md#single-record-rule)).
 - The difference between the gas limit a caller forwards into a failing precompile and the compute gas recorded for it, which is capped at the remaining compute budget (see [Precompiles](compute-gas.md#precompiles)).
-- Gas forwarded to a child frame that a compute-gas exceed discarded before the child ran, which is not returned to the parent (see [Gas Forwarding](gas-forwarding.md)).
-- The unused envelope a transaction forfeits when the [KeylessDeploy](compute-gas.md#keyless-deploy-exceed) dispatch overhead crosses the transaction-level compute limit, which that path spends in full rather than rescuing.
+
+Gas forwarded to a child frame that a compute-gas exceed discarded, and the envelope a transaction has left when the [KeylessDeploy](compute-gas.md#keyless-deploy-exceed) dispatch overhead crosses the transaction-level compute limit, are both returned rather than spent, so neither contributes to this gap (see [Exceed Behavior](compute-gas.md#exceed-behavior)).
 
 They total **more** than the charge when compute gas records gas the transaction never paid.
 This happens on every value-transferring `CALL` or `CALLCODE`: the inherited EVM hands the callee `CALL_STIPEND` without deducting it from the caller, and the parent's compute gas records it regardless, so the counters run `CALL_STIPEND` ahead of the charge for each such call (see [Forwarded Gas Exclusion](compute-gas.md#forwarded-gas-exclusion)).
-
-<details>
-
-<summary>Rex6 (unstable): two of the under-total sources disappear</summary>
-
-Under Rex6, gas forwarded to a discarded child frame is returned to the failing frame, and the KeylessDeploy dispatch exceed rescues the unused envelope.
-Neither then contributes to the gap between the counters and the charge (see [Exceed Behavior](compute-gas.md#exceed-behavior)).
-
-</details>
 
 #### Receipt Gas
 
@@ -80,10 +71,6 @@ The dual gas model itself does not redefine opcode compute gas costs; it adds th
 How much of an operation's inherited EVM gas a node records as compute gas — the measurement window, its exclusions, and the recording sites — is specified in [Compute Gas Accounting](compute-gas.md).
 
 ### Gas Metering Order
-
-<details>
-
-<summary>Rex6 (unstable): canonical per-opcode gas metering order</summary>
 
 Each opcode consumes [compute gas](../glossary.md#compute-gas) and may additionally charge [storage gas](../glossary.md#storage-gas).
 Because the compute gas a transaction has consumed is itself a metered resource bounded by the [compute gas limit](resource-limits.md), the order in which an opcode charges storage gas relative to recording compute gas is consensus-visible: it determines, when an opcode halts partway through, how much compute gas has been recorded and which limit is reached first.
@@ -109,8 +96,6 @@ When more than one dimension is over its limit on that opcode, the reported dime
 
 A node MUST record an opcode's compute gas in exactly one step, after the opcode body has fully executed — with no `CREATE2` exception.
 The no-record rule when the body does not run to completion is specified in [Single-Record Rule](compute-gas.md#single-record-rule).
-
-</details>
 
 ### Storage Gas
 
@@ -185,14 +170,9 @@ The following rules MUST apply:
 - When `multiplier > 1`: storage gas MUST scale linearly as `base × (multiplier − 1)`.
 - The multiplier MUST be determined from the SALT bucket state of the **parent block**, not the current transaction's intermediate state.
 
-<details>
-<summary>Rex6 (unstable): system-originated transactions charge storage gas at minimum bucket capacity</summary>
-
-Under Rex6, a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) MUST be charged dynamic storage gas as if every target bucket were at minimum capacity (`multiplier = 1`), regardless of the bucket's actual capacity.
+A [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) MUST be charged dynamic storage gas as if every target bucket were at minimum capacity (`multiplier = 1`), regardless of the bucket's actual capacity.
 Under the `base × (multiplier − 1)` formula this makes the dynamic storage gas zero, so a protocol-mandated storage write costs only its standard EVM gas and cannot run out of gas as SALT buckets grow.
 User transactions are unaffected and continue to pay capacity-scaled storage gas.
-
-</details>
 
 #### Bucket ID Calculation
 
@@ -322,4 +302,4 @@ For the historical evolution of storage gas formulas and constants across specs:
 - [Rex](../upgrades/rex.md) — revised to `base × (multiplier − 1)` with current base costs, added transaction intrinsic storage gas
 - [Rex4](../upgrades/rex4.md) — storage gas stipend for value transfers
 - [Rex5](../upgrades/rex5.md) — reworked the storage gas stipend into a separated-allowance model, derived the top-level contract-creation storage-gas address from the sender's current state nonce, and made contract-creation code-deposit compute gas atomic with the deployment commit
-- [Rex6](../upgrades/rex6.md) (**unstable**) — unified per-opcode gas metering order (compute gas recorded once, after the opcode body); system-originated transactions charge dynamic storage gas at minimum bucket capacity
+- [Rex6](../upgrades/rex6.md) — unified per-opcode gas metering order (compute gas recorded once, after the opcode body, with no `CREATE2` exception); system-originated transactions charge dynamic storage gas at minimum bucket capacity; forwarded gas and the KeylessDeploy envelope are returned on a compute-gas exceed rather than spent

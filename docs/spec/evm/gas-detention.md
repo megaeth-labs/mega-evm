@@ -1,6 +1,6 @@
 ---
 description: MegaETH gas detention specification — compute gas caps triggered by volatile data access (block environment, oracle SLOAD).
-spec: Rex5
+spec: Rex6
 ---
 
 # Gas Detention
@@ -72,22 +72,11 @@ A node MUST apply beneficiary gas detention with cap `BENEFICIARY_DETENTION_CAP`
 
 `SELFDESTRUCT` targeting the beneficiary MUST also trigger beneficiary gas detention.
 
-<details>
-<summary>Rex6 (unstable): EIP-7702 delegate resolution for CALL-family beneficiary access</summary>
+When a `CALL`, `CALLCODE`, `DELEGATECALL`, or `STATICCALL` loads a target account whose code is an [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) delegation designation, the node MUST resolve the delegation one hop and mark beneficiary access when either the raw target or the resolved delegate equals the beneficiary.
 
-Under Rex6, when a `CALL`, `CALLCODE`, `DELEGATECALL`, or `STATICCALL` loads a target account whose code is an [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) delegation designation, the node MUST resolve the delegation one hop and mark beneficiary access when either the raw target or the resolved delegate equals the beneficiary.
-Pre-Rex6, only the raw target address is compared, so a call routed through a delegator whose delegate is the beneficiary reads the beneficiary's account without triggering detention.
-
-</details>
-
-<details>
-<summary>Rex6 (unstable): applied EIP-7702 authority equal to the beneficiary triggers detention</summary>
-
-Under Rex6, a node MUST apply beneficiary gas detention when an _applied_ EIP-7702 authorization — one that passes the chain-id, nonce, and code application gates and therefore writes the authority account — has an authority address equal to the block beneficiary.
+A node MUST also apply beneficiary gas detention when an _applied_ EIP-7702 authorization — one that passes the chain-id, nonce, and code application gates and therefore writes the authority account — has an authority address equal to the block beneficiary.
 Applying such an authorization mutates beneficiary state (nonce and delegation code), so the node MUST mark beneficiary access and re-derive the effective compute-gas detention cap during transaction validation, even though no opcode in the list above was executed.
 A skipped authorization whose authority equals the beneficiary MUST NOT trigger detention.
-
-</details>
 
 #### Oracle Access
 
@@ -124,13 +113,8 @@ When a volatile-data trigger occurs, the node MUST perform the following steps i
 
 After detention has been applied, any subsequent execution step that would cause `compute_gas_used` to exceed the effective detained limit MUST halt the transaction with `VolatileDataAccessOutOfGas`.
 
-<details>
-<summary>Rex6 (unstable): system-originated transactions are not halted by detention</summary>
-
-Under Rex6, the detained compute-gas limit MUST NOT halt a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption).
+The detained compute-gas limit MUST NOT halt a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption).
 Volatile-data accesses by such a transaction are still tracked, but the detention cap is not enforced against it; its standard EVM `gas_limit` remains the only halting bound.
-
-</details>
 
 ### Refund Semantics
 
@@ -208,6 +192,4 @@ Gas detention semantics evolved across specs:
 - [Rex1](../upgrades/rex1.md) — reset detained compute gas limit between transactions in the same block
 - [Rex3](../upgrades/rex3.md) — raised oracle cap to 20M and changed oracle detection from CALL-based to SLOAD-based
 - [Rex4](../upgrades/rex4.md) — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior
-- [Rex6](../upgrades/rex6.md) (**unstable**) — adds a beneficiary-detention trigger for an applied EIP-7702 authorization whose authority equals the block beneficiary
-- [Rex6](../upgrades/rex6.md) (**unstable**) — resolves a CALL-family target's EIP-7702 delegation one hop before the beneficiary comparison, so a call through a delegator whose delegate is the beneficiary triggers detention
-- [Rex6](../upgrades/rex6.md) (**unstable**) — stops enforcing the detention cap against system-originated transactions; volatile accesses are still tracked
+- [Rex6](../upgrades/rex6.md) — adds a beneficiary-detention trigger for an applied EIP-7702 authorization whose authority equals the block beneficiary; resolves a CALL-family target's EIP-7702 delegation one hop before the beneficiary comparison, so a call through a delegator whose delegate is the beneficiary triggers detention (through Rex5 only the raw target is compared); and stops enforcing the detention cap against system-originated transactions, whose volatile accesses are still tracked

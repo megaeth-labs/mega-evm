@@ -1,6 +1,6 @@
 ---
 description: SELFDESTRUCT opcode on MegaETH — EIP-6780 semantics, same-transaction destruction, beneficiary account metering, and spec history from MiniRex to Rex5.
-spec: Rex5
+spec: Rex6
 ---
 
 # SELFDESTRUCT

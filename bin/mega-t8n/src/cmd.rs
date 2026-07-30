@@ -88,7 +88,8 @@ pub(crate) struct Cmd {
     #[arg(long = "input.txs", default_value = "stdin")]
     pub input_txs: String,
 
-    /// Name of hardfork to use, possible values: `Rex`, `Rex1`, `Rex2`, `MiniRex`, `Equivalence`
+    /// Name of hardfork to use, possible values: `Equivalence`, `MiniRex`, `Rex`, `Rex1`, `Rex2`,
+    /// `Rex3`, `Rex4`, `Rex5`, `Rex6`, `Rex7`
     #[arg(long = "state.fork", default_value = "MiniRex")]
     pub fork: String,
 

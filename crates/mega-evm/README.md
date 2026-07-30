@@ -12,8 +12,8 @@ A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH
 
 This codebase distinguishes between two related concepts:
 
-- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`, `REX3`, `REX4`
-- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`
+- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`, `REX3`, `REX4`, `REX5`, `REX6`, `REX7`
+- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6`, `Rex7`
 
 Multiple hardforks can map to the same spec.
 For example, both `MiniRex` and `MiniRex2` hardforks use the `MINI_REX` spec.

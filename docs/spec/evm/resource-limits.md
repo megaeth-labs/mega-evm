@@ -1,6 +1,6 @@
 ---
 description: MegaETH per-transaction and per-block resource limits — compute gas, data size, KV updates, and state growth ceilings with enforcement semantics.
-spec: Rex5
+spec: Rex6
 ---
 
 # Multidimensional Resource Limits
@@ -100,27 +100,13 @@ The failed transaction's actual resource usage MUST still count toward the block
 
 When a single limit check finds more than one dimension over its limit, the reported dimension MUST be the first in the fixed order: data size, key-value updates, compute gas, state growth.
 
-Step 2 has one exception.
-When the compute-gas limit is crossed while recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispatch overhead, remaining gas is not preserved: the transaction records a full spend and the sender loses the unused envelope.
-See [Keyless Deploy Exceed](compute-gas.md#keyless-deploy-exceed).
-
-<details>
-<summary>Rex6 (unstable): the keyless-deploy exception to gas preservation is removed</summary>
-
-Under Rex6, remaining gas MUST be preserved on the keyless-deploy dispatch exceed as on every other transaction-level exceed.
+Step 2 applies to every transaction-level exceed, including the one crossed while recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispatch overhead.
 The rescued amount is excluded from the receipt's `gas_used` and refunded to the sender.
 See [Keyless Deploy Exceed](compute-gas.md#keyless-deploy-exceed).
 
-</details>
-
-<details>
-<summary>Rex6 (unstable): system-originated transactions are not halted by transaction-level limits</summary>
-
-Under Rex6, the four runtime transaction-level limits MUST NOT be enforced against a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption).
+The four runtime transaction-level limits MUST NOT be enforced against a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption).
 The node MUST still record such a transaction's resource usage; only the per-transaction halt decision is suppressed.
 The transaction's standard EVM `gas_limit` — for the pre-block system calls, floored at 30,000,000 — remains the only bound that can halt it.
-
-</details>
 
 #### Precompile Compute-Gas Bound
 
@@ -182,28 +168,21 @@ Each resource dimension deducts only the pre-frame items relevant to it:
 
 - **Data size** — base transaction data (110 bytes), calldata byte length, access-list entry sizes, EIP-7702 authorization records, and the caller account update.
 - **KV updates** — EIP-7702 authority account updates and the caller account update.
-- **State growth** — valid EIP-7702 authorizations that create previously non-existent authority accounts, resolved during pre-execution.
+- **State growth** — applied EIP-7702 authorizations that create previously non-existent authority accounts.
 - **Compute gas** — standard EVM transaction intrinsic gas, enumerated normatively in [Transaction Intrinsic Gas](compute-gas.md#transaction-intrinsic-gas).
 
 These deductions ensure that pre-frame costs reduce the budget available to the first call frame, preventing transactions from front-loading pre-frame usage to escape per-frame limits.
 
-<details>
-<summary>Rex6 (unstable): EIP-7702 authority accounting moves to validation and adds dynamic SALT account-creation gas</summary>
-
 #### Authority State Growth Resolution
 
-Pre-Rex6, the state-growth contribution of EIP-7702 authorizations that create previously non-existent authority accounts is resolved during pre-execution, after the caller nonce bump.
-
-Under Rex6, a node MUST resolve this contribution during transaction validation, before the gas-limit and fee-affordability checks.
+A node MUST resolve the state-growth contribution of EIP-7702 authorizations during transaction validation, before the gas-limit and fee-affordability checks.
 The set of authorities and the per-authority effects are derived from the same applied-authorization scan that drives the data-size and KV-update narrowing in [Resource Accounting](resource-accounting.md).
 
 #### Dynamic Authority Account-Creation Gas
 
-Under Rex6, for each _applied_ EIP-7702 authorization that materializes a previously non-existent authority account, a node MUST charge dynamic new-account storage gas for that authority using the same SALT bucket pricing as other new-account materialization paths.
+For each _applied_ EIP-7702 authorization that materializes a previously non-existent authority account, a node MUST charge dynamic new-account storage gas for that authority using the same SALT bucket pricing as other new-account materialization paths.
 This charge MUST be folded into the transaction's intrinsic gas so that it is deducted before the first call frame and enforced against the gas limit and fee affordability.
 A node MUST NOT charge this new-account gas twice when a value-transferring call materializes the same account that an applied authorization materializes.
-
-</details>
 
 ## Constants
 
@@ -254,5 +233,4 @@ Including failed transactions ensures the sender always pays for consumed resour
 - [Rex3](../upgrades/rex3.md) retained the stable resource-limit set.
 - [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource costs (always deducted before execution) are now reflected in the top-level frame budget before it is forwarded to child frames.
 - [Rex5](../upgrades/rex5.md) — bounded a precompile invocation's compute-gas consumption by the remaining compute-gas budget, failing the precompile with `PrecompileOOG` rather than letting it overshoot the budget.
-- [Rex6](../upgrades/rex6.md) (**unstable**) — moved EIP-7702 authority state-growth resolution from pre-execution to validation, and added dynamic SALT account-creation gas for each net-new applied authority to the pre-frame intrinsic gas deduction.
-- [Rex6](../upgrades/rex6.md) (**unstable**) — stopped enforcing the four runtime transaction-level limits against system-originated transactions; usage is still recorded.
+- [Rex6](../upgrades/rex6.md) — moved EIP-7702 authority state-growth resolution from pre-execution (after the caller nonce bump) to validation, and added dynamic SALT account-creation gas for each net-new applied authority to the pre-frame intrinsic gas deduction; removed the keyless-deploy exception to gas preservation, so remaining gas is now rescued on every transaction-level exceed; and stopped enforcing the four runtime transaction-level limits against system-originated transactions, whose usage is still recorded.

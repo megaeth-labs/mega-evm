@@ -1,6 +1,6 @@
 ---
 description: MegaETH compute gas accounting specification — the measurement window that derives compute gas from inherited EVM gas, per-opcode metering classes, non-opcode recording sites, transaction and per-call-frame limits, and exceed behavior.
-spec: Rex5
+spec: Rex6
 ---
 
 # Compute Gas Accounting
@@ -49,15 +49,21 @@ MegaETH departs from the inherited account-access pricing on the first touch of 
 
 When the first access to such an address in a transaction is made by one of the opcodes below, the opcode MUST charge the cold account access cost in place of the warm cost:
 
-| Opcode                       | Charged cold since                                                                                                                                                                                 |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CALL`                       | MiniRex                                                                                                                                                                                            |
-| `DELEGATECALL`, `STATICCALL` | [Rex](../upgrades/rex.md)                                                                                                                                                                          |
-| `CALLCODE`                   | Rex through [Rex4](../upgrades/rex4.md) — from [Rex5](../upgrades/rex5.md) the pre-execution inspection targets the executing account, which is already warm, so the inherited pricing is restored |
-| `SELFDESTRUCT` (beneficiary) | Rex5                                                                                                                                                                                               |
+| Opcode                       | Charged cold since                                                                                                                     |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `CALL`                       | MiniRex                                                                                                                                |
+| `DELEGATECALL`, `STATICCALL` | [Rex](../upgrades/rex.md)                                                                                                              |
+| `CALLCODE`                   | Rex through [Rex4](../upgrades/rex4.md); not charged under [Rex5](../upgrades/rex5.md); charged again from [Rex6](../upgrades/rex6.md) |
+| `SELFDESTRUCT` (beneficiary) | Rex5                                                                                                                                   |
 
-The rule covers the inspected address only, and the inspection does not follow EIP-7702 delegation: when the call target carries a delegation, a preload-warm delegate keeps its inherited warmth for the delegate-access charge.
-Under MiniRex through Rex4 the inspection followed the delegation, and the delegate address was charged cold on first touch as well.
+The rule covers the inspected address only.
+A preload-warm _delegate_ keeps its inherited warmth for the delegate-access charge: where the pre-execution inspection resolves an EIP-7702 delegation, it reads the delegate's address, not the delegate's account.
+Under MiniRex through Rex4 the inspection loaded the delegate's account instead, and the delegate address was charged cold on first touch as well.
+
+`CALLCODE`'s two boundaries in the table both follow from which address that inspection materializes.
+Under Rex5 the inspection targets the executing account, which is already warm, so the inherited pricing is restored.
+From Rex6 the beneficiary detection for `CALL`-family targets is delegation-aware, and resolving the delegation materializes the call target — without its preloaded warmth — ahead of the inherited load, which reintroduces the cold first-touch charge.
+The other three call opcodes already materialize their call targets, so their pricing is unaffected by that change.
 
 The rule does not extend beyond that first touch or those opcodes:
 
@@ -66,17 +72,6 @@ The rule does not extend beyond that first touch or those opcodes:
 - addresses loaded rather than merely preloaded — the transaction sender and recipient, access-list addresses listed with storage keys, and addresses created by `CREATE` / `CREATE2` — are unaffected.
 
 The extra charge is ordinary EVM gas: it is debited from the transaction's gas budget, recorded as compute gas by the opcode's measurement window, and visible in the receipt's `gas_used`.
-
-<details>
-
-<summary>Rex6 (unstable): `CALLCODE` rejoins the cold first-touch charge</summary>
-
-Under Rex6, beneficiary detection for `CALL`-family targets is delegation-aware, and resolving the delegation materializes the call target — without its preloaded warmth — ahead of the inherited load.
-For `CALLCODE`, whose pre-execution inspection targets the executing account rather than the call target, this reintroduces the cold first-touch charge for a preload-warm call target.
-The other three call opcodes already materialize their call targets, so their pricing is unchanged.
-The delegate address itself remains unaffected: resolution reads only the delegate's address, not its account.
-
-</details>
 
 ### Measurement Window
 
@@ -104,18 +99,10 @@ The window MUST cover all of the opcode's compute work: it MUST open before any 
 A storage-gas charge is the one movement that MAY fall on either side of the opening point, because it is excluded from the recorded amount either way — see [Storage Gas Exclusion](#storage-gas-exclusion).
 A forwarding-cap adjustment applied after the inner body completes changes the remaining gas and the pending child's gas limit by the same amount, so a window closed before that adjustment records the same amount as one closed after it; both placements satisfy this rule.
 
-<details>
-
-<summary>[Rex6](../upgrades/rex6.md) (unstable): canonical window boundaries for storage-affecting opcodes</summary>
-
-Under Rex6, the window for every storage-affecting opcode — `SSTORE`, `LOG0` through `LOG4`, `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2`, and `SELFDESTRUCT` — MUST open before the opcode's storage-gas charge and before any wrapper-side EVM gas work, and MUST close after the inner opcode body completes.
+The window for every storage-affecting opcode — `SSTORE`, `LOG0` through `LOG4`, `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2`, and `SELFDESTRUCT` — MUST open before the opcode's storage-gas charge and before any wrapper-side EVM gas work, and MUST close after the inner opcode body completes.
 An opcode MAY realize this canonical window through the equivalent charge-outside-window form of the [storage gas exclusion](#storage-gas-exclusion), opening after its storage-gas charge with `storage_gas_charged` treated as zero; the recorded amount is identical by construction.
 
 The full canonical metering order is specified in [Dual Gas Model](dual-gas-model.md#gas-metering-order).
-
-Pre-Rex6, `CREATE2` is the one opcode whose window does not span its wrapper-side memory expansion; see [Contract Creation Memory Expansion](#contract-creation-memory-expansion) below.
-
-</details>
 
 #### Single-Record Rule
 
@@ -124,7 +111,7 @@ A node MUST record an operation's compute gas exactly once per measurement windo
 If the window does not close — because operand validation fails, a storage-gas charge exhausts the budget, or the operation halts partway through — the node MUST NOT record compute gas for that operation, even when EVM gas was already consumed by work performed before the halt.
 The EVM gas consumed by such work remains deducted from the transaction's gas budget.
 
-`CREATE2` records in two windows rather than one; that exception is specified below.
+There is no per-opcode exception: every opcode, `CREATE2` included, records in exactly one window.
 
 #### Storage Gas Exclusion
 
@@ -245,37 +232,17 @@ Per-spec overrides, applied in order on top of the MiniRex base to reach the cur
 | [**Rex3**](../upgrades/rex3.md) | `SLOAD`: Plain → Volatile (conditional on the [oracle](../system-contracts/oracle.md) contract)                                                                                                                                                                                |
 | **Rex4**                        | `SELFBALANCE`: Plain → Volatile (conditional on the beneficiary). `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, and `SELFDESTRUCT` gain a beneficiary volatile-access guard that runs before the opcode executes                                                           |
 | **Rex5**                        | `SELFDESTRUCT` gains a storage-gas charge for empty-beneficiary creation (class unchanged; the storage gas exclusion becomes applicable)                                                                                                                                       |
-
-<details>
-
-<summary>Rex6 (unstable): no class changes</summary>
-
-Under Rex6 the class assignment is identical to the current assignment above.
-
-</details>
+| **Rex6**                        | No change                                                                                                                                                                                                                                                                      |
 
 #### Contract Creation Memory Expansion
 
 `CREATE2` expands memory to hash its initcode before the inner opcode runs.
-The EVM gas consumed by that expansion is compute gas, and a node MUST record it in a window of its own: `CREATE2` records in two windows.
-This is the sole stable exception to the [single-record rule](#single-record-rule).
+The EVM gas consumed by that expansion is compute gas, and a node MUST record it inside the opcode's single measurement window, which opens before the memory expansion and closes after the inner opcode completes.
+A halt between the two therefore records no compute gas for the opcode, per the [single-record rule](#single-record-rule); the EVM gas consumed by the expansion is still debited from the transaction's budget.
 
-The expansion window is recorded before the contract-creation storage gas is charged, ahead of the opcode's main window.
-
-Under MiniRex through Rex4 the expansion window instead records last: after the inner opcode completes and after the main window records.
-On those specs it is skipped if the inner opcode fails, or if the main window's recording fails the opcode on a compute-gas exceed.
-
-<details>
-
-<summary>Rex6 (unstable): CREATE2 memory expansion folded into the single window</summary>
-
-Under Rex6, a node MUST record `CREATE2` compute gas in exactly one window, opened before the memory expansion and closed after the inner opcode completes.
-
-This is observable only when a halt occurs between the memory expansion and the completion of the inner opcode.
-On that path, Rex6 records no compute gas for the opcode, whereas Rex5 has already recorded the expansion gas.
-The EVM gas consumed by the expansion is debited from the transaction's budget under both specs.
-
-</details>
+Earlier specs split the expansion into a window of its own, making `CREATE2` the one opcode that recorded twice.
+Under Rex5 that expansion window records first, before the contract-creation storage gas is charged and ahead of the opcode's main window.
+Under MiniRex through Rex4 it instead records last — after the inner opcode completes and after the main window records — and is skipped if the inner opcode fails, or if the main window's recording fails the opcode on a compute-gas exceed.
 
 ### Non-Opcode Recording Sites
 
@@ -450,20 +417,26 @@ The budget bounds how far a single frame may run; it does not protect the transa
 
 A compute gas exceed is either _frame-local_ or _transaction-level_, and the two produce different outcomes.
 
-| Condition                                 | Scope             | Result                                                                                              | Gas                                                               |
-| ----------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Per-frame budget exceeded                 | Frame-local       | The frame MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`                            | Returns to the parent frame normally                              |
-| Transaction limit exceeded                | Transaction-level | The transaction MUST halt with `OutOfGas`                                                           | Remaining gas is rescued and refunded to the sender               |
-| Detained limit exceeded                   | Transaction-level | The transaction MUST halt with `VolatileDataAccessOutOfGas` (see [Gas Detention](gas-detention.md)) | Remaining gas is rescued and refunded to the sender               |
-| Keyless-deploy dispatch overhead exceeded | See below         | The frame MUST revert, or the transaction MUST halt with `OutOfGas`                                 | Not rescued — see [Keyless Deploy Exceed](#keyless-deploy-exceed) |
+| Condition                                 | Scope             | Result                                                                                              | Gas                                                 |
+| ----------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Per-frame budget exceeded                 | Frame-local       | The frame MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`                            | Returns to the parent frame normally                |
+| Transaction limit exceeded                | Transaction-level | The transaction MUST halt with `OutOfGas`                                                           | Remaining gas is rescued and refunded to the sender |
+| Detained limit exceeded                   | Transaction-level | The transaction MUST halt with `VolatileDataAccessOutOfGas` (see [Gas Detention](gas-detention.md)) | Remaining gas is rescued and refunded to the sender |
+| Keyless-deploy dispatch overhead exceeded | See below         | The frame MUST revert, or the transaction MUST halt with `OutOfGas`                                 | Remaining gas is rescued and refunded to the sender |
 
 A frame-local exceed in a nested frame does not fail the transaction: the parent frame MAY continue execution.
 The top-level frame also carries a budget, and a frame-local exceed there has no parent to return to — the transaction's own result becomes the revert, and the receipt reports failure.
 
 On a transaction-level exceed, a node MUST preserve the frame's remaining gas for refund to the sender.
 The rescued amount MUST exclude any portion contributed by the [storage gas stipend](../glossary.md#storage-gas-stipend), so that system-granted gas is not recovered by the sender.
+The rule admits no exception: the keyless-deploy dispatch path rescues on the same terms as opcode dispatch.
 
-The keyless-deploy dispatch path is the one exception to the rescue rule; it is specified next.
+When a `CALL`-family or `CREATE` / `CREATE2` opcode fails on a compute-gas exceed — the frame-local revert and the transaction-level halt alike — its pending child frame is discarded before the child runs.
+A node MUST return the gas already forwarded to that discarded child to the frame before it terminates, so that gas is not charged as consumed: on a frame-local revert it returns to the parent frame, and on a transaction-level halt it is excluded from the transaction's `gas_used`.
+
+A node MUST NOT halt a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) on the compute gas limit or on gas detention.
+The node MUST still record its compute gas usage; only the halt decision is suppressed.
+The transaction's standard EVM `gas_limit` remains the only bound that can halt it.
 
 A node MUST record compute gas before evaluating any exceed, including an exceed already latched on another resource dimension.
 The compute work was performed, and the recorded total feeds the transaction outcome and the block-level compute accounting even for a transaction halted on a different dimension.
@@ -476,26 +449,9 @@ When recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispat
 - A transaction-level exceed MUST halt with `OutOfGas` and empty output.
   A node MUST NOT attach `InsufficientComputeGas` to this branch; the caller cannot distinguish it from any other out-of-gas halt.
 
-Gas rescue does not apply on this path: on a transaction-level exceed here, a node MUST NOT rescue the outer transaction's remaining gas.
-The halt records a full spend and the sender loses the entire unused envelope.
-A node MUST NOT generalize the opcode-dispatch rescue rule to this path.
+Both branches rescue the outer transaction's remaining gas under the general rule above.
+Specs through Rex5 do not: on those specs a transaction-level exceed here records a full spend and the sender loses the entire unused envelope.
 See [Keyless Deployment](../system-contracts/keyless-deploy.md) for the full dispatch semantics.
-
-<details>
-
-<summary>Rex6 (unstable): forwarded gas returned on a compute-gas exceed, keyless-deploy rescue, and system-originated transaction exemption</summary>
-
-Under Rex6, when a `CALL`-family or `CREATE` / `CREATE2` opcode fails on a compute-gas exceed — the frame-local revert and the transaction-level halt alike — its pending child frame is discarded before the child runs.
-A node MUST return the gas already forwarded to that discarded child to the frame before it terminates, so that gas is not charged as consumed: on a frame-local revert it returns to the parent frame, and on a transaction-level halt it is excluded from the transaction's `gas_used`.
-
-Under Rex6, the keyless-deploy dispatch exceed also rescues: a node MUST rescue the outer transaction's unspent gas on a transaction-level exceed of the dispatch overhead, aligning this path with opcode dispatch.
-The rescued amount is excluded from the receipt's `gas_used` and refunded to the sender.
-
-Under Rex6, a node MUST NOT halt a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) on the compute gas limit or on gas detention.
-The node MUST still record its compute gas usage; only the halt decision is suppressed.
-The transaction's standard EVM `gas_limit` remains the only bound that can halt it.
-
-</details>
 
 ### Revert Behavior
 
@@ -559,8 +515,8 @@ MiniRex behavior remains frozen for replay compatibility.
 
 Concept pages normally describe only the latest stable spec and leave earlier behavior to the Spec History and upgrade pages.
 This page departs from that.
-Compute gas is not a fixed rule that happened to change; it is a measurement whose definition differs at MiniRex, Rex, Rex3, Rex4, and Rex5, and a node replaying historical blocks must implement every one of those definitions simultaneously.
-Splitting them across pages would force an implementer to reassemble the measurement from a changelog before they could execute a single pre-Rex5 block.
+Compute gas is not a fixed rule that happened to change; it is a measurement whose definition differs at MiniRex, Rex, Rex3, Rex4, Rex5, and Rex6, and a node replaying historical blocks must implement every one of those definitions simultaneously.
+Splitting them across pages would force an implementer to reassemble the measurement from a changelog before they could execute a single historical block.
 The current assignment is therefore stated first and directly, with the earlier definitions kept alongside it rather than relocated.
 
 **Why is compute gas the only non-revertible dimension?**
@@ -612,4 +568,4 @@ System-granted gas leaks to the sender, who recovers gas that was never theirs t
 - [Rex3](../upgrades/rex3.md) — moved `SLOAD` into the Volatile class for oracle access; began recording the keyless-deploy dispatch overhead as compute gas.
 - [Rex4](../upgrades/rex4.md) — introduced the per-call-frame compute gas budget; made gas detention caps relative to usage at the access point; added beneficiary volatile-access guards to the `CALL` family, `SELFDESTRUCT`, and `SELFBALANCE`.
 - [Rex5](../upgrades/rex5.md) — excluded the `CALL_STIPEND` from the forwarded-gas deduction; moved `CREATE2` memory-expansion recording ahead of the storage-gas charge; made contract-creation code-deposit compute gas atomic with the deployment commit; refined precompile compute-gas recording and bounded it by the remaining compute budget; added the `SELFDESTRUCT` empty-beneficiary storage-gas charge; removed `CALLCODE` from the cold first-touch charge and added `SELFDESTRUCT`'s beneficiary to it; stopped following EIP-7702 delegation in the pre-execution inspection, restoring inherited warmth for delegates.
-- [Rex6](../upgrades/rex6.md) (**unstable**) — unified the measurement window across all storage-affecting opcodes and folded `CREATE2` memory expansion into it; returned forwarded gas to the failing frame on a compute-gas exceed; rescued the unused envelope on a keyless-deploy dispatch exceed; made beneficiary detection delegation-aware, returning `CALLCODE` call targets to the cold first-touch charge; exempted system-originated transactions from the compute gas limit and gas detention.
+- [Rex6](../upgrades/rex6.md) — unified the measurement window across all storage-affecting opcodes and folded `CREATE2` memory expansion into it, ending the two-window exception; returned forwarded gas to the failing frame on a compute-gas exceed; rescued the unused envelope on a keyless-deploy dispatch exceed; made beneficiary detection delegation-aware, returning `CALLCODE` call targets to the cold first-touch charge; exempted system-originated transactions from the compute gas limit and gas detention.

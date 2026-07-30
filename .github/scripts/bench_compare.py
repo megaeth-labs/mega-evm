@@ -279,6 +279,7 @@ BASELINE_ROW = "revm_pinned"
 ROW_ORDER = [
     "revm_pinned", "revm_latest", "op_revm_pinned", "op_revm_latest",
     "equivalence", "mini_rex", "rex", "rex1", "rex2", "rex3", "rex4", "rex5",
+    "rex6", "rex7",
 ]
 SPECS = set(ROW_ORDER)
 
@@ -443,7 +444,7 @@ def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
     if gap:
         gap_section = _details(
             "Baseline gap — each EVM layer vs <code>revm_pinned</code> (HEAD only)",
-            "_Read the highest `rex*` row (currently `rex5`, the latest spec) "
+            "_Read the highest `rex*` row present (the latest spec benchmarked) "
             'for the "user-visible mega gap"; the earlier `rex*` rows are prior '
             "specs. The non-`rex` rows are diagnostic: they show which layer "
             "adds cost._\n" + gap,
