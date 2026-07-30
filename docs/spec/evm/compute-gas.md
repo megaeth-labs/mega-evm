@@ -322,6 +322,9 @@ remaining_compute_gas = min(current frame's remaining budget,
 
 A precompile is therefore bounded by whichever of the [per-call-frame budget](#per-call-frame-budget) and the detained [transaction budget](#effective-limit) binds first.
 
+For a transaction whose recipient is a precompile, the invocation runs before any call-frame budget exists.
+The frame term of `remaining_compute_gas` is then the transaction-level remaining budget itself — the effective limit minus the compute gas already recorded, including the [transaction intrinsic gas](#transaction-intrinsic-gas) — so the cap reduces to `effective_limit − compute_gas_used`.
+
 A node MUST record a precompile invocation's compute gas as:
 
 ```text

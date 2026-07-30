@@ -28,7 +28,7 @@ use revm::{
 use crate::{
     base_db, push_call_operands, push_valueless_call_operands, transact, transact_output,
     transact_with_access_list, transact_with_envs, transact_with_limits, Outcome, CALLEE, CALLER,
-    CONTRACT, EMPTY_TARGET, EXISTING_TARGET, ONE_ETH, PRECOMPILE_IDENTITY,
+    CONTRACT, EMPTY_TARGET, EXISTING_TARGET, ONE_ETH, PRECOMPILE_IDENTITY, PRECOMPILE_KZG,
 };
 
 /// `remainingComputeGas()` — the `MegaLimitControl` selector the interceptor recognizes.
@@ -245,6 +245,41 @@ fn test_refunds_do_not_reduce_compute_gas() {
             "{spec:?}: the refund must NOT be subtracted from compute gas \
              (cleared={} overwritten={})",
             cleared.compute_gas, overwritten.compute_gas
+        );
+    }
+}
+
+/// Spec: [Precompiles] — "For a transaction whose recipient is a precompile, the invocation runs
+/// before any call-frame budget exists", and the effective gas limit then reduces to the
+/// transaction-level remaining compute gas, net of the recorded intrinsic gas.
+///
+/// A direct transaction with empty calldata to the KZG precompile under a 30,000 tx compute
+/// limit: the intrinsic records 21,000, leaving 9,000 of transaction-level remainder. The
+/// forwarded cap is that remainder, which is below the precompile's 100,000 minimum cost, so the
+/// invocation fails and records exactly the 9,000 cap — total recorded compute gas is exactly
+/// the 30,000 limit. A cap that ignored the recorded intrinsic (forwarding 30,000) or one derived
+/// from an undefined frame budget would shift the total away from the limit.
+#[test]
+fn test_direct_precompile_transaction_cap_is_the_tx_level_remainder() {
+    const TX_COMPUTE_LIMIT: u64 = 30_000;
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::REX5) {
+            continue;
+        }
+        let limits =
+            EvmTxRuntimeLimits::from_spec(spec).with_tx_compute_gas_limit(TX_COMPUTE_LIMIT);
+        let (result, usage) =
+            transact_with_limits(spec, base_db(Bytes::new()), PRECOMPILE_KZG, limits);
+        assert!(
+            matches!(result, ExecutionResult::Halt { .. }),
+            "{spec_name}: the underfunded direct precompile transaction should halt, got \
+             {result:?}"
+        );
+        assert_eq!(
+            usage.compute_gas, TX_COMPUTE_LIMIT,
+            "{spec_name}: the no-frame cap must be the transaction-level remainder, so intrinsic \
+             plus the recorded cap must equal the tx compute limit exactly"
         );
     }
 }
@@ -986,13 +1021,17 @@ fn test_data_size_exceed_is_reported_before_compute_gas_at_selfdestruct() {
         // ends in a zero-cost STOP that records nothing further, and the harness charges no fees,
         // so no post-execution fee-recipient accounting is merged into the reported totals either.
         let (control, at_opcode) =
-            transact_with_limits(spec, control_db(), EvmTxRuntimeLimits::from_spec(spec));
+            transact_with_limits(spec, control_db(), CONTRACT, EvmTxRuntimeLimits::from_spec(spec));
         assert!(control.is_success(), "{spec:?}: control program should succeed");
 
         // Under the spec's default limits the SELFDESTRUCT run succeeds and consumes more of both
         // dimensions, so each tuned limit below is crossed exactly at that opcode.
-        let (relaxed, sd_usage) =
-            transact_with_limits(spec, selfdestruct_db(), EvmTxRuntimeLimits::from_spec(spec));
+        let (relaxed, sd_usage) = transact_with_limits(
+            spec,
+            selfdestruct_db(),
+            CONTRACT,
+            EvmTxRuntimeLimits::from_spec(spec),
+        );
         assert!(relaxed.is_success(), "{spec:?}: SELFDESTRUCT under default limits should succeed");
         assert!(
             sd_usage.data_size > at_opcode.data_size &&
@@ -1006,7 +1045,7 @@ fn test_data_size_exceed_is_reported_before_compute_gas_at_selfdestruct() {
         );
 
         let reported_kind = |limits: EvmTxRuntimeLimits| {
-            let (result, _) = transact_with_limits(spec, selfdestruct_db(), limits);
+            let (result, _) = transact_with_limits(spec, selfdestruct_db(), CONTRACT, limits);
             let ExecutionResult::Revert { output, .. } = result else {
                 panic!("{spec:?}: expected a frame-local limit revert, got {result:?}")
             };

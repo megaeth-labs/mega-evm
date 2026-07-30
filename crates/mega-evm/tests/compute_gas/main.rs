@@ -201,12 +201,14 @@ fn transact_with_access_list(
     Outcome { compute_gas, gas_used, outcome }
 }
 
-/// Runs the same transaction as [`transact`] but under caller-supplied runtime limits, returning
-/// the full execution result — so revert payloads and halt reasons stay observable — together
-/// with the post-transaction tracker usage across all four resource dimensions.
+/// Runs the same transaction as [`transact`] but under caller-supplied runtime limits and an
+/// explicit call target, returning the full execution result — so revert payloads and halt
+/// reasons stay observable — together with the post-transaction tracker usage across all four
+/// resource dimensions.
 fn transact_with_limits(
     spec: MegaSpecId,
     mut db: MemoryDatabase,
+    to: Address,
     limits: EvmTxRuntimeLimits,
 ) -> (ExecutionResult<MegaHaltReason>, LimitUsage) {
     let mut context = MegaContext::new(&mut db, spec).with_tx_runtime_limits(limits);
@@ -214,8 +216,7 @@ fn transact_with_limits(
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
-    let tx =
-        TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
+    let tx = TxEnvBuilder::default().caller(CALLER).call(to).gas_limit(100_000_000).build_fill();
     let mut tx = MegaTransaction::new(tx);
     tx.enveloped_tx = Some(Bytes::new());
 
