@@ -568,3 +568,48 @@ fn test_code_deposit_recorded_only_when_deposit_occurs() {
         );
     }
 }
+
+/// Pins "Transaction Intrinsic Gas" and the contract-creation-transaction leg of "Code Deposit"
+/// for a creation transaction, which no other test here sends — every other helper dispatches a
+/// call transaction, so the creation surcharge and the EIP-3860 per-initcode-word charge are
+/// otherwise unreachable.
+///
+/// The recorded intrinsic is asserted as a closed formula over the initcode length rather than as
+/// a handful of magic numbers, so the test states which components are in the amount:
+/// base cost, the creation surcharge, the calldata token cost, and the per-initcode-word charge.
+/// Lengths straddle a word boundary (64 and 65) so a missing or mis-rounded word charge shows up.
+///
+/// Because the initcode is all zero bytes it executes as `STOP`, depositing no runtime code, so
+/// the amount is the intrinsic alone with no opcode or code-deposit contribution mixed in.
+#[test]
+fn test_creation_transaction_intrinsic_compute_gas() {
+    /// Inherited base cost of any transaction.
+    const TX_BASE_GAS: u64 = 21_000;
+    /// Inherited surcharge that only a contract-creation transaction pays.
+    const TX_CREATE_SURCHARGE: u64 = 32_000;
+    /// Gas per calldata token; a zero byte is one token.
+    const STANDARD_TOKEN_COST: u64 = 4;
+    /// EIP-3860 charge per 32-byte word of initcode.
+    const INITCODE_WORD_COST: u64 = 2;
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::MINI_REX) {
+            continue; // Equivalence records no compute gas at all.
+        }
+        for len in [0_u64, 32, 64, 65] {
+            let words = len.div_ceil(32);
+            let expected = TX_BASE_GAS +
+                TX_CREATE_SURCHARGE +
+                STANDARD_TOKEN_COST * len +
+                INITCODE_WORD_COST * words;
+
+            let actual = crate::transact_create(spec, vec![0_u8; len as usize].into()).compute_gas;
+            assert_eq!(
+                actual, expected,
+                "{spec_name}: a creation transaction with {len} initcode bytes must record base \
+                 cost + creation surcharge + calldata tokens + {words} initcode word(s) as \
+                 compute gas, and nothing else"
+            );
+        }
+    }
+}

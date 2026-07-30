@@ -181,6 +181,45 @@ fn transact_output(spec: MegaSpecId, mut db: MemoryDatabase) -> Bytes {
     result.result.output().cloned().unwrap_or_default()
 }
 
+/// Runs a **contract-creation** transaction carrying `initcode`, rather than the call transaction
+/// every other helper here sends.
+///
+/// The intrinsic-gas rules for a creation transaction differ from those for a call: it carries the
+/// inherited creation surcharge and the EIP-3860 per-initcode-word charge on top of the base cost.
+/// Those two additions are unreachable through a call transaction, so they need their own entry
+/// point to be observable at all.
+fn transact_create(spec: MegaSpecId, initcode: Bytes) -> Outcome {
+    let mut db = base_db(Bytes::new());
+    let mut context =
+        MegaContext::new(&mut db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let tx = TxEnvBuilder::default()
+        .caller(CALLER)
+        .create()
+        .data(initcode)
+        .gas_limit(100_000_000)
+        .build_fill();
+    let mut tx = MegaTransaction::new(tx);
+    tx.enveloped_tx = Some(Bytes::new());
+
+    let mut evm = MegaEvm::new(context);
+    let result =
+        alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
+    let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
+    let gas_used = result.result.gas_used();
+
+    let outcome = match &result.result {
+        ExecutionResult::Success { .. } => "success".to_string(),
+        ExecutionResult::Revert { .. } => "revert".to_string(),
+        ExecutionResult::Halt { reason, .. } => format!("halt {reason:?}"),
+    };
+
+    Outcome { compute_gas, gas_used, outcome }
+}
+
 /// Base world: funded caller, the contract under test with `code`, and the CALL fixtures.
 fn base_db(code: Bytes) -> MemoryDatabase {
     MemoryDatabase::default()
