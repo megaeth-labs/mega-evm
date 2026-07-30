@@ -174,6 +174,9 @@ Optional, if it helps orient readers.
 - Unstable content MUST still use normative language within the `<details>` block.
 - **Glossary exception**: glossary entries for unstable-spec terms do not use `<details>` blocks.
   Instead, mark them with inline text (e.g., "_(SpecName, unstable)_") at the start of the definition.
+- **Replay-page exception**: a page whose subject is a cross-spec measurement that a replaying node must implement for every spec simultaneously (currently only `evm/compute-gas.md`) MAY carry per-stable-spec behavior — spec-named rows, tables, and qualifiers — in its main Specification and Constants sections.
+  Such a page MUST state the current behavior first and derive historical behavior from it, MUST justify the departure in its Rationale section, and MUST still keep unstable-spec behavior in `<details>` blocks.
+  Spec names in its main content are linked on first use per page; repeats stay unlinked.
 
 ## Motivation and Rationale Section Rules
 

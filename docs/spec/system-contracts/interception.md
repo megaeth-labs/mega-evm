@@ -28,7 +28,8 @@ For a call made by a `CALL`-family opcode, that point is after the opcode has ex
 
 A transaction whose recipient is a system contract is also intercepted, at the same frame-initialization point.
 No opcode initiates that call, so none of the opcode-level accounting above applies to it.
-A node MUST NOT make interception conditional on an initiating opcode.
+A node MUST NOT require an initiating opcode for interception: a transaction that targets a system contract directly is intercepted all the same.
+A system contract's own dispatch policy MAY additionally restrict which calls it intercepts — [KeylessDeploy](keyless-deploy.md) intercepts only top-level transactions and lets opcode-initiated calls fall through to its on-chain bytecode.
 
 A system contract MAY intercept `CALL` or `STATICCALL`, but MUST NOT intercept `DELEGATECALL`, `CALLCODE`, `CREATE`, or `CREATE2`.
 

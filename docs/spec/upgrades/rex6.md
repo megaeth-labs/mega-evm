@@ -69,7 +69,7 @@ Both are accounting-completeness corrections in the conservative direction — a
 
 Rex6 closes two gaps in the [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox execution path:
 
-- **Gas rescue on a transaction-level compute-gas halt.** Pre-Rex6, when a keyless-deploy dispatch exceeded the transaction-level compute-gas limit, it halted with a full-spend out-of-gas and did not rescue the outer sender's unused gas — so the sender lost the entire forwarded gas envelope for a halt that performed little work, unlike every ordinary opcode-dispatch path, which already rescued. Rex6 rescues the unused gas; the receipt still spends the full gas limit for replay stability, and the rescued amount is refunded to the sender.
+- **Gas rescue on a transaction-level compute-gas halt.** Pre-Rex6, when a keyless-deploy dispatch exceeded the transaction-level compute-gas limit, it halted with a full-spend out-of-gas and did not rescue the outer sender's unused gas — so the sender lost the entire forwarded gas envelope for a halt that performed little work, unlike every ordinary opcode-dispatch path, which already rescued. Rex6 rescues the unused gas: the rescued amount is excluded from the receipt's `gas_used` and refunded to the sender, aligning this path with opcode dispatch.
 - **Self-destructing constructor reported as empty-code.** Pre-Rex6, a keyless deploy whose constructor self-destructs (EIP-6780) yet returns non-empty bytecode was reported as a successful deployment, even though the merged on-chain account holds no code — and the signer's replay barrier was consumed. Rex6 classifies this as an empty-code deployment (`deployedAddress = 0x0`), matching the merged on-chain state.
 
 ### Post-Execution Fee-Reward Accounting

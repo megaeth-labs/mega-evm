@@ -40,14 +40,14 @@ The child call frame gas limit MUST be the minimum of:
 - the gas requested by the caller, and
 - `forwarded_gas_cap`.
 
+Once forwarded, the gas belongs to the pending child: when a compute-gas exceed fails the opcode after the forwarding decision, the discarded child's gas is not returned to the parent frame, and the transaction's `gas_used` includes it even though the child never executed (see [Exceed Behavior](compute-gas.md#exceed-behavior)).
+
 <details>
-<summary>Rex6 (unstable): forwarded gas returned on a compute-gas-limit halt</summary>
+<summary>Rex6 (unstable): forwarded gas returned on a compute-gas exceed</summary>
 
-When a `CALL`-family or `CREATE` / `CREATE2` opcode records its compute gas after its body and the recording exceeds the [compute gas limit](resource-limits.md), the opcode halts and its pending child frame is discarded before the child runs.
+When a `CALL`-family or `CREATE` / `CREATE2` opcode records its compute gas after its body and the recording exceeds the [compute gas limit](resource-limits.md), the opcode fails — with the frame-local revert or the transaction-level halt — and its pending child frame is discarded before the child runs.
 
-Pre-Rex6, the gas already forwarded to that discarded child is not returned to the parent frame, so the transaction's `gas_used` is inflated by the forwarded amount even though the child never executed.
-
-Under Rex6, the node MUST return the forwarded gas to the parent frame before halting, so `gas_used` reflects only the gas actually consumed.
+Under Rex6, the node MUST return the forwarded gas to the failing frame before it terminates, so the discarded child's gas is not charged as consumed.
 
 </details>
 

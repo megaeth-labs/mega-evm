@@ -69,7 +69,8 @@ That page defines the measurement window that derives compute gas from inherited
 
 Two properties matter for this page's purposes:
 
-- A node MUST track compute gas as the sum of the amounts recorded at the sites [Compute Gas Accounting](compute-gas.md) defines, independent of [storage gas](dual-gas-model.md). It is not simply all EVM gas consumed: gas consumed by an operation whose measurement window never closes is deliberately not recorded.
+- A node MUST track compute gas as the sum of the amounts recorded at the sites [Compute Gas Accounting](compute-gas.md) defines, independent of [storage gas](dual-gas-model.md).
+  It is not simply all EVM gas consumed: gas consumed by an operation whose measurement window never closes is deliberately not recorded.
 - Compute gas MUST accumulate globally and MUST NOT be reverted — the sole exception to the [revert behavior](#revert-behavior) that governs the other three dimensions.
 
 ### Data Size

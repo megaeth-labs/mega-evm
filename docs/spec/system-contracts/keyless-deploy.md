@@ -199,7 +199,7 @@ Two cases do NOT use the success-style return:
 <summary>Rex6 (unstable): unused gas rescued on a transaction-level compute-gas halt</summary>
 
 Under Rex6, when the KeylessDeploy dispatch path halts because recording its usage exceeds the transaction-level compute-gas limit, the node MUST rescue the outer transaction's unspent gas for the sender, aligning this path with the ordinary opcode-dispatch paths that already rescue on a transaction-level limit exceed.
-The halt itself still records a full spend for replay stability; the rescued amount is refunded to the sender.
+The rescued amount is excluded from the receipt's `gas_used` and refunded to the sender.
 Pre-Rex6, this path halted with a full-spend `OutOfGas` without rescuing, so the sender lost the entire unused gas envelope for a halt that performed little work.
 
 </details>
