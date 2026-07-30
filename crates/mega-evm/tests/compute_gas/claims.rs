@@ -19,7 +19,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, SELFDESTRUCT, STATICCALL,
+        CALL, CALLCODE, CREATE, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATACOPY, SELFDESTRUCT,
+        STATICCALL,
     },
     context::result::ExecutionResult,
 };
@@ -543,6 +544,15 @@ fn repeated_staticcall(to: Address, n: usize) -> Bytes {
     b.stop().build()
 }
 
+/// Same as [`repeated_call`] but with CALLCODE units (seven operands, like CALL).
+fn repeated_callcode(to: Address, n: usize) -> Bytes {
+    let mut b = BytecodeBuilder::default();
+    for _ in 0..n {
+        b = push_call_operands(b, to, 0, 50_000).append(CALLCODE).append(POP);
+    }
+    b.stop().build()
+}
+
 /// Measures how much more the first call in a transaction costs than the second call to the same
 /// target.
 ///
@@ -690,6 +700,46 @@ fn test_access_list_address_without_storage_keys_is_charged_cold() {
             extra_with_key, 0,
             "{spec_name}: an access-list address with storage keys is loaded, not merely \
              preloaded, so its warmth must be honored"
+        );
+    }
+}
+
+/// Spec: [Inherited-Cost Exception: Preload-Warm Addresses] — the opcode table's `CALLCODE` arc
+/// across specs: no charge under `MiniRex` (no pre-execution inspection), charged cold from Rex
+/// through Rex4 (the inspection targets the call target), restored to inherited warm pricing at
+/// Rex5 (the inspection targets the executing account, which is already warm), and charged cold
+/// again under Rex6 (the delegation-aware beneficiary detection materializes the call target
+/// ahead of the inherited load).
+///
+/// The target is an access-list address listed without storage keys, so its warmth exists only
+/// as a preload and the first-vs-second-call difference isolates the first-touch pricing.
+#[test]
+fn test_callcode_cold_first_touch_follows_the_spec_arc() {
+    let program = |n| repeated_callcode(EXISTING_TARGET, n);
+    let access_list =
+        || AccessList(vec![AccessListItem { address: EXISTING_TARGET, storage_keys: vec![] }]);
+
+    for (spec, spec_name) in crate::ALL_SPECS {
+        if !spec.is_enabled(MegaSpecId::MINI_REX) {
+            continue;
+        }
+        let extra = first_call_extra_cost(
+            |code| transact_with_access_list(spec, base_db(code), access_list()),
+            program,
+            |o| o.compute_gas,
+        );
+        let expected = if spec.is_enabled(MegaSpecId::REX6) {
+            COLD_IN_PLACE_OF_WARM
+        } else if spec.is_enabled(MegaSpecId::REX5) {
+            0
+        } else if spec.is_enabled(MegaSpecId::REX) {
+            COLD_IN_PLACE_OF_WARM
+        } else {
+            0
+        };
+        assert_eq!(
+            extra, expected,
+            "{spec_name}: CALLCODE first-touch pricing must follow the documented spec arc"
         );
     }
 }

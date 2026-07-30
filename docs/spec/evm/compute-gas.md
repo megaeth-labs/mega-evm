@@ -56,7 +56,8 @@ When the first access to such an address in a transaction is made by one of the 
 | `CALLCODE`                   | Rex through [Rex4](../upgrades/rex4.md) — from [Rex5](../upgrades/rex5.md) the pre-execution inspection targets the executing account, which is already warm, so the inherited pricing is restored |
 | `SELFDESTRUCT` (beneficiary) | Rex5                                                                                                                                                                                               |
 
-When the call target carries an EIP-7702 delegation, the delegate address is subject to the same rule for the delegate-access charge.
+The rule covers the inspected address only, and the inspection does not follow EIP-7702 delegation: when the call target carries a delegation, a preload-warm delegate keeps its inherited warmth for the delegate-access charge.
+Under MiniRex through Rex4 the inspection followed the delegation, and the delegate address was charged cold on first touch as well.
 
 The rule does not extend beyond that first touch or those opcodes:
 
@@ -65,6 +66,17 @@ The rule does not extend beyond that first touch or those opcodes:
 - addresses loaded rather than merely preloaded — the transaction sender and recipient, access-list addresses listed with storage keys, and addresses created by `CREATE` / `CREATE2` — are unaffected.
 
 The extra charge is ordinary EVM gas: it is debited from the transaction's gas budget, recorded as compute gas by the opcode's measurement window, and visible in the receipt's `gas_used`.
+
+<details>
+
+<summary>Rex6 (unstable): `CALLCODE` rejoins the cold first-touch charge</summary>
+
+Under Rex6, beneficiary detection for `CALL`-family targets is delegation-aware, and resolving the delegation materializes the call target — without its preloaded warmth — ahead of the inherited load.
+For `CALLCODE`, whose pre-execution inspection targets the executing account rather than the call target, this reintroduces the cold first-touch charge for a preload-warm call target.
+The other three call opcodes already materialize their call targets, so their pricing is unchanged.
+The delegate address itself remains unaffected: resolution reads only the delegate's address, not its account.
+
+</details>
 
 ### Measurement Window
 
@@ -596,5 +608,5 @@ System-granted gas leaks to the sender, who recovers gas that was never theirs t
 - [Rex2](../upgrades/rex2.md) — re-enabled `SELFDESTRUCT`, adding the SelfDestruct metering class; introduced the keyless-deploy dispatch overhead.
 - [Rex3](../upgrades/rex3.md) — moved `SLOAD` into the Volatile class for oracle access; began recording the keyless-deploy dispatch overhead as compute gas.
 - [Rex4](../upgrades/rex4.md) — introduced the per-call-frame compute gas budget; made gas detention caps relative to usage at the access point; added beneficiary volatile-access guards to the `CALL` family, `SELFDESTRUCT`, and `SELFBALANCE`.
-- [Rex5](../upgrades/rex5.md) — excluded the `CALL_STIPEND` from the forwarded-gas deduction; moved `CREATE2` memory-expansion recording ahead of the storage-gas charge; made contract-creation code-deposit compute gas atomic with the deployment commit; refined precompile compute-gas recording and bounded it by the remaining compute budget; added the `SELFDESTRUCT` empty-beneficiary storage-gas charge; removed `CALLCODE` from the cold first-touch charge and added `SELFDESTRUCT`'s beneficiary to it.
-- [Rex6](../upgrades/rex6.md) (**unstable**) — unified the measurement window across all storage-affecting opcodes and folded `CREATE2` memory expansion into it; returned forwarded gas to the failing frame on a compute-gas exceed; rescued the unused envelope on a keyless-deploy dispatch exceed; exempted system-originated transactions from the compute gas limit and gas detention.
+- [Rex5](../upgrades/rex5.md) — excluded the `CALL_STIPEND` from the forwarded-gas deduction; moved `CREATE2` memory-expansion recording ahead of the storage-gas charge; made contract-creation code-deposit compute gas atomic with the deployment commit; refined precompile compute-gas recording and bounded it by the remaining compute budget; added the `SELFDESTRUCT` empty-beneficiary storage-gas charge; removed `CALLCODE` from the cold first-touch charge and added `SELFDESTRUCT`'s beneficiary to it; stopped following EIP-7702 delegation in the pre-execution inspection, restoring inherited warmth for delegates.
+- [Rex6](../upgrades/rex6.md) (**unstable**) — unified the measurement window across all storage-affecting opcodes and folded `CREATE2` memory expansion into it; returned forwarded gas to the failing frame on a compute-gas exceed; rescued the unused envelope on a keyless-deploy dispatch exceed; made beneficiary detection delegation-aware, returning `CALLCODE` call targets to the cold first-touch charge; exempted system-originated transactions from the compute gas limit and gas detention.
