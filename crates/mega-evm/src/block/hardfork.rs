@@ -321,12 +321,16 @@ impl MegaHardforkConfig {
     }
 
     /// Activates every `MegaHardfork` whose spec is enabled under `spec` at timestamp 0, and
-    /// leaves every later fork unregistered.
+    /// unregisters every later fork.
     ///
     /// This is how to express "a chain running spec N": the resulting config resolves to `spec`
     /// at any timestamp. Removing only the next fork up is not equivalent — the ladder runs past
     /// it, so the config would resolve to the newest fork still registered rather than to `spec`,
     /// and it would silently drift again the next time a spec is introduced.
+    ///
+    /// The result is a function of `spec` alone, not of what the config held before: a later fork
+    /// already registered is removed rather than left in place, so the resolved spec does not
+    /// depend on builder call order.
     ///
     /// Patch hardforks are included by their spec, not their position: `MiniRex1` maps back to
     /// [`MegaSpecId::EQUIVALENCE`], so it is registered for every `spec`.
@@ -334,6 +338,8 @@ impl MegaHardforkConfig {
         for fork in MegaHardfork::ALL {
             if spec.is_enabled(fork.spec_id()) {
                 self.insert(fork, ForkCondition::Timestamp(0));
+            } else {
+                self = self.without(fork);
             }
         }
         self
@@ -539,6 +545,13 @@ mod tests {
             let config = MegaHardforkConfig::default().with_all_activated_through(spec);
             assert_eq!(config.spec_id(0), spec, "{spec:?} at genesis");
             assert_eq!(config.spec_id(u64::MAX), spec, "{spec:?} must be terminal");
+
+            // The same contract must hold when the config already carries later forks: the
+            // builder states the whole ladder, so it removes what it does not activate. Without
+            // that, the resolved spec would depend on which builder ran last.
+            let downgraded =
+                MegaHardforkConfig::default().with_all_activated().with_all_activated_through(spec);
+            assert_eq!(downgraded.spec_id(u64::MAX), spec, "{spec:?} from an activated config");
         }
 
         // `MegaSpecId::default()` tracks the latest spec, so the unqualified builder is the
