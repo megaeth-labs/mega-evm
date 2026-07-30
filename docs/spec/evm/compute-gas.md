@@ -94,7 +94,7 @@ A forwarding-cap adjustment applied after the inner body completes changes the r
 
 <details>
 
-<summary>Rex6 (unstable): canonical window boundaries for storage-affecting opcodes</summary>
+<summary>[Rex6](../upgrades/rex6.md) (unstable): canonical window boundaries for storage-affecting opcodes</summary>
 
 Under Rex6, the window for every storage-affecting opcode — `SSTORE`, `LOG0` through `LOG4`, `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2`, and `SELFDESTRUCT` — MUST open before the opcode's storage-gas charge and before any wrapper-side EVM gas work, and MUST close after the inner opcode body completes.
 An opcode MAY realize this canonical window through the equivalent charge-outside-window form of the [storage gas exclusion](#storage-gas-exclusion), opening after its storage-gas charge with `storage_gas_charged` treated as zero; the recorded amount is identical by construction.
@@ -158,8 +158,8 @@ A `DELEGATECALL` or `STATICCALL` never satisfies it (wrong scheme), a zero-value
 The `CALL_STIPEND` adjustment exists because the stipend is added to the child's gas limit without being deducted from the parent's remaining gas.
 Treating it as forwarded would under-count the parent's compute gas by the stipend amount.
 
-Under MiniRex, `CALLCODE`, `DELEGATECALL`, and `STATICCALL` do not apply the [98/100 forwarding cap](gas-forwarding.md), and therefore deduct the child's uncapped gas limit from the parent's recorded compute gas.
-From Rex onward these three opcodes are subject to the same forwarding cap as `CALL`.
+`CALLCODE`, `DELEGATECALL`, and `STATICCALL` are subject to the same [98/100 forwarding cap](gas-forwarding.md) as `CALL`.
+Under MiniRex only, these three opcodes do not apply the cap, and therefore deduct the child's uncapped gas limit from the parent's recorded compute gas; Rex brought them under the cap.
 
 #### Refund Exclusion
 
@@ -245,15 +245,13 @@ Under Rex6 the class assignment is identical to the current assignment above.
 #### Contract Creation Memory Expansion
 
 `CREATE2` expands memory to hash its initcode before the inner opcode runs.
-The EVM gas consumed by that expansion is compute gas, and the spec determines which window records it:
-
-| Spec         | Recording                                                                                                                                                                                                       |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MiniRex–Rex4 | Recorded in a second window, after the inner opcode completes and after the main window records. Skipped if the inner opcode fails, or if the main window's recording fails the opcode on a compute-gas exceed. |
-| Rex5         | Recorded in a separate window, before the contract-creation storage gas is charged.                                                                                                                             |
-
-Under MiniRex through Rex5 a node MUST therefore record `CREATE2` compute gas in two windows.
+The EVM gas consumed by that expansion is compute gas, and a node MUST record it in a window of its own: `CREATE2` records in two windows.
 This is the sole stable exception to the [single-record rule](#single-record-rule).
+
+The expansion window is recorded before the contract-creation storage gas is charged, ahead of the opcode's main window.
+
+Under MiniRex through Rex4 the expansion window instead records last: after the inner opcode completes and after the main window records.
+On those specs it is skipped if the inner opcode fails, or if the main window's recording fails the opcode on a compute-gas exceed.
 
 <details>
 
@@ -301,18 +299,7 @@ It therefore reduces the budget available to the top-level call frame, as specif
 
 #### Precompiles
 
-A node MUST record a precompile invocation's compute gas as follows:
-
-| Spec         | Recorded amount              |
-| ------------ | ---------------------------- |
-| Equivalence  | Not recorded                 |
-| MiniRex–Rex4 | The gas the precompile spent |
-| Rex5+        | See below                    |
-
-Under MiniRex through Rex4, "the gas the precompile spent" is the amount the precompile itself recorded as consumed.
-On a failing invocation no cost is recorded, so the compute gas recorded is zero — even though the parent frame still burns the forwarded gas limit.
-
-From Rex5 onward, the gas limit a node forwards into a precompile is capped at the remaining compute gas budget, as specified in [Precompile Compute-Gas Bound](resource-limits.md#precompile-compute-gas-bound).
+The gas limit a node forwards into a precompile is capped at the remaining compute gas budget, as specified in [Precompile Compute-Gas Bound](resource-limits.md#precompile-compute-gas-bound).
 Call that capped value the **effective gas limit**:
 
 ```
@@ -323,7 +310,7 @@ remaining_compute_gas = min(current frame's remaining budget,
 
 A precompile is therefore bounded by whichever of the [per-call-frame budget](#per-call-frame-budget) and the detained [transaction budget](#effective-limit) binds first.
 
-A node MUST record a Rex5+ precompile invocation's compute gas as:
+A node MUST record a precompile invocation's compute gas as:
 
 ```text
 if the precompile returned or reverted:
@@ -345,6 +332,17 @@ Both non-`gas_spent` branches exist because the precompile recorded no cost on t
 On a halting precompile the recorded compute gas is deliberately distinct from the EVM gas the parent frame burns: the parent burns the caller-supplied call gas limit, while the compute gas recorded is the effective gas limit.
 When the compute-gas cap is the binding constraint the two amounts differ, and a node MUST NOT reconcile them.
 
+Earlier specs record less:
+
+| Spec         | Recorded amount              |
+| ------------ | ---------------------------- |
+| MiniRex–Rex4 | The gas the precompile spent |
+| Equivalence  | Not recorded                 |
+
+Under MiniRex through Rex4, no compute-gas cap bounds the forwarded gas, and "the gas the precompile spent" is the amount the precompile itself recorded as consumed.
+On a failing invocation no cost is recorded, so the compute gas recorded is zero — even though the parent frame still burns the forwarded gas limit.
+Rex5 introduced the cap and the three-branch recording above.
+
 #### Contract Creation Code Deposit
 
 For any contract creation (`CREATE`, `CREATE2`, or a contract-creation transaction), a node MUST record the code-deposit compute gas — `code_length × CODEDEPOSIT` — exactly once, and only when the deposit's success conditions hold at the recording point.
@@ -354,8 +352,8 @@ These conditions apply on every spec; only the point at which the recording happ
 
 | Spec         | Recording point                                                                                                                                                                                    |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MiniRex–Rex4 | During frame-return processing, in the window covering the EVM's code-deposit charge.                                                                                                              |
 | Rex5+        | Atomically with the deployment commit: recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract. |
+| MiniRex–Rex4 | During frame-return processing, in the window covering the EVM's code-deposit charge.                                                                                                              |
 
 A node MUST NOT record this amount twice.
 
@@ -496,8 +494,8 @@ See [Resource Accounting](resource-accounting.md#revert-behavior).
 
 | Constant                        | Value         | Spec           | Description                                                                                                      |
 | ------------------------------- | ------------- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `TX_COMPUTE_GAS_LIMIT`          | 1,000,000,000 | MiniRex        | Maximum compute gas per transaction under MiniRex                                                                |
 | `TX_COMPUTE_GAS_LIMIT`          | 200,000,000   | Rex onward     | Maximum compute gas per transaction from Rex onward                                                              |
+| `TX_COMPUTE_GAS_LIMIT`          | 1,000,000,000 | MiniRex        | Maximum compute gas per transaction under MiniRex                                                                |
 | `FRAME_LIMIT_NUMERATOR`         | 98            | Rex4 onward    | Numerator of the per-call-frame budget forwarding fraction                                                       |
 | `FRAME_LIMIT_DENOMINATOR`       | 100           | Rex4 onward    | Denominator of the per-call-frame budget forwarding fraction                                                     |
 | `CALL_STIPEND`                  | 2,300         | All            | Standard EVM value-transfer call stipend, inherited unchanged                                                    |
