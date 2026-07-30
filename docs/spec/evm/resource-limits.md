@@ -184,6 +184,17 @@ For each _applied_ EIP-7702 authorization that materializes a previously non-exi
 This charge MUST be folded into the transaction's intrinsic gas so that it is deducted before the first call frame and enforced against the gas limit and fee affordability.
 A node MUST NOT charge this new-account gas twice when a value-transferring call materializes the same account that an applied authorization materializes.
 
+#### Authorization List Skip on Pre-Frame Limit Exceed
+
+A type-4 transaction's authorization list is applied — each applied authority's account written — during pre-execution, before the transaction's first call frame begins.
+A per-transaction limit that pre-frame accounting has already exceeded still halts the transaction at the first frame boundary, but a frame-boundary halt does not roll back writes performed before that frame began.
+Without a guard, a transaction halting on the state-growth limit could commit more net-new authority accounts than the per-transaction state-growth cap allows.
+
+For a type-4 transaction, if any per-transaction resource limit has already been exceeded at the point where the authorization list would be applied, a node MUST NOT apply any authorization in the list.
+The skip is all-or-nothing: once any per-transaction limit is exceeded — whether by the authorizations themselves or by the transaction's other pre-frame usage, such as calldata — no authorization in the list is applied, including ones that would fit under the limit.
+The transaction MUST still halt at the same frame boundary with the same limit-exceeded halt reason it would have reached without the skip.
+Because no authorization is applied, an already-existing authority forgoes the per-authorization refund it would otherwise earn.
+
 ## Constants
 
 | Constant                   | Value       | Description                                     |

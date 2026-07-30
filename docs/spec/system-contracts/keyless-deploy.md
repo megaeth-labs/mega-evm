@@ -88,7 +88,7 @@ Before starting sandbox execution, the node MUST enforce the following checks:
 2. `gasLimitOverride >= inner_tx.gas_limit`,
 3. the signer can be recovered from the inner transaction signature,
 4. the signer nonce in parent state is at most `1`,
-5. the expected deployment address does not already contain code,
+5. the expected deployment address does not already contain code (see [Deploy-Address Occupancy Read](#deploy-address-occupancy-read)),
 6. the signer has sufficient balance to cover the inner transaction's `value` (the sandbox runs fee-free, so no gas component is included),
 7. the caller has sufficient remaining compute gas to pay `KEYLESS_DEPLOY_OVERHEAD_GAS`,
 8. the inner transaction's initcode length does not exceed the configured maximum initcode size,
@@ -97,6 +97,15 @@ Before starting sandbox execution, the node MUST enforce the following checks:
 The expected deployment address MUST be:
 
 `keccak256(rlp([signer, 0]))[12:]`
+
+### Deploy-Address Occupancy Read
+
+A node MUST perform the occupancy check of validation rule 5 as a cold, code-hash-only read through the parent journal, so the deploy address is part of the transaction's returned state — including when the check fails with `ContractAlreadyExists()`.
+The read MUST NOT load the account's bytecode, and the deploy address MUST remain cold for warm/cold access-list gas accounting.
+
+This governs only the transaction's returned state — the stateless-witness read set.
+It does not change the occupancy decision, the committed gas, or the committed state.
+Specs through Rex5 read the database directly, bypassing the journal, so the deploy address is absent from the transaction's returned state there.
 
 ### Sandbox Execution Model
 
@@ -269,5 +278,5 @@ Allowing nonce `1` preserves deployability in that case while still preventing a
 - [Rex2](../upgrades/rex2.md) introduced KeylessDeploy and its stable top-level interception model.
 - [Rex3](../upgrades/rex3.md) makes the overhead gas count toward compute gas accounting.
 - [Rex5](../upgrades/rex5.md) rejects encodings with trailing bytes after the signed RLP payload by reverting with `MalformedEncoding()`; propagates sandbox resource usage and volatile-access footprint to the parent transaction, charges sandbox EVM gas to the outer gas meter, caps `gasLimitOverride` to remaining gas, caps sandbox resource budgets to the parent's remaining limits before execution, preflights known sandbox intrinsic usage, and rejects the outer call without merging sandbox state on the residual overflow path; refactors `InternalError` to selector-only and adds the new selector-only `InvalidTransaction()` validation error; and forwards the constructor's logs when an inner deployment succeeds with empty runtime code.
-- [Rex6](../upgrades/rex6.md) rescues the outer sender's unspent gas when the dispatch path halts on the transaction-level compute-gas limit, and classifies a create-then-`SELFDESTRUCT` constructor that returns non-empty bytecode as an `EmptyCodeDeployed` result (`deployedAddress = 0x0`) matching the merged on-chain state.
+- [Rex6](../upgrades/rex6.md) rescues the outer sender's unspent gas when the dispatch path halts on the transaction-level compute-gas limit; classifies a create-then-`SELFDESTRUCT` constructor that returns non-empty bytecode as an `EmptyCodeDeployed` result (`deployedAddress = 0x0`) matching the merged on-chain state; and reads the deploy-address occupancy check through the parent journal so the address joins the transaction's returned state.
   Through Rex5, the dispatch path halts with a full-spend `OutOfGas` without rescuing, and the self-destructing constructor is reported as a successful deployment even though the merged account holds no code.

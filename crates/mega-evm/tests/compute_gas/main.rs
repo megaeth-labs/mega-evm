@@ -9,8 +9,7 @@
 //! That makes the recorded amount — not the instruction-table wiring — the thing a refactor of the
 //! per-opcode metering layer must preserve. This suite pins it: a corpus covering every metering
 //! class, and every non-opcode recording site reachable from a plain transaction, is executed under
-//! all nine specs, and the resulting compute-gas readings are compared against a checked-in
-//! snapshot.
+//! every spec, and the resulting compute-gas readings are compared against a checked-in snapshot.
 //!
 //! The one recording site the corpus does not reach is `KeylessDeploy` — its dispatch overhead and
 //! the Rex5 sandbox-usage merge. Driving it needs a signed RLP payload, and it is already pinned by
@@ -19,8 +18,8 @@
 //! Within that corpus, any change to a recorded amount on any spec surfaces as a snapshot diff.
 //! The corpus runs against minimum-capacity SALT buckets throughout, so recorded amounts that only
 //! move once a bucket grows are pinned by the claim tests in `claims.rs` rather than here.
-//! Stable specs (Equivalence through Rex5) must never move; a diff there is a replay-breaking
-//! regression.
+//! Frozen specs (Equivalence through Rex6) must never move; a diff there is a replay-breaking
+//! regression. Only the unstable spec's rows may change.
 //!
 //! Regenerate after an intentional change:
 //!

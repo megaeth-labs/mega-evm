@@ -422,7 +422,7 @@ A compute gas exceed is either _frame-local_ or _transaction-level_, and the two
 | Per-frame budget exceeded                 | Frame-local       | The frame MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`                            | Returns to the parent frame normally                |
 | Transaction limit exceeded                | Transaction-level | The transaction MUST halt with `OutOfGas`                                                           | Remaining gas is rescued and refunded to the sender |
 | Detained limit exceeded                   | Transaction-level | The transaction MUST halt with `VolatileDataAccessOutOfGas` (see [Gas Detention](gas-detention.md)) | Remaining gas is rescued and refunded to the sender |
-| Keyless-deploy dispatch overhead exceeded | See below         | The frame MUST revert, or the transaction MUST halt with `OutOfGas`                                 | Remaining gas is rescued and refunded to the sender |
+| Keyless-deploy dispatch overhead exceeded | See below         | The frame MUST revert, or the transaction MUST halt with `OutOfGas`                                 | As for the matching scope above                     |
 
 A frame-local exceed in a nested frame does not fail the transaction: the parent frame MAY continue execution.
 The top-level frame also carries a budget, and a frame-local exceed there has no parent to return to — the transaction's own result becomes the revert, and the receipt reports failure.
@@ -430,6 +430,9 @@ The top-level frame also carries a budget, and a frame-local exceed there has no
 On a transaction-level exceed, a node MUST preserve the frame's remaining gas for refund to the sender.
 The rescued amount MUST exclude any portion contributed by the [storage gas stipend](../glossary.md#storage-gas-stipend), so that system-granted gas is not recovered by the sender.
 The rule admits no exception: the keyless-deploy dispatch path rescues on the same terms as opcode dispatch.
+
+Rescue is specific to a transaction-level exceed.
+A frame-local exceed needs none: the frame reverts and its unspent gas returns to the parent through ordinary frame accounting.
 
 When a `CALL`-family or `CREATE` / `CREATE2` opcode fails on a compute-gas exceed — the frame-local revert and the transaction-level halt alike — its pending child frame is discarded before the child runs.
 A node MUST return the gas already forwarded to that discarded child to the frame before it terminates, so that gas is not charged as consumed: on a frame-local revert it returns to the parent frame, and on a transaction-level halt it is excluded from the transaction's `gas_used`.
@@ -449,8 +452,8 @@ When recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispat
 - A transaction-level exceed MUST halt with `OutOfGas` and empty output.
   A node MUST NOT attach `InsufficientComputeGas` to this branch; the caller cannot distinguish it from any other out-of-gas halt.
 
-Both branches rescue the outer transaction's remaining gas under the general rule above.
-Specs through Rex5 do not: on those specs a transaction-level exceed here records a full spend and the sender loses the entire unused envelope.
+Each branch handles gas as its scope does above: the frame-local revert returns unspent gas to the parent through ordinary frame accounting, and the transaction-level halt rescues the outer transaction's remaining gas for the sender.
+Specs through Rex5 do not rescue on this path: on those specs a transaction-level exceed here records a full spend and the sender loses the entire unused envelope.
 See [Keyless Deployment](../system-contracts/keyless-deploy.md) for the full dispatch semantics.
 
 ### Revert Behavior

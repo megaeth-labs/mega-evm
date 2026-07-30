@@ -19,6 +19,7 @@ is_enabled(MegaSpecId::REX4) ==> is_enabled(MegaSpecId::REX5)
 is_enabled(MegaSpecId::REX5) ==> is_enabled(MegaSpecId::REX4)
 is_enabled(MegaSpecId::REX5) ==> is_enabled(MegaSpecId::REX6)
 is_enabled(MegaSpecId::REX6) ==> is_enabled(MegaSpecId::REX5)
+is_enabled(MegaSpecId::REX6) ==> is_enabled(MegaSpecId::REX7)
 
 # --- SPEC_MATCH_MISROUTE: reroute a per-spec instruction-table arm ---
 :[pre~[^_A-Za-z0-9]]mini_rex::instruction_table ==> :[pre]rex::instruction_table

@@ -1,5 +1,5 @@
 ---
-description: SELFDESTRUCT opcode on MegaETH — EIP-6780 semantics, same-transaction destruction, beneficiary account metering, and spec history from MiniRex to Rex5.
+description: SELFDESTRUCT opcode on MegaETH — EIP-6780 semantics, same-transaction destruction, beneficiary account metering, and spec history from MiniRex to Rex6.
 spec: Rex6
 ---
 
@@ -32,6 +32,7 @@ If the executing contract was not created in the same transaction, `SELFDESTRUCT
 - preserve the contract's code and storage.
 
 `SELFDESTRUCT` targeting the [beneficiary](../glossary.md#beneficiary) MUST trigger beneficiary [gas detention](gas-detention.md).
+A `SELFDESTRUCT` whose **executing contract** is the beneficiary MUST also trigger it: the operation reads and zeroes the executing contract's balance, so it observes beneficiary state regardless of its stack target.
 
 ### Beneficiary Account Creation
 
@@ -42,7 +43,17 @@ A node MUST meter this account creation identically to account creation by any o
 - record the creation against the [data size](resource-accounting.md#data-size) (`+SELFDESTRUCT_BENEFICIARY_DATA_BYTES`), [KV updates](resource-accounting.md#kv-updates) (`+1`), and [state growth](resource-accounting.md#state-growth) (`+1`) resource lanes.
 
 A `SELFDESTRUCT` whose transferred balance is zero MUST NOT incur any of these charges, because a zero-value transfer does not create the target account.
-A `SELFDESTRUCT` whose target already exists in state MUST NOT incur these charges.
+
+### Beneficiary Balance Credit to an Existing Account
+
+When `SELFDESTRUCT` transfers a non-zero balance to a target that already exists in state and is **distinct** from the executing contract, no account is created, but the target's balance is written.
+A node MUST record that write against the [data size](resource-accounting.md#data-size) (`+SELFDESTRUCT_BENEFICIARY_DATA_BYTES`) and [KV updates](resource-accounting.md#kv-updates) (`+1`) resource lanes.
+A node MUST NOT charge account-creation storage gas and MUST NOT record state growth for this case — the account already exists.
+
+Two cases record nothing:
+
+- a `SELFDESTRUCT` whose transferred balance is zero, which performs no balance credit; and
+- a `SELFDESTRUCT` whose target is the executing contract itself, which is an [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) balance no-op.
 
 ### State Growth Refund
 
@@ -90,3 +101,4 @@ Charging the same account-creation storage gas and recording the same resource-l
 - [Rex2](../upgrades/rex2.md) re-enables `SELFDESTRUCT` with [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) semantics.
 - [Rex4](../upgrades/rex4.md) — added beneficiary-triggered volatile-access behavior for SELFDESTRUCT, and [state growth refund](#state-growth-refund) for same-transaction-created accounts destroyed by `SELFDESTRUCT`.
 - [Rex5](../upgrades/rex5.md) — charged account-creation storage gas and recorded data-size, KV-update, and state-growth usage when a value-carrying `SELFDESTRUCT` creates a previously non-existent beneficiary account.
+- [Rex6](../upgrades/rex6.md) — recorded the data-size and KV-update cost of a non-zero balance credit to an **existing** distinct target, which through Rex5 was metered as nothing at all; extended beneficiary detention and `disableVolatileDataAccess` to a `SELFDESTRUCT` whose executing contract is the beneficiary, not only one whose stack target is.

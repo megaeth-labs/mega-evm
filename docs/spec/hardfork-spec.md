@@ -38,9 +38,9 @@ REX6 is frozen and has no activation timestamp on either mainnet or testnet, so 
 
 ### Backward Compatibility
 
-EVM semantics for stable (activated) specs are frozen.
-A new spec may add behavior, but it never alters what an existing stable spec does.
-Every spec carries the invariant that stable pre-{Spec} semantics remain unchanged.
+A frozen spec's EVM semantics never change again.
+Freezing is what confers that guarantee — not activation: a frozen spec no network has scheduled is as immutable as one running on mainnet, because a future schedule would replay history against it.
+A new spec may add behavior, but it never alters what an existing frozen spec does.
 
 This means:
 
