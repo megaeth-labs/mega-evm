@@ -1034,6 +1034,25 @@ mod tests {
         );
     }
 
+    /// A gap in the middle of the ladder is flagged too, naming the first missing rung. Unlike
+    /// the lowest rung (whose empty prefix makes it trivially spec-introducing), this exercises
+    /// the prefix classification for real: `Rex` counts as a rung only because every
+    /// earlier-declared fork maps strictly below it.
+    #[test]
+    fn test_validate_schedule_rejects_skipped_middle_rung() {
+        let hf = MegaHardforkConfig::new()
+            .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
+            .with(MegaHardfork::Rex2, ForkCondition::Timestamp(0));
+
+        assert_eq!(
+            hf.validate_schedule(),
+            Err(ScheduleError::SkippedRung {
+                missing: MegaHardfork::Rex,
+                scheduled: MegaHardfork::Rex2
+            })
+        );
+    }
+
     #[test]
     fn test_validate_schedule_rejects_unordered_forks() {
         let hf = MegaHardforkConfig::new()
