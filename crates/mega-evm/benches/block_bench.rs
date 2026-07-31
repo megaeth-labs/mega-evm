@@ -446,6 +446,35 @@ fn bench_rex5_pre_block(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark hardfork-config resolution on the real mainnet schedule.
+///
+/// The floor-projected predicates (`is_rex_5_active_at_timestamp`) and
+/// `max_activated_spec_id` are what downstream node components call once per block; `spec_id`
+/// is the executor's per-block resolution; `validate_schedule` is a once-per-config-load cost.
+/// The floor's descending early-exit scan keeps the per-query cost at one or two activation
+/// lookups for chains near the top of the ladder, which this benchmark pins.
+fn bench_hardfork_resolution(c: &mut Criterion) {
+    use mega_evm::MegaHardforks;
+
+    let mut group = c.benchmark_group("hardfork_resolution");
+    let schedule = mega_evm::mainnet_hardforks();
+    // A timestamp after the last scheduled fork: every real query happens here.
+    let ts = 1_800_000_000u64;
+
+    group.bench_function("is_rex_5_active_at_timestamp", |b| {
+        b.iter(|| black_box(schedule.is_rex_5_active_at_timestamp(black_box(ts))))
+    });
+    group.bench_function("max_activated_spec_id", |b| {
+        b.iter(|| black_box(schedule.max_activated_spec_id(black_box(ts))))
+    });
+    group.bench_function("spec_id", |b| b.iter(|| black_box(schedule.spec_id(black_box(ts)))));
+    group.bench_function("validate_schedule", |b| {
+        b.iter(|| black_box(schedule.validate_schedule()))
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_block_empty_txs,
@@ -453,5 +482,6 @@ criterion_group!(
     bench_block_deploy,
     bench_block_spec_comparison,
     bench_rex5_pre_block,
+    bench_hardfork_resolution,
 );
 criterion_main!(benches);

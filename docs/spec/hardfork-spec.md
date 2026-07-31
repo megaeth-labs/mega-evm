@@ -32,8 +32,11 @@ The distinction matters for chain setup that is one-way.
 System contracts predeployed under a hardfork remain deployed, and pre-block system calls remain in effect, even while a later hardfork rolls the executing semantics back to an earlier spec.
 A rollback changes how transactions execute; it does not un-deploy a contract or retract a system call.
 
-Pre-block setup — system-contract predeploys, their bytecode versions, and the pre-block EIP-2935/EIP-4788 system calls — is therefore determined by the highest spec reached.
+Pre-block setup — system-contract predeploys, their bytecode versions, and the fail-closed rules on the pre-block EIP-2935/EIP-4788 system calls — is therefore determined by the highest spec reached.
 Everything else — opcode behavior, gas costs, resource limits, transaction classification — is determined by the executing spec.
+
+A published hardfork schedule climbs the spec ladder rung by rung: a hardfork is scheduled only after every hardfork of a lower spec, with patch hardforks as the only ones a network may skip.
+Execution is additionally robust to a malformed schedule: because setup derives from the highest spec reached, a scheduled hardfork implies its predecessors' setup even if they were never scheduled.
 
 This documentation covers specs — the verifiable behavioral definitions that determine correctness of a MegaETH node.
 Protocol-level changes outside the verifiable execution layer (e.g., networking, peer discovery) that are part of a hardfork are not covered here.

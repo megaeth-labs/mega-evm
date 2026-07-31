@@ -26,10 +26,12 @@ use revm::{
 };
 
 use crate::{
-    block::eips, is_apply_pending_changes_due, resolve_system_address,
-    transact_apply_pending_changes, transact_deploy, BlockLimiter, BlockMegaTransactionOutcome,
-    BucketId, MegaBlockExecutionCtx, MegaHardforks, MegaSystemCallOutcome, MegaTransaction,
-    MegaTransactionExt, MegaTransactionOutcome,
+    block::eips, flat_system_contract_specs_for, is_apply_pending_changes_due,
+    resolve_system_address, transact_apply_pending_changes, transact_deploy,
+    transact_deploy_sequencer_registry_for, BlockLimiter, BlockMegaTransactionOutcome, BucketId,
+    MegaBlockExecutionCtx, MegaHardforks, MegaSpecId, MegaSystemCallOutcome, MegaTransaction,
+    MegaTransactionExt, MegaTransactionOutcome, SequencerRegistryConfig,
+    SequencerRegistryRex6Config,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -64,7 +66,7 @@ pub struct MegaBlockExecutor<H, E, R: OpReceiptBuilder> {
     ///
     /// Cached because the block env is fixed for an executor's lifetime — the constructor
     /// already reads `block().timestamp` for its hardfork-coherence asserts.
-    setup_spec: crate::MegaSpecId,
+    setup_spec: MegaSpecId,
 
     /// The inner evm instance.
     pub evm: E,
@@ -195,7 +197,7 @@ where
         // Gating setup on the reversible spec would drop the Oracle predeploys — and their
         // read-only witness entries — from every block in such a window.
         let setup_spec = self.setup_spec;
-        let is_rex_5 = setup_spec.is_enabled(crate::MegaSpecId::REX5);
+        let is_rex_5 = setup_spec.is_enabled(MegaSpecId::REX5);
 
         // EIP-2935
         let result_and_state = eips::transact_blockhashes_contract_call(
@@ -252,7 +254,7 @@ where
         // MegaAccessControl, MegaLimitControl) share one deploy path via the canonical
         // registry. We tentatively use `StateChangeSource::Transaction(0)` as the state
         // change source, as alloy defines no specific source for these predeploys.
-        for spec in crate::flat_system_contract_specs_for(setup_spec) {
+        for spec in flat_system_contract_specs_for(setup_spec) {
             let state =
                 transact_deploy(self.evm.db_mut(), &spec).map_err(BlockExecutionError::other)?;
             outcomes
@@ -265,14 +267,15 @@ where
         if is_rex_5 {
             // Deploy: seeds system address, sequencer, admin, and initialFromBlock
             // into storage on first deploy.
-            // Cloned so the helper below can take `&mut self`; two addresses, once per block.
+            // Cloned so the helper below can take `&mut self`; a few words, once per block.
             let params = self
                 .hardforks
-                .fork_params::<crate::SequencerRegistryConfig>()
+                .fork_params::<SequencerRegistryConfig>()
                 .ok_or_else(|| BlockValidationError::BlockHashContractCall {
                     message: "Rex5 active but SequencerRegistryConfig not configured".into(),
                 })?
                 .clone();
+            let rex6_params = self.hardforks.fork_params::<SequencerRegistryRex6Config>().cloned();
 
             // The deploy and apply-pending-changes outcomes commit in push order, while the
             // apply system call always executes against the not-yet-committed state and thus
@@ -285,11 +288,12 @@ where
             // `applyPendingChanges()` logic is identical in v1/v2 (v2 changes only rotation
             // scheduling), so its semantics do not depend on which side of the deploy it
             // executes. Pre-Rex6 blocks keep the original deploy-then-apply order untouched.
-            let is_rex_6 = setup_spec.is_enabled(crate::MegaSpecId::REX6);
+            let is_rex_6 = setup_spec.is_enabled(MegaSpecId::REX6);
 
             if !is_rex_6 {
                 self.push_deploy_sequencer_registry_outcome(
                     setup_spec,
+                    rex6_params.as_ref(),
                     block_number,
                     &params,
                     &mut outcomes,
@@ -320,6 +324,7 @@ where
             if is_rex_6 {
                 self.push_deploy_sequencer_registry_outcome(
                     setup_spec,
+                    rex6_params.as_ref(),
                     block_number,
                     &params,
                     &mut outcomes,
@@ -334,14 +339,15 @@ where
     /// and pushes its outcome.
     fn push_deploy_sequencer_registry_outcome(
         &mut self,
-        setup_spec: crate::MegaSpecId,
+        setup_spec: MegaSpecId,
+        rex6_params: Option<&SequencerRegistryRex6Config>,
         block_number: u64,
-        params: &crate::SequencerRegistryConfig,
+        params: &SequencerRegistryConfig,
         outcomes: &mut Vec<MegaSystemCallOutcome>,
     ) -> Result<(), BlockExecutionError> {
-        let result_and_state = crate::transact_deploy_sequencer_registry_for(
-            &self.hardforks,
+        let result_and_state = transact_deploy_sequencer_registry_for(
             setup_spec,
+            rex6_params,
             block_number,
             self.evm.db_mut(),
             params,

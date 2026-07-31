@@ -352,7 +352,11 @@ mod tests {
             .with(MegaHardfork::Rex5, ForkCondition::Never)
             .with(MegaHardfork::Rex6, ForkCondition::Timestamp(0));
 
-        assert!(!hf.is_mini_rex_active_at_timestamp(0), "no lower fork is scheduled");
+        assert_eq!(
+            hf.mega_fork_activation(MegaHardfork::MiniRex),
+            ForkCondition::Never,
+            "no lower fork is scheduled"
+        );
 
         let specs = flat_system_contract_specs(&hf, 0);
         assert_eq!(specs.len(), 5, "the partial ladder must still deploy all five flat contracts");

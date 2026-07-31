@@ -90,10 +90,10 @@ fn rex5_chain_spec() -> MegaHardforkConfig {
 }
 
 fn rex4_chain_spec() -> MegaHardforkConfig {
-    // Activate up to Rex4 only — Rex5 stays at `ForkCondition::Never`, so
-    // `is_rex_5_active_at_timestamp(_)` returns false and the new check is
+    // Activate up to Rex4 only — Rex5 stays at `ForkCondition::Never`, so the
+    // activated-spec floor stays below REX5 and the Rex5 fail-closed check is
     // skipped. Sequencer registry is not needed because its deploy is gated
-    // on Rex5 activation.
+    // on the same floor.
     MegaHardforkConfig::default().with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
 }
 

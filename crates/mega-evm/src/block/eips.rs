@@ -16,6 +16,7 @@ use revm::{
 
 use crate::{
     block::hardfork::MegaHardforks, ExternalEnvTypes, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId,
 };
 
 /// Applies the pre-block call to the [EIP-2935] blockhashes contract, using the given block,
@@ -39,7 +40,7 @@ use crate::{
 #[inline]
 pub(crate) fn transact_blockhashes_contract_call<H, DB, INSP, ExtEnvs>(
     hardforks: H,
-    setup_spec: crate::MegaSpecId,
+    setup_spec: MegaSpecId,
     parent_block_hash: B256,
     evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
 ) -> Result<Option<ResultAndState<MegaHaltReason>>, BlockExecutionError>
@@ -60,7 +61,7 @@ where
         return Ok(None);
     }
 
-    let res = if setup_spec.is_enabled(crate::MegaSpecId::REX5) {
+    let res = if setup_spec.is_enabled(MegaSpecId::REX5) {
         let gas_limit =
             evm.block().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
         evm.transact_system_call_with_gas_limit(
@@ -100,7 +101,7 @@ where
 #[inline]
 pub(crate) fn transact_beacon_root_contract_call<H, DB, INSP, ExtEnvs>(
     hardforks: H,
-    setup_spec: crate::MegaSpecId,
+    setup_spec: MegaSpecId,
     parent_beacon_block_root: Option<B256>,
     evm: &mut MegaEvm<DB, INSP, ExtEnvs>,
 ) -> Result<Option<ResultAndState<MegaHaltReason>>, BlockExecutionError>
@@ -130,7 +131,7 @@ where
         return Ok(None);
     }
 
-    let res = if setup_spec.is_enabled(crate::MegaSpecId::REX5) {
+    let res = if setup_spec.is_enabled(MegaSpecId::REX5) {
         let gas_limit =
             evm.block().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
         evm.transact_system_call_with_gas_limit(

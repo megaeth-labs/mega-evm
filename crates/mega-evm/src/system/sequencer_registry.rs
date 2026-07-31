@@ -193,17 +193,20 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     config: &SequencerRegistryConfig,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
     let spec = hardforks.max_activated_spec_id(block_timestamp);
-    transact_deploy_sequencer_registry_for(hardforks, spec, current_block_number, db, config)
+    let rex6_config = hardforks.fork_params::<SequencerRegistryRex6Config>();
+    transact_deploy_sequencer_registry_for(spec, rex6_config, current_block_number, db, config)
 }
 
 /// [`transact_deploy_sequencer_registry`] against an already-resolved activated-spec floor.
 ///
 /// The block executor resolves the floor once per block and calls this directly; the public
-/// wrapper above resolves it for callers that hold a hardfork config. `hardforks` is still
-/// needed for the Rex6 parameter lookup, which is per-fork rather than per-spec.
+/// wrapper above resolves it for callers that hold a hardfork config. Like the flat-registry
+/// spec builders, this deliberately does not take a hardfork config — everything a deploy
+/// depends on arrives resolved (the floor and the typed params), so a per-fork activation gate
+/// cannot be reintroduced here.
 pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
-    hardforks: impl MegaHardforks,
     spec: crate::MegaSpecId,
+    rex6_config: Option<&SequencerRegistryRex6Config>,
     current_block_number: u64,
     db: &mut State<DB>,
     config: &SequencerRegistryConfig,
@@ -232,10 +235,8 @@ pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
         (SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH)
     };
     let min_rotation_delay = if rex6 {
-        let params = hardforks.fork_params::<SequencerRegistryRex6Config>().ok_or_else(|| {
-            BlockValidationError::BlockHashContractCall {
-                message: "Rex6 active but SequencerRegistryRex6Config not configured".into(),
-            }
+        let params = rex6_config.ok_or_else(|| BlockValidationError::BlockHashContractCall {
+            message: "Rex6 active but SequencerRegistryRex6Config not configured".into(),
         })?;
         debug_assert!(
             params.validate().is_ok(),
@@ -418,9 +419,11 @@ where
 ///   to be installed. This must match what [`transact_deploy_sequencer_registry`] installed, which
 ///   is floor-gated because a deployed contract is not un-deployed by a rollback.
 ///
-/// The two agree on every canonical schedule (no hardfork maps below REX5), so this split is
-/// currently inert; it exists so that adding a rollback hardfork cannot silently change
-/// transaction classification or produce a spurious code-hash mismatch.
+/// The two agree on every canonical schedule — no hardfork scheduled after Rex5's activation
+/// rolls the spec back below `REX5` (mainnet's `MiniRex1` maps below it, but activates before
+/// Rex5, keeping both sides below `REX5`) — so this split is currently inert; it exists so that
+/// adding such a rollback hardfork cannot silently change transaction classification or produce
+/// a spurious code-hash mismatch.
 ///
 /// The optional `EvmState` captures account + slot reads as a witness record.
 /// The executor MUST commit this via `system_caller.on_state()` + `db.commit()`.
@@ -430,6 +433,13 @@ pub fn resolve_system_address<DB: Database>(
     setup_spec: crate::MegaSpecId,
     db: &mut State<DB>,
 ) -> Result<(Address, Option<EvmState>), BlockExecutionError> {
+    // The floor is a maximum over activated forks and the executing spec is one of them, so
+    // `setup_spec >= exec_spec` always. A swapped argument pair satisfies the type system but
+    // trips this in every rollback-window test.
+    debug_assert!(
+        setup_spec.is_enabled(exec_spec),
+        "setup_spec ({setup_spec:?}) below exec_spec ({exec_spec:?}) — arguments swapped?"
+    );
     if !exec_spec.is_enabled(crate::MegaSpecId::REX5) {
         return Ok((MEGA_SYSTEM_ADDRESS, None));
     }

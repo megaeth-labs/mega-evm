@@ -12,7 +12,7 @@ use alloy_hardforks::ForkCondition;
 use alloy_primitives::address;
 
 use crate::{
-    MegaHardfork, MegaHardforkConfig, MegaSpecId, SequencerRegistryConfig,
+    MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaSpecId, SequencerRegistryConfig,
     SequencerRegistryRex6Config, MEGA_SYSTEM_ADDRESS,
 };
 
@@ -106,11 +106,15 @@ pub fn all_activated_hardforks() -> MegaHardforkConfig {
 /// Mainnet (`4326`) and testnet v2 (`6343`) use their published schedules; any
 /// other chain gets [`all_activated_hardforks`].
 pub fn hardfork_schedule(chain_id: u64) -> MegaHardforkConfig {
-    match chain_id {
+    let schedule = match chain_id {
         MAINNET_CHAIN_ID => mainnet_hardforks(),
         TESTNET_CHAIN_ID => testnet_hardforks(),
         _ => all_activated_hardforks(),
-    }
+    };
+    // The canonical schedules are edited by hand; a malformed edit must fail at the first
+    // resolution, not at the first block that happens to expose it.
+    debug_assert_eq!(schedule.validate_schedule(), Ok(()));
+    schedule
 }
 
 #[cfg(test)]
@@ -176,8 +180,11 @@ mod tests {
     /// above the pinned rung would rewrite what history they have already produced means, and
     /// `mega-evme replay` resolves an unknown chain ID through this same schedule.
     ///
-    /// Advancing the rung is a deliberate edit made when a spec is sealed. This test is what
-    /// makes the edit deliberate: a new spec fails here until someone decides.
+    /// A newly introduced spec leaves this test green — the pin holding still is the safe
+    /// direction, so nothing fails to force a decision. What the test pins is drift: the
+    /// fallback silently following `MegaSpecId::default` again (it fails here once the default
+    /// advances past the rung), and the rung advancing without this `RUNG` constant being edited
+    /// in the same change.
     #[test]
     fn test_unknown_chain_fallback_pins_its_rung() {
         let hf = all_activated_hardforks();

@@ -80,6 +80,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
   `block/chain.rs` is the single source of truth for the mainnet/testnet chain IDs and activation-timestamp schedules (`hardfork_schedule(chain_id)`, `MAINNET_CHAIN_ID`, `TESTNET_CHAIN_ID`, `mainnet_hardforks()`, `testnet_hardforks()`); look there to find or change when a fork activates on a given chain.
   Its unknown-chain fallback pins a named spec rather than following the latest one, so introducing a spec does not move chains that run from genesis; advancing that pin is a deliberate edit made when a spec is sealed.
   Two resolved specs come out of a config and must not be confused: `spec_id` is the reversible executing spec (a patch hardfork may map back to an earlier spec, as `MiniRex1` does) and gates EVM behavior; `max_activated_spec_id` is the monotone activated-spec floor and gates one-way chain setup such as predeploys and pre-block system calls.
+  The `is_<fork>_active_at_timestamp` predicates for spec-introducing forks are projections of that floor (raw activation events are answered by `mega_fork_activation`), and `MegaHardforks::validate_schedule` is the load-time check that a published schedule climbs the ladder without gaps.
 - **`limit/`** — Resource limit tracking: compute gas, data size, KV updates, state growth (each in its own module).
   MegaETH introduces additional resource metering mechanism and this module implements their logic as utility structs to be used by mega-evm.
 - **`access/`** — Block env access tracking and volatile data detection for parallel execution.
@@ -313,6 +314,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Override `HardforkParams::validate()` for every new params type.**
   The default implementation accepts any value silently.
   Override it with field-level invariant checks (e.g., non-zero addresses) so that `with_params()` panics loudly at chain-config load time rather than allowing the error to surface at the first block where the fork activates.
+  Also register the fork-requires-params rule in `MegaHardforks::validate_schedule` so a schedule that activates the fork without its params fails validation, not the fork's first block.
 - **Pre-block helpers must return state, not commit directly.**
   Any helper participating in `pre_execution_changes` (system contract deploys, pre-block system calls, etc.) MUST return `Option<EvmState>` and never call `db.commit(...)` directly.
   Full convention: `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.

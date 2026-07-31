@@ -211,36 +211,63 @@ fn staged_config() -> MegaHardforkConfig {
         .with(MegaHardfork::Rex3, ForkCondition::Timestamp(700))
         .with(MegaHardfork::Rex4, ForkCondition::Timestamp(800))
         .with(MegaHardfork::Rex5, ForkCondition::Timestamp(900))
+        .with(MegaHardfork::Rex6, ForkCondition::Timestamp(1000))
 }
 
-/// Each `is_*_active_at_timestamp` returns `true` at/after activation and `false` before. This
-/// kills the `-> false` mutants on the MiniRex1/MiniRex2/Rex1/Rex3 predicates (and pins the rest).
+/// Each `is_*_active_at_timestamp` returns `true` at/after activation and `false` before, on a
+/// complete ordered ladder (where the floor-projected predicates coincide with the activation
+/// events). This kills the `-> false` mutants on the predicates.
+///
+/// Every predicate is probed on **both** sides of its own activation, which is what pins the
+/// spec each one projects. A spec-introducing predicate's body is
+/// `max_activated_spec_id(t).is_enabled(MegaSpecId::X)`, so shifting `X` one rung either way is a
+/// live mutation: shifting down makes the predicate fire at the rung below (caught by the
+/// `false` assertion one second early), shifting up makes it stop firing at its own rung (caught
+/// by the `true` assertion). A one-sided probe kills neither direction.
 #[test]
 fn test_hardfork_activation_predicates_are_true_at_activation() {
     let cfg = staged_config();
 
-    // MiniRex1 (line 144) — false strictly before, true at activation.
+    // MiniRex — spec-introducing (MINI_REX). Shifting down lands on EQUIVALENCE, which is
+    // enabled at every timestamp, so only the `false` side catches it.
+    assert!(!cfg.is_mini_rex_active_at_timestamp(99));
+    assert!(cfg.is_mini_rex_active_at_timestamp(100));
+
+    // MiniRex1 — patch fork, raw event query.
     assert!(!cfg.is_mini_rex_1_active_at_timestamp(199));
     assert!(cfg.is_mini_rex_1_active_at_timestamp(200));
 
-    // MiniRex2 (line 149).
+    // MiniRex2 — patch fork, raw event query.
     assert!(!cfg.is_mini_rex_2_active_at_timestamp(299));
     assert!(cfg.is_mini_rex_2_active_at_timestamp(300));
 
-    // Rex1 (line 159).
+    // Rex.
+    assert!(!cfg.is_rex_active_at_timestamp(399));
+    assert!(cfg.is_rex_active_at_timestamp(400));
+
+    // Rex1.
     assert!(!cfg.is_rex_1_active_at_timestamp(499));
     assert!(cfg.is_rex_1_active_at_timestamp(500));
 
-    // Rex3 (line 169).
+    // Rex2.
+    assert!(!cfg.is_rex_2_active_at_timestamp(599));
+    assert!(cfg.is_rex_2_active_at_timestamp(600));
+
+    // Rex3.
     assert!(!cfg.is_rex_3_active_at_timestamp(699));
     assert!(cfg.is_rex_3_active_at_timestamp(700));
 
-    // Sanity on the neighbouring predicates so the staged config is self-consistent.
-    assert!(cfg.is_mini_rex_active_at_timestamp(100));
-    assert!(cfg.is_rex_active_at_timestamp(400));
-    assert!(cfg.is_rex_2_active_at_timestamp(600));
+    // Rex4.
+    assert!(!cfg.is_rex_4_active_at_timestamp(799));
     assert!(cfg.is_rex_4_active_at_timestamp(800));
+
+    // Rex5.
+    assert!(!cfg.is_rex_5_active_at_timestamp(899));
     assert!(cfg.is_rex_5_active_at_timestamp(900));
+
+    // Rex6.
+    assert!(!cfg.is_rex_6_active_at_timestamp(999));
+    assert!(cfg.is_rex_6_active_at_timestamp(1000));
 }
 
 // ============================================================================

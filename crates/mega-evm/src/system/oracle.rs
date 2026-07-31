@@ -37,9 +37,10 @@ pub use mega_system_contracts::oracle::IOracle;
 /// Note that the database `db` is not modified in this function. The caller is responsible to
 /// commit the changes to database.
 ///
-/// The deployed bytecode depends on the active hardfork:
+/// The deployed bytecode depends on the activated-spec floor:
 /// - Pre-Rex2: v1.0.0 bytecode (without `sendHint` function)
-/// - Rex2+: v1.1.0 bytecode (with `sendHint` function for oracle hints)
+/// - Rex2 to Rex4: v1.1.0 bytecode (with `sendHint` function for oracle hints)
+/// - Rex5+: v2.0.0 bytecode (reads the system address from the `SequencerRegistry`)
 pub fn transact_deploy_oracle_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
