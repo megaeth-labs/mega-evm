@@ -26,10 +26,10 @@ use revm::{
 };
 
 use crate::{
-    block::eips, flat_system_contract_specs, is_apply_pending_changes_due, resolve_system_address,
-    transact_apply_pending_changes, transact_deploy, transact_deploy_sequencer_registry,
-    BlockLimiter, BlockMegaTransactionOutcome, BucketId, MegaBlockExecutionCtx, MegaHardforks,
-    MegaSystemCallOutcome, MegaTransaction, MegaTransactionExt, MegaTransactionOutcome,
+    block::eips, is_apply_pending_changes_due, resolve_system_address,
+    transact_apply_pending_changes, transact_deploy, BlockLimiter, BlockMegaTransactionOutcome,
+    BucketId, MegaBlockExecutionCtx, MegaHardforks, MegaSystemCallOutcome, MegaTransaction,
+    MegaTransactionExt, MegaTransactionOutcome,
 };
 
 /// Block executor for the `MegaETH` chain.
@@ -56,6 +56,15 @@ pub struct MegaBlockExecutor<H, E, R: OpReceiptBuilder> {
     receipt_builder: R,
     ctx: MegaBlockExecutionCtx,
     system_caller: SystemCaller<H>,
+    /// The activated-spec floor for this block's timestamp, resolved once at construction.
+    ///
+    /// Every pre-block setup gate derives from this single value, which is what keeps setup
+    /// additive by construction. It is deliberately NOT the executing spec: see
+    /// [`MegaHardforks::max_activated_spec_id`].
+    ///
+    /// Cached because the block env is fixed for an executor's lifetime — the constructor
+    /// already reads `block().timestamp` for its hardfork-coherence asserts.
+    setup_spec: crate::MegaSpecId,
 
     /// The inner evm instance.
     pub evm: E,
@@ -131,6 +140,7 @@ where
         );
 
         Self {
+            setup_spec: hardforks.max_activated_spec_id(block_timestamp),
             hardforks: hardforks.clone(),
             receipt_builder,
             receipts: Vec::new(),
@@ -175,12 +185,22 @@ where
         // clear flag to true.
         self.evm.db_mut().set_state_clear_flag(true);
 
-        let block_timestamp: u64 = self.evm.block().timestamp.saturating_to();
-        let is_rex_5 = self.hardforks.is_rex_5_active_at_timestamp(block_timestamp);
+        // Every pre-block gate below derives from the one floor resolved at construction, so
+        // setup stays additive by construction: a config that schedules only a later fork still
+        // gets every earlier fork's predeploys and fail-closed checks.
+        //
+        // This is the activated-spec floor, NOT `spec_id(block_timestamp)`. The two differ
+        // whenever a patch hardfork rolls the spec back (`MiniRex1` -> `EQUIVALENCE`, live on
+        // mainnet), and pre-block setup is one-way: a rollback does not un-deploy a predeploy.
+        // Gating setup on the reversible spec would drop the Oracle predeploys — and their
+        // read-only witness entries — from every block in such a window.
+        let setup_spec = self.setup_spec;
+        let is_rex_5 = setup_spec.is_enabled(crate::MegaSpecId::REX5);
 
         // EIP-2935
         let result_and_state = eips::transact_blockhashes_contract_call(
             &self.hardforks,
+            setup_spec,
             self.ctx.parent_hash,
             &mut self.evm,
         )?;
@@ -202,6 +222,7 @@ where
         // EIP-4788
         let result_and_state = eips::transact_beacon_root_contract_call(
             &self.hardforks,
+            setup_spec,
             self.ctx.parent_beacon_block_root,
             &mut self.evm,
         )?;
@@ -231,7 +252,7 @@ where
         // MegaAccessControl, MegaLimitControl) share one deploy path via the canonical
         // registry. We tentatively use `StateChangeSource::Transaction(0)` as the state
         // change source, as alloy defines no specific source for these predeploys.
-        for spec in flat_system_contract_specs(&self.hardforks, block_timestamp) {
+        for spec in crate::flat_system_contract_specs_for(setup_spec) {
             let state =
                 transact_deploy(self.evm.db_mut(), &spec).map_err(BlockExecutionError::other)?;
             outcomes
@@ -264,11 +285,11 @@ where
             // `applyPendingChanges()` logic is identical in v1/v2 (v2 changes only rotation
             // scheduling), so its semantics do not depend on which side of the deploy it
             // executes. Pre-Rex6 blocks keep the original deploy-then-apply order untouched.
-            let is_rex_6 = self.hardforks.is_rex_6_active_at_timestamp(block_timestamp);
+            let is_rex_6 = setup_spec.is_enabled(crate::MegaSpecId::REX6);
 
             if !is_rex_6 {
                 self.push_deploy_sequencer_registry_outcome(
-                    block_timestamp,
+                    setup_spec,
                     block_number,
                     &params,
                     &mut outcomes,
@@ -298,7 +319,7 @@ where
 
             if is_rex_6 {
                 self.push_deploy_sequencer_registry_outcome(
-                    block_timestamp,
+                    setup_spec,
                     block_number,
                     &params,
                     &mut outcomes,
@@ -313,14 +334,14 @@ where
     /// and pushes its outcome.
     fn push_deploy_sequencer_registry_outcome(
         &mut self,
-        block_timestamp: u64,
+        setup_spec: crate::MegaSpecId,
         block_number: u64,
         params: &crate::SequencerRegistryConfig,
         outcomes: &mut Vec<MegaSystemCallOutcome>,
     ) -> Result<(), BlockExecutionError> {
-        let result_and_state = transact_deploy_sequencer_registry(
+        let result_and_state = crate::transact_deploy_sequencer_registry_for(
             &self.hardforks,
-            block_timestamp,
+            setup_spec,
             block_number,
             self.evm.db_mut(),
             params,
@@ -666,9 +687,12 @@ where
         // After all pre-block outcomes are committed, resolve the system address for this block.
         // This reads _currentSystemAddress from the now-committed SequencerRegistry storage.
         // The returned EvmState captures the read as a witness record.
-        let spec = self.evm.ctx().mega_spec();
+        // The executing spec gates whether dynamic resolution applies (semantics); the
+        // activated-spec floor selects the expected registry bytecode version, matching what
+        // the floor-gated pre-block deploy installed.
+        let exec_spec = self.evm.ctx().mega_spec();
         let (system_address, read_state) =
-            resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;
+            resolve_system_address(&self.hardforks, exec_spec, self.setup_spec, self.evm.db_mut())?;
         if let Some(state) = read_state {
             self.system_caller.on_state(StateChangeSource::Transaction(0), &state);
             self.evm.db_mut().commit(state);

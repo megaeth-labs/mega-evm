@@ -21,7 +21,7 @@ use alloy_evm::Database;
 use alloy_primitives::{address, Address};
 use revm::{database::State, state::EvmState};
 
-use crate::{MegaHardforks, SystemContractSpec};
+use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
 
 // Re-export error types and transaction functions from sandbox
 pub use crate::sandbox::{
@@ -48,18 +48,18 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
     block_timestamp: u64,
     db: &mut State<DB>,
 ) -> Result<Option<EvmState>, DB::Error> {
-    keyless_deploy_spec(&hardforks, block_timestamp)
+    keyless_deploy_spec(hardforks.max_activated_spec_id(block_timestamp))
         .map(|s| crate::transact_deploy(db, &s))
         .transpose()
 }
 
-/// Builds the [`SystemContractSpec`] for the keyless-deploy contract active at
-/// the given timestamp, or `None` if Rex2 is not yet active.
-pub(crate) fn keyless_deploy_spec(
-    hardforks: &impl MegaHardforks,
-    block_timestamp: u64,
-) -> Option<SystemContractSpec> {
-    hardforks.is_rex_2_active_at_timestamp(block_timestamp).then(|| {
+/// Builds the [`SystemContractSpec`] for the keyless-deploy contract active under
+/// `spec`, or `None` if `REX2` is not yet enabled.
+///
+/// `spec` is the activated-spec floor — see
+/// [`oracle_spec`](crate::system::oracle::oracle_spec).
+pub(crate) fn keyless_deploy_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
+    spec.is_enabled(MegaSpecId::REX2).then(|| {
         SystemContractSpec::new(
             KEYLESS_DEPLOY_ADDRESS,
             KEYLESS_DEPLOY_CODE,
@@ -71,7 +71,7 @@ pub(crate) fn keyless_deploy_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MegaHardfork, MegaHardforkConfig};
+    use crate::MegaHardforkConfig;
     use revm::{
         database::InMemoryDB,
         state::{AccountInfo, Bytecode},
@@ -131,8 +131,8 @@ mod tests {
     fn test_deploy_keyless_deploy_contract_requires_rex2() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex2);
+        // A complete ladder topping out at Rex1: Rex2 is genuinely not reached.
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX1);
 
         let result = transact_deploy_keyless_deploy_contract(&hardforks, 0, &mut state)
             .expect("Should succeed");

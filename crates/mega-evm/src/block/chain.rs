@@ -12,8 +12,8 @@ use alloy_hardforks::ForkCondition;
 use alloy_primitives::address;
 
 use crate::{
-    MegaHardfork, MegaHardforkConfig, SequencerRegistryConfig, SequencerRegistryRex6Config,
-    MEGA_SYSTEM_ADDRESS,
+    MegaHardfork, MegaHardforkConfig, MegaSpecId, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, MEGA_SYSTEM_ADDRESS,
 };
 
 /// `MegaETH` mainnet chain ID.
@@ -81,9 +81,19 @@ pub fn testnet_hardforks() -> MegaHardforkConfig {
 /// seeds the smallest valid rotation delay (1 block) so local and dev chains can
 /// exercise rotations without friction; a real network must attach a
 /// governance-approved value in its published schedule when it schedules Rex6.
+///
+/// The rung is named explicitly rather than inherited from [`MegaSpecId::default`].
+/// These chains run at genesis, so the rung *is* their semantics from block zero,
+/// with no fork boundary to separate an old rule from a new one. Introducing a spec
+/// must therefore not move them: a devnet that produced history under this fallback
+/// would otherwise replay differently — through [`hardfork_schedule`], which is what
+/// `mega-evme replay` resolves an unknown chain ID with — against the same binary
+/// that produced it. Advancing this rung is a deliberate edit made when a spec is
+/// sealed, and forgetting it leaves these chains where they are, which is the safe
+/// direction.
 pub fn all_activated_hardforks() -> MegaHardforkConfig {
     MegaHardforkConfig::new()
-        .with_all_activated()
+        .with_all_activated_through(MegaSpecId::REX6)
         .with_params(SequencerRegistryConfig {
             rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
             rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
@@ -135,7 +145,7 @@ mod tests {
     fn test_schedule_dispatch_by_chain_id() {
         assert_eq!(hardfork_schedule(MAINNET_CHAIN_ID).spec_id(1780632000), MegaSpecId::REX5);
         assert_eq!(hardfork_schedule(TESTNET_CHAIN_ID).spec_id(1780459200), MegaSpecId::REX5);
-        // Unknown chain: everything active at genesis, including the unstable REX6.
+        // Unknown chain: every fork up to the pinned rung, active at genesis.
         assert_eq!(hardfork_schedule(1).spec_id(0), MegaSpecId::REX6);
     }
 
@@ -157,5 +167,32 @@ mod tests {
             .fork_params::<SequencerRegistryRex6Config>()
             .expect("fallback schedule must carry a SequencerRegistryRex6Config");
         assert!(rex6_params.rex6_min_rotation_delay > 0);
+    }
+
+    /// The fallback rung is pinned, not inherited from [`MegaSpecId::default`].
+    ///
+    /// Unknown chains run their rung from genesis, so it is their semantics from block zero with
+    /// no fork boundary. Introducing a spec must therefore leave them alone: registering a fork
+    /// above the pinned rung would rewrite what history they have already produced means, and
+    /// `mega-evme replay` resolves an unknown chain ID through this same schedule.
+    ///
+    /// Advancing the rung is a deliberate edit made when a spec is sealed. This test is what
+    /// makes the edit deliberate: a new spec fails here until someone decides.
+    #[test]
+    fn test_unknown_chain_fallback_pins_its_rung() {
+        let hf = all_activated_hardforks();
+        const RUNG: MegaSpecId = MegaSpecId::REX6;
+
+        assert_eq!(hf.spec_id(0), RUNG, "the rung applies from genesis");
+        assert_eq!(hf.spec_id(u64::MAX), RUNG, "and is terminal — no later fork is registered");
+
+        for fork in MegaHardfork::VARIANTS {
+            let registered = hf.mega_fork_activation(*fork) != ForkCondition::Never;
+            assert_eq!(
+                registered,
+                RUNG.is_enabled(fork.spec_id()),
+                "{fork:?} registration must follow the pinned rung, not MegaSpecId::default()"
+            );
+        }
     }
 }

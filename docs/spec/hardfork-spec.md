@@ -19,6 +19,22 @@ Multiple hardforks can map to the same spec.
 A hardfork can also map to an older spec.
 For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
 
+### Executing Spec vs. Highest Spec Reached
+
+Because a hardfork may roll the spec back, two distinct questions have to be answered separately at each block.
+
+- **Executing spec** — which semantics the EVM applies in this block: the spec of the most recently activated hardfork.
+  This is reversible: during the `MiniRex1` window the executing spec is `EQUIVALENCE` again, and MegaEVM behaves accordingly.
+- **Highest spec reached** — the greatest spec among all hardforks activated at or before this block.
+  This is monotone and never decreases, even across a rollback.
+
+The distinction matters for chain setup that is one-way.
+System contracts predeployed under a hardfork remain deployed, and pre-block system calls remain in effect, even while a later hardfork rolls the executing semantics back to an earlier spec.
+A rollback changes how transactions execute; it does not un-deploy a contract or retract a system call.
+
+Pre-block setup — system-contract predeploys, their bytecode versions, and the pre-block EIP-2935/EIP-4788 system calls — is therefore determined by the highest spec reached.
+Everything else — opcode behavior, gas costs, resource limits, transaction classification — is determined by the executing spec.
+
 This documentation covers specs — the verifiable behavioral definitions that determine correctness of a MegaETH node.
 Protocol-level changes outside the verifiable execution layer (e.g., networking, peer discovery) that are part of a hardfork are not covered here.
 

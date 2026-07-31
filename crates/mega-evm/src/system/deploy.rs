@@ -27,7 +27,7 @@ use revm::{
 };
 use std::vec::Vec;
 
-use crate::MegaHardforks;
+use crate::{MegaHardforks, MegaSpecId};
 
 /// Declarative description of a single system-contract deployment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,14 +147,23 @@ pub fn flat_system_contract_specs(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
 ) -> Vec<SystemContractSpec> {
+    flat_system_contract_specs_for(hardforks.max_activated_spec_id(block_timestamp))
+}
+
+/// [`flat_system_contract_specs`] against an already-resolved activated-spec floor.
+///
+/// The block executor resolves the floor once per block
+/// ([`max_activated_spec_id`](crate::MegaHardforks::max_activated_spec_id)) and calls this
+/// directly; the public wrapper above resolves it for callers that hold a hardfork config.
+pub(crate) fn flat_system_contract_specs_for(spec: MegaSpecId) -> Vec<SystemContractSpec> {
     // Compose the per-contract spec builders (each its own single source of gate
     // + bytecode-version selection). `None` entries (inactive contracts) drop out.
     [
-        super::oracle::oracle_spec(&hardforks, block_timestamp),
-        super::oracle::high_precision_timestamp_oracle_spec(&hardforks, block_timestamp),
-        super::keyless_deploy::keyless_deploy_spec(&hardforks, block_timestamp),
-        super::control::access_control_spec(&hardforks, block_timestamp),
-        super::limit_control::limit_control_spec(&hardforks, block_timestamp),
+        super::oracle::oracle_spec(spec),
+        super::oracle::high_precision_timestamp_oracle_spec(spec),
+        super::keyless_deploy::keyless_deploy_spec(spec),
+        super::control::access_control_spec(spec),
+        super::limit_control::limit_control_spec(spec),
     ]
     .into_iter()
     .flatten()
@@ -165,8 +174,9 @@ pub fn flat_system_contract_specs(
 mod tests {
     use super::*;
     use crate::{
-        MegaHardfork, MegaHardforkConfig, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH,
-        ORACLE_CONTRACT_CODE_HASH_REX2, ORACLE_CONTRACT_CODE_HASH_REX5,
+        MegaHardfork, MegaHardforkConfig, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_HASH, ORACLE_CONTRACT_CODE_HASH_REX2,
+        ORACLE_CONTRACT_CODE_HASH_REX5,
     };
     use alloy_hardforks::ForkCondition;
     use alloy_primitives::address;
@@ -306,6 +316,49 @@ mod tests {
         assert!(!specs[0].force_create_on_upgrade);
         // SequencerRegistry is intentionally not in the flat registry.
         assert!(!addrs(&specs).contains(&crate::SEQUENCER_REGISTRY_ADDRESS));
+    }
+
+    /// Inside mainnet's `MiniRex1` rollback window the registry must still yield both `MiniRex`
+    /// predeploys. Gating on the executing spec (`EQUIVALENCE` there) would drop them, and with
+    /// them their read-only witness entries — a replay-observable change on frozen history.
+    #[test]
+    fn test_registry_survives_mainnet_rollback_window() {
+        let hf = crate::mainnet_hardforks();
+        let ForkCondition::Timestamp(ts) = hf.mega_fork_activation(MegaHardfork::MiniRex1) else {
+            panic!("mainnet must schedule MiniRex1 by timestamp");
+        };
+
+        assert_eq!(hf.spec_id(ts), crate::MegaSpecId::EQUIVALENCE);
+        assert!(
+            flat_system_contract_specs_for(hf.spec_id(ts)).is_empty(),
+            "executing spec would drop both predeploys in the rollback window"
+        );
+
+        let specs = flat_system_contract_specs(&hf, ts);
+        assert_eq!(
+            addrs(&specs),
+            [ORACLE_CONTRACT_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS]
+        );
+        // Still the pre-Rex2 bytecode line, with the pre-Rex5 upgrade semantics.
+        assert_eq!(specs[0].code_hash, ORACLE_CONTRACT_CODE_HASH);
+        assert!(specs[0].force_create_on_upgrade);
+    }
+
+    /// A config that schedules Rex6 without Rex5 must still materialize every lower-spec
+    /// predeploy, at the Rex5 Oracle version. Under per-fork gating none of them deployed.
+    #[test]
+    fn test_registry_complete_on_partial_ladder() {
+        let hf = MegaHardforkConfig::new()
+            .with(MegaHardfork::Rex5, ForkCondition::Never)
+            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(0));
+
+        assert!(!hf.is_mini_rex_active_at_timestamp(0), "no lower fork is scheduled");
+
+        let specs = flat_system_contract_specs(&hf, 0);
+        assert_eq!(specs.len(), 5, "the partial ladder must still deploy all five flat contracts");
+        assert_eq!(specs[0].address, ORACLE_CONTRACT_ADDRESS);
+        assert_eq!(specs[0].code_hash, ORACLE_CONTRACT_CODE_HASH_REX5);
+        assert!(!specs[0].force_create_on_upgrade);
     }
 
     #[test]

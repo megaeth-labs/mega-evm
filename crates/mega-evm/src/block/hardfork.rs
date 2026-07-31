@@ -139,6 +139,40 @@ pub trait MegaHardforks: OpHardforks {
         self.hardfork(timestamp).map_or(MegaSpecId::EQUIVALENCE, |h| h.spec_id())
     }
 
+    /// Returns the highest [`MegaSpecId`] among all [`MegaHardfork`]s activated at or before
+    /// `timestamp`.
+    ///
+    /// This differs from [`spec_id`](Self::spec_id) only when a patch hardfork maps to an earlier
+    /// spec, as `MiniRex1` does (it rolls back to `EQUIVALENCE`). The two answer different
+    /// questions:
+    ///
+    /// - `spec_id` — *which EVM semantics execute in this block*. Reversible: a rollback hardfork
+    ///   moves it back down, and it must stay the gate for execution behavior and block limits.
+    /// - This method — *which chain-setup features have ever been activated*. Monotone: a spec
+    ///   rollback does not un-deploy a predeploy or retract a pre-block system call, so one-way
+    ///   setup must be gated on this instead.
+    ///
+    /// Deriving setup gates from this single value keeps them additive by construction: a config
+    /// that schedules only a late fork still gets every earlier fork's setup, matching the ordinal
+    /// inclusion the EVM layer already relies on.
+    ///
+    /// The equivalence with the per-fork `is_*_active_at_timestamp` predicates holds for
+    /// *spec-introducing* forks — those whose spec is strictly higher than every earlier fork's.
+    /// `MiniRex1` (rollback) and `MiniRex2` (restoration) introduce no new spec and are therefore
+    /// not recoverable from a spec ordinal; nothing gates on them.
+    ///
+    /// Like `spec_id` and [`hardfork`](Self::hardfork), this is timestamp-scoped: a `MegaHardfork`
+    /// registered with [`ForkCondition::Block`] or [`ForkCondition::TTD`] never reports active
+    /// here. Every `MegaHardfork` in the canonical schedules uses `Timestamp` or `Never`.
+    fn max_activated_spec_id(&self, timestamp: BlockTimestamp) -> MegaSpecId {
+        MegaHardfork::VARIANTS
+            .iter()
+            .filter(|fork| self.mega_fork_activation(**fork).active_at_timestamp(timestamp))
+            .map(|fork| fork.spec_id())
+            .max()
+            .unwrap_or(MegaSpecId::EQUIVALENCE)
+    }
+
     /// Returns `true` if [`MegaHardfork::MiniRex`] is active at given block timestamp.
     fn is_mini_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.mega_fork_activation(MegaHardfork::MiniRex).active_at_timestamp(timestamp)
@@ -285,17 +319,35 @@ impl MegaHardforkConfig {
     }
 
     /// Sets all `MegaHardfork` to be activated at timestamp 0.
-    pub fn with_all_activated(mut self) -> Self {
-        self.insert(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::MiniRex1, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::MiniRex2, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex1, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex2, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex3, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex4, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex6, ForkCondition::Timestamp(0));
+    pub fn with_all_activated(self) -> Self {
+        self.with_all_activated_through(MegaSpecId::default())
+    }
+
+    /// Activates every `MegaHardfork` whose spec is enabled under `spec` at timestamp 0, and
+    /// leaves every later fork unregistered.
+    ///
+    /// This is how to express "a chain running spec N": the resulting config resolves to `spec`
+    /// at any timestamp. Removing only the next fork up is not equivalent — the ladder runs past
+    /// it, so the config would resolve to the newest fork still registered rather than to `spec`,
+    /// and it would silently drift again the next time a spec is introduced. On top of the wrong
+    /// executing spec, the leftover later forks also keep the activated-spec floor
+    /// ([`max_activated_spec_id`](MegaHardforks::max_activated_spec_id)) high, so every pre-block
+    /// setup gate below them stays open.
+    ///
+    /// The result is a function of `spec` alone, not of what the config held before: a later fork
+    /// already registered is removed rather than left in place, so the resolved spec does not
+    /// depend on builder call order.
+    ///
+    /// Patch hardforks are included by their spec, not their position: `MiniRex1` maps back to
+    /// [`MegaSpecId::EQUIVALENCE`], so it is registered for every `spec`.
+    pub fn with_all_activated_through(mut self, spec: MegaSpecId) -> Self {
+        for fork in MegaHardfork::VARIANTS {
+            if spec.is_enabled(fork.spec_id()) {
+                self.insert(*fork, ForkCondition::Timestamp(0));
+            } else {
+                self = self.without(*fork);
+            }
+        }
         self
     }
 
@@ -456,19 +508,16 @@ mod tests {
     fn test_with_all_activated_enables_all_mega_hardforks() {
         let config = MegaHardforkConfig::default().with_all_activated();
 
-        for hardfork in [
-            MegaHardfork::MiniRex,
-            MegaHardfork::MiniRex1,
-            MegaHardfork::MiniRex2,
-            MegaHardfork::Rex,
-            MegaHardfork::Rex1,
-            MegaHardfork::Rex2,
-            MegaHardfork::Rex3,
-            MegaHardfork::Rex4,
-            MegaHardfork::Rex5,
-            MegaHardfork::Rex6,
-        ] {
-            assert_eq!(config.mega_fork_activation(hardfork), ForkCondition::Timestamp(0));
+        // Driven off `VARIANTS`, which the `hardfork!` macro generates from the same variant list
+        // that declares the enum. A second hand-written list here would assert only that the
+        // forks someone remembered to name are activated — a new fork missing from both the
+        // builder and the list would fail neither.
+        for hardfork in MegaHardfork::VARIANTS {
+            assert_eq!(
+                config.mega_fork_activation(*hardfork),
+                ForkCondition::Timestamp(0),
+                "{hardfork:?}"
+            );
         }
     }
 
@@ -534,6 +583,197 @@ mod tests {
         }
 
         MegaHardforkConfig::default().with_all_activated().with_params(AlwaysErrParams);
+    }
+
+    /// Mainnet runs a real spec rollback: `MiniRex1` maps to `EQUIVALENCE` while `MiniRex`'s
+    /// timestamp has already passed. Inside that window the resolved spec and the activated-spec
+    /// floor disagree, and only the floor keeps one-way setup (the Oracle predeploys) enabled.
+    #[test]
+    fn test_mainnet_rollback_window_separates_resolved_spec_from_floor() {
+        let hf = crate::mainnet_hardforks();
+        let ForkCondition::Timestamp(rollback_start) =
+            hf.mega_fork_activation(MegaHardfork::MiniRex1)
+        else {
+            panic!("mainnet must schedule MiniRex1 by timestamp");
+        };
+        let ForkCondition::Timestamp(rollback_end) =
+            hf.mega_fork_activation(MegaHardfork::MiniRex2)
+        else {
+            panic!("mainnet must schedule MiniRex2 by timestamp");
+        };
+        assert!(rollback_start < rollback_end, "the rollback window must be non-empty");
+
+        for ts in [rollback_start, rollback_start + 1, rollback_end - 1] {
+            assert_eq!(hf.spec_id(ts), MegaSpecId::EQUIVALENCE, "executing spec rolls back");
+            assert_eq!(hf.max_activated_spec_id(ts), MegaSpecId::MINI_REX, "floor stays monotone");
+            // Gating setup on the executing spec would drop the MiniRex predeploys here.
+            assert!(!hf.spec_id(ts).is_enabled(MegaSpecId::MINI_REX));
+            assert!(hf.max_activated_spec_id(ts).is_enabled(MegaSpecId::MINI_REX));
+            assert!(hf.is_mini_rex_active_at_timestamp(ts));
+        }
+    }
+
+    /// The floor reproduces every per-fork activation predicate exactly, for every
+    /// *spec-introducing* fork, on every canonical schedule. This is what makes the switch a
+    /// no-op on well-formed ladders.
+    ///
+    /// Forks that introduce no new spec — `MiniRex1` (rollback to `EQUIVALENCE`) and `MiniRex2`
+    /// (restoration to `MINI_REX`) — are not recoverable from a spec ordinal by construction, so
+    /// nothing may gate on them. The predicate is derived rather than hardcoded so a future
+    /// rollback fork is classified automatically.
+    #[test]
+    fn test_floor_matches_per_fork_activation_for_spec_introducing_forks() {
+        for hf in [
+            crate::mainnet_hardforks(),
+            crate::testnet_hardforks(),
+            crate::all_activated_hardforks(),
+        ] {
+            let mut stamps = std::vec![0u64, u64::MAX];
+            for fork in MegaHardfork::VARIANTS {
+                if let ForkCondition::Timestamp(t) = hf.mega_fork_activation(*fork) {
+                    stamps.extend([t.saturating_sub(1), t, t.saturating_add(1)]);
+                }
+            }
+
+            for ts in stamps {
+                let floor = hf.max_activated_spec_id(ts);
+                for (i, fork) in MegaHardfork::VARIANTS.iter().enumerate() {
+                    let introduces_spec =
+                        MegaHardfork::VARIANTS[..i].iter().all(|e| e.spec_id() < fork.spec_id());
+                    if !introduces_spec {
+                        continue;
+                    }
+                    assert_eq!(
+                        floor.is_enabled(fork.spec_id()),
+                        hf.mega_fork_activation(*fork).active_at_timestamp(ts),
+                        "floor disagrees with per-fork activation for {fork:?} at ts={ts}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The gap this change closes: a config that schedules a later fork without its predecessor
+    /// resolves to that fork's spec, yet every per-fork predicate below it reports inactive.
+    /// The floor makes the lower gates additive again.
+    #[test]
+    fn test_partial_ladder_floor_enables_unscheduled_predecessors() {
+        let hf = MegaHardforkConfig::new()
+            .with(MegaHardfork::Rex5, ForkCondition::Never)
+            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(0));
+
+        assert!(!hf.is_rex_5_active_at_timestamp(0), "Rex5 is not scheduled");
+        assert!(!hf.is_mini_rex_active_at_timestamp(0), "MiniRex is not scheduled");
+        assert_eq!(hf.spec_id(0), MegaSpecId::REX6);
+
+        let floor = hf.max_activated_spec_id(0);
+        assert_eq!(floor, MegaSpecId::REX6);
+        for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX2, MegaSpecId::REX4, MegaSpecId::REX5] {
+            assert!(floor.is_enabled(spec), "floor must enable {spec:?} on a partial ladder");
+        }
+    }
+
+    /// `with_all_activated_through` is the well-formed way to express "a chain running spec N":
+    /// both the executing spec and the activated-spec floor resolve to exactly `N`, at any
+    /// timestamp. Driven off `MegaSpecId`'s own progression rather than a second hand-written
+    /// list, so a newly introduced spec fails here once instead of silently widening every
+    /// "chain running spec N" config in the suite.
+    #[test]
+    fn test_with_all_activated_through_resolves_to_that_spec() {
+        for spec in [
+            MegaSpecId::EQUIVALENCE,
+            MegaSpecId::MINI_REX,
+            MegaSpecId::REX,
+            MegaSpecId::REX1,
+            MegaSpecId::REX2,
+            MegaSpecId::REX3,
+            MegaSpecId::REX4,
+            MegaSpecId::REX5,
+            MegaSpecId::REX6,
+        ] {
+            let config = MegaHardforkConfig::default().with_all_activated_through(spec);
+            assert_eq!(config.spec_id(0), spec, "{spec:?} at genesis");
+            assert_eq!(config.spec_id(u64::MAX), spec, "{spec:?} must be terminal");
+            assert_eq!(config.max_activated_spec_id(0), spec, "{spec:?} floor at genesis");
+            assert_eq!(
+                config.max_activated_spec_id(u64::MAX),
+                spec,
+                "{spec:?} floor must be terminal"
+            );
+
+            // The same contract must hold when the config already carries later forks: the
+            // builder states the whole ladder, so it removes what it does not activate. Without
+            // that, the resolved spec would depend on which builder ran last.
+            let downgraded =
+                MegaHardforkConfig::default().with_all_activated().with_all_activated_through(spec);
+            assert_eq!(downgraded.spec_id(u64::MAX), spec, "{spec:?} from an activated config");
+            assert_eq!(
+                downgraded.max_activated_spec_id(u64::MAX),
+                spec,
+                "{spec:?} floor from an activated config"
+            );
+        }
+    }
+
+    /// Removing a middle rung does NOT express "a chain running spec N". It is the partial-ladder
+    /// shape: the executing spec follows the newest fork still registered, and the floor keeps
+    /// every lower setup gate open.
+    #[test]
+    fn test_removing_a_middle_rung_does_not_lower_the_spec() {
+        let partial =
+            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex4);
+
+        assert!(!partial.is_rex_4_active_at_timestamp(0), "Rex4 itself is unregistered");
+        assert_ne!(partial.spec_id(0), MegaSpecId::REX4, "the executing spec is not lowered");
+        assert!(
+            partial.max_activated_spec_id(0).is_enabled(MegaSpecId::REX4),
+            "the floor still enables the removed fork's spec"
+        );
+    }
+
+    /// The floor and the executing spec agree across the Rex5/Rex6 boundary on every canonical
+    /// schedule, which is what makes the two-spec split in `resolve_system_address` inert today.
+    /// Adding a hardfork that maps below `REX5` would break this and must be caught here.
+    #[test]
+    fn test_floor_and_executing_spec_agree_across_rex5_rex6_boundary() {
+        for hf in [
+            crate::mainnet_hardforks(),
+            crate::testnet_hardforks(),
+            crate::all_activated_hardforks(),
+        ] {
+            let mut stamps = std::vec![0u64, u64::MAX];
+            for fork in MegaHardfork::VARIANTS {
+                if let ForkCondition::Timestamp(t) = hf.mega_fork_activation(*fork) {
+                    stamps.extend([t.saturating_sub(1), t, t.saturating_add(1)]);
+                }
+            }
+
+            for ts in stamps {
+                let (exec, floor) = (hf.spec_id(ts), hf.max_activated_spec_id(ts));
+                for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+                    assert_eq!(
+                        exec.is_enabled(spec),
+                        floor.is_enabled(spec),
+                        "executing spec and floor disagree on {spec:?} at ts={ts}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Documented domain limit: the floor is timestamp-scoped, so a `MegaHardfork` registered by
+    /// block number never contributes to it and the equivalence with the per-fork predicates does
+    /// not hold. `spec_id`/`hardfork` share this limitation; every canonical schedule uses
+    /// `Timestamp` or `Never`.
+    #[test]
+    fn test_floor_ignores_block_numbered_forks() {
+        let hf = MegaHardforkConfig::new()
+            .with(MegaHardfork::MiniRex, ForkCondition::Block(0))
+            .with(MegaHardfork::Rex, ForkCondition::Timestamp(0));
+
+        assert!(!hf.is_mini_rex_active_at_timestamp(0), "block-numbered forks are not timestamped");
+        assert_eq!(hf.max_activated_spec_id(0), MegaSpecId::REX);
+        assert!(hf.max_activated_spec_id(0).is_enabled(MegaSpecId::MINI_REX));
     }
 
     #[test]

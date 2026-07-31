@@ -150,7 +150,9 @@ Hardcoded hardfork configs exist for:
 - **Chain 6343** — MegaETH testnet v2
 - **Chain 4326** — MegaETH mainnet
 
-For any other chain, `replay` enables all hardforks at genesis (currently equivalent to `Rex6`).
+For any other chain, `replay` enables every hardfork up to a pinned spec at genesis — currently `Rex6`.
+That pin does not follow the newest spec: introducing a spec leaves unrecognized chains where they are, so a replay of history they already produced keeps its meaning.
+Use `--override.spec` below to replay such a chain under a different spec.
 
 ### `--override.spec <SPEC>`
 

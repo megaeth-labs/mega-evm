@@ -192,7 +192,26 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     db: &mut State<DB>,
     config: &SequencerRegistryConfig,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
-    if !hardforks.is_rex_5_active_at_timestamp(block_timestamp) {
+    let spec = hardforks.max_activated_spec_id(block_timestamp);
+    transact_deploy_sequencer_registry_for(hardforks, spec, current_block_number, db, config)
+}
+
+/// [`transact_deploy_sequencer_registry`] against an already-resolved activated-spec floor.
+///
+/// The block executor resolves the floor once per block and calls this directly; the public
+/// wrapper above resolves it for callers that hold a hardfork config. `hardforks` is still
+/// needed for the Rex6 parameter lookup, which is per-fork rather than per-spec.
+pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
+    hardforks: impl MegaHardforks,
+    spec: crate::MegaSpecId,
+    current_block_number: u64,
+    db: &mut State<DB>,
+    config: &SequencerRegistryConfig,
+) -> Result<Option<EvmState>, BlockExecutionError> {
+    // Gate and bytecode selection follow the activated-spec floor, not per-fork registration:
+    // a registry once deployed stays deployed through a spec rollback, and a config that
+    // schedules only a later fork must still get the Rex5 bootstrap.
+    if !spec.is_enabled(crate::MegaSpecId::REX5) {
         return Ok(None);
     }
 
@@ -206,7 +225,7 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     // Select the bytecode version and, for v2.0.0, resolve the seeded minimum rotation delay.
     // The Rex6 params are required as soon as Rex6 is active: failing fast here surfaces a
     // misconfigured chain at the activation block instead of deploying an unseeded registry.
-    let rex6 = hardforks.is_rex_6_active_at_timestamp(block_timestamp);
+    let rex6 = spec.is_enabled(crate::MegaSpecId::REX6);
     let (target_code, target_code_hash) = if rex6 {
         (SEQUENCER_REGISTRY_CODE_REX6, SEQUENCER_REGISTRY_CODE_HASH_REX6)
     } else {
@@ -390,14 +409,28 @@ where
 /// - Pre-REX5: returns `(MEGA_SYSTEM_ADDRESS, None)`.
 /// - REX5: reads `_currentSystemAddress` from committed registry storage.
 ///
+/// The two spec arguments answer different questions and must not be collapsed into one:
+///
+/// - `exec_spec` — the executing spec, gating whether dynamic system-address resolution applies at
+///   all. This is execution semantics: it decides how a transaction is classified, so a spec
+///   rollback below REX5 must return [`MEGA_SYSTEM_ADDRESS`] again.
+/// - `setup_spec` — the activated-spec floor, selecting which registry bytecode version is expected
+///   to be installed. This must match what [`transact_deploy_sequencer_registry`] installed, which
+///   is floor-gated because a deployed contract is not un-deployed by a rollback.
+///
+/// The two agree on every canonical schedule (no hardfork maps below REX5), so this split is
+/// currently inert; it exists so that adding a rollback hardfork cannot silently change
+/// transaction classification or produce a spurious code-hash mismatch.
+///
 /// The optional `EvmState` captures account + slot reads as a witness record.
 /// The executor MUST commit this via `system_caller.on_state()` + `db.commit()`.
 pub fn resolve_system_address<DB: Database>(
     hardforks: impl MegaHardforks,
-    spec: crate::MegaSpecId,
+    exec_spec: crate::MegaSpecId,
+    setup_spec: crate::MegaSpecId,
     db: &mut State<DB>,
 ) -> Result<(Address, Option<EvmState>), BlockExecutionError> {
-    if !spec.is_enabled(crate::MegaSpecId::REX5) {
+    if !exec_spec.is_enabled(crate::MegaSpecId::REX5) {
         return Ok((MEGA_SYSTEM_ADDRESS, None));
     }
 
@@ -420,9 +453,10 @@ pub fn resolve_system_address<DB: Database>(
     };
 
     // Unreachable: deploy verifies the code hash before seeding storage. The expected version
-    // follows the spec: the pre-block deploy has already swapped the bytecode to v2.0.0 at the
-    // Rex6 activation block, so an exact per-spec match holds on every block.
-    let expected_code_hash = if spec.is_enabled(crate::MegaSpecId::REX6) {
+    // follows the activated-spec floor, matching what the pre-block deploy installed: the
+    // bytecode was already swapped to v2.0.0 at the Rex6 activation block, so an exact match
+    // holds on every block.
+    let expected_code_hash = if setup_spec.is_enabled(crate::MegaSpecId::REX6) {
         SEQUENCER_REGISTRY_CODE_HASH_REX6
     } else {
         SEQUENCER_REGISTRY_CODE_HASH
@@ -960,8 +994,13 @@ mod tests {
         .unwrap();
         let mut state = State::builder().with_database(&mut db).build();
 
-        let (addr, witness) =
-            resolve_system_address(&rex6_hardforks(), MegaSpecId::REX6, &mut state).unwrap();
+        let (addr, witness) = resolve_system_address(
+            &rex6_hardforks(),
+            MegaSpecId::REX6,
+            MegaSpecId::REX6,
+            &mut state,
+        )
+        .unwrap();
         assert_eq!(addr, TEST_SYSTEM_ADDRESS);
         assert!(witness.is_some());
     }
@@ -987,8 +1026,13 @@ mod tests {
         .unwrap();
         let mut state = State::builder().with_database(&mut db).build();
 
-        let err = resolve_system_address(&rex6_hardforks(), MegaSpecId::REX6, &mut state)
-            .expect_err("V1 code hash at REX6 must fail closed");
+        let err = resolve_system_address(
+            &rex6_hardforks(),
+            MegaSpecId::REX6,
+            MegaSpecId::REX6,
+            &mut state,
+        )
+        .expect_err("V1 code hash at REX6 must fail closed");
         assert!(err.to_string().contains("code hash mismatch"));
     }
 
@@ -997,9 +1041,13 @@ mod tests {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
 
-        let (addr, _) =
-            resolve_system_address(MegaHardforkConfig::default(), MegaSpecId::REX4, &mut state)
-                .unwrap();
+        let (addr, _) = resolve_system_address(
+            MegaHardforkConfig::default(),
+            MegaSpecId::REX4,
+            MegaSpecId::REX4,
+            &mut state,
+        )
+        .unwrap();
         assert_eq!(addr, MEGA_SYSTEM_ADDRESS);
     }
 
@@ -1022,8 +1070,13 @@ mod tests {
         .unwrap();
         let mut state = State::builder().with_database(&mut db).build();
 
-        let (addr, witness) =
-            resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state).unwrap();
+        let (addr, witness) = resolve_system_address(
+            &rex5_hardforks(),
+            MegaSpecId::REX5,
+            MegaSpecId::REX5,
+            &mut state,
+        )
+        .unwrap();
         assert_eq!(addr, TEST_SYSTEM_ADDRESS);
 
         // Witness must capture the registry account and the CURRENT_SYSTEM_ADDRESS slot.
@@ -1053,7 +1106,12 @@ mod tests {
         );
         let mut state = State::builder().with_database(&mut db).build();
 
-        let result = resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state);
+        let result = resolve_system_address(
+            &rex5_hardforks(),
+            MegaSpecId::REX5,
+            MegaSpecId::REX5,
+            &mut state,
+        );
         assert!(result.is_err(), "zero _currentSystemAddress should be an error");
     }
 
@@ -1063,8 +1121,9 @@ mod tests {
         let mut state = State::builder().with_database(&mut db).build();
         let hardforks = rex5_hardforks();
 
-        let err = resolve_system_address(&hardforks, MegaSpecId::REX5, &mut state)
-            .expect_err("missing registry at Rex5 must fail closed");
+        let err =
+            resolve_system_address(&hardforks, MegaSpecId::REX5, MegaSpecId::REX5, &mut state)
+                .expect_err("missing registry at Rex5 must fail closed");
         assert!(err.to_string().contains("does not exist"));
     }
 
@@ -1081,8 +1140,13 @@ mod tests {
         );
         let mut state = State::builder().with_database(&mut db).build();
 
-        let err = resolve_system_address(&rex5_hardforks(), MegaSpecId::REX5, &mut state)
-            .expect_err("wrong code hash must fail closed");
+        let err = resolve_system_address(
+            &rex5_hardforks(),
+            MegaSpecId::REX5,
+            MegaSpecId::REX5,
+            &mut state,
+        )
+        .expect_err("wrong code hash must fail closed");
 
         assert!(err.to_string().contains("code hash mismatch"));
     }

@@ -26,7 +26,9 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - Do not apply post-execution limit counters before a tx outcome is commit-eligible.
 - Do not bypass `pre_execution_changes` in replay or simulation paths that aim for chain equivalence.
 - Do not infer spec from tx fields.
-- Always derive spec from hardfork activation at block timestamp.
+- Do not gate anything on a per-fork `is_<fork>_active_at_timestamp` predicate. Resolve one spec value from the block timestamp and gate on `spec.is_enabled(MegaSpecId::X)`, so behavior stays additive on a config that schedules a later fork without its predecessors.
+- Pick the right one of the two resolved specs. `spec_id` is reversible (a patch hardfork may map back to an earlier spec, as `MiniRex1` does) and gates execution semantics: EVM behavior, block limits, the executor's spec-coherence assert, transaction classification. `max_activated_spec_id` is monotone and gates one-way chain setup: system-contract predeploys, pre-block system calls, expected installed bytecode versions. A spec rollback does not un-deploy a predeploy, so gating setup on `spec_id` would retract it for the duration of the rollback window — and with it the read-only witness entries the on-state hook feeds to stateless proofs and the state-sync transition shard.
+- Do not express "a chain running spec N" as `with_all_activated().without(fork)`. Removing a middle rung leaves later forks active, so both the executing spec and the activated-spec floor stay at the top of the ladder. Use `with_all_activated_through(MegaSpecId::N)`.
 - Do not hardcode gas-limit assumptions outside `BlockLimits` plumbing.
 - Do not commit outcomes without first firing `on_state`. The two-step `on_state` → `commit` ordering is the witness-recorder contract; swapping or skipping it corrupts stateless proofs.
 
