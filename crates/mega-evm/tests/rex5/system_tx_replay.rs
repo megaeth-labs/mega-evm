@@ -63,7 +63,7 @@ type PocExecutor<'a> = MegaBlockExecutor<
 
 fn rex5_hardforks() -> MegaHardforkConfig {
     // Rex6 is excluded: this suite pins Rex5 semantics (v1.0.0 registry, REX5 spec).
-    MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6).with_params(
+    MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX5).with_params(
         SequencerRegistryConfig {
             rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
             rex5_initial_admin: BOOTSTRAP_ADMIN,

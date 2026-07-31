@@ -527,8 +527,7 @@ mod tests {
     /// registry runs v1.0.0.
     fn rex5_hardforks() -> MegaHardforkConfig {
         MegaHardforkConfig::default()
-            .with_all_activated()
-            .without(MegaHardfork::Rex6)
+            .with_all_activated_through(MegaSpecId::REX5)
             .with_params(test_config())
     }
 
@@ -619,8 +618,7 @@ mod tests {
     fn test_deploy_seeds_storage() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX5);
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
@@ -668,8 +666,7 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX5);
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 2000, &mut state, &test_config())
@@ -694,8 +691,7 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX5);
 
         let err =
             transact_deploy_sequencer_registry(&hardforks, 0, 2000, &mut state, &test_config())
@@ -718,8 +714,7 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX5);
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
