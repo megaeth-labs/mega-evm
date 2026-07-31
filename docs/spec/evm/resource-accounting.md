@@ -125,7 +125,7 @@ When multiple authorizations target the same authority, a node MUST evaluate the
 
 A node MUST record `ACCOUNT_UPDATE_DATA_SIZE` bytes of data size for a `SELFDESTRUCT` that transfers a **non-zero** balance to an existing account **distinct** from the executing contract.
 A `SELFDESTRUCT` of a zero-balance contract performs no balance credit and MUST record nothing.
-A `SELFDESTRUCT` whose target is the executing contract itself is an [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) balance no-op and MUST record nothing.
+A `SELFDESTRUCT` whose target is the executing contract itself credits no other account and MUST record nothing — under [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) it is a balance no-op for a contract not created in the current transaction and burns the balance for one that was, and neither writes a distinct target account.
 
 ### KV Updates
 

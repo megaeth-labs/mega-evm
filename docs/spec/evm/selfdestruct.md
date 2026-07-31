@@ -56,7 +56,7 @@ A node MUST NOT charge account-creation storage gas and MUST NOT record state gr
 Two cases record nothing:
 
 - a `SELFDESTRUCT` whose transferred balance is zero, which performs no balance credit; and
-- a `SELFDESTRUCT` whose target is the executing contract itself, which is an [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) balance no-op.
+- a `SELFDESTRUCT` whose target is the executing contract itself, which credits no other account. Under [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) this is a balance no-op for a contract not created in the current transaction, and burns the balance for one that was; neither writes a distinct target account.
 
 ### State Growth Refund
 

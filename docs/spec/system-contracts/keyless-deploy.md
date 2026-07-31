@@ -101,7 +101,8 @@ The expected deployment address MUST be:
 ### Deploy-Address Occupancy Read
 
 A node MUST perform the occupancy check of validation rule 5 as a cold, code-hash-only read through the parent journal, so the deploy address is part of the transaction's returned state — including when the check fails with `ContractAlreadyExists()`.
-The read MUST NOT load the account's bytecode, and the deploy address MUST remain cold for warm/cold access-list gas accounting.
+The read MUST NOT load the account's bytecode, and MUST NOT warm the deploy address for warm/cold access-list gas accounting.
+It MUST leave any warmth the address already carries — from the transaction's access list, for instance — in place.
 
 This governs only the transaction's returned state — the stateless-witness read set.
 It does not change the occupancy decision, the committed gas, or the committed state.
