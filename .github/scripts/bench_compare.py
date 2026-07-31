@@ -340,6 +340,19 @@ def baseline_gap_section(feature) -> str:
             ns = rows[row]
             marker = " (baseline)" if row == BASELINE_ROW else ""
             out += f"| `{row}` | {format_time(ns)} | {ns / base:.2f}×{marker} |\n"
+
+    # A ROW_ORDER entry that no bench emitted is dropped silently by the filter above, so the
+    # table looks complete while a spec is missing from it. That is how `rex6` went unreported
+    # after it was added to the bench spec list but not here. Name the gap instead.
+    seen = {spec for rows in groups.values() for spec in rows}
+    missing = [row for row in ROW_ORDER if row not in seen]
+    if missing:
+        names = ", ".join(f"`{row}`" for row in missing)
+        out += (
+            f"\n> No benchmark emitted a row for {names}. "
+            f"Either add the spec to `SPEC_IDS` in `crates/mega-evm/benches/common/mod.rs`, "
+            f"or drop it from `ROW_ORDER` here.\n"
+        )
     return out
 
 

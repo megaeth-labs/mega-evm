@@ -527,9 +527,9 @@ mod tests {
     #[test]
     fn test_with_all_activated_through_resolves_to_that_spec() {
         // The contract callers rely on: the config resolves to exactly the spec asked for, at any
-        // timestamp. Driven off `MegaSpecId`'s own progression rather than a second hand-written
-        // list, so a newly introduced spec fails here — once — instead of silently widening every
-        // "chain running spec N" config in the test suite.
+        // timestamp. The list below is hand-written, so introducing a spec does not fail here on
+        // its own — pair it with a builder that derives from the fork ladder, and add the new
+        // spec here so the rung it names is covered too.
         for spec in [
             MegaSpecId::EQUIVALENCE,
             MegaSpecId::MINI_REX,

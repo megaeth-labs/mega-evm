@@ -36,6 +36,11 @@ pub const SPEC_IDS: &[(&str, MegaSpecId)] = &[
     // storage-affecting opcodes (SSTORE, CALL, etc.) through the canonical
     // charge-storage / run-body / record-compute-once path.
     ("rex6", MegaSpecId::REX6),
+    // Rex7 delegates to Rex6 entirely, so the pair reads as a no-op today. It is registered from
+    // the spec's first day anyway: this is the frozen baseline every later Rex7 measurement is
+    // compared against, and a row added only once Rex7 has behavior would arrive with nothing to
+    // compare to.
+    ("rex7", MegaSpecId::REX7),
 ];
 
 type Group<'a> = criterion::BenchmarkGroup<'a, criterion::measurement::WallTime>;
