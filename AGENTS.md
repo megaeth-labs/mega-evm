@@ -78,6 +78,8 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 - **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement, and the canonical per-chain hardfork schedules.
   This module defines how a block in MegaETH block should be executed.
   `block/chain.rs` is the single source of truth for the mainnet/testnet chain IDs and activation-timestamp schedules (`hardfork_schedule(chain_id)`, `MAINNET_CHAIN_ID`, `TESTNET_CHAIN_ID`, `mainnet_hardforks()`, `testnet_hardforks()`); look there to find or change when a fork activates on a given chain.
+  Its unknown-chain fallback pins a named spec rather than following the latest one, so introducing a spec does not move chains that run from genesis; advancing that pin is a deliberate edit made when a spec is sealed.
+  Two resolved specs come out of a config and must not be confused: `spec_id` is the reversible executing spec (a patch hardfork may map back to an earlier spec, as `MiniRex1` does) and gates EVM behavior; `max_activated_spec_id` is the monotone activated-spec floor and gates one-way chain setup such as predeploys and pre-block system calls.
 - **`limit/`** — Resource limit tracking: compute gas, data size, KV updates, state growth (each in its own module).
   MegaETH introduces additional resource metering mechanism and this module implements their logic as utility structs to be used by mega-evm.
 - **`access/`** — Block env access tracking and volatile data detection for parallel execution.

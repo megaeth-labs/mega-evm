@@ -376,7 +376,19 @@ impl MegaHardforkConfig {
 
     /// Removes a `MegaHardfork` from the configuration, i.e., equivalent to setting the fork
     /// condition to [`ForkCondition::Never`].
-    pub fn without(mut self, hardfork: MegaHardfork) -> Self {
+    ///
+    /// Deliberately not public. Every external use it had was
+    /// `with_all_activated().without(fork)` meaning "a chain running the spec below `fork`", which
+    /// it does not express — the forks above `fork` stay registered, so the config resolves above
+    /// the intended rung and silently climbs again with the next spec. Say it with
+    /// [`with_all_activated_through`](Self::with_all_activated_through) instead.
+    ///
+    /// This narrows an idiom, not a capability: [`with`](Self::with) with
+    /// [`ForkCondition::Never`] produces the same unregistered fork, and must stay public because
+    /// the canonical schedules use it for exactly that (testnet's `MiniRex1` / `MiniRex2` never
+    /// activate). Writing a gap that way is at least visibly deliberate, and it keeps the entry
+    /// so [`with_params`](Self::with_params) can still attach to it.
+    pub(crate) fn without(mut self, hardfork: MegaHardfork) -> Self {
         self.entries.retain(|e| e.fork.name() != hardfork.name());
         self
     }
