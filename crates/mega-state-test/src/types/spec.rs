@@ -138,7 +138,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn to_spec_id_known_specs_succeed() {
+    fn test_to_spec_id_known_specs_succeed() {
         // MegaETH specs map to their own ids.
         assert_eq!(SpecName::MiniRex.to_spec_id(), Ok(MegaSpecId::MINI_REX));
         assert_eq!(SpecName::Rex.to_spec_id(), Ok(MegaSpecId::REX));
@@ -163,12 +163,12 @@ mod tests {
     }
 
     #[test]
-    fn to_spec_id_unknown_is_a_clean_error() {
+    fn test_to_spec_id_unknown_is_a_clean_error() {
         assert_eq!(SpecName::Unknown.to_spec_id(), Err(UnknownSpecError));
     }
 
     #[test]
-    fn unrecognized_spec_string_deserializes_to_unknown_and_errors() {
+    fn test_unrecognized_spec_string_deserializes_to_unknown_and_errors() {
         // An unrecognized fixture spec string takes serde's `other` fallback
         // and must then convert to a structured error, never a panic.
         let spec: SpecName = serde_json::from_str("\"FutureFork9000\"").expect("deserialize");
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn from_mega_spec_round_trips_known_specs() {
+    fn test_from_mega_spec_round_trips_known_specs() {
         for spec in [
             MegaSpecId::MINI_REX,
             MegaSpecId::EQUIVALENCE,
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn from_mega_spec_maps_the_latest_spec() {
+    fn test_from_mega_spec_maps_the_latest_spec() {
         // `MegaSpecId` is `#[non_exhaustive]`, so `from_mega_spec` needs a wildcard
         // arm and a newly introduced spec silently falls through to `Unknown`
         // instead of failing to compile. `MegaSpecId::default()` always tracks the
