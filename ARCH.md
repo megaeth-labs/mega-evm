@@ -25,7 +25,8 @@ This page details only the first few; the authoritative per-spec behavior is the
 
 ### EQUIVALENCE
 
-Default spec that maintains equivalence with Optimism Isthmus EVM.
+Baseline spec that maintains equivalence with Optimism Isthmus EVM.
+It is the oldest spec, not the default one — `MegaSpecId::default()` is the latest spec.
 
 ### MINI_REX
 
