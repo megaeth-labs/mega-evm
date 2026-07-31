@@ -142,7 +142,7 @@ REX6 is frozen but not yet scheduled on any network.
 - **[KeylessDeploy](system-contracts/keyless-deploy.md) sandbox hardening** — Unused gas is rescued on a transaction-level compute-gas halt, and a self-destructing constructor is classified as an empty-code deployment.
 - **Post-execution fee-reward accounting** — Account writes performed by the post-execution fee-reward step count toward resource accounting.
 - **System-originated transaction metering exemption** — Pre-block system calls and [Mega System Transactions](system-contracts/system-tx.md) charge storage gas at minimum bucket capacity and are not halted by resource limits or gas detention.
-- **Beneficiary detention / volatile-access coverage** — A `SELFDESTRUCT` executed by the beneficiary and CALL-family targets whose EIP-7702 delegate resolves to the beneficiary come under detention and `disableVolatileDataAccess`; a `SELFDESTRUCT` balance credit to an existing beneficiary counts toward resource accounting.
+- **Beneficiary detention / volatile-access coverage** — A `SELFDESTRUCT` executed by the beneficiary comes under `disableVolatileDataAccess`, and CALL-family targets whose EIP-7702 delegate resolves to the beneficiary come under both detention and `disableVolatileDataAccess`; a `SELFDESTRUCT` balance credit to an existing beneficiary counts toward resource accounting.
 - **Additional resource-accounting corrections** — A per-log data-size base is charged for the log address, and forwarded gas returns to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
 - **Value self-transfer dedup** — A value transfer whose target equals the caller is counted as a single account-info write.
 
