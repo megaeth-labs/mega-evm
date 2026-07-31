@@ -41,27 +41,6 @@ hardfork! {
 }
 
 impl MegaHardfork {
-    /// Every `MegaETH` hardfork, oldest first.
-    ///
-    /// This is the single source of the fork ladder. Everything that needs to walk it —
-    /// [`MegaHardforkConfig::with_all_activated`],
-    /// [`MegaHardforkConfig::with_all_activated_through`] — derives from this array, so
-    /// introducing a hardfork means adding one entry here rather than editing every place that
-    /// enumerates forks.
-    pub const ALL: [Self; 11] = [
-        Self::MiniRex,
-        Self::MiniRex1,
-        Self::MiniRex2,
-        Self::Rex,
-        Self::Rex1,
-        Self::Rex2,
-        Self::Rex3,
-        Self::Rex4,
-        Self::Rex5,
-        Self::Rex6,
-        Self::Rex7,
-    ];
-
     /// Gets the `MegaSpecId` associated with this hardfork.
     #[allow(clippy::match_same_arms)]
     pub fn spec_id(&self) -> MegaSpecId {
@@ -335,11 +314,11 @@ impl MegaHardforkConfig {
     /// Patch hardforks are included by their spec, not their position: `MiniRex1` maps back to
     /// [`MegaSpecId::EQUIVALENCE`], so it is registered for every `spec`.
     pub fn with_all_activated_through(mut self, spec: MegaSpecId) -> Self {
-        for fork in MegaHardfork::ALL {
+        for fork in MegaHardfork::VARIANTS {
             if spec.is_enabled(fork.spec_id()) {
-                self.insert(fork, ForkCondition::Timestamp(0));
+                self.insert(*fork, ForkCondition::Timestamp(0));
             } else {
-                self = self.without(fork);
+                self = self.without(*fork);
             }
         }
         self
@@ -503,23 +482,15 @@ mod tests {
     fn test_with_all_activated_enables_all_mega_hardforks() {
         let config = MegaHardforkConfig::default().with_all_activated();
 
-        for hardfork in [
-            MegaHardfork::MiniRex,
-            MegaHardfork::MiniRex1,
-            MegaHardfork::MiniRex2,
-            MegaHardfork::Rex,
-            MegaHardfork::Rex1,
-            MegaHardfork::Rex2,
-            MegaHardfork::Rex3,
-            MegaHardfork::Rex4,
-            MegaHardfork::Rex5,
-            MegaHardfork::Rex6,
-            MegaHardfork::Rex7,
-        ] {
-            assert_eq!(config.mega_fork_activation(hardfork), ForkCondition::Timestamp(0));
-            assert!(
-                MegaHardfork::ALL.contains(&hardfork),
-                "{hardfork:?} is missing from MegaHardfork::ALL, so the builders skip it"
+        // Driven off `VARIANTS`, which the `hardfork!` macro generates from the same variant list
+        // that declares the enum. A second hand-written list here would assert only that the
+        // forks someone remembered to name are activated — a new fork missing from both the
+        // builder and the list would fail neither.
+        for hardfork in MegaHardfork::VARIANTS {
+            assert_eq!(
+                config.mega_fork_activation(*hardfork),
+                ForkCondition::Timestamp(0),
+                "{hardfork:?}"
             );
         }
     }
@@ -558,8 +529,8 @@ mod tests {
         // through-builder at the top of the ladder — and every fork is registered.
         let all = MegaHardforkConfig::default().with_all_activated();
         assert_eq!(all.spec_id(0), MegaSpecId::default());
-        for fork in MegaHardfork::ALL {
-            assert_eq!(all.mega_fork_activation(fork), ForkCondition::Timestamp(0), "{fork:?}");
+        for fork in MegaHardfork::VARIANTS {
+            assert_eq!(all.mega_fork_activation(*fork), ForkCondition::Timestamp(0), "{fork:?}");
         }
     }
 
