@@ -499,7 +499,7 @@ mod tests {
     /// All hardforks including Rex6, with both registry param sets attached.
     fn rex6_hardforks() -> MegaHardforkConfig {
         MegaHardforkConfig::default()
-            .with_all_activated()
+            .with_all_activated_through(MegaSpecId::REX6)
             .with_params(test_config())
             .with_params(test_rex6_config())
     }
@@ -859,8 +859,9 @@ mod tests {
     fn test_deploy_rex6_missing_config_errors() {
         // Rex6 active but only the Rex5 params attached: deploy must fail fast instead of
         // installing a v2.0.0 registry with an unseeded _minRotationDelay.
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().with_params(test_config());
+        let hardforks = MegaHardforkConfig::default()
+            .with_all_activated_through(MegaSpecId::REX6)
+            .with_params(test_config());
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
 
