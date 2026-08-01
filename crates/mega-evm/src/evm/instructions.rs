@@ -55,7 +55,7 @@ use revm::{
 /// ## CREATE/CREATE2 Opcodes
 /// - Compute gas: Standard costs (32,000 for CREATE, 6 gas/word for CREATE2 hashing)
 /// - Storage gas: Dynamic bucket-based costs for new account creation
-/// - Gas forwarding: 98/100 rule (2% withheld vs. standard 1.5%)
+/// - Gas forwarding: 98/100 rule (2% withheld vs. standard 1/64 ≈ 1.56% per EIP-150)
 /// - Data/KV tracking: 40 bytes + 1 KV update per account creation
 ///
 /// ## CALL-like Opcode
@@ -66,7 +66,7 @@ use revm::{
 ///   storage-gas-heavy operations such as `LOG`
 /// - REX4+: Compute gas remains capped at the original `forwarded_gas + CALL_STIPEND`, so the extra
 ///   stipend cannot be used for pure computation
-/// - Gas forwarding: 98/100 rule (2% withheld vs. standard 1.5%)
+/// - Gas forwarding: 98/100 rule (2% withheld vs. standard 1/64 ≈ 1.56% per EIP-150)
 /// - Oracle detection: Handled at frame level (in `frame_init`), applies gas detention for both
 ///   direct transaction calls and internal CALL operations
 /// - Data/KV tracking: 40 bytes + 2 KV updates when transferring to empty account
