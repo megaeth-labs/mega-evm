@@ -39,6 +39,27 @@ hardfork! {
 }
 
 impl MegaHardfork {
+    /// Whether this fork introduces a new spec — its spec is strictly higher than every
+    /// earlier-declared fork's. Patch forks (`MiniRex1`, `MiniRex2`) do not.
+    pub(crate) fn introduces_spec(self) -> bool {
+        let declared = self.declaration_index();
+        Self::VARIANTS[..declared].iter().all(|fork| fork.spec_id() < self.spec_id())
+    }
+
+    /// The nearest earlier-declared spec-introducing fork — for a patch fork, the fork whose
+    /// behavior it patches. `None` only for the first declared fork.
+    pub(crate) fn base_fork(self) -> Option<Self> {
+        let declared = self.declaration_index();
+        Self::VARIANTS[..declared].iter().rev().find(|fork| fork.introduces_spec()).copied()
+    }
+
+    fn declaration_index(self) -> usize {
+        Self::VARIANTS
+            .iter()
+            .position(|fork| *fork == self)
+            .expect("every MegaHardfork is in VARIANTS")
+    }
+
     /// Gets the `MegaSpecId` associated with this hardfork.
     #[allow(clippy::match_same_arms)]
     pub fn spec_id(&self) -> MegaSpecId {
@@ -137,7 +158,7 @@ pub trait MegaHardforks: OpHardforks {
     /// This is the *executing* resolution: it reads raw activation events
     /// ([`mega_fork_activation`](Self::mega_fork_activation)), not the activated-spec floor, so a
     /// rollback patch fork like `MiniRex1` correctly takes over from the fork it patches.
-    fn hardfork(&self, timestamp: u64) -> Option<MegaHardfork> {
+    fn hardfork(&self, timestamp: BlockTimestamp) -> Option<MegaHardfork> {
         MegaHardfork::VARIANTS
             .iter()
             .rev()
@@ -186,9 +207,8 @@ pub trait MegaHardforks: OpHardforks {
         // `test_floor_early_exit_matches_naive_reference` pins this against the plain
         // max-over-activated-forks formula.
         let mut floor = MegaSpecId::EQUIVALENCE;
-        for (i, fork) in MegaHardfork::VARIANTS.iter().enumerate().rev() {
-            let introduces_spec =
-                MegaHardfork::VARIANTS[..i].iter().all(|e| e.spec_id() < fork.spec_id());
+        for fork in MegaHardfork::VARIANTS.iter().rev() {
+            let introduces_spec = fork.introduces_spec();
             if introduces_spec && floor.is_enabled(fork.spec_id()) {
                 break;
             }
@@ -205,7 +225,7 @@ pub trait MegaHardforks: OpHardforks {
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::MINI_REX`], the
     /// spec introduced by [`MegaHardfork::MiniRex`]. Floor-projected — see the trait docs; for
     /// the raw activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_mini_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_mini_rex_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.max_activated_spec_id(timestamp).is_enabled(MegaSpecId::MINI_REX)
     }
 
@@ -216,7 +236,7 @@ pub trait MegaHardforks: OpHardforks {
     /// back to [`MegaSpecId::EQUIVALENCE`]), so it is not recoverable from a spec ordinal and
     /// this predicate stays a raw event query, unlike the floor-projected spec-introducing
     /// predicates.
-    fn is_mini_rex_1_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_mini_rex_1_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.mega_fork_activation(MegaHardfork::MiniRex1).active_at_timestamp(timestamp)
     }
 
@@ -227,56 +247,56 @@ pub trait MegaHardforks: OpHardforks {
     /// [`MegaSpecId::MINI_REX`] after the `MiniRex1` rollback), so it is not recoverable from a
     /// spec ordinal and this predicate stays a raw event query, unlike the floor-projected
     /// spec-introducing predicates.
-    fn is_mini_rex_2_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_mini_rex_2_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.mega_fork_activation(MegaHardfork::MiniRex2).active_at_timestamp(timestamp)
     }
 
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::REX`], the spec
     /// introduced by [`MegaHardfork::Rex`]. Floor-projected — see the trait docs; for the raw
     /// activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_rex_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.max_activated_spec_id(timestamp).is_enabled(MegaSpecId::REX)
     }
 
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::REX1`], the spec
     /// introduced by [`MegaHardfork::Rex1`]. Floor-projected — see the trait docs; for the raw
     /// activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_1_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_rex_1_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.max_activated_spec_id(timestamp).is_enabled(MegaSpecId::REX1)
     }
 
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::REX2`], the spec
     /// introduced by [`MegaHardfork::Rex2`]. Floor-projected — see the trait docs; for the raw
     /// activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_2_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_rex_2_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.max_activated_spec_id(timestamp).is_enabled(MegaSpecId::REX2)
     }
 
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::REX3`], the spec
     /// introduced by [`MegaHardfork::Rex3`]. Floor-projected — see the trait docs; for the raw
     /// activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_3_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_rex_3_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.max_activated_spec_id(timestamp).is_enabled(MegaSpecId::REX3)
     }
 
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::REX4`], the spec
     /// introduced by [`MegaHardfork::Rex4`]. Floor-projected — see the trait docs; for the raw
     /// activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_4_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_rex_4_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.max_activated_spec_id(timestamp).is_enabled(MegaSpecId::REX4)
     }
 
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::REX5`], the spec
     /// introduced by [`MegaHardfork::Rex5`]. Floor-projected — see the trait docs; for the raw
     /// activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_5_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_rex_5_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.max_activated_spec_id(timestamp).is_enabled(MegaSpecId::REX5)
     }
 
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::REX6`], the spec
     /// introduced by [`MegaHardfork::Rex6`]. Floor-projected — see the trait docs; for the raw
     /// activation event use [`mega_fork_activation`](Self::mega_fork_activation).
-    fn is_rex_6_active_at_timestamp(&self, timestamp: u64) -> bool {
+    fn is_rex_6_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
         self.max_activated_spec_id(timestamp).is_enabled(MegaSpecId::REX6)
     }
 
@@ -299,6 +319,9 @@ pub trait MegaHardforks: OpHardforks {
     /// - No skipped rungs: a spec-introducing fork may be unscheduled only if no scheduled fork
     ///   maps to an equal-or-higher spec. Patch forks are exempt — testnet legitimately never
     ///   schedules `MiniRex1`/`MiniRex2`.
+    /// - No orphan patches: a scheduled patch fork requires the spec-introducing fork it patches to
+    ///   be scheduled. Rolling back or restoring a fork that never happened is a configuration
+    ///   mistake even though execution resolves it harmlessly.
     /// - Per-fork parameters required by a scheduled fork are present (`Rex5` requires
     ///   [`SequencerRegistryConfig`](crate::SequencerRegistryConfig), `Rex6` requires
     ///   [`SequencerRegistryRex6Config`](crate::SequencerRegistryRex6Config)). This surfaces a
@@ -329,10 +352,8 @@ pub trait MegaHardforks: OpHardforks {
             }
         }
 
-        for (i, fork) in MegaHardfork::VARIANTS.iter().enumerate() {
-            let introduces_spec =
-                MegaHardfork::VARIANTS[..i].iter().all(|e| e.spec_id() < fork.spec_id());
-            if !introduces_spec || scheduled(*fork) {
+        for fork in MegaHardfork::VARIANTS {
+            if !fork.introduces_spec() || scheduled(*fork) {
                 continue;
             }
             if let Some(above) = MegaHardfork::VARIANTS
@@ -340,6 +361,16 @@ pub trait MegaHardforks: OpHardforks {
                 .find(|g| scheduled(**g) && g.spec_id() >= fork.spec_id())
             {
                 return Err(ScheduleError::SkippedRung { missing: *fork, scheduled: *above });
+            }
+        }
+
+        for fork in MegaHardfork::VARIANTS {
+            if fork.introduces_spec() || !scheduled(*fork) {
+                continue;
+            }
+            let base = fork.base_fork().expect("a patch fork always has an earlier base");
+            if !scheduled(base) {
+                return Err(ScheduleError::OrphanPatch { patch: *fork, base });
             }
         }
 
@@ -388,6 +419,15 @@ pub enum ScheduleError {
         missing: MegaHardfork,
         /// A scheduled fork whose spec is equal or higher.
         scheduled: MegaHardfork,
+    },
+    /// A patch fork is scheduled while the spec-introducing fork it patches is not — a
+    /// rollback or restoration of a fork that never happened.
+    #[display("patch hardfork {patch:?} is scheduled but its base {base:?} is not")]
+    OrphanPatch {
+        /// The scheduled patch fork.
+        patch: MegaHardfork,
+        /// The unscheduled spec-introducing fork it patches.
+        base: MegaHardfork,
     },
     /// A `MegaHardfork` is registered with a block-number or TTD condition, which the
     /// timestamp-scoped resolution never reports as active.
@@ -523,11 +563,15 @@ impl MegaHardforkConfig {
     /// entry and are not restored by a later climb back up — re-attach them with
     /// [`with_params`](Self::with_params).
     ///
-    /// Patch hardforks are included by their spec, not their position: `MiniRex1` maps back to
-    /// [`MegaSpecId::EQUIVALENCE`], so it is registered for every `spec`.
+    /// Patch hardforks ride along with the fork they patch: `MiniRex1`/`MiniRex2` are
+    /// registered exactly when `MiniRex` is. A patch without its base would schedule the
+    /// rollback of a fork that never happened — the shape `validate_schedule` rejects as
+    /// [`ScheduleError::OrphanPatch`] — so `with_all_activated_through(EQUIVALENCE)` registers
+    /// no fork at all and resolves to `EQUIVALENCE` by default.
     pub fn with_all_activated_through(mut self, spec: MegaSpecId) -> Self {
         for fork in MegaHardfork::VARIANTS {
-            if spec.is_enabled(fork.spec_id()) {
+            let base_included = fork.base_fork().is_none_or(|base| spec.is_enabled(base.spec_id()));
+            if spec.is_enabled(fork.spec_id()) && base_included {
                 self.insert(*fork, ForkCondition::Timestamp(0));
             } else {
                 self = self.without(*fork);
@@ -833,10 +877,8 @@ mod tests {
 
             for ts in stamps {
                 let floor = hf.max_activated_spec_id(ts);
-                for (i, fork) in MegaHardfork::VARIANTS.iter().enumerate() {
-                    let introduces_spec =
-                        MegaHardfork::VARIANTS[..i].iter().all(|e| e.spec_id() < fork.spec_id());
-                    if !introduces_spec {
+                for fork in MegaHardfork::VARIANTS {
+                    if !fork.introduces_spec() {
                         continue;
                     }
                     assert_eq!(
@@ -1049,8 +1091,9 @@ mod tests {
     }
 
     /// Every canonical schedule and every `with_all_activated_through` rung is well-formed.
-    /// `with_all_activated_through(EQUIVALENCE)` is the edge worth pinning: it registers only
-    /// `MiniRex1` (a patch fork), which must not count as a skipped rung.
+    /// `with_all_activated_through(EQUIVALENCE)` is the edge worth pinning: it registers no
+    /// fork at all (a patch without its base would be an orphan) and resolves to
+    /// `EQUIVALENCE` by default.
     #[test]
     fn test_validate_schedule_accepts_well_formed_ladders() {
         assert_eq!(crate::mainnet_hardforks().validate_schedule(), Ok(()));
@@ -1106,6 +1149,24 @@ mod tests {
             Err(ScheduleError::SkippedRung {
                 missing: MegaHardfork::Rex,
                 scheduled: MegaHardfork::Rex2
+            })
+        );
+    }
+
+    /// Scheduling a patch fork without the fork it patches is the rollback of a fork that
+    /// never happened. Execution resolves it harmlessly (the spec stays `EQUIVALENCE`), but a
+    /// published schedule with this shape is a configuration mistake.
+    #[test]
+    fn test_validate_schedule_rejects_orphan_patch() {
+        let hf =
+            MegaHardforkConfig::new().with(MegaHardfork::MiniRex1, ForkCondition::Timestamp(0));
+
+        assert_eq!(hf.spec_id(0), MegaSpecId::EQUIVALENCE, "execution itself is unaffected");
+        assert_eq!(
+            hf.validate_schedule(),
+            Err(ScheduleError::OrphanPatch {
+                patch: MegaHardfork::MiniRex1,
+                base: MegaHardfork::MiniRex
             })
         );
     }
