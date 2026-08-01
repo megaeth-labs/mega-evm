@@ -177,12 +177,29 @@ pub trait MegaHardforks: OpHardforks {
     /// registered with [`ForkCondition::Block`] or [`ForkCondition::TTD`] never reports active
     /// here. Every `MegaHardfork` in the canonical schedules uses `Timestamp` or `Never`.
     fn max_activated_spec_id(&self, timestamp: BlockTimestamp) -> MegaSpecId {
-        MegaHardfork::VARIANTS
-            .iter()
-            .filter(|fork| self.mega_fork_activation(**fork).active_at_timestamp(timestamp))
-            .map(|fork| fork.spec_id())
-            .max()
-            .unwrap_or(MegaSpecId::EQUIVALENCE)
+        // Descending scan with early exit: a spec-introducing fork's spec is the highest any
+        // fork declared at or before it maps to, so the scan stops at the first activated
+        // spec-introducing fork (or once the running floor already covers everything earlier).
+        // The floor for a chain near the top of the ladder — every real query — thus costs one
+        // or two activation lookups, not one per fork; only the `mega_fork_activation` calls
+        // are bounded, the `introduces_spec` prefix check is enum-ordinal arithmetic.
+        // `test_floor_early_exit_matches_naive_reference` pins this against the plain
+        // max-over-activated-forks formula.
+        let mut floor = MegaSpecId::EQUIVALENCE;
+        for (i, fork) in MegaHardfork::VARIANTS.iter().enumerate().rev() {
+            let introduces_spec =
+                MegaHardfork::VARIANTS[..i].iter().all(|e| e.spec_id() < fork.spec_id());
+            if introduces_spec && floor.is_enabled(fork.spec_id()) {
+                break;
+            }
+            if self.mega_fork_activation(*fork).active_at_timestamp(timestamp) {
+                floor = floor.max(fork.spec_id());
+                if introduces_spec {
+                    break;
+                }
+            }
+        }
+        floor
     }
 
     /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::MINI_REX`], the
@@ -859,12 +876,11 @@ mod tests {
 
     /// `with_all_activated_through` is the well-formed way to express "a chain running spec N":
     /// both the executing spec and the activated-spec floor resolve to exactly `N`, at any
-    /// timestamp. The specs under test are derived from the fork ladder itself (every spec some
-    /// fork maps to, which covers the whole progression), so a newly introduced spec is covered
-    /// here automatically instead of depending on a hand-written list.
+    /// timestamp. The specs under test come from [`MegaSpecId::ALL`], so a newly introduced
+    /// spec is covered here automatically instead of depending on a hand-written list.
     #[test]
     fn test_with_all_activated_through_resolves_to_that_spec() {
-        for spec in MegaHardfork::VARIANTS.iter().map(|fork| fork.spec_id()) {
+        for spec in MegaSpecId::ALL.iter().copied() {
             let config = MegaHardforkConfig::default().with_all_activated_through(spec);
             assert_eq!(config.spec_id(0), spec, "{spec:?} at genesis");
             assert_eq!(config.spec_id(u64::MAX), spec, "{spec:?} must be terminal");
@@ -934,10 +950,8 @@ mod tests {
 
             for ts in stamps {
                 let (exec, floor) = (hf.spec_id(ts), hf.max_activated_spec_id(ts));
-                for spec in MegaHardfork::VARIANTS
-                    .iter()
-                    .map(|fork| fork.spec_id())
-                    .filter(|spec| spec.is_enabled(MegaSpecId::REX5))
+                for spec in
+                    MegaSpecId::ALL.iter().copied().filter(|spec| spec.is_enabled(MegaSpecId::REX5))
                 {
                     assert_eq!(
                         exec.is_enabled(spec),
@@ -974,6 +988,49 @@ mod tests {
         );
     }
 
+    /// The early-exit descending scan in `max_activated_spec_id` must be observationally
+    /// identical to the naive maximum over all activated forks, on every schedule shape:
+    /// canonical ladders, rollback windows, partial ladders, block-numbered conditions, and the
+    /// empty config.
+    #[test]
+    fn test_floor_early_exit_matches_naive_reference() {
+        let configs = [
+            crate::mainnet_hardforks(),
+            crate::testnet_hardforks(),
+            crate::all_activated_hardforks(),
+            MegaHardforkConfig::new(),
+            // Partial ladders: a lone top rung, and a lone patch fork.
+            MegaHardforkConfig::new().with(MegaHardfork::Rex6, ForkCondition::Timestamp(7)),
+            MegaHardforkConfig::new().with(MegaHardfork::MiniRex2, ForkCondition::Timestamp(7)),
+            // Non-timestamp conditions never contribute.
+            MegaHardforkConfig::new()
+                .with(MegaHardfork::MiniRex, ForkCondition::Block(0))
+                .with(MegaHardfork::Rex2, ForkCondition::Timestamp(7)),
+        ];
+        let rungs: Vec<MegaHardforkConfig> = MegaSpecId::ALL
+            .iter()
+            .map(|spec| MegaHardforkConfig::default().with_all_activated_through(*spec))
+            .collect();
+
+        for hf in configs.iter().chain(rungs.iter()) {
+            let mut stamps = std::vec![0u64, u64::MAX];
+            for fork in MegaHardfork::VARIANTS {
+                if let ForkCondition::Timestamp(t) = hf.mega_fork_activation(*fork) {
+                    stamps.extend([t.saturating_sub(1), t, t.saturating_add(1)]);
+                }
+            }
+            for ts in stamps {
+                let naive = MegaHardfork::VARIANTS
+                    .iter()
+                    .filter(|fork| hf.mega_fork_activation(**fork).active_at_timestamp(ts))
+                    .map(|fork| fork.spec_id())
+                    .max()
+                    .unwrap_or(MegaSpecId::EQUIVALENCE);
+                assert_eq!(hf.max_activated_spec_id(ts), naive, "floor diverges at ts={ts}");
+            }
+        }
+    }
+
     /// Patch-fork predicates stay raw event queries: they are not recoverable from a spec
     /// ordinal, so they must not follow the floor. Testnet is the live case — its floor climbs
     /// the whole ladder while `MiniRex1`/`MiniRex2` are never scheduled.
@@ -1001,7 +1058,7 @@ mod tests {
         assert_eq!(crate::all_activated_hardforks().validate_schedule(), Ok(()));
         assert_eq!(MegaHardforkConfig::new().validate_schedule(), Ok(()), "no mega forks is fine");
 
-        for spec in MegaHardfork::VARIANTS.iter().map(|fork| fork.spec_id()) {
+        for spec in MegaSpecId::ALL.iter().copied() {
             let mut config = MegaHardforkConfig::default().with_all_activated_through(spec);
             if spec.is_enabled(MegaSpecId::REX5) {
                 config = config.with_params(SequencerRegistryConfig {
