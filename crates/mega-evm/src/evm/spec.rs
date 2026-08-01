@@ -80,6 +80,25 @@ pub mod name {
 }
 
 impl MegaSpecId {
+    /// Every spec in the progression, oldest first.
+    ///
+    /// The single point to enumerate specs from: sweeps and tables that list specs by hand
+    /// drift silently when a variant is added. Completeness is enforced in two steps —
+    /// introducing a variant is a compile error in `ladder_index`'s exhaustive match (whose
+    /// const assertion ties each entry here to its ladder position), and
+    /// `test_all_ends_at_the_latest_spec` fails until the new spec is appended here.
+    pub const ALL: &'static [Self] = &[
+        Self::EQUIVALENCE,
+        Self::MINI_REX,
+        Self::REX,
+        Self::REX1,
+        Self::REX2,
+        Self::REX3,
+        Self::REX4,
+        Self::REX5,
+        Self::REX6,
+    ];
+
     /// Converts the [`SpecId`] into its corresponding [`EthSpecId`].
     pub const fn into_eth_spec(self) -> EthSpecId {
         self.into_op_spec().into_eth_spec()
@@ -109,6 +128,36 @@ impl MegaSpecId {
         other as u8 <= self as u8
     }
 }
+
+/// Position on the spec progression, 0 = `EQUIVALENCE`.
+///
+/// Not an API — the `u8` discriminant already carries the ordinal. This exists to be an
+/// exhaustive match: introducing a spec fails compilation here until the variant is placed,
+/// and the const assertion below fails until [`MegaSpecId::ALL`] lists it at that position.
+const fn ladder_index(spec: MegaSpecId) -> usize {
+    match spec {
+        MegaSpecId::EQUIVALENCE => 0,
+        MegaSpecId::MINI_REX => 1,
+        MegaSpecId::REX => 2,
+        MegaSpecId::REX1 => 3,
+        MegaSpecId::REX2 => 4,
+        MegaSpecId::REX3 => 5,
+        MegaSpecId::REX4 => 6,
+        MegaSpecId::REX5 => 7,
+        MegaSpecId::REX6 => 8,
+    }
+}
+
+const _: () = {
+    let mut i = 0;
+    while i < MegaSpecId::ALL.len() {
+        assert!(
+            ladder_index(MegaSpecId::ALL[i]) == i,
+            "MegaSpecId::ALL must list every spec in ladder order, without gaps"
+        );
+        i += 1;
+    }
+};
 
 impl From<MegaSpecId> for &'static str {
     /// Converts the [`SpecId`] into its corresponding string identifier.
@@ -186,6 +235,11 @@ mod tests {
 
     #[test]
     fn test_spec_names_roundtrip_and_display() {
+        // The golden pairs stay hand-written — deriving the expected names from the code under
+        // test would make the round-trip vacuous — but the spec column must be exactly
+        // `MegaSpecId::ALL`, so a newly introduced spec cannot be forgotten here.
+        assert!(ALL_SPECS.iter().map(|(spec, _)| *spec).eq(MegaSpecId::ALL.iter().copied()));
+
         for (spec, expected_name) in ALL_SPECS {
             assert_eq!(<&'static str>::from(spec), expected_name);
             assert_eq!(MegaSpecId::from_str(expected_name).unwrap(), spec);
@@ -196,9 +250,18 @@ mod tests {
         assert_eq!(MegaSpecId::from_str("unknown"), Err(UnknownHardfork));
     }
 
+    /// The completeness anchor for [`MegaSpecId::ALL`]: `Default` tracks the latest spec (its
+    /// own assertion above pins which), so a variant added without extending `ALL` fails here
+    /// once the default advances. The const assertion on `ladder_index` covers order and gaps;
+    /// this covers the tail.
+    #[test]
+    fn test_all_ends_at_the_latest_spec() {
+        assert_eq!(*MegaSpecId::ALL.last().unwrap(), MegaSpecId::default());
+    }
+
     #[test]
     fn test_all_specs_map_to_isthmus_and_prague() {
-        for (spec, _) in ALL_SPECS {
+        for spec in MegaSpecId::ALL.iter().copied() {
             assert_eq!(spec.into_op_spec(), OpSpecId::ISTHMUS);
             assert_eq!(spec.into_eth_spec(), EthSpecId::PRAGUE);
             assert_eq!(revm::primitives::hardfork::SpecId::from(spec), EthSpecId::PRAGUE);
