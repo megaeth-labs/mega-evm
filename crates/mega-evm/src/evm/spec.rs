@@ -84,8 +84,8 @@ impl MegaSpecId {
     ///
     /// The single point to enumerate specs from: sweeps and tables that list specs by hand
     /// drift silently when a variant is added. Completeness is enforced in two steps —
-    /// introducing a variant is a compile error in `ladder_index`'s exhaustive match (whose
-    /// const assertion ties each entry here to its ladder position), and
+    /// introducing a variant is a compile error in `ladder_index`'s exhaustive match (and the
+    /// `is_ladder_prefix` const assertion ties each entry here to its ladder position), and
     /// `test_all_ends_at_the_latest_spec` fails until the new spec is appended here.
     pub const ALL: &'static [Self] = &[
         Self::EQUIVALENCE,
@@ -148,16 +148,27 @@ const fn ladder_index(spec: MegaSpecId) -> usize {
     }
 }
 
-const _: () = {
+/// Whether `list` is a prefix of the spec ladder: entry `i` is exactly the spec at ladder
+/// position `i` — in order, without gaps, starting from `EQUIVALENCE`.
+///
+/// Shared by the compile-time assertion on [`MegaSpecId::ALL`] below and by the test that
+/// feeds it malformed lists, so the checker itself is exercised — a weakened guard here would
+/// otherwise pass silently, since the real `ALL` always satisfies the property it checks.
+const fn is_ladder_prefix(list: &[MegaSpecId]) -> bool {
     let mut i = 0;
-    while i < MegaSpecId::ALL.len() {
-        assert!(
-            ladder_index(MegaSpecId::ALL[i]) == i,
-            "MegaSpecId::ALL must list every spec in ladder order, without gaps"
-        );
+    while i < list.len() {
+        if ladder_index(list[i]) != i {
+            return false;
+        }
         i += 1;
     }
-};
+    true
+}
+
+const _: () = assert!(
+    is_ladder_prefix(MegaSpecId::ALL),
+    "MegaSpecId::ALL must list every spec in ladder order, without gaps"
+);
 
 impl From<MegaSpecId> for &'static str {
     /// Converts the [`SpecId`] into its corresponding string identifier.
@@ -257,6 +268,29 @@ mod tests {
     #[test]
     fn test_all_ends_at_the_latest_spec() {
         assert_eq!(*MegaSpecId::ALL.last().unwrap(), MegaSpecId::default());
+    }
+
+    /// The compile-time checker is itself exercised with malformed lists: the real `ALL`
+    /// always satisfies the property, so only rejection cases can detect a weakened guard
+    /// inside the checker.
+    #[test]
+    fn test_is_ladder_prefix_rejects_malformed_lists() {
+        assert!(is_ladder_prefix(MegaSpecId::ALL));
+        assert!(is_ladder_prefix(&[]), "the empty prefix is a ladder prefix");
+        assert!(is_ladder_prefix(&[MegaSpecId::EQUIVALENCE, MegaSpecId::MINI_REX]));
+
+        assert!(
+            !is_ladder_prefix(&[MegaSpecId::MINI_REX, MegaSpecId::EQUIVALENCE]),
+            "reordered entries must be rejected"
+        );
+        assert!(
+            !is_ladder_prefix(&[MegaSpecId::MINI_REX]),
+            "a list not starting at the ladder base must be rejected"
+        );
+        assert!(
+            !is_ladder_prefix(&[MegaSpecId::EQUIVALENCE, MegaSpecId::REX]),
+            "a skipped rung must be rejected"
+        );
     }
 
     #[test]
