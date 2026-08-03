@@ -54,7 +54,7 @@ Each group is documented on its own page.
 | Chain and spec    | `--spec`, `--chain-id`                                                                                                                                                                     | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas`                      | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | `--bucket-capacity`                                                                                                                                                                        | [SALT Buckets](../configuration/salt-buckets.md)                                |
-| RPC cache / retry | `--rpc.cache-size`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.cu-per-sec`                                             | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
+| RPC cache / retry | `--rpc.cache-max-entries`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.cu-per-sec`                                      | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
 | Tracing           | `--trace`, `--tracer`, `--trace.output`, and tracer-specific flags                                                                                                                         | [Tracing Overview](../tracing/overview.md)                                      |
 | Output            | `--json`                                                                                                                                                                                   | See [JSON output](#json-output) below                                           |
 
@@ -304,8 +304,8 @@ RPC Options:
       --rpc.replay-file <REPLAY_FILE>
           (replay command only) Serve JSON-RPC from a captured fixture; not usable as a run/tx offline-fork path
 
-      --rpc.cache-size <cache_size>
-          Max items in the in-memory RPC LRU cache; 0 disables it [default: 10000]
+      --rpc.cache-max-entries <cache_max_entries>
+          Max items in the in-memory RPC LRU cache (and therefore the cache file); 0 = unlimited (never evict) [default: 0]
 
       --rpc.cache-dir <CACHE_DIR>
           Directory for per-chain RPC cache files (default: platform cache dir)

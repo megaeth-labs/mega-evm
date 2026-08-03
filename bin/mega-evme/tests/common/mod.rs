@@ -109,7 +109,7 @@ impl MockRpcServer {
 
 /// Build [`RpcArgs`] for a test pointed at `url` with the on-disk cache disabled.
 ///
-/// Defaults: `--rpc.cache-size 0` (no cache layer, no disk persistence),
+/// Defaults: `--rpc.no-cache-file` (in-memory LRU still applies; no disk persistence),
 /// 1ms backoff, production rate limit. `build_provider` still calls
 /// `eth_chainId`, so the caller must mount a mock for it. Pass `Some(n)` to
 /// override `--rpc.max-retries`; `None` keeps the production default.
@@ -118,8 +118,7 @@ pub(crate) fn test_rpc_args(url: &str, max_retries: Option<u32>) -> RpcArgs {
         "mega-evme".into(),
         "--rpc".into(),
         url.into(),
-        "--rpc.cache-size".into(),
-        "0".into(),
+        "--rpc.no-cache-file".into(),
         "--rpc.backoff-ms".into(),
         "1".into(),
         "--rpc.rate-limit".into(),
@@ -134,7 +133,7 @@ pub(crate) fn test_rpc_args(url: &str, max_retries: Option<u32>) -> RpcArgs {
 
 /// Build [`RpcArgs`] for a test that exercises the on-disk cache path.
 ///
-/// Sets `--rpc.cache-size 256` and an explicit `--rpc.cache-dir`. The caller
+/// Sets `--rpc.cache-max-entries 256` and an explicit `--rpc.cache-dir`. The caller
 /// must mount a mock `eth_chainId` response on the server so that
 /// `build_provider`'s `resolve_chain_id` call succeeds — use
 /// [`MockRpcServer::respond_eth_chain_id`] for this.
@@ -147,7 +146,7 @@ pub(crate) fn test_rpc_args_cached(
         "mega-evme".into(),
         "--rpc".into(),
         url.into(),
-        "--rpc.cache-size".into(),
+        "--rpc.cache-max-entries".into(),
         "256".into(),
         "--rpc.cache-dir".into(),
         cache_dir.to_str().expect("cache_dir utf-8").to_string(),

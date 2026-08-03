@@ -29,7 +29,7 @@ fn test_rpc_args_parses_all_new_flags() {
         "mega-evme",
         "--rpc",
         "https://example.test/rpc",
-        "--rpc.cache-size",
+        "--rpc.cache-max-entries",
         "256",
         "--rpc.cache-dir",
         "/tmp/example-cache",
@@ -43,13 +43,33 @@ fn test_rpc_args_parses_all_new_flags() {
         "1234",
     ]);
     assert_eq!(args.rpc_url, Some("https://example.test/rpc".to_string()));
-    assert_eq!(args.cache_size, 256);
+    assert_eq!(args.cache_max_entries, 256);
     assert_eq!(args.cache_dir, Some(PathBuf::from("/tmp/example-cache")));
     assert!(args.no_cache_file);
     assert!(args.clear_cache);
     assert_eq!(args.max_retries, 7);
     assert_eq!(args.backoff_ms, 250);
     assert_eq!(args.compute_units_per_sec, 1234);
+}
+
+/// The removed `--rpc.cache-size` flag must fail to parse (pin the deletion).
+#[test]
+fn test_rpc_args_rejects_removed_cache_size_flag() {
+    let err = RpcArgs::try_parse_from([
+        "mega-evme",
+        "--rpc",
+        "https://example.test/rpc",
+        "--rpc.cache-size",
+        "100",
+    ])
+    .expect_err("removed --rpc.cache-size must not parse");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unexpected argument") ||
+            msg.contains("unknown") ||
+            msg.contains("cache-size"),
+        "error must reject the removed flag, got: {msg}",
+    );
 }
 
 /// Canonical flag name `--rpc.cu-per-sec` parses into the same field.
@@ -94,7 +114,7 @@ fn test_rpc_args_rejects_empty_cache_dir() {
 fn test_rpc_args_default_values() {
     let args = RpcArgs::parse_from(["mega-evme"]);
     assert_eq!(args.rpc_url, None);
-    assert_eq!(args.cache_size, 10_000);
+    assert_eq!(args.cache_max_entries, 0, "default is unlimited (never evict)");
     assert_eq!(args.cache_dir, None);
     assert!(!args.no_cache_file);
     assert!(!args.clear_cache);
@@ -105,16 +125,18 @@ fn test_rpc_args_default_values() {
 
 // ─── build_provider shape variants ───────────────────────────────────────────
 
-/// `--rpc.cache-size 0`: noop store, but `chain_id` is still resolved.
+/// Default `--rpc.cache-max-entries 0` (unlimited) still resolves `chain_id`
+/// and installs the in-memory cache layer; with `--rpc.no-cache-file` the
+/// disk store is a no-op.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_build_provider_without_cache() {
+async fn test_build_provider_default_unlimited_with_no_cache_file() {
     let server = MockRpcServer::start().await;
     server.respond_eth_chain_id(4326, 1).await;
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc", &server.uri(), "--rpc.cache-size", "0"]);
+    let args = RpcArgs::parse_from(["mega-evme", "--rpc", &server.uri(), "--rpc.no-cache-file"]);
     let BuildProviderOutput { cache_store, chain_id, .. } =
         args.build_provider().await.expect("build_provider");
-    assert!(cache_store.is_noop(), "cache_size == 0 must produce a no-op store");
-    assert_eq!(chain_id, 4326, "chain_id must be resolved even when cache is disabled");
+    assert!(cache_store.is_noop(), "--rpc.no-cache-file must produce a no-op store");
+    assert_eq!(chain_id, 4326, "chain_id must be resolved with unlimited cache default");
     cache_store.persist().expect("persist");
 }
 
@@ -128,7 +150,7 @@ async fn test_build_provider_no_cache_file_skips_persistence() {
         "mega-evme",
         "--rpc",
         &server.uri(),
-        "--rpc.cache-size",
+        "--rpc.cache-max-entries",
         "100",
         "--rpc.no-cache-file",
     ]);
@@ -150,13 +172,16 @@ async fn test_build_provider_with_cache_names_file_from_fetched_chain_id() {
 
     let BuildProviderOutput { cache_store, .. } =
         args.build_provider().await.expect("build_provider");
-    assert!(!cache_store.is_noop(), "cache_size > 0 + cache_dir must produce a real store");
+    assert!(
+        !cache_store.is_noop(),
+        "cache_dir without --rpc.no-cache-file must produce a real store"
+    );
     assert_eq!(cache_store.cache_path(), Some(dir.path().join("rpc-cache-4326.json").as_path()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_invalid_url() {
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc", "not a url", "--rpc.cache-size", "0"]);
+    let args = RpcArgs::parse_from(["mega-evme", "--rpc", "not a url", "--rpc.no-cache-file"]);
     let err = args.build_provider().await.expect_err("build_provider should fail");
     match err {
         EvmeError::RpcError(msg) => {
@@ -183,7 +208,7 @@ async fn test_build_provider_fetches_chain_id_from_rpc() {
         "mega-evme",
         "--rpc",
         &server.uri(),
-        "--rpc.cache-size",
+        "--rpc.cache-max-entries",
         "256",
         "--rpc.cache-dir",
         dir.path().to_str().unwrap(),
@@ -215,7 +240,7 @@ async fn test_build_provider_chain_id_rpc_failure_is_hard_error() {
         "mega-evme",
         "--rpc",
         &server.uri(),
-        "--rpc.cache-size",
+        "--rpc.cache-max-entries",
         "256",
         "--rpc.cache-dir",
         dir.path().to_str().unwrap(),
@@ -320,7 +345,7 @@ async fn test_build_provider_clear_cache_deletes_file_before_load() {
         "mega-evme",
         "--rpc",
         &server.uri(),
-        "--rpc.cache-size",
+        "--rpc.cache-max-entries",
         "256",
         "--rpc.cache-dir",
         dir.path().to_str().unwrap(),
@@ -372,7 +397,7 @@ async fn test_build_provider_clear_cache_hard_errors_on_unlink_failure() {
         "mega-evme",
         "--rpc",
         &server.uri(),
-        "--rpc.cache-size",
+        "--rpc.cache-max-entries",
         "256",
         "--rpc.cache-dir",
         dir.path().to_str().unwrap(),
@@ -845,7 +870,7 @@ fn test_capture_file_mutex_with_other_cache_flags() {
         (&["--rpc.cache-dir", "/tmp/cache"], "--rpc.cache-dir"),
         (&["--rpc.clear-cache"], "--rpc.clear-cache"),
         (&["--rpc.no-cache-file"], "--rpc.no-cache-file"),
-        (&["--rpc.cache-size", "256"], "--rpc.cache-size"),
+        (&["--rpc.cache-max-entries", "256"], "--rpc.cache-max-entries"),
     ];
     for (extra_flags, label) in cases {
         let mut argv =
@@ -870,7 +895,7 @@ fn test_replay_file_mutex_with_rpc_and_cache_flags() {
         (&["--rpc.cache-dir", "/tmp/cache"], "--rpc.cache-dir"),
         (&["--rpc.clear-cache"], "--rpc.clear-cache"),
         (&["--rpc.no-cache-file"], "--rpc.no-cache-file"),
-        (&["--rpc.cache-size", "256"], "--rpc.cache-size"),
+        (&["--rpc.cache-max-entries", "256"], "--rpc.cache-max-entries"),
     ];
     for (extra_flags, label) in cases {
         let mut argv = vec!["mega-evme", "--rpc.replay-file", "/tmp/replay.json"];

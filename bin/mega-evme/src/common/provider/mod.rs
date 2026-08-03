@@ -45,11 +45,11 @@ pub type OpProvider = DynProvider<op_alloy_network::Optimism>;
 /// Return value of the `RpcArgs::build_*_provider` methods.
 #[derive(Debug)]
 pub struct BuildProviderOutput {
-    /// Configured OP-stack provider. Already wrapped with the retry layer and (unless
-    /// the cache is disabled) the in-memory cache layer.
+    /// Configured OP-stack provider. Already wrapped with the retry layer and the
+    /// in-memory cache layer.
     pub provider: OpProvider,
     /// Clean-exit cache persistence handle. Call [`RpcCacheStore::persist`] on the
-    /// success path; no-op when the cache is disabled.
+    /// success path; no-op when on-disk persistence is disabled (`--rpc.no-cache-file`).
     pub cache_store: RpcCacheStore,
     /// Chain id resolved during provider construction. Always populated —
     /// comes from `eth_chainId` (standard/capture) or the envelope (replay).
@@ -75,12 +75,12 @@ pub struct RpcArgs {
     /// If the file already exists, its entries are loaded and merged;
     /// missing entries are fetched via the RPC endpoint and persisted on clean exit.
     /// Cannot be used with --rpc.replay-file, --rpc.cache-dir, --rpc.clear-cache,
-    /// --rpc.no-cache-file, or --rpc.cache-size.
+    /// --rpc.no-cache-file, or --rpc.cache-max-entries.
     #[arg(
         long = "rpc.capture-file",
         value_parser = parse_non_empty_path,
         requires = "rpc_url",
-        conflicts_with_all = ["replay_file", "cache_dir", "clear_cache", "no_cache_file", "cache_size"],
+        conflicts_with_all = ["replay_file", "cache_dir", "clear_cache", "no_cache_file", "cache_max_entries"],
     )]
     pub capture_file: Option<PathBuf>,
 
@@ -88,18 +88,18 @@ pub struct RpcArgs {
     /// Cannot be used with `--rpc`.
     /// Any RPC miss is a hard error; the file is never written.
     /// Cannot be used with --rpc.capture-file, --rpc.cache-dir, --rpc.clear-cache,
-    /// --rpc.no-cache-file, or --rpc.cache-size.
+    /// --rpc.no-cache-file, or --rpc.cache-max-entries.
     #[arg(
         long = "rpc.replay-file",
         value_parser = parse_non_empty_path,
-        conflicts_with_all = ["rpc_url", "capture_file", "cache_dir", "clear_cache", "no_cache_file", "cache_size"],
+        conflicts_with_all = ["rpc_url", "capture_file", "cache_dir", "clear_cache", "no_cache_file", "cache_max_entries"],
     )]
     pub replay_file: Option<PathBuf>,
 
-    /// Maximum number of items to keep in the in-memory RPC LRU cache.
-    /// Set to 0 to disable the cache layer entirely.
-    #[arg(id = "cache_size", long = "rpc.cache-size", default_value_t = 10_000)]
-    pub cache_size: u32,
+    /// Maximum number of items in the in-memory RPC LRU cache (and therefore what
+    /// gets persisted to the cache file). `0` = unlimited (never evict). Default is `0`.
+    #[arg(id = "cache_max_entries", long = "rpc.cache-max-entries", default_value_t = 0)]
+    pub cache_max_entries: u32,
 
     /// Directory for per-chain RPC cache files.
     ///
@@ -112,8 +112,7 @@ pub struct RpcArgs {
     #[arg(long = "rpc.cache-dir", value_parser = parse_non_empty_path)]
     pub cache_dir: Option<PathBuf>,
 
-    /// Disable on-disk cache persistence. The in-memory LRU cache still applies — use
-    /// `--rpc.cache-size 0` to disable that too.
+    /// Disable on-disk cache persistence. The in-memory LRU cache still applies.
     #[arg(long = "rpc.no-cache-file")]
     pub no_cache_file: bool,
 
@@ -164,32 +163,17 @@ impl RpcArgs {
         // 1. Resolve chain id (always needed by downstream consumers).
         let chain_id = self.resolve_chain_id(url.clone()).await?;
 
-        // 2. Fast path: cache fully disabled.
-        if self.cache_size == 0 {
-            let provider = build_bare_op_provider(self.build_retry_client(url));
-            info!(
-                rpc_url = %rpc_url_str,
-                max_retries = self.max_retries,
-                backoff_ms = self.backoff_ms,
-                "Built RPC provider (cache disabled)",
-            );
-            return Ok(BuildProviderOutput {
-                provider,
-                cache_store: RpcCacheStore::noop(),
-                chain_id,
-                external_env: None,
-            });
-        }
-
-        // 3. Resolve on-disk cache path (None when disk persistence is disabled).
+        // 2. Resolve on-disk cache path (None when disk persistence is disabled).
         let cache_path = if self.no_cache_file {
             None
         } else {
             Some(resolve_cache_path(self.cache_dir.as_deref(), chain_id)?)
         };
 
-        // 4. Build the cache layer and (optionally) the disk store.
-        let cache_layer = CacheLayer::new(self.cache_size);
+        // 3. Build the cache layer and (optionally) the disk store.
+        // Cache layer is always installed; 0 max entries means unlimited (never evict).
+        let max_items = cache_max_entries_capacity(self.cache_max_entries);
+        let cache_layer = CacheLayer::new(max_items);
         let cache = cache_layer.cache();
         let cache_store = match cache_path {
             Some(path) => {
@@ -215,6 +199,10 @@ impl RpcArgs {
                     }
                 }
                 if path.exists() {
+                    // Oversized-load warning is intentionally omitted: alloy's
+                    // `SharedCache` has no public entry-count API (`len` / loaded-count),
+                    // so a file-with-N-entries-over-cap warning cannot be emitted
+                    // without re-implementing load or file-size heuristics (rejected).
                     if let Err(err) = cache.load_cache(path.clone()) {
                         warn!(
                             path = %path.display(),
@@ -228,7 +216,7 @@ impl RpcArgs {
             None => RpcCacheStore::noop(),
         };
 
-        // 5. Build the cached provider.
+        // 4. Build the cached provider.
         let client = self.build_retry_client(url);
         let provider = ProviderBuilder::new()
             .disable_recommended_fillers()
@@ -238,7 +226,8 @@ impl RpcArgs {
 
         info!(
             rpc_url = %rpc_url_str,
-            cache_size = self.cache_size,
+            cache_max_entries = self.cache_max_entries,
+            cache_capacity = max_items,
             max_retries = self.max_retries,
             backoff_ms = self.backoff_ms,
             "Built RPC provider",
@@ -466,12 +455,23 @@ fn parse_non_empty_path(s: &str) -> std::result::Result<PathBuf, String> {
     }
 }
 
+/// Map `--rpc.cache-max-entries` to the capacity passed to [`CacheLayer::new`].
+///
+/// `0` means unlimited (never evict) and is represented as [`u32::MAX`].
+/// Nonzero values pass through unchanged.
+fn cache_max_entries_capacity(cache_max_entries: u32) -> u32 {
+    if cache_max_entries == 0 {
+        u32::MAX
+    } else {
+        cache_max_entries
+    }
+}
+
 /// Build a cache-less [`OpProvider`] from an already-configured `RpcClient`.
 ///
-/// Used by the cache-disabled fast path and by the throwaway chain-id fetch.
-/// The cache-enabled path builds its provider inline because the cache layer
-/// has to be inserted into the `ProviderBuilder` chain before the client is
-/// attached.
+/// Used by the throwaway chain-id fetch. The standard path builds its provider
+/// inline because the cache layer has to be inserted into the `ProviderBuilder`
+/// chain before the client is attached.
 fn build_bare_op_provider(client: RpcClient) -> OpProvider {
     DynProvider::new(
         ProviderBuilder::new()
@@ -554,5 +554,15 @@ mod tests {
     fn test_cu_per_sec_warning_silent_when_retries_disabled() {
         assert!(cu_per_sec_warning(0, 1).is_none());
         assert!(cu_per_sec_warning(0, 99).is_none());
+    }
+
+    /// `0` maps to unlimited capacity (`u32::MAX`); nonzero values pass through.
+    #[test]
+    fn test_cache_max_entries_capacity_mapping() {
+        assert_eq!(cache_max_entries_capacity(0), u32::MAX);
+        assert_eq!(cache_max_entries_capacity(1), 1);
+        assert_eq!(cache_max_entries_capacity(256), 256);
+        assert_eq!(cache_max_entries_capacity(10_000), 10_000);
+        assert_eq!(cache_max_entries_capacity(u32::MAX), u32::MAX);
     }
 }
