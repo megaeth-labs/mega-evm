@@ -190,7 +190,8 @@ Documentation placement follows **maturity**, not network status:
 - Wrap unstable spec content in `<details>` blocks with a clear label (e.g., "SpecName (unstable): ...").
 - Unstable content MUST still use normative language within the `<details>` block.
 - Do NOT use `<details>` to mark a frozen-but-unscheduled spec.
-  Its content belongs in main prose like any other frozen spec; network status is conveyed by the upgrade page's activation tabs and the upgrade overview, not by hiding the specification.
+  Its content belongs in main prose like any other frozen spec; network status is conveyed by the upgrade overview's activation tabs, not by hiding the specification.
+  Activation timestamps live in `upgrades/overview.md` alone — an individual upgrade page carries none, so there is one place to edit when a spec is scheduled.
 - **Glossary exception**: glossary entries for unstable-spec terms do not use `<details>` blocks.
   Instead, mark them with inline text (e.g., "_(SpecName, unstable)_") at the start of the definition.
 - **Roster-page exception**: a page whose subject is the spec ladder itself (`overview.md`, `hardfork-spec.md`, `upgrades/overview.md`, and the progression line in `glossary.md`) MUST carry the unstable spec in its progression and its per-spec summary, outside `<details>`.

@@ -34,7 +34,7 @@ All specs through REX6 are frozen; REX7 is **unstable** and under active develop
 
 Frozen and activated are separate properties.
 A frozen spec's semantics no longer change, but it takes effect on a network only once that network schedules the corresponding hardfork.
-REX6 is frozen and has no activation timestamp on either mainnet or testnet, so both networks currently execute REX5.
+REX7 is unstable and has no activation timestamp on either mainnet or testnet.
 
 ### Backward Compatibility
 
@@ -134,7 +134,7 @@ _See [Rex5 Network Upgrade](upgrades/rex5.md) for full details._
 
 ### REX6
 
-REX6 is frozen but not yet scheduled on any network.
+REX6 is frozen and scheduled on both networks; see the [upgrade overview](upgrades/overview.md) for activation timestamps.
 
 - **Unified per-opcode gas metering order** — Every storage-affecting opcode charges storage gas before its body and records compute gas exactly once after the body completes; the `CREATE2` memory-expansion gas is folded into that single recording.
 - **Consolidated EIP-7702 authorization accounting** — Per-authorization data-size and KV-update charges are narrowed to applied authorizations, authority state growth resolves during validation, net-new authorities pay dynamic SALT account-creation gas, and an applied authority equal to the block beneficiary triggers beneficiary gas detention.

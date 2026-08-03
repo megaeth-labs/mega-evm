@@ -7,15 +7,6 @@ description: Rex7 network upgrade — the current unstable spec, open for develo
 This page is an informative summary of the Rex7 specification.
 For the full normative definition, see the Rex7 spec in the mega-evm repository.
 
-{% tabs %}
-{% tab title="Testnet" %}
-Not yet scheduled
-{% endtab %}
-{% tab title="Mainnet" %}
-Not yet scheduled
-{% endtab %}
-{% endtabs %}
-
 {% hint style="warning" %}
 **Unstable** — Rex7 is under active development.
 Anything recorded on this page may change before Rex7 is frozen, and nothing here should be relied on.

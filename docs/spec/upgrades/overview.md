@@ -132,14 +132,13 @@ Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas deten
 
 {% tabs %}
 {% tab title="Testnet" %}
-Not yet scheduled
+`1786330800` (Aug 10, 2026, 03:00 UTC)
 {% endtab %}
 {% tab title="Mainnet" %}
-Not yet scheduled
+`1787626800` (Aug 25, 2026, 03:00 UTC)
 {% endtab %}
 {% endtabs %}
 
-Frozen; awaiting an activation timestamp on both networks.
 Unified per-opcode [gas metering order](../evm/dual-gas-model.md#gas-metering-order), consolidated EIP-7702 authorization accounting with dynamic SALT account-creation gas for net-new authorities, CREATE-frame accounting corrections, [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox hardening, post-execution fee-reward accounting, [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) metering exemption, extended beneficiary detention / volatile-access coverage, per-log [data size](../evm/resource-accounting.md#data-size) base, forwarded-gas return on compute-limit halts, value self-transfer account-info dedup, [SequencerRegistry](../system-contracts/sequencer-registry.md) v2.0.0 rotation hardening (EIP-712 possession proof + minimum rotation delay).
 
 ### [Rex7](rex7.md)
