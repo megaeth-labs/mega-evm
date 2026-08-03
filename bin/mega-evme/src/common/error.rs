@@ -73,6 +73,13 @@ pub enum EvmeError {
         total: usize,
     },
 
+    /// A batch replay in which at least one target did not come out clean.
+    ///
+    /// Carries the counts by failure class so the exit-code mapping resolves the
+    /// batch precedence from data instead of parsing this message.
+    #[error("{0}")]
+    BatchFailed(BatchFailureCounts),
+
     /// Code hash mismatch
     #[error("Code hash mismatch: expected {expected}, computed {computed}")]
     CodeHashMismatch {
@@ -85,6 +92,46 @@ pub enum EvmeError {
     /// Other error
     #[error("Other error: {0}")]
     Other(String),
+}
+
+/// How many targets of a batch replay failed, by failure class.
+///
+/// A batch run reports every target on its own output line and then fails once
+/// with this summary, so the exit-code mapping can apply the batch precedence
+/// (execution before RPC before mismatch) without re-reading the per-target
+/// lines or parsing an error message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatchFailureCounts {
+    /// Targets that failed for an execution, setup, or definitive-answer reason
+    /// (unknown or pending transaction, block executor rejection).
+    pub execution: usize,
+    /// Targets whose question went unanswered because an RPC call failed.
+    pub rpc: usize,
+    /// Targets that replayed but did not reproduce their on-chain receipt.
+    pub mismatched: usize,
+    /// Targets the run reported on.
+    pub total: usize,
+}
+
+impl core::fmt::Display for BatchFailureCounts {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} of {} target transaction(s) failed to replay ({} execution, {} rpc)",
+            self.execution + self.rpc,
+            self.total,
+            self.execution,
+            self.rpc,
+        )?;
+        if self.mismatched > 0 {
+            write!(
+                f,
+                "; {} replayed transaction(s) did not reproduce the on-chain receipt",
+                self.mismatched,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 // Implement DBErrorMarker to allow EvmeError to be used as Database error type

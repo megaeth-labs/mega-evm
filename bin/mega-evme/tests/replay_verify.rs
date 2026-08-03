@@ -12,6 +12,8 @@ use std::{
     process::Command,
 };
 
+mod common;
+
 /// Offline RPC capture, including the transaction's on-chain receipt.
 const CACHE: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/replay_offline.cache.json");
@@ -25,26 +27,50 @@ const GAS_USED: u64 = 75_514;
 /// Outcome of one `mega-evme replay` invocation.
 struct Run {
     success: bool,
+    code: Option<i32>,
     stdout: String,
     stderr: String,
 }
 
 impl Run {
+    /// The process exit code the run ended with.
+    fn code(&self) -> i32 {
+        self.code.expect("mega-evme was killed by a signal")
+    }
+
+    /// The results printed on stdout, without the structured error object a
+    /// failing `--json` run ends with.
+    fn results(&self) -> Vec<serde_json::Value> {
+        let mut values = common::json_values(&self.stdout);
+        if values.last().is_some_and(common::is_run_error) {
+            values.pop();
+        }
+        values
+    }
+
     /// Parse the stdout of a `--json` single-transaction run.
     fn json(&self) -> serde_json::Value {
-        serde_json::from_str(self.stdout.trim())
-            .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}", self.stdout))
+        let mut results = self.results();
+        assert_eq!(results.len(), 1, "expected one summary on stdout:\n{}", self.stdout);
+        results.pop().expect("checked above")
     }
 
     /// Parse the stdout of a `--json` batch run as one value per NDJSON line.
     fn ndjson(&self) -> Vec<serde_json::Value> {
-        self.stdout
-            .lines()
-            .map(|line| {
-                serde_json::from_str(line)
-                    .unwrap_or_else(|e| panic!("stdout line is not compact JSON ({e}): {line}"))
-            })
-            .collect()
+        self.results()
+    }
+
+    /// The structured error object a failing `--json` run ends with.
+    fn error_object(&self) -> serde_json::Value {
+        let values = common::json_values(&self.stdout);
+        let last = values
+            .last()
+            .unwrap_or_else(|| panic!("a failing --json run must not leave stdout empty"));
+        assert!(
+            common::is_run_error(last),
+            "the last stdout value must be the error object, got: {last}"
+        );
+        last.clone()
     }
 }
 
@@ -57,6 +83,7 @@ fn replay(cache: &Path, args: &[&str]) -> Run {
         .expect("failed to run mega-evme");
     Run {
         success: output.status.success(),
+        code: output.status.code(),
         stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
         stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
     }
@@ -166,7 +193,8 @@ fn test_single_transaction_json_is_unchanged_without_the_flag() {
     assert_eq!(stripped, plain.json(), "--verify-receipt must add the verdict and nothing else");
 }
 
-/// A gas divergence is reported as a `gas_used` diff and fails the run.
+/// A gas divergence is reported as a `gas_used` diff and fails the run with the
+/// dedicated mismatch exit code.
 #[test]
 fn test_verify_receipt_reports_a_gas_mismatch() {
     let path = doctored_cache("gas", |receipt| receipt["gasUsed"] = "0x1".into());
@@ -174,7 +202,7 @@ fn test_verify_receipt_reports_a_gas_mismatch() {
     let run = replay(&path, &["--verify-receipt", "--json", TX]);
     let _ = std::fs::remove_file(&path);
 
-    assert!(!run.success, "a mismatch must exit non-zero");
+    assert_eq!(run.code(), 2, "a mismatch exits 2.\nstderr: {}", run.stderr);
     assert_eq!(
         run.json()["verification"],
         serde_json::json!({
@@ -182,6 +210,8 @@ fn test_verify_receipt_reports_a_gas_mismatch() {
             "diff": { "gas_used": { "onchain": 1, "replay": GAS_USED } },
         })
     );
+    assert_eq!(run.error_object()["error"]["code"].as_u64(), Some(2));
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("verification-mismatch"));
     assert!(
         run.stderr.contains("Receipt verification mismatch"),
         "expected the mismatch error, got stderr:\n{}",
@@ -198,7 +228,7 @@ fn test_verify_receipt_reports_a_status_mismatch() {
     let run = replay(&path, &["--verify-receipt", "--json", TX]);
     let _ = std::fs::remove_file(&path);
 
-    assert!(!run.success, "a mismatch must exit non-zero");
+    assert_eq!(run.code(), 2, "a mismatch exits 2.\nstderr: {}", run.stderr);
     assert_eq!(
         run.json()["verification"],
         serde_json::json!({
@@ -228,7 +258,7 @@ fn test_verify_receipt_reports_a_log_mismatch() {
     let run = replay(&path, &["--verify-receipt", "--json", TX]);
     let _ = std::fs::remove_file(&path);
 
-    assert!(!run.success, "a mismatch must exit non-zero");
+    assert_eq!(run.code(), 2, "a mismatch exits 2.\nstderr: {}", run.stderr);
     assert_eq!(
         run.json()["verification"],
         serde_json::json!({
@@ -250,7 +280,10 @@ fn test_verify_receipt_reorg_is_an_infrastructure_error() {
     let run = replay(&path, &["--verify-receipt", "--json", TX]);
     let _ = std::fs::remove_file(&path);
 
-    assert!(!run.success, "a receipt from another block must fail the run");
+    // The comparison never ran, so the run fails as an RPC-class failure, not
+    // as a mismatch.
+    assert_eq!(run.code(), 3, "an unverifiable target exits 3.\nstderr: {}", run.stderr);
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
     assert!(
         run.stderr.contains("different inclusion"),
         "expected the reorg/divergent-endpoint hint, got stderr:\n{}",
@@ -273,7 +306,7 @@ fn test_verify_receipt_missing_receipt_is_an_infrastructure_error() {
     let run = replay(&path, &["--verify-receipt", "--json", TX]);
     let _ = std::fs::remove_file(&path);
 
-    assert!(!run.success, "an unavailable receipt must fail the run");
+    assert_eq!(run.code(), 3, "an unavailable receipt exits 3.\nstderr: {}", run.stderr);
     assert!(
         run.stderr.contains("receipt"),
         "expected an error naming the receipt, got stderr:\n{}",
@@ -314,7 +347,8 @@ fn test_batch_verify_receipt_reports_a_mismatch_and_exits_nonzero() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&list);
 
-    assert!(!run.success, "a mismatch must exit non-zero");
+    assert_eq!(run.code(), 2, "a mismatch exits 2.\nstderr: {}", run.stderr);
+    assert_eq!(run.error_object()["error"]["code"].as_u64(), Some(2));
     let lines = run.ndjson();
     assert_eq!(lines.len(), 1, "a mismatch is still a result line, not an error entry");
     assert!(lines[0].get("error").is_none(), "a mismatch is not an infrastructure error");
@@ -343,11 +377,12 @@ fn test_batch_verify_receipt_missing_receipt_is_an_rpc_error_entry() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&list);
 
-    assert!(!run.success, "an unverified target must exit non-zero");
+    assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
     let lines = run.ndjson();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
     assert_eq!(lines[0]["error"]["kind"].as_str(), Some("rpc"));
     assert!(lines[0].get("verification").is_none(), "an unverified target carries no verdict");
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("rpc-failure"));
     assert!(
         !run.stderr.contains("verification mismatch"),
         "an unverifiable target must not fail as a mismatch:\n{}",
@@ -368,7 +403,7 @@ fn test_batch_verify_receipt_reorg_is_an_rpc_error_entry() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&list);
 
-    assert!(!run.success, "an unverified target must exit non-zero");
+    assert_eq!(run.code(), 3, "an unverified target exits 3.\nstderr: {}", run.stderr);
     let lines = run.ndjson();
     assert_eq!(lines[0]["error"]["kind"].as_str(), Some("rpc"));
     assert!(
@@ -449,7 +484,8 @@ fn test_batch_dump_fixture_dir_refuses_overwrite_without_flag() {
             "--json",
         ],
     );
-    assert!(!second.success, "overwrite without --overwrite must fail the run");
+    // The dump failed for the target, which is an execution-class failure.
+    assert_eq!(second.code(), 1, "a failed dump exits 1.\nstderr: {}", second.stderr);
     let lines = second.ndjson();
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["error"]["kind"].as_str(), Some("execution"));

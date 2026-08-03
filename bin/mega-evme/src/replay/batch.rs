@@ -43,8 +43,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     common::{
-        op_receipt_to_tx_receipt, print_execution_summary, print_receipt, EvmeExternalEnvs,
-        ExecutionSummary, OpTxReceipt,
+        op_receipt_to_tx_receipt, print_execution_summary, print_receipt, BatchFailureCounts,
+        EvmeExternalEnvs, ExecutionSummary, OpTxReceipt,
     },
     replay::get_hardfork_config,
     ChainArgs, EvmeState,
@@ -188,6 +188,74 @@ struct FailedTx {
     message: String,
 }
 
+/// Running tally of a batch run's per-target outcomes.
+///
+/// A batch reports each target as it goes and fails once at the end, so the
+/// outcome classes are counted here rather than recovered from the emitted
+/// lines.
+#[derive(Debug, Default)]
+struct BatchTally {
+    /// Targets that produced an execution result.
+    replayed: usize,
+    /// Targets compared against an on-chain receipt.
+    verified: usize,
+    /// Failed and mismatched targets, by class.
+    counts: BatchFailureCounts,
+}
+
+impl BatchTally {
+    /// Count one reported target.
+    fn record(&mut self, entry: &BatchEntry) {
+        match entry {
+            BatchEntry::Executed(tx) => {
+                self.replayed += 1;
+                if let Some(verification) = &tx.verification {
+                    self.verified += 1;
+                    if !verification.matched {
+                        self.counts.mismatched += 1;
+                    }
+                }
+            }
+            // A transaction the endpoint does not know, or that is not mined
+            // yet, is a definitive answer about the target rather than an
+            // unanswered question, so it counts as an execution failure.
+            BatchEntry::Failed(tx) => match tx.kind {
+                BatchErrorKind::Rpc => self.counts.rpc += 1,
+                BatchErrorKind::NotFound | BatchErrorKind::Pending | BatchErrorKind::Execution => {
+                    self.counts.execution += 1
+                }
+            },
+        }
+    }
+
+    /// Targets that produced no execution result.
+    const fn failed(&self) -> usize {
+        self.counts.execution + self.counts.rpc
+    }
+
+    /// The run's terminal error, or `None` when every target came out clean.
+    ///
+    /// Infrastructure failures are reported with their counts by class so the
+    /// exit-code mapping resolves the precedence between them and a mismatch; a
+    /// run whose only finding is divergence fails as the mismatch it is.
+    /// Fixture skips never count as failures.
+    fn into_error(self) -> Option<ReplayError> {
+        if self.failed() > 0 {
+            return Some(ReplayError::BatchFailed(BatchFailureCounts {
+                total: self.replayed + self.failed(),
+                ..self.counts
+            }));
+        }
+        if self.counts.mismatched > 0 {
+            return Some(ReplayError::VerificationMismatch {
+                mismatched: self.counts.mismatched,
+                total: self.verified,
+            });
+        }
+        None
+    }
+}
+
 /// One block's worth of work.
 struct BlockJob {
     /// Number of the block holding the targets.
@@ -249,10 +317,12 @@ struct BatchErrorBody<'a> {
 /// Returns an error when at least one target produced an infrastructure error
 /// entry, so the process exits non-zero; execution outcomes never fail the run.
 /// Fixture skips (fidelity gate, BLOCKHASH readers, unsupported tx shapes) do
-/// not fail the run. With `--verify-receipt`, a run in which every target
-/// replayed but some diverged from its on-chain receipt fails with
-/// [`ReplayError::VerificationMismatch`] instead — a distinct variant, so a
-/// divergence is never confused with a target that could not be replayed.
+/// not fail the run. The failure carries the counts by class
+/// ([`ReplayError::BatchFailed`]), which decide the exit code. With
+/// `--verify-receipt`, a run in which every target replayed but some diverged
+/// from its on-chain receipt fails with [`ReplayError::VerificationMismatch`]
+/// instead — a distinct variant, so a divergence is never confused with a
+/// target that could not be replayed.
 pub(super) async fn run<P>(
     provider: &P,
     chain_id: u64,
@@ -264,10 +334,7 @@ where
     P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
 {
     let start = Instant::now();
-    let mut replayed = 0usize;
-    let mut failed = 0usize;
-    let mut verified = 0usize;
-    let mut mismatched = 0usize;
+    let mut tally = BatchTally::default();
     let mut fixtures_written = 0usize;
     let mut fixtures_skipped = 0usize;
     let mut fixtures_failed = 0usize;
@@ -297,8 +364,9 @@ where
                 "Batch replay of a transaction list",
             );
             for failure in failures {
-                failed += 1;
-                emit(&BatchEntry::Failed(failure), report.json);
+                let entry = BatchEntry::Failed(failure);
+                tally.record(&entry);
+                emit(&entry, report.json);
             }
             jobs
         }
@@ -309,32 +377,32 @@ where
             replay_block(provider, chain_id, job, external_envs.clone(), &report).await;
         fixtures_failed += block_result.fixture_write_failures;
         for entry in block_result.entries {
-            match &entry {
-                BatchEntry::Executed(tx) => {
-                    replayed += 1;
-                    if let Some(verification) = &tx.verification {
-                        verified += 1;
-                        if !verification.matched {
-                            mismatched += 1;
-                        }
-                    }
-                    if let Some(fixture) = &tx.fixture {
-                        if fixture.path.is_some() {
-                            fixtures_written += 1;
-                        } else {
-                            fixtures_skipped += 1;
-                        }
+            if let BatchEntry::Executed(tx) = &entry {
+                if let Some(fixture) = &tx.fixture {
+                    if fixture.path.is_some() {
+                        fixtures_written += 1;
+                    } else {
+                        fixtures_skipped += 1;
                     }
                 }
-                BatchEntry::Failed(_) => failed += 1,
             }
+            tally.record(&entry);
             emit(&entry, report.json);
         }
     }
 
-    info!(replayed, failed, elapsed = ?start.elapsed(), "Batch replay finished");
+    info!(
+        replayed = tally.replayed,
+        failed = tally.failed(),
+        elapsed = ?start.elapsed(),
+        "Batch replay finished",
+    );
     if report.verify_receipt {
-        info!(verified, mismatched, "On-chain receipt verification finished");
+        info!(
+            verified = tally.verified,
+            mismatched = tally.counts.mismatched,
+            "On-chain receipt verification finished",
+        );
     }
     if report.dump_fixture_dir.is_some() {
         info!(
@@ -345,19 +413,7 @@ where
         );
     }
 
-    // Infrastructure failures keep their own error: a target that never replayed
-    // was also never verified, so reporting it as a mismatch would overstate
-    // what the run actually found. Fixture skips never contribute to `failed`.
-    if failed > 0 {
-        return Err(ReplayError::Other(format!(
-            "{failed} of {} target transaction(s) failed to replay",
-            replayed + failed
-        )));
-    }
-    if mismatched > 0 {
-        return Err(ReplayError::VerificationMismatch { mismatched, total: verified });
-    }
-    Ok(())
+    tally.into_error().map_or(Ok(()), Err)
 }
 
 /// Resolve each requested hash to its containing block.
@@ -1038,9 +1094,79 @@ pub(super) fn parse_block_number(value: &str) -> std::result::Result<u64, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::ExitCode;
 
     const HASH_A: &str = "0xde3d56dc739484166b8af1bea757bf7e3e9a4b9a0fb62d722703345570dfc1d6";
     const HASH_B: &str = "0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef";
+
+    /// Build a tally from the outcomes a run would have reported.
+    fn tally(failures: &[BatchErrorKind], replayed: usize, mismatched: usize) -> BatchTally {
+        let mut tally = BatchTally::default();
+        for kind in failures {
+            tally.record(&failure(B256::ZERO, *kind, String::new()));
+        }
+        // Verified targets are counted through the executed entries, which need
+        // a full `ExecutedTx`; the tally fields they feed are set directly.
+        tally.replayed = replayed;
+        tally.verified = replayed;
+        tally.counts.mismatched = mismatched;
+        tally
+    }
+
+    /// The exit code a batch run with these outcomes ends with.
+    fn exit_code(failures: &[BatchErrorKind], replayed: usize, mismatched: usize) -> ExitCode {
+        tally(failures, replayed, mismatched)
+            .into_error()
+            .map_or(ExitCode::Success, |err| ExitCode::from_evme_error(&err))
+    }
+
+    /// A clean run has nothing to report and exits 0.
+    #[test]
+    fn test_batch_tally_clean_run_has_no_error() {
+        assert!(tally(&[], 3, 0).into_error().is_none());
+        assert_eq!(exit_code(&[], 3, 0), ExitCode::Success);
+    }
+
+    /// Mixed failures are ranked by class: an execution failure outranks the
+    /// rest, an RPC failure outranks a mismatch.
+    #[test]
+    fn test_batch_tally_failure_precedence() {
+        use BatchErrorKind::{Execution, NotFound, Pending, Rpc};
+
+        assert_eq!(exit_code(&[Execution, Rpc], 1, 1), ExitCode::ExecutionError);
+        assert_eq!(exit_code(&[Rpc, Rpc], 1, 1), ExitCode::RpcFailure);
+        assert_eq!(exit_code(&[], 2, 1), ExitCode::VerificationMismatch);
+        // A definitive answer about a target is an execution-class failure.
+        assert_eq!(exit_code(&[NotFound], 1, 0), ExitCode::ExecutionError);
+        assert_eq!(exit_code(&[Pending], 1, 0), ExitCode::ExecutionError);
+    }
+
+    /// The aggregate error carries the counts by class, not a formatted string
+    /// the exit mapping would have to parse.
+    #[test]
+    fn test_batch_tally_aggregate_carries_counts() {
+        use BatchErrorKind::{Execution, NotFound, Rpc};
+
+        let err = tally(&[Execution, NotFound, Rpc], 2, 1).into_error().expect("run failed");
+        let ReplayError::BatchFailed(counts) = err else {
+            panic!("infrastructure failures must aggregate: {err:?}");
+        };
+        assert_eq!(counts, BatchFailureCounts { execution: 2, rpc: 1, mismatched: 1, total: 5 });
+        assert!(
+            counts.to_string().contains("3 of 5 target transaction(s) failed to replay"),
+            "unexpected message: {counts}"
+        );
+    }
+
+    /// A run whose only finding is divergence fails as the mismatch it is.
+    #[test]
+    fn test_batch_tally_mismatch_only_reports_the_verification_error() {
+        let err = tally(&[], 4, 2).into_error().expect("run failed");
+        assert!(
+            matches!(err, ReplayError::VerificationMismatch { mismatched: 2, total: 4 }),
+            "unexpected error: {err:?}"
+        );
+    }
 
     #[test]
     fn test_parse_tx_hash_list_skips_blanks_and_comments() {

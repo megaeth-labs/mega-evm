@@ -107,6 +107,27 @@ impl MockRpcServer {
     }
 }
 
+/// Parse every top-level JSON value a run printed on stdout.
+///
+/// Streaming parse, so it covers both the pretty-printed single-transaction
+/// summary and the compact NDJSON of a batch run — in either case followed by
+/// the structured error object a failing `--json` run ends with.
+pub(crate) fn json_values(stdout: &str) -> Vec<serde_json::Value> {
+    serde_json::Deserializer::from_str(stdout)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| panic!("stdout is not a JSON stream ({e}):\n{stdout}"))
+}
+
+/// Whether a printed value is the run-level error object of a failing `--json`
+/// run (`{"error":{"code":…,"kind":…,"message":…}}`).
+///
+/// A per-target NDJSON error line carries its transaction hash alongside the
+/// `error` key, so the single-key shape identifies the run-level object.
+pub(crate) fn is_run_error(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|obj| obj.len() == 1 && obj.contains_key("error"))
+}
+
 /// Build [`RpcArgs`] for a test pointed at `url` with the on-disk cache disabled.
 ///
 /// Defaults: `--rpc.no-cache-file` (in-memory LRU still applies; no disk persistence),

@@ -230,8 +230,10 @@ The mismatch line names every dimension that disagreed, comma-separated.
 ### Exit Status
 
 A run in which every target replayed and every verification matched exits `0`.
-A verification mismatch exits non-zero through a dedicated error (`Receipt verification mismatch: N of M verified transaction(s) did not reproduce the on-chain receipt`), reported after every result line has been written.
-Infrastructure failures keep their own non-zero exit and take precedence in a batch run: a target that never replayed was also never verified, so reporting it as a mismatch would overstate what the run found.
+A verification mismatch exits `2` through a dedicated error (`Receipt verification mismatch: N of M verified transaction(s) did not reproduce the on-chain receipt`), reported after every result line has been written.
+Infrastructure failures keep their own exit code and take precedence in a batch run: a target that never replayed was also never verified, so reporting it as a mismatch would overstate what the run found.
+An execution or input failure exits `1`, an RPC failure (including a receipt the endpoint cannot serve) exits `3`.
+See [Exit codes](../overview.md#exit-codes) for the full taxonomy and the batch precedence rule.
 
 ### Examples
 

@@ -67,6 +67,32 @@ These flags apply to all commands.
 | `--log.file <PATH>` | stderr  | `--log-file`     | Write logs to a file instead of stderr                                                      |
 | `--log.no-color`    | `false` | `--log-no-color` | Disable colored console output                                                              |
 
+## Exit codes
+
+Every command reports its outcome through the same set of exit codes, so a pipeline can branch on the process status without parsing output.
+
+| Code | Class                   | Meaning                                                                                                                                                      |
+| ---- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0`  | success                 | The command completed; with [`--verify-receipt`](commands/replay.md#receipt-verification), every verification matched.                                       |
+| `1`  | `execution-error`       | Execution or internal error: an EVM or setup failure, bad input (including a usage error), or a definitive negative answer such as an unknown transaction.   |
+| `2`  | `verification-mismatch` | The run completed, but at least one replay did not reproduce its on-chain receipt.                                                                           |
+| `3`  | `rpc-failure`           | An RPC or transport call failed — endpoint unreachable, transport error, or an offline replay file that holds no response for a request the run had to make. |
+
+Codes `1` and `3` separate the two ways a question can go wrong: `1` means the tool answered, and the answer is negative; `3` means the question went unanswered, so retrying against a healthy endpoint may still produce a result.
+
+A batch run (`--tx-file` / `--block`) reports every target on its own line and then exits once for the run as a whole, ranking the failure classes it saw: any execution or internal failure exits `1`, otherwise any RPC failure exits `3`, otherwise any verification mismatch exits `2`.
+A target that never replayed was also never verified, which is why an infrastructure failure outranks a mismatch.
+
+On failure the run also prints a report: one `error: <message>` line on stderr, plus — with `--json` — a structured object as the last line of stdout, so a machine-readable run never ends with empty output.
+
+```json
+{ "error": { "code": 3, "kind": "rpc-failure", "message": "RPC error: …" } }
+```
+
+In batch mode that object follows the per-target lines, whose own `error.kind` (`not_found`, `pending`, `rpc`, `execution`) describes why one target failed and is independent of the run-level class above.
+
+New failure classes are added as new codes; the meaning of an existing code does not change.
+
 ## Read more
 
 - **[Cookbook](cookbook.md)** — Real-world recipes and worked examples.

@@ -12,6 +12,8 @@
 
 use std::process::Command;
 
+mod common;
+
 /// Block fully covered by the envelope, and its transaction count.
 const BLOCK: u64 = 22_945_844;
 const BLOCK_TX_COUNT: usize = 23;
@@ -57,16 +59,40 @@ fn replay(args: &[&str], expect_success: bool) -> String {
     String::from_utf8(output.stdout).expect("stdout is utf-8")
 }
 
-/// Parse NDJSON stdout into one JSON value per line.
+/// Run `replay` offline and return its stdout plus its exit code.
+fn replay_with_code(args: &[&str]) -> (String, Option<i32>) {
+    let envelope = envelope();
+    let mut cmd = mega_evme();
+    cmd.args(["replay", "--rpc.replay-file", &envelope]);
+    cmd.args(args);
+    let output = cmd.output().expect("failed to run mega-evme");
+    (String::from_utf8(output.stdout).expect("stdout is utf-8"), output.status.code())
+}
+
+/// Parse NDJSON stdout into one JSON value per line, dropping the structured
+/// error object a failing run ends with.
 fn ndjson(stdout: &str) -> Vec<serde_json::Value> {
-    stdout
+    let mut lines: Vec<serde_json::Value> = stdout
         .lines()
         .map(|line| {
             assert!(!line.trim().is_empty(), "NDJSON output must not contain blank lines");
             serde_json::from_str(line)
                 .unwrap_or_else(|e| panic!("stdout line is not compact JSON ({e}): {line}"))
         })
-        .collect()
+        .collect();
+    if lines.last().is_some_and(common::is_run_error) {
+        lines.pop();
+    }
+    lines
+}
+
+/// The structured error object a failing `--json` run ends with.
+fn run_error(stdout: &str) -> serde_json::Value {
+    let last = stdout.lines().last().unwrap_or_else(|| panic!("stdout must not be empty"));
+    let value: serde_json::Value = serde_json::from_str(last)
+        .unwrap_or_else(|e| panic!("last stdout line is not compact JSON ({e}): {last}"));
+    assert!(common::is_run_error(&value), "the last line must be the error object: {value}");
+    value
 }
 
 /// `--block N --json` emits exactly one NDJSON line per transaction of the
@@ -161,7 +187,8 @@ fn test_replay_tx_file_spans_blocks_in_order() {
 }
 
 /// A hash that cannot be resolved is reported as an error entry, the remaining
-/// targets still replay, and the process exits non-zero.
+/// targets still replay, and the process exits non-zero with the class of the
+/// failure — here an unanswered lookup against the offline envelope.
 #[test]
 #[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_tx_file_reports_unresolved_targets_and_exits_nonzero() {
@@ -170,7 +197,7 @@ fn test_replay_tx_file_reports_unresolved_targets_and_exits_nonzero() {
         std::env::temp_dir().join(format!("mega_evme_tx_list_bad_{}.txt", std::process::id()));
     std::fs::write(&path, format!("{unknown}\n{}\n", BLOCK_TXS[1].0)).expect("write tx list");
 
-    let stdout = replay(&["--tx-file", path.to_str().unwrap(), "--json"], false);
+    let (stdout, code) = replay_with_code(&["--tx-file", path.to_str().unwrap(), "--json"]);
     let _ = std::fs::remove_file(&path);
     let lines = ndjson(&stdout);
 
@@ -180,6 +207,10 @@ fn test_replay_tx_file_reports_unresolved_targets_and_exits_nonzero() {
     assert!(lines[0]["error"]["message"].is_string(), "failure line carries a message");
     assert_eq!(lines[1]["tx_hash"].as_str(), Some(BLOCK_TXS[1].0));
     assert_eq!(lines[1]["success"].as_bool(), Some(true), "the resolvable target still replays");
+
+    // A hash the envelope cannot answer is an RPC-class failure for the run.
+    assert_eq!(code, Some(3), "an unanswered target exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
 /// `--verify-receipt` against an envelope that carries no receipts: every target
@@ -191,7 +222,8 @@ fn test_replay_tx_file_reports_unresolved_targets_and_exits_nonzero() {
 #[test]
 #[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_block_verify_receipt_without_receipts_reports_rpc_errors() {
-    let stdout = replay(&["--block", &BLOCK.to_string(), "--verify-receipt", "--json"], false);
+    let (stdout, code) =
+        replay_with_code(&["--block", &BLOCK.to_string(), "--verify-receipt", "--json"]);
     let lines = ndjson(&stdout);
 
     assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
@@ -203,6 +235,10 @@ fn test_replay_block_verify_receipt_without_receipts_reports_rpc_errors() {
         );
         assert!(line.get("verification").is_none(), "an unverified target carries no verdict");
     }
+
+    // Unverified targets are RPC-class failures, never mismatches.
+    assert_eq!(code, Some(3), "a run of unverified targets exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
 /// Batch mode rejects the single-transaction-only flags before doing any work.
