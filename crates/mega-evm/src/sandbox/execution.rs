@@ -193,10 +193,10 @@ pub fn execute_keyless_deploy_call<DB: AlloyDatabase, ExtEnvs: ExternalEnvTypes>
                 // REX6+: rescue the outer `Gas`'s unspent portion (after the
                 // `KEYLESS_DEPLOY_OVERHEAD_GAS` charge) so it is refunded to the sender,
                 // matching the per-opcode `compute_gas!` path's TX-level-exceed rescue.
-                // The eventual `make_halt!` still spends `gas.limit()` for replay-stable
-                // receipts; the rescued amount is added back in `last_frame_result` via
-                // `rescued_gas`. Pre-REX6 specs leave the un-rescued full-spend in place
-                // for replay parity.
+                // The eventual `make_halt!` spends `gas.limit()` at the frame level;
+                // `last_frame_result` then erases `rescued_gas` from the final spend, so
+                // the receipt's `gas_used` excludes the rescued amount. Pre-REX6 specs
+                // leave the un-rescued full-spend in place for replay parity.
                 if ctx.spec.is_enabled(MegaSpecId::REX6) {
                     additional_limit.try_rescue_gas(&gas);
                 }

@@ -7,6 +7,7 @@
 
 - [Overview](evm/overview.md)
 - [Dual Gas Model](evm/dual-gas-model.md)
+- [Compute Gas Accounting](evm/compute-gas.md)
 - [Resource Limits](evm/resource-limits.md)
 - [Resource Accounting](evm/resource-accounting.md)
 - [Gas Detention](evm/gas-detention.md)

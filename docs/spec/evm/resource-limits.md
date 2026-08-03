@@ -38,7 +38,8 @@ MegaETH enforces seven distinct resource limits:
 Limits 1–3 are checked before execution.
 Limits 4–7 are enforced during execution and accumulated at block level after execution.
 
-For exact counting rules of compute gas, data size, KV updates, and state growth, see [Resource Accounting](resource-accounting.md).
+For exact counting rules of data size, KV updates, and state growth, see [Resource Accounting](resource-accounting.md).
+For compute gas — the measurement window, metering classes, recording sites, and exceed behavior — see [Compute Gas Accounting](compute-gas.md).
 For the relationship between total gas, compute gas, and storage gas, see [Dual Gas Model](dual-gas-model.md).
 
 ### Limit Set
@@ -96,6 +97,21 @@ If any runtime transaction-level limit is exceeded during execution, the transac
 4. and still be included in the block.
 
 The failed transaction's actual resource usage MUST still count toward the block's cumulative resource counters.
+
+When a single limit check finds more than one dimension over its limit, the reported dimension MUST be the first in the fixed order: data size, key-value updates, compute gas, state growth.
+
+Step 2 has one exception.
+When the compute-gas limit is crossed while recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispatch overhead, remaining gas is not preserved: the transaction records a full spend and the sender loses the unused envelope.
+See [Keyless Deploy Exceed](compute-gas.md#keyless-deploy-exceed).
+
+<details>
+<summary>Rex6 (unstable): the keyless-deploy exception to gas preservation is removed</summary>
+
+Under Rex6, remaining gas MUST be preserved on the keyless-deploy dispatch exceed as on every other transaction-level exceed.
+The rescued amount is excluded from the receipt's `gas_used` and refunded to the sender.
+See [Keyless Deploy Exceed](compute-gas.md#keyless-deploy-exceed).
+
+</details>
 
 <details>
 <summary>Rex6 (unstable): system-originated transactions are not halted by transaction-level limits</summary>
@@ -167,7 +183,7 @@ Each resource dimension deducts only the pre-frame items relevant to it:
 - **Data size** — base transaction data (110 bytes), calldata byte length, access-list entry sizes, EIP-7702 authorization records, and the caller account update.
 - **KV updates** — EIP-7702 authority account updates and the caller account update.
 - **State growth** — valid EIP-7702 authorizations that create previously non-existent authority accounts, resolved during pre-execution.
-- **Compute gas** — standard EVM transaction intrinsic gas (not enumerated here; see EIP-2028 and related specs).
+- **Compute gas** — standard EVM transaction intrinsic gas, enumerated normatively in [Transaction Intrinsic Gas](compute-gas.md#transaction-intrinsic-gas).
 
 These deductions ensure that pre-frame costs reduce the budget available to the first call frame, preventing transactions from front-loading pre-frame usage to escape per-frame limits.
 
