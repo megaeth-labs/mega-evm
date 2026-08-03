@@ -1,10 +1,10 @@
-use std::{str::FromStr, time::Instant};
+use std::{path::PathBuf, str::FromStr, time::Instant};
 
 use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_primitives::{B256, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use mega_evm::{
     alloy_evm::{block::BlockExecutor, Evm, EvmEnv},
     alloy_op_evm::block::OpAlloyReceiptBuilder,
@@ -26,20 +26,40 @@ use crate::{
     common::{
         op_receipt_to_tx_receipt, parse_bucket_capacity, print_execution_summary,
         print_execution_trace, print_receipt, BuildProviderOutput, EvmeExternalEnvs, EvmeOutcome,
-        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcCacheStore, TxOverrideArgs,
+        ExecutionSummary, ExternalEnvSnapshot, OpTxReceipt, RpcCacheStore, TracerType,
+        TxOverrideArgs,
     },
     replay::get_hardfork_config,
     run, ChainArgs, EvmeState,
 };
 
-use super::{ReplayError, Result};
+use super::{batch, ReplayError, Result};
 
 /// Replay a transaction from RPC
 #[derive(Parser, Debug)]
+#[command(group(
+    ArgGroup::new("replay_target").required(true).args(["tx_hash", "tx_file", "block"])
+))]
 pub struct Cmd {
     /// Transaction hash to replay
     #[arg(value_name = "TX_HASH")]
-    pub tx_hash: B256,
+    pub tx_hash: Option<B256>,
+
+    /// Replay every transaction hash listed in the given file, one per line.
+    ///
+    /// Blank lines and `#`-prefixed comment lines are ignored, and duplicates are
+    /// replayed once. All hashes are replayed in a single process: transactions
+    /// are grouped by their containing block and each block is executed once.
+    /// Batch mode does not support `--dump-fixture`, transaction overrides,
+    /// `--override.spec`, tracing, or state dumps.
+    #[arg(long = "tx-file", value_name = "PATH")]
+    pub tx_file: Option<PathBuf>,
+
+    /// Replay every transaction of the given block (decimal or `0x`-prefixed hex).
+    ///
+    /// Same batch semantics and restrictions as `--tx-file`.
+    #[arg(long = "block", value_name = "N", value_parser = batch::parse_block_number)]
+    pub block: Option<u64>,
 
     /// RPC configuration
     #[command(flatten)]
@@ -104,6 +124,7 @@ pub(super) struct ReplayOutcome {
 
 /// Intermediate context fetched from RPC before execution.
 struct ReplayContext {
+    tx_hash: B256,
     target_tx: Transaction,
     parent_block: Block<Transaction>,
     block: Block<Transaction>,
@@ -111,13 +132,57 @@ struct ReplayContext {
     preceding_tx_hashes: Vec<B256>,
 }
 
+/// What the command was asked to replay, resolved from the target argument group.
+enum ReplayMode {
+    /// The single transaction named by the positional `TX_HASH`.
+    Single(B256),
+    /// Many transactions replayed in one process (`--tx-file` / `--block`).
+    Batch(batch::BatchMode),
+}
+
 impl Cmd {
-    /// Replay a historical transaction.
+    /// Replay one or more historical transactions.
     pub async fn run(&self) -> Result<()> {
-        // Pure input validation — reject before any network/state work. A dumped
-        // fixture must represent the on-chain transaction, so it can neither apply
-        // transaction overrides nor force a spec: both would make the recorded
-        // execution a what-if, not the on-chain one.
+        self.validate()?;
+        let mode = self.resolve_mode()?;
+
+        let mut pctx = self.resolve_provider().await?;
+
+        // Execute, report, and (for --dump-fixture) finalize/write — but defer
+        // error propagation until the cache store has persisted: in capture mode
+        // an execution or dump-gate failure is exactly the case you'd want to
+        // debug offline, so the captured RPC responses must not be discarded.
+        let run_result = match &mode {
+            ReplayMode::Single(tx_hash) => self.run_single(&mut pctx, *tx_hash).await,
+            ReplayMode::Batch(batch_mode) => self.run_batch(&mut pctx, batch_mode).await,
+        };
+
+        let persist_result = pctx.cache_store.persist();
+        match run_result {
+            Ok(()) => Ok(persist_result?),
+            Err(run_err) => {
+                // Surface the original error; a persist failure on top of it is
+                // logged, not propagated, so it cannot mask the root cause.
+                if let Err(persist_err) = persist_result {
+                    warn!(
+                        error = %persist_err,
+                        "Failed to persist RPC cache while handling an earlier error",
+                    );
+                }
+                Err(run_err)
+            }
+        }
+    }
+
+    /// Pure input validation — reject before any network/state work.
+    fn validate(&self) -> Result<()> {
+        if self.is_batch() {
+            self.validate_batch_args()?;
+        }
+
+        // A dumped fixture must represent the on-chain transaction, so it can
+        // neither apply transaction overrides nor force a spec: both would make
+        // the recorded execution a what-if, not the on-chain one.
         if self.dump_fixture.is_some() {
             if self.tx_override_args.has_overrides() {
                 return Err(ReplayError::Other(
@@ -136,36 +201,112 @@ impl Cmd {
             }
         }
 
-        let mut pctx = self.resolve_provider().await?;
-        let rctx = self.fetch_replay_context(&pctx.provider, pctx.chain_id).await?;
-        let (external_envs, env_snapshot) = self.resolve_external_envs(&pctx)?;
+        Ok(())
+    }
 
-        // Execute, report, and (for --dump-fixture) finalize/write — but defer
-        // error propagation until the cache store has persisted: in capture mode
-        // an execution or dump-gate failure is exactly the case you'd want to
-        // debug offline, so the captured RPC responses must not be discarded.
-        let run_result = self.execute_and_report(&pctx.provider, &rctx, external_envs).await;
+    /// Whether this invocation selects a batch of transactions.
+    fn is_batch(&self) -> bool {
+        self.tx_file.is_some() || self.block.is_some()
+    }
 
-        // Hand the effective external-env snapshot to the store before the final
-        // persist; no-op unless this is a fixture-capture store.
+    /// Reject the single-transaction-only flags in batch mode.
+    ///
+    /// Batch mode reports one summary per transaction; per-transaction artifacts
+    /// (fixture, trace, state dump) and what-if knobs (overrides, forced spec)
+    /// have no meaningful batch semantics, so they are rejected up front rather
+    /// than silently ignored.
+    fn validate_batch_args(&self) -> Result<()> {
+        const MODE: &str = "batch replay (--tx-file / --block)";
+
+        if self.dump_fixture.is_some() {
+            return Err(ReplayError::Other(format!(
+                "--dump-fixture is not supported by {MODE}; dump a fixture by replaying a \
+                 single transaction"
+            )));
+        }
+        if self.tx_override_args.has_overrides() {
+            return Err(ReplayError::Other(format!(
+                "transaction overrides (--override.gas-limit / --override.value / \
+                 --override.input / --override.input-file) are not supported by {MODE}"
+            )));
+        }
+        if self.spec_override.is_some() {
+            return Err(ReplayError::Other(format!(
+                "--override.spec is not supported by {MODE}; each block's spec is \
+                 auto-detected from its timestamp"
+            )));
+        }
+        if has_trace_args(&self.trace_args) {
+            return Err(ReplayError::Other(format!(
+                "trace options (--trace / --trace.output / --tracer / --trace.*) are not \
+                 supported by {MODE}"
+            )));
+        }
+        if has_dump_args(&self.dump_args) {
+            return Err(ReplayError::Other(format!(
+                "state dump options (--dump / --dump.output) are not supported by {MODE}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Resolve the target argument group into an execution mode.
+    ///
+    /// Reads `--tx-file` from disk here so a malformed list fails before any
+    /// provider is built.
+    fn resolve_mode(&self) -> Result<ReplayMode> {
+        if let Some(path) = &self.tx_file {
+            let contents = std::fs::read_to_string(path).map_err(|e| {
+                ReplayError::InvalidInput(format!(
+                    "Failed to read --tx-file '{}': {e}",
+                    path.display()
+                ))
+            })?;
+            let hashes = batch::parse_tx_hash_list(&contents)?;
+            if hashes.is_empty() {
+                return Err(ReplayError::InvalidInput(format!(
+                    "--tx-file '{}' contains no transaction hashes",
+                    path.display()
+                )));
+            }
+            return Ok(ReplayMode::Batch(batch::BatchMode::TxList(hashes)));
+        }
+        if let Some(number) = self.block {
+            return Ok(ReplayMode::Batch(batch::BatchMode::Block(number)));
+        }
+        match self.tx_hash {
+            Some(tx_hash) => Ok(ReplayMode::Single(tx_hash)),
+            // Unreachable through clap (the target group is required), but the
+            // library API can construct `Cmd` directly.
+            None => Err(ReplayError::InvalidInput(
+                "'mega-evme replay' requires a TX_HASH, '--tx-file <PATH>', or '--block <N>'"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Replay the single transaction named by the positional argument.
+    async fn run_single(&self, pctx: &mut ProviderContext, tx_hash: B256) -> Result<()> {
+        let rctx = self.fetch_replay_context(&pctx.provider, tx_hash, pctx.chain_id).await?;
+        let external_envs = self.apply_external_envs(pctx)?;
+        self.execute_and_report(&pctx.provider, &rctx, external_envs).await
+    }
+
+    /// Replay a batch of transactions through the shared per-block driver.
+    async fn run_batch(&self, pctx: &mut ProviderContext, mode: &batch::BatchMode) -> Result<()> {
+        let external_envs = self.apply_external_envs(pctx)?;
+        batch::run(&pctx.provider, pctx.chain_id, mode, external_envs, self.output_args.json).await
+    }
+
+    /// Resolve the external environment and hand the capture snapshot to the
+    /// cache store, which persists it on exit.
+    fn apply_external_envs(&self, pctx: &mut ProviderContext) -> Result<EvmeExternalEnvs> {
+        let (external_envs, env_snapshot) = self.resolve_external_envs(pctx)?;
         if let Some(snapshot) = env_snapshot {
             pctx.cache_store.set_external_env(snapshot);
         }
-        let persist_result = pctx.cache_store.persist();
-        match run_result {
-            Ok(()) => Ok(persist_result?),
-            Err(run_err) => {
-                // Surface the original error; a persist failure on top of it is
-                // logged, not propagated, so it cannot mask the root cause.
-                if let Err(persist_err) = persist_result {
-                    warn!(
-                        error = %persist_err,
-                        "Failed to persist RPC cache while handling an earlier error",
-                    );
-                }
-                Err(run_err)
-            }
-        }
+        Ok(external_envs)
     }
 
     /// Execute the replay, print the results, and (for `--dump-fixture`)
@@ -225,16 +366,21 @@ impl Cmd {
     }
 
     /// Fetch the transaction, its block, and preceding transaction hashes from the provider.
-    async fn fetch_replay_context<P>(&self, provider: &P, chain_id: u64) -> Result<ReplayContext>
+    async fn fetch_replay_context<P>(
+        &self,
+        provider: &P,
+        tx_hash: B256,
+        chain_id: u64,
+    ) -> Result<ReplayContext>
     where
         P: Provider<op_alloy_network::Optimism>,
     {
-        info!(tx_hash = %self.tx_hash, "Fetching transaction");
+        info!(tx_hash = %tx_hash, "Fetching transaction");
         let target_tx = provider
-            .get_transaction_by_hash(self.tx_hash)
+            .get_transaction_by_hash(tx_hash)
             .await
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
-            .ok_or_else(|| ReplayError::TransactionNotFound(self.tx_hash))?;
+            .ok_or_else(|| ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
         let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
@@ -267,7 +413,7 @@ impl Cmd {
         let mut preceding_tx_hashes = vec![];
         if !is_pending {
             for hash in block.transactions.hashes() {
-                if hash == self.tx_hash {
+                if hash == tx_hash {
                     break;
                 }
                 preceding_tx_hashes.push(hash);
@@ -276,7 +422,7 @@ impl Cmd {
 
         debug!(chain_id, preceding_count = preceding_tx_hashes.len(), "Replay context ready");
 
-        Ok(ReplayContext { target_tx, parent_block, block, chain_id, preceding_tx_hashes })
+        Ok(ReplayContext { tx_hash, target_tx, parent_block, block, chain_id, preceding_tx_hashes })
     }
 
     /// Build the external environment and (for capture mode) the envelope snapshot.
@@ -400,10 +546,10 @@ impl Cmd {
             oracle_storage.sort_unstable();
             let mega_env = state_test::types::MegaEnv { bucket_capacities, oracle_storage };
             let receipt = provider
-                .get_transaction_receipt(self.tx_hash)
+                .get_transaction_receipt(ctx.tx_hash)
                 .await
                 .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
-                .ok_or(ReplayError::TransactionNotFound(self.tx_hash))?;
+                .ok_or(ReplayError::TransactionNotFound(ctx.tx_hash))?;
             // Anchor the receipt to the replayed block: across a reorg or a
             // load-balanced endpoint serving divergent views, the receipt can
             // describe a different inclusion than the block fetched earlier,
@@ -664,12 +810,36 @@ impl Cmd {
     }
 }
 
+/// Whether any trace option was set on the command line.
+///
+/// `--tracer` carries a default, so it counts as set only when it names a
+/// non-default tracer.
+fn has_trace_args(args: &run::TraceArgs) -> bool {
+    args.trace ||
+        args.trace_output_file.is_some() ||
+        !matches!(args.tracer, TracerType::Opcode) ||
+        args.trace_opcode_disable_memory ||
+        args.trace_opcode_disable_stack ||
+        args.trace_opcode_disable_storage ||
+        args.trace_opcode_enable_return_data ||
+        args.trace_call_only_top_call ||
+        args.trace_call_with_log ||
+        args.trace_prestate_diff_mode ||
+        args.trace_prestate_disable_code ||
+        args.trace_prestate_disable_storage
+}
+
+/// Whether any state dump option was set on the command line.
+fn has_dump_args(args: &run::StateDumpArgs) -> bool {
+    args.dump || args.dump_output_file.is_some()
+}
+
 /// Build a [`BlockEnv`] from the RPC block header.
 ///
 /// Reads `excess_blob_gas` directly from the header rather than using a
 /// hardcoded default, so blob-fee-sensitive opcodes (e.g. `BLOBBASEFEE`)
 /// match on-chain semantics during replay.
-fn retrieve_block_env(block: &Block<Transaction>) -> Result<BlockEnv> {
+pub(super) fn retrieve_block_env(block: &Block<Transaction>) -> Result<BlockEnv> {
     let mut block_env = BlockEnv {
         number: U256::from(block.number()),
         beneficiary: block.header.beneficiary(),
@@ -703,6 +873,117 @@ mod tests {
     use alloy_consensus::Header as ConsensusHeader;
     use alloy_rpc_types_eth::Header as RpcHeader;
     use mega_evm::revm::context_interface::block::BlobExcessGasAndPrice;
+
+    const TX: &str = "0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef";
+    const RPC: [&str; 2] = ["--rpc.replay-file", "/tmp/envelope.json"];
+
+    /// Parse a `replay` invocation, prefixing the shared offline RPC flags.
+    fn parse(extra: &[&str]) -> std::result::Result<Cmd, clap::Error> {
+        let mut argv = vec!["replay"];
+        argv.extend_from_slice(&RPC);
+        argv.extend_from_slice(extra);
+        Cmd::try_parse_from(argv)
+    }
+
+    /// Parse a batch invocation carrying one extra flag, and return the
+    /// validation error message it must be rejected with.
+    fn batch_rejection(extra: &[&str]) -> String {
+        let mut argv = vec!["--block", "22945844"];
+        argv.extend_from_slice(extra);
+        let cmd = parse(&argv).expect("flags should parse");
+        cmd.validate().expect_err("batch mode must reject the flag").to_string()
+    }
+
+    #[test]
+    fn test_replay_target_group_accepts_each_form() {
+        assert!(matches!(
+            parse(&[TX]).expect("positional").resolve_mode().expect("mode"),
+            ReplayMode::Single(_)
+        ));
+        assert!(matches!(
+            parse(&["--block", "0x15e2034"]).expect("block").resolve_mode().expect("mode"),
+            ReplayMode::Batch(batch::BatchMode::Block(22_945_844)),
+        ));
+        // `--tx-file` reads the file, so only the parse is checked here.
+        assert_eq!(
+            parse(&["--tx-file", "/tmp/list.txt"]).expect("tx-file").tx_file,
+            Some(PathBuf::from("/tmp/list.txt")),
+        );
+    }
+
+    #[test]
+    fn test_replay_target_group_is_required() {
+        let err = parse(&[]).expect_err("a replay target is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn test_replay_target_group_is_mutually_exclusive() {
+        for extra in [
+            vec![TX, "--block", "1"],
+            vec![TX, "--tx-file", "/tmp/list.txt"],
+            vec!["--block", "1", "--tx-file", "/tmp/list.txt"],
+        ] {
+            let err = parse(&extra).expect_err("targets must be mutually exclusive");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "unexpected error for {extra:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_batch_rejects_single_transaction_only_flags() {
+        for (extra, expected) in [
+            (vec!["--dump-fixture", "/tmp/f.json"], "--dump-fixture"),
+            (vec!["--override.gas-limit", "50000"], "transaction overrides"),
+            (vec!["--override.value", "1ether"], "transaction overrides"),
+            (vec!["--override.input", "0xdeadbeef"], "transaction overrides"),
+            (vec!["--override.input-file", "/tmp/in.hex"], "transaction overrides"),
+            (vec!["--override.spec", "Rex4"], "--override.spec"),
+            (vec!["--trace"], "trace options"),
+            (vec!["--trace.output", "/tmp/t.json"], "trace options"),
+            (vec!["--tracer", "call"], "trace options"),
+            (vec!["--trace.call.with-log"], "trace options"),
+            (vec!["--trace.prestate.diff-mode"], "trace options"),
+            (vec!["--dump"], "state dump options"),
+            (vec!["--dump.output", "/tmp/s.json"], "state dump options"),
+        ] {
+            let message = batch_rejection(&extra);
+            assert!(
+                message.contains(expected) && message.contains("batch replay"),
+                "unexpected rejection for {extra:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_batch_accepts_the_flags_it_supports() {
+        parse(&["--block", "1", "--json"]).expect("parse").validate().expect("--json is allowed");
+        parse(&["--tx-file", "/tmp/list.txt"])
+            .expect("parse")
+            .validate()
+            .expect("plain batch replay is allowed");
+    }
+
+    /// The single-transaction path keeps accepting every flag batch mode rejects.
+    #[test]
+    fn test_single_transaction_path_keeps_all_flags() {
+        for extra in [
+            vec!["--trace", "--tracer", "call"],
+            vec!["--dump", "--dump.output", "/tmp/s.json"],
+            vec!["--override.spec", "Rex4"],
+            vec!["--override.gas-limit", "50000"],
+        ] {
+            let mut argv = vec![TX];
+            argv.extend_from_slice(&extra);
+            parse(&argv)
+                .expect("parse")
+                .validate()
+                .unwrap_or_else(|e| panic!("single-transaction replay must accept {extra:?}: {e}"));
+        }
+    }
 
     fn make_block(excess_blob_gas: Option<u64>) -> Block<Transaction> {
         let inner = ConsensusHeader { excess_blob_gas, ..Default::default() };

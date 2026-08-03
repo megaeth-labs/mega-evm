@@ -45,19 +45,14 @@ impl MainCmd {
         // Initialize logging first
         self.log.init();
 
+        // Map instead of `?`: `?` inside an arm returns from `run` directly and
+        // skips the handler below, leaving the error to be printed on stdout by
+        // the binary's fallback — which corrupts machine-readable output such as
+        // the batch replay NDJSON stream.
         match self.command {
-            Commands::Run(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
-            Commands::Tx(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
-            Commands::Replay(cmd) => {
-                cmd.run().await?;
-                Ok(())
-            }
+            Commands::Run(cmd) => cmd.run().await.map_err(Error::from),
+            Commands::Tx(cmd) => cmd.run().await.map_err(Error::from),
+            Commands::Replay(cmd) => cmd.run().await.map_err(Error::from),
         }
         .inspect_err(|e| {
             error!(err = ?e, "Error executing command");

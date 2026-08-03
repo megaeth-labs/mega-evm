@@ -1,24 +1,31 @@
 ---
-description: Fetch and re-execute an on-chain transaction with optional overrides and tracing.
+description: Fetch and re-execute one or many on-chain transactions with optional overrides and tracing.
 ---
 
 # replay
 
-Re-execute a historical transaction locally using an RPC endpoint or a previously captured fixture file.
+Re-execute historical transactions locally using an RPC endpoint or a previously captured fixture file.
 In online mode, `mega-evme` fetches the transaction, block environment, and pre-state from the RPC and re-executes locally.
 In offline mode (`--rpc.replay-file`), all data is served from a local fixture captured by an earlier run — no network access is required.
+
+`replay` has two modes.
+The single-transaction mode replays the transaction named by the positional `TX_HASH` and supports the full option set (overrides, tracing, state dumps, fixture dumps).
+[Batch mode](#batch-replay) (`--tx-file` / `--block`) replays many transactions in one process and reports one summary per transaction.
 
 ## Usage
 
 ```
-mega-evme replay [OPTIONS] <TX_HASH>
+mega-evme replay [OPTIONS] <TX_HASH|--tx-file <PATH>|--block <N>>
 ```
+
+Exactly one replay target is required: the positional `TX_HASH`, `--tx-file`, or `--block`.
+The three are mutually exclusive.
 
 ## Arguments
 
 ### `TX_HASH`
 
-The transaction hash to replay (32-byte hex, required).
+The transaction hash to replay (32-byte hex).
 
 `mega-evme` re-executes the transaction locally using state and block context sourced from either an RPC endpoint or a local fixture file.
 This gives you a fully reproducible execution without needing a local archive node.
@@ -33,6 +40,108 @@ Required for online replay and capture mode; omit when using `--rpc.replay-file`
 
 ```
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc <TX_HASH>
+```
+
+## Batch Replay
+
+Replaying a corpus of transactions one process at a time pays for provider construction, chain-id resolution, and RPC cache parsing once per transaction — work that dominates the actual EVM execution.
+Batch mode does all of it once.
+
+A batch run builds a single provider and a single RPC cache, groups the requested transactions by their containing block, and processes the blocks in ascending order.
+Each block is executed exactly once: state is forked at the parent block, pre-execution changes are applied, and every transaction of the block runs in order, with each requested transaction's result recorded before it is committed.
+The RPC cache is persisted once, on exit, even if some transactions failed — the captured responses are the artifact you need to debug the failure offline.
+
+Batch mode issues the same RPC calls as single-transaction replay, so an offline envelope captured by single-transaction runs serves a batch run without a cache miss.
+
+### `--tx-file <PATH>`
+
+Replay every transaction hash listed in `<PATH>`, one per line.
+
+Blank lines and lines whose first non-whitespace character is `#` are ignored.
+A hash listed more than once is replayed once.
+A line that is not a valid 32-byte hex hash aborts the run before any network access, naming the offending line number.
+
+### `--block <N>`
+
+Replay every transaction of block `N`, given in decimal or `0x`-prefixed hex.
+
+### Restrictions
+
+Batch mode reports one summary per transaction and has no meaningful semantics for per-transaction artifacts or what-if knobs, so the following are rejected up front with an explanatory error rather than silently ignored:
+
+- `--dump-fixture`
+- Transaction overrides (`--override.gas-limit`, `--override.value`, `--override.input`, `--override.input-file`)
+- `--override.spec` — each block's spec is auto-detected from its timestamp
+- All trace options (`--trace`, `--trace.output`, `--tracer`, `--trace.*`)
+- All state dump options (`--dump`, `--dump.output`)
+
+Single-transaction replay keeps accepting all of them.
+
+### Output
+
+With `--json`, batch mode writes NDJSON: exactly one compact, single-line JSON object per requested transaction, in processing order (ascending block, then transaction index).
+
+A transaction that executed is reported as its `tx_hash`, `block_number`, and `tx_index`, followed by the same fields the single-transaction JSON output carries (`success`, `gas_used`, `logs_count`, and the optional `output` / `contract_address` / `revert_reason` / `halt_reason`) and its `receipt`.
+Both shapes below are expanded for readability; on the wire each object occupies exactly one line.
+
+```json
+{
+  "tx_hash": "0x…",
+  "block_number": 22945844,
+  "tx_index": 3,
+  "success": true,
+  "gas_used": 81740,
+  "logs_count": 0,
+  "receipt": { "…": "…" }
+}
+```
+
+A transaction that could not be executed is reported as an error entry instead:
+
+```json
+{
+  "tx_hash": "0x…",
+  "error": { "kind": "not_found", "message": "Transaction not found" }
+}
+```
+
+`kind` is one of `not_found` (unknown hash), `pending` (mined into no block yet), `rpc` (an RPC call failed), or `execution` (block setup or the block executor rejected the transaction).
+Execution outcomes are not errors: a reverted or halted transaction is a normal result line with `success: false`.
+
+Without `--json`, each transaction is printed with a header naming its hash, block, and index, followed by the same summary and receipt the single-transaction mode prints.
+A final one-line summary (transactions replayed, transactions failed, elapsed time) is logged at `INFO` level, so pass `-vvv` to see it.
+
+### Exit Status
+
+A batch run exits `0` when every requested transaction produced an execution result, and `1` when any of them produced an error entry.
+The NDJSON stream is written to stdout in both cases; diagnostics go to stderr.
+
+### Examples
+
+Replay a whole block offline and stream the results as NDJSON:
+
+```bash
+mega-evme replay --rpc.replay-file ./fixtures/blocks.json --block 22945844 --json
+```
+
+Replay a corpus of transactions against a live RPC, one process for the lot:
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --tx-file ./corpus.txt --json > results.ndjson
+```
+
+Where `corpus.txt` looks like:
+
+```
+# regression corpus, refreshed 2026-08-03
+0xde3d56dc739484166b8af1bea757bf7e3e9a4b9a0fb62d722703345570dfc1d6
+0x323ddc8e67dfc134284d78c65f3c1dc7ff45ba1db02eeaf62e211ae3253478ef
+```
+
+Count the transactions that did not succeed:
+
+```bash
+jq -c 'select(.error != null or .success == false)' results.ndjson | wc -l
 ```
 
 ## RPC Cache File
@@ -181,18 +290,21 @@ All of that context comes from the RPC.
 
 `replay` supports the following shared option groups.
 See the linked pages for full details.
+Options marked _(single transaction only)_ are rejected in [batch mode](#batch-replay).
 
+- **Batch replay** — Replay many transactions in one process via `--tx-file` / `--block`.
+  See [Batch Replay](#batch-replay) above.
 - **SALT buckets** — Configure SALT bucket capacity for dynamic storage gas pricing.
   See [SALT Buckets](../configuration/salt-buckets.md).
-- **State dump** — Dump or load pre/post-state snapshots.
+- **State dump** _(single transaction only)_ — Dump or load pre/post-state snapshots.
   See [State Management](../configuration/state-management.md).
 - **RPC cache file** — Single-file JSON-RPC capture and offline replay via `--rpc.capture-file` / `--rpc.replay-file`.
   See [RPC Cache File](#rpc-cache-file) above.
 - **RPC cache / retry** — Per-chain response cache, retry, and rate-limit settings.
   See [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry).
-- **Tracing** — Emit execution traces (call traces, opcode traces, gas profiles, etc.).
+- **Tracing** _(single transaction only)_ — Emit execution traces (call traces, opcode traces, gas profiles, etc.).
   See [Tracing Overview](../tracing/overview.md).
-- **Fixture dump** — Write a self-validating EEST state-test fixture via `--dump-fixture`.
+- **Fixture dump** _(single transaction only)_ — Write a self-validating EEST state-test fixture via `--dump-fixture`.
   See [Self-Validating Fixture Dump](#self-validating-fixture-dump) above.
 - **Throughput benchmark** — Dump a fixture (`--dump-fixture`) and time it with `state-test --bench`.
   See [Throughput Benchmark](#throughput-benchmark) above.
@@ -230,6 +342,12 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.input 0xdeadbe
 
 ```bash
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.spec Rex2 0xabc123...
+```
+
+**Replay a whole block as NDJSON**
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --block 22945844 --json
 ```
 
 ## See Also
