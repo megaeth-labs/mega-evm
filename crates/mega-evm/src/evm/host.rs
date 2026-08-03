@@ -375,7 +375,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> HostExt for MegaContext<DB, ExtEnv
 /// | --- | --- | --- | --- |
 /// | Code / execution target | delegate | revm's `load_account_delegated` (not these primitives) | revm-owned |
 /// | Storage / SALT / state-growth / account-write accounting | original | `inspect_account` | REX5+ original; pre-REX5 followed the delegate (frozen) |
-/// | CALL-family beneficiary / volatile-access check | delegate | `resolve_eip7702_delegate_address` | REX6+ only; `<=` REX5 compares the raw operand (frozen) |
+/// | CALL-family beneficiary / volatile-access check | delegate | `resolve_eip7702_delegate_address` | REX6+ only; pre-REX6 compares the raw operand (frozen) |
 /// | Validate-time authorization accounting | original authority | `inspect_account` with `load_code = true` (EIP-7702 / EIP-3607 detection) | scan-wide |
 ///
 /// `inspect_account_delegated` follows the delegate; it backs the frozen pre-REX5 accounting path
