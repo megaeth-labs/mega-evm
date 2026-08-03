@@ -204,7 +204,7 @@ RPC Options:
                                          [aliases: --rpc-url] [compat alias: --fork.rpc]
       --rpc.capture-file <PATH>          (replay command only) capture to fixture; not usable as a run/tx offline path
       --rpc.replay-file <PATH>           (replay command only) serve from fixture; not usable as a run/tx offline path
-      --rpc.cache-max-entries <N>        In-memory RPC LRU max entries; 0 = unlimited (never evict) [default: 0]
+      --rpc.cache-max-entries <N>        In-memory RPC LRU max entries; 0 = effectively unlimited (caps at 1,048,576 entries; the cache index is preallocated proportional to the cap) [default: 0]
       --rpc.cache-dir <DIR>              Per-chain RPC cache directory (default: platform cache dir)
       --rpc.no-cache-file                Disable on-disk cache persistence
       --rpc.clear-cache                  Delete the current chain's cache file before loading

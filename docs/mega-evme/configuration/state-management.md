@@ -219,12 +219,12 @@ The default cache directory is the platform cache directory:
 
 ### Cache Flags
 
-| Flag                          | Type  | Default            | Description                                                                                                                                         |
-| ----------------------------- | ----- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--rpc.cache-max-entries <N>` | `u32` | `0`                | Maximum number of items in the in-memory RPC LRU cache (and therefore what is persisted to the cache file). `0` = unlimited (never evict). Default. |
-| `--rpc.cache-dir <PATH>`      | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`.                                       |
-| `--rpc.no-cache-file`         | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies.                                                                           |
-| `--rpc.clear-cache`           | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                                             |
+| Flag                          | Type  | Default            | Description                                                                                                                                                                                                                            |
+| ----------------------------- | ----- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--rpc.cache-max-entries <N>` | `u32` | `0`                | Maximum number of items in the in-memory RPC LRU cache (and therefore what is persisted to the cache file). `0` = effectively unlimited (caps at 1,048,576 entries; the cache index is preallocated proportional to the cap). Default. |
+| `--rpc.cache-dir <PATH>`      | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`.                                                                                                                          |
+| `--rpc.no-cache-file`         | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies.                                                                                                                                                              |
+| `--rpc.clear-cache`           | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                                                                                                                                |
 
 ### Retry Flags
 

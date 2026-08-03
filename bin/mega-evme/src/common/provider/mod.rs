@@ -97,7 +97,9 @@ pub struct RpcArgs {
     pub replay_file: Option<PathBuf>,
 
     /// Maximum number of items in the in-memory RPC LRU cache (and therefore what
-    /// gets persisted to the cache file). `0` = unlimited (never evict). Default is `0`.
+    /// gets persisted to the cache file). `0` = effectively unlimited (caps at
+    /// 1,048,576 entries; the cache index is preallocated proportional to the
+    /// cap). Default is `0`.
     #[arg(id = "cache_max_entries", long = "rpc.cache-max-entries", default_value_t = 0)]
     pub cache_max_entries: u32,
 
@@ -171,7 +173,8 @@ impl RpcArgs {
         };
 
         // 3. Build the cache layer and (optionally) the disk store.
-        // Cache layer is always installed; 0 max entries means unlimited (never evict).
+        // Cache layer is always installed; 0 max entries maps to
+        // EFFECTIVELY_UNLIMITED_CACHE_ENTRIES.
         let max_items = cache_max_entries_capacity(self.cache_max_entries);
         let cache_layer = CacheLayer::new(max_items);
         let cache = cache_layer.cache();
@@ -455,13 +458,25 @@ fn parse_non_empty_path(s: &str) -> std::result::Result<PathBuf, String> {
     }
 }
 
+/// Cap used when `--rpc.cache-max-entries 0` ("effectively unlimited") is requested.
+///
+/// Alloy's `SharedCache` preallocates its LRU hash table to full capacity
+/// (`lru::LruCache::with_hasher` → `HashMap::with_capacity_and_hasher`), so a true
+/// `u32::MAX` mapping would preallocate ~2^33 hash buckets and balloon RSS by multi-GB
+/// on every default-config online run. 2^20 entries preallocates ~2^21 pointer-sized
+/// buckets (tens of MB) while covering ~2,600 blocks' worth of RPC entries per process
+/// (a full mainnet block is ~200 entries; the largest real merged corpus to date was
+/// 15,294).
+const EFFECTIVELY_UNLIMITED_CACHE_ENTRIES: u32 = 1_048_576;
+
 /// Map `--rpc.cache-max-entries` to the capacity passed to [`CacheLayer::new`].
 ///
-/// `0` means unlimited (never evict) and is represented as [`u32::MAX`].
+/// `0` means effectively unlimited and is approximated by
+/// [`EFFECTIVELY_UNLIMITED_CACHE_ENTRIES`] (see that constant's rationale).
 /// Nonzero values pass through unchanged.
 fn cache_max_entries_capacity(cache_max_entries: u32) -> u32 {
     if cache_max_entries == 0 {
-        u32::MAX
+        EFFECTIVELY_UNLIMITED_CACHE_ENTRIES
     } else {
         cache_max_entries
     }
@@ -556,13 +571,31 @@ mod tests {
         assert!(cu_per_sec_warning(0, 99).is_none());
     }
 
-    /// `0` maps to unlimited capacity (`u32::MAX`); nonzero values pass through.
+    /// `0` maps to the effectively-unlimited cap; nonzero values pass through.
     #[test]
     fn test_cache_max_entries_capacity_mapping() {
-        assert_eq!(cache_max_entries_capacity(0), u32::MAX);
+        assert_eq!(cache_max_entries_capacity(0), EFFECTIVELY_UNLIMITED_CACHE_ENTRIES);
+        assert_eq!(cache_max_entries_capacity(0), 1_048_576);
         assert_eq!(cache_max_entries_capacity(1), 1);
         assert_eq!(cache_max_entries_capacity(256), 256);
         assert_eq!(cache_max_entries_capacity(10_000), 10_000);
         assert_eq!(cache_max_entries_capacity(u32::MAX), u32::MAX);
+    }
+
+    /// Construction-reality check: actually allocate the cache at the mapped "unlimited"
+    /// capacity, insert, and read back. Preallocating `u32::MAX` would hang/OOM here
+    /// (hashbrown ctrl-byte memset over ~2^33 buckets); this test must complete quickly.
+    #[test]
+    fn test_cache_layer_constructs_at_effectively_unlimited_capacity() {
+        let layer = CacheLayer::new(cache_max_entries_capacity(0));
+        assert_eq!(layer.max_items(), EFFECTIVELY_UNLIMITED_CACHE_ENTRIES);
+
+        let cache = layer.cache();
+        assert_eq!(cache.max_items(), EFFECTIVELY_UNLIMITED_CACHE_ENTRIES);
+
+        let key = alloy_primitives::B256::repeat_byte(0xab);
+        let value = r#"{"result":"0x1"}"#.to_string();
+        cache.put(key, value.clone()).expect("put into SharedCache");
+        assert_eq!(cache.get(&key).as_deref(), Some(value.as_str()));
     }
 }
