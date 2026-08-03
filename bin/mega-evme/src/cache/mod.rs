@@ -13,11 +13,13 @@ use crate::common::{EvmeError, Result};
 
 pub(crate) use merge::{
     lock_sidecar_path, merge_envelope_for_persist, merge_kv_entries, merge_provider_lists,
-    read_envelope, read_provider_cache, write_bytes_atomic, write_envelope_atomic,
-    write_provider_cache_atomic, CacheKv, EnvelopeDoc, ExternalEnvDoc, ENVELOPE_VERSION,
+    parse_rpc_cache_filename_chain_id, read_provider_cache, reread_envelope_for_merge,
+    write_bytes_atomic, write_envelope_atomic, write_provider_cache_atomic, CacheKv, EnvelopeDoc,
+    EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
 };
 
 use merge::{load_cache_file, merge_envelopes_cli, CacheShape, LoadedCache};
+use tracing::warn;
 
 /// `mega-evme cache` — offline cache-file utilities.
 #[derive(Parser, Debug)]
@@ -55,6 +57,42 @@ impl Cmd {
     }
 }
 
+/// Validate that provider-cache paths agreeing with `rpc-cache-{id}.json` all
+/// name the same chain id.
+///
+/// Paths that do not match the pattern emit a `warn!` (chain identity cannot be
+/// validated for them) and are otherwise ignored. Two or more matching paths
+/// with different ids are a hard error naming the conflicting files.
+pub(crate) fn check_provider_cache_chain_identity<'a>(
+    paths: impl IntoIterator<Item = &'a std::path::Path>,
+) -> Result<()> {
+    let mut seen: Option<(u64, PathBuf)> = None;
+    for path in paths {
+        match parse_rpc_cache_filename_chain_id(path) {
+            None => {
+                warn!(
+                    path = %path.display(),
+                    "Provider-cache path does not match rpc-cache-{{id}}.json; \
+                     chain identity cannot be validated for this file",
+                );
+            }
+            Some(id) => match &seen {
+                None => seen = Some((id, path.to_path_buf())),
+                Some((prev_id, prev_path)) if *prev_id != id => {
+                    return Err(EvmeError::InvalidInput(format!(
+                        "Provider-cache chain identity mismatch: '{}' is chain {prev_id}, \
+                         but '{}' is chain {id}. Merge only caches from the same chain.",
+                        prev_path.display(),
+                        path.display(),
+                    )));
+                }
+                Some(_) => {}
+            },
+        }
+    }
+    Ok(())
+}
+
 impl MergeArgs {
     /// Merge inputs into `--output` and print a one-line summary.
     pub fn run(self) -> Result<()> {
@@ -89,6 +127,16 @@ impl MergeArgs {
 
         let unique_out = match first_shape {
             CacheShape::Provider => {
+                // Provider-cache files carry chain identity only in the
+                // `rpc-cache-{id}.json` filename. Reject merges that would
+                // union different chains; warn when a path cannot be checked.
+                check_provider_cache_chain_identity(
+                    loaded
+                        .iter()
+                        .map(|(p, _, _)| p.as_path())
+                        .chain(std::iter::once(self.output.as_path())),
+                )?;
+
                 let mut acc = Vec::new();
                 for (_, _, data) in loaded {
                     let LoadedCache::Provider(entries) = data else { unreachable!() };
@@ -258,5 +306,87 @@ mod tests {
         ];
         let err = merge_envelopes_cli(&docs).unwrap_err();
         assert!(err.to_string().contains("version"));
+    }
+
+    /// Mismatched `rpc-cache-{id}.json` filenames hard-error naming both files.
+    #[test]
+    fn test_cache_merge_rejects_provider_chain_id_filename_mismatch() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("rpc-cache-1.json");
+        let b = dir.path().join("rpc-cache-4326.json");
+        let out = dir.path().join("rpc-cache-4326-out.json");
+
+        write(&a, &serde_json::to_string(&vec![kv(1, "a")]).unwrap());
+        write(&b, &serde_json::to_string(&vec![kv(2, "b")]).unwrap());
+
+        let err = MergeArgs { inputs: vec![a.clone(), b.clone()], output: out }.run().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("chain identity") || msg.contains("chain"), "msg={msg}");
+        assert!(msg.contains("chain 1") && msg.contains("chain 4326"), "msg={msg}");
+        assert!(
+            msg.contains(a.file_name().unwrap().to_str().unwrap()) ||
+                msg.contains("rpc-cache-1.json"),
+            "msg={msg}"
+        );
+        assert!(
+            msg.contains(b.file_name().unwrap().to_str().unwrap()) ||
+                msg.contains("rpc-cache-4326.json"),
+            "msg={msg}"
+        );
+    }
+
+    /// Output path is included in the chain-identity check.
+    #[test]
+    fn test_cache_merge_rejects_provider_output_chain_id_mismatch() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("rpc-cache-1.json");
+        let out = dir.path().join("rpc-cache-4326.json");
+        write(&a, &serde_json::to_string(&vec![kv(1, "a")]).unwrap());
+
+        let err = MergeArgs { inputs: vec![a], output: out }.run().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("chain 1") && msg.contains("chain 4326"), "msg={msg}");
+    }
+
+    /// Unit-testable predicate: non-matching filename cannot supply chain identity.
+    #[test]
+    fn test_provider_cache_chain_identity_non_matching_filename_is_none() {
+        assert_eq!(parse_rpc_cache_filename_chain_id(std::path::Path::new("merged.json")), None);
+        assert_eq!(
+            parse_rpc_cache_filename_chain_id(std::path::Path::new("rpc-cache-1.json")),
+            Some(1)
+        );
+    }
+
+    /// Same chain id across matching names is accepted (including output).
+    #[test]
+    fn test_check_provider_cache_chain_identity_same_id_ok() {
+        let paths = [
+            std::path::Path::new("worker0/rpc-cache-4326.json"),
+            std::path::Path::new("worker1/rpc-cache-4326.json"),
+            std::path::Path::new("rpc-cache-4326.json"),
+        ];
+        check_provider_cache_chain_identity(paths).expect("same chain ok");
+    }
+
+    /// Different ids hard-error; non-matching names alone do not.
+    #[test]
+    fn test_check_provider_cache_chain_identity_mismatch_and_non_matching() {
+        let paths = [
+            std::path::Path::new("rpc-cache-1.json"),
+            std::path::Path::new("out.json"), // non-matching → warn only
+            std::path::Path::new("rpc-cache-4326.json"),
+        ];
+        let err = check_provider_cache_chain_identity(paths).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("rpc-cache-1.json") && msg.contains("rpc-cache-4326.json"), "{msg}");
+
+        // Only non-matching names: no chain id to disagree on → ok (with warns).
+        let only_free = [
+            std::path::Path::new("a.json"),
+            std::path::Path::new("b.json"),
+            std::path::Path::new("merged.json"),
+        ];
+        check_provider_cache_chain_identity(only_free).expect("no ids to conflict");
     }
 }

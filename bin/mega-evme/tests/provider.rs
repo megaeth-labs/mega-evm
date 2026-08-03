@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use alloy_primitives::B256;
 use alloy_provider::Provider;
 use clap::Parser;
-use mega_evme::common::{BuildProviderOutput, EvmeError, RpcArgs};
+use mega_evme::common::{BuildProviderOutput, EvmeError, ExitCode, RpcArgs};
 use tempfile::tempdir;
 
 mod common;
@@ -179,16 +179,24 @@ async fn test_build_provider_with_cache_names_file_from_fetched_chain_id() {
     assert_eq!(cache_store.cache_path(), Some(dir.path().join("rpc-cache-4326.json").as_path()));
 }
 
+/// Malformed `--rpc` is bad input (exit 1), not an RPC transport failure (exit 3).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_invalid_url() {
     let args = RpcArgs::parse_from(["mega-evme", "--rpc", "not a url", "--rpc.no-cache-file"]);
     let err = args.build_provider().await.expect_err("build_provider should fail");
-    match err {
-        EvmeError::RpcError(msg) => {
+    match &err {
+        EvmeError::InvalidInput(msg) => {
             assert!(msg.contains("not a url"), "error must echo the original input, got: {msg}");
+            assert!(msg.contains("Invalid RPC URL"), "msg={msg}");
         }
-        other => panic!("expected EvmeError::RpcError, got {other:?}"),
+        other => panic!("expected EvmeError::InvalidInput, got {other:?}"),
     }
+    // Exit-code taxonomy: InvalidInput → execution-error (code 1), never rpc-failure (3).
+    assert_eq!(
+        ExitCode::from_evme_error(&err).code(),
+        1,
+        "malformed --rpc must exit 1 (bad input), not 3 (rpc-failure)",
+    );
 }
 
 // ─── Chain-id resolution ─────────────────────────────────────────────────────

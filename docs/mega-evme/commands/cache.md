@@ -33,6 +33,9 @@ Mixing a provider-cache file with a capture envelope is a hard error that names 
 - Union entries by `key`.
 - Later inputs win on collision.
 - Output is a provider-cache-shaped JSON array, written atomically (temp file + rename).
+- Chain identity is taken only from the standard filename `rpc-cache-{chain_id}.json` (provider-cache bodies have no chain field).
+  Every input path and `--output` that matches that pattern must name the same chain id; a mismatch is a hard error that names the conflicting files.
+  Paths that do not match the pattern emit a warning that chain identity cannot be validated for them, and the merge proceeds for those paths without a filename-based check.
 
 ### Envelope merge
 

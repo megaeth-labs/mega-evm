@@ -232,9 +232,17 @@ Lock contention blocks for a short critical section rather than failing the fini
 If the lock cannot be acquired at all (for example the directory is not writable), persist logs a warning and falls back to an unlocked write.
 A missing or corrupt on-disk file during the re-read degrades to writing this process's entries only (also warned).
 
-Capture envelopes (`--rpc.capture-file`) use the same lock + re-read-merge path, with an additional check that the on-disk `chain_id` matches before merging.
+Capture envelopes (`--rpc.capture-file`) use the same lock + re-read-merge path, with additional hard-error checks before writing:
+
+- The on-disk envelope `version` and `chain_id` must match this process's capture.
+- If both the on-disk envelope and this process carry a non-null `external_env` snapshot and those snapshots are not identical, persist hard-errors and names both values.
+  One-sided or identical snapshots still merge: this process's snapshot is kept when set, otherwise the on-disk snapshot is propagated.
+  This matches the offline [`cache merge`](../commands/cache.md) rule so concurrent captures cannot silently union RPC entries under a single wrong environment.
+
+A corrupt or unreadable on-disk envelope during re-read degrades to writing this process's entries only (warned), while identity/schema failures remain hard errors.
 
 To consolidate historical per-worker cache directories offline, use [`cache merge`](../commands/cache.md).
+Provider-cache merge also rejects inputs (and `--output`) whose `rpc-cache-{chain_id}.json` filenames disagree on chain id.
 
 ### Cache Flags
 

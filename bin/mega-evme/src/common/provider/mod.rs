@@ -156,7 +156,7 @@ impl RpcArgs {
         })?;
 
         let url: reqwest::Url = rpc_url_str.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
+            EvmeError::InvalidInput(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
         })?;
 
         // Once per provider build (not per client: resolve_chain_id also builds a client).
@@ -299,7 +299,7 @@ impl RpcArgs {
         let rpc_url_str = self.rpc_url.as_ref().expect("capture mode requires --rpc");
 
         let url: reqwest::Url = rpc_url_str.parse().map_err(|e| {
-            EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
+            EvmeError::InvalidInput(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
         })?;
 
         // Once per provider build (capture builds a single client; keep the same entry point).

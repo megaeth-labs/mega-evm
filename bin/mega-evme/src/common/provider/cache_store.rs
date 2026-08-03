@@ -32,9 +32,9 @@ use tracing::{info, warn};
 use super::transport::TransportCache;
 use crate::{
     cache::{
-        lock_sidecar_path, merge_envelope_for_persist, merge_kv_entries, read_envelope,
-        read_provider_cache, write_bytes_atomic, write_envelope_atomic, CacheKv, EnvelopeDoc,
-        ExternalEnvDoc, ENVELOPE_VERSION,
+        lock_sidecar_path, merge_envelope_for_persist, merge_kv_entries, read_provider_cache,
+        reread_envelope_for_merge, write_bytes_atomic, write_envelope_atomic, CacheKv, EnvelopeDoc,
+        EnvelopeReread, ExternalEnvDoc, ENVELOPE_VERSION,
     },
     common::{EvmeError, Result},
 };
@@ -363,8 +363,12 @@ impl CacheFileEnvelope {
     }
 
     /// Atomically write this envelope to `path` under a lock, merging with any
-    /// on-disk envelope already present (ours win on cache key collision;
-    /// `external_env` keeps ours if set, else the on-disk one).
+    /// on-disk envelope already present (ours win on cache key collision).
+    ///
+    /// `external_env` keeps ours if set, else the on-disk one. Both sides non-null
+    /// and not identical is a hard error (same rule as offline `cache merge`).
+    /// On-disk re-read failures are typed: identity/schema mismatches hard-fail;
+    /// corrupt JSON degrades to ours-only with a warning.
     ///
     /// Lock contention blocks until the lock is free. Failure to create/acquire
     /// the lock degrades to an unlocked write with a `warn!`. Write failures
@@ -384,23 +388,14 @@ impl CacheFileEnvelope {
 
         let ours = self.to_merge_doc()?;
         let to_write = if path.exists() {
-            match read_envelope(path) {
-                Ok(on_disk) => merge_envelope_for_persist(&on_disk, &ours, path)?,
-                // Version / chain_id / shape mismatches are hard errors (primary capture output).
-                // Corrupt or unreadable JSON degrades to ours-only with a warning.
-                Err(err) => {
-                    let msg = err.to_string();
-                    let hard = msg.contains("chain_id") ||
-                        msg.contains("version") ||
-                        msg.contains("Unsupported") ||
-                        msg.contains("Expected capture envelope") ||
-                        msg.contains("provider-cache");
-                    if hard {
-                        return Err(err);
-                    }
+            // Typed hard vs degradable: no substring matching on formatted messages.
+            match reread_envelope_for_merge(path) {
+                EnvelopeReread::Ok(on_disk) => merge_envelope_for_persist(&on_disk, &ours, path)?,
+                EnvelopeReread::Hard(err) => return Err(err),
+                EnvelopeReread::Degradable(msg) => {
                     warn!(
                         path = %path.display(),
-                        error = %err,
+                        error = %msg,
                         "Failed to re-read on-disk envelope during merge; persisting our entries only",
                     );
                     ours
@@ -628,6 +623,81 @@ mod tests {
         let cache_a = TransportCache::new();
         let err = CacheFileEnvelope::new(&cache_a, 2, None).save(&path).expect_err("mismatch");
         assert!(err.to_string().contains("chain_id"));
+    }
+
+    /// Corrupt on-disk envelope under a path whose name contains `chain_id` is
+    /// degradable (warn + replace), not a hard error — classification is typed,
+    /// not substring-based on the formatted message / path.
+    #[test]
+    fn test_envelope_persist_degrades_on_corrupt_disk_path_containing_chain_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Path deliberately contains the substrings the old classifier matched.
+        let path = dir.path().join("chain_id_version_capture.json");
+        fs::write(&path, "not-json{{{").expect("corrupt");
+
+        let cache = TransportCache::new();
+        cache
+            .merge(&serde_json::json!([{
+                "key": keccak256("eth_blockNumber"),
+                "value": r#"{"id":0,"jsonrpc":"2.0","result":"0x1"}"#,
+            }]))
+            .expect("seed");
+        CacheFileEnvelope::new(&cache, 7, None)
+            .save(&path)
+            .expect("corrupt disk with chain_id in path must degrade, not hard-fail");
+
+        let env = CacheFileEnvelope::load(&path).expect("ours written");
+        assert_eq!(env.chain_id, 7);
+        assert_eq!(TransportCache::from_value(&env.cache).expect("from_value").len(), 1);
+    }
+
+    /// Genuine `chain_id` mismatch remains a hard error (typed path via merge).
+    #[test]
+    fn test_envelope_persist_hard_errors_on_genuine_chain_id_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Same path naming trap as the corrupt-file test: must not flip classification.
+        let path = dir.path().join("chain_id_version_capture.json");
+
+        let cache_b = TransportCache::new();
+        CacheFileEnvelope::new(&cache_b, 1, None).save(&path).expect("save b");
+
+        let cache_a = TransportCache::new();
+        let err = CacheFileEnvelope::new(&cache_a, 2, None)
+            .save(&path)
+            .expect_err("chain_id mismatch must hard-fail");
+        let msg = err.to_string();
+        assert!(msg.contains("chain_id"), "msg={msg}");
+    }
+
+    /// Typed re-read: corrupt content is Degradable even when path mentions `chain_id`.
+    #[test]
+    fn test_reread_envelope_classifies_corrupt_vs_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let corrupt = dir.path().join("chain_id_and_version.json");
+        fs::write(&corrupt, "{not valid").expect("write");
+        match reread_envelope_for_merge(&corrupt) {
+            EnvelopeReread::Degradable(msg) => {
+                assert!(msg.contains("parse") || msg.contains("Failed"), "{msg}");
+            }
+            other => panic!("corrupt must be Degradable, got {other:?}"),
+        }
+
+        let bad_version = dir.path().join("env.json");
+        fs::write(&bad_version, r#"{"version":99,"chain_id":1,"cache":[]}"#).unwrap();
+        match reread_envelope_for_merge(&bad_version) {
+            EnvelopeReread::Hard(err) => {
+                assert!(err.to_string().contains("Unsupported") || err.to_string().contains("99"));
+            }
+            other => panic!("unsupported version must be Hard, got {other:?}"),
+        }
+
+        let ok_path = dir.path().join("ok.json");
+        fs::write(&ok_path, r#"{"version":1,"chain_id":5,"cache":[]}"#).unwrap();
+        match reread_envelope_for_merge(&ok_path) {
+            EnvelopeReread::Ok(doc) => assert_eq!(doc.chain_id, 5),
+            other => panic!("valid envelope must be Ok, got {other:?}"),
+        }
     }
 
     /// Corrupt on-disk provider cache during re-read does not abort; ours are written.
