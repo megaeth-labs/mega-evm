@@ -362,11 +362,20 @@ impl RpcArgs {
             "Built RPC provider (capture to cache file)",
         );
 
+        // Same snapshot whose entries were merged above — carry it into the
+        // store as the OCC load-time baseline. Do not re-read the file: a
+        // concurrent writer between this load and store construction would
+        // make the later write treat C as baseline and silently overwrite it.
         let prev_external_env = existing_envelope.and_then(|e| e.external_env);
 
         Ok(BuildProviderOutput {
             provider: DynProvider::new(provider),
-            cache_store: RpcCacheStore::new_envelope(transport_cache, path.clone(), chain_id),
+            cache_store: RpcCacheStore::new_envelope(
+                transport_cache,
+                path.clone(),
+                chain_id,
+                prev_external_env.clone(),
+            ),
             chain_id,
             external_env: prev_external_env,
         })

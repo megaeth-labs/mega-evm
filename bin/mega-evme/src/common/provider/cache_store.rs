@@ -99,18 +99,17 @@ impl RpcCacheStore {
     /// this module. The write snapshot starts empty; callers inject it later
     /// via [`Self::set_external_env`].
     ///
-    /// The on-disk snapshot at `path` (if any) is captured here as the load-time
-    /// baseline for optimistic concurrency at persist — intentional A→B
-    /// refreshes are accepted when the locked re-read still matches this value.
-    pub(super) fn new_envelope(cache: TransportCache, path: PathBuf, chain_id: u64) -> Self {
-        // Observe the load-time external_env once, at store construction (the
-        // same moment capture mode opens the file). Re-reading at persist is
-        // compared against this baseline, not against a second open-time read.
-        let loaded_external_env = if path.exists() {
-            CacheFileEnvelope::load(&path).ok().and_then(|e| e.external_env)
-        } else {
-            None
-        };
+    /// `loaded_external_env` is the load-time baseline already observed by the
+    /// caller when it opened the capture file (if any). Persist compares the
+    /// locked re-read against this value so intentional A→B refreshes are
+    /// accepted when the on-disk snapshot is still A. The baseline must come
+    /// from that first load — this constructor must not re-read the file.
+    pub(super) fn new_envelope(
+        cache: TransportCache,
+        path: PathBuf,
+        chain_id: u64,
+        loaded_external_env: Option<ExternalEnvSnapshot>,
+    ) -> Self {
         Self {
             inner: Some(RpcCacheStoreInner::FixtureCapture {
                 cache,
@@ -738,20 +737,21 @@ mod tests {
         assert_eq!(written.bucket_capacities, vec![(1, 99)]);
     }
 
-    /// Store construction observes the on-disk snapshot so intentional A→B
-    /// refresh works through the public `set_external_env` + `persist` path
-    /// without callers plumbing the load-time baseline themselves.
+    /// Store constructed with baseline A; disk still A; ours B → B wins
+    /// (intentional refresh through `set_external_env` + `persist`).
     #[test]
     fn test_store_persist_intentional_external_env_refresh() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("capture.json");
 
-        let loaded = ExternalEnvSnapshot { bucket_capacities: vec![(1, 10)] };
-        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&loaded))
+        let a = ExternalEnvSnapshot { bucket_capacities: vec![(1, 10)] };
+        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&a))
             .save(&path, None)
             .expect("seed A");
 
-        let mut store = RpcCacheStore::new_envelope(TransportCache::new(), path.clone(), 7);
+        // Baseline A is passed in (same object the caller loaded); no re-read.
+        let mut store =
+            RpcCacheStore::new_envelope(TransportCache::new(), path.clone(), 7, Some(a));
         store.set_external_env(ExternalEnvSnapshot { bucket_capacities: vec![(1, 99)] });
         store.persist().expect("store-level intentional A→B refresh must succeed");
 
@@ -762,8 +762,12 @@ mod tests {
         );
     }
 
-    /// After store construction loads A, a concurrent writer changing the file
-    /// to C causes persist with ours B to hard-error (true concurrent conflict).
+    /// Store constructed with baseline A; on-disk mutated to C before persist;
+    /// ours B derived from A → hard conflict naming loaded/ours/on-disk.
+    ///
+    /// Regression for the double-read defect: the store must use the caller's
+    /// loaded baseline, not re-read the file at construction (which would
+    /// observe C and treat ours-from-A as an intentional refresh of C).
     #[test]
     fn test_store_persist_rejects_concurrent_external_env_conflict() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -774,9 +778,11 @@ mod tests {
             .save(&path, None)
             .expect("seed A");
 
-        // Observe A at construction, then a concurrent writer intentionally
-        // refreshes A→C (its own loaded baseline is A).
-        let mut store = RpcCacheStore::new_envelope(TransportCache::new(), path.clone(), 7);
+        // Baseline A from the first load — not re-read from disk at construction.
+        let mut store =
+            RpcCacheStore::new_envelope(TransportCache::new(), path.clone(), 7, Some(a.clone()));
+
+        // Concurrent writer lands C (≠A, ≠B) after our load, before our persist.
         let c = ExternalEnvSnapshot { bucket_capacities: vec![(1, 42)] };
         CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&c))
             .save(&path, Some(&a))
@@ -784,6 +790,36 @@ mod tests {
 
         store.set_external_env(ExternalEnvSnapshot { bucket_capacities: vec![(1, 99)] });
         let err = store.persist().expect_err("true concurrent conflict via store");
+        let msg = err.to_string();
+        assert!(msg.contains("external_env"), "msg={msg}");
+        assert!(
+            msg.contains("loaded") && msg.contains("ours") && msg.contains("on-disk"),
+            "msg={msg}"
+        );
+        assert!(msg.contains("10") && msg.contains("99") && msg.contains("42"), "msg={msg}");
+    }
+
+    /// If the store re-read the file at construction, a concurrent C would be
+    /// mistaken for the baseline and an A-derived B would silently overwrite C.
+    /// Passing baseline A while disk is already C must still conflict.
+    #[test]
+    fn test_store_persist_uses_passed_baseline_not_disk_at_construction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        // Disk already holds C when the store is constructed (simulates a
+        // writer that landed between the caller's first load and store build).
+        let a = ExternalEnvSnapshot { bucket_capacities: vec![(1, 10)] };
+        let c = ExternalEnvSnapshot { bucket_capacities: vec![(1, 42)] };
+        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&c))
+            .save(&path, None)
+            .expect("disk is C");
+
+        let mut store = RpcCacheStore::new_envelope(TransportCache::new(), path, 7, Some(a));
+        store.set_external_env(ExternalEnvSnapshot { bucket_capacities: vec![(1, 99)] });
+        let err = store
+            .persist()
+            .expect_err("passed baseline A must not be replaced by on-disk C at construction");
         let msg = err.to_string();
         assert!(msg.contains("external_env"), "msg={msg}");
         assert!(
