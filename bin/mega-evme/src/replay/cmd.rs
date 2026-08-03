@@ -54,8 +54,8 @@ pub struct Cmd {
     /// Blank lines and `#`-prefixed comment lines are ignored, and duplicates are
     /// replayed once. All hashes are replayed in a single process: transactions
     /// are grouped by their containing block and each block is executed once.
-    /// Batch mode does not support `--dump-fixture`, transaction overrides,
-    /// `--override.spec`, tracing, or state dumps.
+    /// Batch mode does not support `--dump-fixture` (use `--dump-fixture-dir`),
+    /// transaction overrides, `--override.spec`, tracing, or state dumps.
     #[arg(long = "tx-file", value_name = "PATH")]
     pub tx_file: Option<PathBuf>,
 
@@ -103,8 +103,28 @@ pub struct Cmd {
     /// replay, and `state-test --bench` benchmarks it. The dump is rejected
     /// unless the local replay reproduces the on-chain receipt's gas and success
     /// status. Incompatible with transaction overrides and `--override.spec`.
+    /// Single-transaction only; for batch mode use `--dump-fixture-dir`.
     #[arg(long = "dump-fixture", value_name = "FILE")]
     pub dump_fixture: Option<std::path::PathBuf>,
+
+    /// Dump a self-validating EEST state-test fixture for every successfully
+    /// replayed target into `<DIR>/<tx_hash>.json`.
+    ///
+    /// Batch mode only (`--tx-file` / `--block`). Per-target gating mirrors the
+    /// single-transaction dump: fidelity-gate failures and BLOCKHASH readers are
+    /// skipped with a recorded reason instead of failing the run; pending or
+    /// unresolvable targets stay error entries. Existing files are refused unless
+    /// `--overwrite` is set. Registration into `bench/replay/manifest.json` is
+    /// not performed — corpus curation stays manual.
+    #[arg(long = "dump-fixture-dir", value_name = "DIR")]
+    pub dump_fixture_dir: Option<std::path::PathBuf>,
+
+    /// Replace existing files when writing fixtures with `--dump-fixture-dir`.
+    ///
+    /// Without this flag, a target whose `<DIR>/<tx_hash>.json` already exists is
+    /// reported as an infrastructure error for that target.
+    #[arg(long = "overwrite")]
+    pub overwrite: bool,
 
     /// Verify every replayed transaction against its on-chain receipt.
     ///
@@ -196,6 +216,8 @@ impl Cmd {
     fn validate(&self) -> Result<()> {
         if self.is_batch() {
             self.validate_batch_args()?;
+        } else {
+            self.validate_single_args()?;
         }
 
         // A dumped fixture must represent the on-chain transaction, so it can
@@ -219,6 +241,26 @@ impl Cmd {
             }
         }
 
+        if self.dump_fixture.is_some() && self.dump_fixture_dir.is_some() {
+            return Err(ReplayError::Other(
+                "--dump-fixture and --dump-fixture-dir are mutually exclusive: dump one \
+                 transaction with --dump-fixture, or a batch with --dump-fixture-dir"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Reject batch-only flags in single-transaction mode.
+    fn validate_single_args(&self) -> Result<()> {
+        if self.dump_fixture_dir.is_some() {
+            return Err(ReplayError::Other(
+                "--dump-fixture-dir is only supported by batch replay (--tx-file / --block); \
+                 dump a single transaction with --dump-fixture <FILE>"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -229,17 +271,18 @@ impl Cmd {
 
     /// Reject the single-transaction-only flags in batch mode.
     ///
-    /// Batch mode reports one summary per transaction; per-transaction artifacts
-    /// (fixture, trace, state dump) and what-if knobs (overrides, forced spec)
-    /// have no meaningful batch semantics, so they are rejected up front rather
-    /// than silently ignored.
+    /// Batch mode reports one summary per transaction; single-file fixture dumps,
+    /// tracing, state dumps, and what-if knobs (overrides, forced spec) have no
+    /// meaningful batch semantics, so they are rejected up front rather than
+    /// silently ignored. Per-target fixture sedimentation uses
+    /// `--dump-fixture-dir` instead of `--dump-fixture`.
     fn validate_batch_args(&self) -> Result<()> {
         const MODE: &str = "batch replay (--tx-file / --block)";
 
         if self.dump_fixture.is_some() {
             return Err(ReplayError::Other(format!(
-                "--dump-fixture is not supported by {MODE}; dump a fixture by replaying a \
-                 single transaction"
+                "--dump-fixture is not supported by {MODE}; dump fixtures for a batch \
+                 with --dump-fixture-dir <DIR>"
             )));
         }
         if self.tx_override_args.has_overrides() {
@@ -329,7 +372,12 @@ impl Cmd {
             pctx.chain_id,
             mode,
             external_envs,
-            batch::ReportArgs { json: self.output_args.json, verify_receipt: self.verify_receipt },
+            batch::ReportArgs {
+                json: self.output_args.json,
+                verify_receipt: self.verify_receipt,
+                dump_fixture_dir: self.dump_fixture_dir.clone(),
+                overwrite: self.overwrite,
+            },
         )
         .await
     }
@@ -1052,6 +1100,52 @@ mod tests {
     #[test]
     fn test_verify_receipt_defaults_to_off() {
         assert!(!parse(&[TX]).expect("parse").verify_receipt);
+    }
+
+    /// `--dump-fixture-dir` is batch-only; single-transaction mode keeps
+    /// `--dump-fixture` and must reject the dir flag.
+    #[test]
+    fn test_dump_fixture_dir_rejected_in_single_transaction_mode() {
+        let cmd = parse(&["--dump-fixture-dir", "/tmp/fixtures", TX]).expect("parse");
+        let message =
+            cmd.validate().expect_err("single-tx must reject --dump-fixture-dir").to_string();
+        assert!(
+            message.contains("--dump-fixture-dir") && message.contains("batch"),
+            "unexpected rejection: {message}"
+        );
+    }
+
+    /// Batch mode accepts `--dump-fixture-dir` and still rejects the single-file
+    /// dump flag (use the dir form for sedimentation sweeps).
+    #[test]
+    fn test_dump_fixture_dir_accepted_in_batch_mode() {
+        let cmd = parse(&["--block", "1", "--dump-fixture-dir", "/tmp/fixtures"]).expect("parse");
+        cmd.validate().expect("--dump-fixture-dir must be accepted in batch mode");
+        assert_eq!(cmd.dump_fixture_dir, Some(PathBuf::from("/tmp/fixtures")));
+
+        let with_overwrite =
+            parse(&["--tx-file", "/tmp/list.txt", "--dump-fixture-dir", "/tmp/f", "--overwrite"])
+                .expect("parse");
+        with_overwrite.validate().expect("--overwrite is allowed with --dump-fixture-dir");
+        assert!(with_overwrite.overwrite);
+    }
+
+    /// The two dump forms are mutually exclusive even when one would otherwise
+    /// be valid for the selected mode.
+    #[test]
+    fn test_dump_fixture_forms_are_mutually_exclusive() {
+        let cmd = parse(&[
+            "--block",
+            "1",
+            "--dump-fixture",
+            "/tmp/f.json",
+            "--dump-fixture-dir",
+            "/tmp/fixtures",
+        ])
+        .expect("parse");
+        // Batch validation rejects --dump-fixture first; either way both must not run.
+        let message = cmd.validate().expect_err("both dump forms must be rejected").to_string();
+        assert!(message.contains("--dump-fixture"), "unexpected rejection: {message}");
     }
 
     #[test]

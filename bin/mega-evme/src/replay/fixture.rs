@@ -79,6 +79,63 @@ const DEPOSIT_TX_TYPE: u8 = 0x7e;
 /// than emit a fixture whose isolated run diverges from the chain.
 const EIP7702_TX_TYPE: u8 = 0x04;
 
+/// Check that a local replay reproduces the on-chain receipt's gas, success
+/// status, and logs root.
+///
+/// A mismatch means the replay executed under the wrong spec / hardfork config
+/// for this chain and block; self-validation cannot catch this, because the
+/// fixture is validated under the same spec it was dumped with.
+///
+/// Logs are checked, not just inferred from gas: LOG gas depends on topic count
+/// and data length, never content, so two executions can burn identical gas yet
+/// emit different log payloads (e.g. a preceding-tx divergence that changes a
+/// value the target re-emits).
+///
+/// Returns the explanatory reason on failure so batch dump can record a skip
+/// without treating it as an infrastructure error.
+pub(crate) fn check_fidelity(
+    result: &ExecutionResult<MegaHaltReason>,
+    anchor: &OnchainAnchor,
+    chain_id: u64,
+) -> std::result::Result<(), String> {
+    let actual_gas = result.tx_gas_used();
+    if actual_gas != anchor.gas_used {
+        return Err(format!(
+            "replay gas {actual_gas} != on-chain receipt gas {}: the local replay does \
+             not reproduce on-chain execution (likely a wrong spec or hardfork config \
+             for chain {chain_id} at this block)",
+            anchor.gas_used
+        ));
+    }
+    if result.is_success() != anchor.success {
+        return Err(format!(
+            "replay status (success={}) != on-chain receipt status (success={}): the \
+             local replay does not reproduce on-chain execution for chain {chain_id}",
+            result.is_success(),
+            anchor.success
+        ));
+    }
+    let actual_logs_root = state_test::utils::log_rlp_hash(result.logs());
+    if actual_logs_root != anchor.logs_root {
+        return Err(format!(
+            "replay logs root {actual_logs_root} != on-chain receipt logs root {}: the \
+             local replay emits different logs than the chain for chain {chain_id} \
+             (same gas/status, different log contents)",
+            anchor.logs_root
+        ));
+    }
+    Ok(())
+}
+
+/// Build an [`OnchainAnchor`] from the consensus facts of an on-chain receipt.
+pub(crate) fn anchor_from_receipt_facts(facts: &super::verify::ReceiptFacts) -> OnchainAnchor {
+    OnchainAnchor {
+        gas_used: facts.gas_used,
+        success: facts.status,
+        logs_root: state_test::utils::log_rlp_hash(&facts.logs),
+    }
+}
+
 /// A fixture built from a replay, awaiting its `post` expectation.
 ///
 /// The `post` map is filled by [`finalize_and_write`] after re-executing the
@@ -144,48 +201,9 @@ where
     let actual_output = inputs.result.output().cloned();
     let actual_logs_root = state_test::utils::log_rlp_hash(inputs.result.logs());
 
-    // Fidelity gate: the local replay must reproduce the on-chain receipt's gas,
-    // success status, and logs. A mismatch means the replay executed under the
-    // wrong spec / hardfork config for this chain and block; self-validation
-    // cannot catch this, because the fixture is validated under the same spec it
-    // was dumped with. Refuse to build a fixture that does not match the chain.
-    //
-    // Logs are checked, not just inferred from gas: LOG gas depends on topic count
-    // and data length, never content, so two executions can burn identical gas yet
-    // emit different log payloads (e.g. a preceding-tx divergence that changes a
-    // value the target re-emits). The receipt's logs are already fetched, so the
-    // comparison is a single root equality. `finalize_and_write` then re-checks the
-    // isolated run's logs root against this same value, so any gas-, output-, or
-    // log-visible divergence from the zeroed L1 data fee aborts the dump. One
-    // channel stays open by construction: the isolated run's sender balance is
-    // shifted by the zeroed fee, so a contract that stores a balance-derived value
-    // bakes that shifted value into `post` (gas, status, output, and logs all
-    // still match). The fixture still self-validates and reproduces gas exactly.
-    let anchor = &inputs.anchor;
-    if actual_gas != anchor.gas_used {
-        return Err(ReplayError::Other(format!(
-            "replay gas {actual_gas} != on-chain receipt gas {}: the local replay does \
-             not reproduce on-chain execution (likely a wrong spec or hardfork config \
-             for chain {chain_id} at this block)",
-            anchor.gas_used
-        )));
-    }
-    if inputs.result.is_success() != anchor.success {
-        return Err(ReplayError::Other(format!(
-            "replay status (success={}) != on-chain receipt status (success={}): the \
-             local replay does not reproduce on-chain execution for chain {chain_id}",
-            inputs.result.is_success(),
-            anchor.success
-        )));
-    }
-    if actual_logs_root != anchor.logs_root {
-        return Err(ReplayError::Other(format!(
-            "replay logs root {actual_logs_root} != on-chain receipt logs root {}: the \
-             local replay emits different logs than the chain for chain {chain_id} \
-             (same gas/status, different log contents)",
-            anchor.logs_root
-        )));
-    }
+    // Fidelity gate: refuse to dump a fixture that does not match the chain.
+    // See [`check_fidelity`] for the rationale and the dimensions checked.
+    check_fidelity(inputs.result, &inputs.anchor, chain_id).map_err(ReplayError::Other)?;
 
     let pre = build_pre_state(db, evm_state)?;
     let env = build_env(chain_id, block);

@@ -379,3 +379,103 @@ fn test_batch_verify_receipt_reorg_is_an_rpc_error_entry() {
         lines[0]
     );
 }
+
+/// Batch `--dump-fixture-dir` writes a self-validating fixture for a target
+/// whose capture includes the on-chain receipt, and exits 0.
+#[test]
+fn test_batch_dump_fixture_dir_writes_validatable_file() {
+    let list = tx_file("batch_dump");
+    let dir = std::env::temp_dir().join(format!("mega_evme_batch_dump_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let run = replay(
+        &cache(),
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&list);
+
+    assert!(run.success, "a successful dump must exit 0.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1, "one line per requested transaction");
+    assert_eq!(lines[0]["tx_hash"].as_str(), Some(TX));
+    let path = lines[0]["fixture"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected a written fixture path: {}", lines[0]));
+    assert!(
+        path.ends_with(&format!("{TX}.json")),
+        "fixture path should be <DIR>/<tx_hash>.json, got: {path}"
+    );
+    assert!(std::path::Path::new(path).exists(), "fixture file must exist at {path}");
+
+    let elapsed = std::sync::Arc::new(std::sync::Mutex::new(std::time::Duration::ZERO));
+    let result = state_test::runner::execute_test_suite(Path::new(path), &elapsed, false, false);
+    let _ = std::fs::remove_dir_all(&dir);
+    result.unwrap_or_else(|e| panic!("dumped fixture failed to validate: {e}"));
+}
+
+/// Without `--overwrite`, a second dump into a directory that already holds the
+/// fixture fails that target as an infrastructure error.
+#[test]
+fn test_batch_dump_fixture_dir_refuses_overwrite_without_flag() {
+    let list = tx_file("batch_dump_ow");
+    let dir = std::env::temp_dir().join(format!("mega_evme_batch_dump_ow_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let first = replay(
+        &cache(),
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(first.success, "first dump must succeed.\nstderr: {}", first.stderr);
+
+    let second = replay(
+        &cache(),
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(!second.success, "overwrite without --overwrite must fail the run");
+    let lines = second.ndjson();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["error"]["kind"].as_str(), Some("execution"));
+    assert!(
+        lines[0]["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("already exists") && m.contains("--overwrite")),
+        "expected overwrite refusal: {}",
+        lines[0]
+    );
+
+    // With --overwrite the second dump succeeds and replaces the file.
+    let third = replay(
+        &cache(),
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--overwrite",
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&list);
+    assert!(third.success, "dump with --overwrite must succeed.\nstderr: {}", third.stderr);
+    let lines = third.ndjson();
+    assert!(lines[0]["fixture"]["path"].is_string(), "overwrite must report a written path");
+    let _ = std::fs::remove_dir_all(&dir);
+}

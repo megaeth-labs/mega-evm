@@ -231,3 +231,45 @@ fn test_replay_batch_rejects_single_transaction_flags() {
         assert!(output.stdout.is_empty(), "a rejected batch run must print nothing on stdout");
     }
 }
+
+/// Sweeping a block with `--dump-fixture-dir` against an envelope that carries
+/// no receipts skips every target on the fidelity gate and still exits 0.
+///
+/// Fixture skips are expected (not infrastructure failures); the development
+/// envelope is captured without receipts, so this pins the skip path end to end.
+#[test]
+#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
+fn test_replay_block_dump_fixture_dir_skips_without_receipts() {
+    let dir = std::env::temp_dir().join(format!(
+        "mega_evme_dump_dir_skip_{}_{}",
+        std::process::id(),
+        BLOCK
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = replay(
+        &["--block", &BLOCK.to_string(), "--dump-fixture-dir", dir.to_str().unwrap(), "--json"],
+        true,
+    );
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    for line in &lines {
+        assert!(line.get("error").is_none(), "skips must not turn into error entries: {line}");
+        let skipped = line["fixture"]["skipped"]
+            .as_str()
+            .unwrap_or_else(|| panic!("every line must carry a fixture skip reason: {line}"));
+        assert!(
+            skipped.contains("fidelity-gate-unavailable"),
+            "expected fidelity-gate-unavailable skip, got: {skipped}"
+        );
+        assert!(line["fixture"].get("path").is_none(), "a skip must not report a path: {line}");
+    }
+
+    // No fixtures written: the directory may exist (create_dir_all) but be empty.
+    if dir.exists() {
+        let entries: Vec<_> = std::fs::read_dir(&dir).expect("read dump dir").collect();
+        assert!(entries.is_empty(), "fidelity skips must write no fixture files");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

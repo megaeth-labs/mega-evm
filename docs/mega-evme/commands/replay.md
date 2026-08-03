@@ -67,15 +67,16 @@ Replay every transaction of block `N`, given in decimal or `0x`-prefixed hex.
 
 ### Restrictions
 
-Batch mode reports one summary per transaction and has no meaningful semantics for per-transaction artifacts or what-if knobs, so the following are rejected up front with an explanatory error rather than silently ignored:
+Batch mode reports one summary per transaction and has no meaningful semantics for single-file fixture dumps, tracing, state dumps, or what-if knobs, so the following are rejected up front with an explanatory error rather than silently ignored:
 
-- `--dump-fixture`
+- `--dump-fixture` — use [`--dump-fixture-dir`](#dump-fixture-dir-dir) for batch sedimentation
 - Transaction overrides (`--override.gas-limit`, `--override.value`, `--override.input`, `--override.input-file`)
 - `--override.spec` — each block's spec is auto-detected from its timestamp
 - All trace options (`--trace`, `--trace.output`, `--tracer`, `--trace.*`)
 - All state dump options (`--dump`, `--dump.output`)
 
 Single-transaction replay keeps accepting all of them.
+Batch mode additionally accepts [`--dump-fixture-dir`](#dump-fixture-dir-dir) for per-target fixture sedimentation.
 
 ### Output
 
@@ -112,10 +113,12 @@ Without `--json`, each transaction is printed with a header naming its hash, blo
 A final one-line summary (transactions replayed, transactions failed, elapsed time) is logged at `INFO` level, so pass `-vvv` to see it.
 
 With [`--verify-receipt`](#receipt-verification), each result line additionally carries a `verification` object.
+With [`--dump-fixture-dir`](#dump-fixture-dir-dir), each result line additionally carries a `fixture` object (`path` or `skipped`).
 
 ### Exit Status
 
 A batch run exits `0` when every requested transaction produced an execution result, and `1` when any of them produced an error entry.
+Fixture skips (fidelity gate, BLOCKHASH readers, unsupported shapes) are not error entries and do not fail the run.
 The NDJSON stream is written to stdout in both cases; diagnostics go to stderr.
 
 ### Examples
@@ -353,6 +356,45 @@ mega-evme replay --rpc.replay-file ./cap.json --dump-fixture ./fixtures/0xabc123
 state-test ./fixtures/0xabc123.json
 ```
 
+### `--dump-fixture-dir <DIR>`
+
+Batch-only.
+Dump a self-validating fixture for every successfully replayed target into `<DIR>/<tx_hash>.json`.
+The fixture content and format match the single-transaction [`--dump-fixture`](#dump-fixture-file) path (same EEST schema, same sorted `megaEnv`, same self-validation via `state-test`).
+The directory is created if it does not exist.
+Existing files are refused unless `--overwrite` is also set — a refused overwrite is an infrastructure error for that target (`execution`), not a skip.
+
+Per-target gating mirrors the single-transaction rules, but records a skip instead of failing the run:
+
+| Gate                                                                             | Outcome                                                       |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| On-chain receipt unavailable (not in capture, pruned, reorg/divergent inclusion) | `fixture.skipped` with `fidelity-gate-unavailable: …`         |
+| Fidelity mismatch (gas / status / logs root)                                     | `fixture.skipped` with `fidelity gate failed: …`              |
+| Target reads `BLOCKHASH`                                                         | `fixture.skipped` (fixtures carry no historical block hashes) |
+| Unsupported shape (deposit, EIP-7702, unknown spec mapping)                      | `fixture.skipped`                                             |
+| Finalize / write / self-validation failure                                       | infrastructure error entry (`kind: execution`)                |
+| Pending / unresolvable target                                                    | already an error entry; no fixture report                     |
+
+`BLOCKHASH` access is isolated per transaction: the access record is cleared before each transaction of the block, so preceding readers do not poison a later target's dump.
+
+NDJSON result lines gain `"fixture": {"path": "…"}` or `"fixture": {"skipped": "<reason>"}`.
+Human mode prints one fixture line per target.
+An end-of-run `INFO` summary reports written / skipped / failed counts.
+Fixture skips do not fail the run; infrastructure failures keep the usual batch exit semantics.
+
+Registration into `bench/replay/manifest.json` is not performed — corpus curation stays manual.
+`--dump-fixture-dir` cannot be combined with `--dump-fixture`, and is rejected in single-transaction mode.
+
+```bash
+# Sweep a whole block offline into per-tx fixtures (skips targets without receipts):
+mega-evme replay --rpc.replay-file ./fixtures/blocks.json \
+  --block 22945844 --dump-fixture-dir ./fixtures/out --json
+
+# Sediment a curated list, replacing any previously written files:
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
+  --tx-file ./corpus.txt --dump-fixture-dir ./fixtures/out --overwrite
+```
+
 ## Throughput Benchmark
 
 To benchmark a replayed transaction, dump it to a fixture and time the fixture with the `state-test` runner — there is no `replay`-side benchmark flag:
@@ -420,9 +462,9 @@ Options marked _(single transaction only)_ are rejected in [batch mode](#batch-r
   See [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry).
 - **Tracing** _(single transaction only)_ — Emit execution traces (call traces, opcode traces, gas profiles, etc.).
   See [Tracing Overview](../tracing/overview.md).
-- **Fixture dump** _(single transaction only)_ — Write a self-validating EEST state-test fixture via `--dump-fixture`.
+- **Fixture dump** — Write a self-validating EEST state-test fixture via `--dump-fixture` (single transaction) or `--dump-fixture-dir` (batch).
   See [Self-Validating Fixture Dump](#self-validating-fixture-dump) above.
-- **Throughput benchmark** — Dump a fixture (`--dump-fixture`) and time it with `state-test --bench`.
+- **Throughput benchmark** — Dump a fixture (`--dump-fixture` / `--dump-fixture-dir`) and time it with `state-test --bench`.
   See [Throughput Benchmark](#throughput-benchmark) above.
 
 ## Examples

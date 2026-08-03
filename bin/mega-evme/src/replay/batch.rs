@@ -15,6 +15,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
 };
@@ -33,10 +34,11 @@ use mega_evm::{
         DatabaseRef,
     },
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHaltReason,
-    MegaHardforks,
+    MegaHardforks, MegaSpecId,
 };
 use op_alloy_rpc_types::Transaction;
 use serde::Serialize;
+use state_test::types::MegaEnv;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -50,17 +52,63 @@ use crate::{
 
 use super::{
     cmd::retrieve_block_env,
+    fixture,
     verify::{self, ReceiptFacts, VerificationOutcome},
     ReplayError, Result,
 };
 
 /// How a batch run reports its targets.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct ReportArgs {
     /// Emit one NDJSON line per target instead of the human-readable summary.
     pub json: bool,
     /// Verify every target against its on-chain receipt.
     pub verify_receipt: bool,
+    /// When set, dump a self-validating fixture for every successful target into
+    /// this directory as `<DIR>/<tx_hash>.json`.
+    pub dump_fixture_dir: Option<PathBuf>,
+    /// Replace existing fixture files under [`Self::dump_fixture_dir`].
+    pub overwrite: bool,
+}
+
+/// Per-target fixture dump outcome reported on the NDJSON / human result line.
+#[derive(Debug, Clone, Serialize)]
+struct FixtureReport {
+    /// Absolute or as-written path of a successfully written fixture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    /// Why the fixture was not written for this target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped: Option<String>,
+}
+
+impl FixtureReport {
+    fn written(path: &Path) -> Self {
+        Self { path: Some(path.display().to_string()), skipped: None }
+    }
+
+    fn skipped(reason: impl Into<String>) -> Self {
+        Self { path: None, skipped: Some(reason.into()) }
+    }
+
+    /// One-line human summary printed under the transaction header.
+    fn human_line(&self) -> String {
+        if let Some(path) = &self.path {
+            format!("fixture: written to {path}")
+        } else if let Some(reason) = &self.skipped {
+            format!("fixture: skipped ({reason})")
+        } else {
+            "fixture: (no report)".to_string()
+        }
+    }
+}
+
+/// Result of attempting to dump a fixture for one target during the block loop.
+enum FixtureAttempt {
+    /// Wrote a fixture or recorded an expected skip (fidelity / BLOCKHASH / unsupported).
+    Report(FixtureReport),
+    /// Finalize/write failed; the target becomes an infrastructure error entry.
+    WriteError(String),
 }
 
 /// What a batch run was asked to replay.
@@ -129,6 +177,8 @@ struct ExecutedTx {
     receipt: OpTxReceipt,
     /// On-chain receipt verdict, present iff `--verify-receipt` was given.
     verification: Option<VerificationOutcome>,
+    /// Fixture dump outcome, present iff `--dump-fixture-dir` was given.
+    fixture: Option<FixtureReport>,
 }
 
 /// A target transaction that hit an infrastructure failure.
@@ -161,6 +211,11 @@ struct PendingTarget {
     from: Address,
     to: Option<Address>,
     effective_gas_price: u128,
+    /// Fixture dump outcome, present iff `--dump-fixture-dir` was given.
+    ///
+    /// `Ok` is a written or skipped report; `Err` is a finalize/write failure
+    /// that turns this target into an infrastructure error entry.
+    fixture: Option<std::result::Result<FixtureReport, String>>,
 }
 
 /// NDJSON line for a target that produced an execution result.
@@ -171,6 +226,8 @@ struct BatchResultLine<'a> {
     tx_index: u64,
     #[serde(flatten)]
     summary: &'a ExecutionSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixture: Option<&'a FixtureReport>,
 }
 
 /// NDJSON line for a target that produced an infrastructure error.
@@ -191,8 +248,9 @@ struct BatchErrorBody<'a> {
 ///
 /// Returns an error when at least one target produced an infrastructure error
 /// entry, so the process exits non-zero; execution outcomes never fail the run.
-/// With `--verify-receipt`, a run in which every target replayed but some
-/// diverged from its on-chain receipt fails with
+/// Fixture skips (fidelity gate, BLOCKHASH readers, unsupported tx shapes) do
+/// not fail the run. With `--verify-receipt`, a run in which every target
+/// replayed but some diverged from its on-chain receipt fails with
 /// [`ReplayError::VerificationMismatch`] instead — a distinct variant, so a
 /// divergence is never confused with a target that could not be replayed.
 pub(super) async fn run<P>(
@@ -210,6 +268,18 @@ where
     let mut failed = 0usize;
     let mut verified = 0usize;
     let mut mismatched = 0usize;
+    let mut fixtures_written = 0usize;
+    let mut fixtures_skipped = 0usize;
+    let mut fixtures_failed = 0usize;
+
+    if let Some(dir) = &report.dump_fixture_dir {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            ReplayError::Other(format!(
+                "failed to create --dump-fixture-dir '{}': {e}",
+                dir.display()
+            ))
+        })?;
+    }
 
     let jobs = match mode {
         BatchMode::Block(number) => {
@@ -235,10 +305,10 @@ where
     };
 
     for job in jobs {
-        for entry in
-            replay_block(provider, chain_id, job, external_envs.clone(), report.verify_receipt)
-                .await
-        {
+        let block_result =
+            replay_block(provider, chain_id, job, external_envs.clone(), &report).await;
+        fixtures_failed += block_result.fixture_write_failures;
+        for entry in block_result.entries {
             match &entry {
                 BatchEntry::Executed(tx) => {
                     replayed += 1;
@@ -246,6 +316,13 @@ where
                         verified += 1;
                         if !verification.matched {
                             mismatched += 1;
+                        }
+                    }
+                    if let Some(fixture) = &tx.fixture {
+                        if fixture.path.is_some() {
+                            fixtures_written += 1;
+                        } else {
+                            fixtures_skipped += 1;
                         }
                     }
                 }
@@ -259,10 +336,18 @@ where
     if report.verify_receipt {
         info!(verified, mismatched, "On-chain receipt verification finished");
     }
+    if report.dump_fixture_dir.is_some() {
+        info!(
+            written = fixtures_written,
+            skipped = fixtures_skipped,
+            failed = fixtures_failed,
+            "Fixture dump finished"
+        );
+    }
 
     // Infrastructure failures keep their own error: a target that never replayed
     // was also never verified, so reporting it as a mismatch would overstate
-    // what the run actually found.
+    // what the run actually found. Fixture skips never contribute to `failed`.
     if failed > 0 {
         return Err(ReplayError::Other(format!(
             "{failed} of {} target transaction(s) failed to replay",
@@ -316,50 +401,94 @@ where
     (jobs, failures)
 }
 
+/// Entries produced by replaying one block, plus how many fixture write failures
+/// it contributed (for the end-of-run fixture summary).
+struct BlockReplayResult {
+    entries: Vec<BatchEntry>,
+    /// Finalize/write errors that became `execution` infrastructure entries.
+    fixture_write_failures: usize,
+}
+
+impl BlockReplayResult {
+    fn from_entries(entries: Vec<BatchEntry>) -> Self {
+        Self { entries, fixture_write_failures: 0 }
+    }
+
+    fn fail_all(targets: &[B256], kind: BatchErrorKind, message: &str) -> Self {
+        Self::from_entries(fail_all(targets, kind, message))
+    }
+}
+
 /// Replay one block, reporting an entry for every target it was asked about.
 ///
 /// The block is executed exactly once: every transaction runs in order, and each
 /// target's result is recorded before the transaction is committed. Receipts are
 /// harvested from the finished block, which is why the block's entries are only
 /// produced once the block is done.
+///
+/// When `--dump-fixture-dir` is set, each target's fixture draft is built from
+/// the pre-commit state (same moment as the single-transaction dump), gated per
+/// target for fidelity and BLOCKHASH, and written before the transaction commits.
 async fn replay_block<P>(
     provider: &P,
     chain_id: u64,
     job: BlockJob,
     external_envs: EvmeExternalEnvs,
-    verify_receipt: bool,
-) -> Vec<BatchEntry>
+    report: &ReportArgs,
+) -> BlockReplayResult
 where
     P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
 {
     let BlockJob { number, block, targets } = job;
+    let verify_receipt = report.verify_receipt;
+    let dump_dir = report.dump_fixture_dir.as_deref();
+    let overwrite = report.overwrite;
 
     if number == 0 {
-        return fail_all(&targets, BatchErrorKind::Rpc, "Block 0 has no parent block to fork from");
+        return BlockReplayResult::fail_all(
+            &targets,
+            BatchErrorKind::Rpc,
+            "Block 0 has no parent block to fork from",
+        );
     }
 
     let block = match block {
         Some(block) => block,
         None => match fetch_block(provider, number).await {
             Ok(block) => block,
-            Err(e) => return fail_all(&targets, BatchErrorKind::Rpc, &e.to_string()),
+            Err(e) => {
+                return BlockReplayResult::fail_all(&targets, BatchErrorKind::Rpc, &e.to_string());
+            }
         },
     };
     let parent_block = match fetch_block(provider, number - 1).await {
         Ok(block) => block,
-        Err(e) => return fail_all(&targets, BatchErrorKind::Rpc, &e.to_string()),
+        Err(e) => {
+            return BlockReplayResult::fail_all(&targets, BatchErrorKind::Rpc, &e.to_string());
+        }
     };
 
-    // Fetch the on-chain receipts before the block runs, so the comparison
-    // afterwards is a pure function over the two receipts. A receipt that cannot
-    // be fetched, or that describes a different inclusion than this block, is
-    // recorded as a per-target failure here and reported as an `rpc` error entry
-    // below: such a target is unverified, never mismatched.
-    let onchain_receipts = if verify_receipt {
+    // Fetch the on-chain receipts before the block runs. Needed for
+    // `--verify-receipt` (mismatch vs unverified) and for `--dump-fixture-dir`
+    // (fidelity gate). A receipt that cannot be fetched, or that describes a
+    // different inclusion than this block, is recorded here and interpreted by
+    // each feature below.
+    let need_receipts = verify_receipt || dump_dir.is_some();
+    let onchain_receipts = if need_receipts {
         fetch_target_receipts(provider, &targets, block.hash()).await
     } else {
         BTreeMap::new()
     };
+
+    // Sorted once so every fixture of this block is byte-reproducible for the
+    // same megaEnv (hash-map iteration order is otherwise non-deterministic).
+    let mega_env = dump_dir.map(|_| {
+        let mut bucket_capacities = external_envs.bucket_capacities();
+        bucket_capacities.sort_unstable();
+        let mut oracle_storage = external_envs.oracle_storage();
+        oracle_storage.sort_unstable();
+        MegaEnv { bucket_capacities, oracle_storage }
+    });
 
     let hardforks = get_hardfork_config(chain_id);
     let timestamp = block.header.timestamp();
@@ -369,17 +498,22 @@ where
 
     let cfg_env = match chain_args.create_cfg_env() {
         Ok(cfg) => cfg,
-        Err(e) => return fail_all(&targets, BatchErrorKind::Execution, &e.to_string()),
+        Err(e) => {
+            return BlockReplayResult::fail_all(&targets, BatchErrorKind::Execution, &e.to_string());
+        }
     };
     let block_env = match retrieve_block_env(&block) {
         Ok(env) => env,
-        Err(e) => return fail_all(&targets, BatchErrorKind::Execution, &e.to_string()),
+        Err(e) => {
+            return BlockReplayResult::fail_all(&targets, BatchErrorKind::Execution, &e.to_string());
+        }
     };
+    let executed_spec = cfg_env.spec;
     let evm_env = EvmEnv::new(cfg_env, block_env);
 
     let Some(hardfork) = hardforks.hardfork(timestamp) else {
         let message = format!("No `MegaHardfork` active at block timestamp: {timestamp}");
-        return fail_all(&targets, BatchErrorKind::Execution, &message);
+        return BlockReplayResult::fail_all(&targets, BatchErrorKind::Execution, &message);
     };
     let block_limits =
         BlockLimits::from_hardfork_and_block_gas_limit(hardfork, block.header.gas_limit());
@@ -400,7 +534,9 @@ where
     .await
     {
         Ok(database) => database,
-        Err(e) => return fail_all(&targets, BatchErrorKind::Rpc, &e.to_string()),
+        Err(e) => {
+            return BlockReplayResult::fail_all(&targets, BatchErrorKind::Rpc, &e.to_string());
+        }
     };
 
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
@@ -411,7 +547,7 @@ where
 
     if let Err(e) = block_executor.apply_pre_execution_changes() {
         let message = format!("Block execution error: {e}");
-        return fail_all(&targets, BatchErrorKind::Execution, &message);
+        return BlockReplayResult::fail_all(&targets, BatchErrorKind::Execution, &message);
     }
 
     let target_set: HashSet<B256> = targets.iter().copied().collect();
@@ -424,6 +560,11 @@ where
     // cannot be replayed faithfully.
     let loop_result: Result<()> = async {
         for (tx_index, tx_hash) in tx_hashes.iter().enumerate() {
+            // Isolate BLOCKHASH reads per transaction so a fixture dump sees only
+            // the target's own accesses (mirrors the single-tx clear after
+            // preceding transactions).
+            block_executor.clear_accessed_block_hashes();
+
             let tx = provider
                 .get_transaction_by_hash(*tx_hash)
                 .await
@@ -446,6 +587,36 @@ where
             let outcome = block_executor
                 .run_transaction(tx.as_recovered())
                 .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+
+            // Fixture draft must be built before commit: the pre-state closure
+            // is the database after preceding txs, with the target's result
+            // state still uncommitted — same moment as the single-tx dump.
+            let fixture = if is_target {
+                if let (Some(dir), Some(mega_env)) = (dump_dir, mega_env.as_ref()) {
+                    let accessed_block_hashes = block_executor.get_accessed_block_hashes();
+                    Some(dump_target_fixture(
+                        block_executor.evm().db_ref(),
+                        DumpFixtureArgs {
+                            accessed_block_hash_count: accessed_block_hashes.len(),
+                            exec_result: &outcome.inner.result,
+                            evm_state: &outcome.inner.state,
+                            chain_id,
+                            executed_spec,
+                            block: &block,
+                            target_tx: &tx,
+                            mega_env: mega_env.clone(),
+                            onchain: onchain_receipts.get(tx_hash),
+                            dir,
+                            overwrite,
+                        },
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             // Record the target's result before committing, mirroring the
             // single-transaction path.
             let exec_result = is_target.then(|| outcome.inner.result.clone());
@@ -456,6 +627,11 @@ where
             committed += 1;
 
             if let Some(exec_result) = exec_result {
+                let fixture = match fixture {
+                    Some(FixtureAttempt::Report(report)) => Some(Ok(report)),
+                    Some(FixtureAttempt::WriteError(message)) => Some(Err(message)),
+                    None => None,
+                };
                 pending.push(PendingTarget {
                     tx_hash: *tx_hash,
                     tx_index: tx_index as u64,
@@ -467,6 +643,7 @@ where
                     from: tx.inner.inner.signer(),
                     to: tx.inner.inner.to(),
                     effective_gas_price: tx.inner.effective_gas_price.unwrap_or(0),
+                    fixture,
                 });
             }
         }
@@ -477,6 +654,7 @@ where
     // Finish the block even when it aborted midway: targets that already ran
     // still have a receipt worth reporting.
     let mut entries = Vec::with_capacity(targets.len());
+    let mut fixture_write_failures = 0usize;
     match block_executor.finish() {
         Ok((evm, block_result)) => {
             let (db, _) = evm.finish();
@@ -488,6 +666,15 @@ where
             let offset = receipts.len().saturating_sub(committed);
             let block_hash = block.hash();
             for target in pending {
+                // Fixture finalize/write failure: infrastructure error entry.
+                // The target did replay, but the dump request failed.
+                if let Some(Err(message)) = target.fixture {
+                    fixture_write_failures += 1;
+                    entries.push(failure(target.tx_hash, BatchErrorKind::Execution, message));
+                    continue;
+                }
+                let fixture = target.fixture.and_then(|report| report.ok());
+
                 let Some(envelope) = receipts.get(offset + target.commit_index) else {
                     entries.push(failure(
                         target.tx_hash,
@@ -540,12 +727,16 @@ where
                     exec_time: target.exec_time,
                     receipt,
                     verification,
+                    fixture,
                 })));
             }
         }
         Err(e) => {
             let message = format!("Block execution error: {e}");
             for target in pending {
+                if matches!(target.fixture, Some(Err(_))) {
+                    fixture_write_failures += 1;
+                }
                 entries.push(failure(target.tx_hash, BatchErrorKind::Execution, message.clone()));
             }
         }
@@ -567,7 +758,117 @@ where
         }
     }
 
-    entries
+    BlockReplayResult { entries, fixture_write_failures }
+}
+
+/// Inputs for [`dump_target_fixture`], grouped so the dump path stays a single
+/// call site without a long positional argument list.
+struct DumpFixtureArgs<'a> {
+    accessed_block_hash_count: usize,
+    exec_result: &'a ExecutionResult<MegaHaltReason>,
+    evm_state: &'a mega_evm::revm::state::EvmState,
+    chain_id: u64,
+    executed_spec: MegaSpecId,
+    block: &'a Block<Transaction>,
+    target_tx: &'a Transaction,
+    mega_env: MegaEnv,
+    onchain: Option<&'a std::result::Result<ReceiptFacts, String>>,
+    dir: &'a Path,
+    overwrite: bool,
+}
+
+/// Attempt to build and write a fixture for one successfully executed target.
+///
+/// Expected skips (missing receipt, fidelity mismatch, BLOCKHASH, unsupported
+/// transaction shapes) return [`FixtureAttempt::Report`] with a skip reason and
+/// never fail the batch run. Finalize/write errors return
+/// [`FixtureAttempt::WriteError`] and become infrastructure error entries.
+///
+/// `db` must reflect the pre-target-commit state (preceding txs committed, target
+/// not yet), matching the single-transaction dump.
+fn dump_target_fixture<DB>(db: &DB, args: DumpFixtureArgs<'_>) -> FixtureAttempt
+where
+    DB: DatabaseRef,
+    DB::Error: core::fmt::Display,
+{
+    let DumpFixtureArgs {
+        accessed_block_hash_count,
+        exec_result,
+        evm_state,
+        chain_id,
+        executed_spec,
+        block,
+        target_tx,
+        mega_env,
+        onchain,
+        dir,
+        overwrite,
+    } = args;
+
+    // Fidelity gate needs the on-chain receipt; without it the dump is skipped,
+    // not failed — the envelope may simply lack receipts (expected in sweeps
+    // over captures that never fetched them).
+    let facts = match onchain {
+        Some(Ok(facts)) => facts,
+        Some(Err(message)) => {
+            return FixtureAttempt::Report(FixtureReport::skipped(format!(
+                "fidelity-gate-unavailable: {message}"
+            )));
+        }
+        None => {
+            return FixtureAttempt::Report(FixtureReport::skipped(
+                "fidelity-gate-unavailable: no on-chain receipt was fetched for this transaction",
+            ));
+        }
+    };
+
+    if accessed_block_hash_count > 0 {
+        return FixtureAttempt::Report(FixtureReport::skipped(format!(
+            "transaction reads block hashes (BLOCKHASH): {accessed_block_hash_count} block \
+             hash(es) were accessed and the fixture cannot faithfully reproduce them"
+        )));
+    }
+
+    let anchor = fixture::anchor_from_receipt_facts(facts);
+    if let Err(reason) = fixture::check_fidelity(exec_result, &anchor, chain_id) {
+        return FixtureAttempt::Report(FixtureReport::skipped(format!(
+            "fidelity gate failed: {reason}"
+        )));
+    }
+
+    let draft = match fixture::build_draft(
+        db,
+        evm_state,
+        chain_id,
+        executed_spec,
+        block,
+        target_tx,
+        fixture::FixtureInputs { mega_env, result: exec_result, anchor },
+    ) {
+        Ok(draft) => draft,
+        // Unsupported shapes (deposit, EIP-7702, unknown spec) are expected in
+        // whole-block sweeps: skip rather than fail the run.
+        Err(e) => {
+            return FixtureAttempt::Report(FixtureReport::skipped(e.to_string()));
+        }
+    };
+
+    let tx_hash = target_tx.inner.inner.tx_hash();
+    let path = dir.join(format!("{tx_hash:#x}.json"));
+    if path.exists() && !overwrite {
+        return FixtureAttempt::WriteError(format!(
+            "fixture already exists at {} (pass --overwrite to replace)",
+            path.display()
+        ));
+    }
+
+    match fixture::finalize_and_write(draft, &path) {
+        Ok(()) => {
+            info!(path = %path.display(), tx_hash = %tx_hash, "Wrote self-validating fixture");
+            FixtureAttempt::Report(FixtureReport::written(&path))
+        }
+        Err(e) => FixtureAttempt::WriteError(format!("fixture write failed: {e}")),
+    }
 }
 
 /// Fetch the on-chain receipt of every target of a block.
@@ -653,6 +954,7 @@ fn emit(entry: &BatchEntry, json: bool) {
                     block_number: tx.block_number,
                     tx_index: tx.tx_index,
                     summary: &summary,
+                    fixture: tx.fixture.as_ref(),
                 })
             }
             BatchEntry::Failed(tx) => serde_json::to_string(&BatchErrorLine {
@@ -676,6 +978,10 @@ fn emit(entry: &BatchEntry, json: bool) {
             if let Some(verification) = &tx.verification {
                 println!();
                 println!("{}", verification.verdict_line());
+            }
+            if let Some(fixture) = &tx.fixture {
+                println!();
+                println!("{}", fixture.human_line());
             }
         }
         BatchEntry::Failed(tx) => {
