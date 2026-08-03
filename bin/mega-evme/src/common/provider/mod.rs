@@ -135,8 +135,11 @@ pub struct RpcArgs {
     #[arg(long = "rpc.backoff-ms", default_value_t = 1_000)]
     pub backoff_ms: u64,
 
-    /// Compute units per second budget passed to the retry layer's rate-limit accounting.
-    #[arg(long = "rpc.rate-limit", default_value_t = 660)]
+    /// Compute-unit budget (CU/s) for the retry layer's rate-limit accounting.
+    /// This is NOT requests per second: each RPC method costs multiple compute units.
+    /// A single-digit value will heavily self-throttle. Default (660) matches typical
+    /// public-endpoint budgets.
+    #[arg(long = "rpc.cu-per-sec", visible_alias = "rpc.rate-limit", default_value_t = 660)]
     pub compute_units_per_sec: u64,
 }
 
@@ -154,6 +157,9 @@ impl RpcArgs {
         let url: reqwest::Url = rpc_url_str.parse().map_err(|e| {
             EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
         })?;
+
+        // Once per provider build (not per client: resolve_chain_id also builds a client).
+        self.maybe_warn_low_cu_per_sec();
 
         // 1. Resolve chain id (always needed by downstream consumers).
         let chain_id = self.resolve_chain_id(url.clone()).await?;
@@ -304,6 +310,9 @@ impl RpcArgs {
             EvmeError::RpcError(format!("Invalid RPC URL '{}': {}", rpc_url_str, e))
         })?;
 
+        // Once per provider build (capture builds a single client; keep the same entry point).
+        self.maybe_warn_low_cu_per_sec();
+
         // Load existing envelope if the file exists.
         let existing_envelope = if path.exists() {
             let env = CacheFileEnvelope::load(path)?;
@@ -402,6 +411,17 @@ impl RpcArgs {
         }
     }
 
+    /// Emit the low CU/s warning at most once per networked provider build.
+    ///
+    /// Not placed in [`Self::build_client`]: the standard path builds a throwaway
+    /// client for chain-id resolution and then the real client, so a warning there
+    /// would fire twice.
+    fn maybe_warn_low_cu_per_sec(&self) {
+        if let Some(msg) = cu_per_sec_warning(self.max_retries, self.compute_units_per_sec) {
+            warn!("{msg}");
+        }
+    }
+
     /// Resolve the chain ID by issuing `eth_chainId` against a throwaway
     /// cache-less provider using the configured retry policy.
     async fn resolve_chain_id(&self, url: reqwest::Url) -> Result<u64> {
@@ -411,6 +431,23 @@ impl RpcArgs {
             EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {}", url_str, e))
         })
     }
+}
+
+/// Threshold below which a configured CU/s budget is considered dangerously low.
+/// Values under this with retries enabled produce a one-shot warning at provider build.
+const CU_PER_SEC_WARN_THRESHOLD: u64 = 100;
+
+/// Return a warning message when the retry layer is enabled and the CU/s budget is
+/// below [`CU_PER_SEC_WARN_THRESHOLD`]. Used so the trigger rule is unit-testable
+/// without capturing log output.
+fn cu_per_sec_warning(max_retries: u32, compute_units_per_sec: u64) -> Option<String> {
+    (max_retries > 0 && compute_units_per_sec < CU_PER_SEC_WARN_THRESHOLD).then(|| {
+        format!(
+            "--rpc.cu-per-sec is set to {compute_units_per_sec}, which is a compute-unit \
+             budget (CU/s) for the retry layer's rate-limit accounting, NOT requests per \
+             second; such a low budget will heavily self-throttle RPC traffic"
+        )
+    })
 }
 
 /// `clap` value parser that rejects empty and whitespace-only path arguments
@@ -494,5 +531,28 @@ mod tests {
         let path = resolve_cache_path(None, 11_155_420).expect("resolve");
         let expected = expected_root.join("mega-evme").join("rpc").join("rpc-cache-11155420.json");
         assert_eq!(path, expected);
+    }
+
+    /// Warn when retries are on and CU/s is below the threshold.
+    #[test]
+    fn test_cu_per_sec_warning_fires_below_threshold_with_retries() {
+        let msg = cu_per_sec_warning(5, 99).expect("should warn at 99 with retries on");
+        assert!(msg.contains("99"), "message should include the configured value: {msg}");
+        assert!(msg.contains("NOT requests per second") || msg.contains("NOT requests"), "{msg}");
+        assert!(msg.contains("self-throttle"), "{msg}");
+    }
+
+    /// Silent at the threshold boundary (100) and at the production default (660).
+    #[test]
+    fn test_cu_per_sec_warning_silent_at_or_above_threshold() {
+        assert!(cu_per_sec_warning(5, 100).is_none());
+        assert!(cu_per_sec_warning(5, 660).is_none());
+    }
+
+    /// Silent when the retry layer is disabled, even with a low CU/s budget.
+    #[test]
+    fn test_cu_per_sec_warning_silent_when_retries_disabled() {
+        assert!(cu_per_sec_warning(0, 1).is_none());
+        assert!(cu_per_sec_warning(0, 99).is_none());
     }
 }

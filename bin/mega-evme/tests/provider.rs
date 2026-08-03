@@ -24,6 +24,7 @@ use common::{test_rpc_args, test_rpc_args_cached, MockRpcServer};
 
 #[test]
 fn test_rpc_args_parses_all_new_flags() {
+    // Keep `--rpc.rate-limit` here so the visible alias stays pin-tested.
     let args = RpcArgs::parse_from([
         "mega-evme",
         "--rpc",
@@ -48,6 +49,19 @@ fn test_rpc_args_parses_all_new_flags() {
     assert!(args.clear_cache);
     assert_eq!(args.max_retries, 7);
     assert_eq!(args.backoff_ms, 250);
+    assert_eq!(args.compute_units_per_sec, 1234);
+}
+
+/// Canonical flag name `--rpc.cu-per-sec` parses into the same field.
+#[test]
+fn test_rpc_args_parses_cu_per_sec_flag() {
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "https://example.test/rpc",
+        "--rpc.cu-per-sec",
+        "1234",
+    ]);
     assert_eq!(args.compute_units_per_sec, 1234);
 }
 

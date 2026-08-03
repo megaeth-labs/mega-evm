@@ -210,7 +210,9 @@ RPC Options:
       --rpc.clear-cache                  Delete the current chain's cache file before loading
       --rpc.max-retries <N>              Max transport retries; 0 disables [default: 5]
       --rpc.backoff-ms <MS>              Fixed retry sleep in ms [default: 1000]
-      --rpc.rate-limit <CU/S>            Retry-layer compute-units-per-second budget [default: 660]
+      --rpc.cu-per-sec <COMPUTE_UNITS_PER_SEC>
+                                         Compute-unit budget (CU/s) for the retry layer's rate-limit accounting (NOT requests/s) [default: 660]
+                                         [alias: --rpc.rate-limit]
 
 Chain Options:
       --spec <SPEC>                Spec [default: Rex7]

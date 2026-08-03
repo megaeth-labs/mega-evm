@@ -54,7 +54,7 @@ Each group is documented on its own page.
 | Chain and spec    | `--spec`, `--chain-id`                                                                                                                                                                     | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas`                      | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | `--bucket-capacity`                                                                                                                                                                        | [SALT Buckets](../configuration/salt-buckets.md)                                |
-| RPC cache / retry | `--rpc.cache-size`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.rate-limit`                                             | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
+| RPC cache / retry | `--rpc.cache-size`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.cu-per-sec`                                             | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
 | Tracing           | `--trace`, `--tracer`, `--trace.output`, and tracer-specific flags                                                                                                                         | [Tracing Overview](../tracing/overview.md)                                      |
 | Output            | `--json`                                                                                                                                                                                   | See [JSON output](#json-output) below                                           |
 
@@ -322,8 +322,11 @@ RPC Options:
       --rpc.backoff-ms <BACKOFF_MS>
           Fixed sleep (ms) between retries; no exponential backoff [default: 1000]
 
-      --rpc.rate-limit <COMPUTE_UNITS_PER_SEC>
-          Compute-units-per-second budget for the retry layer [default: 660]
+      --rpc.cu-per-sec <COMPUTE_UNITS_PER_SEC>
+          Compute-unit budget (CU/s) for the retry layer's rate-limit accounting. This is NOT requests per second: each RPC method costs multiple compute units. A single-digit value will heavily self-throttle. Default (660) matches typical public-endpoint budgets
+
+          [default: 660]
+          [alias: --rpc.rate-limit]
 
 Chain Options:
       --spec <SPEC>

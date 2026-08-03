@@ -228,11 +228,11 @@ The default cache directory is the platform cache directory:
 
 ### Retry Flags
 
-| Flag                      | Type  | Default | Description                                                                                                                          |
-| ------------------------- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `--rpc.max-retries <N>`   | `u32` | `5`     | Maximum retry attempts for failing RPC requests. Retries on HTTP 429/503, rate-limit errors, and transport failures. `0` to disable. |
-| `--rpc.backoff-ms <MS>`   | `u64` | `1000`  | Fixed sleep duration in milliseconds between retry attempts (no exponential backoff).                                                |
-| `--rpc.rate-limit <CU/s>` | `u64` | `660`   | Compute units per second budget for the retry layer's rate-limit accounting.                                                         |
+| Flag                      | Type  | Default | Description                                                                                                                                                                        |
+| ------------------------- | ----- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--rpc.max-retries <N>`   | `u32` | `5`     | Maximum retry attempts for failing RPC requests. Retries on HTTP 429/503, rate-limit errors, and transport failures. `0` to disable.                                               |
+| `--rpc.backoff-ms <MS>`   | `u64` | `1000`  | Fixed sleep duration in milliseconds between retry attempts (no exponential backoff).                                                                                              |
+| `--rpc.cu-per-sec <CU/s>` | `u64` | `660`   | Compute-unit budget (CU/s) for the retry layer's rate-limit accounting — not requests per second. Alias: `--rpc.rate-limit`. Values below 100 with retries enabled emit a warning. |
 
 ### Examples
 
