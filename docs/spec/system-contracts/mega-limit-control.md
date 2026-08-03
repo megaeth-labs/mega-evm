@@ -1,6 +1,6 @@
 ---
 description: MegaLimitControl system contract — runtime query for effective remaining compute gas under detention and call-frame limits.
-spec: Rex5
+spec: Rex6
 ---
 
 # MegaLimitControl

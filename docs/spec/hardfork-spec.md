@@ -1,6 +1,6 @@
 ---
 description: MegaETH hardfork and spec versioning — how behavioral changes are versioned, activated, and tracked across network upgrades.
-spec: Rex5
+spec: Rex6
 ---
 
 # Hardforks and Specs
@@ -25,18 +25,22 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6
+EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
 ```
 
 Each newer spec includes all previous behaviors.
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
-All specs through REX5 are stable (frozen); REX6 is **unstable** and under active development.
+All specs through REX6 are frozen; REX7 is **unstable** and under active development.
+
+Frozen and activated are separate properties.
+A frozen spec's semantics no longer change, but it takes effect on a network only once that network schedules the corresponding hardfork.
+REX6 is frozen and has no activation timestamp on either mainnet or testnet, so both networks currently execute REX5.
 
 ### Backward Compatibility
 
-EVM semantics for stable (activated) specs are frozen.
-A new spec may add behavior, but it never alters what an existing stable spec does.
-Every spec carries the invariant that stable pre-{Spec} semantics remain unchanged.
+A frozen spec's EVM semantics never change again.
+Freezing is what confers that guarantee — not activation: a frozen spec no network has scheduled is as immutable as one running on mainnet, because a future schedule would replay history against it.
+A new spec may add behavior, but it never alters what an existing frozen spec does.
 
 This means:
 
@@ -130,7 +134,7 @@ _See [Rex5 Network Upgrade](upgrades/rex5.md) for full details._
 
 ### REX6
 
-REX6 is the current **unstable** spec under active development; its semantics may still change before network activation.
+REX6 is frozen but not yet scheduled on any network.
 
 - **Unified per-opcode gas metering order** — Every storage-affecting opcode charges storage gas before its body and records compute gas exactly once after the body completes; the `CREATE2` memory-expansion gas is folded into that single recording.
 - **Consolidated EIP-7702 authorization accounting** — Per-authorization data-size and KV-update charges are narrowed to applied authorizations, authority state growth resolves during validation, net-new authorities pay dynamic SALT account-creation gas, and an applied authority equal to the block beneficiary triggers beneficiary gas detention.
@@ -138,8 +142,15 @@ REX6 is the current **unstable** spec under active development; its semantics ma
 - **[KeylessDeploy](system-contracts/keyless-deploy.md) sandbox hardening** — Unused gas is rescued on a transaction-level compute-gas halt, and a self-destructing constructor is classified as an empty-code deployment.
 - **Post-execution fee-reward accounting** — Account writes performed by the post-execution fee-reward step count toward resource accounting.
 - **System-originated transaction metering exemption** — Pre-block system calls and [Mega System Transactions](system-contracts/system-tx.md) charge storage gas at minimum bucket capacity and are not halted by resource limits or gas detention.
-- **Beneficiary detention / volatile-access coverage** — A `SELFDESTRUCT` executed by the beneficiary and CALL-family targets whose EIP-7702 delegate resolves to the beneficiary come under detention and `disableVolatileDataAccess`; a `SELFDESTRUCT` balance credit to an existing beneficiary counts toward resource accounting.
+- **Beneficiary detention / volatile-access coverage** — A `SELFDESTRUCT` executed by the beneficiary comes under `disableVolatileDataAccess`, and CALL-family targets whose EIP-7702 delegate resolves to the beneficiary come under both detention and `disableVolatileDataAccess`; a `SELFDESTRUCT` balance credit to an existing beneficiary counts toward resource accounting.
 - **Additional resource-accounting corrections** — A per-log data-size base is charged for the log address, and forwarded gas returns to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
 - **Value self-transfer dedup** — A value transfer whose target equals the caller is counted as a single account-info write.
 
 _See [Rex6 Network Upgrade](upgrades/rex6.md) for full details._
+
+### REX7
+
+REX7 is the current **unstable** spec under active development.
+It introduces no behavioral change over REX6 yet; its semantics may change at any time before it is frozen.
+
+_See [Rex7 Network Upgrade](upgrades/rex7.md) for the current state._

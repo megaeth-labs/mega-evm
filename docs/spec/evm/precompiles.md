@@ -1,6 +1,6 @@
 ---
 description: MegaETH precompile gas overrides — KZG Point Evaluation and ModExp cost schedules diverging from standard Ethereum.
-spec: Rex5
+spec: Rex6
 ---
 
 # Precompiles

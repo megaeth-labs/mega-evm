@@ -1,6 +1,6 @@
 ---
 description: MegaETH glossary — definitions of protocol terms including EVM blocks, mini-blocks, compute gas, storage gas, and gas detention.
-spec: Rex5
+spec: Rex6
 ---
 
 # Glossary
@@ -163,7 +163,7 @@ A set of MegaETH verifiable behaviors: the complete definition of what a correct
 
 Captures the execution-layer semantics that determine node correctness.
 
-Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5`.
+Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`.
 
 See [Hardforks and Specs](hardfork-spec.md).
 

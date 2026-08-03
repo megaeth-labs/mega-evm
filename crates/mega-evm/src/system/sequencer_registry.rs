@@ -489,19 +489,17 @@ mod tests {
         SequencerRegistryRex6Config { rex6_min_rotation_delay: TEST_MIN_ROTATION_DELAY }
     }
 
-    /// All hardforks up to and including Rex5, but NOT Rex6: the pre-upgrade world where the
-    /// registry runs v1.0.0.
+    /// A chain running Rex5: the pre-upgrade world where the registry runs v1.0.0.
     fn rex5_hardforks() -> MegaHardforkConfig {
         MegaHardforkConfig::default()
-            .with_all_activated()
-            .without(MegaHardfork::Rex6)
+            .with_all_activated_through(MegaSpecId::REX5)
             .with_params(test_config())
     }
 
     /// All hardforks including Rex6, with both registry param sets attached.
     fn rex6_hardforks() -> MegaHardforkConfig {
         MegaHardforkConfig::default()
-            .with_all_activated()
+            .with_all_activated_through(MegaSpecId::REX6)
             .with_params(test_config())
             .with_params(test_rex6_config())
     }
@@ -585,8 +583,7 @@ mod tests {
     fn test_deploy_seeds_storage() {
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
+        let hardforks = rex5_hardforks();
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
@@ -634,8 +631,7 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
+        let hardforks = rex5_hardforks();
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 2000, &mut state, &test_config())
@@ -660,8 +656,7 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
+        let hardforks = rex5_hardforks();
 
         let err =
             transact_deploy_sequencer_registry(&hardforks, 0, 2000, &mut state, &test_config())
@@ -684,8 +679,7 @@ mod tests {
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex6);
+        let hardforks = rex5_hardforks();
 
         let result =
             transact_deploy_sequencer_registry(&hardforks, 0, 1000, &mut state, &test_config())
@@ -865,8 +859,9 @@ mod tests {
     fn test_deploy_rex6_missing_config_errors() {
         // Rex6 active but only the Rex5 params attached: deploy must fail fast instead of
         // installing a v2.0.0 registry with an unseeded _minRotationDelay.
-        let hardforks =
-            MegaHardforkConfig::default().with_all_activated().with_params(test_config());
+        let hardforks = MegaHardforkConfig::default()
+            .with_all_activated_through(MegaSpecId::REX6)
+            .with_params(test_config());
         let mut db = InMemoryDB::default();
         let mut state = State::builder().with_database(&mut db).build();
 

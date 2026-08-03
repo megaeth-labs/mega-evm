@@ -62,7 +62,7 @@ Each group is documented on its own page.
 
 | Option       | Default                                      |
 | ------------ | -------------------------------------------- |
-| `--spec`     | `Rex6`                                       |
+| `--spec`     | `Rex7`                                       |
 | `--gas`      | `10000000`                                   |
 | `--sender`   | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
 | `--receiver` | `0x0000000000000000000000000000000000000000` |
@@ -327,7 +327,9 @@ RPC Options:
 
 Chain Options:
       --spec <SPEC>
-          Spec to use: MiniRex, Equivalence, Rex, Rex1, Rex2, Rex3, Rex4, Rex5, Rex6 [default: Rex6]
+          Name of spec to use, possible values: `MiniRex`, `Equivalence`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6`, `Rex7`
+
+          [default: Rex7]
 
       --chain-id <CHAIN_ID>
           Chain ID [default: 6342] [aliases: --chainid]

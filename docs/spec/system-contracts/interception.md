@@ -1,6 +1,6 @@
 ---
 description: Generic call-interception mechanism for MegaETH system contracts — frame-init hook, selector matching, intercepted vs. fall-through semantics, gas treatment, and call-scheme rules.
-spec: Rex5
+spec: Rex6
 ---
 
 # Call Interception

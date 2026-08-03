@@ -23,7 +23,7 @@ MegaEVM execution core that wraps revm/op-revm with MegaETH instruction tables, 
 - Keep inspector and non-inspector paths behaviorally aligned.
 
 ## WHERE TO LOOK
-- New spec opcode delta: `instructions.rs` (`mini_rex`, `rex`, `rex2`, `rex3`, `rex4` tables).
+- New spec opcode delta: `instructions.rs` (`mini_rex`, `rex`, `rex2`, `rex3`, `rex4`, `rex5`, `rex6`, `rex7` tables; `rex6` and `rex7` currently alias their predecessor, expressing their deltas as `is_enabled` dispatch inside the shared handlers).
 - Volatile access detention trigger changes: `host.rs` and volatile wrappers in `instructions.rs`.
 - Call forwarding and stipend interplay: `instructions.rs` + `../limit/storage_call_stipend.rs`.
 - New external gas pricing path: `host.rs` gas helper methods.

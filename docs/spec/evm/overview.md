@@ -1,6 +1,6 @@
 ---
 description: MegaEVM specification index — dual gas model, resource limits, gas detention, system contracts, and per-spec behavioral history.
-spec: Rex5
+spec: Rex6
 ---
 
 # MegaEVM Overview

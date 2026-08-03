@@ -29,6 +29,7 @@ impl EvmTxRuntimeLimits {
             MegaSpecId::REX4 => Self::rex4(),
             MegaSpecId::REX5 => Self::rex5(),
             MegaSpecId::REX6 => Self::rex6(),
+            MegaSpecId::REX7 => Self::rex7(),
         }
     }
 
@@ -103,6 +104,13 @@ impl EvmTxRuntimeLimits {
     /// Currently identical to Rex5 limits.
     fn rex6() -> Self {
         Self::rex5()
+    }
+
+    /// Limits for the `REX7` spec.
+    ///
+    /// Currently identical to Rex6 limits.
+    fn rex7() -> Self {
+        Self::rex6()
     }
 }
 

@@ -1,6 +1,6 @@
 ---
 description: SequencerRegistry system contract — dual-role registry for system address and sequencer, with change scheduling and history.
-spec: Rex5
+spec: Rex6
 ---
 
 # SequencerRegistry
@@ -47,9 +47,6 @@ cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/Sequence
 A node MUST deploy the contract via raw state patch with initial storage seeded at deploy time.
 A node MUST NOT execute a constructor during deployment.
 
-<details>
-<summary>Rex6 (unstable): Version 2.0.0 bytecode and in-place upgrade</summary>
-
 #### Version 2.0.0
 
 Since: [Rex6](../upgrades/rex6.md)
@@ -69,8 +66,6 @@ To verify the code hash, from the repository root:
 ```bash
 cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/SequencerRegistry-2.0.0.json)
 ```
-
-</details>
 
 ### Storage Layout
 
@@ -95,12 +90,6 @@ Rust slot constants in `mega-system-contracts` MUST match this layout.
 
 Each `ChangeRecord` MUST be packed as `uint96 fromBlock` followed by `address addr` in one 32-byte slot.
 
-Future versions of `SequencerRegistry` MUST only append new storage slots after slot 12.
-Future versions MUST NOT reorder existing slots or insert new slots before slot 13 once the contract is in use, because dynamic-array element keys are derived from `keccak256(slot)` and any slot change orphans the existing data.
-
-<details>
-<summary>Rex6 (unstable): `_minRotationDelay` storage slot</summary>
-
 Version 2.0.0 appends one slot:
 
 | Slot | Name                | Type      |
@@ -109,7 +98,8 @@ Version 2.0.0 appends one slot:
 
 Slot 13 exists only in version 2.0.0 and later; slots 0–12 are identical across versions.
 
-</details>
+Future versions of `SequencerRegistry` MUST only append new storage slots after slot 13.
+Future versions MUST NOT reorder existing slots or insert new slots before slot 14 once the contract is in use, because dynamic-array element keys are derived from `keccak256(slot)` and any slot change orphans the existing data.
 
 ### Interface
 
@@ -161,9 +151,6 @@ interface ISequencerRegistry {
 }
 ```
 
-<details>
-<summary>Rex6 (unstable): rotation-hardening interface additions</summary>
-
 Version 2.0.0 replaces the sequencer scheduling entry point and adds two views and two errors:
 
 ```solidity
@@ -185,8 +172,6 @@ error InvalidRotationProof();
 
 Every other method keeps its version 1.0.0 signature, and `version()` reports `2.0.0`.
 
-</details>
-
 ### Read Methods
 
 `currentSystemAddress()` MUST return the value in `_currentSystemAddress`.
@@ -205,8 +190,7 @@ For all other values, `activationBlock` MUST be strictly greater than `block.num
 `activationBlock` MUST also fit in `uint96`; if it exceeds `type(uint96).max`, the call MUST revert with `ActivationBlockTooLarge()`.
 At most one pending change per role MUST exist at a time; a new schedule MUST overwrite the previous one.
 
-<details>
-<summary>Rex6 (unstable): sequencer rotation hardening (possession proof + minimum delay)</summary>
+#### Sequencer Rotation Hardening
 
 From version 2.0.0, the sequencer role additionally enforces the rules below; the system-address role keeps the two-parameter `scheduleNextSystemAddressChange(newSystemAddress, activationBlock)` signature and only the rules above.
 
@@ -252,8 +236,6 @@ The signature commits to `(chainId, verifyingContract, newSequencer, activationB
 - Replaying the identical `(newSequencer, activationBlock)` pair merely reinstates the same intended rotation, which is harmless by construction.
 - A stale signature naturally expires: once `block.number + minRotationDelay()` exceeds its `activationBlock`, no schedule call can accept it.
 
-</details>
-
 ### Pre-Block Apply
 
 `applyPendingChanges()` MUST be permissionless and MUST apply both roles atomically.
@@ -263,17 +245,13 @@ For each role, if a change is pending and due, `applyPendingChanges()` MUST upda
 The system call MUST be issued with `gas_limit = max(block.gas_limit, 30_000_000)` instead of revm's upstream-fixed 30M default, matching the EIP-2935 / EIP-4788 pre-block calls.
 This gas floor is necessary because the slot-rotation cost scales with REX dynamic storage gas (SALT bucket capacity), and a fixed 30M is no longer guaranteed to be sufficient on activation blocks.
 
-<details>
-<summary>Rex6 (unstable): apply/deploy commit order at the activation block</summary>
+#### Apply/Deploy Commit Order
 
 Pre-block outcomes commit in execution order, and the apply call always executes against the not-yet-committed pre-block state, so its recorded outcome carries the registry account info as of the start of the block.
-From Rex6 the execution layer MUST run the `applyPendingChanges()` pre-block call (including its due-check) before the registry deploy step, so the deploy outcome commits last.
-At the Rex6 activation block, when a version 1.0.0 registry exists, the deploy performs the in-place version 1.0.0 → 2.0.0 upgrade; an apply outcome committed after it would overwrite the upgraded account info with the stale pre-upgrade bytecode.
-(On a chain whose registry never existed, the deploy installs version 2.0.0 directly and the order is not observable, but the same order MUST be used.)
+The execution layer MUST run the `applyPendingChanges()` pre-block call (including its due-check) before the registry deploy step, so the deploy outcome commits last.
+At an activation block where a version 1.0.0 registry exists, the deploy performs the in-place version 1.0.0 → 2.0.0 upgrade; an apply outcome committed after it would overwrite the upgraded account info with the stale pre-upgrade bytecode.
+On a chain whose registry never existed, the deploy installs version 2.0.0 directly and the order is not observable, but the same order MUST be used.
 The `applyPendingChanges()` logic is identical in versions 1.0.0 and 2.0.0 — the version 2.0.0 changes touch only rotation scheduling — so its semantics do not depend on which side of the deploy it executes.
-Pre-Rex6 blocks keep the original deploy-then-apply order.
-
-</details>
 
 ### Two-Step Admin Transfer
 
@@ -316,34 +294,21 @@ A zero `rex5_initial_sequencer` produces an invalid initial sequencer state.
 
 The `rex5_` prefix on these field names is deliberate: the values seed the registry at the activation boundary of the spec that introduces it, and blocks before that boundary ignore them entirely.
 
-<details>
-<summary>Rex6 (unstable): `_minRotationDelay` seeding</summary>
+The node MUST also seed the `_minRotationDelay` slot from `SequencerRegistryRex6Config.rex6_min_rotation_delay` on the chain's hardfork configuration:
 
-From Rex6, the node MUST also seed the `_minRotationDelay` slot from `SequencerRegistryRex6Config.rex6_min_rotation_delay` on the chain's hardfork configuration:
-
-- On a fresh deploy at Rex6 (registry never existed), the node MUST write all 6 bootstrap slots plus `_minRotationDelay` and install the version 2.0.0 bytecode directly.
-- On the in-place version 1.0.0 → 2.0.0 upgrade at the Rex6 activation block, the node MUST write only `_minRotationDelay` and MUST leave every other slot untouched.
+- On a fresh deploy of version 2.0.0 (registry never existed), the node MUST write all 6 bootstrap slots plus `_minRotationDelay` and install the version 2.0.0 bytecode directly.
+- On the in-place version 1.0.0 → 2.0.0 upgrade, the node MUST write only `_minRotationDelay` and MUST leave every other slot untouched.
 
 `rex6_min_rotation_delay` MUST be non-zero; the chain configuration MUST reject a zero value at load time, because a zero delay disables the reaction window the field exists to guarantee.
 
-</details>
-
 ## Constants
-
-| Name                         | Value                                        | Description      |
-| ---------------------------- | -------------------------------------------- | ---------------- |
-| `SEQUENCER_REGISTRY_ADDRESS` | `0x6342000000000000000000000000000000000006` | Contract address |
-
-<details>
-<summary>Rex6 (unstable): rotation-proof constants</summary>
 
 | Name                          | Value                                                                | Description                                  |
 | ----------------------------- | -------------------------------------------------------------------- | -------------------------------------------- |
+| `SEQUENCER_REGISTRY_ADDRESS`  | `0x6342000000000000000000000000000000000006`                         | Contract address                             |
 | `SEQUENCER_ROTATION_TYPEHASH` | `0xaebf84f20bcc14afc14200ed16cfb9314ef205d4d1d8fbcc0a256c39a3e79aa9` | EIP-712 struct type hash for rotation proofs |
 | EIP-712 domain name           | `MegaETH SequencerRegistry`                                          | Rotation-proof signing domain                |
 | EIP-712 domain version        | `1`                                                                  | Independent of the contract semantic version |
-
-</details>
 
 ## Rationale
 
@@ -358,9 +323,6 @@ Applying a role change as a regular transaction would change role addresses mid-
 The `_initialFromBlock` depends on the Rex5 activation block number, which is not known at compile time.
 Seeding all initial values at deploy time keeps the bootstrap mechanism uniform.
 
-<details>
-<summary>Rex6 (unstable): rotation-hardening rationale</summary>
-
 **Why require a possession proof at scheduling time?**
 A sequencer rotation to a typo'd or otherwise unheld address deadlocks the chain at the activation block, and no on-chain recovery exists once block production halts.
 Requiring the new key to sign the exact rotation it authorizes moves the failure to the scheduling transaction, where it reverts harmlessly.
@@ -373,9 +335,7 @@ A seeded storage value keeps one canonical version 2.0.0 code hash across all ne
 Scheduling is admin-gated, the signature binds the exact `(chainId, contract, newSequencer, activationBlock)` tuple, replaying the identical tuple is idempotent, and the minimum-delay check naturally expires stale signatures.
 A nonce would add a storage slot and a tooling burden without excluding any additional attack.
 
-</details>
-
 ## Spec History
 
-- [Rex5](../upgrades/rex5.md) introduced the `SequencerRegistry` contract with dual roles.
-- [Rex6](../upgrades/rex6.md) (**unstable**) — upgrades the contract to version 2.0.0: sequencer rotation requires the new key's EIP-712 possession proof and a minimum scheduling-to-activation delay (`_minRotationDelay`, slot 13).
+- [Rex5](../upgrades/rex5.md) introduced the `SequencerRegistry` contract with dual roles, at version 1.0.0.
+- [Rex6](../upgrades/rex6.md) upgraded the contract to version 2.0.0 in place: sequencer rotation requires the new key's EIP-712 possession proof and a minimum scheduling-to-activation delay (`_minRotationDelay`, slot 13), and the pre-block apply call now runs before the deploy step so the upgraded account info commits last.

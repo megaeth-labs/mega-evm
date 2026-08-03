@@ -91,7 +91,16 @@ Adding an operator is a drop-in: create a new pack dir; the engine (`scripts/umu
 - **match misroute** — `rexN::instruction_table` → a neighbour's table (probes per-spec opcode wiring).
 - **negate** *(opt-in, `--with-negate`)* — per-site polarity flip.
 
-Only **frozen** specs are mutated; when an unstable spec is introduced, drop it from `FROZEN_SPECS` in `generate.py` and regenerate (mutating an unstable gate only yields expected/equivalent survivors).
+Only **frozen** specs are mutated; when an unstable spec is introduced, add it to `ALL_SPECS` but keep it out of `FROZEN_SPECS` in `generate.py`, then regenerate (mutating an unstable gate only yields expected/equivalent survivors).
+When that spec is later frozen, move it into `FROZEN_SPECS` and regenerate.
+
+The two lists are not interchangeable.
+`ALL_SPECS` fixes adjacency and `FROZEN_SPECS` restricts only the mutation *source*: `is_enabled(FrozenSpec) ==> is_enabled(UnstableSpec)` is a legitimate mutant — it is the "gated one fork too late" bug that silently disables the frozen spec's behavior — so the unstable spec must stay in `ALL_SPECS` as a destination.
+Collapsing them into one list drops exactly those mutants, probing the newest frozen spec's gates from one side only.
+
+`INSTRUCTION_MODULES` is a separate list, not a copy of the frozen progression.
+A module belongs there only if its table differs from its neighbour's: misroute swaps one module's table for an adjacent one, so swapping in an identical table is an equivalent mutant and a guaranteed survivor.
+A spec whose table is a verbatim alias of its predecessor's — because the spec expresses its differences as `is_enabled` dispatch inside shared handlers rather than as swapped table entries — is covered by boundary shift and must stay out of `INSTRUCTION_MODULES`.
 
 ## Running
 

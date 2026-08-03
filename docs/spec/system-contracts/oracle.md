@@ -1,6 +1,6 @@
 ---
 description: MegaETH Oracle system contract — address, storage layout, hint forwarding, and gas detention trigger.
-spec: Rex5
+spec: Rex6
 ---
 
 # Oracle
@@ -169,29 +169,22 @@ Because the Solidity implementation of `sendHint` is a no-op `view` function, th
 
 Calls to `ORACLE_CONTRACT_ADDRESS` that do not match the `sendHint` selector MUST fall through without any side effect.
 
-When the call's gas limit is greater than zero and the calldata's leading four bytes match the `sendHint` selector, the node MUST charge the full byte length of the call's calldata — the entire call input — against the transaction's data-size resource lane before attempting to decode it.
+The node MUST NOT forward a hint when the calling frame's volatile data access is disabled (see [`MegaAccessControl`](mega-access-control.md#disablevolatiledataaccess)).
+This condition MUST be evaluated before the data-size charge described below: a call blocked for this reason MUST NOT be charged against the transaction's data-size resource lane, regardless of its gas limit or whether its calldata matches the `sendHint` selector.
+
+When the calling frame's volatile data access is enabled, the call's gas limit is greater than zero, and the calldata's leading four bytes match the `sendHint` selector, the node MUST charge the full byte length of the call's calldata — the entire call input — against the transaction's data-size resource lane before attempting to decode it.
 A call whose gas limit is zero MUST NOT be charged and MUST fall through to the on-chain Oracle bytecode for canonical handling.
 This charge MUST apply regardless of whether the calldata subsequently decodes successfully.
 If decoding the calldata fails, the node MUST NOT invoke the hint callback; the byte charge still applies.
 
-The node MUST forward a hint to the off-chain backend only when the call's gas limit is greater than zero, the leading four bytes of the calldata match the `sendHint` selector, the calldata decodes as a valid `sendHint(bytes32 topic, bytes data)` invocation, AND recording the calldata byte length keeps the transaction within its data-size limit.
-If the gas limit is zero, or the selector does not match, or decoding fails, the node MUST NOT invoke the hint callback.
-A zero-gas-limit, selector-mismatch, or decode-failure call falls through to the on-chain Oracle bytecode for canonical handling.
+The node MUST forward a hint to the off-chain backend only when the calling frame's volatile data access is enabled, the call's gas limit is greater than zero, the leading four bytes of the calldata match the `sendHint` selector, the calldata decodes as a valid `sendHint(bytes32 topic, bytes data)` invocation, AND recording the calldata byte length keeps the transaction within its data-size limit.
+If volatile data access is disabled, or the gas limit is zero, or the selector does not match, or decoding fails, the node MUST NOT invoke the hint callback.
+A disabled-volatile-access, zero-gas-limit, selector-mismatch, or decode-failure call falls through to the on-chain Oracle bytecode for canonical handling.
+The first three are uncharged; only a decode failure reaches the byte-length charge.
 A data-size overflow halts the transaction with the canonical data-size `OutOfGas` failure.
 
 If a transaction sends a hint — a direct `CALL` or `STATICCALL` to `sendHint` that meets the admission conditions above — and subsequently reads an Oracle slot, the hint MUST be delivered to the oracle backend before the read is served.
 This guarantee does not extend to a `sendHint` payload whose forwarding was not triggered: a `sendHint` routed through `multiCall`'s `DELEGATECALL` delivers no hint, so a subsequent read observes the backend as if that payload had never been sent.
-
-<details>
-<summary>Rex6 (unstable): volatile-access-disabled admission condition</summary>
-
-Under Rex6, the node MUST additionally NOT forward a hint when the calling frame's volatile data access is disabled (see [`MegaAccessControl`](mega-access-control.md#disablevolatiledataaccess)).
-This condition MUST be evaluated before the data-size charge described above: a call blocked for this reason MUST NOT be charged against the transaction's data-size resource lane, regardless of its gas limit or whether its calldata matches the `sendHint` selector.
-This groups with the zero-gas-limit and selector-mismatch cases (uncharged), not with a decode failure (charged) — a call whose forwarding is skipped for this reason falls through to the on-chain Oracle bytecode without reverting, exactly like those two, but unlike a decode failure it never reaches the byte-length charge at all.
-
-Pre-Rex6, `sendHint` forwarding did not consult the volatile-access-disabled state.
-
-</details>
 
 ### Gas and Detention Semantics
 
@@ -268,3 +261,4 @@ Per-frame trace visibility of the would-be writes is informative only and MUST N
 - [Rex2](../upgrades/rex2.md) added the `sendHint` entry point to the deployed Oracle bytecode.
 - [Rex3](../upgrades/rex3.md) changed oracle detention to SLOAD-based triggering and raised the oracle detention cap to 20M.
 - [Rex5](../upgrades/rex5.md) replaced the constructor `immutable` authority with a dynamic read from `SequencerRegistry.currentSystemAddress()` (Oracle v2.0.0), preserved existing Oracle storage across in-place bytecode upgrades, and gated hint forwarding on a positive gas limit while metering the full hint calldata against the transaction data-size lane before decoding.
+- [Rex6](../upgrades/rex6.md) added the volatile-access-disabled admission condition to hint forwarding: through Rex5, `sendHint` forwarding did not consult that state, so a frame that had called `disableVolatileDataAccess` could still reach the oracle backend.

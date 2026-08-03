@@ -35,6 +35,8 @@ hardfork! {
         Rex5,
         /// The tenth hardfork (sixth patch to Rex).
         Rex6,
+        /// The eleventh hardfork (seventh patch to Rex).
+        Rex7,
     }
 }
 
@@ -55,6 +57,7 @@ impl MegaHardfork {
             Self::Rex4 => MegaSpecId::REX4,
             Self::Rex5 => MegaSpecId::REX5,
             Self::Rex6 => MegaSpecId::REX6,
+            Self::Rex7 => MegaSpecId::REX7,
         }
     }
 }
@@ -109,7 +112,9 @@ pub trait MegaHardforks: OpHardforks {
 
     /// Returns the current `MegaHardfork` active at the given timestamp.
     fn hardfork(&self, timestamp: u64) -> Option<MegaHardfork> {
-        if self.is_rex_6_active_at_timestamp(timestamp) {
+        if self.is_rex_7_active_at_timestamp(timestamp) {
+            Some(MegaHardfork::Rex7)
+        } else if self.is_rex_6_active_at_timestamp(timestamp) {
             Some(MegaHardfork::Rex6)
         } else if self.is_rex_5_active_at_timestamp(timestamp) {
             Some(MegaHardfork::Rex5)
@@ -187,6 +192,11 @@ pub trait MegaHardforks: OpHardforks {
     /// Returns `true` if [`MegaHardfork::Rex6`] is active at given block timestamp.
     fn is_rex_6_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.mega_fork_activation(MegaHardfork::Rex6).active_at_timestamp(timestamp)
+    }
+
+    /// Returns `true` if [`MegaHardfork::Rex7`] is active at given block timestamp.
+    fn is_rex_7_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.mega_fork_activation(MegaHardfork::Rex7).active_at_timestamp(timestamp)
     }
 }
 
@@ -285,17 +295,32 @@ impl MegaHardforkConfig {
     }
 
     /// Sets all `MegaHardfork` to be activated at timestamp 0.
-    pub fn with_all_activated(mut self) -> Self {
-        self.insert(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::MiniRex1, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::MiniRex2, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex1, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex2, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex3, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex4, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex5, ForkCondition::Timestamp(0));
-        self.insert(MegaHardfork::Rex6, ForkCondition::Timestamp(0));
+    pub fn with_all_activated(self) -> Self {
+        self.with_all_activated_through(MegaSpecId::default())
+    }
+
+    /// Activates every `MegaHardfork` whose spec is enabled under `spec` at timestamp 0, and
+    /// unregisters every later fork.
+    ///
+    /// This is how to express "a chain running spec N": the resulting config resolves to `spec`
+    /// at any timestamp. Removing only the next fork up is not equivalent — the ladder runs past
+    /// it, so the config would resolve to the newest fork still registered rather than to `spec`,
+    /// and it would silently drift again the next time a spec is introduced.
+    ///
+    /// The result is a function of `spec` alone, not of what the config held before: a later fork
+    /// already registered is removed rather than left in place, so the resolved spec does not
+    /// depend on builder call order.
+    ///
+    /// Patch hardforks are included by their spec, not their position: `MiniRex1` maps back to
+    /// [`MegaSpecId::EQUIVALENCE`], so it is registered for every `spec`.
+    pub fn with_all_activated_through(mut self, spec: MegaSpecId) -> Self {
+        for fork in MegaHardfork::VARIANTS {
+            if spec.is_enabled(fork.spec_id()) {
+                self.insert(*fork, ForkCondition::Timestamp(0));
+            } else {
+                self = self.without(*fork);
+            }
+        }
         self
     }
 
@@ -402,6 +427,7 @@ mod tests {
             (MegaHardfork::Rex4, MegaSpecId::REX4),
             (MegaHardfork::Rex5, MegaSpecId::REX5),
             (MegaHardfork::Rex6, MegaSpecId::REX6),
+            (MegaHardfork::Rex7, MegaSpecId::REX7),
         ];
 
         for (hardfork, expected_spec) in cases {
@@ -456,19 +482,55 @@ mod tests {
     fn test_with_all_activated_enables_all_mega_hardforks() {
         let config = MegaHardforkConfig::default().with_all_activated();
 
-        for hardfork in [
-            MegaHardfork::MiniRex,
-            MegaHardfork::MiniRex1,
-            MegaHardfork::MiniRex2,
-            MegaHardfork::Rex,
-            MegaHardfork::Rex1,
-            MegaHardfork::Rex2,
-            MegaHardfork::Rex3,
-            MegaHardfork::Rex4,
-            MegaHardfork::Rex5,
-            MegaHardfork::Rex6,
+        // Driven off `VARIANTS`, which the `hardfork!` macro generates from the same variant list
+        // that declares the enum. A second hand-written list here would assert only that the
+        // forks someone remembered to name are activated — a new fork missing from both the
+        // builder and the list would fail neither.
+        for hardfork in MegaHardfork::VARIANTS {
+            assert_eq!(
+                config.mega_fork_activation(*hardfork),
+                ForkCondition::Timestamp(0),
+                "{hardfork:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_with_all_activated_through_resolves_to_that_spec() {
+        // The contract callers rely on: the config resolves to exactly the spec asked for, at any
+        // timestamp. The list below is hand-written, so introducing a spec does not fail here on
+        // its own — pair it with a builder that derives from the fork ladder, and add the new
+        // spec here so the rung it names is covered too.
+        for spec in [
+            MegaSpecId::EQUIVALENCE,
+            MegaSpecId::MINI_REX,
+            MegaSpecId::REX,
+            MegaSpecId::REX1,
+            MegaSpecId::REX2,
+            MegaSpecId::REX3,
+            MegaSpecId::REX4,
+            MegaSpecId::REX5,
+            MegaSpecId::REX6,
+            MegaSpecId::REX7,
         ] {
-            assert_eq!(config.mega_fork_activation(hardfork), ForkCondition::Timestamp(0));
+            let config = MegaHardforkConfig::default().with_all_activated_through(spec);
+            assert_eq!(config.spec_id(0), spec, "{spec:?} at genesis");
+            assert_eq!(config.spec_id(u64::MAX), spec, "{spec:?} must be terminal");
+
+            // The same contract must hold when the config already carries later forks: the
+            // builder states the whole ladder, so it removes what it does not activate. Without
+            // that, the resolved spec would depend on which builder ran last.
+            let downgraded =
+                MegaHardforkConfig::default().with_all_activated().with_all_activated_through(spec);
+            assert_eq!(downgraded.spec_id(u64::MAX), spec, "{spec:?} from an activated config");
+        }
+
+        // `MegaSpecId::default()` tracks the latest spec, so the unqualified builder is the
+        // through-builder at the top of the ladder — and every fork is registered.
+        let all = MegaHardforkConfig::default().with_all_activated();
+        assert_eq!(all.spec_id(0), MegaSpecId::default());
+        for fork in MegaHardfork::VARIANTS {
+            assert_eq!(all.mega_fork_activation(*fork), ForkCondition::Timestamp(0), "{fork:?}");
         }
     }
 
@@ -542,17 +604,20 @@ mod tests {
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(100))
             .with(MegaHardfork::Rex4, ForkCondition::Timestamp(200))
             .with(MegaHardfork::Rex5, ForkCondition::Timestamp(300))
-            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(400));
+            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(400))
+            .with(MegaHardfork::Rex7, ForkCondition::Timestamp(500));
 
         assert_eq!(config.hardfork(99), None);
         assert_eq!(config.hardfork(100), Some(MegaHardfork::MiniRex));
         assert_eq!(config.hardfork(200), Some(MegaHardfork::Rex4));
         assert_eq!(config.hardfork(300), Some(MegaHardfork::Rex5));
         assert_eq!(config.hardfork(400), Some(MegaHardfork::Rex6));
+        assert_eq!(config.hardfork(500), Some(MegaHardfork::Rex7));
         assert_eq!(config.spec_id(99), MegaSpecId::EQUIVALENCE);
         assert_eq!(config.spec_id(100), MegaSpecId::MINI_REX);
         assert_eq!(config.spec_id(200), MegaSpecId::REX4);
         assert_eq!(config.spec_id(300), MegaSpecId::REX5);
         assert_eq!(config.spec_id(400), MegaSpecId::REX6);
+        assert_eq!(config.spec_id(500), MegaSpecId::REX7);
     }
 }

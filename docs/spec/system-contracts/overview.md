@@ -1,6 +1,6 @@
 ---
 description: MegaETH system contract registry — addresses, whitelisting rules, and protocol-level execution constraints.
-spec: Rex5
+spec: Rex6
 ---
 
 # System Contracts
@@ -57,7 +57,7 @@ Each system-contract page defines which of its functions are intercepted and wha
 ### Backward Compatibility Rule
 
 Any change to system-contract semantics, bytecode-visible interface behavior, or interception rules MUST be introduced by a new spec.
-Stable behavior for an already-activated spec MUST remain unchanged.
+Behavior for a frozen spec MUST remain unchanged, whether or not any network has activated it.
 
 ## Constants
 
