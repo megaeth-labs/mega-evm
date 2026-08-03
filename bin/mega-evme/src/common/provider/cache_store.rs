@@ -8,19 +8,36 @@
 //!
 //! The envelope is v1. Forward-incompatible changes bump `ENVELOPE_VERSION`;
 //! additive fields use `#[serde(default)]` instead.
+//!
+//! # Concurrent cache-dir sharing
+//!
+//! Persist takes an exclusive advisory lock on a sidecar `<target>.lock`, re-reads
+//! the target file, merges in-memory entries over on-disk ones (ours win on key
+//! collision), then writes via temp-file + atomic rename. Multiple processes may
+//! therefore share one `--rpc.cache-dir` without losing each other's entries.
+//! The lock sidecar is left in place after the process exits (the flock is released
+//! when the lock file handle is closed).
 
 use std::{
     fmt, fs,
-    io::Write as _,
+    fs::OpenOptions,
     path::{Path, PathBuf},
 };
 
 use alloy_provider::layers::SharedCache;
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::transport::TransportCache;
-use crate::common::{EvmeError, Result};
+use crate::{
+    cache::{
+        lock_sidecar_path, merge_envelope_for_persist, merge_kv_entries, read_envelope,
+        read_provider_cache, write_bytes_atomic, write_envelope_atomic, CacheKv, EnvelopeDoc,
+        ExternalEnvDoc, ENVELOPE_VERSION,
+    },
+    common::{EvmeError, Result},
+};
 
 /// Clean-exit cache persistence handle.
 ///
@@ -145,6 +162,11 @@ impl RpcCacheStore {
     /// For fixture-capture stores, any `external_env` snapshot previously
     /// attached via [`Self::set_external_env`] is written into the envelope.
     ///
+    /// Persist takes an exclusive advisory lock on `<path>.lock`, re-reads the
+    /// on-disk file (a sibling process may have written since load), and merges
+    /// our in-memory entries over the on-disk ones (ours win on key collision)
+    /// before the atomic write.
+    ///
     /// - **`ProviderCache`**: best-effort — failures are warn-logged and swallowed.
     /// - **`FixtureCapture`**: hard error — the fixture is the primary output of capture mode.
     /// - **No-op**: returns `Ok(())`.
@@ -189,40 +211,106 @@ impl fmt::Debug for RpcCacheStore {
     }
 }
 
-/// Atomically persist `cache` to `target` via a temp file + rename.
+/// RAII exclusive lock on the sidecar file for `target`.
+///
+/// The lock is released when this guard is dropped (file handle closed).
+/// The sidecar file itself is left on disk.
+struct ExclusiveFileLock {
+    _file: fs::File,
+}
+
+/// Acquire an exclusive advisory lock on `<target>.lock`, blocking until held.
+///
+/// The sidecar is created if missing and left in place after unlock.
+fn acquire_exclusive_lock(target: &Path) -> std::io::Result<ExclusiveFileLock> {
+    let lock_path = lock_sidecar_path(target);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // truncate(false): the sidecar is only a flock target; keep any existing bytes.
+    let file =
+        OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&lock_path)?;
+    file.lock_exclusive()?;
+    Ok(ExclusiveFileLock { _file: file })
+}
+
+/// Atomically persist `cache` to `target` via lock + re-read-merge + temp rename.
 ///
 /// All error paths include `target` in the returned [`std::io::Error`] so the
 /// warn-log in [`RpcCacheStore::persist`] identifies which file failed.
+///
+/// Lock acquisition failure degrades to an unlocked write with a `warn!`.
+/// A missing or corrupt on-disk file during re-read degrades to persisting
+/// our entries only (with a `warn!` for corrupt).
 fn save_cache_atomic(cache: &SharedCache, target: &Path) -> std::io::Result<()> {
+    let _guard = match acquire_exclusive_lock(target) {
+        Ok(g) => Some(g),
+        Err(err) => {
+            warn!(
+                path = %target.display(),
+                error = %err,
+                "Failed to acquire RPC cache lock; persisting without lock",
+            );
+            None
+        }
+    };
+
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
+    fs::create_dir_all(dir).map_err(|e| {
+        std::io::Error::other(format!("failed to create directory {}: {e}", dir.display()))
+    })?;
+
+    // SharedCache has no iteration API — dump our entries to a temp file and re-read.
+    let our_tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
         std::io::Error::other(format!("failed to create temp file in {}: {e}", dir.display()))
     })?;
-    let tmp_path = tmp.path().to_path_buf();
-
-    // alloy's save_cache takes a PathBuf, not a Write.
-    cache.save_cache(tmp_path).map_err(|e| {
+    let our_tmp_path = our_tmp.path().to_path_buf();
+    cache.save_cache(our_tmp_path.clone()).map_err(|e| {
         std::io::Error::other(format!("failed to save cache for {}: {e}", target.display()))
     })?;
 
-    // Atomic rename. persist() consumes the NamedTempFile without deleting it.
-    tmp.persist(target).map_err(|e| {
+    let our_entries: Vec<CacheKv> = match fs::read_to_string(&our_tmp_path)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+    {
+        Ok(entries) => entries,
+        Err(err) => {
+            return Err(std::io::Error::other(format!(
+                "failed to re-read our cache dump for {}: {err}",
+                target.display()
+            )));
+        }
+    };
+    // Drop the NamedTempFile so it is unlinked; we only needed the dump bytes.
+    drop(our_tmp);
+
+    let disk_entries = match read_provider_cache(target) {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn!(
+                path = %target.display(),
+                error = %err,
+                "Failed to re-read on-disk RPC cache during merge; persisting our entries only",
+            );
+            Vec::new()
+        }
+    };
+
+    let merged = merge_kv_entries(disk_entries, our_entries);
+    let serialized = serde_json::to_vec(&merged).map_err(|e| {
         std::io::Error::other(format!(
-            "failed to rename temp file into {}: {}",
-            target.display(),
-            e.error,
+            "failed to serialize merged cache for {}: {e}",
+            target.display()
         ))
     })?;
+    write_bytes_atomic(target, &serialized)?;
     Ok(())
 }
-
-/// Envelope version accepted by this build.
-const ENVELOPE_VERSION: u32 = 1;
 
 /// On-disk envelope format shared by `--rpc.capture-file` (write) and
 /// `--rpc.replay-file` (read). Contains a transport-level cache dump,
 /// chain ID, and optional external environment snapshot.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct CacheFileEnvelope {
     /// Schema version (currently always 1, reserved for future format changes).
     version: u32,
@@ -274,41 +362,75 @@ impl CacheFileEnvelope {
         Ok(envelope)
     }
 
-    /// Atomically write this envelope to `path`.
+    /// Atomically write this envelope to `path` under a lock, merging with any
+    /// on-disk envelope already present (ours win on cache key collision;
+    /// `external_env` keeps ours if set, else the on-disk one).
+    ///
+    /// Lock contention blocks until the lock is free. Failure to create/acquire
+    /// the lock degrades to an unlocked write with a `warn!`. Write failures
+    /// remain hard errors.
     pub(super) fn save(&self, path: &Path) -> Result<()> {
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(dir).map_err(|e| {
-            EvmeError::FixtureError(format!(
-                "Failed to create cache file directory {}: {e}",
-                dir.display()
-            ))
-        })?;
+        let _guard = match acquire_exclusive_lock(path) {
+            Ok(g) => Some(g),
+            Err(err) => {
+                warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "Failed to acquire envelope lock; persisting without lock",
+                );
+                None
+            }
+        };
 
-        let serialized = serde_json::to_string_pretty(self).map_err(|e| {
-            EvmeError::FixtureError(format!(
-                "Failed to serialize envelope for {}: {e}",
-                path.display()
-            ))
-        })?;
+        let ours = self.to_merge_doc()?;
+        let to_write = if path.exists() {
+            match read_envelope(path) {
+                Ok(on_disk) => merge_envelope_for_persist(&on_disk, &ours, path)?,
+                // Version / chain_id / shape mismatches are hard errors (primary capture output).
+                // Corrupt or unreadable JSON degrades to ours-only with a warning.
+                Err(err) => {
+                    let msg = err.to_string();
+                    let hard = msg.contains("chain_id") ||
+                        msg.contains("version") ||
+                        msg.contains("Unsupported") ||
+                        msg.contains("Expected capture envelope") ||
+                        msg.contains("provider-cache");
+                    if hard {
+                        return Err(err);
+                    }
+                    warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "Failed to re-read on-disk envelope during merge; persisting our entries only",
+                    );
+                    ours
+                }
+            }
+        } else {
+            ours
+        };
 
-        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-            EvmeError::FixtureError(format!("Failed to create temp file in {}: {e}", dir.display()))
-        })?;
-        tmp.write_all(serialized.as_bytes())
-            .map_err(|e| EvmeError::FixtureError(format!("Failed to write envelope: {e}")))?;
-        tmp.persist(path).map_err(|e| {
-            EvmeError::FixtureError(format!(
-                "Failed to persist envelope to {}: {e}",
-                path.display()
-            ))
-        })?;
+        write_envelope_atomic(path, &to_write)
+    }
 
-        Ok(())
+    fn to_merge_doc(&self) -> Result<EnvelopeDoc> {
+        let cache: Vec<CacheKv> = serde_json::from_value(self.cache.clone()).map_err(|e| {
+            EvmeError::FixtureError(format!("Failed to decode envelope cache entries: {e}"))
+        })?;
+        Ok(EnvelopeDoc {
+            version: self.version,
+            chain_id: self.chain_id,
+            cache,
+            external_env: self
+                .external_env
+                .as_ref()
+                .map(|e| ExternalEnvDoc { bucket_capacities: e.bucket_capacities.clone() }),
+        })
     }
 }
 
 /// Snapshot of mega-evm external environment inputs not derivable from RPC.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalEnvSnapshot {
     /// SALT bucket capacity pairs `(bucket_id, capacity)`.
     #[serde(default)]
@@ -317,7 +439,8 @@ pub struct ExternalEnvSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::keccak256;
+    use alloy_primitives::{keccak256, B256};
+    use alloy_provider::layers::CacheLayer;
 
     use super::*;
 
@@ -391,5 +514,136 @@ mod tests {
         let err = CacheFileEnvelope::load(&p3).expect_err("missing version");
         let msg = format!("{err}");
         assert!(msg.contains("parse"), "error should mention parse: {msg}");
+    }
+
+    /// Interleaving: A holds only key A in memory; B persists key B; A then
+    /// persists — on-disk file must contain the union (B's entries survive).
+    #[test]
+    fn test_provider_cache_persist_merges_interleaved_disk_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+
+        let key_a = B256::repeat_byte(0xaa);
+        let key_b = B256::repeat_byte(0xbb);
+        let val_a = r#"{"result":"a"}"#.to_string();
+        let val_b = r#"{"result":"b"}"#.to_string();
+
+        // Process B persists first.
+        let cache_b = CacheLayer::new(64).cache();
+        cache_b.put(key_b, val_b.clone()).expect("put b");
+        RpcCacheStore::new(cache_b, path.clone()).persist().expect("persist b");
+
+        // Process A never loaded B's write; only has key_a in memory.
+        let cache_a = CacheLayer::new(64).cache();
+        cache_a.put(key_a, val_a.clone()).expect("put a");
+        RpcCacheStore::new(cache_a, path.clone()).persist().expect("persist a");
+
+        let loaded = CacheLayer::new(64).cache();
+        loaded.load_cache(path).expect("load");
+        assert_eq!(loaded.get(&key_a).as_deref(), Some(val_a.as_str()));
+        assert_eq!(loaded.get(&key_b).as_deref(), Some(val_b.as_str()));
+    }
+
+    /// On collision, the process that persists last wins for that key.
+    #[test]
+    fn test_provider_cache_persist_ours_wins_on_collision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+        let key = B256::repeat_byte(0x01);
+
+        let cache_b = CacheLayer::new(64).cache();
+        cache_b.put(key, "from-b".into()).expect("put");
+        RpcCacheStore::new(cache_b, path.clone()).persist().expect("persist b");
+
+        let cache_a = CacheLayer::new(64).cache();
+        cache_a.put(key, "from-a".into()).expect("put");
+        RpcCacheStore::new(cache_a, path.clone()).persist().expect("persist a");
+
+        let loaded = CacheLayer::new(64).cache();
+        loaded.load_cache(path).expect("load");
+        assert_eq!(loaded.get(&key).as_deref(), Some("from-a"));
+    }
+
+    /// Lock sidecar `<target>.lock` is created on persist and left in place.
+    #[test]
+    fn test_provider_cache_persist_creates_lock_sidecar_left_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-9.json");
+        let lock = lock_sidecar_path(&path);
+        assert!(!lock.exists());
+
+        let cache = CacheLayer::new(16).cache();
+        cache.put(B256::repeat_byte(1), "v".into()).expect("put");
+        RpcCacheStore::new(cache, path.clone()).persist().expect("persist");
+
+        assert!(path.exists(), "cache file written");
+        assert!(lock.exists(), "lock sidecar left in place");
+        // Sidecar is an empty (or near-empty) lock file, not the cache payload.
+        let lock_meta = fs::metadata(&lock).expect("lock meta");
+        assert!(lock_meta.len() == 0 || lock_meta.is_file());
+    }
+
+    /// Envelope persist merges on-disk entries the same way, with `chain_id` check.
+    #[test]
+    fn test_envelope_persist_merges_interleaved_disk_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        let key_a = keccak256("a");
+        let key_b = keccak256("b");
+
+        let cache_b = TransportCache::new();
+        cache_b
+            .merge(&serde_json::json!([{
+                "key": key_b,
+                "value": r#"{"result":"b"}"#,
+            }]))
+            .expect("seed b");
+        CacheFileEnvelope::new(&cache_b, 99, None).save(&path).expect("save b");
+
+        let cache_a = TransportCache::new();
+        cache_a
+            .merge(&serde_json::json!([{
+                "key": key_a,
+                "value": r#"{"result":"a"}"#,
+            }]))
+            .expect("seed a");
+        CacheFileEnvelope::new(&cache_a, 99, None).save(&path).expect("save a");
+
+        let env = CacheFileEnvelope::load(&path).expect("load");
+        let loaded = TransportCache::from_value(&env.cache).expect("from_value");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(env.chain_id, 99);
+    }
+
+    /// Envelope persist hard-errors on `chain_id` mismatch with on-disk file.
+    #[test]
+    fn test_envelope_persist_rejects_chain_id_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        let cache_b = TransportCache::new();
+        CacheFileEnvelope::new(&cache_b, 1, None).save(&path).expect("save b");
+
+        let cache_a = TransportCache::new();
+        let err = CacheFileEnvelope::new(&cache_a, 2, None).save(&path).expect_err("mismatch");
+        assert!(err.to_string().contains("chain_id"));
+    }
+
+    /// Corrupt on-disk provider cache during re-read does not abort; ours are written.
+    #[test]
+    fn test_provider_cache_persist_degrades_on_corrupt_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rpc-cache-1.json");
+        fs::write(&path, "not-json{{{").expect("corrupt");
+
+        let key = B256::repeat_byte(0xcc);
+        let cache = CacheLayer::new(16).cache();
+        cache.put(key, "ok".into()).expect("put");
+        RpcCacheStore::new(cache, path.clone()).persist().expect("persist");
+
+        let loaded = CacheLayer::new(16).cache();
+        loaded.load_cache(path).expect("load");
+        assert_eq!(loaded.get(&key).as_deref(), Some("ok"));
     }
 }

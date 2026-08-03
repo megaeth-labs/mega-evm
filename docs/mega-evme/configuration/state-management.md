@@ -217,6 +217,25 @@ The default cache directory is the platform cache directory:
 - **Linux**: `$XDG_CACHE_HOME/mega-evme/rpc`
 - **macOS**: `~/Library/Caches/mega-evme/rpc`
 
+### Concurrent cache-dir sharing
+
+Multiple `mega-evme` processes may share the same `--rpc.cache-dir` safely.
+On clean-exit persist, each process:
+
+1. Takes an exclusive advisory lock on a sidecar file next to the cache (`rpc-cache-{chain_id}.json.lock`).
+2. Re-reads the on-disk cache (a sibling process may have written since this process loaded).
+3. Merges its in-memory entries over the on-disk ones (same key → this process's value wins).
+4. Writes the result via a temp file and atomic rename, then releases the lock.
+
+The lock sidecar is left in place after the process exits; only the flock is released when the handle closes.
+Lock contention blocks for a short critical section rather than failing the finished run.
+If the lock cannot be acquired at all (for example the directory is not writable), persist logs a warning and falls back to an unlocked write.
+A missing or corrupt on-disk file during the re-read degrades to writing this process's entries only (also warned).
+
+Capture envelopes (`--rpc.capture-file`) use the same lock + re-read-merge path, with an additional check that the on-disk `chain_id` matches before merging.
+
+To consolidate historical per-worker cache directories offline, use [`cache merge`](../commands/cache.md).
+
 ### Cache Flags
 
 | Flag                          | Type  | Default            | Description                                                                                                                                                                                                                            |

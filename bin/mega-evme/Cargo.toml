@@ -48,6 +48,7 @@ op-alloy-rpc-types.workspace = true
 # misc
 clap = { workspace = true, features = ["default", "env"] }
 dirs.workspace = true
+fs2 = { version = "0.4", default-features = false }
 reqwest = "0.13"
 serde.workspace = true
 serde_json.workspace = true

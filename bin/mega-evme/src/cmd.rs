@@ -26,6 +26,8 @@ pub enum Commands {
     Tx(crate::tx::Cmd),
     /// Replay a transaction from RPC
     Replay(crate::replay::Cmd),
+    /// Offline RPC cache utilities (`cache merge`, …)
+    Cache(crate::cache::Cmd),
 }
 
 /// Error types for the main command system
@@ -53,6 +55,7 @@ impl MainCmd {
             Commands::Run(cmd) => cmd.run().await.map_err(Error::from),
             Commands::Tx(cmd) => cmd.run().await.map_err(Error::from),
             Commands::Replay(cmd) => cmd.run().await.map_err(Error::from),
+            Commands::Cache(cmd) => cmd.run().map_err(Error::from),
         }
         .inspect_err(|e| {
             error!(err = ?e, "Error executing command");
