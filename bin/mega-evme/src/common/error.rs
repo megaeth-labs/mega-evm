@@ -56,6 +56,23 @@ pub enum EvmeError {
     #[error("Unsupported transaction type: {0}")]
     UnsupportedTxType(u8),
 
+    /// A `replay --verify-receipt` run found at least one local replay that did
+    /// not reproduce the on-chain receipt.
+    ///
+    /// Distinct from the infrastructure error variants so a verification
+    /// mismatch can be told apart from a target that could not be replayed or
+    /// verified at all.
+    #[error(
+        "Receipt verification mismatch: {mismatched} of {total} verified transaction(s) did \
+         not reproduce the on-chain receipt"
+    )]
+    VerificationMismatch {
+        /// Number of verified transactions whose replay diverged.
+        mismatched: usize,
+        /// Number of transactions that were verified.
+        total: usize,
+    },
+
     /// Code hash mismatch
     #[error("Code hash mismatch: expected {expected}, computed {computed}")]
     CodeHashMismatch {

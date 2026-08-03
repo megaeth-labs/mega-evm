@@ -33,7 +33,11 @@ use crate::{
     run, ChainArgs, EvmeState,
 };
 
-use super::{batch, ReplayError, Result};
+use super::{
+    batch,
+    verify::{self, VerificationOutcome},
+    ReplayError, Result,
+};
 
 /// Replay a transaction from RPC
 #[derive(Parser, Debug)]
@@ -101,6 +105,18 @@ pub struct Cmd {
     /// status. Incompatible with transaction overrides and `--override.spec`.
     #[arg(long = "dump-fixture", value_name = "FILE")]
     pub dump_fixture: Option<std::path::PathBuf>,
+
+    /// Verify every replayed transaction against its on-chain receipt.
+    ///
+    /// Fetches the receipt of each target and compares the success status, the
+    /// gas used, and the emitted logs (count plus each log's address, topics,
+    /// and data). The verdict is reported per transaction, and a mismatch makes
+    /// the run exit non-zero. A target whose receipt cannot be fetched, or whose
+    /// receipt describes a different inclusion than the replayed block, is
+    /// reported as an infrastructure failure rather than a mismatch. Supported
+    /// in both single-transaction and batch mode.
+    #[arg(long = "verify-receipt")]
+    pub verify_receipt: bool,
 }
 
 /// Resolved provider and associated metadata from `--rpc` / `--rpc.capture-file` /
@@ -120,6 +136,8 @@ pub(super) struct ReplayOutcome {
     pub receipt: OpTxReceipt,
     /// Self-validating fixture draft, present iff `--dump-fixture` was given.
     pub fixture: Option<super::fixture::FixtureDraft>,
+    /// On-chain receipt verdict, present iff `--verify-receipt` was given.
+    pub verification: Option<VerificationOutcome>,
 }
 
 /// Intermediate context fetched from RPC before execution.
@@ -289,6 +307,16 @@ impl Cmd {
     /// Replay the single transaction named by the positional argument.
     async fn run_single(&self, pctx: &mut ProviderContext, tx_hash: B256) -> Result<()> {
         let rctx = self.fetch_replay_context(&pctx.provider, tx_hash, pctx.chain_id).await?;
+        // A pending transaction has no receipt to verify against; fail clearly
+        // instead of replaying it and then surfacing the receipt lookup's
+        // confusing "transaction is unknown to the endpoint".
+        if self.verify_receipt && rctx.target_tx.block_number.is_none() {
+            return Err(ReplayError::Other(
+                "--verify-receipt does not support pending transactions: the comparison needs \
+                 the on-chain receipt, which does not exist yet"
+                    .to_string(),
+            ));
+        }
         let external_envs = self.apply_external_envs(pctx)?;
         self.execute_and_report(&pctx.provider, &rctx, external_envs).await
     }
@@ -296,7 +324,14 @@ impl Cmd {
     /// Replay a batch of transactions through the shared per-block driver.
     async fn run_batch(&self, pctx: &mut ProviderContext, mode: &batch::BatchMode) -> Result<()> {
         let external_envs = self.apply_external_envs(pctx)?;
-        batch::run(&pctx.provider, pctx.chain_id, mode, external_envs, self.output_args.json).await
+        batch::run(
+            &pctx.provider,
+            pctx.chain_id,
+            mode,
+            external_envs,
+            batch::ReportArgs { json: self.output_args.json, verify_receipt: self.verify_receipt },
+        )
+        .await
     }
 
     /// Resolve the external environment and hand the capture snapshot to the
@@ -324,12 +359,19 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
     {
         let result = self.execute(provider, rctx, external_envs).await?;
+        // Read the verdict before `result.fixture` is moved below; the mismatch
+        // is reported after every artifact has been written, so a failing
+        // verification never costs the user the output it was derived from.
+        let mismatched = result.verification.as_ref().is_some_and(|v| !v.matched);
         self.output_results(&result)?;
         // Write the self-validating fixture (re-executes the isolated unit through
         // state-test and cross-checks it against the replay before writing).
         if let (Some(path), Some(draft)) = (&self.dump_fixture, result.fixture) {
             super::fixture::finalize_and_write(draft, path)?;
             info!(path = %path.display(), "Wrote self-validating fixture");
+        }
+        if mismatched {
+            return Err(ReplayError::VerificationMismatch { mismatched: 1, total: 1 });
         }
         Ok(())
     }
@@ -582,6 +624,23 @@ impl Cmd {
             None
         };
 
+        // For `--verify-receipt`, fetch the on-chain receipt here — before the
+        // executor borrows the database, and with the same call shape the
+        // fixture path uses — so `--rpc.capture-file` records it and a later
+        // offline run verifies without network access. It is compared against
+        // the replay's own receipt once the block is finished.
+        let onchain_receipt = if self.verify_receipt {
+            let receipt = verify::fetch_receipt(provider, ctx.tx_hash).await?;
+            // A receipt describing a different inclusion than the replayed block
+            // would compare the replay against the wrong on-chain execution:
+            // that is an infrastructure failure, not a verification mismatch.
+            verify::check_inclusion(receipt.block_hash(), ctx.block.hash())
+                .map_err(ReplayError::RpcError)?;
+            Some(receipt)
+        } else {
+            None
+        };
+
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
         let block_executor_factory = MegaBlockExecutorFactory::new(
             &hardforks,
@@ -763,6 +822,16 @@ impl Cmd {
             ctx.preceding_tx_hashes.len() as u64,
         );
 
+        let verification = onchain_receipt.as_ref().map(|onchain| {
+            verify::compare(
+                &verify::ReceiptFacts::from_receipt(&onchain.inner),
+                &verify::ReceiptFacts::from_receipt(&receipt),
+            )
+        });
+        if let Some(verification) = &verification {
+            debug!(matched = verification.matched, "On-chain receipt verified");
+        }
+
         Ok(ReplayOutcome {
             outcome: EvmeOutcome {
                 pre_execution_nonce,
@@ -773,6 +842,7 @@ impl Cmd {
             },
             receipt,
             fixture,
+            verification,
         })
     }
 
@@ -787,6 +857,9 @@ impl Cmd {
             summary.fill_trace_and_dump(&result.outcome, &self.trace_args, &self.dump_args)?;
             summary.receipt =
                 Some(serde_json::to_value(&result.receipt).expect("failed to serialize receipt"));
+            summary.verification = result.verification.as_ref().map(|verification| {
+                serde_json::to_value(verification).expect("failed to serialize verification")
+            });
             println!(
                 "{}",
                 serde_json::to_string_pretty(&summary).expect("failed to serialize output")
@@ -798,6 +871,10 @@ impl Cmd {
                 result.outcome.exec_time,
             );
             print_receipt(&result.receipt);
+            if let Some(verification) = &result.verification {
+                println!();
+                println!("{}", verification.verdict_line());
+            }
             print_execution_trace(
                 result.outcome.trace_data.as_deref(),
                 self.trace_args.trace_output_file.as_deref(),
@@ -956,6 +1033,25 @@ mod tests {
                 "unexpected rejection for {extra:?}: {message}"
             );
         }
+    }
+
+    /// `--verify-receipt` is a whole-corpus flag: both replay modes take it.
+    #[test]
+    fn test_verify_receipt_is_accepted_in_both_modes() {
+        for extra in [vec![TX], vec!["--block", "1"], vec!["--tx-file", "/tmp/list.txt"]] {
+            let mut argv = extra.clone();
+            argv.push("--verify-receipt");
+            let cmd = parse(&argv).expect("--verify-receipt should parse");
+            assert!(cmd.verify_receipt, "the flag must be recorded for {extra:?}");
+            cmd.validate()
+                .unwrap_or_else(|e| panic!("--verify-receipt must be accepted for {extra:?}: {e}"));
+        }
+    }
+
+    /// The flag defaults to off, so a replay without it does no receipt fetch.
+    #[test]
+    fn test_verify_receipt_defaults_to_off() {
+        assert!(!parse(&[TX]).expect("parse").verify_receipt);
     }
 
     #[test]

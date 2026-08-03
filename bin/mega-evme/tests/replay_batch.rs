@@ -182,6 +182,29 @@ fn test_replay_tx_file_reports_unresolved_targets_and_exits_nonzero() {
     assert_eq!(lines[1]["success"].as_bool(), Some(true), "the resolvable target still replays");
 }
 
+/// `--verify-receipt` against an envelope that carries no receipts: every target
+/// becomes an `rpc` error entry (unverified), never a mismatch, and the run
+/// exits non-zero.
+///
+/// The development envelope is captured by replays, which do not fetch receipts,
+/// so this pins the endpoint-cannot-serve-the-receipt path end to end.
+#[test]
+#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
+fn test_replay_block_verify_receipt_without_receipts_reports_rpc_errors() {
+    let stdout = replay(&["--block", &BLOCK.to_string(), "--verify-receipt", "--json"], false);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    for line in &lines {
+        assert_eq!(
+            line["error"]["kind"].as_str(),
+            Some("rpc"),
+            "a receipt the envelope cannot serve is an infrastructure error: {line}"
+        );
+        assert!(line.get("verification").is_none(), "an unverified target carries no verdict");
+    }
+}
+
 /// Batch mode rejects the single-transaction-only flags before doing any work.
 #[test]
 #[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]

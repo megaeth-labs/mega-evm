@@ -275,6 +275,10 @@ pub struct ExecutionSummary {
     /// Transaction receipt (present only for `tx` command)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<serde_json::Value>,
+    /// On-chain receipt verification verdict (present only for `replay
+    /// --verify-receipt`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<serde_json::Value>,
 }
 
 impl ExecutionSummary {

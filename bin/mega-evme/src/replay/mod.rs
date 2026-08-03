@@ -7,6 +7,7 @@ mod batch;
 mod cmd;
 mod fixture;
 mod hardforks;
+mod verify;
 
 pub use cmd::Cmd;
 pub use hardforks::*;

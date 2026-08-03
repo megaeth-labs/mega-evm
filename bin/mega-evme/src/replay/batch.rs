@@ -20,6 +20,7 @@ use std::{
 };
 
 use alloy_consensus::{BlockHeader, Transaction as _};
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
@@ -47,7 +48,20 @@ use crate::{
     ChainArgs, EvmeState,
 };
 
-use super::{cmd::retrieve_block_env, ReplayError, Result};
+use super::{
+    cmd::retrieve_block_env,
+    verify::{self, ReceiptFacts, VerificationOutcome},
+    ReplayError, Result,
+};
+
+/// How a batch run reports its targets.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ReportArgs {
+    /// Emit one NDJSON line per target instead of the human-readable summary.
+    pub json: bool,
+    /// Verify every target against its on-chain receipt.
+    pub verify_receipt: bool,
+}
 
 /// What a batch run was asked to replay.
 #[derive(Debug)]
@@ -113,6 +127,8 @@ struct ExecutedTx {
     contract_address: Option<Address>,
     exec_time: Duration,
     receipt: OpTxReceipt,
+    /// On-chain receipt verdict, present iff `--verify-receipt` was given.
+    verification: Option<VerificationOutcome>,
 }
 
 /// A target transaction that hit an infrastructure failure.
@@ -175,12 +191,16 @@ struct BatchErrorBody<'a> {
 ///
 /// Returns an error when at least one target produced an infrastructure error
 /// entry, so the process exits non-zero; execution outcomes never fail the run.
+/// With `--verify-receipt`, a run in which every target replayed but some
+/// diverged from its on-chain receipt fails with
+/// [`ReplayError::VerificationMismatch`] instead — a distinct variant, so a
+/// divergence is never confused with a target that could not be replayed.
 pub(super) async fn run<P>(
     provider: &P,
     chain_id: u64,
     mode: &BatchMode,
     external_envs: EvmeExternalEnvs,
-    json: bool,
+    report: ReportArgs,
 ) -> Result<()>
 where
     P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
@@ -188,6 +208,8 @@ where
     let start = Instant::now();
     let mut replayed = 0usize;
     let mut failed = 0usize;
+    let mut verified = 0usize;
+    let mut mismatched = 0usize;
 
     let jobs = match mode {
         BatchMode::Block(number) => {
@@ -206,29 +228,49 @@ where
             );
             for failure in failures {
                 failed += 1;
-                emit(&BatchEntry::Failed(failure), json);
+                emit(&BatchEntry::Failed(failure), report.json);
             }
             jobs
         }
     };
 
     for job in jobs {
-        for entry in replay_block(provider, chain_id, job, external_envs.clone()).await {
-            match entry {
-                BatchEntry::Executed(_) => replayed += 1,
+        for entry in
+            replay_block(provider, chain_id, job, external_envs.clone(), report.verify_receipt)
+                .await
+        {
+            match &entry {
+                BatchEntry::Executed(tx) => {
+                    replayed += 1;
+                    if let Some(verification) = &tx.verification {
+                        verified += 1;
+                        if !verification.matched {
+                            mismatched += 1;
+                        }
+                    }
+                }
                 BatchEntry::Failed(_) => failed += 1,
             }
-            emit(&entry, json);
+            emit(&entry, report.json);
         }
     }
 
     info!(replayed, failed, elapsed = ?start.elapsed(), "Batch replay finished");
+    if report.verify_receipt {
+        info!(verified, mismatched, "On-chain receipt verification finished");
+    }
 
+    // Infrastructure failures keep their own error: a target that never replayed
+    // was also never verified, so reporting it as a mismatch would overstate
+    // what the run actually found.
     if failed > 0 {
         return Err(ReplayError::Other(format!(
             "{failed} of {} target transaction(s) failed to replay",
             replayed + failed
         )));
+    }
+    if mismatched > 0 {
+        return Err(ReplayError::VerificationMismatch { mismatched, total: verified });
     }
     Ok(())
 }
@@ -285,6 +327,7 @@ async fn replay_block<P>(
     chain_id: u64,
     job: BlockJob,
     external_envs: EvmeExternalEnvs,
+    verify_receipt: bool,
 ) -> Vec<BatchEntry>
 where
     P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
@@ -305,6 +348,17 @@ where
     let parent_block = match fetch_block(provider, number - 1).await {
         Ok(block) => block,
         Err(e) => return fail_all(&targets, BatchErrorKind::Rpc, &e.to_string()),
+    };
+
+    // Fetch the on-chain receipts before the block runs, so the comparison
+    // afterwards is a pure function over the two receipts. A receipt that cannot
+    // be fetched, or that describes a different inclusion than this block, is
+    // recorded as a per-target failure here and reported as an `rpc` error entry
+    // below: such a target is unverified, never mismatched.
+    let onchain_receipts = if verify_receipt {
+        fetch_target_receipts(provider, &targets, block.hash()).await
+    } else {
+        BTreeMap::new()
     };
 
     let hardforks = get_hardfork_config(chain_id);
@@ -457,6 +511,26 @@ where
                     Some(block_hash),
                     target.tx_index,
                 );
+                let verification = if verify_receipt {
+                    match onchain_receipts.get(&target.tx_hash) {
+                        Some(Ok(onchain)) => {
+                            Some(verify::compare(onchain, &ReceiptFacts::from_receipt(&receipt)))
+                        }
+                        // Without an on-chain receipt there is nothing to compare
+                        // against: report the target as unverified.
+                        unverified => {
+                            let message = match unverified {
+                                Some(Err(message)) => message.clone(),
+                                _ => "No on-chain receipt was fetched for this transaction"
+                                    .to_string(),
+                            };
+                            entries.push(failure(target.tx_hash, BatchErrorKind::Rpc, message));
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
                 entries.push(BatchEntry::Executed(Box::new(ExecutedTx {
                     tx_hash: target.tx_hash,
                     block_number: number,
@@ -465,6 +539,7 @@ where
                     contract_address,
                     exec_time: target.exec_time,
                     receipt,
+                    verification,
                 })));
             }
         }
@@ -493,6 +568,40 @@ where
     }
 
     entries
+}
+
+/// Fetch the on-chain receipt of every target of a block.
+///
+/// Each target maps either to the consensus facts its receipt reports, or to the
+/// message explaining why it could not be verified (the endpoint failed the
+/// call or pruned the receipt, or the receipt describes a different inclusion
+/// than the block being replayed).
+async fn fetch_target_receipts<P>(
+    provider: &P,
+    targets: &[B256],
+    block_hash: B256,
+) -> BTreeMap<B256, std::result::Result<ReceiptFacts, String>>
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    let mut receipts = BTreeMap::new();
+    for tx_hash in targets {
+        let fetched = match verify::fetch_receipt(provider, *tx_hash).await {
+            Ok(receipt) => match verify::check_inclusion(receipt.block_hash(), block_hash) {
+                Ok(()) => Ok(ReceiptFacts::from_receipt(&receipt.inner)),
+                Err(message) => Err(message),
+            },
+            // The reported entry already carries the `rpc` kind, so the error's
+            // own "RPC error" prefix would only repeat it.
+            Err(ReplayError::RpcError(message)) => Err(message),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(message) = &fetched {
+            warn!(tx_hash = %tx_hash, %message, "Could not fetch the on-chain receipt");
+        }
+        receipts.insert(*tx_hash, fetched);
+    }
+    receipts
 }
 
 /// Fetch a block by number, using the same call shape as the single-transaction path.
@@ -536,6 +645,9 @@ fn emit(entry: &BatchEntry, json: bool) {
                     ExecutionSummary::from_result(&tx.exec_result, tx.contract_address);
                 summary.receipt =
                     Some(serde_json::to_value(&tx.receipt).expect("failed to serialize receipt"));
+                summary.verification = tx.verification.as_ref().map(|verification| {
+                    serde_json::to_value(verification).expect("failed to serialize verification")
+                });
                 serde_json::to_string(&BatchResultLine {
                     tx_hash: tx.tx_hash,
                     block_number: tx.block_number,
@@ -561,6 +673,10 @@ fn emit(entry: &BatchEntry, json: bool) {
             );
             print_execution_summary(&tx.exec_result, tx.contract_address, tx.exec_time);
             print_receipt(&tx.receipt);
+            if let Some(verification) = &tx.verification {
+                println!();
+                println!("{}", verification.verdict_line());
+            }
         }
         BatchEntry::Failed(tx) => {
             println!();

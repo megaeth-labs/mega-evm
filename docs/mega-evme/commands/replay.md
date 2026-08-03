@@ -1,5 +1,5 @@
 ---
-description: Fetch and re-execute one or many on-chain transactions with optional overrides and tracing.
+description: Fetch and re-execute one or many on-chain transactions with optional overrides, tracing, and on-chain receipt verification.
 ---
 
 # replay
@@ -111,6 +111,8 @@ Execution outcomes are not errors: a reverted or halted transaction is a normal 
 Without `--json`, each transaction is printed with a header naming its hash, block, and index, followed by the same summary and receipt the single-transaction mode prints.
 A final one-line summary (transactions replayed, transactions failed, elapsed time) is logged at `INFO` level, so pass `-vvv` to see it.
 
+With [`--verify-receipt`](#receipt-verification), each result line additionally carries a `verification` object.
+
 ### Exit Status
 
 A batch run exits `0` when every requested transaction produced an execution result, and `1` when any of them produced an error entry.
@@ -142,6 +144,118 @@ Count the transactions that did not succeed:
 
 ```bash
 jq -c 'select(.error != null or .success == false)' results.ndjson | wc -l
+```
+
+## Receipt Verification
+
+Replaying a transaction only proves that the local EVM produced _some_ result; equivalence verification needs that result checked against what the chain recorded.
+`--verify-receipt` builds that check into the tool: it fetches the on-chain receipt of every replayed transaction and compares it against the receipt the replay produced, so verifying an upgrade is one command over one transaction list instead of a replay run plus a separate receipt-diffing pipeline.
+
+### `--verify-receipt`
+
+Verify every replayed transaction against its on-chain receipt.
+Supported in both single-transaction and [batch](#batch-replay) mode.
+
+Three dimensions are compared:
+
+- **Status** — the success flag.
+- **Gas used** — the transaction's gas, not the block's cumulative gas.
+- **Logs** — the number of logs, and each log's `address`, `topics`, and `data`.
+
+Logs are compared explicitly rather than inferred from gas: `LOG` gas depends on topic count and data length, never on content, so two executions can burn identical gas yet emit different log payloads.
+
+The receipt is fetched with the same call the [fixture dump](#self-validating-fixture-dump) uses, so a run with `--rpc.capture-file` records it and a later `--rpc.replay-file` run verifies the same transaction offline.
+An envelope captured without `--verify-receipt` (or by any earlier run that never needed a receipt) holds no receipts, so verifying against it fails the receipt fetch — capture once online with the flag, then re-verify offline as often as you like.
+
+### Verified, Unverified, and Mismatched
+
+A transaction is only reported as mismatched when both receipts were compared and disagreed.
+Anything that prevents the comparison from running is an infrastructure failure — the transaction is _unverified_, which is a different finding from a divergence:
+
+- The endpoint fails the receipt call, or has pruned the receipt below its retention height (common on non-archive endpoints): reported as an `rpc` failure.
+- The receipt describes a different inclusion than the replayed block (its `blockHash` differs — a reorg in progress, or a load-balanced endpoint serving divergent views): reported as an `rpc` failure, because comparing against it would compare the replay to the wrong on-chain execution.
+- The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
+
+In batch mode each of these becomes an error entry for that transaction, exactly like any other infrastructure failure.
+
+Transaction overrides and `--override.spec` are still accepted with `--verify-receipt`, but they make the replay a what-if that the chain never executed, so the comparison will normally report a mismatch.
+
+### Output
+
+With `--json`, the verdict is a `verification` object — added to the single-transaction summary, and to each batch result line.
+The field is absent entirely without the flag.
+
+A match carries nothing else:
+
+```json
+{ "match": true }
+```
+
+A mismatch carries a `diff` holding only the dimensions that disagreed, each as `{"onchain": …, "replay": …}`:
+
+```json
+{
+  "match": false,
+  "diff": {
+    "status": { "onchain": true, "replay": false },
+    "gas_used": { "onchain": 75514, "replay": 75500 },
+    "logs": {
+      "count": { "onchain": 2, "replay": 1 },
+      "first_mismatch": {
+        "index": 0,
+        "field": "address",
+        "onchain": "0x00000000000000000000000000000000000000aa",
+        "replay": "0x00000000000000000000000000000000000000bb"
+      }
+    }
+  }
+}
+```
+
+Under `logs`, `count` is present when the two sides emitted a different number of logs, and `first_mismatch` names the first log both sides emitted whose contents differ — its `field` is `address`, `topics`, or `data`, and the two values are that field's contents on each side.
+Both can appear at once, which distinguishes truncated logs from rewritten ones.
+
+Without `--json`, each transaction gets one verdict line after its usual output:
+
+```
+verification: MATCH
+verification: MISMATCH (gas_used: onchain 75514 vs replay 75500)
+```
+
+The mismatch line names every dimension that disagreed, comma-separated.
+
+### Exit Status
+
+A run in which every target replayed and every verification matched exits `0`.
+A verification mismatch exits non-zero through a dedicated error (`Receipt verification mismatch: N of M verified transaction(s) did not reproduce the on-chain receipt`), reported after every result line has been written.
+Infrastructure failures keep their own non-zero exit and take precedence in a batch run: a target that never replayed was also never verified, so reporting it as a mismatch would overstate what the run found.
+
+### Examples
+
+Verify one transaction against a live RPC:
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --verify-receipt 0xabc123...
+```
+
+Verify a whole corpus in one process and collect the divergences:
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
+  --tx-file ./corpus.txt --verify-receipt --json > results.ndjson
+
+jq -c 'select(.verification.match == false)' results.ndjson    # mismatched
+jq -c 'select(.error != null)' results.ndjson                  # unverified
+```
+
+Capture once online, then re-verify the same corpus offline:
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc \
+  --rpc.capture-file ./corpus.cache.json --tx-file ./corpus.txt --verify-receipt --json
+
+mega-evme replay --rpc.replay-file ./corpus.cache.json \
+  --tx-file ./corpus.txt --verify-receipt --json
 ```
 
 ## RPC Cache File
@@ -294,6 +408,8 @@ Options marked _(single transaction only)_ are rejected in [batch mode](#batch-r
 
 - **Batch replay** — Replay many transactions in one process via `--tx-file` / `--block`.
   See [Batch Replay](#batch-replay) above.
+- **Receipt verification** — Check every replayed transaction against its on-chain receipt via `--verify-receipt`.
+  See [Receipt Verification](#receipt-verification) above.
 - **SALT buckets** — Configure SALT bucket capacity for dynamic storage gas pricing.
   See [SALT Buckets](../configuration/salt-buckets.md).
 - **State dump** _(single transaction only)_ — Dump or load pre/post-state snapshots.
@@ -348,6 +464,12 @@ mega-evme replay --rpc https://mainnet.megaeth.com/rpc --override.spec Rex2 0xab
 
 ```bash
 mega-evme replay --rpc https://mainnet.megaeth.com/rpc --block 22945844 --json
+```
+
+**Verify a whole block against its on-chain receipts**
+
+```bash
+mega-evme replay --rpc https://mainnet.megaeth.com/rpc --block 22945844 --verify-receipt --json
 ```
 
 ## See Also
