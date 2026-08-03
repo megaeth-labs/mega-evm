@@ -103,7 +103,8 @@ pub enum EvmeError {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BatchFailureCounts {
     /// Targets that failed for an execution, setup, or definitive-answer reason
-    /// (unknown or pending transaction, block executor rejection).
+    /// (unknown or pending transaction, block executor rejection, a fixture the
+    /// run was asked to write and could not).
     pub execution: usize,
     /// Targets whose question went unanswered because an RPC call failed.
     pub rpc: usize,
@@ -117,7 +118,7 @@ impl core::fmt::Display for BatchFailureCounts {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "{} of {} target transaction(s) failed to replay ({} execution, {} rpc)",
+            "{} of {} target transaction(s) failed ({} execution, {} rpc)",
             self.execution + self.rpc,
             self.total,
             self.execution,

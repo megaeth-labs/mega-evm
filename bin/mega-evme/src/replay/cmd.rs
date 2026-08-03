@@ -17,7 +17,7 @@ use mega_evm::{
     BlockLimits, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
     MegaEvmFactory, MegaHardforks, MegaSpecId,
 };
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use alloy_network::ReceiptResponse;
 use op_alloy_rpc_types::Transaction;
@@ -199,13 +199,17 @@ impl Cmd {
         match run_result {
             Ok(()) => Ok(persist_result?),
             Err(run_err) => {
-                // Surface the original error; a persist failure on top of it is
-                // logged, not propagated, so it cannot mask the root cause.
+                // The run error is the root cause and keeps the exit code, so
+                // the persist failure is not propagated. It is still reported on
+                // stderr the way the central reporter reports a failure — a
+                // capture file that never reached disk must not be silent just
+                // because the run it captured also failed.
                 if let Err(persist_err) = persist_result {
-                    warn!(
+                    error!(
                         error = %persist_err,
                         "Failed to persist RPC cache while handling an earlier error",
                     );
+                    eprintln!("error: {persist_err}");
                 }
                 Err(run_err)
             }
@@ -733,9 +737,7 @@ impl Cmd {
             &mut inspector,
         );
 
-        block_executor
-            .apply_pre_execution_changes()
-            .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+        block_executor.apply_pre_execution_changes().map_err(ReplayError::BlockExecutionError)?;
 
         // Execute preceding transactions
         info!(preceding_count = ctx.preceding_tx_hashes.len(), "Executing preceding transactions",);
@@ -748,11 +750,11 @@ impl Cmd {
                 .ok_or(ReplayError::TransactionNotFound(*tx_hash))?;
             let outcome = block_executor
                 .run_transaction(tx.as_recovered())
-                .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+                .map_err(ReplayError::BlockExecutionError)?;
             trace!(tx_hash = %tx_hash, ?outcome, "Preceding transaction executed");
             block_executor
                 .commit_transaction_outcome(outcome)
-                .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+                .map_err(ReplayError::BlockExecutionError)?;
         }
 
         // Clear block hash reads accumulated by the preceding transactions so the
@@ -774,9 +776,8 @@ impl Cmd {
             .unwrap_or(0);
 
         block_executor.inspector_mut().fuse();
-        let outcome = block_executor
-            .run_transaction(wrapped_tx)
-            .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+        let outcome =
+            block_executor.run_transaction(wrapped_tx).map_err(ReplayError::BlockExecutionError)?;
         trace!(tx_hash = %ctx.target_tx.inner.inner.tx_hash(), ?outcome, "Target transaction executed");
         let exec_result = outcome.inner.result.clone();
         let evm_state = outcome.inner.state.clone();
@@ -841,12 +842,11 @@ impl Cmd {
 
         let gas_used = block_executor
             .commit_transaction_outcome(outcome)
-            .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+            .map_err(ReplayError::BlockExecutionError)?;
         let duration = start.elapsed();
 
-        let (evm, block_result) = block_executor
-            .finish()
-            .map_err(|e| ReplayError::Other(format!("Block execution error: {e}")))?;
+        let (evm, block_result) =
+            block_executor.finish().map_err(ReplayError::BlockExecutionError)?;
         let (db, _) = evm.finish();
         db.merge_transitions(BundleRetention::Reverts);
         let receipt_envelope = block_result.receipts.last().unwrap().clone();

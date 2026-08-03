@@ -454,6 +454,51 @@ fn test_batch_dump_fixture_dir_writes_validatable_file() {
     result.unwrap_or_else(|e| panic!("dumped fixture failed to validate: {e}"));
 }
 
+/// A target whose fixture could not be written is still verified against its
+/// on-chain receipt: the failed dump is reported on the target's result line
+/// alongside the verdict, and fails the run as an execution-class failure.
+#[test]
+fn test_batch_fixture_write_failure_keeps_the_receipt_verification() {
+    let list = tx_file("batch_dump_verify");
+    let dir =
+        std::env::temp_dir().join(format!("mega_evme_batch_dump_verify_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // Pre-create the fixture path so the dump is refused without --overwrite.
+    std::fs::create_dir_all(&dir).expect("create dump dir");
+    std::fs::write(dir.join(format!("{TX}.json")), "{}").expect("pre-create fixture file");
+
+    let run = replay(
+        &cache(),
+        &[
+            "--tx-file",
+            list.to_str().unwrap(),
+            "--verify-receipt",
+            "--dump-fixture-dir",
+            dir.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(run.code(), 1, "a failed dump exits 1.\nstderr: {}", run.stderr);
+    let lines = run.ndjson();
+    assert_eq!(lines.len(), 1, "one line per requested transaction");
+    assert!(lines[0].get("error").is_none(), "a failed dump is not an error entry: {}", lines[0]);
+    assert_eq!(
+        lines[0]["verification"],
+        serde_json::json!({ "match": true }),
+        "the verification still ran: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0]["fixture"]["error"].as_str().is_some_and(|m| m.contains("already exists")),
+        "the failed dump is reported on the result line: {}",
+        lines[0]
+    );
+    assert_eq!(run.error_object()["error"]["kind"].as_str(), Some("execution-error"));
+}
+
 /// Without `--overwrite`, a second dump into a directory that already holds the
 /// fixture fails that target as an infrastructure error.
 #[test]
@@ -484,18 +529,22 @@ fn test_batch_dump_fixture_dir_refuses_overwrite_without_flag() {
             "--json",
         ],
     );
-    // The dump failed for the target, which is an execution-class failure.
+    // The dump failed for the target, which is an execution-class failure. The
+    // target still replayed, so it keeps its result line and reports the failed
+    // dump on it.
     assert_eq!(second.code(), 1, "a failed dump exits 1.\nstderr: {}", second.stderr);
     let lines = second.ndjson();
     assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["error"]["kind"].as_str(), Some("execution"));
+    assert!(lines[0].get("error").is_none(), "a failed dump is not an error entry: {}", lines[0]);
+    assert!(lines[0]["receipt"].is_object(), "the replayed target keeps its receipt: {}", lines[0]);
     assert!(
-        lines[0]["error"]["message"]
+        lines[0]["fixture"]["error"]
             .as_str()
             .is_some_and(|m| m.contains("already exists") && m.contains("--overwrite")),
         "expected overwrite refusal: {}",
         lines[0]
     );
+    assert_eq!(second.error_object()["error"]["kind"].as_str(), Some("execution-error"));
 
     // With --overwrite the second dump succeeds and replaces the file.
     let third = replay(

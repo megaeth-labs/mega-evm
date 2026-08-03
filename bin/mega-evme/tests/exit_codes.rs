@@ -20,6 +20,14 @@ const TX_OK: &str = "0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2
 /// A hash the capture holds no response for: the question goes unanswered.
 const UNANSWERABLE_TX: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 
+/// Request fingerprint of a state read `TX_OK` performs while it executes.
+///
+/// Entries are keyed by the request, so dropping this one from a copy of the
+/// capture models an endpoint that stops answering mid-execution — the read
+/// then fails inside the EVM and surfaces as a block execution error.
+const IN_EXECUTION_STATE_READ: &str =
+    "0x0d9aee1b171e0c4a2be0107def891d838cc94d71e4046cb95b00a1c2a61cffed";
+
 /// Outcome of one `mega-evme` invocation.
 struct Run {
     code: Option<i32>,
@@ -74,6 +82,23 @@ fn replay(args: &[&str]) -> Run {
     run(&argv)
 }
 
+/// Write a copy of the committed capture without the entry `key` answers, and
+/// return its path.
+fn cache_without_entry(name: &str, key: &str) -> std::path::PathBuf {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
+            .expect("parse offline cache");
+    let entries = envelope["cache"].as_array_mut().expect("cache entries");
+    let before = entries.len();
+    entries.retain(|entry| entry["key"].as_str() != Some(key));
+    assert_eq!(entries.len() + 1, before, "the capture must hold exactly one entry for {key}");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_exit_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write pruned cache");
+    path
+}
+
 /// Write a `--tx-file` holding `contents`, and return its path.
 fn tx_file(name: &str, contents: &str) -> std::path::PathBuf {
     let path =
@@ -124,6 +149,38 @@ fn test_offline_cache_miss_exits_rpc_failure_with_a_json_error_object() {
     assert!(
         error["error"]["message"].as_str().is_some_and(|m| m.contains("cache miss")),
         "the message must explain the miss: {error}"
+    );
+}
+
+/// A state read that fails while the EVM is executing arrives as a block
+/// execution error, but it is still an unanswered question: the run exits 3, and
+/// a batch reports the target as an `rpc` failure rather than an execution one.
+#[test]
+fn test_state_read_failure_during_execution_is_an_rpc_failure() {
+    let path = cache_without_entry("state_read", IN_EXECUTION_STATE_READ);
+    let cache = path.to_str().unwrap();
+
+    let single = run(&["replay", "--rpc.replay-file", cache, "--json", TX_OK]);
+    assert_eq!(single.code(), 3, "an unanswered state read exits 3.\nstderr: {}", single.stderr);
+    let error = single.error_object();
+    assert_eq!(error["error"]["kind"].as_str(), Some("rpc-failure"));
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Block execution error") && m.contains("cache miss")),
+        "the failure must be the block error carrying the missed read: {error}"
+    );
+
+    let list = tx_file("state_read", &format!("{TX_OK}\n"));
+    let batch = run(&["replay", "--rpc.replay-file", cache, "--tx-file", list.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(batch.code(), 3, "the batch run exits 3 too.\nstderr: {}", batch.stderr);
+    assert!(
+        batch.stdout.contains("Error (rpc):"),
+        "the target is reported as unanswered:\n{}",
+        batch.stdout
     );
 }
 
@@ -197,6 +254,69 @@ fn test_successful_run_exits_zero_without_an_error_object() {
     assert_eq!(run.error_lines(), 0, "a successful run reports nothing on stderr");
 }
 
+/// A capture that could not be persisted is reported even when the run it was
+/// capturing also failed: the run error keeps the exit code (it is the root
+/// cause), and both failures are named on stderr without `-v`, so a stale or
+/// missing capture file cannot go unnoticed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_persist_failure_is_reported_next_to_the_run_error() {
+    let server = common::MockRpcServer::start().await;
+    // Chain id resolves, every other call fails: the replay itself goes
+    // unanswered while the capture store still has entries to write.
+    server.respond_eth_chain_id(6342, 1).await;
+    server.respond_status_always(500).await;
+    let url = server.uri();
+
+    // A capture path whose parent is a regular file: persisting cannot succeed.
+    let blocker =
+        std::env::temp_dir().join(format!("mega_evme_capture_blocker_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&blocker);
+    std::fs::write(&blocker, b"not a directory").expect("write blocker file");
+    let capture = blocker.join("capture.json");
+
+    let mut argv = vec![
+        "replay",
+        "--rpc",
+        &url,
+        "--rpc.capture-file",
+        capture.to_str().unwrap(),
+        "--rpc.max-retries",
+        "0",
+        "--rpc.backoff-ms",
+        "1",
+        TX_OK,
+    ];
+    let human = run(&argv);
+    argv.push("--json");
+    let json = run(&argv);
+    let _ = std::fs::remove_file(&blocker);
+
+    for run in [&human, &json] {
+        assert_eq!(run.code(), 3, "the run error keeps the exit code.\nstderr: {}", run.stderr);
+        assert_eq!(run.error_lines(), 2, "both failures are reported:\n{}", run.stderr);
+        assert!(
+            run.stderr.contains("Failed to fetch transaction"),
+            "the run error must be reported:\n{}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains(blocker.to_str().expect("blocker path is utf-8")),
+            "the persist failure must name where the capture could not be written:\n{}",
+            run.stderr
+        );
+    }
+
+    // The structured object still reports the run error, which owns the code.
+    let error = json.error_object();
+    assert_eq!(error["error"]["code"].as_u64(), Some(3));
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Failed to fetch transaction")),
+        "the object carries the run error, not the persist failure: {error}"
+    );
+}
+
 /// A usage error is bad input, so it joins the execution class instead of
 /// colliding with the mismatch code; `--help` stays a successful run.
 #[test]
@@ -209,4 +329,39 @@ fn test_usage_errors_exit_one_and_help_exits_zero() {
     let help = run(&["--help"]);
     assert_eq!(help.code(), 0, "--help exits 0");
     assert!(help.stdout.contains("mega-evme"), "--help prints usage on stdout");
+}
+
+/// A usage error of a `--json` run still ends stdout with the structured error
+/// object: argument parsing fails before the command exists, but a
+/// machine-readable run must never end with empty stdout.
+#[test]
+fn test_usage_error_in_json_mode_ends_stdout_with_the_error_object() {
+    // No replay target: rejected by argument parsing.
+    let usage = run(&["replay", "--json"]);
+
+    assert_eq!(usage.code(), 1, "a usage error exits 1.\nstderr: {}", usage.stderr);
+    let error = usage.error_object();
+    assert_eq!(error["error"]["code"].as_u64(), Some(1));
+    assert_eq!(error["error"]["kind"].as_str(), Some("execution-error"));
+    let message = error["error"]["message"].as_str().expect("the object carries a message");
+    assert!(!message.contains('\n'), "the message is a single line: {message}");
+    assert!(
+        message.contains("required arguments"),
+        "the message must summarize the usage error: {message}"
+    );
+    // clap keeps rendering its own report, including the usage block.
+    assert!(usage.stderr.contains("Usage:"), "clap still reports on stderr:\n{}", usage.stderr);
+}
+
+/// `--help` in a `--json` run is still not a failure: no error object, exit 0.
+#[test]
+fn test_help_in_json_mode_prints_no_error_object() {
+    let help = run(&["--help", "--json"]);
+
+    assert_eq!(help.code(), 0, "--help exits 0");
+    assert!(
+        !help.stdout.lines().any(|line| line.trim_start().starts_with(r#"{"error""#)),
+        "--help prints no error object:\n{}",
+        help.stdout
+    );
 }

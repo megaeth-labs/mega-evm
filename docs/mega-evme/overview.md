@@ -79,17 +79,22 @@ Every command reports its outcome through the same set of exit codes, so a pipel
 | `3`  | `rpc-failure`           | An RPC or transport call failed — endpoint unreachable, transport error, or an offline replay file that holds no response for a request the run had to make. |
 
 Codes `1` and `3` separate the two ways a question can go wrong: `1` means the tool answered, and the answer is negative; `3` means the question went unanswered, so retrying against a healthy endpoint may still produce a result.
+A state read that fails while the EVM is executing — an offline replay file without the response, or an endpoint that dies mid-transaction — belongs to `3` as well, even though it surfaces as a block execution error.
+Two paths cannot be classified that way: a read that fails inside the pre-block system calls (EIP-4788 beacon root, EIP-2935 block hashes) or inside the sandboxed execution of the keyless-deploy system contract has its cause rendered into a message by the layer that raises it, so `mega-evme` cannot tell it from an execution failure and reports `1`.
 
 A batch run (`--tx-file` / `--block`) reports every target on its own line and then exits once for the run as a whole, ranking the failure classes it saw: any execution or internal failure exits `1`, otherwise any RPC failure exits `3`, otherwise any verification mismatch exits `2`.
 A target that never replayed was also never verified, which is why an infrastructure failure outranks a mismatch.
 
-On failure the run also prints a report: one `error: <message>` line on stderr, plus — with `--json` — a structured object as the last line of stdout, so a machine-readable run never ends with empty output.
+On failure the run also prints a report: one `error: <message>` line per failure on stderr, plus — with `--json` — a structured object as the last line of stdout, so a machine-readable run never ends with empty output.
+A run reports more than one line when a secondary failure must not go unnoticed but does not own the exit code — an unwritable [`--rpc.capture-file`](commands/replay.md#rpccapture-file-path) behind an earlier replay failure, for instance.
+The structured object always carries the failure the exit code came from.
 
 ```json
 { "error": { "code": 3, "kind": "rpc-failure", "message": "RPC error: …" } }
 ```
 
 In batch mode that object follows the per-target lines, whose own `error.kind` (`not_found`, `pending`, `rpc`, `execution`) describes why one target failed and is independent of the run-level class above.
+A usage error is reported the same way: the argument parser prints its own report and usage block on stderr, and a `--json` run still ends its stdout with the object, whose `message` is a one-line summary of the parse failure.
 
 New failure classes are added as new codes; the meaning of an existing code does not change.
 

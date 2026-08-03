@@ -69,6 +69,51 @@ fn replay_with_code(args: &[&str]) -> (String, Option<i32>) {
     (String::from_utf8(output.stdout).expect("stdout is utf-8"), output.status.code())
 }
 
+/// Write a copy of the envelope whose `eth_getTransactionByHash` response for
+/// `tx_hash` answers "unknown transaction", and return its path.
+///
+/// Entries are keyed by the request, not the response, so the doctored answer
+/// still resolves. This models the endpoint losing one transaction of a block it
+/// still serves — the block body lists the hash, the lookup denies it.
+fn envelope_without_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    // Only the transaction's own response carries it as the `hash` field; the
+    // block body lists bare hashes and a receipt names it `transactionHash`.
+    let marker = format!("\"hash\":\"{tx_hash}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        response["result"] = serde_json::Value::Null;
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "the envelope must hold exactly one response for {tx_hash}");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+    path
+}
+
+/// Run `replay` against `envelope_path` and return its stdout plus its exit code.
+fn replay_envelope_with_code(
+    envelope_path: &std::path::Path,
+    args: &[&str],
+) -> (String, Option<i32>) {
+    let mut cmd = mega_evme();
+    cmd.args(["replay", "--rpc.replay-file", envelope_path.to_str().expect("path is utf-8")]);
+    cmd.args(args);
+    let output = cmd.output().expect("failed to run mega-evme");
+    (String::from_utf8(output.stdout).expect("stdout is utf-8"), output.status.code())
+}
+
 /// Parse NDJSON stdout into one JSON value per line, dropping the structured
 /// error object a failing run ends with.
 fn ndjson(stdout: &str) -> Vec<serde_json::Value> {
@@ -238,6 +283,91 @@ fn test_replay_block_verify_receipt_without_receipts_reports_rpc_errors() {
 
     // Unverified targets are RPC-class failures, never mismatches.
     assert_eq!(code, Some(3), "a run of unverified targets exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
+/// An abort caused by one transaction of the block is not an answer about the
+/// targets behind it: only the transaction the endpoint denied is reported as
+/// `not_found`, and every target swept up behind it is reported as unanswered
+/// (`rpc`) with a message naming the transaction that aborted the block.
+#[test]
+#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
+fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
+    let (missing, missing_index) = BLOCK_TXS[1];
+    let path = envelope_without_transaction("abort_block", missing);
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    for (index, line) in lines.iter().enumerate() {
+        let index = index as u64;
+        if index < missing_index {
+            assert!(line.get("error").is_none(), "targets before the abort replay: {line}");
+            continue;
+        }
+        if index == missing_index {
+            assert_eq!(
+                line["error"]["kind"].as_str(),
+                Some("not_found"),
+                "only the denied transaction is unknown: {line}"
+            );
+            continue;
+        }
+        assert_eq!(
+            line["error"]["kind"].as_str(),
+            Some("rpc"),
+            "a target swept up behind the abort went unanswered: {line}"
+        );
+        assert!(
+            line["error"]["message"].as_str().is_some_and(|m| m.contains(missing)),
+            "the message must name the transaction that aborted the block: {line}"
+        );
+    }
+
+    // The denied transaction is an execution-class failure, which outranks the
+    // unanswered ones.
+    assert_eq!(code, Some(1), "a definitive negative answer exits 1");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("execution-error"));
+}
+
+/// Targets swept up by an abort are reported in block transaction-index order,
+/// whatever order `--tx-file` listed them in.
+#[test]
+#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
+fn test_replay_tx_file_sweeps_targets_in_block_order() {
+    let missing = BLOCK_TXS[0].0;
+    let path = envelope_without_transaction("abort_order", missing);
+    // Deliberately reversed: the last transaction of the block first.
+    let list = format!("{}\n{}\n", BLOCK_TXS[2].0, BLOCK_TXS[1].0);
+    let list_path =
+        std::env::temp_dir().join(format!("mega_evme_tx_list_order_{}.txt", std::process::id()));
+    std::fs::write(&list_path, list).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--tx-file", list_path.to_str().unwrap(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&list_path);
+    let lines = ndjson(&stdout);
+
+    let observed: Vec<&str> = lines.iter().map(|line| line["tx_hash"].as_str().unwrap()).collect();
+    assert_eq!(
+        observed,
+        vec![BLOCK_TXS[1].0, BLOCK_TXS[2].0],
+        "swept targets must follow the block's transaction order, not the input order",
+    );
+    for line in &lines {
+        assert_eq!(line["error"]["kind"].as_str(), Some("rpc"), "swept target: {line}");
+        assert!(
+            line["error"]["message"].as_str().is_some_and(|m| m.contains(missing)),
+            "the message must name the transaction that aborted the block: {line}"
+        );
+    }
+
+    // No target was answered definitively, so the run is an RPC failure.
+    assert_eq!(code, Some(3), "targets that went unanswered exit 3");
     assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 

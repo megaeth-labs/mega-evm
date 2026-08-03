@@ -109,16 +109,21 @@ A transaction that could not be executed is reported as an error entry instead:
 `kind` is one of `not_found` (unknown hash), `pending` (mined into no block yet), `rpc` (an RPC call failed), or `execution` (block setup or the block executor rejected the transaction).
 Execution outcomes are not errors: a reverted or halted transaction is a normal result line with `success: false`.
 
+A failure while running the block aborts it, because the executor state no longer matches the chain.
+The transaction the failure is about — the hash the endpoint denied, or the one the executor rejected — is reported with that failure's own kind.
+Every target behind it is reported as `rpc` with a message naming the aborting cause: nothing was established about those transactions, so they went unanswered rather than being unknown.
+Targets that never ran are still emitted in the block's transaction-index order, keeping the whole stream in ascending `(block, tx_index)` order; a hash the block does not contain is reported last, in input order, as `not_found`.
+
 Without `--json`, each transaction is printed with a header naming its hash, block, and index, followed by the same summary and receipt the single-transaction mode prints.
 A final one-line summary (transactions replayed, transactions failed, elapsed time) is logged at `INFO` level, so pass `-vvv` to see it.
 
 With [`--verify-receipt`](#receipt-verification), each result line additionally carries a `verification` object.
-With [`--dump-fixture-dir`](#dump-fixture-dir-dir), each result line additionally carries a `fixture` object (`path` or `skipped`).
+With [`--dump-fixture-dir`](#dump-fixture-dir-dir), each result line additionally carries a `fixture` object (`path`, `skipped`, or `error`).
 
 ### Exit Status
 
-A batch run exits `0` when every requested transaction produced an execution result, and `1` when any of them produced an error entry.
-Fixture skips (fidelity gate, BLOCKHASH readers, unsupported shapes) are not error entries and do not fail the run.
+A batch run exits `0` when every requested transaction produced an execution result and nothing the run was asked to do failed, and non-zero otherwise — see [Exit codes](../overview.md#exit-codes) for how the failure classes are ranked.
+Fixture skips (fidelity gate, BLOCKHASH readers, unsupported shapes) are not failures and do not fail the run; a fixture the run was asked to write and could not is an execution-class failure of its target.
 The NDJSON stream is written to stdout in both cases; diagnostics go to stderr.
 
 ### Examples
@@ -283,6 +288,9 @@ The updated set of entries is persisted back to the same file on clean exit.
 The file also embeds an external-environment snapshot — currently the set of `--bucket-capacity` values in effect — so the captured fixture is self-contained.
 If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them.
 
+The capture is written even when the replay itself failed — an execution or verification failure is exactly the case you want to debug offline.
+If the write fails, it is reported on stderr like any other failure, next to the run's own error; the run error keeps the exit code, since it is the root cause.
+
 `--rpc.capture-file` is mutually exclusive with `--rpc.replay-file`, `--rpc.cache-dir`, `--rpc.clear-cache`, `--rpc.no-cache-file`, and `--rpc.cache-max-entries`.
 
 ### `--rpc.replay-file <PATH>`
@@ -364,7 +372,7 @@ Batch-only.
 Dump a self-validating fixture for every successfully replayed target into `<DIR>/<tx_hash>.json`.
 The fixture content and format match the single-transaction [`--dump-fixture`](#dump-fixture-file) path (same EEST schema, same sorted `megaEnv`, same self-validation via `state-test`).
 The directory is created if it does not exist.
-Existing files are refused unless `--overwrite` is also set — a refused overwrite is an infrastructure error for that target (`execution`), not a skip.
+Existing files are refused unless `--overwrite` is also set — a refused overwrite is a failed dump for that target, not a skip.
 
 Per-target gating mirrors the single-transaction rules, but records a skip instead of failing the run:
 
@@ -374,15 +382,17 @@ Per-target gating mirrors the single-transaction rules, but records a skip inste
 | Fidelity mismatch (gas / status / logs root)                                     | `fixture.skipped` with `fidelity gate failed: …`              |
 | Target reads `BLOCKHASH`                                                         | `fixture.skipped` (fixtures carry no historical block hashes) |
 | Unsupported shape (deposit, EIP-7702, unknown spec mapping)                      | `fixture.skipped`                                             |
-| Finalize / write / self-validation failure                                       | infrastructure error entry (`kind: execution`)                |
+| Finalize / write / self-validation failure, refused overwrite                    | `fixture.error` with the reason; execution-class failure      |
 | Pending / unresolvable target                                                    | already an error entry; no fixture report                     |
 
 `BLOCKHASH` access is isolated per transaction: the access record is cleared before each transaction of the block, so preceding readers do not poison a later target's dump.
 
-NDJSON result lines gain `"fixture": {"path": "…"}` or `"fixture": {"skipped": "<reason>"}`.
+NDJSON result lines gain `"fixture": {"path": "…"}`, `"fixture": {"skipped": "<reason>"}`, or `"fixture": {"error": "<reason>"}`.
 Human mode prints one fixture line per target.
 An end-of-run `INFO` summary reports written / skipped / failed counts.
-Fixture skips do not fail the run; infrastructure failures keep the usual batch exit semantics.
+
+A failed dump is reported on the target's own result line rather than replacing it: the transaction did replay, so its receipt — and, with [`--verify-receipt`](#receipt-verification), its verdict — is still what the run was asked for, and a divergence found on such a target is still counted as a mismatch.
+Fixture skips do not fail the run; a failed dump does, as an execution-class failure of that target.
 
 Registration into `bench/replay/manifest.json` is not performed — corpus curation stays manual.
 `--dump-fixture-dir` cannot be combined with `--dump-fixture`, and is rejected in single-transaction mode.
