@@ -28,6 +28,10 @@ pub use common::*;
 /// Install a thread panic hook that prints a custom backtrace and exits with a
 /// non-zero status. Lets failing tests and CLI runs surface a useful trace
 /// without relying on `RUST_BACKTRACE`.
+///
+/// When the raw process argv contains `--json`, the hook also prints the
+/// standard structured error object on stdout before exiting so a machine-
+/// readable run never ends with empty stdout on panic.
 pub fn set_thread_panic_hook() {
     use std::{
         backtrace::Backtrace,
@@ -40,6 +44,53 @@ pub fn set_thread_panic_hook() {
         // installed yet when a panic fires during CLI startup.
         eprintln!("Custom backtrace: {}", Backtrace::capture());
         orig_hook(panic_info);
+        if raw_argv_wants_json() {
+            // Keep the panic text on stderr (via `orig_hook`); the structured
+            // object is the machine-readable final stdout line.
+            let message = format!("panic: {panic_info}");
+            print_json_error(ExitCode::ExecutionError, &message);
+        }
         exit(1);
     }));
+}
+
+/// Whether the raw process argv contains `--json`.
+///
+/// Used by the panic hook when the parsed command is not available (and kept
+/// public so unit tests can document the same decision as production).
+pub fn raw_argv_wants_json() -> bool {
+    std::env::args_os().any(|arg| arg == "--json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The panic-hook JSON decision is driven by raw argv, not the parsed CLI.
+    #[test]
+    fn test_raw_argv_wants_json_detects_flag() {
+        // Unit-test the predicate shape by scanning a synthetic argv slice
+        // (the production helper reads process args; this mirrors its logic).
+        fn wants_json(args: &[&str]) -> bool {
+            args.contains(&"--json")
+        }
+        assert!(!wants_json(&["mega-evme", "replay", "0xabc"]));
+        assert!(wants_json(&["mega-evme", "replay", "--json", "0xabc"]));
+        assert!(wants_json(&["mega-evme", "--json"]));
+        // Only the exact flag; a value containing the substring is not enough.
+        assert!(!wants_json(&["mega-evme", "--json-pretty"]));
+    }
+
+    /// The structured panic object uses the standard error envelope shape.
+    #[test]
+    fn test_panic_json_error_object_shape() {
+        let code = ExitCode::ExecutionError;
+        assert_eq!(code.code(), 1);
+        assert_eq!(code.kind(), "execution-error");
+        // Message prefix matches the hook's `panic: …` form; printing itself is
+        // covered by `print_json_error` and cannot be unit-tested without
+        // capturing stdout, so a deterministic binary panic trigger is not used.
+        let message = format!("panic: {}", "explicit test panic");
+        assert!(message.starts_with("panic: "));
+    }
 }

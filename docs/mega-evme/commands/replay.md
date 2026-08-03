@@ -286,7 +286,7 @@ On subsequent runs the existing file is loaded, its entries are merged into the 
 The updated set of entries is persisted back to the same file on clean exit.
 
 The file also embeds an external-environment snapshot — currently the set of `--bucket-capacity` values in effect — so the captured fixture is self-contained.
-If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them.
+If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them (an intentional A→B refresh of an existing capture is accepted at persist when no concurrent writer changed the on-disk snapshot; a true concurrent conflict hard-errors and names the load-time, caller, and on-disk values — see [state management](../configuration/state-management.md#rpc-cache)).
 
 The capture is written even when the replay itself failed — an execution or verification failure is exactly the case you want to debug offline.
 If the write fails, it is reported on stderr like any other failure, next to the run's own error; the run error keeps the exit code, since it is the root cause.

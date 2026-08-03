@@ -58,6 +58,27 @@ pub(crate) struct ExternalEnvDoc {
     pub bucket_capacities: Vec<(u32, u64)>,
 }
 
+impl ExternalEnvDoc {
+    /// Canonical form used for equality and on-disk writes.
+    ///
+    /// Deduplicates by bucket id with last-wins (matching runtime map-insert
+    /// semantics when applying `--bucket-capacity`), then sorts by bucket id so
+    /// two workers with the same effective capacities never conflict solely
+    /// because of CLI order.
+    pub(crate) fn canonicalized(&self) -> Self {
+        Self { bucket_capacities: canonicalize_bucket_capacities(&self.bucket_capacities) }
+    }
+}
+
+/// Deduplicate by bucket id (last-wins), then sort by bucket id.
+pub(crate) fn canonicalize_bucket_capacities(caps: &[(u32, u64)]) -> Vec<(u32, u64)> {
+    let mut map = BTreeMap::new();
+    for &(id, capacity) in caps {
+        map.insert(id, capacity);
+    }
+    map.into_iter().collect()
+}
+
 /// Path of the advisory lock sidecar for `target` (`<target>.lock`).
 pub(crate) fn lock_sidecar_path(target: &Path) -> PathBuf {
     let mut os = target.as_os_str().to_owned();
@@ -233,13 +254,24 @@ pub(crate) fn merge_provider_lists(base: Vec<CacheKv>, overlay: Vec<CacheKv>) ->
 
 /// Merge `ours` over `on_disk` for envelope persist (ours wins on key collision).
 ///
-/// Returns an error if `chain_id` or `version` disagree, or if both sides carry
-/// non-null `external_env` snapshots that are not identical (same rule as
-/// [`merge_envelopes_cli`]). One-sided or identical snapshots are accepted:
-/// ours is kept when set, otherwise the on-disk snapshot is propagated.
+/// Returns an error if `chain_id` or `version` disagree.
+///
+/// `external_env` uses optimistic concurrency against `loaded_external_env` — the
+/// snapshot observed when this process opened the capture file (or `None` when
+/// the file was absent / had no snapshot):
+///
+/// - If the locked on-disk snapshot is absent, or still equals the loaded one, nobody else changed
+///   it: the caller's intentional update wins (`ours`).
+/// - Hard-error only when the on-disk snapshot changed since load **and** differs from ours (true
+///   concurrent conflict). The error names all three values (loaded, ours, on-disk).
+///
+/// Snapshots are canonicalized (last-wins per bucket id, then sorted) before
+/// comparison and before writing, so CLI order alone cannot spuriously conflict.
+/// One-sided snapshots still merge: ours is kept when set, otherwise on-disk.
 pub(crate) fn merge_envelope_for_persist(
     on_disk: &EnvelopeDoc,
     ours: &EnvelopeDoc,
+    loaded_external_env: Option<&ExternalEnvDoc>,
     path: &Path,
 ) -> Result<EnvelopeDoc> {
     if on_disk.version != ours.version {
@@ -258,19 +290,12 @@ pub(crate) fn merge_envelope_for_persist(
             ours.chain_id,
         )));
     }
-    let external_env = match (&ours.external_env, &on_disk.external_env) {
-        (Some(a), Some(b)) if a != b => {
-            return Err(EvmeError::FixtureError(format!(
-                "Conflicting external_env snapshots when merging '{}': \
-                 on-disk {on_disk_env:?}, ours {ours_env:?}",
-                path.display(),
-                on_disk_env = on_disk.external_env,
-                ours_env = ours.external_env,
-            )));
-        }
-        (Some(a), _) => Some(a.clone()),
-        (None, disk) => disk.clone(),
-    };
+    let external_env = resolve_external_env_for_persist(
+        &ours.external_env,
+        &on_disk.external_env,
+        loaded_external_env,
+        path,
+    )?;
     Ok(EnvelopeDoc {
         version: ours.version,
         chain_id: ours.chain_id,
@@ -279,11 +304,50 @@ pub(crate) fn merge_envelope_for_persist(
     })
 }
 
+/// Resolve the envelope `external_env` under optimistic concurrency.
+///
+/// See [`merge_envelope_for_persist`] for the accept / hard-error rules.
+fn resolve_external_env_for_persist(
+    ours: &Option<ExternalEnvDoc>,
+    on_disk: &Option<ExternalEnvDoc>,
+    loaded: Option<&ExternalEnvDoc>,
+    path: &Path,
+) -> Result<Option<ExternalEnvDoc>> {
+    let ours_c = ours.as_ref().map(ExternalEnvDoc::canonicalized);
+    let disk_c = on_disk.as_ref().map(ExternalEnvDoc::canonicalized);
+    let loaded_c = loaded.map(ExternalEnvDoc::canonicalized);
+
+    match (&ours_c, &disk_c) {
+        (Some(o), Some(d)) if o != d => {
+            // Differing non-null snapshots: accept only when the on-disk value
+            // is still the one this process observed at load (intentional A→B
+            // refresh). A third concurrent writer that changed the file since
+            // load is a true conflict.
+            let disk_unchanged = disk_c == loaded_c;
+            if disk_unchanged {
+                Ok(ours_c)
+            } else {
+                Err(EvmeError::FixtureError(format!(
+                    "Conflicting external_env snapshots when merging '{}': \
+                     loaded {loaded_env:?}, ours {ours_env:?}, on-disk {on_disk_env:?}",
+                    path.display(),
+                    loaded_env = loaded_c,
+                    ours_env = ours_c,
+                    on_disk_env = disk_c,
+                )))
+            }
+        }
+        (Some(_), _) => Ok(ours_c),
+        (None, disk) => Ok(disk.clone()),
+    }
+}
+
 /// Merge multiple envelope inputs for the `cache merge` subcommand.
 ///
 /// All inputs must share `version` and `chain_id`. Later inputs win on cache
-/// key collision. Non-null `external_env` values must be identical when more
-/// than one is present.
+/// key collision. Non-null `external_env` values must be identical (after
+/// canonicalization) when more than one is present; the written snapshot is
+/// always the canonical form.
 pub(crate) fn merge_envelopes_cli(docs: &[(PathBuf, EnvelopeDoc)]) -> Result<EnvelopeDoc> {
     let Some((_, first)) = docs.first() else {
         return Err(EvmeError::InvalidInput("cache merge requires at least one input file".into()));
@@ -317,9 +381,10 @@ pub(crate) fn merge_envelopes_cli(docs: &[(PathBuf, EnvelopeDoc)]) -> Result<Env
         }
         cache = merge_kv_entries(cache, doc.cache.clone());
         if let Some(ref ext) = doc.external_env {
+            let canon = ext.canonicalized();
             match &external_env {
-                None => external_env = Some(ext.clone()),
-                Some(prev) if prev != ext => {
+                None => external_env = Some(canon),
+                Some(prev) if prev != &canon => {
                     return Err(EvmeError::InvalidInput(format!(
                         "Conflicting external_env snapshots while merging '{}'",
                         path.display(),
@@ -477,7 +542,8 @@ mod tests {
             cache: vec![kv(1, "ours"), kv(2, "new")],
             external_env: None,
         };
-        let merged = merge_envelope_for_persist(&on_disk, &ours, Path::new("x.json")).unwrap();
+        let merged =
+            merge_envelope_for_persist(&on_disk, &ours, None, Path::new("x.json")).unwrap();
         assert_eq!(merged.cache, vec![kv(1, "ours"), kv(2, "new")]);
         assert_eq!(merged.external_env, Some(ExternalEnvDoc { bucket_capacities: vec![(1, 10)] }));
     }
@@ -486,33 +552,80 @@ mod tests {
     fn test_merge_envelope_for_persist_chain_id_mismatch() {
         let on_disk = EnvelopeDoc { version: 1, chain_id: 1, cache: vec![], external_env: None };
         let ours = EnvelopeDoc { version: 1, chain_id: 2, cache: vec![], external_env: None };
-        let err = merge_envelope_for_persist(&on_disk, &ours, Path::new("x.json")).unwrap_err();
+        let err =
+            merge_envelope_for_persist(&on_disk, &ours, None, Path::new("x.json")).unwrap_err();
         assert!(err.to_string().contains("chain_id"));
     }
 
-    /// Conflicting non-null `external_env` snapshots hard-error and name both values.
+    /// Intentional refresh: loaded A, ours B, disk still A → B wins.
     #[test]
-    fn test_merge_envelope_for_persist_rejects_conflicting_external_env() {
+    fn test_merge_envelope_for_persist_intentional_refresh_wins() {
+        let loaded = ExternalEnvDoc { bucket_capacities: vec![(1, 10)] };
+        let ours_ext = ExternalEnvDoc { bucket_capacities: vec![(1, 99)] };
         let on_disk = EnvelopeDoc {
             version: 1,
             chain_id: 7,
             cache: vec![kv(1, "disk")],
-            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(1, 10)] }),
+            external_env: Some(loaded.clone()),
         };
         let ours = EnvelopeDoc {
             version: 1,
             chain_id: 7,
             cache: vec![kv(2, "ours")],
-            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(1, 99)] }),
+            external_env: Some(ours_ext.clone()),
+        };
+        let merged =
+            merge_envelope_for_persist(&on_disk, &ours, Some(&loaded), Path::new("capture.json"))
+                .expect("intentional A→B refresh must succeed");
+        assert_eq!(merged.external_env, Some(ours_ext.canonicalized()));
+        assert_eq!(merged.cache, vec![kv(1, "disk"), kv(2, "ours")]);
+    }
+
+    /// True concurrent conflict: loaded A, ours B, disk now C≠B → hard error naming A/B/C.
+    #[test]
+    fn test_merge_envelope_for_persist_rejects_true_concurrent_conflict() {
+        let loaded = ExternalEnvDoc { bucket_capacities: vec![(1, 10)] };
+        let ours_ext = ExternalEnvDoc { bucket_capacities: vec![(1, 99)] };
+        let disk_ext = ExternalEnvDoc { bucket_capacities: vec![(1, 42)] };
+        let on_disk = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![kv(1, "disk")],
+            external_env: Some(disk_ext),
+        };
+        let ours = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![kv(2, "ours")],
+            external_env: Some(ours_ext),
         };
         let err =
-            merge_envelope_for_persist(&on_disk, &ours, Path::new("capture.json")).unwrap_err();
+            merge_envelope_for_persist(&on_disk, &ours, Some(&loaded), Path::new("capture.json"))
+                .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("external_env"), "msg={msg}");
-        assert!(msg.contains("on-disk"), "msg={msg}");
+        assert!(msg.contains("loaded"), "msg={msg}");
         assert!(msg.contains("ours"), "msg={msg}");
-        // Both snapshots named in the message (Debug form of bucket capacities).
-        assert!(msg.contains("10") && msg.contains("99"), "msg={msg}");
+        assert!(msg.contains("on-disk"), "msg={msg}");
+        // All three snapshots named (Debug form of bucket capacities).
+        assert!(msg.contains("10") && msg.contains("99") && msg.contains("42"), "msg={msg}");
+    }
+
+    /// Loaded none, ours B, disk now C≠B → hard error (file gained a foreign snapshot).
+    #[test]
+    fn test_merge_envelope_for_persist_rejects_conflict_when_loaded_none() {
+        let ours_ext = ExternalEnvDoc { bucket_capacities: vec![(1, 99)] };
+        let disk_ext = ExternalEnvDoc { bucket_capacities: vec![(1, 42)] };
+        let on_disk =
+            EnvelopeDoc { version: 1, chain_id: 7, cache: vec![], external_env: Some(disk_ext) };
+        let ours =
+            EnvelopeDoc { version: 1, chain_id: 7, cache: vec![], external_env: Some(ours_ext) };
+        let err = merge_envelope_for_persist(&on_disk, &ours, None, Path::new("capture.json"))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("external_env"), "msg={msg}");
+        assert!(msg.contains("loaded"), "msg={msg}");
+        assert!(msg.contains("99") && msg.contains("42"), "msg={msg}");
     }
 
     /// Identical non-null `external_env` snapshots merge successfully.
@@ -531,9 +644,40 @@ mod tests {
             cache: vec![kv(2, "ours")],
             external_env: Some(ext.clone()),
         };
-        let merged = merge_envelope_for_persist(&on_disk, &ours, Path::new("x.json")).unwrap();
+        let merged =
+            merge_envelope_for_persist(&on_disk, &ours, Some(&ext), Path::new("x.json")).unwrap();
         assert_eq!(merged.cache, vec![kv(1, "disk"), kv(2, "ours")]);
-        assert_eq!(merged.external_env, Some(ext));
+        assert_eq!(merged.external_env, Some(ext.canonicalized()));
+    }
+
+    /// Same capacities in different order are not a conflict (canonical equality).
+    #[test]
+    fn test_merge_envelope_for_persist_order_insensitive_external_env() {
+        let a = ExternalEnvDoc { bucket_capacities: vec![(1, 10), (2, 20)] };
+        let b = ExternalEnvDoc { bucket_capacities: vec![(2, 20), (1, 10)] };
+        let on_disk = EnvelopeDoc { version: 1, chain_id: 1, cache: vec![], external_env: Some(a) };
+        let ours = EnvelopeDoc { version: 1, chain_id: 1, cache: vec![], external_env: Some(b) };
+        // Concurrent writer used the same effective capacities in different CLI order.
+        let merged = merge_envelope_for_persist(
+            &on_disk,
+            &ours,
+            Some(&ExternalEnvDoc { bucket_capacities: vec![(9, 9)] }),
+            Path::new("x.json"),
+        )
+        .expect("order-only difference must not conflict");
+        assert_eq!(
+            merged.external_env,
+            Some(ExternalEnvDoc { bucket_capacities: vec![(1, 10), (2, 20)] })
+        );
+    }
+
+    /// Duplicate bucket ids collapse with last-wins before sort.
+    #[test]
+    fn test_canonicalize_bucket_capacities_last_wins_and_sorts() {
+        let caps = canonicalize_bucket_capacities(&[(2, 20), (1, 10), (2, 99), (1, 11)]);
+        assert_eq!(caps, vec![(1, 11), (2, 99)]);
+        let doc = ExternalEnvDoc { bucket_capacities: vec![(3, 1), (1, 2), (3, 9)] };
+        assert_eq!(doc.canonicalized().bucket_capacities, vec![(1, 2), (3, 9)]);
     }
 
     /// One-sided `external_env` propagates the non-null snapshot (either side).
@@ -546,8 +690,9 @@ mod tests {
             EnvelopeDoc { version: 1, chain_id: 1, cache: vec![], external_env: Some(ext.clone()) };
         let ours =
             EnvelopeDoc { version: 1, chain_id: 1, cache: vec![kv(1, "a")], external_env: None };
-        let merged = merge_envelope_for_persist(&on_disk, &ours, Path::new("x.json")).unwrap();
-        assert_eq!(merged.external_env, Some(ext.clone()));
+        let merged =
+            merge_envelope_for_persist(&on_disk, &ours, None, Path::new("x.json")).unwrap();
+        assert_eq!(merged.external_env, Some(ext.canonicalized()));
 
         // Ours Some, disk None → ours kept.
         let on_disk = EnvelopeDoc { version: 1, chain_id: 1, cache: vec![], external_env: None };
@@ -557,8 +702,9 @@ mod tests {
             cache: vec![kv(1, "a")],
             external_env: Some(ext.clone()),
         };
-        let merged = merge_envelope_for_persist(&on_disk, &ours, Path::new("x.json")).unwrap();
-        assert_eq!(merged.external_env, Some(ext));
+        let merged =
+            merge_envelope_for_persist(&on_disk, &ours, None, Path::new("x.json")).unwrap();
+        assert_eq!(merged.external_env, Some(ext.canonicalized()));
     }
 
     #[test]
@@ -578,6 +724,29 @@ mod tests {
         let docs = vec![(PathBuf::from("a.json"), a), (PathBuf::from("b.json"), b)];
         let err = merge_envelopes_cli(&docs).unwrap_err();
         assert!(err.to_string().contains("external_env"));
+    }
+
+    /// CLI merge treats equal capacities in different order as identical.
+    #[test]
+    fn test_merge_envelopes_cli_order_insensitive_external_env() {
+        let a = EnvelopeDoc {
+            version: 1,
+            chain_id: 1,
+            cache: vec![kv(1, "a")],
+            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(2, 20), (1, 10)] }),
+        };
+        let b = EnvelopeDoc {
+            version: 1,
+            chain_id: 1,
+            cache: vec![kv(2, "b")],
+            external_env: Some(ExternalEnvDoc { bucket_capacities: vec![(1, 10), (2, 20)] }),
+        };
+        let docs = vec![(PathBuf::from("a.json"), a), (PathBuf::from("b.json"), b)];
+        let merged = merge_envelopes_cli(&docs).expect("order-only difference must merge");
+        assert_eq!(
+            merged.external_env,
+            Some(ExternalEnvDoc { bucket_capacities: vec![(1, 10), (2, 20)] })
+        );
     }
 
     #[test]

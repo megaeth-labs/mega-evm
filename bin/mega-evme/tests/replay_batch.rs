@@ -26,6 +26,12 @@ const BLOCK_TXS: [(&str, u64); 3] = [
     ("0xb6a0b7a302c741f64b8e46861a3dcb2d5c1047f6f2cb89a35b5c2183c96296b7", 22),
 ];
 
+/// A mid-block type-0x2 call (not a deposit): zeroing its gas makes the block
+/// executor reject the transaction as invalid and abort — unlike deposits,
+/// which can still halt as `FailedDeposit` without aborting the block.
+const EXEC_ABORT_TX: (&str, u64) =
+    ("0xa637d68cda9423d67826e008b1c90295193f30f19cd74a6f4acf54022d56cae2", 2);
+
 /// Last transaction of the envelope's second block.
 const OTHER_BLOCK: u64 = 22_945_853;
 const OTHER_BLOCK_TX: &str = "0x18302160f2395069a44e1654d173fa9eed95ead8f922f12bfe07b6bdcc0a14f2";
@@ -91,6 +97,37 @@ fn envelope_without_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf
         let mut response: serde_json::Value =
             serde_json::from_str(value).expect("parse transaction response");
         response["result"] = serde_json::Value::Null;
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "the envelope must hold exactly one response for {tx_hash}");
+
+    let path =
+        std::env::temp_dir().join(format!("mega_evme_batch_{name}_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+    path
+}
+
+/// Write a copy of the envelope whose `eth_getTransactionByHash` response for
+/// `tx_hash` still returns the transaction object, but with `gas` set to `0x0`
+/// so execution/setup fails (intrinsic gas / validation) rather than a missing
+/// lookup. Models an executor abort mid-block.
+fn envelope_with_zero_gas_transaction(name: &str, tx_hash: &str) -> std::path::PathBuf {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let marker = format!("\"hash\":\"{tx_hash}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object for {tx_hash}");
+        result["gas"] = serde_json::Value::String("0x0".into());
         entry["value"] = serde_json::Value::String(response.to_string());
         doctored += 1;
     }
@@ -330,6 +367,59 @@ fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
     // The denied transaction is an execution-class failure, which outranks the
     // unanswered ones.
     assert_eq!(code, Some(1), "a definitive negative answer exits 1");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("execution-error"));
+}
+
+/// An executor/setup abort on a mid-block transaction is still an execution
+/// failure for that transaction only: every target behind it is unanswered
+/// (`rpc`), not blamed as execution.
+///
+/// Doctors the envelope so a mid-block type-0x2 call has gas `0x0` — the lookup
+/// succeeds, but the block executor rejects it as an invalid transaction
+/// (intrinsic/call gas) and aborts the block — an execution-class error, not
+/// `TransactionNotFound`.
+#[test]
+#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
+fn test_replay_block_sweeps_targets_behind_execution_abort_as_rpc() {
+    let (aborting, aborting_index) = EXEC_ABORT_TX;
+    let path = envelope_with_zero_gas_transaction("exec_abort_block", aborting);
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    for (index, line) in lines.iter().enumerate() {
+        let index = index as u64;
+        if index < aborting_index {
+            assert!(line.get("error").is_none(), "targets before the abort replay: {line}");
+            continue;
+        }
+        if index == aborting_index {
+            assert_eq!(
+                line["error"]["kind"].as_str(),
+                Some("execution"),
+                "the aborting transaction keeps its own execution kind: {line}"
+            );
+            continue;
+        }
+        assert_eq!(
+            line["error"]["kind"].as_str(),
+            Some("rpc"),
+            "a target swept up behind an execution abort went unanswered: {line}"
+        );
+        assert!(
+            line["error"]["message"].as_str().is_some_and(|m| {
+                m.contains(aborting) || m.contains("aborted") || m.contains("Block replay")
+            }),
+            "the message must name the abort cause: {line}"
+        );
+    }
+
+    // The aborting transaction is an execution-class failure, which outranks
+    // the unanswered ones.
+    assert_eq!(code, Some(1), "a definitive execution failure exits 1");
     assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("execution-error"));
 }
 

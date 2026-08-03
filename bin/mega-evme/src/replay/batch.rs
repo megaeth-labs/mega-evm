@@ -139,7 +139,7 @@ pub(super) enum BatchMode {
 ///
 /// Execution outcomes (success, revert, halt) are normal results and never map
 /// to one of these kinds.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchErrorKind {
     /// The transaction hash is unknown to the endpoint.
     NotFound,
@@ -1015,13 +1015,12 @@ fn classify(err: &ReplayError) -> BatchErrorKind {
 
 /// The kind reported for a target swept up by an abort caused elsewhere.
 ///
-/// The abort says nothing about this target, so a definitive answer about
-/// another transaction (an unknown hash) becomes an unanswered question here.
-fn swept_kind(err: &ReplayError) -> BatchErrorKind {
-    match classify(err) {
-        BatchErrorKind::NotFound | BatchErrorKind::Rpc => BatchErrorKind::Rpc,
-        kind => kind,
-    }
+/// The abort says nothing about this target: whatever class caused the block to
+/// stop (unknown hash, RPC failure, executor/setup error on another
+/// transaction), a non-aborting swept target is unanswered (`rpc`). Only the
+/// transaction that caused the abort keeps its own classified kind.
+fn swept_kind(_err: &ReplayError) -> BatchErrorKind {
+    BatchErrorKind::Rpc
 }
 
 /// The transaction an aborting error is about, when it names one.
@@ -1256,6 +1255,30 @@ mod tests {
 
         assert_eq!(tally.counts.execution, 0);
         assert!(tally.into_error().is_none(), "fixture skips never fail the run");
+    }
+
+    /// Every non-aborting swept target is unanswered (`rpc`), even when the
+    /// abort itself is an execution-class failure of another transaction.
+    #[test]
+    fn test_swept_kind_always_rpc_regardless_of_abort_class() {
+        // Unknown hash: already unanswered for the cause, and for swept peers.
+        assert_eq!(swept_kind(&ReplayError::TransactionNotFound(B256::ZERO)), BatchErrorKind::Rpc);
+        // Transport/RPC failure.
+        assert_eq!(swept_kind(&ReplayError::RpcError("endpoint down".into())), BatchErrorKind::Rpc);
+        // Execution-class aborts (other, setup, internal) must not blame swept targets.
+        assert_eq!(
+            swept_kind(&ReplayError::Other("executor setup failed".into())),
+            BatchErrorKind::Rpc
+        );
+        assert_eq!(
+            swept_kind(&ReplayError::InvalidInput("bad hardfork schedule".into())),
+            BatchErrorKind::Rpc
+        );
+        // classify itself still distinguishes execution for the aborting target.
+        assert_eq!(
+            classify(&ReplayError::Other("executor setup failed".into())),
+            BatchErrorKind::Execution
+        );
     }
 
     /// A run whose only finding is divergence fails as the mismatch it is.

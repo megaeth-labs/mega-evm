@@ -235,9 +235,13 @@ A missing or corrupt on-disk file during the re-read degrades to writing this pr
 Capture envelopes (`--rpc.capture-file`) use the same lock + re-read-merge path, with additional hard-error checks before writing:
 
 - The on-disk envelope `version` and `chain_id` must match this process's capture.
-- If both the on-disk envelope and this process carry a non-null `external_env` snapshot and those snapshots are not identical, persist hard-errors and names both values.
-  One-sided or identical snapshots still merge: this process's snapshot is kept when set, otherwise the on-disk snapshot is propagated.
-  This matches the offline [`cache merge`](../commands/cache.md) rule so concurrent captures cannot silently union RPC entries under a single wrong environment.
+- `external_env` uses optimistic concurrency against the snapshot observed when this process opened the capture file:
+  - If the locked on-disk snapshot is absent, or still equals the load-time snapshot, the caller's intentional update wins (so a sequential refresh with `--bucket-capacity` on an existing capture is accepted).
+  - Persist hard-errors only when the on-disk snapshot changed since load **and** differs from this process's snapshot (true concurrent conflict).
+    The error names all three values: loaded, ours, and on-disk.
+  - Snapshots are canonicalized before comparison and write (deduplicate by bucket id with last-wins, then sort by id), so two workers with the same effective capacities in different CLI order do not conflict.
+  - One-sided snapshots still merge: this process's snapshot is kept when set, otherwise the on-disk snapshot is propagated.
+- Offline [`cache merge`](../commands/cache.md) still rejects non-identical non-null `external_env` snapshots across inputs (no load-time baseline to compare against).
 
 A corrupt or unreadable on-disk envelope during re-read degrades to writing this process's entries only (warned), while identity/schema failures remain hard errors.
 

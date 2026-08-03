@@ -76,6 +76,11 @@ enum RpcCacheStoreInner {
         /// by the command layer once it has computed the effective value
         /// from CLI + prior envelope.
         external_env: Option<ExternalEnvSnapshot>,
+        /// Snapshot observed when the capture file was loaded (or `None` when
+        /// the file was absent / carried no snapshot). Used for optimistic
+        /// concurrency at persist: intentional A→B refreshes are accepted when
+        /// the locked re-read is still A; only a true concurrent change conflicts.
+        loaded_external_env: Option<ExternalEnvSnapshot>,
     },
 }
 
@@ -91,15 +96,28 @@ impl RpcCacheStore {
     /// Construct a store backed by a transport-level fixture envelope file.
     ///
     /// `pub(super)` to keep the `TransportCache` parameter from leaking out of
-    /// this module. The snapshot field starts empty; callers inject it later
+    /// this module. The write snapshot starts empty; callers inject it later
     /// via [`Self::set_external_env`].
+    ///
+    /// The on-disk snapshot at `path` (if any) is captured here as the load-time
+    /// baseline for optimistic concurrency at persist — intentional A→B
+    /// refreshes are accepted when the locked re-read still matches this value.
     pub(super) fn new_envelope(cache: TransportCache, path: PathBuf, chain_id: u64) -> Self {
+        // Observe the load-time external_env once, at store construction (the
+        // same moment capture mode opens the file). Re-reading at persist is
+        // compared against this baseline, not against a second open-time read.
+        let loaded_external_env = if path.exists() {
+            CacheFileEnvelope::load(&path).ok().and_then(|e| e.external_env)
+        } else {
+            None
+        };
         Self {
             inner: Some(RpcCacheStoreInner::FixtureCapture {
                 cache,
                 path,
                 chain_id,
                 external_env: None,
+                loaded_external_env,
             }),
         }
     }
@@ -184,9 +202,16 @@ impl RpcCacheStore {
                 }
                 Ok(())
             }
-            RpcCacheStoreInner::FixtureCapture { cache, path, chain_id, external_env } => {
+            RpcCacheStoreInner::FixtureCapture {
+                cache,
+                path,
+                chain_id,
+                external_env,
+                loaded_external_env,
+            } => {
                 let entry_count = cache.len();
-                CacheFileEnvelope::new(&cache, chain_id, external_env.as_ref()).save(&path)?;
+                CacheFileEnvelope::new(&cache, chain_id, external_env.as_ref())
+                    .save(&path, loaded_external_env.as_ref())?;
                 info!(
                     path = %path.display(),
                     entries = entry_count,
@@ -365,15 +390,23 @@ impl CacheFileEnvelope {
     /// Atomically write this envelope to `path` under a lock, merging with any
     /// on-disk envelope already present (ours win on cache key collision).
     ///
-    /// `external_env` keeps ours if set, else the on-disk one. Both sides non-null
-    /// and not identical is a hard error (same rule as offline `cache merge`).
+    /// `loaded_external_env` is the snapshot observed when this process opened
+    /// the capture file. Persist accepts an intentional A→B refresh when the
+    /// locked re-read is still A (or absent); a concurrent change to a third
+    /// snapshot C hard-errors and names loaded/ours/on-disk. See
+    /// [`merge_envelope_for_persist`].
+    ///
     /// On-disk re-read failures are typed: identity/schema mismatches hard-fail;
     /// corrupt JSON degrades to ours-only with a warning.
     ///
     /// Lock contention blocks until the lock is free. Failure to create/acquire
     /// the lock degrades to an unlocked write with a `warn!`. Write failures
     /// remain hard errors.
-    pub(super) fn save(&self, path: &Path) -> Result<()> {
+    pub(super) fn save(
+        &self,
+        path: &Path,
+        loaded_external_env: Option<&ExternalEnvSnapshot>,
+    ) -> Result<()> {
         let _guard = match acquire_exclusive_lock(path) {
             Ok(g) => Some(g),
             Err(err) => {
@@ -387,10 +420,14 @@ impl CacheFileEnvelope {
         };
 
         let ours = self.to_merge_doc()?;
+        let loaded_doc = loaded_external_env
+            .map(|e| ExternalEnvDoc { bucket_capacities: e.bucket_capacities.clone() });
         let to_write = if path.exists() {
             // Typed hard vs degradable: no substring matching on formatted messages.
             match reread_envelope_for_merge(path) {
-                EnvelopeReread::Ok(on_disk) => merge_envelope_for_persist(&on_disk, &ours, path)?,
+                EnvelopeReread::Ok(on_disk) => {
+                    merge_envelope_for_persist(&on_disk, &ours, loaded_doc.as_ref(), path)?
+                }
                 EnvelopeReread::Hard(err) => return Err(err),
                 EnvelopeReread::Degradable(msg) => {
                     warn!(
@@ -398,11 +435,12 @@ impl CacheFileEnvelope {
                         error = %msg,
                         "Failed to re-read on-disk envelope during merge; persisting our entries only",
                     );
-                    ours
+                    // Still write the canonical form when replacing corrupt content.
+                    canonicalize_envelope_external_env(ours)
                 }
             }
         } else {
-            ours
+            canonicalize_envelope_external_env(ours)
         };
 
         write_envelope_atomic(path, &to_write)
@@ -422,6 +460,15 @@ impl CacheFileEnvelope {
                 .map(|e| ExternalEnvDoc { bucket_capacities: e.bucket_capacities.clone() }),
         })
     }
+}
+
+/// Canonicalize `external_env` on a merge doc about to be written alone (no
+/// on-disk merge). Merge path already returns a canonical snapshot.
+fn canonicalize_envelope_external_env(mut doc: EnvelopeDoc) -> EnvelopeDoc {
+    if let Some(ext) = doc.external_env.take() {
+        doc.external_env = Some(ext.canonicalized());
+    }
+    doc
 }
 
 /// Snapshot of mega-evm external environment inputs not derivable from RPC.
@@ -457,7 +504,7 @@ mod tests {
             .expect("seed cache");
 
         let ext = ExternalEnvSnapshot { bucket_capacities: vec![(1, 100), (2, 200)] };
-        CacheFileEnvelope::new(&cache, 4326, Some(&ext)).save(&path).expect("save envelope");
+        CacheFileEnvelope::new(&cache, 4326, Some(&ext)).save(&path, None).expect("save envelope");
 
         let envelope = CacheFileEnvelope::load(&path).expect("load envelope");
         assert_eq!(envelope.version, 1);
@@ -594,7 +641,7 @@ mod tests {
                 "value": r#"{"result":"b"}"#,
             }]))
             .expect("seed b");
-        CacheFileEnvelope::new(&cache_b, 99, None).save(&path).expect("save b");
+        CacheFileEnvelope::new(&cache_b, 99, None).save(&path, None).expect("save b");
 
         let cache_a = TransportCache::new();
         cache_a
@@ -603,7 +650,7 @@ mod tests {
                 "value": r#"{"result":"a"}"#,
             }]))
             .expect("seed a");
-        CacheFileEnvelope::new(&cache_a, 99, None).save(&path).expect("save a");
+        CacheFileEnvelope::new(&cache_a, 99, None).save(&path, None).expect("save a");
 
         let env = CacheFileEnvelope::load(&path).expect("load");
         let loaded = TransportCache::from_value(&env.cache).expect("from_value");
@@ -618,10 +665,11 @@ mod tests {
         let path = dir.path().join("capture.json");
 
         let cache_b = TransportCache::new();
-        CacheFileEnvelope::new(&cache_b, 1, None).save(&path).expect("save b");
+        CacheFileEnvelope::new(&cache_b, 1, None).save(&path, None).expect("save b");
 
         let cache_a = TransportCache::new();
-        let err = CacheFileEnvelope::new(&cache_a, 2, None).save(&path).expect_err("mismatch");
+        let err =
+            CacheFileEnvelope::new(&cache_a, 2, None).save(&path, None).expect_err("mismatch");
         assert!(err.to_string().contains("chain_id"));
     }
 
@@ -643,7 +691,7 @@ mod tests {
             }]))
             .expect("seed");
         CacheFileEnvelope::new(&cache, 7, None)
-            .save(&path)
+            .save(&path, None)
             .expect("corrupt disk with chain_id in path must degrade, not hard-fail");
 
         let env = CacheFileEnvelope::load(&path).expect("ours written");
@@ -659,14 +707,138 @@ mod tests {
         let path = dir.path().join("chain_id_version_capture.json");
 
         let cache_b = TransportCache::new();
-        CacheFileEnvelope::new(&cache_b, 1, None).save(&path).expect("save b");
+        CacheFileEnvelope::new(&cache_b, 1, None).save(&path, None).expect("save b");
 
         let cache_a = TransportCache::new();
         let err = CacheFileEnvelope::new(&cache_a, 2, None)
-            .save(&path)
+            .save(&path, None)
             .expect_err("chain_id mismatch must hard-fail");
         let msg = err.to_string();
         assert!(msg.contains("chain_id"), "msg={msg}");
+    }
+
+    /// Sequential capture refresh: loaded A, ours B, disk still A → B is written.
+    #[test]
+    fn test_envelope_persist_intentional_external_env_refresh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        let loaded = ExternalEnvSnapshot { bucket_capacities: vec![(1, 10)] };
+        let cache_a = TransportCache::new();
+        CacheFileEnvelope::new(&cache_a, 7, Some(&loaded)).save(&path, None).expect("seed A");
+
+        let ours = ExternalEnvSnapshot { bucket_capacities: vec![(1, 99)] };
+        let cache_b = TransportCache::new();
+        CacheFileEnvelope::new(&cache_b, 7, Some(&ours))
+            .save(&path, Some(&loaded))
+            .expect("intentional A→B refresh");
+
+        let env = CacheFileEnvelope::load(&path).expect("load");
+        let written = env.external_env.expect("external_env written");
+        assert_eq!(written.bucket_capacities, vec![(1, 99)]);
+    }
+
+    /// Store construction observes the on-disk snapshot so intentional A→B
+    /// refresh works through the public `set_external_env` + `persist` path
+    /// without callers plumbing the load-time baseline themselves.
+    #[test]
+    fn test_store_persist_intentional_external_env_refresh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        let loaded = ExternalEnvSnapshot { bucket_capacities: vec![(1, 10)] };
+        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&loaded))
+            .save(&path, None)
+            .expect("seed A");
+
+        let mut store = RpcCacheStore::new_envelope(TransportCache::new(), path.clone(), 7);
+        store.set_external_env(ExternalEnvSnapshot { bucket_capacities: vec![(1, 99)] });
+        store.persist().expect("store-level intentional A→B refresh must succeed");
+
+        let env = CacheFileEnvelope::load(&path).expect("load");
+        assert_eq!(
+            env.external_env.expect("external_env written").bucket_capacities,
+            vec![(1, 99)]
+        );
+    }
+
+    /// After store construction loads A, a concurrent writer changing the file
+    /// to C causes persist with ours B to hard-error (true concurrent conflict).
+    #[test]
+    fn test_store_persist_rejects_concurrent_external_env_conflict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        let a = ExternalEnvSnapshot { bucket_capacities: vec![(1, 10)] };
+        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&a))
+            .save(&path, None)
+            .expect("seed A");
+
+        // Observe A at construction, then a concurrent writer intentionally
+        // refreshes A→C (its own loaded baseline is A).
+        let mut store = RpcCacheStore::new_envelope(TransportCache::new(), path.clone(), 7);
+        let c = ExternalEnvSnapshot { bucket_capacities: vec![(1, 42)] };
+        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&c))
+            .save(&path, Some(&a))
+            .expect("concurrent C");
+
+        store.set_external_env(ExternalEnvSnapshot { bucket_capacities: vec![(1, 99)] });
+        let err = store.persist().expect_err("true concurrent conflict via store");
+        let msg = err.to_string();
+        assert!(msg.contains("external_env"), "msg={msg}");
+        assert!(
+            msg.contains("loaded") && msg.contains("ours") && msg.contains("on-disk"),
+            "msg={msg}"
+        );
+        assert!(msg.contains("10") && msg.contains("99") && msg.contains("42"), "msg={msg}");
+    }
+
+    /// Concurrent conflict through save: loaded A, ours B, disk C → hard error.
+    #[test]
+    fn test_envelope_persist_rejects_concurrent_external_env_conflict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        let c = ExternalEnvSnapshot { bucket_capacities: vec![(1, 42)] };
+        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&c))
+            .save(&path, None)
+            .expect("seed C");
+
+        let loaded = ExternalEnvSnapshot { bucket_capacities: vec![(1, 10)] };
+        let ours = ExternalEnvSnapshot { bucket_capacities: vec![(1, 99)] };
+        let err = CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&ours))
+            .save(&path, Some(&loaded))
+            .expect_err("true concurrent conflict");
+        let msg = err.to_string();
+        assert!(msg.contains("external_env"), "msg={msg}");
+        assert!(
+            msg.contains("loaded") && msg.contains("ours") && msg.contains("on-disk"),
+            "msg={msg}"
+        );
+        assert!(msg.contains("10") && msg.contains("99") && msg.contains("42"), "msg={msg}");
+    }
+
+    /// Same effective capacities in different order do not conflict at save.
+    #[test]
+    fn test_envelope_persist_order_insensitive_external_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capture.json");
+
+        let a = ExternalEnvSnapshot { bucket_capacities: vec![(1, 10), (2, 20)] };
+        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&a))
+            .save(&path, None)
+            .expect("seed");
+
+        let b = ExternalEnvSnapshot { bucket_capacities: vec![(2, 20), (1, 10)] };
+        // Pretend we loaded something else so equality is the only thing that
+        // would save us from a false concurrent-conflict report.
+        let foreign = ExternalEnvSnapshot { bucket_capacities: vec![(9, 9)] };
+        CacheFileEnvelope::new(&TransportCache::new(), 7, Some(&b))
+            .save(&path, Some(&foreign))
+            .expect("order-only difference must not conflict");
+
+        let env = CacheFileEnvelope::load(&path).expect("load");
+        assert_eq!(env.external_env.expect("present").bucket_capacities, vec![(1, 10), (2, 20)]);
     }
 
     /// Typed re-read: corrupt content is Degradable even when path mentions `chain_id`.
