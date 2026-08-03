@@ -77,11 +77,13 @@ Because the compute gas a transaction has consumed is itself a metered resource 
 
 A node MUST meter every storage-affecting opcode — `SSTORE`, `LOG0` through `LOG4`, `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2`, and `SELFDESTRUCT` — in the following fixed order:
 
-1. Validate the opcode's operands.
+1. Validate the operands the storage-gas charge itself reads.
    A validation failure (for example, stack underflow) MUST halt before any gas is charged or recorded.
+   Operands the charge does not read are validated by the opcode body in step 3: `LOG1` through `LOG4` read only the data length here, so a short stack missing their topic operands reaches step 2 first.
 2. Charge the opcode's storage gas against the transaction's gas budget.
    If the budget is insufficient, the node MUST halt with `OutOfGas` before executing the opcode body.
 3. Execute the opcode body, including every standard EVM dynamic cost such as memory expansion, account access, and child-frame gas forwarding.
+   `CREATE2` is the exception to the order of steps 2 and 3: its target address is derived from the initcode, so the memory expansion and hash that derive it necessarily precede the charge for that address, and an insufficient budget surfaces after the expansion has already been paid for.
 4. Record the opcode's compute gas as a single amount, measured over a window spanning steps 2 and 3 — or over the equivalent window that opens after step 2 with `storage_gas_charged` treated as zero (see [Storage Gas Exclusion](compute-gas.md#storage-gas-exclusion)).
    The recorded amount and its exclusions are defined in [Compute Gas Accounting](compute-gas.md#measurement-window).
    The node MUST then enforce the compute gas limit, halting if it is exceeded.

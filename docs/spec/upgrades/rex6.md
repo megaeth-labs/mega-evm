@@ -62,7 +62,7 @@ This split caused four metering bugs in which skipped authorizations were still 
 Rex6 derives every per-authorization effect — data size, KV update, state growth, dynamic new-account storage gas, and beneficiary detention — from a single journal-aware scan that mirrors revm's authorization application gates exactly.
 Charges are now narrowed to authorizations that actually pass the chain-id, nonce, and code gates and therefore write the authority account.
 
-Rex6 also moves authority state-growth resolution from pre-execution to validation, before the gas-limit and fee-affordability checks.
+Rex6 also moves authority state-growth resolution from pre-execution to validation, after the inherited intrinsic-gas validation and before the final gas-limit and fee-affordability checks.
 This lets the dynamic SALT account-creation gas for net-new authorities be folded into intrinsic gas and enforced against `gas_limit` and the sender's available balance before the sender is debited or the caller nonce is bumped, mirroring the existing per-`tx.kind` new-account storage-gas treatment.
 
 ### CREATE-Frame Resource Accounting
@@ -196,9 +196,9 @@ The prevailing pattern was: charge storage gas, run the opcode body, then record
 
 Every storage-affecting opcode (`SSTORE`, `LOG0`–`LOG4`, `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2`, `SELFDESTRUCT`) follows one fixed order:
 
-1. Validate operands; a validation failure halts before any gas is charged or recorded.
+1. Validate the operands the storage-gas charge reads; a validation failure halts before any gas is charged or recorded. Operands only the body needs are validated in step 3 — `LOG1`–`LOG4` read only the data length here, so a `LOG4` with its topic operands absent can halt with `OutOfGas` on the topic charge rather than with a stack underflow.
 2. Charge storage gas; an insufficient budget halts with `OutOfGas` before the body runs.
-3. Execute the opcode body, including all standard EVM dynamic costs (memory expansion, account access, child-frame forwarding).
+3. Execute the opcode body, including all standard EVM dynamic costs (memory expansion, account access, child-frame forwarding). `CREATE2` inverts steps 2 and 3: its address is derived from the initcode, so the memory expansion and hash precede the charge for that address.
 4. Record the opcode's compute gas exactly once, equal to the EVM gas consumed by steps 2–3 minus the storage gas charged in step 2 minus any gas forwarded to a child frame, then enforce the compute gas limit.
 5. Apply resource-limit accounting (data size, key-value updates, state growth).
 
@@ -233,7 +233,7 @@ Per-authorization effects were resolved in three separate places with different 
 
 #### New behavior (Rex6)
 
-A single journal-aware scan runs in `validate`, before the caller nonce bump and before the gas-limit / fee-affordability checks.
+A single journal-aware scan runs in `validate`, before the caller nonce bump and before the final gas-limit / fee-affordability checks — but after the inherited intrinsic-gas validation, so a transaction whose standard intrinsic gas already exceeds its gas limit is rejected without the authority accounts being read.
 The scan mirrors revm's authorization application rules exactly: for each authorization entry, a node MUST apply the entry only when all of the following hold:
 
 - the authorization chain ID is zero or equals the current chain ID,

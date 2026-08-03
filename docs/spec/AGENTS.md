@@ -155,6 +155,14 @@ Optional, if it helps orient readers.
 - State edge cases explicitly as normative rules (e.g., "For state that does not yet exist, the node MUST...").
 - Do not leave behavior undefined — if the spec doesn't say what happens, implementers will guess differently.
 
+### Universal Claims
+
+A rule stated for "every X" is read as covering every X, so it must be checked against every X before it is written.
+Two habits keep that honest:
+
+- **Declare the page's lower bound.** A page whose rules do not apply from Equivalence onward MUST say where they start, once, before stating them — as `evm/compute-gas.md` does with "Compute gas metering begins at MiniRex." Without it, every later sentence on the page silently claims to cover Equivalence, which runs the unmodified upstream instruction table and therefore has none of MegaETH's wrappers, storage-gas charges, or resource lanes.
+- **Look for the counterexample before writing the quantifier.** For a claim spanning specs, resolve it through the per-spec instruction table selection; for one spanning opcodes or call schemes, check each named opcode's own wrapper. Where the implementation has an exception, name the exception in the rule rather than leaving the rule clean — an implementer following a rule mega-evm does not keep will diverge, and a halt reason or charge ordering is observable.
+
 ### Charging Lifecycle
 
 - For any cost or fee, specify WHEN it is charged: before execution, at the opcode, or post-execution.

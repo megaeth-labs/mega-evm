@@ -31,6 +31,9 @@ The initcode limit is defined as:
 
 ### Creation-Opcode Halt Ordering
 
+The rules in this section apply from [MiniRex](../upgrades/minirex.md) onward.
+Under the Equivalence spec a node runs the creation opcodes unchanged, with no prework and no contract-creation storage gas, so canonical ordering applies throughout.
+
 `CREATE2` computes its target address by expanding memory, copying the initcode, and hashing it before the inner opcode body runs, and both `CREATE` and `CREATE2` charge the contract-creation [storage gas](../glossary.md#storage-gas) for the derived address before that body runs.
 Two rejections MUST fire ahead of that prework.
 
@@ -39,14 +42,15 @@ The check follows canonical operand ordering: the length operand is converted fi
 
 This rule is specific to `CREATE2`.
 A `CREATE` derives its address from the creator's nonce without reading the initcode, so it has no such prework to precede: its size check stays inside the opcode body, after the contract-creation storage gas for the derived address is charged.
-An oversized `CREATE` therefore surfaces whichever halt that charge reaches first — a storage-gas out-of-gas, or a fatal external error from the storage-pricing lookup — rather than `CreateInitCodeSizeLimit`, on every spec.
+An oversized `CREATE` therefore surfaces whichever halt that charge reaches first — a storage-gas out-of-gas, or a fatal external error from the storage-pricing lookup — rather than `CreateInitCodeSizeLimit`, on every spec from MiniRex onward.
 
 Inside a static call frame, any `CREATE` or `CREATE2` MUST halt with the static-call rejection before its operands are read, before the size check runs, before the deployment address is derived, and before the contract-creation storage gas is charged.
 This matches canonical ordering, in which the static-context check precedes every other check.
 
-Both rules change only the halt reason and its timing, not the outcome: every halt involved consumes all gas regardless of when it fires, so committed gas and committed state are identical either way.
+Where both orderings end in a halt, they change only the halt reason and its timing, not the outcome: every such halt consumes all gas regardless of when it fires, so committed gas and committed state are identical either way.
+The exception is the fatal external error, which abandons the transaction instead of halting the frame: rejecting before the storage-pricing lookup avoids it entirely, so the outcomes there are not equivalent.
 
-Earlier specs run the prework first.
+MiniRex through Rex5 run the prework first.
 There, an oversized `CREATE2` surfaces whichever halt the prework reaches first — a memory out-of-gas, for instance — rather than the size-limit halt, and a creation opcode in a static frame surfaces a stack underflow, a memory out-of-gas, a storage-gas out-of-gas, or a fatal external error from the storage-pricing lookup instead of the static-call rejection.
 
 ### Zero-Length Init Code in CREATE2
@@ -78,4 +82,4 @@ This page has no security considerations.
 - [MiniRex](../upgrades/minirex.md) introduced the enlarged contract and initcode limits.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), [Rex3](../upgrades/rex3.md), and [Rex4](../upgrades/rex4.md) retain the same stable limits.
 - [Rex5](../upgrades/rex5.md) short-circuits zero-length `CREATE2` after salt validation, using the empty-init-code hash without observing the init-code offset operand.
-- [Rex6](../upgrades/rex6.md) moved the oversized-initcode halt and the static-frame rejection ahead of the creation opcode's address-computation prework; through Rex5 the prework runs first, so those cases surface whichever halt it reaches first instead. Only the halt reason and its timing change.
+- [Rex6](../upgrades/rex6.md) moved the oversized-`CREATE2` initcode halt and the static-frame rejection ahead of the creation opcode's address-computation prework; MiniRex through Rex5 run the prework first, so those cases surface whichever halt it reaches first instead. The halt reason and its timing change; the outcome changes only where the prework would have raised a fatal external error.

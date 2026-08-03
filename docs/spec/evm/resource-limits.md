@@ -175,7 +175,8 @@ These deductions ensure that pre-frame costs reduce the budget available to the 
 
 #### Authority State Growth Resolution
 
-A node MUST resolve the state-growth contribution of EIP-7702 authorizations during transaction validation, before the gas-limit and fee-affordability checks.
+A node MUST resolve the state-growth contribution of EIP-7702 authorizations during transaction validation, after the inherited intrinsic-gas validation and before the final gas-limit and fee-affordability checks — the ones that see the dynamic SALT account-creation gas this scan folds in.
+A transaction whose standard intrinsic gas already exceeds its own gas limit is therefore rejected by the inherited validation without the authority accounts being read at all.
 The set of authorities and the per-authority effects are derived from the same applied-authorization scan that drives the data-size and KV-update narrowing in [Resource Accounting](resource-accounting.md).
 
 #### Dynamic Authority Account-Creation Gas

@@ -50,10 +50,12 @@ The sole exception is [compute gas](../glossary.md#compute-gas), which MUST accu
 
 #### Creator Nonce-Bump Frame Attribution
 
-Every `CREATE` / `CREATE2` bumps the creator's nonce, and that account-info write is charged to the data-size and KV-update dimensions.
+A `CREATE` / `CREATE2` bumps the creator's nonce, and that account-info write is charged to the data-size and KV-update dimensions.
 The creator's nonce bump survives a revert of the created frame under EVM semantics, so its accounting MUST follow the same scope.
 
 A node MUST record the creator nonce-bump account-info write (`ACCOUNT_UPDATE_DATA_SIZE` bytes of data size and one KV update) in the **parent** frame's discardable lane, so that it is discarded only when the parent itself reverts.
+
+A node MUST record the charge even for a creation rejected for exceeding the call-depth limit or for insufficient creator balance, where no nonce bump follows.
 
 ### Compute Gas
 
@@ -266,7 +268,7 @@ This page describes the current accounting behavior.
 - [Rex4](../upgrades/rex4.md) — introduced per-call-frame runtime budgets for all four resource dimensions.
 - [Rex5](../upgrades/rex5.md) — corrected caller-account update deduplication: pre-Rex5, the caller's `ACCOUNT_UPDATE_DATA_SIZE` (data size) and KV-update count were re-charged on every value-transferring sub-call or create from the same parent frame because the caller was never marked as already counted after the first charge; Rex5 marks the caller after the first charge so subsequent operations from the same parent frame do not re-count the caller account. Rex5 also records contract-creation code-deposit compute gas atomically with the deployment commit instead of during post-execution accounting.
 - [Rex6](../upgrades/rex6.md) — narrowed the EIP-7702 authority data-size and KV-update charges from every recoverable authorization to only _applied_ authorizations: through Rex5, the `ACCOUNT_UPDATE_DATA_SIZE` and KV update were charged for every authorization with a recoverable authority, including ones later skipped by the chain-id, nonce, or code application gates.
-- [Rex6](../upgrades/rex6.md) — corrected two `CREATE`-frame accounting errors: the creator nonce-bump account-info write is booked to the parent frame's discardable lane instead of the child's, so it survives a child-`CREATE` revert correctly; and `CREATE` records `+1` state growth only when the created address is net-new instead of unconditionally.
+- [Rex6](../upgrades/rex6.md) — corrected two `CREATE`-frame accounting errors: the creator nonce-bump account-info write is booked to the parent frame's discardable lane instead of the child's, so it survives a child-`CREATE` revert correctly, and a creation rejected for call depth or creator balance now keeps the charge where through Rex5 it was discarded with the child's lane; and `CREATE` records `+1` state growth only when the created address is net-new instead of unconditionally.
 - [Rex6](../upgrades/rex6.md) — counted the account writes performed by the post-execution fee-reward step toward resource accounting: through Rex5, fee-recipient writes performed after the resource trackers were finalized escaped accounting entirely. The deposit-mint half was already closed in Rex5; Rex6 covers the remaining non-deposit fee-credit paths.
 - [Rex6](../upgrades/rex6.md) — counted the account-info write of a `SELFDESTRUCT` balance credit to an already-existing beneficiary: through Rex5 only a `SELFDESTRUCT` that created a new beneficiary was metered, so a balance credit to an existing beneficiary (which does not flow through the frame-initialization or caller-dedup path) recorded nothing.
 - [Rex6](../upgrades/rex6.md) — added a per-log data-size base: through Rex5, an empty `LOG0` contributed zero data size because the log address was not counted.
