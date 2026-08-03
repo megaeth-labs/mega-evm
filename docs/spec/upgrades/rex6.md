@@ -7,20 +7,6 @@ description: Rex6 network upgrade — unified per-opcode gas metering order (sto
 This page is an informative summary of the Rex6 specification.
 For the full normative definition, see the Rex6 spec in the mega-evm repository.
 
-{% tabs %}
-{% tab title="Testnet" %}
-Not yet scheduled
-{% endtab %}
-{% tab title="Mainnet" %}
-Not yet scheduled
-{% endtab %}
-{% endtabs %}
-
-{% hint style="info" %}
-Rex6 is frozen: its semantics no longer change.
-It has no activation timestamp on either network, so both currently execute [Rex5](rex5.md).
-{% endhint %}
-
 ## Summary
 
 Rex6 bundles fourteen changes to gas metering, resource accounting, execution behavior, and system contracts.
