@@ -180,17 +180,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> core::fmt::Debug for MegaInstructi
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
     /// Create a new `MegaethInstructions` with the given spec id.
     pub fn new(spec: MegaSpecId) -> Self {
-        // Dispatch on the BEHAVIOR: alias specs execute their target's tables. `behavior()`
-        // never returns an alias, so the alias arms below are unreachable by construction.
-        let instruction_table = match spec.behavior() {
-            MegaSpecId::MINI_REX_1 | MegaSpecId::MINI_REX_2 => {
-                unreachable!("behavior() projects aliases to their targets")
+        // An alias spec is grouped with its `behavior()` target so it executes exactly the
+        // target's table; the grouping must agree with `behavior()`, pinned by
+        // `test_alias_specs_use_their_behavior_targets_table`.
+        let instruction_table = match spec {
+            MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => EthInstructions::new_mainnet(),
+            MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => {
+                EthInstructions::new(mini_rex::instruction_table::<
+                    EthInterpreter,
+                    MegaContext<DB, ExtEnvs>,
+                >())
             }
-            MegaSpecId::EQUIVALENCE => EthInstructions::new_mainnet(),
-            MegaSpecId::MINI_REX => EthInstructions::new(mini_rex::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
             MegaSpecId::REX | MegaSpecId::REX1 => EthInstructions::new(rex::instruction_table::<
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
@@ -2348,5 +2348,36 @@ impl StackInspectTr for Stack {
         let index = self.len() - 1 - N;
         // SAFETY: the index must be within the bounds of the stack
         Some(unsafe { *self.data().get_unchecked(index) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
+
+    /// Every alias spec must select exactly its `behavior()` target's instruction
+    /// table — the match in `MegaInstructions::new` states the alias→target mapping a
+    /// second time, and this test is the reconciliation between the two. Both tables
+    /// come from the same monomorphization, so identical arms produce identical fn
+    /// pointers and `fn_addr_eq` compares them reliably.
+    #[test]
+    fn test_alias_specs_use_their_behavior_targets_table() {
+        for spec in MegaSpecId::ALL {
+            if !spec.is_alias() {
+                continue;
+            }
+            let alias = MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(*spec);
+            let target = MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(spec.behavior());
+            let (alias_table, target_table) =
+                (alias.instruction_table(), target.instruction_table());
+            for opcode in 0..=0xff_usize {
+                assert!(
+                    core::ptr::fn_addr_eq(alias_table[opcode], target_table[opcode]),
+                    "{spec:?} table diverges from its behavior target {:?} at opcode {opcode:#04x}",
+                    spec.behavior(),
+                );
+            }
+        }
     }
 }
