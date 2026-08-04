@@ -48,10 +48,11 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7
 ```
 
-Each newer spec includes all previous behaviors.
+Each newer behavior-introducing spec includes all previous behaviors.
+The alias rungs `MINI_REX_1` (behavior: `EQUIVALENCE`) and `MINI_REX_2` (behavior: `MINI_REX`) are the exception: an alias rung introduces no behavior of its own and instead executes exactly its target's earlier behavior (see [Alias Specs](#alias-specs-behavior-vs-position)).
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
 All specs through REX6 are frozen; REX7 is **unstable** and under active development.
 
@@ -92,6 +93,15 @@ The first spec to introduce MegaETH-specific modifications:
 - **Large contract support** — 512 KB contracts (21x increase from 24 KB)
 
 _See [MiniRex Network Upgrade](upgrades/minirex.md) for full details._
+
+### MINI_REX_1 and MINI_REX_2
+
+Alias rungs with no behavior of their own.
+
+- `MINI_REX_1` (behavior: `EQUIVALENCE`) — scheduled by the `MiniRex1` hardfork; rolls execution semantics back to `EQUIVALENCE`.
+- `MINI_REX_2` (behavior: `MINI_REX`) — scheduled by the `MiniRex2` hardfork; restores `MINI_REX` semantics.
+
+See [Alias Specs](#alias-specs-behavior-vs-position) for how behavior and position project from an alias rung.
 
 ### REX
 
