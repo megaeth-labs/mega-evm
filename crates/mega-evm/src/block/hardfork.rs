@@ -45,13 +45,6 @@ impl MegaHardfork {
         !self.spec_id().is_alias()
     }
 
-    fn declaration_index(self) -> usize {
-        Self::VARIANTS
-            .iter()
-            .position(|fork| *fork == self)
-            .expect("every MegaHardfork is in VARIANTS")
-    }
-
     /// Gets the `MegaSpecId` associated with this hardfork.
     #[allow(clippy::match_same_arms)]
     pub fn spec_id(&self) -> MegaSpecId {

@@ -39,10 +39,10 @@ pub enum MegaSpecId {
     EQUIVALENCE,
     /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
     MINI_REX,
-    /// Alias spec for the *MiniRex1* hardfork: scheduled as its own rung, executes
+    /// Alias spec for the `MiniRex1` hardfork: scheduled as its own rung, executes
     /// [`MegaSpecId::EQUIVALENCE`] behavior (`behavior()` projects there).
     MINI_REX_1,
-    /// Alias spec for the *MiniRex2* hardfork: scheduled as its own rung, executes
+    /// Alias spec for the `MiniRex2` hardfork: scheduled as its own rung, executes
     /// [`MegaSpecId::MINI_REX`] behavior (`behavior()` projects there).
     MINI_REX_2,
     /// The EVM version for the *Rex* hardfork of `MegaETH`.
@@ -69,9 +69,9 @@ pub mod name {
     pub const EQUIVALENCE: &str = "Equivalence";
     /// The string identifier for the *Mini-Rex* version of the `MegaETH` EVM.
     pub const MINI_REX: &str = "MiniRex";
-    /// The string identifier for the *MiniRex1* alias spec.
+    /// The string identifier for the `MiniRex1` alias spec.
     pub const MINI_REX_1: &str = "MiniRex1";
-    /// The string identifier for the *MiniRex2* alias spec.
+    /// The string identifier for the `MiniRex2` alias spec.
     pub const MINI_REX_2: &str = "MiniRex2";
     /// The string identifier for the *Rex* version of the `MegaETH` EVM.
     pub const REX: &str = "Rex";
