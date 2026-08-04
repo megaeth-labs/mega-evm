@@ -212,8 +212,21 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
         load_code: bool,
         skip_cold_load: bool,
     ) -> Result<AccountInfoLoad<'_>, LoadError> {
+        let is_call_raw_operand = self.call_target_load_phase == CallTargetLoadPhase::RawOperand;
         if self.account_load_marks_beneficiary() {
             self.check_and_mark_beneficiary_balance_access(&address);
+        }
+        // Rex6+: the pre-revm-40 CALL-family host entry resolved the raw operand's EIP-7702
+        // delegate before loading it, and that resolution materialized the operand's journal
+        // entry — cold, code hydrated — as a side effect. The materialization is priced: the
+        // load below then sees a resident entry and keeps the entry's own coldness (see
+        // [`Self::resident_entry_prices_cold`]), where a fresh load would honor the pre-warmed
+        // sets (precompiles, coinbase, address-only access-list entries). Reproduce it so a
+        // Rex6 CALL-family first touch of a preload-warm address still prices cold. The
+        // delegate address itself is not marked here: revm loads it as the delegate hop and
+        // that load marks through this same entry point.
+        if is_call_raw_operand && self.spec.is_enabled(MegaSpecId::REX6) {
+            let _ = self.best_effort_resolve_eip7702_delegate_address(address);
         }
         // Read before the load: the load marks the entry warm.
         let resident_entry_is_cold = self.resident_entry_prices_cold(&address);
