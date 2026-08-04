@@ -61,7 +61,7 @@ pub fn transact_deploy_access_control_contract<DB: Database>(
 /// `spec` is the activated-spec floor — see
 /// [`oracle_spec`](crate::system::oracle::oracle_spec).
 pub(crate) fn access_control_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
-    spec.is_enabled(MegaSpecId::REX4).then(|| {
+    spec.reaches(MegaSpecId::REX4).then(|| {
         SystemContractSpec::new(
             ACCESS_CONTROL_ADDRESS,
             ACCESS_CONTROL_CODE,

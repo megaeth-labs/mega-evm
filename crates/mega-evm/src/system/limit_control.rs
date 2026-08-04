@@ -40,7 +40,7 @@ pub fn transact_deploy_limit_control_contract<DB: Database>(
 /// `spec` is the activated-spec floor — see
 /// [`oracle_spec`](crate::system::oracle::oracle_spec).
 pub(crate) fn limit_control_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
-    spec.is_enabled(MegaSpecId::REX4).then(|| {
+    spec.reaches(MegaSpecId::REX4).then(|| {
         SystemContractSpec::new(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, LIMIT_CONTROL_CODE_HASH)
     })
 }

@@ -289,8 +289,10 @@ fn test_rollback_window_still_emits_predeploy_witness_entries() {
     else {
         panic!("mainnet must schedule MiniRex1 by timestamp");
     };
-    // Precondition: inside the window the executing spec really has rolled back.
-    assert_eq!(chain_spec.spec_id(timestamp), MegaSpecId::EQUIVALENCE);
+    // Precondition: inside the window the scheduled spec is the alias rung and its behavior
+    // projects back to EQUIVALENCE.
+    assert_eq!(chain_spec.spec_id(timestamp), MegaSpecId::MINI_REX_1);
+    assert_eq!(chain_spec.spec_id(timestamp).behavior(), MegaSpecId::EQUIVALENCE);
 
     let mut db = MemoryDatabase::default();
     install_eip_contracts(&mut db);
@@ -311,7 +313,7 @@ fn test_rollback_window_still_emits_predeploy_witness_entries() {
     let mut executor = block_executor_factory.create_executor(
         &mut state,
         block_ctx(),
-        create_evm_env(MegaSpecId::EQUIVALENCE, timestamp),
+        create_evm_env(MegaSpecId::MINI_REX_1, timestamp),
     );
 
     let recorder = RecordingStateHook::default();

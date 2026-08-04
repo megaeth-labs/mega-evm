@@ -61,7 +61,7 @@ where
         return Ok(None);
     }
 
-    let res = if setup_spec.is_enabled(MegaSpecId::REX5) {
+    let res = if setup_spec.reaches(MegaSpecId::REX5) {
         let gas_limit =
             evm.block().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
         evm.transact_system_call_with_gas_limit(
@@ -131,7 +131,7 @@ where
         return Ok(None);
     }
 
-    let res = if setup_spec.is_enabled(MegaSpecId::REX5) {
+    let res = if setup_spec.reaches(MegaSpecId::REX5) {
         let gas_limit =
             evm.block().gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR);
         evm.transact_system_call_with_gas_limit(

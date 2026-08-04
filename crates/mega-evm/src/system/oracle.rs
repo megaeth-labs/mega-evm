@@ -62,7 +62,7 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
 /// ([`max_activated_spec_id`](crate::MegaHardforks::max_activated_spec_id)), not the executing
 /// spec: an Oracle already installed under `MINI_REX` stays installed through a spec rollback.
 pub(crate) fn oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
-    if !spec.is_enabled(MegaSpecId::MINI_REX) {
+    if !spec.reaches(MegaSpecId::MINI_REX) {
         return None;
     }
 
@@ -70,10 +70,10 @@ pub(crate) fn oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
     // - Pre-Rex2: v1.0.0 (without `sendHint`)
     // - Rex2-Rex4: v1.1.0 (with `sendHint`)
     // - Rex5+: v2.0.0 (reads system address from SequencerRegistry)
-    let rex5 = spec.is_enabled(MegaSpecId::REX5);
+    let rex5 = spec.reaches(MegaSpecId::REX5);
     let (target_code, target_code_hash) = if rex5 {
         (ORACLE_CONTRACT_CODE_REX5, ORACLE_CONTRACT_CODE_HASH_REX5)
-    } else if spec.is_enabled(MegaSpecId::REX2) {
+    } else if spec.reaches(MegaSpecId::REX2) {
         (ORACLE_CONTRACT_CODE_REX2, ORACLE_CONTRACT_CODE_HASH_REX2)
     } else {
         (ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_HASH)
@@ -119,7 +119,7 @@ pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
 ///
 /// `spec` is the activated-spec floor — see [`oracle_spec`].
 pub(crate) fn high_precision_timestamp_oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
-    spec.is_enabled(MegaSpecId::MINI_REX).then(|| {
+    spec.reaches(MegaSpecId::MINI_REX).then(|| {
         SystemContractSpec::new(
             HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
             HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,

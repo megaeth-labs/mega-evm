@@ -328,12 +328,12 @@ mod tests {
             panic!("mainnet must schedule MiniRex1 by timestamp");
         };
 
-        assert_eq!(hf.spec_id(ts), crate::MegaSpecId::EQUIVALENCE);
-        assert!(
-            flat_system_contract_specs_for(hf.spec_id(ts)).is_empty(),
-            "executing spec would drop both predeploys in the rollback window"
-        );
+        let spec = hf.spec_id(ts);
+        assert_eq!(spec, crate::MegaSpecId::MINI_REX_1);
+        assert_eq!(spec.behavior(), crate::MegaSpecId::EQUIVALENCE);
 
+        // The single scheduled spec keeps setup via position comparison even while its
+        // behavior projects back to EQUIVALENCE.
         let specs = flat_system_contract_specs(&hf, ts);
         assert_eq!(
             addrs(&specs),

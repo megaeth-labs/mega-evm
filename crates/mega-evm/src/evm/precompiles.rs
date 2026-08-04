@@ -38,7 +38,10 @@ impl MegaPrecompiles {
     #[inline]
     pub fn new_with_spec(spec: MegaSpecId) -> Self {
         // Get base precompiles from op-revm
-        let inner = match spec {
+        let inner = match spec.behavior() {
+            MegaSpecId::MINI_REX_1 | MegaSpecId::MINI_REX_2 => {
+                unreachable!("behavior() projects aliases to their targets")
+            }
             MegaSpecId::EQUIVALENCE => op_revm::precompiles::isthmus(),
             MegaSpecId::MINI_REX => mini_rex(),
             MegaSpecId::REX |

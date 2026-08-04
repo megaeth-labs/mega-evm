@@ -39,6 +39,12 @@ pub enum MegaSpecId {
     EQUIVALENCE,
     /// The EVM version for the *Mini-Rex* hardfork of `MegaETH`.
     MINI_REX,
+    /// Alias spec for the *MiniRex1* hardfork: scheduled as its own rung, executes
+    /// [`MegaSpecId::EQUIVALENCE`] behavior (`behavior()` projects there).
+    MINI_REX_1,
+    /// Alias spec for the *MiniRex2* hardfork: scheduled as its own rung, executes
+    /// [`MegaSpecId::MINI_REX`] behavior (`behavior()` projects there).
+    MINI_REX_2,
     /// The EVM version for the *Rex* hardfork of `MegaETH`.
     REX,
     /// The EVM version for the *Rex1* hardfork of `MegaETH`.
@@ -63,6 +69,10 @@ pub mod name {
     pub const EQUIVALENCE: &str = "Equivalence";
     /// The string identifier for the *Mini-Rex* version of the `MegaETH` EVM.
     pub const MINI_REX: &str = "MiniRex";
+    /// The string identifier for the *MiniRex1* alias spec.
+    pub const MINI_REX_1: &str = "MiniRex1";
+    /// The string identifier for the *MiniRex2* alias spec.
+    pub const MINI_REX_2: &str = "MiniRex2";
     /// The string identifier for the *Rex* version of the `MegaETH` EVM.
     pub const REX: &str = "Rex";
     /// The string identifier for the *Rex1* version of the `MegaETH` EVM.
@@ -90,6 +100,8 @@ impl MegaSpecId {
     pub const ALL: &'static [Self] = &[
         Self::EQUIVALENCE,
         Self::MINI_REX,
+        Self::MINI_REX_1,
+        Self::MINI_REX_2,
         Self::REX,
         Self::REX1,
         Self::REX2,
@@ -108,6 +120,8 @@ impl MegaSpecId {
     pub const fn into_op_spec(self) -> OpSpecId {
         match self {
             Self::MINI_REX |
+            Self::MINI_REX_1 |
+            Self::MINI_REX_2 |
             Self::EQUIVALENCE |
             Self::REX |
             Self::REX1 |
@@ -119,12 +133,33 @@ impl MegaSpecId {
         }
     }
 
-    /// Returns `true` if `other` is enabled under `self` — i.e. `other` is at or below `self`
-    /// in [`SpecId`] order.
-    ///
-    /// Evm versions are backward compatible: the current spec (`self`) enables every version at
-    /// or below it, so a lower-or-equal version is always enabled under a higher one.
+    /// The behavior this spec executes: alias specs project to the spec whose behavior they
+    /// reuse; every other spec is its own behavior.
+    pub const fn behavior(self) -> Self {
+        match self {
+            Self::MINI_REX_1 => Self::EQUIVALENCE,
+            Self::MINI_REX_2 => Self::MINI_REX,
+            other => other,
+        }
+    }
+
+    /// Whether this spec is an alias — a rung whose behavior belongs to another spec.
+    pub const fn is_alias(self) -> bool {
+        matches!(self, Self::MINI_REX_1 | Self::MINI_REX_2)
+    }
+
+    /// Returns `true` if `other`'s BEHAVIOR is enabled under `self` — the gate for execution
+    /// semantics. Both sides project through [`behavior`](Self::behavior) first, so an alias
+    /// spec enables exactly what its behavior target enables (`MINI_REX_1` does NOT enable
+    /// `MINI_REX`).
     pub const fn is_enabled(self, other: Self) -> bool {
+        other.behavior() as u8 <= self.behavior() as u8
+    }
+
+    /// Returns `true` if the ladder has REACHED `other`'s rung — the gate for one-way chain
+    /// setup. Position comparison, no behavior projection: during an alias window the ladder
+    /// stands above the specs it rolled back from, so their setup stays in place.
+    pub const fn reaches(self, other: Self) -> bool {
         other as u8 <= self as u8
     }
 }
@@ -138,13 +173,15 @@ const fn ladder_index(spec: MegaSpecId) -> usize {
     match spec {
         MegaSpecId::EQUIVALENCE => 0,
         MegaSpecId::MINI_REX => 1,
-        MegaSpecId::REX => 2,
-        MegaSpecId::REX1 => 3,
-        MegaSpecId::REX2 => 4,
-        MegaSpecId::REX3 => 5,
-        MegaSpecId::REX4 => 6,
-        MegaSpecId::REX5 => 7,
-        MegaSpecId::REX6 => 8,
+        MegaSpecId::MINI_REX_1 => 2,
+        MegaSpecId::MINI_REX_2 => 3,
+        MegaSpecId::REX => 4,
+        MegaSpecId::REX1 => 5,
+        MegaSpecId::REX2 => 6,
+        MegaSpecId::REX3 => 7,
+        MegaSpecId::REX4 => 8,
+        MegaSpecId::REX5 => 9,
+        MegaSpecId::REX6 => 10,
     }
 }
 
@@ -176,6 +213,8 @@ impl From<MegaSpecId> for &'static str {
         match spec_id {
             MegaSpecId::EQUIVALENCE => name::EQUIVALENCE,
             MegaSpecId::MINI_REX => name::MINI_REX,
+            MegaSpecId::MINI_REX_1 => name::MINI_REX_1,
+            MegaSpecId::MINI_REX_2 => name::MINI_REX_2,
             MegaSpecId::REX => name::REX,
             MegaSpecId::REX1 => name::REX1,
             MegaSpecId::REX2 => name::REX2,
@@ -195,6 +234,8 @@ impl FromStr for MegaSpecId {
         match s {
             name::EQUIVALENCE => Ok(Self::EQUIVALENCE),
             name::MINI_REX => Ok(Self::MINI_REX),
+            name::MINI_REX_1 => Ok(Self::MINI_REX_1),
+            name::MINI_REX_2 => Ok(Self::MINI_REX_2),
             name::REX => Ok(Self::REX),
             name::REX1 => Ok(Self::REX1),
             name::REX2 => Ok(Self::REX2),
@@ -232,9 +273,11 @@ impl Display for MegaSpecId {
 mod tests {
     use super::*;
 
-    const ALL_SPECS: [(MegaSpecId, &str); 9] = [
+    const ALL_SPECS: [(MegaSpecId, &str); 11] = [
         (MegaSpecId::EQUIVALENCE, name::EQUIVALENCE),
         (MegaSpecId::MINI_REX, name::MINI_REX),
+        (MegaSpecId::MINI_REX_1, name::MINI_REX_1),
+        (MegaSpecId::MINI_REX_2, name::MINI_REX_2),
         (MegaSpecId::REX, name::REX),
         (MegaSpecId::REX1, name::REX1),
         (MegaSpecId::REX2, name::REX2),

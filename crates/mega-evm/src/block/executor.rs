@@ -197,7 +197,7 @@ where
         // Gating setup on the reversible spec would drop the Oracle predeploys — and their
         // read-only witness entries — from every block in such a window.
         let setup_spec = self.setup_spec;
-        let is_rex_5 = setup_spec.is_enabled(MegaSpecId::REX5);
+        let is_rex_5 = setup_spec.reaches(MegaSpecId::REX5);
 
         // EIP-2935
         let result_and_state = eips::transact_blockhashes_contract_call(
@@ -288,7 +288,7 @@ where
             // `applyPendingChanges()` logic is identical in v1/v2 (v2 changes only rotation
             // scheduling), so its semantics do not depend on which side of the deploy it
             // executes. Pre-Rex6 blocks keep the original deploy-then-apply order untouched.
-            let is_rex_6 = setup_spec.is_enabled(MegaSpecId::REX6);
+            let is_rex_6 = setup_spec.reaches(MegaSpecId::REX6);
 
             if !is_rex_6 {
                 self.push_deploy_sequencer_registry_outcome(
@@ -696,9 +696,9 @@ where
         // The executing spec gates whether dynamic resolution applies (semantics); the
         // activated-spec floor selects the expected registry bytecode version, matching what
         // the floor-gated pre-block deploy installed.
-        let exec_spec = self.evm.ctx().mega_spec();
+        let spec = self.evm.ctx().mega_spec();
         let (system_address, read_state) =
-            resolve_system_address(&self.hardforks, exec_spec, self.setup_spec, self.evm.db_mut())?;
+            resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;
         if let Some(state) = read_state {
             self.system_caller.on_state(StateChangeSource::Transaction(0), &state);
             self.evm.db_mut().commit(state);

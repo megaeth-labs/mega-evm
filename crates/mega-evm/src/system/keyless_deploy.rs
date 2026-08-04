@@ -59,7 +59,7 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
 /// `spec` is the activated-spec floor — see
 /// [`oracle_spec`](crate::system::oracle::oracle_spec).
 pub(crate) fn keyless_deploy_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
-    spec.is_enabled(MegaSpecId::REX2).then(|| {
+    spec.reaches(MegaSpecId::REX2).then(|| {
         SystemContractSpec::new(
             KEYLESS_DEPLOY_ADDRESS,
             KEYLESS_DEPLOY_CODE,

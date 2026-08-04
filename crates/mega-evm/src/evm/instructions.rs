@@ -180,7 +180,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> core::fmt::Debug for MegaInstructi
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
     /// Create a new `MegaethInstructions` with the given spec id.
     pub fn new(spec: MegaSpecId) -> Self {
-        let instruction_table = match spec {
+        // Dispatch on the BEHAVIOR: alias specs execute their target's tables. `behavior()`
+        // never returns an alias, so the alias arms below are unreachable by construction.
+        let instruction_table = match spec.behavior() {
+            MegaSpecId::MINI_REX_1 | MegaSpecId::MINI_REX_2 => {
+                unreachable!("behavior() projects aliases to their targets")
+            }
             MegaSpecId::EQUIVALENCE => EthInstructions::new_mainnet(),
             MegaSpecId::MINI_REX => EthInstructions::new(mini_rex::instruction_table::<
                 EthInterpreter,

@@ -21,7 +21,10 @@ pub struct EvmTxRuntimeLimits {
 impl EvmTxRuntimeLimits {
     /// Creates a new `TxLimits` instance from the given `MegaSpecId`.
     pub fn from_spec(spec: MegaSpecId) -> Self {
-        match spec {
+        match spec.behavior() {
+            MegaSpecId::MINI_REX_1 | MegaSpecId::MINI_REX_2 => {
+                unreachable!("behavior() projects aliases to their targets")
+            }
             MegaSpecId::EQUIVALENCE => Self::equivalence(),
             MegaSpecId::MINI_REX => Self::mini_rex(),
             MegaSpecId::REX | MegaSpecId::REX1 | MegaSpecId::REX2 => Self::rex(),
