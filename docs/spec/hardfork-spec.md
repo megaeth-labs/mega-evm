@@ -39,6 +39,9 @@ A rollback changes how transactions execute; it does not un-deploy a contract or
 A node MUST determine pre-block setup — system-contract predeploys, their bytecode versions, and the fail-closed rules on the pre-block EIP-2935/EIP-4788 system calls — from the resolved spec's position.
 A node MUST determine all other behavior — opcode behavior, gas costs, resource limits, transaction classification — from the resolved spec's behavior.
 
+Spec ranges elsewhere in this specification — "from MiniRex onward", "MiniRex through Rex5" — are stated on behavior.
+An alias rung counts as its behavior target in such ranges: during the `MiniRex1` window, a rule stated "from MiniRex onward" does not apply, because the behavior in effect is `EQUIVALENCE`.
+
 A published hardfork schedule MUST climb the spec ladder rung by rung: a hardfork MUST NOT be scheduled unless every hardfork of a lower rung is scheduled, with one exception — a network MAY omit an alias hardfork, since an alias rung carries no setup of its own.
 Execution is additionally robust to a malformed schedule: because setup derives from position, a scheduled hardfork implies its predecessors' setup even if they were never scheduled.
 

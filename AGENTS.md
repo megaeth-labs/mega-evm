@@ -55,7 +55,7 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6` → `REX7` (alias rungs `MINI_REX_1`/`MINI_REX_2` sit between `MINI_REX` and `REX`, executing earlier behaviors)
+Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6` → `REX7` (`MINI_REX_1`/`MINI_REX_2` are alias rungs executing `EQUIVALENCE` and `MINI_REX` behavior respectively)
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
@@ -68,7 +68,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
     Freezing forbids further semantic change; scheduling is a later, separate decision.
   - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
-  Multiple hardforks can map to one spec.
+  Every hardfork schedules a spec rung of its own — the fork→spec mapping is 1:1.
   `MiniRex1` and `MiniRex2` schedule the alias specs `MINI_REX_1` and `MINI_REX_2`, whose `behavior()` projects to `EQUIVALENCE` and `MINI_REX` respectively.
   Defined in `crates/mega-evm/src/block/hardfork.rs`.
 - All specs use `OpSpecId::ISTHMUS` as the Optimism base layer.
@@ -103,7 +103,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 
 #### Backward Compatibility of Specs
 
-The spec system (`MegaSpecId`) forms a linear progression where each newer spec includes all previous behaviors.
+The spec system (`MegaSpecId`) forms a linear progression where each newer behavior-introducing spec includes all previous behaviors; the alias rungs are the exception, re-executing an earlier spec's behavior instead.
 The codebase **MUST** maintain backward-compatibility: EVM semantics must never change for existing (stable) specs.
 The only exception is the latest spec if explicitly marked as **unstable**.
 Consequently:

@@ -163,8 +163,8 @@ A set of MegaETH verifiable behaviors: the complete definition of what a correct
 
 Captures the execution-layer semantics that determine node correctness.
 
-Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`.
-The [alias rungs](#alias-spec) `MINI_REX_1` and `MINI_REX_2` sit between `MINI_REX` and `REX`, executing `EQUIVALENCE` and `MINI_REX` behavior respectively.
+Progression: `EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`.
+`MINI_REX_1` and `MINI_REX_2` are [alias rungs](#alias-spec) executing `EQUIVALENCE` and `MINI_REX` behavior respectively.
 
 ## Alias Spec
 

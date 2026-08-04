@@ -113,7 +113,9 @@ use revm::{
 ///
 /// ## Spec Progression and Opcode Overrides
 ///
-/// Each spec builds on the previous one. Only the opcodes that change are listed:
+/// Each behavior-introducing spec builds on the previous one; the alias specs have no table of
+/// their own and select their behavior target's (see [`MegaInstructions::new`]). Only the
+/// opcodes that change are listed:
 ///
 /// - **EQUIVALENCE**: Standard revm mainnet instruction table (no custom wrappers).
 /// - **`MINI_REX`** (base custom table): All 256 opcodes initialized from scratch.

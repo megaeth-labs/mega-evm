@@ -161,6 +161,7 @@ A rule stated for "every X" is read as covering every X, so it must be checked a
 Two habits keep that honest:
 
 - **Declare the page's lower bound.** A page whose rules do not apply from Equivalence onward MUST say where they start, once, before stating them — as `evm/compute-gas.md` does with "Compute gas metering begins at MiniRex." Without it, every later sentence on the page silently claims to cover Equivalence, which runs the unmodified upstream instruction table and therefore has none of MegaETH's wrappers, storage-gas charges, or resource lanes.
+- **Spec ranges are behavior ranges.** A range like "from MiniRex onward" or "MiniRex through Rex5" is read on behavior: an alias rung counts as its behavior target (`MINI_REX_1` counts as Equivalence), a convention `hardfork-spec.md` states once — do not add per-sentence alias caveats to range statements.
 - **Look for the counterexample before writing the quantifier.** For a claim spanning specs, resolve it through the per-spec instruction table selection; for one spanning opcodes or call schemes, check each named opcode's own wrapper. Where the implementation has an exception, name the exception in the rule rather than leaving the rule clean — an implementer following a rule mega-evm does not keep will diverge, and a halt reason or charge ordering is observable.
 
 ### Charging Lifecycle

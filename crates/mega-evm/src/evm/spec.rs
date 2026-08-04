@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 /// corresponding relations are as follows:
 /// - [`SpecId::EQUIVALENCE`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::MINI_REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::MINI_REX_1`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
+/// - [`SpecId::MINI_REX_2`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX1`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
 /// - [`SpecId::REX2`] -> [`OpSpecId::ISTHMUS`] -> [`EthSpecId::PRAGUE`]
