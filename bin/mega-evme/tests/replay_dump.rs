@@ -121,16 +121,15 @@ fn test_replay_dump_is_byte_reproducible() {
     );
 }
 
-/// Dumping over an existing fixture must go through a sibling temp file +
-/// rename: on success the target holds the new (valid) content and no
-/// `.json.tmp` residue is left behind, so an interrupt mid-write can no longer
-/// truncate a committed corpus fixture.
+/// Dumping over an existing fixture must go through a unique temp file +
+/// persist: on success the target holds the new (valid) content and no
+/// leftover temp files remain in the destination directory, so an interrupt
+/// mid-write can no longer truncate a committed corpus fixture.
 #[test]
 fn test_replay_dump_overwrites_atomically_without_tmp_residue() {
     let out =
         std::env::temp_dir().join(format!("mega_evme_dump_atomic_{}.json", std::process::id()));
-    let tmp = out.with_extension("json.tmp");
-    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&out);
     // Seed a pre-existing "committed" fixture that the dump overwrites in place.
     std::fs::write(&out, br#"{"pre-existing":"corpus fixture"}"#).expect("seed existing fixture");
 
@@ -144,7 +143,20 @@ fn test_replay_dump_overwrites_atomically_without_tmp_residue() {
         "dump over an existing fixture failed.\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!tmp.exists(), "dump must not leave a .json.tmp file behind");
+    // NamedTempFile uses a random name; ensure only the destination remains.
+    let parent = out.parent().expect("temp dir");
+    let stem = out.file_stem().and_then(|s| s.to_str()).expect("utf-8 stem");
+    let leftovers: Vec<_> = std::fs::read_dir(parent)
+        .expect("list temp dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(stem) && name != out.file_name().unwrap().to_string_lossy()
+        })
+        .map(|e| e.path())
+        .collect();
+    assert!(leftovers.is_empty(), "dump must not leave temp residue: {leftovers:?}");
 
     let content = std::fs::read_to_string(&out).expect("read dumped fixture");
     let _ = std::fs::remove_file(&out);

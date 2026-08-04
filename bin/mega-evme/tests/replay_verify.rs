@@ -76,11 +76,18 @@ impl Run {
 
 /// Run `replay` offline against `cache`.
 fn replay(cache: &Path, args: &[&str]) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
-        .args(["replay", "--rpc.replay-file", cache.to_str().expect("cache path is utf-8")])
-        .args(args)
-        .output()
-        .expect("failed to run mega-evme");
+    replay_with_env(cache, args, &[])
+}
+
+/// Run `replay` offline against `cache` with additional process environment.
+fn replay_with_env(cache: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mega-evme"));
+    cmd.args(["replay", "--rpc.replay-file", cache.to_str().expect("cache path is utf-8")])
+        .args(args);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let output = cmd.output().expect("failed to run mega-evme");
     Run {
         success: output.status.success(),
         code: output.status.code(),
@@ -621,58 +628,22 @@ fn test_batch_dump_fixture_dir_refuses_overwrite_without_flag() {
 ///
 /// Classification of construction vs unsupported-shape errors is unit-tested in
 /// `batch::tests::test_fixture_build_err_classifies_skips_vs_construction_errors`.
-/// This end-to-end check forces a construction-time failure by removing every
-/// non-empty bytecode response from the capture so a pre-state `code` fetch
-/// fails after the transaction has already executed against cached account
-/// state (execution may still succeed from in-memory code; draft-time re-fetch
-/// does not).
+///
+/// The offline State cache reuses account basics already loaded during
+/// execution, so doctoring bytecode responses only kills execution. This test
+/// injects a draft-time pre-state failure after execution succeeds
+/// (`MEGA_EVME_INJECT_FIXTURE_PRE_STATE_ERROR`), proving the construction path
+/// itself — a result line with `fixture.error` containing `construction failed`,
+/// exit 1, and no skip.
 #[test]
 fn test_batch_fixture_construction_failure_is_fixture_error_not_skip() {
-    let mut envelope: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
-            .expect("parse offline cache");
-    let mut nulled = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
-        let value = entry["value"].as_str().expect("entry value is a string");
-        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
-            continue;
-        };
-        let Some(result) = response.get("result").cloned() else {
-            continue;
-        };
-        // Non-empty bytecode hex responses (eth_getCode / code-by-hash).
-        let Some(hex) = result.as_str() else {
-            continue;
-        };
-        if hex == "0x" || hex == "0x0" || hex.len() <= 4 {
-            continue;
-        }
-        // Only rewrite pure hex bytecode payloads, not block/tx objects.
-        if !hex.starts_with("0x") || hex.len() < 100 {
-            continue;
-        }
-        // Turn the code response into a JSON-RPC error so a draft-time re-fetch fails.
-        response.as_object_mut().expect("response object").remove("result");
-        response["error"] = serde_json::json!({
-            "code": -32000,
-            "message": "code unavailable at draft time",
-        });
-        entry["value"] = serde_json::Value::String(response.to_string());
-        nulled += 1;
-    }
-    // If the capture has no long bytecode entries the construction path cannot
-    // be forced this way; fail loudly so the fixture is refreshed.
-    assert!(nulled > 0, "offline cache should contain bytecode responses to doctor");
-
-    let cache_path = temp_path("fixture_construction");
-    std::fs::write(&cache_path, envelope.to_string()).expect("write doctored cache");
     let list = tx_file("fixture_construction");
     let dir =
         std::env::temp_dir().join(format!("mega_evme_fixture_construction_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
-    let run = replay(
-        &cache_path,
+    let run = replay_with_env(
+        &cache(),
         &[
             "--tx-file",
             list.to_str().unwrap(),
@@ -680,74 +651,100 @@ fn test_batch_fixture_construction_failure_is_fixture_error_not_skip() {
             dir.to_str().unwrap(),
             "--json",
         ],
+        &[("MEGA_EVME_INJECT_FIXTURE_PRE_STATE_ERROR", "1")],
     );
-    let _ = std::fs::remove_file(&cache_path);
     let _ = std::fs::remove_file(&list);
     let _ = std::fs::remove_dir_all(&dir);
 
-    // Either the run fails during execution (code needed to execute) or during
-    // fixture construction. The construction path is the one we want: a result
-    // line with fixture.error. If execution fails first, the target is an error
-    // entry — also non-zero, never a silent skip.
-    assert!(!run.success, "missing code must not exit 0.\nstderr: {}", run.stderr);
+    assert!(!run.success, "construction failure must not exit 0.\nstderr: {}", run.stderr);
     let lines = run.ndjson();
     assert_eq!(lines.len(), 1, "one line per requested transaction");
-    if let Some(error) = lines[0].get("error") {
-        // Execution failed before draft: still non-zero, not a skip.
-        assert!(error.get("kind").is_some(), "execution failure entry: {}", lines[0]);
-    } else {
-        assert!(
-            lines[0]["fixture"]["error"].as_str().is_some_and(|m| {
-                m.contains("construction failed") ||
-                    m.contains("code") ||
-                    m.contains("pre-state") ||
-                    m.contains("fixture")
-            }),
-            "expected fixture.error for a construction failure: {}",
-            lines[0]
-        );
-        assert!(
-            lines[0]["fixture"].get("skipped").is_none(),
-            "construction failure must not be reported as a skip: {}",
-            lines[0]
-        );
-        assert_eq!(run.code(), 1, "fixture construction failure exits 1");
-    }
+    // Sentinel: execution reached the dump target (receipt present); only the
+    // draft failed. The old code path accepted an execution-only failure here.
+    assert!(
+        lines[0].get("error").is_none(),
+        "execution must succeed so the failure is fixture construction, not an error entry: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0]["success"].as_bool() == Some(true),
+        "target must have executed successfully: {}",
+        lines[0]
+    );
+    let fixture_error = lines[0]["fixture"]["error"]
+        .as_str()
+        .expect("fixture.error must be set for a construction failure");
+    assert!(
+        fixture_error.contains("construction failed"),
+        "expected construction failed, got: {fixture_error}"
+    );
+    assert!(
+        fixture_error.contains("pre-state") || fixture_error.contains("injected"),
+        "expected pre-state/injected failure detail, got: {fixture_error}"
+    );
+    assert!(
+        lines[0]["fixture"].get("skipped").is_none(),
+        "construction failure must not be reported as a skip: {}",
+        lines[0]
+    );
+    assert_eq!(run.code(), 1, "fixture construction failure exits 1");
 }
 
-/// When the block aborts before a dump target can finish, no fixture file is
-/// written and `--overwrite` does not clobber a pre-existing file.
+/// When the block aborts after a dump target built a Ready draft, no fixture
+/// file is written and `--overwrite` does not clobber a pre-existing file.
 ///
-/// Doctors the capture so a preceding transaction is unknown to the endpoint:
-/// the dump target never reaches commit/finish, so deferred finalize+write never
-/// runs. Happy-path writes are covered by
+/// Seeds a zero-gas object for the index-2 hash so resolve succeeds but the
+/// block loop aborts on that transaction *after* the dump target (index 1)
+/// has executed and built a deferred draft. Materialize runs only on a clean
+/// loop, so the Ready draft is discarded. Happy-path writes are covered by
 /// [`test_batch_dump_fixture_dir_writes_validatable_file`].
 #[test]
 fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
-    // The captured transaction is at index 1; deny the index-0 hash so the block
-    // aborts before the dump target runs.
+    // Index-2 hash of the captured block. Not present as a full TX object in
+    // the offline capture; we inject a zero-gas type-2 call so lookup succeeds
+    // and execution aborts after the dump target has drafted.
+    const LATER: &str = "0xfc0a0b9d76b13125ac1e36e524f6df3a72c25720c023b960b23c6f5891be05bc";
+    // `keccak256("eth_getTransactionByHash\0[\"<LATER>\"]")` — same formula as
+    // `transport_cache_key` in `common/provider/transport.rs`.
+    const LATER_CACHE_KEY: &str =
+        "0x91bbb37d27a588e217e5be6aeab0fb377ffea0ad3a2714d1f54ceb69852124f2";
+
     let mut envelope: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(CACHE).expect("read offline cache"))
             .expect("parse offline cache");
-    let preceding = "0x14ca11aad284153b6e0460428dadf5d0dcab76a5b129ee1f6c9e07f535620a24";
-    let marker = format!("\"hash\":\"{preceding}\"");
-    let mut doctored = 0;
-    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+    // Clone the dump target's TX response shape and rewrite hash + gas so the
+    // later index is fetchable but rejected at execution (intrinsic gas).
+    let mut template: Option<serde_json::Value> = None;
+    let target_marker = format!("\"hash\":\"{TX}\"");
+    for entry in envelope["cache"].as_array().expect("cache entries") {
         let value = entry["value"].as_str().expect("entry value is a string");
-        if !value.contains(&marker) {
+        if !value.contains(&target_marker) {
             continue;
         }
-        let mut response: serde_json::Value =
+        let response: serde_json::Value =
             serde_json::from_str(value).expect("parse transaction response");
-        response["result"] = serde_json::Value::Null;
-        entry["value"] = serde_json::Value::String(response.to_string());
-        doctored += 1;
+        if response["result"].get("hash").and_then(|h| h.as_str()) == Some(TX) {
+            template = Some(response);
+            break;
+        }
     }
-    assert_eq!(doctored, 1, "the offline cache must hold the preceding transaction");
-    let cache_path = temp_path("dump_abort_before");
+    let mut response = template.expect("offline cache must hold the dump target TX object");
+    let result = response["result"].as_object_mut().expect("tx result object");
+    result.insert("hash".into(), serde_json::Value::String(LATER.to_string()));
+    result.insert("transactionIndex".into(), serde_json::Value::String("0x2".into()));
+    result.insert("gas".into(), serde_json::Value::String("0x0".into()));
+    envelope["cache"].as_array_mut().expect("cache").push(serde_json::json!({
+        "key": LATER_CACHE_KEY,
+        "value": response.to_string(),
+    }));
+
+    let cache_path = temp_path("dump_abort_after");
     std::fs::write(&cache_path, envelope.to_string()).expect("write doctored cache");
 
-    let list = tx_file("dump_abort_before");
+    let list_path = std::env::temp_dir()
+        .join(format!("mega_evme_verify_dump_abort_after_{}.txt", std::process::id()));
+    std::fs::write(&list_path, format!("{TX}\n{LATER}\n")).expect("write tx list");
+
     let dir =
         std::env::temp_dir().join(format!("mega_evme_batch_dump_abort_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -760,7 +757,7 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
         &cache_path,
         &[
             "--tx-file",
-            list.to_str().unwrap(),
+            list_path.to_str().unwrap(),
             "--dump-fixture-dir",
             dir.to_str().unwrap(),
             "--overwrite",
@@ -768,41 +765,91 @@ fn test_batch_dump_does_not_write_or_clobber_when_block_aborts_before_finish() {
         ],
     );
     let _ = std::fs::remove_file(&cache_path);
-    let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_file(&list_path);
 
     assert!(!run.success, "an aborted block must exit non-zero.\nstderr: {}", run.stderr);
     let lines = run.ndjson();
-    assert_eq!(lines.len(), 1, "one line for the requested target");
+    assert!(lines.len() >= 2, "expected lines for both targets, got: {lines:?}");
+
+    let dump_line = lines
+        .iter()
+        .find(|line| line["tx_hash"].as_str() == Some(TX))
+        .expect("dump target must appear in the output");
+    // Sentinel: the target ran and built a Ready draft that was then discarded.
+    // The old test aborted before the target, so there was never a fixture report.
     assert!(
-        lines[0].get("error").is_some(),
-        "the target must be reported as an error entry, not a dump: {}",
-        lines[0]
+        dump_line.get("error").is_none(),
+        "dump target must execute before the abort: {dump_line}"
+    );
+    assert!(dump_line["success"].as_bool() == Some(true), "dump target must succeed: {dump_line}");
+    let fixture_error = dump_line["fixture"]["error"]
+        .as_str()
+        .expect("discarded Ready draft must surface as fixture.error");
+    assert!(
+        fixture_error.contains("discarded") || fixture_error.contains("aborted"),
+        "expected draft-discarded message, got: {fixture_error}"
     );
     assert!(
-        lines[0].get("fixture").is_none(),
-        "an unfinished target carries no fixture report: {}",
-        lines[0]
+        dump_line["fixture"].get("path").is_none(),
+        "discarded draft must not report a written path: {dump_line}"
     );
+
     let kept = std::fs::read(&fixture_path).expect("pre-existing fixture must still exist");
     assert_eq!(kept, sentinel, "--overwrite must not clobber when the dump never finalizes");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Replay receipts stamp each inner log with the outer receipt's block/tx
-/// identity. The offline capture emits no logs, so this asserts the empty-log
-/// path stays consistent; non-empty log metadata is covered by the unit test on
-/// `op_receipt_to_tx_receipt`.
+/// identity and a block-global `logIndex` that starts above zero when earlier
+/// receipts in the block already emitted logs.
+///
+/// The committed offline capture has no logs, so this test uses the dev
+/// envelope (block 22945844, last tx) when `MEGA_EVME_TEST_ENVELOPE` is set —
+/// the same fixture the ignored batch suite uses. Without the envelope the
+/// non-empty path is covered by
+/// `outcome::tests::test_op_receipt_to_tx_receipt_stamps_inner_log_metadata`.
 #[test]
 fn test_replay_receipt_inner_log_metadata_matches_outer_receipt() {
-    let run = replay(&cache(), &["--json", TX]);
-    assert!(run.success, "replay must exit 0.\nstderr: {}", run.stderr);
+    let envelope = match std::env::var("MEGA_EVME_TEST_ENVELOPE") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        _ => {
+            // Unit test covers non-empty logs + non-zero first_log_index; keep
+            // this integration test green in CI without the large envelope.
+            let run = replay(&cache(), &["--json", TX]);
+            assert!(run.success, "replay must exit 0.\nstderr: {}", run.stderr);
+            let summary = run.json();
+            let logs = summary["receipt"]["logs"].as_array().expect("logs array");
+            assert!(
+                logs.is_empty(),
+                "committed capture is log-less; set MEGA_EVME_TEST_ENVELOPE for multi-log coverage"
+            );
+            return;
+        }
+    };
+
+    // Last transaction of block 22945844: multi-log, with many preceding logs.
+    const LATE_TX: &str = "0xb6a0b7a302c741f64b8e46861a3dcb2d5c1047f6f2cb89a35b5c2183c96296b7";
+
+    let run = replay(&envelope, &["--json", LATE_TX]);
+    assert!(run.success, "envelope replay must exit 0.\nstderr: {}", run.stderr);
     let summary = run.json();
     let receipt = &summary["receipt"];
     let block_hash = receipt["blockHash"].as_str().expect("receipt blockHash");
     let tx_hash = receipt["transactionHash"].as_str().expect("receipt transactionHash");
     let tx_index = receipt["transactionIndex"].as_str().expect("receipt transactionIndex");
-    assert_eq!(tx_hash, TX);
+    assert_eq!(tx_hash, LATE_TX);
     let logs = receipt["logs"].as_array().expect("receipt logs array");
+    assert!(!logs.is_empty(), "late envelope tx must emit logs (got empty); envelope may be stale");
+    // Sentinel: preceding receipts emitted logs, so the first log_index is > 0.
+    let first_log_index = u64::from_str_radix(
+        logs[0]["logIndex"].as_str().expect("logIndex string").trim_start_matches("0x"),
+        16,
+    )
+    .expect("parse logIndex");
+    assert!(
+        first_log_index > 0,
+        "expected non-zero preceding-log offset, got logIndex={first_log_index}"
+    );
     for (i, log) in logs.iter().enumerate() {
         assert_eq!(log["blockHash"].as_str(), Some(block_hash), "log {i} blockHash");
         assert_eq!(log["transactionHash"].as_str(), Some(tx_hash), "log {i} transactionHash");
@@ -811,15 +858,24 @@ fn test_replay_receipt_inner_log_metadata_matches_outer_receipt() {
     }
 
     // Batch path stamps the same fields.
-    let list = tx_file("batch_log_meta");
-    let batch = replay(&cache(), &["--tx-file", list.to_str().unwrap(), "--json"]);
-    let _ = std::fs::remove_file(&list);
+    let list_path = std::env::temp_dir()
+        .join(format!("mega_evme_verify_batch_log_meta_{}.txt", std::process::id()));
+    std::fs::write(&list_path, format!("{LATE_TX}\n")).expect("write tx list");
+    let batch = replay(&envelope, &["--tx-file", list_path.to_str().unwrap(), "--json"]);
+    let _ = std::fs::remove_file(&list_path);
     assert!(batch.success, "batch replay must exit 0.\nstderr: {}", batch.stderr);
     let line = &batch.ndjson()[0];
     let batch_receipt = &line["receipt"];
     assert_eq!(batch_receipt["blockHash"].as_str(), Some(block_hash));
     assert_eq!(batch_receipt["transactionHash"].as_str(), Some(tx_hash));
     let batch_logs = batch_receipt["logs"].as_array().expect("batch receipt logs");
+    assert!(!batch_logs.is_empty(), "batch path must also carry non-empty logs");
+    let batch_first = u64::from_str_radix(
+        batch_logs[0]["logIndex"].as_str().expect("logIndex").trim_start_matches("0x"),
+        16,
+    )
+    .expect("parse batch logIndex");
+    assert!(batch_first > 0, "batch logIndex must start above zero, got {batch_first}");
     for (i, log) in batch_logs.iter().enumerate() {
         assert_eq!(log["blockHash"].as_str(), Some(block_hash), "batch log {i} blockHash");
         assert_eq!(log["transactionHash"].as_str(), Some(tx_hash), "batch log {i} transactionHash");

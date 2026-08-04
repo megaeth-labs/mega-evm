@@ -242,7 +242,16 @@ where
 
 /// Re-execute the isolated unit through `state-test`, cross-check it against the
 /// observed replay outcome, fill the `post` expectation, and write the fixture.
-pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) -> Result<()> {
+///
+/// `overwrite` controls the final publish step: when false, the write refuses to
+/// replace an existing file (`persist_noclobber`); when true, it replaces via
+/// `persist`. Existence checks earlier in the dump pipeline are a fast-path only
+/// — correctness against a concurrent creator comes from the noclobber publish.
+pub(crate) fn finalize_and_write(
+    draft: FixtureDraft,
+    path: &std::path::Path,
+    overwrite: bool,
+) -> Result<()> {
     let executed = execute_unit_collect(&draft.unit, &draft.spec)
         .map_err(|e| ReplayError::Other(format!("fixture self-execution failed: {e}")))?;
 
@@ -297,20 +306,46 @@ pub(crate) fn finalize_and_write(draft: FixtureDraft, path: &std::path::Path) ->
     let suite = TestSuite(BTreeMap::from([(draft.name, unit)]));
     let json = serde_json::to_string_pretty(&suite)
         .map_err(|e| ReplayError::Other(format!("failed to serialize fixture: {e}")))?;
-    // Write to a sibling temp file and rename so an interrupted write cannot
-    // truncate an existing fixture at `path` (e.g. a committed corpus entry
-    // being refreshed in place).
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| {
-        ReplayError::Other(format!("failed to write fixture {}: {e}", tmp.display()))
+
+    // Unique temp file in the target directory, then persist (or noclobber-persist)
+    // into `path`. A fixed sibling name would race two concurrent dumps; a unique
+    // name plus noclobber makes `--overwrite=false` safe at materialization time.
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
+        ReplayError::Other(format!("failed to create temp fixture file in {}: {e}", dir.display()))
     })?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        ReplayError::Other(format!(
-            "failed to rename fixture {} -> {}: {e}",
-            tmp.display(),
-            path.display()
-        ))
-    })
+    use std::io::Write;
+    tmp.write_all(json.as_bytes())
+        .map_err(|e| ReplayError::Other(format!("failed to write fixture temp file: {e}")))?;
+    tmp.flush()
+        .map_err(|e| ReplayError::Other(format!("failed to flush fixture temp file: {e}")))?;
+    if overwrite {
+        tmp.persist(path).map_err(|e| {
+            ReplayError::Other(format!(
+                "failed to persist fixture to {}: {}",
+                path.display(),
+                e.error
+            ))
+        })?;
+    } else {
+        tmp.persist_noclobber(path).map_err(|e| {
+            // Target already present (or appeared between prep and publish): same
+            // refused-overwrite path the prep-time existence check uses.
+            if path.exists() {
+                ReplayError::Other(format!(
+                    "fixture already exists at {} (pass --overwrite to replace)",
+                    path.display()
+                ))
+            } else {
+                ReplayError::Other(format!(
+                    "failed to persist fixture to {}: {}",
+                    path.display(),
+                    e.error
+                ))
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// Read the pre-execution values of every account in the target transaction's
@@ -324,6 +359,18 @@ where
     DB: DatabaseRef,
     DB::Error: Display,
 {
+    // Test-only injection: the offline State cache reuses account basics already
+    // loaded during execution, so doctoring the capture cannot force a draft-only
+    // pre-state failure. Integration tests set this env var to exercise the
+    // construction-error path after a successful execution.
+    if std::env::var_os("MEGA_EVME_INJECT_FIXTURE_PRE_STATE_ERROR").is_some() {
+        return Err(ReplayError::Other(
+            "pre-state read for 0x0000000000000000000000000000000000000001: \
+             injected draft-time database failure"
+                .to_string(),
+        ));
+    }
+
     let mut pre = BTreeMap::new();
     for (address, account) in evm_state {
         let Some(info) = db

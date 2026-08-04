@@ -419,7 +419,9 @@ impl Cmd {
         // Write the self-validating fixture (re-executes the isolated unit through
         // state-test and cross-checks it against the replay before writing).
         if let (Some(path), Some(draft)) = (&self.dump_fixture, result.fixture) {
-            super::fixture::finalize_and_write(draft, path)?;
+            // Single-file `--dump-fixture` always replaces the destination path
+            // (there is no `--overwrite` gate on this form).
+            super::fixture::finalize_and_write(draft, path, true)?;
             info!(path = %path.display(), "Wrote self-validating fixture");
         }
         if mismatched {
@@ -646,21 +648,11 @@ impl Cmd {
                 .ok_or(ReplayError::TransactionNotFound(ctx.tx_hash))?;
             // Anchor the receipt to the replayed block: across a reorg or a
             // load-balanced endpoint serving divergent views, the receipt can
-            // describe a different inclusion than the block fetched earlier,
-            // and the fidelity gate would then compare the replay against the
-            // wrong on-chain execution.
-            if let Some(receipt_block_hash) = receipt.block_hash() {
-                let replayed_block_hash = ctx.block.hash();
-                if receipt_block_hash != replayed_block_hash {
-                    return Err(ReplayError::Other(format!(
-                        "receipt block hash {receipt_block_hash} != replayed block hash \
-                         {replayed_block_hash}: the receipt describes a different inclusion \
-                         than the fetched block (reorg in progress, or a load-balanced \
-                         endpoint serving divergent views); retry the dump once the chain \
-                         settles"
-                    )));
-                }
-            }
+            // describe a different inclusion than the block fetched earlier
+            // (including a receipt with `blockHash: null`). Same check as
+            // `--verify-receipt` so dump and verify agree on unanchored receipts.
+            verify::check_inclusion(receipt.block_hash(), ctx.block.hash())
+                .map_err(ReplayError::Other)?;
             // RLP-hash the receipt's logs with the same helper the state-test
             // runner uses for `logsRoot`, so the dump can check the replay's logs
             // against the chain (the rich RPC logs' `inner` is the consensus log).

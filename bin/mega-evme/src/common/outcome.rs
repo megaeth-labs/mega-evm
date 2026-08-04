@@ -88,6 +88,12 @@ pub fn op_receipt_to_tx_receipt(
     transaction_index: u64,
     first_log_index: u64,
 ) -> OpTxReceipt {
+    // Resolve the effective tx hash once so the outer receipt and every inner
+    // log agree: a missing hash becomes `B256::ZERO` on both sides (the outer
+    // field is non-optional on `TransactionReceipt`).
+    let effective_tx_hash = transaction_hash.unwrap_or_default();
+    let stamped_tx_hash = Some(effective_tx_hash);
+
     // Map logs to include block/tx metadata matching the outer receipt.
     let mut log_index = first_log_index;
     let inner = receipt.clone().map_logs(|log| {
@@ -96,7 +102,7 @@ pub fn op_receipt_to_tx_receipt(
             block_hash,
             block_number: Some(block_number),
             block_timestamp: Some(block_timestamp),
-            transaction_hash,
+            transaction_hash: stamped_tx_hash,
             transaction_index: Some(transaction_index),
             log_index: Some(log_index),
             removed: false,
@@ -107,7 +113,7 @@ pub fn op_receipt_to_tx_receipt(
 
     TransactionReceipt {
         inner,
-        transaction_hash: transaction_hash.unwrap_or_default(),
+        transaction_hash: effective_tx_hash,
         transaction_index: Some(transaction_index),
         block_hash,
         block_number: Some(block_number),
@@ -363,7 +369,7 @@ impl ExecutionSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, b256, Bytes, Log as PrimitiveLog, LogData};
+    use alloy_primitives::{address, b256, Bytes, Log as PrimitiveLog, LogData, B256};
     use alloy_sol_types::SolError;
 
     #[test]
@@ -440,5 +446,50 @@ mod tests {
             assert_eq!(log.log_index, Some(7 + i as u64), "log {i} block-global log_index");
             assert_eq!(log.block_number, Some(42));
         }
+    }
+
+    /// A missing transaction hash becomes `B256::ZERO` on the outer receipt and
+    /// the same value on every inner log (not `None` on logs / zero only outside).
+    #[test]
+    fn test_op_receipt_to_tx_receipt_missing_tx_hash_stamps_outer_and_inner_consistently() {
+        let addr = address!("0x00000000000000000000000000000000000000aa");
+        let topic = b256!("0x000000000000000000000000000000000000000000000000000000000000000a");
+        let log = PrimitiveLog {
+            address: addr,
+            data: LogData::new(vec![topic], Bytes::from(vec![0xbe, 0xef])).expect("topics"),
+        };
+        let receipt = OpReceiptEnvelope::Legacy(
+            alloy_consensus::Receipt {
+                status: Eip658Value::Eip658(true),
+                cumulative_gas_used: 21_000,
+                logs: vec![log],
+            }
+            .with_bloom(),
+        );
+        let from = address!("0x00000000000000000000000000000000000000bb");
+
+        let tx_receipt = op_receipt_to_tx_receipt(
+            &receipt,
+            1,
+            1,
+            from,
+            Some(addr),
+            None,
+            1,
+            21_000,
+            None,
+            None,
+            0,
+            0,
+        );
+
+        assert_eq!(tx_receipt.transaction_hash, B256::ZERO);
+        let logs = tx_receipt.inner.logs();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].transaction_hash,
+            Some(B256::ZERO),
+            "inner log must use the same effective hash as the outer receipt"
+        );
     }
 }

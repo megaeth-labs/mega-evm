@@ -553,6 +553,38 @@ fn test_replay_block_rejects_mismatched_parent_hash() {
     assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
 }
 
+/// Receipts from a late multi-log transaction stamp every inner log with the
+/// outer block/tx identity and a block-global `logIndex` that starts above zero
+/// (preceding receipts already emitted logs).
+#[test]
+#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
+fn test_replay_receipt_inner_log_metadata_nonzero_preceding_offset() {
+    // Last transaction of BLOCK: multi-log, with many preceding logs in-block.
+    const LATE_TX: &str = "0xb6a0b7a302c741f64b8e46861a3dcb2d5c1047f6f2cb89a35b5c2183c96296b7";
+
+    let stdout = replay(&["--json", LATE_TX], true);
+    let summary = common::json_values(&stdout)
+        .into_iter()
+        .find(|v| v.get("receipt").is_some())
+        .expect("replay summary with receipt");
+    let receipt = &summary["receipt"];
+    let block_hash = receipt["blockHash"].as_str().expect("blockHash");
+    let tx_hash = receipt["transactionHash"].as_str().expect("transactionHash");
+    let logs = receipt["logs"].as_array().expect("logs");
+    assert!(!logs.is_empty(), "late tx must emit logs");
+    let first = u64::from_str_radix(
+        logs[0]["logIndex"].as_str().expect("logIndex").trim_start_matches("0x"),
+        16,
+    )
+    .expect("parse logIndex");
+    assert!(first > 0, "expected non-zero preceding-log offset, got {first}");
+    for (i, log) in logs.iter().enumerate() {
+        assert_eq!(log["blockHash"].as_str(), Some(block_hash), "log {i}");
+        assert_eq!(log["transactionHash"].as_str(), Some(tx_hash), "log {i}");
+        assert!(log["logIndex"].is_string(), "log {i} logIndex");
+    }
+}
+
 /// Sweeping a block with `--dump-fixture-dir` against an envelope that carries
 /// no receipts skips every target on the fidelity gate and still exits 0.
 ///

@@ -318,7 +318,9 @@ enum DeferredFixture {
     Report(FixtureReport),
     /// Draft built against pre-commit state; write after `finish()` succeeds.
     /// Boxed so the enum is not dominated by the draft's size on the skip path.
-    Ready { draft: Box<fixture::FixtureDraft>, path: PathBuf },
+    /// `overwrite` is enforced at materialization via noclobber persist — the
+    /// prep-time existence check is only a fast path.
+    Ready { draft: Box<fixture::FixtureDraft>, path: PathBuf, overwrite: bool },
 }
 
 /// A target that executed, awaiting the receipt harvested by `finish()`.
@@ -652,6 +654,16 @@ where
 
     let target_set: HashSet<B256> = targets.iter().copied().collect();
     let tx_hashes: Vec<B256> = block.transactions.hashes().collect();
+    // Highest block index among this job's targets: once that transaction has
+    // committed we can stop — later non-targets are not needed for receipts or
+    // fixtures, and requiring them would force incomplete offline captures to
+    // abort after a successful dump target.
+    let last_target_index = tx_hashes
+        .iter()
+        .enumerate()
+        .filter(|(_, hash)| target_set.contains(*hash))
+        .map(|(i, _)| i)
+        .max();
     let mut pending: Vec<PendingTarget> = Vec::new();
     let mut committed = 0usize;
 
@@ -742,6 +754,12 @@ where
                     fixture,
                 });
             }
+
+            // Stop once every requested target that can run has committed: trailing
+            // non-targets are irrelevant to this job's receipts and fixtures.
+            if Some(tx_index) == last_target_index {
+                break;
+            }
         }
         Ok(())
     }
@@ -820,7 +838,25 @@ where
                 } else {
                     None
                 };
-                let fixture = target.fixture.map(materialize_deferred_fixture);
+                // Materialize only when the block loop completed cleanly: a
+                // mid-block abort after this target built a Ready draft must
+                // not publish (or clobber) a fixture for a block that failed.
+                let fixture = target.fixture.map(|deferred| {
+                    if loop_result.is_ok() {
+                        materialize_deferred_fixture(deferred)
+                    } else {
+                        // Drop the ready draft without writing; the target still
+                        // reports its receipt below when finish succeeded.
+                        match deferred {
+                            DeferredFixture::Report(report) => report,
+                            DeferredFixture::Ready { path, .. } => FixtureReport::error(format!(
+                                "fixture not written: block aborted before a clean finish \
+                                 (draft for {} was discarded)",
+                                path.display()
+                            )),
+                        }
+                    }
+                });
                 entries.push(BatchEntry::Executed(Box::new(ExecutedTx {
                     tx_hash: target.tx_hash,
                     block_number: number,
@@ -983,6 +1019,10 @@ where
     // Refuse overwrite without the flag before carrying a ready draft, so the
     // harvest path never has to re-check and a finish failure cannot be confused
     // with an overwrite refusal.
+    // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
+    // harvest path never confuses a finish failure with an overwrite refusal.
+    // Correctness against a concurrent creator is still enforced at materialize
+    // time via noclobber persist.
     if path.exists() && !overwrite {
         return DeferredFixture::Report(FixtureReport::error(format!(
             "fixture already exists at {} (pass --overwrite to replace)",
@@ -990,7 +1030,7 @@ where
         )));
     }
 
-    DeferredFixture::Ready { draft: Box::new(draft), path }
+    DeferredFixture::Ready { draft: Box::new(draft), path, overwrite }
 }
 
 /// Finalize a deferred fixture after the block `finish()` succeeded.
@@ -1001,13 +1041,22 @@ where
 fn materialize_deferred_fixture(deferred: DeferredFixture) -> FixtureReport {
     match deferred {
         DeferredFixture::Report(report) => report,
-        DeferredFixture::Ready { draft, path } => {
-            match fixture::finalize_and_write(*draft, &path) {
+        DeferredFixture::Ready { draft, path, overwrite } => {
+            match fixture::finalize_and_write(*draft, &path, overwrite) {
                 Ok(()) => {
                     info!(path = %path.display(), "Wrote self-validating fixture");
                     FixtureReport::written(&path)
                 }
-                Err(e) => FixtureReport::error(format!("fixture write failed: {e}")),
+                Err(e) => {
+                    let message = e.to_string();
+                    // Noclobber / prep-time refusal already carry the full
+                    // "already exists … --overwrite" text; do not wrap them.
+                    if message.contains("already exists") {
+                        FixtureReport::error(message)
+                    } else {
+                        FixtureReport::error(format!("fixture write failed: {message}"))
+                    }
+                }
             }
         }
     }
