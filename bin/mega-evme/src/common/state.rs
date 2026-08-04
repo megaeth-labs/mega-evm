@@ -566,8 +566,8 @@ where
         // Rex5+: SequencerRegistry (v1.0.0 pre-Rex6, v2.0.0 from Rex6). Only the bytecode
         // is installed here — a local run has no chain-config sequencer/admin to seed (the
         // registry's storage is otherwise read from forked state).
-        if spec >= MegaSpecId::REX5 {
-            let code = if spec >= MegaSpecId::REX6 {
+        if spec.reaches(MegaSpecId::REX5) {
+            let code = if spec.reaches(MegaSpecId::REX6) {
                 SEQUENCER_REGISTRY_CODE_REX6
             } else {
                 SEQUENCER_REGISTRY_CODE
