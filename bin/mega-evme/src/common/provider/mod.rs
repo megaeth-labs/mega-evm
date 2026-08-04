@@ -18,6 +18,7 @@ mod transport;
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use alloy_provider::{
@@ -127,7 +128,8 @@ pub struct RpcArgs {
     /// Maximum number of times the transport layer will retry a failing RPC request.
     /// Retries trigger on HTTP 429 / 503, JSON-RPC rate-limit error responses, and
     /// transport failures surfaced as `TransportErrorKind::Custom` (connection refused,
-    /// DNS failure, TLS handshake, etc.). Set to 0 to disable retries entirely.
+    /// DNS failure, TLS handshake, request timeout, etc.). Set to 0 to disable retries
+    /// entirely.
     #[arg(long = "rpc.max-retries", default_value_t = 5)]
     pub max_retries: u32,
 
@@ -142,6 +144,12 @@ pub struct RpcArgs {
     /// public-endpoint budgets.
     #[arg(long = "rpc.cu-per-sec", visible_alias = "rpc.rate-limit", default_value_t = 660)]
     pub compute_units_per_sec: u64,
+
+    /// Total per-HTTP-request timeout in seconds (connect + response).
+    /// `0` disables the timeout (previous behavior: a hung endpoint can block forever).
+    /// A non-zero timeout surfaces a hung endpoint as a retryable transport error.
+    #[arg(long = "rpc.request-timeout", default_value_t = 30)]
+    pub request_timeout: u64,
 }
 
 impl RpcArgs {
@@ -325,7 +333,7 @@ impl RpcArgs {
         // envelope first, a stale eth_chainId entry would short-circuit the
         // cross-chain validation.
         let transport_cache = TransportCache::new();
-        let http = alloy_transport_http::Http::new(url.clone());
+        let http = self.build_http_transport(url.clone());
         let caching = CachingTransport::new(http, transport_cache.clone());
         let client = self.build_client(caching, &url);
         let provider = ProviderBuilder::new()
@@ -381,14 +389,49 @@ impl RpcArgs {
         })
     }
 
+    /// Build the HTTP transport, applying [`Self::request_timeout`] when non-zero.
+    ///
+    /// All networked `Http` construction (standard provider, capture provider, and
+    /// the throwaway chain-id probe) must go through this helper so the timeout is
+    /// applied uniformly. Offline replay (`--rpc.replay-file`) never constructs
+    /// an HTTP transport.
+    ///
+    /// When `request_timeout == 0`, uses the default reqwest client (no total
+    /// request timeout). When non-zero, builds a client with both `.timeout` and
+    /// `.connect_timeout` set to the same duration so a hung endpoint surfaces as
+    /// a `TransportErrorKind::Custom` error (retryable under the policy below)
+    /// instead of hanging the process forever.
+    fn build_http_transport(
+        &self,
+        url: reqwest::Url,
+    ) -> alloy_transport_http::Http<reqwest::Client> {
+        if self.request_timeout == 0 {
+            return alloy_transport_http::Http::new(url);
+        }
+        let timeout = Duration::from_secs(self.request_timeout);
+        // `Client::builder` with only timeout settings cannot fail under normal
+        // conditions (failure requires a broken TLS backend).
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(timeout)
+            .build()
+            .expect("reqwest Client with timeout settings must build");
+        alloy_transport_http::Http::with_client(client, url)
+    }
+
     /// Build an `RpcClient` over HTTP, wired with the configured retry layer.
     fn build_retry_client(&self, url: reqwest::Url) -> RpcClient {
-        self.build_client(alloy_transport_http::Http::new(url.clone()), &url)
+        self.build_client(self.build_http_transport(url.clone()), &url)
     }
 
     /// Build an `RpcClient` over an arbitrary transport, wired with the configured
     /// retry layer (or bare when `max_retries == 0`). `url` is used only to detect
     /// whether the endpoint is local.
+    ///
+    /// Retry coverage: `RateLimitRetryPolicy` handles HTTP 429/503 and JSON-RPC
+    /// rate-limit bodies. The `TransportErrorKind::Custom` predicate additionally
+    /// retries transport failures, including reqwest request timeouts (mapped by
+    /// `alloy-transport-http` via `TransportErrorKind::custom`).
     fn build_client<T: alloy_transport::IntoBoxTransport>(
         &self,
         transport: T,
@@ -397,6 +440,8 @@ impl RpcArgs {
         let is_local =
             url.host_str().is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
         if self.max_retries > 0 {
+            // Reqwest timeouts, connection refused, DNS failure, TLS handshake,
+            // etc. all arrive as `TransportErrorKind::Custom` and are retryable.
             let policy = RateLimitRetryPolicy::default().or(|err: &TransportError| {
                 matches!(err, RpcError::Transport(TransportErrorKind::Custom(_)))
             });

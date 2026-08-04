@@ -259,11 +259,12 @@ Provider-cache merge also rejects inputs (and `--output`) whose `rpc-cache-{chai
 
 ### Retry Flags
 
-| Flag                      | Type  | Default | Description                                                                                                                                                                        |
-| ------------------------- | ----- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--rpc.max-retries <N>`   | `u32` | `5`     | Maximum retry attempts for failing RPC requests. Retries on HTTP 429/503, rate-limit errors, and transport failures. `0` to disable.                                               |
-| `--rpc.backoff-ms <MS>`   | `u64` | `1000`  | Fixed sleep duration in milliseconds between retry attempts (no exponential backoff).                                                                                              |
-| `--rpc.cu-per-sec <CU/s>` | `u64` | `660`   | Compute-unit budget (CU/s) for the retry layer's rate-limit accounting — not requests per second. Alias: `--rpc.rate-limit`. Values below 100 with retries enabled emit a warning. |
+| Flag                        | Type  | Default | Description                                                                                                                                                                        |
+| --------------------------- | ----- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--rpc.max-retries <N>`     | `u32` | `5`     | Maximum retry attempts for failing RPC requests. Retries on HTTP 429/503, rate-limit errors, and transport failures. `0` to disable.                                               |
+| `--rpc.backoff-ms <MS>`     | `u64` | `1000`  | Fixed sleep duration in milliseconds between retry attempts (no exponential backoff).                                                                                              |
+| `--rpc.cu-per-sec <CU/s>`   | `u64` | `660`   | Compute-unit budget (CU/s) for the retry layer's rate-limit accounting — not requests per second. Alias: `--rpc.rate-limit`. Values below 100 with retries enabled emit a warning. |
+| `--rpc.request-timeout <S>` | `u64` | `30`    | Total per-HTTP-request timeout in seconds (connect + response). `0` disables. A hung endpoint then surfaces as a retryable transport error instead of hanging the process.         |
 
 ### Examples
 

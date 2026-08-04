@@ -105,6 +105,21 @@ impl MockRpcServer {
     pub(crate) async fn received_request_count(&self) -> usize {
         self.server.received_requests().await.expect("received_requests").len()
     }
+
+    /// Accept every POST and delay the response far beyond any test timeout.
+    ///
+    /// Models a black-hole endpoint that accepts the TCP connection (and the
+    /// HTTP request) but never answers in time — the failure mode that
+    /// `--rpc.request-timeout` is meant to bound. The delay is 5 minutes so a
+    /// client with a 1s timeout fires first while the mock still records the hit.
+    pub(crate) async fn respond_black_hole(&self) {
+        use std::time::Duration;
+
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(300)))
+            .mount(&self.server)
+            .await;
+    }
 }
 
 /// Parse every top-level JSON value a run printed on stdout.

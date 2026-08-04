@@ -213,6 +213,7 @@ RPC Options:
       --rpc.cu-per-sec <COMPUTE_UNITS_PER_SEC>
                                          Compute-unit budget (CU/s) for the retry layer's rate-limit accounting (NOT requests/s) [default: 660]
                                          [alias: --rpc.rate-limit]
+      --rpc.request-timeout <SECS>       Total per-HTTP-request timeout (connect + response); 0 disables [default: 30]
 
 Chain Options:
       --spec <SPEC>                Spec [default: Rex7]

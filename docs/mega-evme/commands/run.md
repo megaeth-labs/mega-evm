@@ -54,7 +54,7 @@ Each group is documented on its own page.
 | Chain and spec    | `--spec`, `--chain-id`                                                                                                                                                                     | [Chain and Spec](../configuration/chain-and-spec.md)                            |
 | Block environment | `--block.number`, `--block.coinbase`, `--block.timestamp`, `--block.gaslimit`, `--block.basefee`, `--block.difficulty`, `--block.prevrandao`, `--block.blobexcessgas`                      | [Block Environment](../configuration/block-environment.md)                      |
 | SALT buckets      | `--bucket-capacity`                                                                                                                                                                        | [SALT Buckets](../configuration/salt-buckets.md)                                |
-| RPC cache / retry | `--rpc.cache-max-entries`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.cu-per-sec`                                      | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
+| RPC cache / retry | `--rpc.cache-max-entries`, `--rpc.cache-dir`, `--rpc.no-cache-file`, `--rpc.clear-cache`, `--rpc.max-retries`, `--rpc.backoff-ms`, `--rpc.cu-per-sec`, `--rpc.request-timeout`             | [RPC Cache and Retry](../configuration/state-management.md#rpc-cache-and-retry) |
 | Tracing           | `--trace`, `--tracer`, `--trace.output`, and tracer-specific flags                                                                                                                         | [Tracing Overview](../tracing/overview.md)                                      |
 | Output            | `--json`                                                                                                                                                                                   | See [JSON output](#json-output) below                                           |
 
@@ -317,7 +317,7 @@ RPC Options:
           Delete the current chain's cache file before loading it
 
       --rpc.max-retries <MAX_RETRIES>
-          Max transport retries on 429/503, rate-limit, and transport failures; 0 disables [default: 5]
+          Max transport retries on 429/503, rate-limit, transport failures, and request timeouts; 0 disables [default: 5]
 
       --rpc.backoff-ms <BACKOFF_MS>
           Fixed sleep (ms) between retries; no exponential backoff [default: 1000]
@@ -327,6 +327,11 @@ RPC Options:
 
           [default: 660]
           [alias: --rpc.rate-limit]
+
+      --rpc.request-timeout <REQUEST_TIMEOUT>
+          Total per-HTTP-request timeout in seconds (connect + response). `0` disables the timeout (previous behavior: a hung endpoint can block forever). A non-zero timeout surfaces a hung endpoint as a retryable transport error
+
+          [default: 30]
 
 Chain Options:
       --spec <SPEC>

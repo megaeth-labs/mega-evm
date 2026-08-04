@@ -41,6 +41,8 @@ fn test_rpc_args_parses_all_new_flags() {
         "250",
         "--rpc.rate-limit",
         "1234",
+        "--rpc.request-timeout",
+        "45",
     ]);
     assert_eq!(args.rpc_url, Some("https://example.test/rpc".to_string()));
     assert_eq!(args.cache_max_entries, 256);
@@ -50,6 +52,20 @@ fn test_rpc_args_parses_all_new_flags() {
     assert_eq!(args.max_retries, 7);
     assert_eq!(args.backoff_ms, 250);
     assert_eq!(args.compute_units_per_sec, 1234);
+    assert_eq!(args.request_timeout, 45);
+}
+
+/// Explicit `--rpc.request-timeout` values parse, including the disable sentinel `0`.
+#[test]
+fn test_rpc_args_parses_request_timeout() {
+    let defaulted = RpcArgs::parse_from(["mega-evme"]);
+    assert_eq!(defaulted.request_timeout, 30, "default request timeout is 30s");
+
+    let explicit = RpcArgs::parse_from(["mega-evme", "--rpc.request-timeout", "12"]);
+    assert_eq!(explicit.request_timeout, 12);
+
+    let disabled = RpcArgs::parse_from(["mega-evme", "--rpc.request-timeout", "0"]);
+    assert_eq!(disabled.request_timeout, 0, "0 disables the per-request timeout");
 }
 
 /// The removed `--rpc.cache-size` flag must fail to parse (pin the deletion).
@@ -121,6 +137,7 @@ fn test_rpc_args_default_values() {
     assert_eq!(args.max_retries, 5);
     assert_eq!(args.backoff_ms, 1_000);
     assert_eq!(args.compute_units_per_sec, 660);
+    assert_eq!(args.request_timeout, 30);
 }
 
 // ─── build_provider shape variants ───────────────────────────────────────────
@@ -572,6 +589,132 @@ async fn test_retry_layer_retries_on_unreachable_endpoint() {
     assert!(
         err_str.contains("Failed to fetch chain ID"),
         "error must surface chain-id resolution failure, got: {err_str}",
+    );
+}
+
+// ─── Request-timeout behavior ────────────────────────────────────────────────
+
+/// A hung endpoint (accepts TCP, never responds) with
+/// `--rpc.request-timeout 1` and `--rpc.max-retries 0` fails quickly at
+/// chain-id resolution as `EvmeError::RpcError` (exit 3), instead of hanging.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_request_timeout_fails_black_hole_within_bound() {
+    let server = MockRpcServer::start().await;
+    server.respond_black_hole().await;
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.request-timeout",
+        "1",
+        "--rpc.max-retries",
+        "0",
+        "--rpc.backoff-ms",
+        "1",
+    ]);
+
+    let started = std::time::Instant::now();
+    let err = args.build_provider().await.expect_err("black-hole must time out");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "must fail within a few seconds (timeout=1s, retries=0), took {elapsed:?}",
+    );
+    // Floor: a real 1s timeout should not return in sub-millisecond time.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(500),
+        "must wait for the request timeout, took {elapsed:?}",
+    );
+
+    match &err {
+        EvmeError::RpcError(msg) => {
+            assert!(
+                msg.contains("Failed to fetch chain ID"),
+                "timeout must surface via chain-id resolution, got: {msg}",
+            );
+        }
+        other => panic!("expected EvmeError::RpcError, got {other:?}"),
+    }
+    assert_eq!(
+        ExitCode::from_evme_error(&err).code(),
+        3,
+        "exhausted timeout must exit 3 (rpc-failure)",
+    );
+
+    // Spawned-binary assertion: the same flags on `replay` must exit 3 within
+    // the wall-time bound (chain-id fetch is the first networked call).
+    let started = std::time::Instant::now();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+        .args([
+            "replay",
+            "--rpc",
+            &server.uri(),
+            "--rpc.no-cache-file",
+            "--rpc.request-timeout",
+            "1",
+            "--rpc.max-retries",
+            "0",
+            "--rpc.backoff-ms",
+            "1",
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        ])
+        .output()
+        .expect("spawn mega-evme");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "spawned binary must fail within a few seconds, took {elapsed:?}",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "spawned binary must exit 3 on timeout.\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// A black-hole endpoint with `--rpc.max-retries 2` makes three attempts
+/// (1 initial + 2 retries) before giving up — proving reqwest timeouts are
+/// classified as retryable `TransportErrorKind::Custom` errors.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_request_timeout_is_retried_up_to_max_retries() {
+    let server = MockRpcServer::start().await;
+    server.respond_black_hole().await;
+
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        &server.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.request-timeout",
+        "1",
+        "--rpc.max-retries",
+        "2",
+        "--rpc.backoff-ms",
+        "1",
+    ]);
+
+    let started = std::time::Instant::now();
+    let err = args.build_provider().await.expect_err("black-hole must exhaust retries");
+    let elapsed = started.elapsed();
+
+    // 3 attempts × ~1s timeout + small backoffs; keep a generous upper bound.
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "3×1s timeouts must finish well under 30s, took {elapsed:?}",
+    );
+    assert_eq!(
+        server.received_request_count().await,
+        3,
+        "max-retries=2 → 1 initial + 2 retries against the black-hole",
+    );
+    assert_eq!(
+        ExitCode::from_evme_error(&err).code(),
+        3,
+        "exhausted timeout retries must exit 3 (rpc-failure)",
     );
 }
 
