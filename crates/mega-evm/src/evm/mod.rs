@@ -103,6 +103,11 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvTypes: ExternalEnvTypes> {
     /// The context stores `CfgEnv<OpSpecId>` (revm's shape) plus the `MegaSpecId` separately,
     /// while `alloy_evm::Evm::cfg_env` must hand out a `&CfgEnv<Self::Spec>`. This mirrors how
     /// `alloy-op-evm` keeps its own `cfg` copy on the EVM struct.
+    ///
+    /// This is a snapshot taken at construction. Mutating the live configuration afterwards —
+    /// reachable through the mutable deref to the inner EVM, e.g. `ctx.modify_cfg` — desyncs
+    /// this view from what execution actually uses. The supported way to change configuration
+    /// is to rebuild the EVM from a reconfigured context.
     mega_cfg: CfgEnv<spec::MegaSpecId>,
 }
 
@@ -247,6 +252,10 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     ///
     /// This is the `MegaEvm`-owned copy of the configuration, carrying the `MegaSpecId` the
     /// EVM was built with; the context's own `CfgEnv` is typed by the underlying `OpSpecId`.
+    ///
+    /// The copy is a construction-time snapshot: do not mutate the context's configuration
+    /// after building the EVM (rebuild it instead), or this view diverges from what execution
+    /// uses.
     #[inline]
     pub fn cfg_env_ref(&self) -> &CfgEnv<spec::MegaSpecId> {
         &self.mega_cfg
