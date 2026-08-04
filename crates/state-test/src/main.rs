@@ -249,6 +249,8 @@ mod tests {
         for (s, expected) in [
             (mega_evm::name::EQUIVALENCE, SpecName::Equivalence),
             (mega_evm::name::MINI_REX, SpecName::MiniRex),
+            (mega_evm::name::MINI_REX_1, SpecName::MiniRex1),
+            (mega_evm::name::MINI_REX_2, SpecName::MiniRex2),
             (mega_evm::name::REX, SpecName::Rex),
             (mega_evm::name::REX1, SpecName::Rex1),
             (mega_evm::name::REX2, SpecName::Rex2),
