@@ -901,4 +901,56 @@ mod tests {
             "CALLCODE-to-KZG must charge fixed GAS_COST via bytecode_address"
         );
     }
+
+    /// Direct unit coverage for `PrecompileProvider::contains` on the Mega
+    /// `PrecompilesMap` wrapper.
+    ///
+    /// The method is a thin forwarder; both always-true and always-false mutants
+    /// of its body previously survived because no test consulted the return value.
+    /// Pin known precompile addresses as true and a non-precompile as false under
+    /// every MegaETH-relevant precompile table (`MINI_REX` / `REX` share the same
+    /// Isthmus-era set for the classic 0x01-0x0a range plus KZG).
+    #[test]
+    fn test_precompiles_map_contains_known_and_unknown_addresses() {
+        // Classic Ethereum precompiles present in every MegaETH table.
+        const ECRECOVER: Address =
+            alloy_primitives::address!("0000000000000000000000000000000000000001");
+        const SHA256: Address =
+            alloy_primitives::address!("0000000000000000000000000000000000000002");
+        const IDENTITY: Address =
+            alloy_primitives::address!("0000000000000000000000000000000000000004");
+        // KZG point evaluation (EIP-4844) — overridden by MegaPrecompiles.
+        let kzg = revm::precompile::kzg_point_evaluation::ADDRESS;
+        // Address outside the precompile range.
+        const NON_PRECOMPILE: Address =
+            alloy_primitives::address!("00000000000000000000000000000000000000ff");
+
+        type Ctx<'a> = MegaContext<&'a mut MemoryDatabase, crate::EmptyExternalEnv>;
+
+        for spec in [MegaSpecId::MINI_REX, MegaSpecId::REX, MegaSpecId::REX5, MegaSpecId::REX6] {
+            let precompiles_map =
+                PrecompilesMap::from_static(MegaPrecompiles::new_with_spec(spec).precompiles());
+
+            assert!(
+                PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &ECRECOVER),
+                "{spec:?}: ecrecover (0x01) must be reported as a precompile",
+            );
+            assert!(
+                PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &SHA256),
+                "{spec:?}: sha256 (0x02) must be reported as a precompile",
+            );
+            assert!(
+                PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &IDENTITY),
+                "{spec:?}: identity (0x04) must be reported as a precompile",
+            );
+            assert!(
+                PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &kzg),
+                "{spec:?}: KZG point evaluation must be reported as a precompile",
+            );
+            assert!(
+                !PrecompileProvider::<Ctx<'_>>::contains(&precompiles_map, &NON_PRECOMPILE),
+                "{spec:?}: 0xff must not be reported as a precompile",
+            );
+        }
+    }
 }

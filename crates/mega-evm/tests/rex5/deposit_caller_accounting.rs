@@ -493,3 +493,112 @@ fn test_rex5_mega_system_deposit_marked_legacy_tx_branch() {
     let growth = evm.ctx_ref().additional_limit.borrow().get_usage().state_growth;
     assert_eq!(growth, 1, "mega-system-marked tx with empty caller must record +1 state_growth",);
 }
+
+/// REX5: pin that empty-deposit-caller materialisation adds (`+=`) storage gas onto
+/// the prior initial gas, rather than multiplying.
+///
+/// Setup (empirically locked):
+/// - Prior initial gas (base 21000 + REX intrinsic storage 39000) equals 60000.
+/// - [`SingleBucketHasher`] with capacity 512 yields multiplier 2, so `new_account_storage_gas` is
+///   25000.
+/// - Addition yields initial 85000; the simple RETURN callee then spends 6 more compute gas, so
+///   success requires `gas_limit == 85006` with matching `gas_used`.
+/// - A multiply mutant yields initial 1500000000 and fails as `FailedDeposit` under the same tight
+///   limit (only recovers at gas limit >= 1500000006).
+///
+/// Existing binary OOG/success tests (for example
+/// `test_rex5_storage_gas_charge_blocks_undergassed_empty_caller`) use a budget of 75k
+/// that both operators overshoot, so they cannot distinguish add from multiply.
+#[test]
+fn test_rex5_deposit_caller_storage_gas_is_added_not_multiplied() {
+    use std::convert::Infallible;
+
+    const HEAVY_BUCKET: BucketId = 7;
+    const HEAVY_CAPACITY: u64 = 512; // 2x MIN_BUCKET_SIZE -> multiplier 2 -> charge 25000
+                                     // Exact success threshold: prior 60000 + storage 25000 + 6 opcode gas.
+    const EXACT_SUCCESS_GAS_LIMIT: u64 = 85_006;
+    // Funded-caller baseline spends only prior + opcode gas (no deposit-caller charge).
+    const FUNDED_SUCCESS_GAS_LIMIT: u64 = 60_006;
+    // The deposit-caller storage-gas contribution pinned by the delta.
+    const DEPOSIT_CALLER_STORAGE_GAS: u64 = 25_000;
+
+    let external_envs = TestExternalEnvs::<Infallible, SingleBucketHasher>::new()
+        .with_bucket_capacity(HEAVY_BUCKET, HEAVY_CAPACITY);
+
+    // Empty-caller deposit at the exact += threshold must succeed and spend exactly that budget.
+    let mut db_empty =
+        MemoryDatabase::default().account_code(TARGET_CONTRACT, simple_return_contract());
+    let mut context_empty = MegaContext::new(&mut db_empty, MegaSpecId::REX5)
+        .with_external_envs((&external_envs).into());
+    context_empty.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut tx_empty = make_op_deposit_tx(EMPTY_CALLER, 1u128, TARGET_CONTRACT);
+    tx_empty.base.gas_limit = EXACT_SUCCESS_GAS_LIMIT;
+    let mut evm_empty = MegaEvm::new(context_empty);
+    let res_empty = alloy_evm::Evm::transact_raw(&mut evm_empty, tx_empty)
+        .expect("empty-caller deposit must not produce a validation Err under exact budget");
+    assert!(
+        res_empty.result.is_success(),
+        "empty-caller deposit with prior=60_000 + storage=25_000 must succeed at gas_limit=\
+         {EXACT_SUCCESS_GAS_LIMIT} under `+=` (a `*=` mutant multiplies to 1.5e9 and fails); got {:?}",
+        res_empty.result,
+    );
+    assert_eq!(
+        res_empty.result.tx_gas_used(),
+        EXACT_SUCCESS_GAS_LIMIT,
+        "exact-fit empty-caller deposit must spend the entire tight budget",
+    );
+
+    // One gas below the threshold must fail — pins that the sum is not smaller.
+    let mut db_under =
+        MemoryDatabase::default().account_code(TARGET_CONTRACT, simple_return_contract());
+    let mut context_under = MegaContext::new(&mut db_under, MegaSpecId::REX5)
+        .with_external_envs((&external_envs).into());
+    context_under.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut tx_under = make_op_deposit_tx(EMPTY_CALLER, 1u128, TARGET_CONTRACT);
+    tx_under.base.gas_limit = EXACT_SUCCESS_GAS_LIMIT - 1;
+    let mut evm_under = MegaEvm::new(context_under);
+    let res_under = alloy_evm::Evm::transact_raw(&mut evm_under, tx_under)
+        .expect("under-budget deposit returns Ok(Halt), not validation Err");
+    assert!(
+        !res_under.result.is_success(),
+        "empty-caller deposit must fail at gas_limit={} (one below the += sum)",
+        EXACT_SUCCESS_GAS_LIMIT - 1,
+    );
+
+    // Funded-caller baseline: same setup, no deposit-caller charge → 25_000 less gas.
+    let mut db_funded = MemoryDatabase::default()
+        .account_balance(FUNDED_CALLER, U256::from(1u64))
+        .account_code(TARGET_CONTRACT, simple_return_contract());
+    let mut context_funded = MegaContext::new(&mut db_funded, MegaSpecId::REX5)
+        .with_external_envs((&external_envs).into());
+    context_funded.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut tx_funded = make_op_deposit_tx(FUNDED_CALLER, 1u128, TARGET_CONTRACT);
+    tx_funded.base.gas_limit = FUNDED_SUCCESS_GAS_LIMIT;
+    let mut evm_funded = MegaEvm::new(context_funded);
+    let res_funded = alloy_evm::Evm::transact_raw(&mut evm_funded, tx_funded)
+        .expect("funded-caller deposit must not produce a validation Err");
+    assert!(
+        res_funded.result.is_success(),
+        "funded-caller deposit must succeed at gas_limit={FUNDED_SUCCESS_GAS_LIMIT}; got {:?}",
+        res_funded.result,
+    );
+    assert_eq!(
+        res_funded.result.tx_gas_used(),
+        FUNDED_SUCCESS_GAS_LIMIT,
+        "funded baseline must spend exactly prior+opcode gas",
+    );
+    assert_eq!(
+        EXACT_SUCCESS_GAS_LIMIT - FUNDED_SUCCESS_GAS_LIMIT,
+        DEPOSIT_CALLER_STORAGE_GAS,
+        "empty−funded gas delta must equal the REX new-account storage charge (25_000)",
+    );
+}
