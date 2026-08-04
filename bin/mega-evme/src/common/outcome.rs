@@ -5,7 +5,7 @@ use std::{path::Path, time::Duration};
 use super::{EvmeError, StateDumpArgs, TraceArgs};
 
 use alloy_consensus::{Eip658Value, Receipt};
-use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash, B256};
+use alloy_primitives::{hex, Address, BlockHash, Bytes, TxHash};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::{Panic, Revert, SolError};
 use clap::Parser;
@@ -68,6 +68,11 @@ impl EvmeOutcome {
 }
 
 /// Convert an [`OpReceiptEnvelope`] to an OP transaction receipt.
+///
+/// `first_log_index` is the block-global log index of this receipt's first log
+/// (the cumulative log count of all preceding receipts in the block). Each
+/// inner log is stamped with the same block/tx identity as the outer receipt so
+/// the JSON is self-consistent.
 #[allow(clippy::too_many_arguments)]
 pub fn op_receipt_to_tx_receipt(
     receipt: &OpReceiptEnvelope,
@@ -81,17 +86,18 @@ pub fn op_receipt_to_tx_receipt(
     transaction_hash: Option<TxHash>, // only used for replay command where tx hash is known
     block_hash: Option<BlockHash>,    // only used for replay command where block hash is known
     transaction_index: u64,
+    first_log_index: u64,
 ) -> OpTxReceipt {
-    // Map logs to include block/tx metadata
-    let mut log_index = 0;
+    // Map logs to include block/tx metadata matching the outer receipt.
+    let mut log_index = first_log_index;
     let inner = receipt.clone().map_logs(|log| {
         let log = alloy_rpc_types_eth::Log {
             inner: log,
-            block_hash: None,
+            block_hash,
             block_number: Some(block_number),
             block_timestamp: Some(block_timestamp),
-            transaction_hash: Some(B256::ZERO),
-            transaction_index: Some(0),
+            transaction_hash,
+            transaction_index: Some(transaction_index),
             log_index: Some(log_index),
             removed: false,
         };
@@ -357,7 +363,7 @@ impl ExecutionSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::Bytes;
+    use alloy_primitives::{address, b256, Bytes, Log as PrimitiveLog, LogData};
     use alloy_sol_types::SolError;
 
     #[test]
@@ -382,5 +388,57 @@ mod tests {
     fn test_decode_revert_reason_raw_hex() {
         let raw = Bytes::from(vec![0xde, 0xad]);
         assert_eq!(decode_revert_reason(&raw), "0xdead");
+    }
+
+    /// Inner logs carry the same block/tx identity as the outer receipt, and
+    /// `log_index` is the block-global index starting at `first_log_index`.
+    #[test]
+    fn test_op_receipt_to_tx_receipt_stamps_inner_log_metadata() {
+        let addr = address!("0x00000000000000000000000000000000000000aa");
+        let topic = b256!("0x000000000000000000000000000000000000000000000000000000000000000a");
+        let log = PrimitiveLog {
+            address: addr,
+            data: LogData::new(vec![topic], Bytes::from(vec![0xde, 0xad])).expect("topics"),
+        };
+        let receipt = OpReceiptEnvelope::Legacy(
+            alloy_consensus::Receipt {
+                status: Eip658Value::Eip658(true),
+                cumulative_gas_used: 21_000,
+                logs: vec![log.clone(), log],
+            }
+            .with_bloom(),
+        );
+        let tx_hash = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
+        let block_hash =
+            b256!("0x2222222222222222222222222222222222222222222222222222222222222222");
+        let from = address!("0x00000000000000000000000000000000000000bb");
+
+        let tx_receipt = op_receipt_to_tx_receipt(
+            &receipt,
+            42,
+            1_700_000_000,
+            from,
+            Some(addr),
+            None,
+            1,
+            21_000,
+            Some(tx_hash),
+            Some(block_hash),
+            3,
+            7, // two preceding receipts already emitted 7 logs in this block
+        );
+
+        assert_eq!(tx_receipt.transaction_hash, tx_hash);
+        assert_eq!(tx_receipt.block_hash, Some(block_hash));
+        assert_eq!(tx_receipt.transaction_index, Some(3));
+        let logs = tx_receipt.inner.logs();
+        assert_eq!(logs.len(), 2);
+        for (i, log) in logs.iter().enumerate() {
+            assert_eq!(log.block_hash, Some(block_hash), "log {i} block_hash");
+            assert_eq!(log.transaction_hash, Some(tx_hash), "log {i} transaction_hash");
+            assert_eq!(log.transaction_index, Some(3), "log {i} transaction_index");
+            assert_eq!(log.log_index, Some(7 + i as u64), "log {i} block-global log_index");
+            assert_eq!(log.block_number, Some(42));
+        }
     }
 }

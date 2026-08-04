@@ -488,6 +488,71 @@ fn test_replay_batch_rejects_single_transaction_flags() {
     }
 }
 
+/// A parent block whose hash does not match the child block's `parentHash` is an
+/// infrastructure failure for every target of that block (reorg / divergent views).
+#[test]
+#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
+fn test_replay_block_rejects_mismatched_parent_hash() {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let wrong_parent = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let mut expected_parent = None;
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        let Ok(mut response) = serde_json::from_str::<serde_json::Value>(value) else {
+            continue;
+        };
+        let Some(result) = response.get_mut("result") else {
+            continue;
+        };
+        if !result.is_object() {
+            continue;
+        }
+        // Doctor the parent block (number == BLOCK - 1), not the target block.
+        let number = result.get("number").and_then(|n| {
+            n.as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        });
+        if number != Some(BLOCK - 1) {
+            continue;
+        }
+        let original = result.get("hash").and_then(|h| h.as_str()).map(str::to_string);
+        assert!(original.is_some(), "parent block must report a hash");
+        expected_parent = original;
+        result["hash"] = serde_json::Value::String(wrong_parent.into());
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "the envelope must hold exactly one parent-block body for {BLOCK}");
+    let expected_parent = expected_parent.expect("parent hash");
+
+    let path = std::env::temp_dir()
+        .join(format!("mega_evme_batch_parent_mismatch_{}.json", std::process::id()));
+    std::fs::write(&path, envelope.to_string()).expect("write doctored envelope");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&path, &["--block", &BLOCK.to_string(), "--json"]);
+    let _ = std::fs::remove_file(&path);
+    let lines = ndjson(&stdout);
+
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    for line in &lines {
+        assert_eq!(
+            line["error"]["kind"].as_str(),
+            Some("rpc"),
+            "a parent/block linkage failure is an infrastructure error: {line}"
+        );
+        let message = line["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains(wrong_parent) && message.contains(&expected_parent),
+            "the message must name both hashes (got parent {expected_parent}, wrong {wrong_parent}): {line}"
+        );
+    }
+    assert_eq!(code, Some(3), "an infrastructure failure exits 3");
+    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+}
+
 /// Sweeping a block with `--dump-fixture-dir` against an envelope that carries
 /// no receipts skips every target on the fidelity gate and still exits 0.
 ///

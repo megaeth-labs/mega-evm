@@ -323,13 +323,20 @@ pub(super) fn check_inclusion(
     replayed_block_hash: B256,
 ) -> std::result::Result<(), String> {
     match receipt_block_hash {
-        Some(hash) if hash != replayed_block_hash => Err(format!(
+        Some(hash) if hash == replayed_block_hash => Ok(()),
+        Some(hash) => Err(format!(
             "receipt block hash {hash} != replayed block hash {replayed_block_hash}: the receipt \
              describes a different inclusion than the replayed block (reorg in progress, or a \
              load-balanced endpoint serving divergent views); the transaction is unverified, \
              retry once the chain settles"
         )),
-        _ => Ok(()),
+        // A receipt with no inclusion hash cannot be anchored to the replayed
+        // block, so it is the same class of failure as a mismatched hash.
+        None => Err(format!(
+            "receipt has no block hash: cannot anchor the receipt to the replayed block \
+             {replayed_block_hash} (reorg in progress, or a load-balanced endpoint serving \
+             divergent views); the transaction is unverified, retry once the chain settles"
+        )),
     }
 }
 
@@ -593,8 +600,6 @@ mod tests {
         let hash = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
 
         assert!(check_inclusion(Some(hash), hash).is_ok());
-        // A receipt without a block hash cannot contradict the replayed block.
-        assert!(check_inclusion(None, hash).is_ok());
     }
 
     #[test]
@@ -608,6 +613,20 @@ mod tests {
         assert!(
             message.contains("different inclusion") && message.contains("unverified"),
             "message must explain the reorg and that the target is unverified: {message}"
+        );
+    }
+
+    #[test]
+    fn test_check_inclusion_rejects_a_missing_block_hash() {
+        let replayed = b256!("0x2222222222222222222222222222222222222222222222222222222222222222");
+        let message = check_inclusion(None, replayed)
+            .expect_err("a receipt without a block hash must be rejected");
+
+        assert!(
+            message.contains("no block hash") &&
+                message.contains("unverified") &&
+                message.contains(&format!("{replayed}")),
+            "message must explain the missing anchor and name the replayed block: {message}"
         );
     }
 }

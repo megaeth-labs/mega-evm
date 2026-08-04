@@ -168,6 +168,7 @@ impl Cmd {
             None,
             None,
             0,
+            0,
         );
 
         if self.output_args.json {

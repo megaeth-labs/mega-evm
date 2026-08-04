@@ -852,6 +852,16 @@ impl Cmd {
         let receipt_envelope = block_result.receipts.last().unwrap().clone();
         trace!(?receipt_envelope, "Receipt envelope obtained");
 
+        // Block-global log index: cumulative log count of every preceding
+        // receipt in this block (same data `finish()` harvested).
+        let first_log_index: u64 = block_result
+            .receipts
+            .iter()
+            .rev()
+            .skip(1)
+            .map(|envelope| envelope.logs().len() as u64)
+            .sum();
+
         let from = ctx.target_tx.inner.inner.signer();
         let to = ctx.target_tx.inner.inner.to();
         let contract_address = (to.is_none() && receipt_envelope.is_success())
@@ -868,6 +878,7 @@ impl Cmd {
             Some(ctx.target_tx.inner.inner.tx_hash()),
             Some(ctx.block.hash()),
             ctx.preceding_tx_hashes.len() as u64,
+            first_log_index,
         );
 
         let verification = onchain_receipt.as_ref().map(|onchain| {

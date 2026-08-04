@@ -306,6 +306,21 @@ struct BlockJob {
     targets: Vec<B256>,
 }
 
+/// Fixture work for one target, held until `finish()` succeeds.
+///
+/// Skips and construction failures are decided against the pre-commit state and
+/// carried as a final report. A successfully built draft is written only after
+/// the transaction commits and the block finishes — a commit-time rejection or
+/// finish failure must not leave a fixture file on disk (and must not clobber a
+/// pre-existing file under `--overwrite`).
+enum DeferredFixture {
+    /// Already decided (skip, construction error, or refused overwrite).
+    Report(FixtureReport),
+    /// Draft built against pre-commit state; write after `finish()` succeeds.
+    /// Boxed so the enum is not dominated by the draft's size on the skip path.
+    Ready { draft: Box<fixture::FixtureDraft>, path: PathBuf },
+}
+
 /// A target that executed, awaiting the receipt harvested by `finish()`.
 struct PendingTarget {
     tx_hash: B256,
@@ -319,8 +334,8 @@ struct PendingTarget {
     from: Address,
     to: Option<Address>,
     effective_gas_price: u128,
-    /// Fixture dump outcome, present iff `--dump-fixture-dir` was given.
-    fixture: Option<FixtureReport>,
+    /// Fixture dump work, present iff `--dump-fixture-dir` was given.
+    fixture: Option<DeferredFixture>,
 }
 
 /// NDJSON line for a target that produced an execution result.
@@ -500,7 +515,9 @@ where
 ///
 /// When `--dump-fixture-dir` is set, each target's fixture draft is built from
 /// the pre-commit state (same moment as the single-transaction dump), gated per
-/// target for fidelity and BLOCKHASH, and written before the transaction commits.
+/// target for fidelity and BLOCKHASH, and written only after the block
+/// `finish()` succeeds — so a commit-time rejection or finish failure cannot
+/// leave a fixture file on disk.
 async fn replay_block<P>(
     provider: &P,
     chain_id: u64,
@@ -535,6 +552,21 @@ where
             return fail_all(&targets, BatchErrorKind::Rpc, &e.to_string());
         }
     };
+
+    // Parent/block linkage guard: across a reorg or a load-balanced endpoint
+    // serving divergent views, `eth_getBlockByNumber(N-1)` can return a block
+    // that is not the parent of the block being replayed. Forking from that
+    // state would silently execute against the wrong pre-state.
+    let parent_hash = parent_block.hash();
+    let expected_parent = block.header.parent_hash();
+    if parent_hash != expected_parent {
+        let message = format!(
+            "parent block hash {parent_hash} != block parent_hash {expected_parent}: the parent \
+             block describes a different chain than the block being replayed (reorg in progress, \
+             or a load-balanced endpoint serving divergent views); retry once the chain settles"
+        );
+        return fail_all(&targets, BatchErrorKind::Rpc, &message);
+    }
 
     // Fetch the on-chain receipts before the block runs. Needed for
     // `--verify-receipt` (mismatch vs unverified) and for `--dump-fixture-dir`
@@ -659,10 +691,11 @@ where
             // Fixture draft must be built before commit: the pre-state closure
             // is the database after preceding txs, with the target's result
             // state still uncommitted — same moment as the single-tx dump.
+            // The draft is only written after `finish()` succeeds (see harvest).
             let fixture = if is_target {
                 if let (Some(dir), Some(mega_env)) = (dump_dir, mega_env.as_ref()) {
                     let accessed_block_hashes = block_executor.get_accessed_block_hashes();
-                    Some(dump_target_fixture(
+                    Some(prepare_target_fixture(
                         block_executor.evm().db_ref(),
                         DumpFixtureArgs {
                             accessed_block_hash_count: accessed_block_hashes.len(),
@@ -732,6 +765,10 @@ where
             // verification verdict are still what the run was asked for. The
             // failed dump fails the run through the tally, not by replacing the
             // result with an error entry.
+            //
+            // Finalize+write runs only here, after finish succeeded: a
+            // commit-time rejection never reaches pending, and a finish failure
+            // drops ready drafts unwritten (see the Err arm).
             for target in pending {
                 let Some(envelope) = receipts.get(offset + target.commit_index) else {
                     entries.push(failure(
@@ -743,6 +780,12 @@ where
                 };
                 let contract_address = (target.to.is_none() && envelope.is_success())
                     .then(|| target.from.create(target.pre_execution_nonce));
+                // Block-global log index: cumulative log count of all committed
+                // receipts that precede this target in the block.
+                let first_log_index: u64 = receipts[offset..offset + target.commit_index]
+                    .iter()
+                    .map(|r| r.logs().len() as u64)
+                    .sum();
                 let receipt = op_receipt_to_tx_receipt(
                     envelope,
                     number,
@@ -755,6 +798,7 @@ where
                     Some(target.tx_hash),
                     Some(block_hash),
                     target.tx_index,
+                    first_log_index,
                 );
                 let verification = if verify_receipt {
                     match onchain_receipts.get(&target.tx_hash) {
@@ -776,6 +820,7 @@ where
                 } else {
                     None
                 };
+                let fixture = target.fixture.map(materialize_deferred_fixture);
                 entries.push(BatchEntry::Executed(Box::new(ExecutedTx {
                     tx_hash: target.tx_hash,
                     block_number: number,
@@ -785,12 +830,12 @@ where
                     exec_time: target.exec_time,
                     receipt,
                     verification,
-                    fixture: target.fixture,
+                    fixture,
                 })));
             }
         }
-        // The block itself failed to finish, so no target of it has a receipt:
-        // that failure outranks whatever each target's fixture dump reported.
+        // The block itself failed to finish, so no target of it has a receipt
+        // and no deferred fixture is written or replaced.
         Err(e) => {
             let error = ReplayError::BlockExecutionError(e);
             let kind = classify(&error);
@@ -844,7 +889,7 @@ where
     entries
 }
 
-/// Inputs for [`dump_target_fixture`], grouped so the dump path stays a single
+/// Inputs for [`prepare_target_fixture`], grouped so the dump path stays a single
 /// call site without a long positional argument list.
 struct DumpFixtureArgs<'a> {
     accessed_block_hash_count: usize,
@@ -860,16 +905,17 @@ struct DumpFixtureArgs<'a> {
     overwrite: bool,
 }
 
-/// Attempt to build and write a fixture for one successfully executed target.
+/// Prepare a fixture for one successfully executed target against pre-commit state.
 ///
 /// Expected skips (missing receipt, fidelity mismatch, BLOCKHASH, unsupported
-/// transaction shapes) report a skip reason and never fail the batch run.
-/// Finalize/write errors report a fixture error, which fails the run as an
-/// execution-class failure of this target without discarding its result.
+/// transaction shapes) become a final [`FixtureReport`] and never fail the run.
+/// Database and other construction failures become a fixture error (execution-class).
+/// A successfully built draft is carried as [`DeferredFixture::Ready`] and only
+/// written by [`materialize_deferred_fixture`] after `finish()` succeeds.
 ///
 /// `db` must reflect the pre-target-commit state (preceding txs committed, target
 /// not yet), matching the single-transaction dump.
-fn dump_target_fixture<DB>(db: &DB, args: DumpFixtureArgs<'_>) -> FixtureReport
+fn prepare_target_fixture<DB>(db: &DB, args: DumpFixtureArgs<'_>) -> DeferredFixture
 where
     DB: DatabaseRef,
     DB::Error: core::fmt::Display,
@@ -894,25 +940,29 @@ where
     let facts = match onchain {
         Some(Ok(facts)) => facts,
         Some(Err(message)) => {
-            return FixtureReport::skipped(format!("fidelity-gate-unavailable: {message}"));
+            return DeferredFixture::Report(FixtureReport::skipped(format!(
+                "fidelity-gate-unavailable: {message}"
+            )));
         }
         None => {
-            return FixtureReport::skipped(
+            return DeferredFixture::Report(FixtureReport::skipped(
                 "fidelity-gate-unavailable: no on-chain receipt was fetched for this transaction",
-            );
+            ));
         }
     };
 
     if accessed_block_hash_count > 0 {
-        return FixtureReport::skipped(format!(
+        return DeferredFixture::Report(FixtureReport::skipped(format!(
             "transaction reads block hashes (BLOCKHASH): {accessed_block_hash_count} block \
              hash(es) were accessed and the fixture cannot faithfully reproduce them"
-        ));
+        )));
     }
 
     let anchor = fixture::anchor_from_receipt_facts(facts);
     if let Err(reason) = fixture::check_fidelity(exec_result, &anchor, chain_id) {
-        return FixtureReport::skipped(format!("fidelity gate failed: {reason}"));
+        return DeferredFixture::Report(FixtureReport::skipped(format!(
+            "fidelity gate failed: {reason}"
+        )));
     }
 
     let draft = match fixture::build_draft(
@@ -925,29 +975,69 @@ where
         fixture::FixtureInputs { mega_env, result: exec_result, anchor },
     ) {
         Ok(draft) => draft,
-        // Unsupported shapes (deposit, EIP-7702, unknown spec) are expected in
-        // whole-block sweeps: skip rather than fail the run.
-        Err(e) => {
-            return FixtureReport::skipped(e.to_string());
-        }
+        Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
     };
 
     let tx_hash = target_tx.inner.inner.tx_hash();
     let path = dir.join(format!("{tx_hash:#x}.json"));
+    // Refuse overwrite without the flag before carrying a ready draft, so the
+    // harvest path never has to re-check and a finish failure cannot be confused
+    // with an overwrite refusal.
     if path.exists() && !overwrite {
-        return FixtureReport::error(format!(
+        return DeferredFixture::Report(FixtureReport::error(format!(
             "fixture already exists at {} (pass --overwrite to replace)",
             path.display()
-        ));
+        )));
     }
 
-    match fixture::finalize_and_write(draft, &path) {
-        Ok(()) => {
-            info!(path = %path.display(), tx_hash = %tx_hash, "Wrote self-validating fixture");
-            FixtureReport::written(&path)
+    DeferredFixture::Ready { draft: Box::new(draft), path }
+}
+
+/// Finalize a deferred fixture after the block `finish()` succeeded.
+///
+/// Ready drafts are self-validated and written here. Pre-decided reports pass
+/// through unchanged. On finish failure the caller drops the deferred value
+/// without calling this, so no file is written or replaced.
+fn materialize_deferred_fixture(deferred: DeferredFixture) -> FixtureReport {
+    match deferred {
+        DeferredFixture::Report(report) => report,
+        DeferredFixture::Ready { draft, path } => {
+            match fixture::finalize_and_write(*draft, &path) {
+                Ok(()) => {
+                    info!(path = %path.display(), "Wrote self-validating fixture");
+                    FixtureReport::written(&path)
+                }
+                Err(e) => FixtureReport::error(format!("fixture write failed: {e}")),
+            }
         }
-        Err(e) => FixtureReport::error(format!("fixture write failed: {e}")),
     }
+}
+
+/// Classify a [`fixture::build_draft`] error as a skip (unsupported shape) or a
+/// fixture construction error (database / other failures).
+///
+/// Unsupported shapes are expected in whole-block sweeps and must not fail the
+/// run. Endpoint/DB failures during construction mean the requested artifact
+/// could not be produced and fail the run as an execution-class fixture error.
+fn fixture_report_from_build_err(err: ReplayError) -> FixtureReport {
+    let message = err.to_string();
+    if is_unsupported_fixture_shape(&message) {
+        FixtureReport::skipped(message)
+    } else {
+        FixtureReport::error(format!("fixture construction failed: {message}"))
+    }
+}
+
+/// Whether a `build_draft` error is an expected unsupported shape (skip) rather
+/// than a construction failure.
+fn is_unsupported_fixture_shape(message: &str) -> bool {
+    message.contains("does not support deposit")
+        || message.contains("does not support EIP-7702")
+        || message.contains("has no fixture mapping")
+        || message.contains("reports no gas price")
+        // Fidelity is normally gated before `build_draft`; keep the classification
+        // if a fidelity check inside the builder ever surfaces here.
+        || message.contains("does not reproduce on-chain execution")
 }
 
 /// Fetch the on-chain receipt of every target of a block.
@@ -1347,5 +1437,66 @@ mod tests {
         assert!(parse_block_number("0xzz").is_err());
         assert!(parse_block_number("-1").is_err());
         assert!(parse_block_number("12.5").is_err());
+    }
+
+    /// Unsupported shapes remain skips; database/construction failures become
+    /// fixture errors so the run exits non-zero.
+    #[test]
+    fn test_fixture_build_err_classifies_skips_vs_construction_errors() {
+        let deposit = fixture_report_from_build_err(ReplayError::Other(
+            "--dump-fixture does not support deposit transactions".into(),
+        ));
+        assert!(deposit.skipped.is_some(), "deposit is a skip: {deposit:?}");
+        assert!(deposit.error.is_none());
+
+        let eip7702 = fixture_report_from_build_err(ReplayError::Other(
+            "--dump-fixture does not support EIP-7702 (set-code) transactions: the \
+             fixture builder does not serialize the authorization list"
+                .into(),
+        ));
+        assert!(eip7702.skipped.is_some(), "EIP-7702 is a skip: {eip7702:?}");
+
+        let unknown_spec = fixture_report_from_build_err(ReplayError::Other(
+            "--dump-fixture: spec Rex99 has no fixture mapping".into(),
+        ));
+        assert!(unknown_spec.skipped.is_some(), "unknown spec is a skip: {unknown_spec:?}");
+
+        let pre_state = fixture_report_from_build_err(ReplayError::Other(
+            "pre-state read for 0x00000000000000000000000000000000000000aa: database unavailable"
+                .into(),
+        ));
+        assert!(
+            pre_state.error.as_ref().is_some_and(|m| m.contains("construction failed")),
+            "DB pre-state failure is a fixture error: {pre_state:?}"
+        );
+        assert!(pre_state.skipped.is_none());
+
+        let code_fetch = fixture_report_from_build_err(ReplayError::Other(
+            "code fetch for 0x1111: endpoint timeout".into(),
+        ));
+        assert!(
+            code_fetch.error.as_ref().is_some_and(|m| m.contains("construction failed")),
+            "code fetch failure is a fixture error: {code_fetch:?}"
+        );
+        assert!(code_fetch.skipped.is_none());
+    }
+
+    /// A pre-decided fixture report is never rewritten by materialization, so a
+    /// finish failure that drops a Ready draft (without calling materialize)
+    /// cannot leave a file and a Report never touches the filesystem.
+    #[test]
+    fn test_materialize_deferred_fixture_passes_reports_through() {
+        let skipped = materialize_deferred_fixture(DeferredFixture::Report(
+            FixtureReport::skipped("fidelity-gate-unavailable: no receipt"),
+        ));
+        assert_eq!(skipped.skipped.as_deref(), Some("fidelity-gate-unavailable: no receipt"));
+        assert!(skipped.path.is_none());
+        assert!(skipped.error.is_none());
+
+        let err = materialize_deferred_fixture(DeferredFixture::Report(FixtureReport::error(
+            "fixture construction failed: code fetch failed",
+        )));
+        assert!(err.error.as_ref().is_some_and(|m| m.contains("construction failed")));
+        assert!(err.path.is_none());
     }
 }

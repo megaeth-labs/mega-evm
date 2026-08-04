@@ -181,7 +181,7 @@ A transaction is only reported as mismatched when both receipts were compared an
 Anything that prevents the comparison from running is an infrastructure failure — the transaction is _unverified_, which is a different finding from a divergence:
 
 - The endpoint fails the receipt call, or has pruned the receipt below its retention height (common on non-archive endpoints): reported as an `rpc` failure.
-- The receipt describes a different inclusion than the replayed block (its `blockHash` differs — a reorg in progress, or a load-balanced endpoint serving divergent views): reported as an `rpc` failure, because comparing against it would compare the replay to the wrong on-chain execution.
+- The receipt describes a different inclusion than the replayed block (its `blockHash` differs from the replayed block, or is null — a reorg in progress, or a load-balanced endpoint serving divergent views): reported as an `rpc` failure, because comparing against it would compare the replay to the wrong on-chain execution, and a receipt with no inclusion hash cannot be anchored at all.
 - The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
 
 In batch mode each of these becomes an error entry for that transaction, exactly like any other infrastructure failure.
@@ -374,7 +374,8 @@ The fixture content and format match the single-transaction [`--dump-fixture`](#
 The directory is created if it does not exist.
 Existing files are refused unless `--overwrite` is also set — a refused overwrite is a failed dump for that target, not a skip.
 
-Per-target gating mirrors the single-transaction rules, but records a skip instead of failing the run:
+Per-target gating mirrors the single-transaction rules, but records a skip instead of failing the run.
+The fixture draft is built against the pre-commit state (same moment as the single-transaction dump) and only written after the block finishes successfully — a commit-time rejection or finish failure never creates or replaces a fixture file.
 
 | Gate                                                                             | Outcome                                                       |
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------- |
@@ -382,6 +383,7 @@ Per-target gating mirrors the single-transaction rules, but records a skip inste
 | Fidelity mismatch (gas / status / logs root)                                     | `fixture.skipped` with `fidelity gate failed: …`              |
 | Target reads `BLOCKHASH`                                                         | `fixture.skipped` (fixtures carry no historical block hashes) |
 | Unsupported shape (deposit, EIP-7702, unknown spec mapping)                      | `fixture.skipped`                                             |
+| Fixture construction failure (database / pre-state reads)                        | `fixture.error` with the reason; execution-class failure      |
 | Finalize / write / self-validation failure, refused overwrite                    | `fixture.error` with the reason; execution-class failure      |
 | Pending / unresolvable target                                                    | already an error entry; no fixture report                     |
 
