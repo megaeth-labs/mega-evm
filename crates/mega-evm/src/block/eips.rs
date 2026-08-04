@@ -9,7 +9,6 @@ use alloy_evm::{
 use alloy_primitives::{Address, B256, U256};
 use revm::{
     context_interface::result::ResultAndState,
-    database::State,
     state::{Account, EvmState},
     Database, Inspector,
 };
@@ -30,10 +29,11 @@ use crate::{
 /// result of the call.
 ///
 /// Rex5+: the system call is issued with `max(block.gas_limit, SYSTEM_CALL_GAS_LIMIT_FLOOR)`
-/// (matching `SequencerRegistry` pre-block helpers) instead of revm's upstream-fixed 30M
+/// (matching `SequencerRegistry` pre-block helpers) instead of the frozen pre-REX5 30M
 /// default. The EIP-2935 history-storage write cost depends on Rex5 dynamic storage gas, so
 /// the 30M default is no longer guaranteed to be enough on high-SALT-bucket blocks.
-/// Pre-Rex5 keeps the original `transact_system_call` (30M) path for replay parity.
+/// Pre-Rex5 keeps [`crate::constants::PRE_REX5_SYSTEM_CALL_GAS_LIMIT`] (30M) for replay
+/// parity — not upstream `SYSTEM_CALL_GAS_LIMIT`, which revm 40 raised to `31_566_720`.
 ///
 /// [EIP-2935]: https://eips.ethereum.org/EIPS/eip-2935
 #[inline]
@@ -69,10 +69,15 @@ where
             gas_limit,
         )
     } else {
-        evm.transact_system_call(
+        // Use the inherent entry point so both branches share the same error type; the
+        // `alloy_evm::Evm` method now reports `OpTxError`.
+        // Pre-REX5 keeps MegaETH's frozen 30M system-call gas limit (not upstream's
+        // revm 40 `SYSTEM_CALL_GAS_LIMIT`, which includes a state-gas reservoir).
+        evm.transact_system_call_with_gas_limit(
             alloy_eips::eip4788::SYSTEM_ADDRESS,
             alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
             parent_block_hash.0.into(),
+            crate::constants::PRE_REX5_SYSTEM_CALL_GAS_LIMIT,
         )
     };
 
@@ -138,10 +143,12 @@ where
             gas_limit,
         )
     } else {
-        evm.transact_system_call(
+        // Pre-REX5 keeps MegaETH's frozen 30M system-call gas limit; see EIP-2935 helper.
+        evm.transact_system_call_with_gas_limit(
             alloy_eips::eip4788::SYSTEM_ADDRESS,
             alloy_eips::eip4788::BEACON_ROOTS_ADDRESS,
             parent_beacon_block_root.0.into(),
+            crate::constants::PRE_REX5_SYSTEM_CALL_GAS_LIMIT,
         )
     };
 
@@ -159,7 +166,7 @@ where
 /// committed to the given db.
 pub(crate) fn transact_balance_increments<DB: Database>(
     balances: impl IntoIterator<Item = (Address, u128)>,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
     let balances = balances.into_iter();
     let mut state = EvmState::default();
@@ -168,8 +175,7 @@ pub(crate) fn transact_balance_increments<DB: Database>(
         if balance_increment == 0 {
             continue;
         }
-        let cache_account = db.load_cache_account(address)?;
-        let account_info = cache_account.account_info().unwrap_or_default();
+        let account_info = db.basic(address)?.unwrap_or_default();
         let mut account = Account::default().with_info(account_info);
         account.info.balance += U256::from(balance_increment);
         account.mark_touch();
@@ -183,7 +189,12 @@ pub(crate) fn transact_balance_increments<DB: Database>(
 mod tests {
     use super::*;
     use alloy_primitives::address;
-    use revm::{database::InMemoryDB, state::AccountInfo, DatabaseCommit};
+    use revm::{
+        database::{InMemoryDB, State},
+        database_interface::DatabaseCommitExt,
+        state::AccountInfo,
+        DatabaseCommit,
+    };
 
     #[test]
     fn test_balance_increment_commit_equivalence() {
@@ -205,6 +216,7 @@ mod tests {
                         nonce,
                         code_hash: alloy_primitives::B256::ZERO,
                         code: None,
+                        account_id: None,
                     },
                 );
             }
@@ -232,7 +244,8 @@ mod tests {
         // The refactoring separates increment_balances into two steps:
         // 1. transact_balance_increments() - produces EvmState delta
         // 2. commit() - integrates the delta and fixes status transitions
-        // This allows extracting the intermediate state for system_caller.on_state() hooks
+        // This lets the executor collect the intermediate state as a pre-block outcome and
+        // commit it, which is what fires the witness-recording state hook.
         let result_state = transact_balance_increments(balance_increments.clone(), &mut state2)
             .expect("transact_balance_increments should succeed")
             .expect("Should return state");

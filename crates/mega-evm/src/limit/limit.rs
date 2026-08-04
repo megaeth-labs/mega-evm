@@ -247,7 +247,7 @@ impl AdditionalLimit {
         trial.before_tx_start(tx);
 
         let initial_and_floor_gas = calculate_initial_tx_gas_for_tx(tx, spec.into_eth_spec());
-        trial.record_compute_gas(initial_and_floor_gas.initial_gas);
+        trial.record_compute_gas(initial_and_floor_gas.initial_regular_gas);
 
         trial.check_limit()
     }
@@ -632,7 +632,7 @@ impl AdditionalLimit {
             FrameInput::Call(inputs) => {
                 (inputs.gas_limit, Some(inputs.return_memory_offset.clone()))
             }
-            FrameInput::Create(inputs) => (inputs.gas_limit, None),
+            FrameInput::Create(inputs) => (inputs.gas_limit(), None),
             FrameInput::Empty => unreachable!(),
         };
         let output = self.has_exceeded_limit.revert_data();
@@ -1087,13 +1087,13 @@ mod tests {
 
         // Latch the data-size dimension at its mutation site: intrinsic transaction data
         // (110-byte base + 200 bytes of calldata) exceeds the 100-byte limit.
-        let tx = MegaTransaction::new(
+        let tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(
             TxEnvBuilder::new()
                 .caller(Address::ZERO)
                 .call(Address::ZERO)
                 .data(vec![0u8; 200].into())
                 .build_fill(),
-        );
+        ));
         limit.before_tx_start(&tx);
         assert_eq!(latched_kind(&limit), Some(LimitKind::DataSize));
 
@@ -1144,9 +1144,9 @@ mod tests {
     #[should_panic(expected = "REX5")]
     #[cfg(debug_assertions)]
     fn test_intrinsic_check_for_tx_requires_rex5_spec() {
-        let tx = MegaTransaction::new(
+        let tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(
             TxEnvBuilder::new().caller(Address::ZERO).call(Address::ZERO).build_fill(),
-        );
+        ));
         // REX4 < REX5: the precondition assert must fire.
         let _ = AdditionalLimit::intrinsic_check_for_tx(MegaSpecId::REX4, &tx, test_limits());
     }

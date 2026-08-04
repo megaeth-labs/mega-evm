@@ -13,3 +13,4 @@ mod keyless_deploy;
 mod limit_control;
 mod selfdestruct_state_growth;
 mod storage_call_stipend;
+mod volatile_guard_gas;

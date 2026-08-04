@@ -22,11 +22,13 @@ use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U2
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
+    alloy_op_evm::OpTx,
+    op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
+    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs,
+    KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{LOG1, MSTORE, RETURN, STOP},
@@ -156,7 +158,7 @@ fn run_keyless_outer(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

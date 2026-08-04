@@ -17,11 +17,13 @@ use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U2
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
+    alloy_op_evm::OpTx,
+    op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::MemoryDatabase,
-    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv,
-    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
+    IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, SaltEnv, TestExternalEnvs,
+    KEYLESS_DEPLOY_ADDRESS, MIN_BUCKET_SIZE,
 };
 use revm::{
     context::{
@@ -82,7 +84,7 @@ fn run_keyless_outer_with_gas_limit(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -125,7 +127,7 @@ where
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -426,7 +428,7 @@ fn test_rex5_caller_materialization_first_deploy_charged_retry_not_recharged() {
     assert_eq!(first_signer_after.nonce, 1, "first call must bump signer nonce");
 
     let first_gas_used = match &first {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         other => panic!("first call must return success-style; got {other:?}"),
     };
 
@@ -446,7 +448,7 @@ fn test_rex5_caller_materialization_first_deploy_charged_retry_not_recharged() {
     assert_eq!(second_signer_after.nonce, 1, "retry: signer nonce must remain 1 (already used)");
 
     let second_gas_used = match &second {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         other => panic!("second call must return success-style; got {other:?}"),
     };
 
@@ -553,7 +555,7 @@ fn test_rex5_runtime_halt_returns_execution_halted_with_replay_barrier_consumed(
     // success-with-errorData on inner failure); a `Revert(InvalidTransaction)` here
     // would mean the runtime halt was misclassified as a validation rejection.
     let (gas_used, output) = match &result {
-        ExecutionResult::Success { gas_used, output, .. } => (*gas_used, output.data().clone()),
+        ExecutionResult::Success { gas, output, .. } => (gas.tx_gas_used(), output.data().clone()),
         other => panic!("runtime halt must surface as outer Success; got {other:?}"),
     };
     let decoded = IKeylessDeploy::keylessDeployCall::abi_decode_returns(&output)
@@ -874,7 +876,7 @@ fn test_rex5_pre_sandbox_materialization_charged_even_on_sandbox_validate_reject
             keyless_tx_bytes.clone(),
             low_gas_limit,
         );
-        let gas_used = result.gas_used();
+        let gas_used = result.tx_gas_used();
         (result, gas_used)
     };
 

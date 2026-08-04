@@ -21,10 +21,14 @@
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
 use alloy_primitives::{address, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+// Imported as the struct itself (not the `MegaTransaction` type alias) so the
+// tuple-struct constructor is usable — constructors cannot be called through a
+// type alias.
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     revm::inspector::NoOpInspector,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{
@@ -743,7 +747,7 @@ fn bench_eip7702_authlist(c: &mut Criterion) {
                     .gas_limit(100_000_000)
                     .authorization_list_recovered(auth_list.clone())
                     .build_fill();
-                let mut mega_tx = MegaTransaction::new(tx);
+                let mut mega_tx = MegaTransaction(op_revm::OpTransaction::new(tx));
                 mega_tx.enveloped_tx = Some(Bytes::new());
                 black_box(evm.transact(mega_tx))
             })

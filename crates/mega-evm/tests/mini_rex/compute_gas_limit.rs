@@ -7,9 +7,9 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::*,
@@ -21,7 +21,7 @@ use revm::{
     database::{CacheDB, EmptyDB},
     handler::EvmTr,
     precompile::{
-        bn128::pair,
+        bn254::pair,
         hash::{RIPEMD160, SHA256},
         secp256k1::ECRECOVER,
     },
@@ -45,7 +45,10 @@ fn transact(
     db: &mut CacheDB<EmptyDB>,
     compute_gas_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<
+    (ResultAndState<MegaHaltReason>, u64),
+    EVMError<Infallible, mega_evm::alloy_op_evm::OpTxError>,
+> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(compute_gas_limit),
     );
@@ -54,7 +57,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
@@ -103,7 +106,7 @@ fn test_empty_contract_compute_gas() {
     // Should have some gas from transaction intrinsic cost and opcodes
     assert!(compute_gas_used > 0);
     assert!(compute_gas_used < 50_000); // Should be small for simple operations
-    assert_eq!(compute_gas_used, result.result.gas_used());
+    assert_eq!(compute_gas_used, result.result.tx_gas_used());
 }
 
 #[test]
@@ -132,7 +135,7 @@ fn test_simple_arithmetic_compute_gas() {
     assert!(result.result.is_success());
     // Should track gas for all arithmetic operations
     assert!(compute_gas_used > 0);
-    assert_eq!(compute_gas_used, result.result.gas_used());
+    assert_eq!(compute_gas_used, result.result.tx_gas_used());
 }
 
 // ============================================================================
@@ -269,8 +272,8 @@ fn test_compute_gas_refund_on_limit_exceeded() {
 
     // Should halt with compute gas limit exceeded, but remaining gas is refunded
     assert!(is_compute_gas_limit_exceeded(&result));
-    assert_eq!(compute_gas_used, result.result.gas_used());
-    assert!(result.result.gas_used() < 43_000);
+    assert_eq!(compute_gas_used, result.result.tx_gas_used());
+    assert!(result.result.tx_gas_used() < 43_000);
 }
 
 // ============================================================================
@@ -451,7 +454,7 @@ fn test_compute_gas_limit_exceed_in_nested_call() {
 
     // Should halt with compute gas limit exceeded
     assert!(is_compute_gas_limit_exceeded(&result));
-    assert!(result.result.gas_used() < 1_000_000);
+    assert!(result.result.tx_gas_used() < 1_000_000);
 }
 
 // ============================================================================
@@ -549,9 +552,7 @@ fn test_compute_gas_resets_across_transactions() {
 /// from the oracle access in TX1.
 #[test]
 fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
-    use mega_evm::{
-        constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
-    };
+    use mega_evm::{constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS, ORACLE_CONTRACT_ADDRESS};
     use revm::ExecuteEvm;
 
     // Contract 1: Calls the oracle, which lowers compute_gas_limit to 1M
@@ -604,11 +605,11 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
     let mut evm = MegaEvm::new(context);
 
     // TX1: Call oracle contract - this lowers compute_gas_limit to 1M
-    let tx1 = MegaTransaction {
+    let tx1 = MegaTransaction(op_revm::OpTransaction {
         base: TxEnvBuilder::new().caller(CALLER).call(CONTRACT).build_fill(),
         enveloped_tx: Some(Bytes::new()),
         ..Default::default()
-    };
+    });
     let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1).unwrap();
     assert!(result1.result.is_success(), "TX1 should succeed");
 
@@ -621,11 +622,11 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
 
     // TX2: Expensive contract that uses >1M compute gas on the SAME EVM instance.
     // If the limit wasn't reset, this would fail with ComputeGasLimitExceeded.
-    let tx2 = MegaTransaction {
+    let tx2 = MegaTransaction(op_revm::OpTransaction {
         base: TxEnvBuilder::new().caller(CALLER).call(CONTRACT2).build_fill(),
         enveloped_tx: Some(Bytes::new()),
         ..Default::default()
-    };
+    });
     let result2 = evm.transact_one(tx2).unwrap();
 
     // Get the compute gas used by TX2
@@ -665,9 +666,7 @@ fn test_compute_gas_limit_resets_after_volatile_access_rex1() {
 /// (like oracle), the lowered compute gas limit persists to subsequent transactions.
 #[test]
 fn test_compute_gas_limit_not_reset_pre_rex1() {
-    use mega_evm::{
-        constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS, MegaTransaction, ORACLE_CONTRACT_ADDRESS,
-    };
+    use mega_evm::{constants::mini_rex::ORACLE_ACCESS_COMPUTE_GAS, ORACLE_CONTRACT_ADDRESS};
     use revm::ExecuteEvm;
 
     // Contract 1: Calls the oracle, which lowers compute_gas_limit to 1M
@@ -712,11 +711,11 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
     let mut evm = MegaEvm::new(context);
 
     // TX1: Call oracle contract - this lowers compute_gas_limit to 1M
-    let tx1 = MegaTransaction {
+    let tx1 = MegaTransaction(op_revm::OpTransaction {
         base: TxEnvBuilder::new().caller(CALLER).call(CONTRACT).build_fill(),
         enveloped_tx: Some(Bytes::new()),
         ..Default::default()
-    };
+    });
     let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1).unwrap();
     assert!(result1.result.is_success(), "TX1 should succeed");
 
@@ -729,11 +728,11 @@ fn test_compute_gas_limit_not_reset_pre_rex1() {
 
     // TX2: Expensive contract that uses >1M compute gas on the SAME EVM instance.
     // In pre-Rex1, this should FAIL because the limit is stuck at 1M.
-    let tx2 = MegaTransaction {
+    let tx2 = MegaTransaction(op_revm::OpTransaction {
         base: TxEnvBuilder::new().caller(CALLER).call(CONTRACT2).build_fill(),
         enveloped_tx: Some(Bytes::new()),
         ..Default::default()
-    };
+    });
     let result2 = evm.transact_one(tx2).unwrap();
 
     // TX2 should fail because the limit was NOT reset (pre-Rex1 behavior)
@@ -1320,4 +1319,166 @@ fn test_volatile_data_access_with_non_restrictive_detention_reports_compute_gas_
     let (limit, actual) = get_compute_gas_limit_info(&result).unwrap();
     assert_eq!(limit, compute_gas_limit);
     assert!(actual > limit);
+}
+
+// ============================================================================
+// PER-OPCODE STATIC GAS ACCOUNTING
+// ============================================================================
+
+/// Every metered opcode's cost is split by the interpreter into a static part charged before the
+/// handler runs and a dynamic part charged inside it. The handlers measure a `gas.remaining()`
+/// delta that only spans the dynamic part, so each one adds its opcode's static entry back.
+///
+/// This exercises a mix that would silently under-report if any handler dropped that add-back:
+/// opcodes whose cost is entirely static (PUSH/DUP/SWAP/POP/JUMPDEST/JUMP/JUMPI/PC/MSIZE/GAS),
+/// opcodes that split it (MSTORE/MLOAD with memory expansion, cold then warm SLOAD, KECCAK256,
+/// EXP), and the account-touching family whose static part is only the warm access cost (BALANCE,
+/// EXTCODESIZE, EXTCODEHASH). None of them charges storage gas, so the transaction's compute gas
+/// must equal its total gas.
+#[test]
+fn test_static_gas_counted_for_every_metered_opcode() {
+    let body = BytecodeBuilder::default()
+        // Fully static: stack and control flow.
+        .push_number(1u8)
+        .push_number(2u8)
+        .append(DUP2)
+        .append(SWAP1)
+        .append(POP)
+        .append(POP)
+        .append(POP)
+        .append(PC)
+        .append(MSIZE)
+        .append(GAS)
+        .append(POP)
+        .append(POP)
+        .append(POP)
+        // Split static/dynamic: memory expansion.
+        .push_number(0xffu8)
+        .push_number(0u8)
+        .append(MSTORE)
+        .push_number(0u8)
+        .append(MLOAD)
+        .append(POP)
+        // Split static/dynamic: hashing and exponentiation.
+        .push_number(32u8)
+        .push_number(0u8)
+        .append(KECCAK256)
+        .append(POP)
+        .push_number(7u8)
+        .push_number(3u8)
+        .append(EXP)
+        .append(POP)
+        // Warm-cost-only static part: cold then warm storage read.
+        .push_number(0u8)
+        .append(SLOAD)
+        .append(POP)
+        .push_number(0u8)
+        .append(SLOAD)
+        .append(POP)
+        // Warm-cost-only static part: cold then warm account reads.
+        .push_address(CONTRACT2)
+        .append(BALANCE)
+        .append(POP)
+        .push_address(CONTRACT2)
+        .append(EXTCODESIZE)
+        .append(POP)
+        .push_address(CONTRACT2)
+        .append(EXTCODEHASH)
+        .append(POP)
+        .build();
+
+    // Fully static: a taken JUMPI into a trailing JUMPDEST. The destination is derived from the
+    // body length plus the jump section's own `PUSH1 cond` (2) + `PUSH2 dest` (3) + `JUMPI` (1)
+    // bytes.
+    let jump_dest = (body.len() + 6) as u16;
+    let bytecode = BytecodeBuilder::default()
+        .append_many(body.iter().copied())
+        .append_many([PUSH1, 1, PUSH2])
+        .append_many(jump_dest.to_be_bytes())
+        .append_many([JUMPI, JUMPDEST, STOP])
+        .build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000u64))
+        .account_code(CONTRACT, bytecode)
+        .account_balance(CONTRACT2, U256::from(1u64));
+
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(10_000_000).build_fill();
+
+    let (result, compute_gas_used) = transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, tx).unwrap();
+
+    assert!(result.result.is_success(), "tx should succeed: {:?}", result.result);
+    // No opcode here charges storage gas, so compute gas accounts for the whole transaction.
+    assert_eq!(
+        compute_gas_used,
+        result.result.tx_gas_used(),
+        "compute gas must cover every opcode's full cost, static part included",
+    );
+}
+
+/// A compute-gas limit exceeded *by the CALL opcode itself* aborts while the CALL body has already
+/// published its child frame. The abort must win over that pending child — the callee never runs,
+/// so its work never reaches the compute-gas total — and must not burn the frame's remaining gas,
+/// which is refunded to the sender.
+#[test]
+fn test_compute_limit_exceeded_at_call_skips_child_and_keeps_gas() {
+    // Expensive callee: ~3,000 × 11 gas, far more than the CALL opcode's own cost.
+    let mut callee_bytecode = BytecodeBuilder::default();
+    for _ in 0..3_000 {
+        callee_bytecode = callee_bytecode.push_number(1u8).push_number(2u8).append(ADD).append(POP);
+    }
+    let callee_bytecode = callee_bytecode.append(STOP).build();
+
+    // The CALL argument pushes, shared by both programs below so their pre-CALL compute gas
+    // matches.
+    let call_args = || {
+        BytecodeBuilder::default()
+            .push_number(0u8) // retSize
+            .push_number(0u8) // retOffset
+            .push_number(0u8) // argsSize
+            .push_number(0u8) // argsOffset
+            .push_number(0u8) // value
+            .push_address(CONTRACT2)
+            .push_number(0xFFFFFFu32) // gas
+    };
+    let without_call = call_args().append(STOP).build();
+    let with_call = call_args().append(CALL).append(POP).append(STOP).build();
+
+    let gas_limit = 10_000_000;
+    let tx = TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(gas_limit).build_fill();
+
+    // Compute gas of the pushes alone (STOP costs nothing), i.e. the usage the CALL then exceeds.
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000u64))
+        .account_code(CONTRACT, without_call);
+    let (prefix_result, prefix_usage) =
+        transact(MegaSpecId::MINI_REX, &mut db, u64::MAX, tx.clone()).unwrap();
+    assert!(prefix_result.result.is_success());
+
+    // Same pushes, then a CALL. The limit leaves exactly no room for the CALL's own cost.
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000u64))
+        .account_code(CONTRACT, with_call)
+        .account_code(CONTRACT2, callee_bytecode);
+    let (result, _) = transact(MegaSpecId::MINI_REX, &mut db, prefix_usage, tx).unwrap();
+
+    assert!(
+        is_compute_gas_limit_exceeded(&result),
+        "CALL should exceed the compute gas limit, got {:?}",
+        result.result
+    );
+    let (limit, actual) = get_compute_gas_limit_info(&result).unwrap();
+    assert_eq!(limit, prefix_usage);
+    // The callee alone costs >30,000 gas. Only the CALL opcode's own cost may be recorded on top of
+    // the limit, which proves the pending child frame was discarded instead of executed.
+    assert!(
+        actual > limit && actual < limit + 30_000,
+        "only the CALL's own cost may be recorded (limit={limit}, actual={actual})",
+    );
+    // The halt must leave the frame's remaining gas intact for the sender refund.
+    assert!(
+        result.result.tx_gas_used() < gas_limit,
+        "limit-exceeded halt must not consume the whole gas limit, got {}",
+        result.result.tx_gas_used()
+    );
 }

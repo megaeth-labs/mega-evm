@@ -20,10 +20,11 @@ use std::{cell::RefCell, convert::Infallible, rc::Rc};
 use crate::common::{transact, transact_default, CALLER, CONTRACT, EMPTY_TARGET};
 use alloy_primitives::{Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx,
     constants::mini_rex::MAX_INITCODE_SIZE,
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BucketHasher, BucketId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
-    TestExternalEnvs,
+    BucketHasher, BucketId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{CREATE, CREATE2, STATICCALL, STOP},
@@ -105,7 +106,7 @@ fn static_halt_reason_for_bytecode(
     });
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context).with_inspector(capture.clone());
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");

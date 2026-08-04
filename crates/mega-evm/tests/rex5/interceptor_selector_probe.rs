@@ -24,10 +24,12 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaAccessControl, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, TestExternalEnvs, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE,
-    ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
+    IMegaAccessControl, IOracle, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
+    TestExternalEnvs, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
     bytecode::opcode::*,
@@ -47,14 +49,14 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -265,7 +267,7 @@ fn test_oracle_hint_malformed_args_does_not_record_under_both_specs() {
             .gas_limit(100_000_000)
             .build_fill();
         let mut evm = MegaEvm::new(context);
-        let mut tx = MegaTransaction::new(tx);
+        let mut tx = OpTx(OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
         let _ = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
 

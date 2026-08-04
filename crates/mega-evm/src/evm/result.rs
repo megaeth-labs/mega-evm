@@ -1,4 +1,3 @@
-use alloy_evm::block::StateChangeSource;
 pub use alloy_evm::InvalidTxError;
 use alloy_primitives::Address;
 pub use op_revm::{OpHaltReason, OpTransactionError};
@@ -31,6 +30,36 @@ pub struct MegaTransactionOutcome {
     pub compute_gas_used: u64,
     /// The state growth used.
     pub state_growth_used: u64,
+}
+
+/// Identifies which stage of block execution produced a state change.
+///
+/// The state commit hook no longer carries this label, so it is kept for `MegaETH`'s own
+/// pre/post-block bookkeeping and for the ordering guarantees documented on the block executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChangeSource {
+    /// Change produced by the transaction at the given index within the block.
+    Transaction(usize),
+    /// Change produced before any transaction ran.
+    PreBlock(StateChangePreBlockSource),
+    /// Change produced after every transaction ran.
+    PostBlock(StateChangePostBlockSource),
+}
+
+/// The pre-block stage that produced a state change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChangePreBlockSource {
+    /// EIP-4788 beacon block root contract call.
+    BeaconRootContract,
+    /// EIP-2935 block hashes contract call.
+    BlockHashesContract,
+}
+
+/// The post-block stage that produced a state change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChangePostBlockSource {
+    /// Block reward and withdrawal balance increments.
+    BalanceIncrements,
 }
 
 /// The execution outcome of system call in `MegaETH`.
@@ -147,12 +176,13 @@ mod tests {
 
     #[test]
     fn test_base_halt_reasons_convert_roundtrip() {
+        // `EthHaltReason` is no longer `Copy`, so clone at each use.
         let eth_reason = EthHaltReason::OutOfGas(OutOfGasError::Basic);
-        let mega_from_eth = MegaHaltReason::from(eth_reason);
-        let mega_from_op = MegaHaltReason::from(OpHaltReason::Base(eth_reason));
+        let mega_from_eth = MegaHaltReason::from(eth_reason.clone());
+        let mega_from_op = MegaHaltReason::from(OpHaltReason::Base(eth_reason.clone()));
 
-        assert_eq!(mega_from_eth, MegaHaltReason::Base(OpHaltReason::Base(eth_reason)));
-        assert_eq!(mega_from_op, MegaHaltReason::Base(OpHaltReason::Base(eth_reason)));
+        assert_eq!(mega_from_eth, MegaHaltReason::Base(OpHaltReason::Base(eth_reason.clone())));
+        assert_eq!(mega_from_op, MegaHaltReason::Base(OpHaltReason::Base(eth_reason.clone())));
         assert_eq!(EthHaltReason::try_from(mega_from_eth).unwrap(), eth_reason);
         assert_eq!(EthHaltReason::try_from(mega_from_op).unwrap(), eth_reason);
     }

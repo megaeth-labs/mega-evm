@@ -10,9 +10,11 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx,
+    op_revm::OpTransaction,
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
     EmptyExternalEnv, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, ACCOUNT_INFO_WRITE_SIZE,
+    ACCOUNT_INFO_WRITE_SIZE,
 };
 use revm::{
     context::{
@@ -72,7 +74,7 @@ fn run(spec: MegaSpecId, db: MemoryDatabase, init_code: Bytes) -> (TestResult, T
         value: U256::ZERO,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx_env);
+    let mut tx = OpTx(OpTransaction::new(tx_env));
     tx.enveloped_tx = Some(Bytes::new());
 
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
@@ -140,13 +142,13 @@ fn test_rex6_nested_create_revert_charges_creator_nonce_bump_to_parent() {
             .account_code(OUTER_CREATOR, outer_creator_code())
     };
     let make_call = || {
-        let mut tx = MegaTransaction::new(TxEnv {
+        let mut tx = OpTx(OpTransaction::new(TxEnv {
             caller: CALLER,
             kind: TxKind::Call(OUTER_CREATOR),
             gas_limit: TX_GAS_LIMIT,
             gas_price: 0,
             ..Default::default()
-        });
+        }));
         tx.enveloped_tx = Some(Bytes::new());
         tx
     };
@@ -212,7 +214,7 @@ fn run_create_with_limits(
         value: U256::ZERO,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx_env);
+    let mut tx = OpTx(OpTransaction::new(tx_env));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError")
 }
@@ -255,12 +257,12 @@ fn test_rex6_create_oog_over_limit_matches_rex5_frozen() {
 
     // Same result class → same returned gas; no REX6 burn-vs-refund divergence on this path.
     assert_eq!(
-        r6.result.gas_used(),
-        r5.result.gas_used(),
+        r6.result.tx_gas_used(),
+        r5.result.tx_gas_used(),
         "REX6 must return the absorbed CREATE's gas identically to REX5 \
          (rex5_gas_used={}, rex6_gas_used={})",
-        r5.result.gas_used(),
-        r6.result.gas_used(),
+        r5.result.tx_gas_used(),
+        r6.result.tx_gas_used(),
     );
 }
 
@@ -316,7 +318,7 @@ fn test_rex6_create_net_new_inspect_db_error_surfaces() {
         value: U256::ZERO,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx_env);
+    let mut tx = OpTx(OpTransaction::new(tx_env));
     tx.enveloped_tx = Some(Bytes::new());
 
     let res = alloy_evm::Evm::transact_raw(&mut evm, tx);
@@ -357,13 +359,13 @@ fn test_rex6_nested_create_revert_then_retry_charges_creator_once() {
             .account_code(OUTER_CREATOR, outer_double_creator_code())
     };
     let make_call = || {
-        let mut tx = MegaTransaction::new(TxEnv {
+        let mut tx = OpTx(OpTransaction::new(TxEnv {
             caller: CALLER,
             kind: TxKind::Call(OUTER_CREATOR),
             gas_limit: TX_GAS_LIMIT,
             gas_price: 0,
             ..Default::default()
-        });
+        }));
         tx.enveloped_tx = Some(Bytes::new());
         tx
     };

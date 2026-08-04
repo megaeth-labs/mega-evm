@@ -9,9 +9,9 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    revm::context::result::ExecutionResult, test_utils::MemoryDatabase, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
-    KEYLESS_DEPLOY_CODE,
+    alloy_op_evm::OpTx, op_revm::OpTransaction, revm::context::result::ExecutionResult,
+    test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs,
+    KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
 };
 use revm::context::{result::ResultAndState, tx::TxEnvBuilder};
 
@@ -40,7 +40,7 @@ fn run_dispatch(spec: MegaSpecId, calldata: Bytes) -> ResultAndState<MegaHaltRea
         .gas_price(0)
         .data(calldata)
         .build_fill();
-    let mut tx = MegaTransaction::new(tx_env);
+    let mut tx = OpTx(OpTransaction::new(tx_env));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context);

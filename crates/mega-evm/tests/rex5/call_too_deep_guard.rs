@@ -50,6 +50,9 @@ fn make_call_frame_init(target: Address, selector: [u8; 4], depth: usize) -> Fra
             value: CallValue::Transfer(U256::ZERO),
             scheme: CallScheme::Call,
             is_static: false,
+            reservoir: 0,
+            known_bytecode: Default::default(),
+            charged_new_account_state_gas: false,
         })),
     }
 }
@@ -63,7 +66,7 @@ fn assert_call_too_deep(outcome_result: &FrameResult) {
         InstructionResult::CallTooDeep,
         "depth guard should produce CallTooDeep"
     );
-    assert_eq!(outcome.result.gas.spent(), 0, "no gas should be spent on CallTooDeep");
+    assert_eq!(outcome.result.gas.total_gas_spent(), 0, "no gas should be spent on CallTooDeep");
     assert_eq!(
         outcome.result.gas.remaining(),
         GAS_LIMIT,
@@ -202,14 +205,14 @@ struct AlwaysInterceptInspector {
 impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for AlwaysInterceptInspector {
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         self.call_count += 1;
-        Some(CallOutcome {
-            result: InterpreterResult {
+        Some(CallOutcome::new(
+            InterpreterResult {
                 result: InstructionResult::Stop,
                 output: Bytes::new(),
                 gas: Gas::new(inputs.gas_limit),
             },
-            memory_offset: inputs.return_memory_offset.clone(),
-        })
+            inputs.return_memory_offset.clone(),
+        ))
     }
 
     fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, _outcome: &mut CallOutcome) {

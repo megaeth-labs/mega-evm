@@ -9,10 +9,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, TestExternalEnvs, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
+    IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs,
+    VolatileDataAccessType, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -72,14 +73,14 @@ fn decode_volatile_data_access_disabled(
 fn transact(
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, MegaSpecId::REX4);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -452,7 +453,7 @@ fn test_reverted_inner_call_returns_gas() {
 
     // The gas used should be relatively small since child reverted immediately
     // and gas was returned to parent
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     assert!(gas_used < 5_000_000, "Gas used ({gas_used}) should be relatively small");
 }
 
@@ -526,7 +527,7 @@ fn test_pre_rex4_no_interception() {
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(PARENT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 
@@ -1121,7 +1122,7 @@ fn test_inspector_sees_system_contract_call() {
     });
     let mut inspector = CallTrackingInspector::default();
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
-    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(PARENT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success(), "Transaction should succeed");
@@ -1276,7 +1277,7 @@ fn test_blocked_volatile_access_does_not_set_bitmap() {
     let volatile_data_tracker = context.volatile_data_tracker.clone();
 
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(PARENT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success(), "Parent tx should succeed");
@@ -1328,7 +1329,7 @@ fn test_blocked_beneficiary_balance_does_not_set_bitmap() {
     let volatile_data_tracker = context.volatile_data_tracker.clone();
 
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(PARENT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success(), "Parent tx should succeed");
@@ -1381,7 +1382,7 @@ fn test_blocked_oracle_sload_does_not_set_bitmap() {
     let volatile_data_tracker = context.volatile_data_tracker.clone();
 
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(PARENT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success(), "Parent tx should succeed");
@@ -1422,7 +1423,7 @@ fn append_callcode(builder: BytecodeBuilder, target: Address, gas: u64) -> Bytec
 fn transact_with_oracle(
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let external_envs = TestExternalEnvs::<Infallible>::new()
         .with_oracle_storage(U256::from(0), U256::from(0x1234));
     let mut context =
@@ -1432,7 +1433,7 @@ fn transact_with_oracle(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -1882,7 +1883,7 @@ fn test_blocked_call_beneficiary_does_not_pollute_tracker() {
     let volatile_data_tracker = context.volatile_data_tracker.clone();
 
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(PARENT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success(), "Parent tx should succeed");
@@ -2010,7 +2011,7 @@ fn test_blocked_selfdestruct_beneficiary_does_not_pollute_tracker() {
     let volatile_data_tracker = context.volatile_data_tracker.clone();
 
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(PARENT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success(), "Parent tx should succeed");
@@ -2056,7 +2057,7 @@ fn test_selfdestruct_beneficiary_not_restricted_pre_rex4() {
     let volatile_data_tracker = context.volatile_data_tracker.clone();
 
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(default_tx(PARENT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(PARENT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 

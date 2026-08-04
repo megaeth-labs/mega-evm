@@ -13,9 +13,10 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx,
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    TestExternalEnvs,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::*,
@@ -71,7 +72,7 @@ fn test_create2_with_oversize_initcode_len_does_not_panic() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx_env);
+    let mut tx = OpTx(OpTransaction::new(tx_env));
     tx.enveloped_tx = Some(Bytes::new());
     let res =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact should not surface EVMError");
@@ -142,7 +143,7 @@ fn run_create2_and_get_compute_gas(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx_env);
+    let mut tx = OpTx(OpTransaction::new(tx_env));
     tx.enveloped_tx = Some(Bytes::new());
     let res = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact should not fail");
     let compute_gas = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;

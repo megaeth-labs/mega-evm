@@ -2,9 +2,9 @@
 //!
 //! A bench declares a backend-agnostic [`Workload`] (accounts + transactions)
 //! and registers it across a fixed set of [`Subject`](subject::Subject) rows:
-//! the four vanilla baselines (`revm_pinned`, `revm_latest`, `op_revm_pinned`,
-//! `op_revm_latest`) and the mega specs. Every row runs the same scenario, so a
-//! single criterion group yields a comparable gap table.
+//! the two vanilla baselines (`revm_pinned`, `op_revm_pinned`) and the mega
+//! specs. Every row runs the same scenario, so a single criterion group yields
+//! a comparable gap table.
 //!
 //! Bench files pull this in with a plain `mod common;` (resolved via the
 //! standard `common/mod.rs` sibling-folder lookup). Each criterion bench target
@@ -20,7 +20,7 @@ use core::convert::Infallible;
 
 use mega_evm::{MegaSpecId, TestExternalEnvs};
 pub use subject::MegaWithEnv;
-use subject::{Mega, OpRevmLatest, OpRevmPinned, RevmLatest, RevmPinned, Subject};
+use subject::{Mega, OpRevmPinned, RevmPinned, Subject};
 pub use workload::{Account, TxSpec, Workload};
 
 /// Mega specs registered by [`register_all`] and [`register_mega`]. Shared so
@@ -46,7 +46,7 @@ pub const SPEC_IDS: &[(&str, MegaSpecId)] = &[
 type Group<'a> = criterion::BenchmarkGroup<'a, criterion::measurement::WallTime>;
 
 fn baseline_subjects() -> Vec<Box<dyn Subject>> {
-    vec![Box::new(RevmPinned), Box::new(RevmLatest), Box::new(OpRevmPinned), Box::new(OpRevmLatest)]
+    vec![Box::new(RevmPinned), Box::new(OpRevmPinned)]
 }
 
 fn mega_subjects(specs: &[(&'static str, MegaSpecId)]) -> Vec<Box<dyn Subject>> {

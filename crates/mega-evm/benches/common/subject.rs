@@ -8,38 +8,27 @@
 //! What makes the vanilla rows comparable — the target hardfork and the
 //! operator-fee zero-out — is defined once in the "Comparability baseline"
 //! section below, not repeated per stack.
-//!
-//! `_latest` types come from a cargo `package` rename in `Cargo.toml`. Both
-//! `_latest` subjects share one revm tree because the chosen `op-revm` version
-//! already pulls the chosen `revm` version transitively.
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Bytes, U256};
 use core::convert::Infallible;
 use criterion::black_box;
+// Imported as the struct itself (not the `MegaTransaction` type alias) so the
+// tuple-struct constructor is usable — constructors cannot be called through a
+// type alias.
 use mega_evm::{
-    revm::inspector::NoOpInspector, test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext,
-    MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
+    alloy_op_evm::OpTx as MegaTransaction, revm::inspector::NoOpInspector,
+    test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId,
+    TestExternalEnvs,
 };
 use op_revm::{
     DefaultOp as _, OpBuilder as _, OpContext as OpContextPinned, OpSpecId as OpSpecIdPinned,
     OpTransaction as OpTransactionPinned,
-};
-use op_revm_latest::{
-    DefaultOp as _, OpBuilder as _, OpContext as OpContextLatest, OpSpecId as OpSpecIdLatest,
-    OpTransaction as OpTransactionLatest,
 };
 use revm::{
     context::{tx::TxEnvBuilder, TxEnv},
     database::EmptyDB as EmptyDBPinned,
     primitives::hardfork::SpecId as SpecIdPinned,
     Context as ContextPinned, ExecuteEvm, MainBuilder as _, MainContext as _,
-};
-use revm_latest::{
-    bytecode::Bytecode as BytecodeLatest,
-    context::{tx::TxEnvBuilder as TxEnvBuilderLatest, TxEnv as TxEnvLatest},
-    database::{CacheDB as CacheDBLatest, EmptyDB as EmptyDBLatest},
-    primitives::hardfork::SpecId as SpecIdLatest,
-    Context as ContextLatest, ExecuteEvm as _, MainBuilder as _, MainContext as _,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -53,25 +42,23 @@ use super::workload::{Account, TxSpec, Workload};
 // ============================================================================
 //
 
-/// Target hardfork for the vanilla `revm` rows. Cancun keeps every baseline on
+/// Target hardfork for the vanilla `revm` row. Cancun keeps every baseline on
 /// one fork and predates EIP-7825's `tx_gas_limit_cap` (2^24), so the
-/// multi-gigagas `gas_limit` workloads are not truncated. (`revm_latest`'s
-/// `MainContext::mainnet()` would otherwise default to Osaka and trip the cap.)
+/// multi-gigagas `gas_limit` workloads are not truncated
+/// (`MainContext::mainnet()` would otherwise default to Osaka and trip the
+/// cap).
 const REVM_FORK: SpecIdPinned = SpecIdPinned::CANCUN;
-const REVM_FORK_LATEST: SpecIdLatest = SpecIdLatest::CANCUN;
 
-/// Target hardfork for the op rows. Holocene maps to eth Cancun, matching the
-/// `revm` rows above. Needed because `DefaultOp::op()` hard-codes `BEDROCK`
-/// (eth Merge) regardless of the enum default — without this the op rows would
+/// Target hardfork for the op row. Holocene maps to eth Cancun, matching the
+/// `revm` row above. Needed because `DefaultOp::op()` hard-codes `BEDROCK`
+/// (eth Merge) regardless of the enum default — without this the op row would
 /// sit on a different fork and the op-vs-revm gap would reflect a hardfork
 /// difference rather than a version one.
 const OP_FORK: OpSpecIdPinned = OpSpecIdPinned::HOLOCENE;
-const OP_FORK_LATEST: OpSpecIdLatest = OpSpecIdLatest::HOLOCENE;
 
 /// Zero the operator fee so the op and mega rows are comparable to the revm
-/// rows, which carry no such fee. A macro rather than a fn: the three `chain`
-/// types come from distinct crates (op-revm pinned/latest, mega-evm) and share
-/// no common trait — only the field names line up.
+/// rows, which carry no such fee. A macro rather than a fn keeps it
+/// independent of the concrete `chain` type — only the field names matter.
 macro_rules! zero_operator_fee {
     ($chain:expr) => {{
         $chain.operator_fee_scalar = Some(U256::ZERO);
@@ -143,38 +130,11 @@ fn build_pinned_db(accounts: &[Account]) -> MemoryDatabase {
     db
 }
 
-/// Seed a latest-revm `CacheDB` from the workload accounts. Shared by both
-/// `*_latest` baselines.
-fn build_latest_db(accounts: &[Account]) -> CacheDBLatest<EmptyDBLatest> {
-    let mut builder = LatestDbBuilder::new();
-    for account in accounts {
-        builder = builder.account_balance(account.address, account.balance);
-        if let Some(code) = &account.code {
-            builder = builder.account_code(account.address, code.clone());
-        }
-        for (slot, value) in &account.storage {
-            builder = builder.account_storage(account.address, *slot, *value);
-        }
-    }
-    builder.build()
-}
-
 /// Translate a [`TxSpec`] into a pinned-revm `TxEnv`, used by the `revm_pinned`,
 /// `op_revm_pinned`, and `mega_*` subjects (mega-evm re-exports the same pinned
 /// revm crate).
 fn pinned_tx_env(tx: &TxSpec) -> TxEnv {
     TxEnvBuilder::new()
-        .caller(tx.caller)
-        .call(tx.target)
-        .gas_limit(tx.gas_limit)
-        .value(tx.value)
-        .data(tx.data.clone())
-        .build_fill()
-}
-
-/// Translate a [`TxSpec`] into a latest-revm `TxEnv`.
-fn latest_tx_env(tx: &TxSpec) -> TxEnvLatest {
-    TxEnvBuilderLatest::new()
         .caller(tx.caller)
         .call(tx.target)
         .gas_limit(tx.gas_limit)
@@ -213,7 +173,7 @@ impl Subject for Mega {
             |evm, tx| {
                 // Wrap into a `MegaTransaction` with an empty envelope, matching
                 // what the production tx-pool would attach.
-                let mut mega_tx = MegaTransaction::new(pinned_tx_env(tx));
+                let mut mega_tx = MegaTransaction(OpTransactionPinned::new(pinned_tx_env(tx)));
                 mega_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(mega_tx).expect("mega transact");
                 let success = r.result.is_success();
@@ -259,7 +219,7 @@ impl Subject for MegaWithEnv {
                 MegaEvm::<_, NoOpInspector, TestExternalEnvs<Infallible>>::new(context)
             },
             |evm, tx| {
-                let mut mega_tx = MegaTransaction::new(pinned_tx_env(tx));
+                let mut mega_tx = MegaTransaction(OpTransactionPinned::new(pinned_tx_env(tx)));
                 mega_tx.enveloped_tx = Some(Bytes::new());
                 let r = evm.transact(mega_tx).expect("mega transact");
                 let success = r.result.is_success();
@@ -291,40 +251,15 @@ impl Subject for RevmPinned {
             workload,
             || {
                 ContextPinned::mainnet()
-                    .modify_cfg_chained(|cfg| cfg.spec = REVM_FORK)
+                    // Sets the gas params along with the spec: revm 40 keeps
+                    // per-spec `GasParams` in `CfgEnv`, so assigning `cfg.spec`
+                    // alone would leave the default (Osaka) params in place.
+                    .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(REVM_FORK))
                     .with_db(build_pinned_db(&workload.accounts))
                     .build_mainnet()
             },
             |evm, tx| {
                 let r = evm.transact(pinned_tx_env(tx)).expect("revm_pinned transact");
-                let success = r.result.is_success();
-                black_box(r);
-                success
-            },
-        );
-    }
-}
-
-/// Vanilla `revm` at the latest crates.io release (fork: [`REVM_FORK_LATEST`]).
-pub struct RevmLatest;
-
-impl Subject for RevmLatest {
-    fn name(&self) -> &str {
-        "revm_latest"
-    }
-
-    fn run(&self, workload: &Workload) {
-        run_workload(
-            self.name(),
-            workload,
-            || {
-                ContextLatest::mainnet()
-                    .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(REVM_FORK_LATEST))
-                    .with_db(build_latest_db(&workload.accounts))
-                    .build_mainnet()
-            },
-            |evm, tx| {
-                let r = evm.transact(latest_tx_env(tx)).expect("revm_latest transact");
                 let success = r.result.is_success();
                 black_box(r);
                 success
@@ -349,7 +284,10 @@ impl Subject for OpRevmPinned {
             || {
                 let mut ctx = <OpContextPinned<EmptyDBPinned>>::op()
                     .with_db(build_pinned_db(&workload.accounts));
-                ctx.modify_cfg(|cfg| cfg.spec = OP_FORK);
+                // Sets the gas params along with the spec: `DefaultOp::op()`
+                // seeds `CfgEnv` with BEDROCK gas params, so assigning
+                // `cfg.spec` alone would leave those in place.
+                ctx.modify_cfg(|cfg| cfg.set_spec_and_mainnet_gas_params(OP_FORK));
                 ctx.modify_chain(|chain| zero_operator_fee!(chain));
                 ctx.build_op()
             },
@@ -362,82 +300,5 @@ impl Subject for OpRevmPinned {
                 success
             },
         );
-    }
-}
-
-/// `op-revm` at the latest crates.io release (fork: [`OP_FORK_LATEST`],
-/// operator fee = 0).
-pub struct OpRevmLatest;
-
-impl Subject for OpRevmLatest {
-    fn name(&self) -> &str {
-        "op_revm_latest"
-    }
-
-    fn run(&self, workload: &Workload) {
-        run_workload(
-            self.name(),
-            workload,
-            || {
-                let mut ctx = <OpContextLatest<EmptyDBLatest>>::op()
-                    .with_db(build_latest_db(&workload.accounts));
-                ctx.modify_cfg(|cfg| cfg.spec = OP_FORK_LATEST);
-                ctx.modify_chain(|chain| zero_operator_fee!(chain));
-                ctx.build_op()
-            },
-            |evm, tx| {
-                let mut op_tx = OpTransactionLatest::new(latest_tx_env(tx));
-                op_tx.enveloped_tx = Some(Bytes::new());
-                let r = evm.transact(op_tx).expect("op_revm_latest transact");
-                let success = r.result.is_success();
-                black_box(r);
-                success
-            },
-        );
-    }
-}
-
-//
-// ============================================================================
-// CacheDB builder for the latest revm stack.
-// ============================================================================
-//
-
-/// Fluent builder for a `CacheDB` from the latest revm stack, mirroring
-/// `MemoryDatabase`'s API so [`build_latest_db`] can seed it the same way
-/// [`build_pinned_db`] seeds the pinned database.
-#[derive(Default)]
-struct LatestDbBuilder {
-    db: CacheDBLatest<EmptyDBLatest>,
-}
-
-impl LatestDbBuilder {
-    fn new() -> Self {
-        Self { db: CacheDBLatest::new(EmptyDBLatest::default()) }
-    }
-
-    fn account_code(mut self, address: Address, code: Bytes) -> Self {
-        let bytecode = BytecodeLatest::new_legacy(code);
-        let code_hash = bytecode.hash_slow();
-        let entry = self.db.cache.accounts.entry(address).or_default();
-        entry.info.code = Some(bytecode);
-        entry.info.code_hash = code_hash;
-        self
-    }
-
-    fn account_balance(mut self, address: Address, balance: U256) -> Self {
-        let entry = self.db.cache.accounts.entry(address).or_default();
-        entry.info.balance = balance;
-        self
-    }
-
-    fn account_storage(mut self, address: Address, slot: U256, value: U256) -> Self {
-        let entry = self.db.cache.accounts.entry(address).or_default();
-        entry.storage.insert(slot, value);
-        self
-    }
-
-    fn build(self) -> CacheDBLatest<EmptyDBLatest> {
-        self.db
     }
 }

@@ -11,8 +11,9 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, EthHaltReason, EvmTxRuntimeLimits, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, OpHaltReason, TestExternalEnvs,
+    alloy_op_evm::OpTx, op_revm::OpTransaction, test_utils::MemoryDatabase, EthHaltReason,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, OpHaltReason,
+    TestExternalEnvs,
 };
 use revm::{
     context::{
@@ -96,7 +97,7 @@ fn run_create_with_gas_limit(
         value: U256::ZERO,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx_env);
+    let mut tx = OpTx(OpTransaction::new(tx_env));
     tx.enveloped_tx = Some(Bytes::new());
 
     if inspector {

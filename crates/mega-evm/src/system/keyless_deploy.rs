@@ -19,7 +19,7 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, Address};
-use revm::{database::State, state::EvmState};
+use revm::state::EvmState;
 
 use crate::{MegaHardforks, SystemContractSpec};
 
@@ -46,7 +46,7 @@ pub use mega_system_contracts::keyless_deploy::IKeylessDeploy;
 pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
     keyless_deploy_spec(&hardforks, block_timestamp)
         .map(|s| crate::transact_deploy(db, &s))
@@ -73,7 +73,7 @@ mod tests {
     use super::*;
     use crate::{MegaHardfork, MegaHardforkConfig};
     use revm::{
-        database::InMemoryDB,
+        database::{InMemoryDB, State},
         state::{AccountInfo, Bytecode},
     };
 
@@ -108,6 +108,7 @@ mod tests {
                 nonce: 0,
                 code_hash: wrong_code_hash,
                 code: Some(Bytecode::new_raw(wrong_code)),
+                account_id: None,
             },
         );
 

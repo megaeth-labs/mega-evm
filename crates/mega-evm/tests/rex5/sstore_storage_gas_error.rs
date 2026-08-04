@@ -9,9 +9,11 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv,
+    MegaHaltReason, MegaSpecId, SaltEnv,
 };
 use revm::{
     bytecode::opcode::{SSTORE, STOP},
@@ -56,7 +58,7 @@ fn sstore_fresh_slot_bytecode() -> Bytes {
 fn transact_with_failing_salt(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let envs: ExternalEnvs<(FailingSaltEnv, EmptyExternalEnv)> =
         ExternalEnvs { salt_env: FailingSaltEnv, oracle_env: EmptyExternalEnv };
     let mut context = MegaContext::new(db, spec)
@@ -75,7 +77,7 @@ fn transact_with_failing_salt(
         gas_limit: 1_000_000,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

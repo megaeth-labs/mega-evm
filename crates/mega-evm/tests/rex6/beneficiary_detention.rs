@@ -11,8 +11,9 @@
 //! - **EIP-7702-delegated CALL** — REX5 `wrap_call_volatile_check!` compared the raw stack operand;
 //!   a CALL to delegator `A` whose EIP-7702 code points at `B == beneficiary` slipped past both the
 //!   `disableVolatileDataAccess` revert and the detention mark. That wrapper now resolves the
-//!   EIP-7702 delegate one hop before the comparison under REX6 (raw operand <= REX5);
-//!   `MegaContext::load_account_delegated` also marks the resolved delegate.
+//!   EIP-7702 delegate one hop before the comparison under REX6 (raw operand <= REX5); on the
+//!   volatile-access-enabled path the host marks the delegate as the CALL loads it, again only from
+//!   REX6. The cross-spec sweeps below freeze that split for all four CALL-family opcodes.
 //!
 //! - **Existing-target SELFDESTRUCT** — REX5 `storage_gas_ext::selfdestruct` only charged
 //!   DataSize/KV/StateGrowth for SELFDESTRUCT to a *new* beneficiary. When the target already
@@ -29,10 +30,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, MegaTransactionError, VolatileDataAccessType,
-    ACCESS_CONTROL_ADDRESS,
+    MegaSpecId, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -90,7 +92,7 @@ const DETENTION_CAP: u64 = 20_000_000;
 /// limit, whether the beneficiary balance was marked accessed)`.
 type BeneficiaryTransactResult = Result<
     (ResultAndState<MegaHaltReason>, LimitUsage, u64, bool),
-    EVMError<Infallible, MegaTransactionError>,
+    EVMError<Infallible, OpTxError>,
 >;
 
 /// Executes `tx` under `spec` with the block beneficiary set to `BENEFICIARY`
@@ -110,7 +112,7 @@ fn transact_with_beneficiary(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -348,8 +350,8 @@ fn test_rex5_call_to_eip7702_delegator_to_beneficiary_disabled_does_not_revert()
 }
 
 /// REX6: A CALL to an EIP-7702 delegator pointing at the beneficiary, with
-/// volatile access enabled, must engage beneficiary detention via
-/// `MegaContext::load_account_delegated`'s resolved-delegate mark.
+/// volatile access enabled, must engage beneficiary detention through the mark
+/// the host makes as the CALL loads the resolved delegate.
 ///
 /// REX5 only marks the raw input (`DELEGATOR_TO_BENEFICIARY`), which is not the
 /// block beneficiary, so detention never engages.
@@ -393,6 +395,177 @@ fn test_rex6_call_to_eip7702_delegator_to_beneficiary_enabled_marks_beneficiary(
     assert!(result_rex6.result.is_success(), "REX6 tx should succeed: {result_rex6:?}");
     assert!(marked_rex6, "REX6 must mark beneficiary via resolved delegate");
     assert!(detained_rex6 < u64::MAX, "REX6 must engage detention: {detained_rex6}");
+}
+
+/// Every spec whose instruction table wraps the CALL family, oldest first.
+///
+/// `EQUIVALENCE` is absent on purpose: its table keeps revm's unwrapped CALL handlers, so the host
+/// has no way to tell a CALL's EIP-7702 delegate hop from its raw stack operand there. That gap is
+/// unobservable — detention (`AdditionalLimit`) and the reported volatile-access info both start at
+/// `MINI_REX`, and `get_block_env_accesses` masks the beneficiary bit out.
+const SPECS_BEFORE_REX6: [MegaSpecId; 7] = [
+    MegaSpecId::MINI_REX,
+    MegaSpecId::REX,
+    MegaSpecId::REX1,
+    MegaSpecId::REX2,
+    MegaSpecId::REX3,
+    MegaSpecId::REX4,
+    MegaSpecId::REX5,
+];
+
+/// Builds `MIDDLE` code that runs `opcode` against `target` with empty args and return data,
+/// pushing the operands deepest-first so `gas` ends up on top of the stack.
+fn call_family_code(opcode: u8, target: Address) -> Bytes {
+    let builder = BytecodeBuilder::default()
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64); // argsOffset
+    let builder = if matches!(opcode, CALL | CALLCODE) {
+        builder.push_number(0_u64) // value
+    } else {
+        builder
+    };
+    builder.push_address(target).push_number(100_000_u64).append(opcode).append(STOP).build()
+}
+
+/// Runs `middle_code` at `MIDDLE` under `spec` over the shared fixture: `DELEGATOR_TO_BENEFICIARY`
+/// designates `BENEFICIARY` (installed for every case, whether or not the code uses it) and
+/// `BENEFICIARY` holds a `STOP` body. Returns `(beneficiary marked, detained compute-gas limit)`.
+fn run_beneficiary_marking_case(spec: MegaSpecId, middle_code: Bytes) -> (bool, u64) {
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000u64))
+        .account_code(MIDDLE, middle_code)
+        .account_code(BENEFICIARY, BytecodeBuilder::default().stop().build());
+    set_eip7702_delegation(&mut db, DELEGATOR_TO_BENEFICIARY, BENEFICIARY);
+
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
+    let (result, _, detained, marked) = transact_with_beneficiary(spec, &mut db, tx).unwrap();
+    assert!(result.result.is_success(), "{spec:?} tx should succeed: {result:?}");
+    (marked, detained)
+}
+
+/// Every CALL-family opcode resolves its target's EIP-7702 delegate, so each one must mark the
+/// beneficiary from REX6 and none of them may mark it before.
+///
+/// Both loads revm issues for the target (raw operand, then delegate) reach the host as the same
+/// method with the same arguments, so the fix that made the delegate hop distinguishable has to
+/// hold for all four opcodes and at every wrapper layer — CALLCODE / DELEGATECALL / STATICCALL run
+/// through a different layer than CALL on `MINI_REX`.
+#[test]
+fn test_call_family_to_delegator_to_beneficiary_marks_beneficiary_only_from_rex6() {
+    for opcode in [CALL, CALLCODE, DELEGATECALL, STATICCALL] {
+        let code = call_family_code(opcode, DELEGATOR_TO_BENEFICIARY);
+
+        for spec in SPECS_BEFORE_REX6 {
+            let (marked, detained) = run_beneficiary_marking_case(spec, code.clone());
+            assert!(
+                !marked,
+                "{spec:?} must not mark the beneficiary for opcode {opcode:#x}: the raw target is \
+                 the delegator, and only REX6 follows the EIP-7702 hop",
+            );
+            assert_eq!(
+                detained,
+                u64::MAX,
+                "{spec:?} must not engage detention for opcode {opcode:#x}: {detained}",
+            );
+        }
+
+        let (marked, detained) = run_beneficiary_marking_case(MegaSpecId::REX6, code);
+        assert!(marked, "REX6 must mark the beneficiary via the resolved delegate of {opcode:#x}");
+        assert!(detained < u64::MAX, "REX6 must engage detention for {opcode:#x}: {detained}");
+    }
+}
+
+/// A CALL whose raw stack operand IS the beneficiary marks it on every spec — the delegate-hop rule
+/// must not suppress the operand it brackets.
+///
+/// The mark turns into a detained compute-gas limit from REX4 on, which is where the CALL family
+/// gained the wrapper that pushes the tracker's cap into `AdditionalLimit`; before that the cap
+/// sits in the tracker until some other volatile-wrapped opcode applies it.
+#[test]
+fn test_call_directly_to_beneficiary_marks_beneficiary_on_every_spec() {
+    for opcode in [CALL, CALLCODE, DELEGATECALL, STATICCALL] {
+        for spec in SPECS_BEFORE_REX6.iter().copied().chain([MegaSpecId::REX6]) {
+            let (marked, detained) =
+                run_beneficiary_marking_case(spec, call_family_code(opcode, BENEFICIARY));
+            assert!(marked, "{spec:?} must mark the beneficiary for a direct {opcode:#x} to it");
+            if spec.is_enabled(MegaSpecId::REX4) {
+                assert!(
+                    detained < u64::MAX,
+                    "{spec:?} must engage detention for a direct {opcode:#x} to the beneficiary: \
+                     {detained}",
+                );
+            }
+        }
+    }
+}
+
+/// The CALL-family bracket must close when the opcode ends: an `EXTCODESIZE` of the beneficiary
+/// right after a CALL that hopped through a delegator still marks on the specs where the hop itself
+/// does not.
+#[test]
+fn test_extcodesize_after_delegated_call_still_marks_beneficiary() {
+    let code = BytecodeBuilder::default()
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(0_u64) // value
+        .push_address(DELEGATOR_TO_BENEFICIARY)
+        .push_number(100_000_u64) // gas
+        .append(CALL)
+        .append(POP)
+        .push_address(BENEFICIARY)
+        .append(EXTCODESIZE)
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    for spec in SPECS_BEFORE_REX6 {
+        let (marked, detained) = run_beneficiary_marking_case(spec, code.clone());
+        assert!(
+            marked,
+            "{spec:?}: EXTCODESIZE of the beneficiary after a delegated CALL must mark it",
+        );
+        assert!(detained < u64::MAX, "{spec:?} must engage detention: {detained}");
+    }
+}
+
+/// `EXTCODESIZE` reads exactly the address it is handed — it never hops to an EIP-7702 delegate —
+/// so the delegator must stay unmarked on every spec, including REX6, and a later `EXTCODESIZE` of
+/// the beneficiary itself must still mark.
+#[test]
+fn test_extcodesize_of_delegator_does_not_mark_beneficiary_on_any_spec() {
+    let delegator_only = BytecodeBuilder::default()
+        .push_address(DELEGATOR_TO_BENEFICIARY)
+        .append(EXTCODESIZE)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let then_beneficiary = BytecodeBuilder::default()
+        .push_address(DELEGATOR_TO_BENEFICIARY)
+        .append(EXTCODESIZE)
+        .append(POP)
+        .push_address(BENEFICIARY)
+        .append(EXTCODESIZE)
+        .append(POP)
+        .append(STOP)
+        .build();
+
+    for spec in SPECS_BEFORE_REX6.iter().copied().chain([MegaSpecId::REX6]) {
+        let (marked, detained) = run_beneficiary_marking_case(spec, delegator_only.clone());
+        assert!(!marked, "{spec:?}: EXTCODESIZE of a delegator must not mark the beneficiary");
+        assert_eq!(detained, u64::MAX, "{spec:?} must not engage detention: {detained}");
+
+        let (marked, detained) = run_beneficiary_marking_case(spec, then_beneficiary.clone());
+        assert!(
+            marked,
+            "{spec:?}: EXTCODESIZE of the beneficiary after one of a delegator must mark it",
+        );
+        assert!(detained < u64::MAX, "{spec:?} must engage detention: {detained}");
+    }
 }
 
 // ============================================================================
@@ -578,7 +751,7 @@ fn test_rex6_selfdestruct_db_error_on_target_surfaces() {
     });
     let mut evm = MegaEvm::new(context);
     let tx = TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(1_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, tx) {
@@ -681,11 +854,11 @@ fn test_rex6_call_to_non_beneficiary_under_disabled_volatile_proceeds() {
     );
 }
 
-/// REX6: a DB failure while `load_account_delegated` resolves a CALL target's EIP-7702 delegate
-/// must SURFACE (as an `EVMError` or a non-success halt), never a silent success. The resolve error
-/// is swallowed by the side-mark (best-effort), and the inner `load_account_delegated` then
-/// surfaces the failure. `MemoryDatabase` is infallible, so this is only reachable by injecting a
-/// `basic()` failure on the CALL target.
+/// REX6: a DB failure while a CALL resolves its target's EIP-7702 delegate must SURFACE (as an
+/// `EVMError` or a non-success halt), never a silent success. The wrapper's precheck resolve
+/// swallows the error (best-effort), and the opcode's own account load then surfaces the failure.
+/// `MemoryDatabase` is infallible, so this is only reachable by injecting a `basic()` failure on
+/// the CALL target.
 #[test]
 fn test_rex6_call_db_error_on_target_surfaces() {
     let middle_code = BytecodeBuilder::default()
@@ -714,7 +887,7 @@ fn test_rex6_call_db_error_on_target_surfaces() {
     let mut evm = MegaEvm::new(context);
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let surfaced = match alloy_evm::Evm::transact_raw(&mut evm, tx) {
@@ -780,7 +953,7 @@ fn test_call_partial_stack_db_error_on_target_surfaces_rex5_eq_rex6() {
         let mut evm = MegaEvm::new(context);
         let tx =
             TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-        let mut tx = MegaTransaction::new(tx);
+        let mut tx = OpTx(OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
         match alloy_evm::Evm::transact_raw(&mut evm, tx) {
             Err(_) => true,
@@ -831,7 +1004,7 @@ fn test_rex6_call_partial_stack_code_load_failure_keeps_stack_underflow() {
     let mut evm = MegaEvm::new(context);
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(MIDDLE).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     match alloy_evm::Evm::transact_raw(&mut evm, tx) {

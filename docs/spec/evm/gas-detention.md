@@ -145,6 +145,13 @@ If a child call frame triggers detention, the reduced effective compute gas limi
 If volatile access occurs inside a call frame that later reverts, the compute gas already consumed remains consumed.
 The detained compute gas limit MUST remain in effect for the rest of the transaction.
 
+#### Frames That Run Out of Gas on the Triggering Opcode
+
+Detention is triggered by the volatile read itself, not by the successful completion of the opcode that issues it.
+`BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, `SLOAD` and `SELFDESTRUCT` consume their operands and read state before that access is charged for.
+A frame that reaches one of them holding less gas than the access costs therefore still performs the read, and detention MUST still be applied for the rest of the transaction even though that frame halts out of gas.
+An access blocked by [`disableVolatileDataAccess()`](../system-contracts/mega-access-control.md) is the exception: the blocked opcode never runs, so it reads nothing and triggers nothing.
+
 ## Constants
 
 | Constant                       | Value      | Description                                                          |

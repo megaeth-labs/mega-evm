@@ -32,9 +32,11 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx,
     constants,
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, SaltEnv, TestExternalEnvs,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, SaltEnv, TestExternalEnvs,
     VolatileDataAccess, VolatileDataAccessTracker, MIN_BUCKET_SIZE,
 };
 use revm::context::{BlockEnv, TxEnv};
@@ -225,7 +227,7 @@ fn test_get_accessed_bucket_ids_reports_touched_non_zero_bucket() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
@@ -285,7 +287,7 @@ fn beneficiary_balance_after_transfer(disable: bool) -> U256 {
         value: U256::from(1_u64),
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
@@ -335,7 +337,7 @@ fn intrinsic_boundary_result(
     gas_limit: u64,
 ) -> Result<
     revm::context::result::ResultAndState<MegaHaltReason>,
-    revm::context::result::EVMError<Infallible, mega_evm::MegaTransactionError>,
+    revm::context::result::EVMError<Infallible, mega_evm::alloy_op_evm::OpTxError>,
 > {
     let mut db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000_000_000_u64));
     // Callee already exists (has code) and just STOPs, so the call adds no new-account storage gas
@@ -358,7 +360,7 @@ fn intrinsic_boundary_result(
         value: U256::ZERO,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     alloy_evm::Evm::transact_raw(&mut evm, tx)
@@ -389,7 +391,7 @@ fn test_before_execution_allows_exact_intrinsic_gas() {
         exact.result
     );
     assert_eq!(
-        exact.result.gas_used(),
+        exact.result.tx_gas_used(),
         intrinsic,
         "the exact-gas call must consume exactly the intrinsic gas"
     );

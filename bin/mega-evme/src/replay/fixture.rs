@@ -138,7 +138,7 @@ where
         ));
     }
 
-    let actual_gas = inputs.result.gas_used();
+    let actual_gas = inputs.result.tx_gas_used();
     let actual_status = execution_status(inputs.result).to_string();
     let actual_halt_reason = halt_reason(inputs.result);
     let actual_output = inputs.result.output().cloned();

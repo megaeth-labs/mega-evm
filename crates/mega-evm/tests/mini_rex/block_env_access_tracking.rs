@@ -3,6 +3,7 @@
 use ::revm::{context::BlockEnv, ExecuteEvm};
 use alloy_primitives::{address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     revm::{
         bytecode::opcode::{
             BASEFEE, BLOCKHASH, CALLER, CHAINID, COINBASE, DIFFICULTY, GASLIMIT, GASPRICE, NUMBER,
@@ -68,7 +69,7 @@ fn test_block_env_tracking_with_evm() {
         );
 
         // Create transaction
-        let tx = MegaTransaction {
+        let tx = MegaTransaction(op_revm::OpTransaction {
             base: revm::context::TxEnv {
                 caller: address!("0000000000000000000000000000000000100000"),
                 kind: revm::primitives::TxKind::Call(contract_address),
@@ -78,7 +79,7 @@ fn test_block_env_tracking_with_evm() {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        });
 
         // Execute transaction
         let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
@@ -183,7 +184,7 @@ fn test_multiple_block_env_accesses() {
     let mut evm = MegaEvm::new(context);
 
     // Execute transaction
-    let tx = MegaTransaction {
+    let tx = MegaTransaction(op_revm::OpTransaction {
         base: revm::context::TxEnv {
             caller: address!("0000000000000000000000000000000000100000"),
             kind: revm::primitives::TxKind::Call(contract_address),
@@ -193,7 +194,7 @@ fn test_multiple_block_env_accesses() {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
     assert!(result.is_ok());
@@ -230,7 +231,7 @@ fn test_block_env_reset_between_transactions() {
     let mut evm = MegaEvm::new(context);
 
     // First transaction - accesses block env
-    let tx1 = MegaTransaction {
+    let tx1 = MegaTransaction(op_revm::OpTransaction {
         base: revm::context::TxEnv {
             caller: address!("0000000000000000000000000000000000100000"),
             kind: revm::primitives::TxKind::Call(contract_address),
@@ -240,7 +241,7 @@ fn test_block_env_reset_between_transactions() {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1);
     assert!(result1.is_ok());
@@ -256,7 +257,7 @@ fn test_block_env_reset_between_transactions() {
         nonce: 0, // Same account should continue with correct nonce
         ..Default::default()
     };
-    let tx2 = MegaTransaction { base: tx2_env, ..Default::default() };
+    let tx2 = MegaTransaction(op_revm::OpTransaction { base: tx2_env, ..Default::default() });
 
     // This simulates how the EVM would be used for a new transaction
     // Setting tx should automatically reset the block env access

@@ -282,7 +282,7 @@ impl TxRuntimeLimit for StateGrowthTracker {
                     // deployment uses; derive the target and skip the +1 when it already exists
                     // (e.g. a pre-funded balance-only account).
                     let caller_nonce =
-                        journal.inspect_account(create_inputs.caller, false)?.info.nonce;
+                        journal.inspect_account(create_inputs.caller(), false)?.info.nonce;
                     let created_address = create_inputs.created_address(caller_nonce);
                     let to_account = journal.inspect_account(created_address, false)?;
                     if to_account.state_clear_aware_is_empty(SpecId::PRAGUE) {

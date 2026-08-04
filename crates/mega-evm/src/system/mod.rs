@@ -5,9 +5,10 @@
 //! Deploy helpers and pre-block system-call helpers in this module
 //! (`transact_deploy_*`, `transact_apply_pending_changes`, etc.) **must never** call
 //! `db.commit(...)` directly. They return `Option<EvmState>` (or
-//! `Option<ResultAndState<_>>`), and the block executor commits the collected outcomes
-//! after running its `on_state` hook so the stateless witness generator captures the full
-//! read/write set.
+//! `Option<ResultAndState<_>>`), and the block executor commits the collected outcomes.
+//! The state hook that feeds the stateless witness generator is installed on the revm
+//! `State` database (`State::set_state_hook`) and fires from inside `DatabaseCommit::commit`,
+//! so the commit is what records the helper's full read/write set.
 //!
 //! Specifically:
 //!

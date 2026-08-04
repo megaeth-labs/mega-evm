@@ -16,6 +16,8 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx,
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, LimitUsage, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
     ACCOUNT_INFO_WRITE_SIZE,
@@ -69,7 +71,7 @@ fn base_db() -> MemoryDatabase {
 
 /// A top-level call `A -> to` with the given `value`.
 fn call_tx(to: Address, value: u128) -> MegaTransaction {
-    let mut tx = MegaTransaction {
+    let mut tx = OpTx(OpTransaction {
         base: TxEnv {
             caller: A,
             kind: TxKind::Call(to),
@@ -79,7 +81,7 @@ fn call_tx(to: Address, value: u128) -> MegaTransaction {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -209,7 +211,7 @@ fn self_calling_code(value: u64) -> Bytes {
 /// A top-level no-value call `EOA -> SELF_CALLER` carrying 1 byte of calldata (so the outer
 /// invocation takes the self-call branch).
 fn nested_tx() -> MegaTransaction {
-    let mut tx = MegaTransaction {
+    let mut tx = OpTx(OpTransaction {
         base: TxEnv {
             caller: EOA,
             kind: TxKind::Call(SELF_CALLER),
@@ -220,7 +222,7 @@ fn nested_tx() -> MegaTransaction {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }

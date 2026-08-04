@@ -13,17 +13,17 @@
 //!
 //! | Path | Trigger | Wrapper / Hook | Test |
 //! |---|---|---|---|
-//! | CALL to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 1, 1b |
-//! | STATICCALL to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 2 |
-//! | DELEGATECALL to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 3 |
-//! | CALLCODE to beneficiary | `load_account_delegated` | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 4 |
+//! | CALL to beneficiary | CALL-family target account load | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 1, 1b |
+//! | STATICCALL to beneficiary | CALL-family target account load | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 2 |
+//! | DELEGATECALL to beneficiary | CALL-family target account load | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 3 |
+//! | CALLCODE to beneficiary | CALL-family target account load | `wrap_call_volatile_check!` + `apply_compute_gas_limit!` | test 4 |
 //! | TX sender = beneficiary | `on_new_tx` eager | `check_tx_beneficiary_access` + sync (REX4) | test 5, 5b |
 //! | TX recipient = beneficiary | `on_new_tx` eager | `check_tx_beneficiary_access` + sync (REX4) | test 6, 6b |
 //! | SELFBALANCE in beneficiary | `host.balance()` | `volatile_data_ext::selfbalance` | test 7 (integration), 9 (address sensitivity) |
 //! | BALANCE(beneficiary) | `host.balance()` | `wrap_op_detain_gas_conditional!` | (covered in `block_env_gas_limit.rs`) |
 //! | CALL to non-beneficiary | — | no trigger | test 8 (negative) |
 //! | SELFBALANCE in non-beneficiary | — | no trigger | test 9 (negative) |
-//! | Child reverts after CALL to beneficiary | `load_account_delegated` | detention persists | test 1b |
+//! | Child reverts after CALL to beneficiary | CALL-family target account load | detention persists | test 1b |
 //! | disableVolatileDataAccess + CALL beneficiary | — | CALL blocked by `wrap_call_volatile_check` | (covered in `access_control.rs`) |
 //! | disableVolatileDataAccess + SELFBALANCE beneficiary | — | revert before exec | test 10 |
 //! | Detention + intrinsic DataSize overflow | `on_new_tx` eager | halt with DataLimitExceeded | test 11 |
@@ -34,10 +34,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, IMegaLimitControl, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, ACCESS_CONTROL_ADDRESS,
-    LIMIT_CONTROL_ADDRESS,
+    MegaHaltReason, MegaSpecId, ACCESS_CONTROL_ADDRESS, LIMIT_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -73,7 +74,7 @@ fn transact_with_spec(
     compute_gas_limit: u64,
     block_env_access_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, OpTxError>> {
     let block = BlockEnv { beneficiary, ..Default::default() };
 
     let mut context = MegaContext::new(db, spec).with_block(block).with_tx_runtime_limits(
@@ -86,7 +87,7 @@ fn transact_with_spec(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 
@@ -101,7 +102,7 @@ fn transact(
     compute_gas_limit: u64,
     block_env_access_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, OpTxError>> {
     transact_with_spec(
         MegaSpecId::REX4,
         db,
@@ -706,7 +707,7 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 
@@ -729,7 +730,7 @@ fn test_detention_plus_intrinsic_data_size_overflow() {
     );
 
     // Gas rescue should have returned most gas since no execution happened.
-    let gas_remaining = 1_000_000_000 - result.result.gas_used();
+    let gas_remaining = 1_000_000_000 - result.result.tx_gas_used();
     assert!(
         gas_remaining > 900_000_000,
         "Expected >900M gas remaining from rescue (not inflated by detention), got {gas_remaining}"
@@ -792,7 +793,7 @@ fn test_detention_does_not_interfere_with_data_size_limit() {
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 

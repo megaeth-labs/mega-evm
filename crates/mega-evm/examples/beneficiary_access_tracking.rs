@@ -8,7 +8,10 @@
 //! 3. Contract 3: Accesses beneficiary via different operations (should trigger detection)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
+// Imported as the struct itself (not the `MegaTransaction` type alias) so the
+// tuple-struct constructor is usable — constructors cannot be called through a
+// type alias.
+use mega_evm::{alloy_op_evm::OpTx as MegaTransaction, MegaContext, MegaEvm, MegaSpecId};
 use revm::{
     bytecode::opcode::{BALANCE, CALLER, POP, PUSH20, STOP},
     context::{BlockEnv, ContextSetters, ContextTr, TxEnv},
@@ -79,21 +82,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  Initial state: no beneficiary access detected");
 
-    let tx1 = MegaTransaction {
-        base: TxEnv {
-            caller,
-            kind: TxKind::Call(contract1_address),
-            data: Bytes::default(),
-            value: U256::ZERO,
-            gas_limit: 100000, // Use reasonable gas limit
-            ..Default::default()
-        },
+    let mut tx1 = MegaTransaction(op_revm::OpTransaction::new(TxEnv {
+        caller,
+        kind: TxKind::Call(contract1_address),
+        data: Bytes::default(),
+        value: U256::ZERO,
+        gas_limit: 100000, // Use reasonable gas limit
         ..Default::default()
-    };
+    }));
+    tx1.enveloped_tx = Some(Bytes::new());
 
     let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1)?;
     println!("  Transaction successful: {}", result1.result.is_success());
-    println!("  Gas used: {}", result1.result.gas_used());
+    println!("  Gas used: {}", result1.result.tx_gas_used());
 
     // Verify that beneficiary access was detected
     let beneficiary_accessed =
@@ -118,21 +119,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  Initial state: no beneficiary access detected");
 
-    let tx2 = MegaTransaction {
-        base: TxEnv {
-            caller,
-            kind: TxKind::Call(contract2_address),
-            data: Bytes::default(),
-            value: U256::ZERO,
-            gas_limit: 100000,
-            ..Default::default()
-        },
+    let mut tx2 = MegaTransaction(op_revm::OpTransaction::new(TxEnv {
+        caller,
+        kind: TxKind::Call(contract2_address),
+        data: Bytes::default(),
+        value: U256::ZERO,
+        gas_limit: 100000,
         ..Default::default()
-    };
+    }));
+    tx2.enveloped_tx = Some(Bytes::new());
 
     let result2 = alloy_evm::Evm::transact_raw(&mut evm, tx2)?;
     println!("  Transaction successful: {}", result2.result.is_success());
-    println!("  Gas used: {}", result2.result.gas_used());
+    println!("  Gas used: {}", result2.result.tx_gas_used());
 
     // Verify that beneficiary was NOT accessed
     let beneficiary_accessed =
@@ -154,21 +153,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  Initial state: no beneficiary access detected");
 
-    let tx3 = MegaTransaction {
-        base: TxEnv {
-            caller,
-            kind: TxKind::Call(contract3_address),
-            data: Bytes::default(),
-            value: U256::ZERO,
-            gas_limit: 100000,
-            ..Default::default()
-        },
+    let mut tx3 = MegaTransaction(op_revm::OpTransaction::new(TxEnv {
+        caller,
+        kind: TxKind::Call(contract3_address),
+        data: Bytes::default(),
+        value: U256::ZERO,
+        gas_limit: 100000,
         ..Default::default()
-    };
+    }));
+    tx3.enveloped_tx = Some(Bytes::new());
 
     let result3 = alloy_evm::Evm::transact_raw(&mut evm, tx3)?;
     println!("  Transaction successful: {}", result3.result.is_success());
-    println!("  Gas used: {}", result3.result.gas_used());
+    println!("  Gas used: {}", result3.result.tx_gas_used());
 
     // Verify that beneficiary access was detected
     let beneficiary_accessed =

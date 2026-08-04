@@ -20,9 +20,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolError;
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaLimitExceeded, MegaSpecId,
-    MegaTransaction, MegaTransactionError,
 };
 use revm::{
     bytecode::opcode::*,
@@ -65,8 +66,7 @@ fn transact_with_spec(
     compute_gas_limit: u64,
     block_env_access_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
-{
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits()
             .with_tx_compute_gas_limit(compute_gas_limit)
@@ -77,7 +77,7 @@ fn transact_with_spec(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
 

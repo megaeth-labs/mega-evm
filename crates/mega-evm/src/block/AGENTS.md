@@ -20,7 +20,9 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - System contract deployments are idempotent state patches and are hardfork-gated.
 - Executor constructor asserts hardfork/spec coherence for non-test builds.
 - Block limiter state is cumulative and must be updated only on committed outcomes.
-- `pre_execution_changes` collects `Option<EvmState>` outcomes from each helper into a vector; `commit_system_call_outcomes` walks them and calls `system_caller.on_state(source, &state)` **before** `db.commit(state)` for every entry. The `on_state` hook feeds the stateless witness generator with the complete read/write set. Helpers must therefore return all accounts and slots they touched (including reads). See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
+- `pre_execution_changes` collects `Option<EvmState>` outcomes from each helper into a vector; `commit_system_call_outcomes` walks them and calls `db.commit(state)` for every entry. The state hook that feeds the stateless witness generator lives on the revm `State` database (`State::set_state_hook`) and fires from inside `DatabaseCommit::commit`, so committing is what records the outcome. Helpers must therefore return all accounts and slots they touched (including reads). See `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT` for the helper-side contract.
+- `MegaSystemCallOutcome.source` no longer reaches the hook (which sees only the state diff); it is retained for in-crate use.
+- Commit-time block-limit re-validation: `commit_tx_result` / `commit_transaction_outcome` re-run `BlockLimiter::pre_execution_check` and return `Err` without committing anything, because another transaction may have filled the block between execute and commit. The infallible `BlockExecutor::commit_transaction` cannot return that error, so it latches it into `pending_commit_error` and `finish` fails the block with it.
 
 ## ANTI-PATTERNS
 - Do not apply post-execution limit counters before a tx outcome is commit-eligible.
@@ -28,7 +30,8 @@ Block execution orchestration for MegaETH, including hardfork-to-spec resolution
 - Do not infer spec from tx fields.
 - Always derive spec from hardfork activation at block timestamp.
 - Do not hardcode gas-limit assumptions outside `BlockLimits` plumbing.
-- Do not commit outcomes without first firing `on_state`. The two-step `on_state` → `commit` ordering is the witness-recorder contract; swapping or skipping it corrupts stateless proofs.
+- Do not apply pre-block state changes by any route other than `db.commit`. The witness recorder hooks `commit`, so a change written around it is invisible to stateless proofs.
+- Do not `expect`/`unwrap` a commit-time limit re-validation. It fails on a legitimate parallel-execution race, not on a broken invariant.
 
 ## WHERE TO LOOK
 - Add a new hardfork activation condition: `hardfork.rs` and `MegaHardforkConfig` wiring.

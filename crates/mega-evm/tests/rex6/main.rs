@@ -18,3 +18,5 @@ mod oracle_hint_volatile_access;
 mod self_transfer_account_dedup;
 mod sequencer_registry_rotation;
 mod system_tx_metering_exemption;
+mod volatile_guard_charge_order;
+mod volatile_guard_static_gas;

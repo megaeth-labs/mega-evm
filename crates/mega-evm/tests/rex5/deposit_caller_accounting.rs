@@ -18,10 +18,12 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BucketHasher, BucketId, EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
-    MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
+    MegaTransaction, TestExternalEnvs, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -49,7 +51,7 @@ fn simple_return_contract() -> Bytes {
 /// Builds an OP deposit transaction (`tx_type` == `DEPOSIT_TRANSACTION_TYPE`) with the
 /// specified caller, mint amount, and callee.
 fn make_op_deposit_tx(caller: Address, mint: u128, callee: Address) -> MegaTransaction {
-    let mut tx = MegaTransaction {
+    let mut tx = OpTx(OpTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(callee),
@@ -58,7 +60,7 @@ fn make_op_deposit_tx(caller: Address, mint: u128, callee: Address) -> MegaTrans
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     // Setting a non-zero source_hash flips the tx_type to DEPOSIT_TRANSACTION_TYPE.
     tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     tx.deposit.mint = Some(mint);
@@ -73,7 +75,7 @@ fn make_op_deposit_tx(caller: Address, mint: u128, callee: Address) -> MegaTrans
 fn make_op_deposit_create_tx(caller: Address, mint: u128) -> MegaTransaction {
     // Minimal init code: STOP (deploys to a zero-byte runtime).
     let init_code = Bytes::from_static(&[0x00]);
-    let mut tx = MegaTransaction {
+    let mut tx = OpTx(OpTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Create,
@@ -83,7 +85,7 @@ fn make_op_deposit_create_tx(caller: Address, mint: u128) -> MegaTransaction {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     tx.deposit.mint = Some(mint);
     tx.enveloped_tx = Some(Bytes::new());
@@ -92,7 +94,7 @@ fn make_op_deposit_create_tx(caller: Address, mint: u128) -> MegaTransaction {
 
 /// Builds a mega system deposit-marked legacy tx.
 fn make_mega_system_tx() -> MegaTransaction {
-    let mut tx = MegaTransaction {
+    let mut tx = OpTx(OpTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
             kind: TxKind::Call(WHITELISTED_CALLEE),
@@ -101,7 +103,7 @@ fn make_mega_system_tx() -> MegaTransaction {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -120,8 +122,7 @@ fn build_evm(
 }
 
 type TestEvm = MegaEvm<MemoryDatabase, revm::inspector::NoOpInspector, EmptyExternalEnv>;
-type TestEvmResult =
-    Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>>;
+type TestEvmResult = Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>>;
 
 fn transact_with(
     spec: MegaSpecId,
@@ -201,7 +202,7 @@ fn test_rex5_non_empty_caller_no_extra_charge() {
     let db_normal = MemoryDatabase::default()
         .account_balance(FUNDED_CALLER, U256::from(1_000_000u64))
         .account_code(TARGET_CONTRACT, simple_return_contract());
-    let tx_normal = MegaTransaction {
+    let tx_normal = OpTx(OpTransaction {
         base: TxEnv {
             caller: FUNDED_CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),
@@ -210,9 +211,9 @@ fn test_rex5_non_empty_caller_no_extra_charge() {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     let (res_normal, _) = transact_with(MegaSpecId::REX5, db_normal, tx_normal);
-    let gas_normal = res_normal.expect("ok").result.gas_used();
+    let gas_normal = res_normal.expect("ok").result.tx_gas_used();
 
     // Deposit variant with the same already-non-empty caller.
     let db_deposit = MemoryDatabase::default()
@@ -257,8 +258,8 @@ fn test_rex4_baseline_behaviour() {
     // REX4: empty vs funded must produce identical gas usage on the deposit-caller path
     // (the only legitimate gas delta would come from the deposit-caller rule, which is REX5-gated).
     assert_eq!(
-        res_empty.result.gas_used(),
-        res_funded.result.gas_used(),
+        res_empty.result.tx_gas_used(),
+        res_funded.result.tx_gas_used(),
         "REX4 deposit gas must be identical between empty and funded caller",
     );
     // REX4: state_growth must be unaffected by the deposit caller materialisation.

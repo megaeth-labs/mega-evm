@@ -327,7 +327,7 @@ use alloy_consensus::transaction::Recovered as MegaRecovered;
 use alloy_primitives::B256;
 use mega_evm::{BlockLimiter, BlockMegaTransactionOutcome, MegaHaltReason, MegaTransactionOutcome};
 use revm::{
-    context::result::{ExecutionResult, Output, SuccessReason},
+    context::result::{ExecutionResult, Output, ResultGas, SuccessReason},
     state::EvmState,
 };
 
@@ -346,8 +346,7 @@ fn outcome_for(
         inner: MegaTransactionOutcome {
             result: ExecutionResult::<MegaHaltReason>::Success {
                 reason: SuccessReason::Stop,
-                gas_used: 0,
-                gas_refunded: 0,
+                gas: ResultGas::default(),
                 logs: Vec::new(),
                 output: Output::Call(Bytes::new()),
             },

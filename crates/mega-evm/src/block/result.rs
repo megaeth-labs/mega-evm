@@ -1,7 +1,11 @@
-use alloy_evm::InvalidTxError;
-use revm::state::AccountInfo;
+use alloy_evm::{block::TxResult, InvalidTxError};
+use alloy_primitives::TxHash;
+use revm::{
+    context::result::{InvalidTransaction, ResultAndState},
+    state::AccountInfo,
+};
 
-use crate::MegaTransactionOutcome;
+use crate::{MegaHaltReason, MegaTransactionOutcome};
 
 /// The execution outcome of a transaction in `MegaETH`.
 ///
@@ -21,6 +25,56 @@ pub struct BlockMegaTransactionOutcome<T> {
     #[deref]
     #[deref_mut]
     pub inner: MegaTransactionOutcome,
+}
+
+/// Per-transaction execution result handed to `alloy_evm::block::BlockExecutor`.
+///
+/// `TxResult` requires a borrowable [`ResultAndState`], while `MegaETH` tracks the execution
+/// result, the post-state and the four resource dimensions side by side. This type holds the
+/// upstream shape directly and keeps the `MegaETH` fields alongside it.
+///
+/// It carries only the transaction *type* rather than the transaction itself: the receipt builder
+/// takes a type byte, so nothing here needs to own or clone the envelope. The transaction hash and
+/// gas limit are carried separately because the commit path re-runs the block-level admission
+/// check, which needs both, at a point where the transaction is no longer available.
+#[derive(Debug, Clone)]
+pub struct MegaBlockTxResult<T> {
+    /// Transaction type, which is all the receipt builder needs from the transaction.
+    pub tx_type: T,
+    /// The transaction hash, used to attribute a commit-time admission failure to this
+    /// transaction.
+    pub tx_hash: TxHash,
+    /// The transaction's declared gas limit, re-checked against the block's remaining gas at
+    /// commit time.
+    pub gas_limit: u64,
+    /// The transaction size in bytes.
+    pub tx_size: u64,
+    /// The transaction data availability size in bytes.
+    pub da_size: u64,
+    /// The depositor account info.
+    pub depositor: Option<AccountInfo>,
+    /// The data size usage in bytes.
+    pub data_size: u64,
+    /// The number of KV updates.
+    pub kv_updates: u64,
+    /// The compute gas used.
+    pub compute_gas_used: u64,
+    /// The state growth used.
+    pub state_growth_used: u64,
+    /// The execution result and post-state in the shape `TxResult` requires.
+    pub result_and_state: ResultAndState<MegaHaltReason>,
+}
+
+impl<T: Send + 'static> TxResult for MegaBlockTxResult<T> {
+    type HaltReason = MegaHaltReason;
+
+    fn result(&self) -> &ResultAndState<Self::HaltReason> {
+        &self.result_and_state
+    }
+
+    fn into_result(self) -> ResultAndState<Self::HaltReason> {
+        self.result_and_state
+    }
 }
 
 /// Error type for additional reasons of an invalid transaction. If one transaction is invalid, it
@@ -79,6 +133,11 @@ impl MegaTxLimitExceededError {
 impl InvalidTxError for MegaTxLimitExceededError {
     fn is_nonce_too_low(&self) -> bool {
         false
+    }
+
+    fn as_invalid_tx_err(&self) -> Option<&InvalidTransaction> {
+        // MegaETH's resource-limit errors have no upstream `InvalidTransaction` counterpart.
+        None
     }
 }
 
@@ -174,6 +233,11 @@ impl MegaBlockLimitExceededError {
 impl InvalidTxError for MegaBlockLimitExceededError {
     fn is_nonce_too_low(&self) -> bool {
         false
+    }
+
+    fn as_invalid_tx_err(&self) -> Option<&InvalidTransaction> {
+        // Block-level limit errors have no upstream `InvalidTransaction` counterpart.
+        None
     }
 }
 

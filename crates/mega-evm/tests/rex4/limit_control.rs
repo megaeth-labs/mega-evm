@@ -8,10 +8,12 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaLimitControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
+    LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, MSTORE, POP, RETURN, STATICCALL, TIMESTAMP},
@@ -46,14 +48,14 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -95,8 +97,7 @@ fn transact_with_compute_limit(
     db: &mut MemoryDatabase,
     tx_compute_gas_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
-{
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(tx_compute_gas_limit),
     );
@@ -105,7 +106,7 @@ fn transact_with_compute_limit(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
     let additional_limit = evm.ctx_ref().additional_limit.borrow();
@@ -591,7 +592,7 @@ fn test_remaining_compute_gas_clamped_by_detention_limit() {
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(default_tx(CONTRACT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(CONTRACT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 
@@ -643,7 +644,7 @@ fn test_inspector_sees_remaining_compute_gas_system_call() {
     });
     let mut inspector = CallTrackingInspector::default();
     let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
-    let mut tx = MegaTransaction::new(default_tx(CONTRACT));
+    let mut tx = OpTx(OpTransaction::new(default_tx(CONTRACT)));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
 

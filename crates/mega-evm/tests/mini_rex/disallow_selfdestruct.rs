@@ -25,7 +25,7 @@ fn test_selfdestruct_allowed_before_mini_rex() {
     let result =
         transact(MegaSpecId::EQUIVALENCE, &mut db, caller, callee, Bytes::default(), U256::ZERO);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().result.gas_used(), 26004);
+    assert_eq!(result.unwrap().result.tx_gas_used(), 26004);
 }
 
 /// Test that verifies the SELFDESTRUCT opcode is disabled and returns `InvalidFEOpcode` after

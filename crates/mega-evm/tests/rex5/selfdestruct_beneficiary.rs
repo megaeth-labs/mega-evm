@@ -8,14 +8,21 @@
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    alloy_op_evm::OpTx,
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
+    MegaSpecId, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
-    context::{result::ResultAndState, tx::TxEnvBuilder, TxEnv},
+    context::{result::ResultAndState, tx::TxEnvBuilder, ContextTr, TxEnv},
     handler::EvmTr,
+    interpreter::{
+        interpreter_types::{InputsTr, Jumps},
+        CallInputs, CallOutcome, Interpreter, InterpreterTypes,
+    },
+    Inspector,
 };
 
 /// The 4-byte selector for `disableVolatileDataAccess()`.
@@ -50,7 +57,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -454,7 +461,7 @@ fn test_rex5_selfdestruct_beneficiary_creation_fails_on_state_growth_limit() {
             .call(CONTRACT)
             .gas_limit(10_000_000)
             .build_fill();
-        let mut tx = MegaTransaction::new(tx);
+        let mut tx = OpTx(OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
         let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
         let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -472,5 +479,149 @@ fn test_rex5_selfdestruct_beneficiary_creation_fails_on_state_growth_limit() {
         !res.result.is_success(),
         "zero state-growth budget must fail the SELFDESTRUCT, got {:?}",
         res.result,
+    );
+}
+
+// ============================================================================
+// GUARD GAS ACCOUNTING
+// ============================================================================
+
+/// Observes the gas a frame holds when it reaches `SELFDESTRUCT`, and the outcome it returns.
+///
+/// `step` runs before anything is charged for the opcode, so `remaining_before_op` is the frame's
+/// gas as of reaching `SELFDESTRUCT` — the amount a guard that rejects the opcode outright must
+/// hand back untouched.
+struct SelfdestructGuardGasInspector {
+    /// Address of the frame that runs the guarded `SELFDESTRUCT`.
+    frame: Address,
+    /// `gas.remaining()` observed when `SELFDESTRUCT` was reached.
+    remaining_before_op: Option<u64>,
+    /// Gas remaining in that frame's return action.
+    returned_remaining: Option<u64>,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR>
+    for SelfdestructGuardGasInspector
+{
+    fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        if interp.input.target_address() == self.frame && interp.bytecode.opcode() == SELFDESTRUCT {
+            self.remaining_before_op = Some(interp.gas.remaining());
+        }
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address == self.frame {
+            self.returned_remaining = Some(outcome.result.gas.remaining());
+        }
+    }
+}
+
+/// Rex5: the hoisted `SELFDESTRUCT` guard rejects the opcode before it executes, so the frame it
+/// reverts must hand its caller back every bit of gas it held.
+///
+/// `SELFDESTRUCT` carries 5,000 gas of static cost, more than any other guarded opcode, so a guard
+/// that let any of it be charged would be plainly visible here: a frame blocked by
+/// `disableVolatileDataAccess` would silently return 5,000 gas less than it should — visible to the
+/// caller through `GAS`, and able to flip a later operation into out-of-gas.
+#[test]
+fn test_rex5_selfdestruct_guard_charges_reverted_frame_nothing() {
+    let (inspector, output) = run_selfdestruct_guard_scenario(50_000_000);
+
+    // The revert data must stay exactly what it was.
+    let decoded = decode_volatile_data_access_disabled(&output);
+    assert_eq!(decoded.accessType, VolatileDataAccessType::Beneficiary);
+
+    let before = inspector.remaining_before_op.expect("SELFDESTRUCT was never reached");
+    let returned = inspector.returned_remaining.expect("guarded frame never ended");
+    assert_eq!(
+        returned,
+        before,
+        "the guard rejects SELFDESTRUCT before it runs, so the frame must return all {before} gas \
+         it held; it returned {returned}, i.e. {} gas short",
+        before - returned,
+    );
+}
+
+/// Static gas of `SELFDESTRUCT` — the largest of any guarded opcode.
+const SELFDESTRUCT_STATIC_GAS: u64 = 5_000;
+
+/// Runs the disabled-volatile `SELFDESTRUCT`-to-beneficiary scenario with `child_gas` forwarded to
+/// the guarded frame, returning the gas observations and the parent's output (the child's revert
+/// data).
+fn run_selfdestruct_guard_scenario(child_gas: u64) -> (SelfdestructGuardGasInspector, Bytes) {
+    // Block beneficiary defaults to `Address::ZERO` in `BlockEnv::default()`,
+    // matching the `MegaContext::new(db, spec)` setup used below.
+    let beneficiary = Address::ZERO;
+
+    let child_code =
+        BytecodeBuilder::default().push_address(beneficiary).append(SELFDESTRUCT).build();
+    let parent_code = call_disable_volatile_data_access(BytecodeBuilder::default());
+    let parent_code = append_call_and_return_child_data(parent_code, CONTRACT, child_gas).build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000_000u64))
+        .account_code(PARENT, parent_code)
+        .account_code(CONTRACT, child_code)
+        .account_balance(CONTRACT, U256::from(1_000_000u64));
+
+    let mut inspector = SelfdestructGuardGasInspector {
+        frame: CONTRACT,
+        remaining_before_op: None,
+        returned_remaining: None,
+    };
+
+    let mut context = MegaContext::new(&mut db, MegaSpecId::REX5);
+    context.modify_chain(|chain| {
+        chain.operator_fee_scalar = Some(U256::from(0));
+        chain.operator_fee_constant = Some(U256::from(0));
+    });
+    let mut evm = MegaEvm::new(context).with_inspector(&mut inspector);
+    let tx =
+        TxEnvBuilder::default().caller(CALLER).call(PARENT).gas_limit(100_000_000).build_fill();
+    let mut tx = OpTx(OpTransaction::new(tx));
+    tx.enveloped_tx = Some(Bytes::new());
+    let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
+    assert!(result.result.is_success(), "parent should succeed: {result:?}");
+
+    let output = result.result.output().expect("parent returns child's revert data").clone();
+    (inspector, output)
+}
+
+/// Rex5: a frame that cannot even afford `SELFDESTRUCT`'s 5,000 static gas still gets the guard's
+/// revert, with every unit of gas it held handed back.
+///
+/// A guarded opcode may not be pre-charged at all, so being unable to afford the static cost must
+/// not pre-empt the guard with an out-of-gas halt: that would hand the caller a halted frame with
+/// no revert data and a spent budget instead of the specified `VolatileDataAccessDisabled` revert.
+#[test]
+fn test_rex5_underfunded_selfdestruct_guard_reverts_with_all_gas_kept() {
+    let remaining_at_opcode = SELFDESTRUCT_STATIC_GAS - 1;
+
+    // The child's prologue cost does not depend on how much gas it was handed, so one probe run
+    // calibrates the forwarding amount that leaves it one gas short of the static cost.
+    let (probe, _) = run_selfdestruct_guard_scenario(1_000_000);
+    let probe_remaining = probe.remaining_before_op.expect("SELFDESTRUCT was never reached");
+    let child_gas = 1_000_000 + remaining_at_opcode - probe_remaining;
+
+    let (inspector, output) = run_selfdestruct_guard_scenario(child_gas);
+    assert_eq!(
+        inspector.remaining_before_op,
+        Some(remaining_at_opcode),
+        "the frame should reach SELFDESTRUCT holding {remaining_at_opcode} gas, one short of its \
+         {SELFDESTRUCT_STATIC_GAS} static gas",
+    );
+
+    let decoded = decode_volatile_data_access_disabled(&output);
+    assert_eq!(
+        decoded.accessType,
+        VolatileDataAccessType::Beneficiary,
+        "an underfunded frame must still get the guard's revert, not an out-of-gas halt",
+    );
+
+    let returned = inspector.returned_remaining.expect("guarded frame never ended");
+    assert_eq!(
+        returned, remaining_at_opcode,
+        "the guard rejects SELFDESTRUCT before it runs, so the frame must return all \
+         {remaining_at_opcode} gas it held; it returned {returned}",
     );
 }

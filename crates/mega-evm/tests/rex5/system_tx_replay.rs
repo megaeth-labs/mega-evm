@@ -29,11 +29,13 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, EVMError, IOracle, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory,
-    MegaHardfork, MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTransactionError,
-    MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
-    ORACLE_CONTRACT_ADDRESS,
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
+    test_utils::MemoryDatabase,
+    BlockLimits, EVMError, IOracle, MegaBlockExecutionCtx, MegaBlockExecutor,
+    MegaBlockExecutorFactory, MegaContext, MegaEvm, MegaEvmFactory, MegaHardfork,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs,
+    MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     context::{result::InvalidTransaction, BlockEnv, CfgEnv, ContextTr as _, TxEnv},
@@ -568,10 +570,10 @@ fn test_normal_user_legacy_tx_is_unaffected() {
                                         * defaults */
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
-    let result: Result<_, EVMError<Infallible, MegaTransactionError>> =
+    let result: Result<_, EVMError<Infallible, OpTxError>> =
         alloy_evm::Evm::transact_raw(&mut evm, tx);
     assert!(result.is_ok(), "normal user legacy tx must still execute successfully under REX5");
     assert!(result.unwrap().result.is_success());
@@ -615,11 +617,11 @@ fn test_actual_op_deposit_tx_is_unaffected() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx_inner);
+    let mut tx = OpTx(OpTransaction::new(tx_inner));
     tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     tx.enveloped_tx = Some(Bytes::new());
 
-    let result: Result<_, EVMError<Infallible, MegaTransactionError>> =
+    let result: Result<_, EVMError<Infallible, OpTxError>> =
         alloy_evm::Evm::transact_raw(&mut evm, tx);
     assert!(
         result.is_ok(),

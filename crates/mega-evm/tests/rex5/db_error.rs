@@ -19,6 +19,8 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    alloy_op_evm::OpTx,
+    op_revm::OpTransaction,
     revm::context::result::ExecutionResult,
     sandbox::{
         decode_error_result,
@@ -26,7 +28,7 @@ use mega_evm::{
         KeylessDeployError,
     },
     test_utils::{ErrorInjectingDatabase, MemoryDatabase},
-    EVMError, IKeylessDeploy, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
+    EVMError, IKeylessDeploy, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs,
     KEYLESS_DEPLOY_ADDRESS, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{context::TxEnv, inspector::NoOpInspector};
@@ -73,7 +75,7 @@ fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -142,7 +144,7 @@ fn test_keyless_deploy_address_db_error_maps_to_internal_error_revert_rex6() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -209,7 +211,7 @@ fn test_keyless_signer_nonce_db_error_maps_to_internal_error_revert() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -272,7 +274,7 @@ fn test_system_tx_validate_inspect_account_db_error_surfaces_as_custom() {
         nonce: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

@@ -7,7 +7,7 @@
 use alloy_evm::Database;
 use alloy_primitives::{address, Address};
 use alloy_sol_types::SolError;
-use revm::{database::State, state::EvmState};
+use revm::state::EvmState;
 
 use crate::{MegaHardforks, SystemContractSpec};
 
@@ -48,7 +48,7 @@ pub const DISABLED_BY_PARENT_REVERT_DATA: [u8; 4] = IMegaAccessControl::Disabled
 pub fn transact_deploy_access_control_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
     access_control_spec(&hardforks, block_timestamp)
         .map(|s| crate::transact_deploy(db, &s))
@@ -75,7 +75,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{keccak256, B256};
     use revm::{
-        database::InMemoryDB,
+        database::{InMemoryDB, State},
         state::{AccountInfo, Bytecode},
     };
 
@@ -154,6 +154,7 @@ mod tests {
                 nonce: 0,
                 code_hash: ACCESS_CONTROL_CODE_HASH,
                 code: Some(Bytecode::new_raw(ACCESS_CONTROL_CODE)),
+                account_id: None,
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
@@ -198,6 +199,7 @@ mod tests {
                 nonce: 0,
                 code_hash: B256::ZERO,
                 code: Some(Bytecode::new_raw(alloy_primitives::Bytes::from_static(&[0x60, 0x00]))),
+                account_id: None,
             },
         );
         let mut state = State::builder().with_database(&mut db).build();

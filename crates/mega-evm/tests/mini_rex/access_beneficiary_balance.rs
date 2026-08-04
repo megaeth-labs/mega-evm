@@ -6,9 +6,10 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
     test_utils::{BytecodeBuilder, GasInspector, MsgCallMeta},
-    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, POP, PUSH0, STOP},
@@ -56,7 +57,7 @@ fn execute_tx(
         evm.disable_beneficiary();
     }
 
-    let tx = MegaTransaction {
+    let tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller,
             kind: match to {
@@ -69,7 +70,7 @@ fn execute_tx(
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     alloy_evm::Evm::transact_raw(evm, tx).unwrap()
 }
@@ -518,7 +519,7 @@ fn test_detained_gas_is_restored() {
 
     // Execute with a large gas limit
     let gas_limit = 1_000_000u64;
-    let tx = MegaTransaction {
+    let tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller: CALLER_ADDR,
             kind: TxKind::Call(CONTRACT_ADDR),
@@ -528,7 +529,7 @@ fn test_detained_gas_is_restored() {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     assert!(result.result.is_success());
@@ -536,7 +537,7 @@ fn test_detained_gas_is_restored() {
 
     // The gas_used should be much less than the gas_limit because detained gas is refunded.
     // We expect gas_used to be only a few thousand (for the actual work done), not close to 1M.
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     assert!(
         gas_used < 50_000,
         "Gas used should be low after detained gas restoration, got {}",

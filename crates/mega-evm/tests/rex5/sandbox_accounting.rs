@@ -10,7 +10,9 @@ use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U2
 use alloy_sol_types::SolCall;
 use mega_evm::{
     alloy_consensus::{Signed, TxLegacy},
+    alloy_op_evm::OpTx,
     constants,
+    op_revm::OpTransaction,
     revm::context::result::{ExecutionResult, ResultAndState},
     sandbox::{calculate_keyless_deploy_address, decode_error_result, KeylessDeployError},
     test_utils::{BytecodeBuilder, MemoryDatabase},
@@ -136,7 +138,7 @@ fn keyless_deploy_call_tx(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -153,7 +155,7 @@ fn sandbox_create_tx_for_intrinsic(init_code: Bytes, signer: Address) -> MegaTra
         nonce: 0,
         ..Default::default()
     };
-    MegaTransaction::new(tx)
+    OpTx(OpTransaction::new(tx))
 }
 
 /// Computes the intrinsic compute gas that Rex5 records during transaction validation.
@@ -166,7 +168,7 @@ fn intrinsic_compute_gas(tx: &MegaTransaction) -> u64 {
         tx,
         MegaSpecId::REX5.into_eth_spec(),
     )
-    .initial_gas
+    .initial_regular_gas
 }
 
 /// Computes the intrinsic data-size usage recorded before the first frame.
@@ -591,9 +593,9 @@ fn test_rex5_pre_sandbox_materialization_state_growth_overflow_halts_immediately
     // Gas was rescued — the unspent outer budget is returned to the sender; only the
     // dispatch overhead, materialization charge, and tx intrinsic are reported as used.
     assert!(
-        result_and_state.result.gas_used() < OUTER_TX_GAS_LIMIT / 2,
+        result_and_state.result.tx_gas_used() < OUTER_TX_GAS_LIMIT / 2,
         "outer caller must be rescued; gas_used={} should be well below tx limit {}",
-        result_and_state.result.gas_used(),
+        result_and_state.result.tx_gas_used(),
         OUTER_TX_GAS_LIMIT,
     );
 }
@@ -783,9 +785,9 @@ fn test_rex5_sandbox_compute_gas_overflow_rejects_cleanly() {
     // The halt must NOT consume the full parent tx gas: the safety net rescues remaining
     // gas and only charges the caller for the KeylessDeploy overhead plus sandbox gas.
     assert!(
-        result_and_state.result.gas_used() < OUTER_TX_GAS_LIMIT / 2,
+        result_and_state.result.tx_gas_used() < OUTER_TX_GAS_LIMIT / 2,
         "outer caller must be rescued; gas_used={} should be well below tx limit {}",
-        result_and_state.result.gas_used(),
+        result_and_state.result.tx_gas_used(),
         OUTER_TX_GAS_LIMIT,
     );
 
@@ -835,9 +837,9 @@ fn test_rex5_sandbox_data_size_overflow_rejects_cleanly() {
     // the safety net must have rescued gas and prevented state survival.
     if result_and_state.result.is_halt() {
         assert!(
-            result_and_state.result.gas_used() < OUTER_TX_GAS_LIMIT / 2,
+            result_and_state.result.tx_gas_used() < OUTER_TX_GAS_LIMIT / 2,
             "outer caller must be rescued; gas_used={} should be well below tx limit {}",
-            result_and_state.result.gas_used(),
+            result_and_state.result.tx_gas_used(),
             OUTER_TX_GAS_LIMIT,
         );
         let deployed_account = result_and_state.state.get(&deploy_address);
@@ -1144,7 +1146,7 @@ fn test_rex5_sandbox_outer_gas_used_includes_sandbox_gas_used_on_success() {
         tx_bytes,
         LARGE_GAS_LIMIT_OVERRIDE,
     );
-    let outer_gas_used = result.gas_used();
+    let outer_gas_used = result.tx_gas_used();
     let decoded = decode_keyless_deploy_return(&result);
     let sandbox_gas_used = decoded.gasUsed;
 
@@ -1170,7 +1172,7 @@ fn test_rex4_sandbox_outer_gas_used_excludes_sandbox_gas_used() {
         tx_bytes,
         LARGE_GAS_LIMIT_OVERRIDE,
     );
-    let outer_gas_used = result.gas_used();
+    let outer_gas_used = result.tx_gas_used();
     let decoded = decode_keyless_deploy_return(&result);
     let sandbox_gas_used = decoded.gasUsed;
 
@@ -1197,7 +1199,7 @@ fn test_rex5_sandbox_outer_gas_used_includes_sandbox_gas_used_on_in_sandbox_fail
         tx_bytes,
         LARGE_GAS_LIMIT_OVERRIDE,
     );
-    let outer_gas_used = result.gas_used();
+    let outer_gas_used = result.tx_gas_used();
     let decoded = decode_keyless_deploy_return(&result);
     let sandbox_gas_used = decoded.gasUsed;
     assert!(!decoded.errorData.is_empty(), "in-sandbox failure should be encoded");

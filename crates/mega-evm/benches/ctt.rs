@@ -8,7 +8,13 @@
 
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mega_evm::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId, MegaTransaction};
+// Imported as the struct itself (not the `MegaTransaction` type alias) so the
+// tuple-struct constructor is usable — constructors cannot be called through a
+// type alias.
+use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction, test_utils::MemoryDatabase, MegaContext, MegaEvm,
+    MegaSpecId,
+};
 use revm::{context::tx::TxEnvBuilder, primitives::KECCAK_EMPTY, ExecuteCommitEvm, ExecuteEvm};
 
 const DEPLOYER: Address = address!("0000000000000000000000000000000000100000");
@@ -55,7 +61,7 @@ fn deploy_ctt(spec: MegaSpecId) -> (Address, MemoryDatabase) {
         .create()
         .data(Bytes::from(deploy_data))
         .build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
+    let mut mega_tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     mega_tx.enveloped_tx = Some(Bytes::new());
 
     let result = evm.transact_commit(mega_tx).expect("deployment should succeed");
@@ -111,7 +117,7 @@ fn execute_batch_transfer(
 
     let tx =
         TxEnvBuilder::new().caller(CALLER).call(contract_addr).data(calldata.clone()).build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
+    let mut mega_tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     mega_tx.enveloped_tx = Some(Bytes::new());
 
     let result = evm.transact(mega_tx).expect("transaction should succeed");

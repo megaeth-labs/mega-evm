@@ -3,9 +3,9 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, TestExternalEnvs,
-    ORACLE_CONTRACT_ADDRESS,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{CALL, GAS, POP, PUSH0, SLOAD, SSTORE, STOP, TIMESTAMP},
@@ -42,7 +42,7 @@ fn execute_transaction(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

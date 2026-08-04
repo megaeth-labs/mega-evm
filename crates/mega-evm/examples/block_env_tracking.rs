@@ -8,7 +8,12 @@
 //! 3. Contract 3: Does NOT use block environment (CALLER opcode)
 
 use alloy_primitives::{address, Bytes, U256};
-use mega_evm::{MegaContext, MegaEvm, MegaSpecId, MegaTransaction, VolatileDataAccess};
+// Imported as the struct itself (not the `MegaTransaction` type alias) so the
+// tuple-struct constructor is usable — constructors cannot be called through a
+// type alias.
+use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction, MegaContext, MegaEvm, MegaSpecId, VolatileDataAccess,
+};
 use revm::{
     bytecode::opcode::{BASEFEE, CALLER, NUMBER, POP, STOP, TIMESTAMP},
     context::{ContextTr, TxEnv},
@@ -61,17 +66,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 1
-    let tx1 = MegaTransaction {
-        base: TxEnv {
-            caller,
-            kind: TxKind::Call(contract1_address),
-            data: Bytes::default(),
-            value: U256::ZERO,
-            gas_limit: 1000000,
-            ..Default::default()
-        },
+    let mut tx1 = MegaTransaction(op_revm::OpTransaction::new(TxEnv {
+        caller,
+        kind: TxKind::Call(contract1_address),
+        data: Bytes::default(),
+        value: U256::ZERO,
+        gas_limit: 1000000,
         ..Default::default()
-    };
+    }));
+    tx1.enveloped_tx = Some(Bytes::new());
 
     let result1 = alloy_evm::Evm::transact_raw(&mut evm, tx1)?;
     println!("  Transaction result: {:?}", result1.result.is_success());
@@ -101,18 +104,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 2
-    let tx2 = MegaTransaction {
-        base: TxEnv {
-            caller,
-            kind: TxKind::Call(contract2_address),
-            data: Bytes::default(),
-            value: U256::ZERO,
-            gas_limit: 1000000,
-            nonce: 0, // Reset nonce for new transaction
-            ..Default::default()
-        },
+    let mut tx2 = MegaTransaction(op_revm::OpTransaction::new(TxEnv {
+        caller,
+        kind: TxKind::Call(contract2_address),
+        data: Bytes::default(),
+        value: U256::ZERO,
+        gas_limit: 1000000,
+        nonce: 0, // Reset nonce for new transaction
         ..Default::default()
-    };
+    }));
+    tx2.enveloped_tx = Some(Bytes::new());
 
     let result2 = alloy_evm::Evm::transact_raw(&mut evm, tx2)?;
     println!("  Transaction result: {:?}", result2.result.is_success());
@@ -146,18 +147,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Initial state: no block env access");
 
     // Create and execute transaction for contract 3
-    let tx3 = MegaTransaction {
-        base: TxEnv {
-            caller,
-            kind: TxKind::Call(contract3_address),
-            data: Bytes::default(),
-            value: U256::ZERO,
-            gas_limit: 1000000,
-            nonce: 0, // Reset nonce for new transaction
-            ..Default::default()
-        },
+    let mut tx3 = MegaTransaction(op_revm::OpTransaction::new(TxEnv {
+        caller,
+        kind: TxKind::Call(contract3_address),
+        data: Bytes::default(),
+        value: U256::ZERO,
+        gas_limit: 1000000,
+        nonce: 0, // Reset nonce for new transaction
         ..Default::default()
-    };
+    }));
+    tx3.enveloped_tx = Some(Bytes::new());
 
     let result3 = alloy_evm::Evm::transact_raw(&mut evm, tx3)?;
     println!("  Transaction result: {:?}", result3.result.is_success());

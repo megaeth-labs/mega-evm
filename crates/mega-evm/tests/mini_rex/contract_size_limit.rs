@@ -15,7 +15,8 @@ fn deploy_contract(
     db: &mut MemoryDatabase,
     bytecode: Bytes,
     spec: MegaSpecId,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, mega_evm::alloy_op_evm::OpTxError>>
+{
     transact(
         spec,
         db,
@@ -36,8 +37,8 @@ fn initcode_size_limit_test_case(spec: MegaSpecId, initcode_size: usize, success
     } else {
         assert!(matches!(
             result,
-            Err(EVMError::Transaction(MegaTransactionError::Base(
-                InvalidTransaction::CreateInitCodeSizeLimit
+            Err(EVMError::Transaction(mega_evm::alloy_op_evm::OpTxError(
+                MegaTransactionError::Base(InvalidTransaction::CreateInitCodeSizeLimit)
             )))
         ));
     }

@@ -4,10 +4,11 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, keccak256, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     constants::{self, rex::*},
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
+    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, SaltEnv, TestExternalEnvs,
+    MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CREATE, CREATE2},
@@ -34,7 +35,8 @@ fn transact(
     data: Bytes,
     value: U256,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, mega_evm::alloy_op_evm::OpTxError>>
+{
     let mut context = MegaContext::new(db, spec).with_external_envs(external_envs.into());
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -49,7 +51,7 @@ fn transact(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -92,7 +94,7 @@ fn test_sstore_minimum_bucket_zero_gas() {
     // - 0 (REX storage gas with multiplier = 1)
     // Total: ~82,200
 
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     assert_eq!(
         gas_used,
         BASE_INTRINSIC_GAS +
@@ -135,7 +137,7 @@ fn test_sstore_with_multiplier_charges_storage_gas() {
     .expect("Transaction should succeed");
 
     // Expected storage gas: 20,000 × (2 - 1) = 20,000
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     let expected_storage_gas = SSTORE_SET_STORAGE_GAS_BASE;
 
     assert_eq!(
@@ -183,7 +185,7 @@ fn test_sstore_multiplier_scaling() {
         )
         .expect("Transaction should succeed");
 
-        let gas_used = result.result.gas_used();
+        let gas_used = result.result.tx_gas_used();
         let expected_storage_gas = SSTORE_SET_STORAGE_GAS_BASE * (multiplier - 1);
         let expected_total = BASE_INTRINSIC_GAS
             + constants::rex::TX_INTRINSIC_STORAGE_GAS
@@ -246,7 +248,7 @@ fn test_sstore_reset_no_storage_gas() {
     // - Base intrinsic + TX_INTRINSIC_STORAGE_GAS
     // - First SSTORE: EVM gas + storage gas
     // - Second SSTORE: warm storage read (no storage gas, no reset cost)
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     let expected_total = BASE_INTRINSIC_GAS
         + constants::rex::TX_INTRINSIC_STORAGE_GAS
         + constants::equivalence::SSTORE_SET
@@ -288,7 +290,7 @@ fn test_new_account_minimum_bucket_zero_gas() {
     // - 0 (REX account creation with multiplier = 1)
     // Total: 60,000
 
-    assert_eq!(result.result.gas_used(), 60_000);
+    assert_eq!(result.result.tx_gas_used(), 60_000);
 }
 
 #[test]
@@ -322,7 +324,7 @@ fn test_new_account_with_multiplier() {
         let expected_storage_gas = NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1);
         let expected_total = 21_000 + TX_INTRINSIC_STORAGE_GAS + expected_storage_gas;
 
-        assert_eq!(result.result.gas_used(), expected_total);
+        assert_eq!(result.result.tx_gas_used(), expected_total);
     }
 }
 
@@ -354,7 +356,7 @@ fn test_existing_account_no_storage_gas() {
     // Should only charge intrinsic gas, no storage gas for existing account
     let expected_total = 21_000 + TX_INTRINSIC_STORAGE_GAS;
 
-    assert_eq!(result.result.gas_used(), expected_total);
+    assert_eq!(result.result.tx_gas_used(), expected_total);
 }
 
 #[test]
@@ -389,7 +391,7 @@ fn test_contract_creation_minimum_bucket() {
     // MIN_BUCKET_SIZE)
     let expected_gas =
         BASE_INTRINSIC_GAS + BASE_CREATE_GAS + constants::rex::TX_INTRINSIC_STORAGE_GAS + 46; // bytecode overhead
-    assert_eq!(result.result.gas_used(), expected_gas);
+    assert_eq!(result.result.tx_gas_used(), expected_gas);
 }
 
 #[test]
@@ -427,7 +429,7 @@ fn test_contract_creation_with_multiplier() {
         .expect("Transaction should succeed");
 
         let expected_storage_gas = CONTRACT_CREATION_STORAGE_GAS_BASE * (multiplier - 1);
-        let gas_used = result.result.gas_used();
+        let gas_used = result.result.tx_gas_used();
 
         // Gas breakdown for CREATE:
         // Base overhead (including intrinsic, CREATE opcode, code deposit, etc.) = 92,046
@@ -488,8 +490,8 @@ fn test_contract_creation_costs_more_than_account() {
     )
     .expect("Account creation should succeed");
 
-    let contract_gas = contract_result.result.gas_used();
-    let account_gas = account_result.result.gas_used();
+    let contract_gas = contract_result.result.tx_gas_used();
+    let account_gas = account_result.result.tx_gas_used();
 
     // Expected difference in storage gas: (32,000 - 25,000) × (10 - 1) = 63,000
     let _expected_difference =
@@ -546,7 +548,7 @@ fn test_combined_contract_creation_and_sstore() {
     let expected_storage_gas = CONTRACT_CREATION_STORAGE_GAS_BASE * (multiplier - 1) +
         SSTORE_SET_STORAGE_GAS_BASE * (multiplier - 1);
 
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
 
     // Gas breakdown for CREATE with SSTORE:
     // Base overhead (including intrinsic, CREATE, SSTORE, code deposit, etc.) = 117,632
@@ -604,7 +606,7 @@ fn test_rex_vs_minirex_comparison() {
     // REX: 21k + 39k + 25k×(10-1) = 285k
     // Mini-Rex: 21k + 0 + 2M×10 = 20,021k
     assert!(
-        rex_result.result.gas_used() < minirex_result.result.gas_used(),
+        rex_result.result.tx_gas_used() < minirex_result.result.tx_gas_used(),
         "REX should charge less total gas than Mini-Rex for account creation"
     );
 }
@@ -638,7 +640,7 @@ fn test_large_multiplier_linear_scaling() {
     let expected_storage_gas = NEW_ACCOUNT_STORAGE_GAS_BASE * (multiplier - 1);
     let expected_total = 21_000 + TX_INTRINSIC_STORAGE_GAS + expected_storage_gas;
 
-    assert_eq!(result.result.gas_used(), expected_total);
+    assert_eq!(result.result.tx_gas_used(), expected_total);
 }
 
 // ========================================================================================
@@ -685,7 +687,7 @@ fn test_create_opcode() {
 
     assert!(result.result.is_success());
     assert_eq!(
-        result.result.gas_used(),
+        result.result.tx_gas_used(),
         BASE_INTRINSIC_GAS +
             constants::rex::TX_INTRINSIC_STORAGE_GAS +
             constants::equivalence::CREATE +
@@ -737,7 +739,7 @@ fn test_create2_opcode() {
 
     assert!(result.result.is_success());
     assert_eq!(
-        result.result.gas_used(),
+        result.result.tx_gas_used(),
         BASE_INTRINSIC_GAS +
             constants::rex::TX_INTRINSIC_STORAGE_GAS +
             constants::equivalence::CREATE +
@@ -787,7 +789,7 @@ fn test_call_opcode_creates_account() {
 
     assert!(result.result.is_success());
     assert_eq!(
-        result.result.gas_used(),
+        result.result.tx_gas_used(),
         BASE_INTRINSIC_GAS +
             constants::rex::TX_INTRINSIC_STORAGE_GAS +
             constants::equivalence::CALLVALUE +

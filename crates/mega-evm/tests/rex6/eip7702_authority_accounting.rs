@@ -14,9 +14,13 @@ use std::convert::Infallible;
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants, test_utils::MemoryDatabase, BucketHasher, EVMError, EvmTxRuntimeLimits, LimitUsage,
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError,
-    SimpleBucketHasher, TestExternalEnvs, ACCOUNT_INFO_WRITE_SIZE, MIN_BUCKET_SIZE,
+    alloy_op_evm::{OpTx, OpTxError},
+    constants,
+    op_revm::OpTransaction,
+    test_utils::MemoryDatabase,
+    BucketHasher, EVMError, EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason,
+    MegaSpecId, MegaTransactionError, SimpleBucketHasher, TestExternalEnvs,
+    ACCOUNT_INFO_WRITE_SIZE, MIN_BUCKET_SIZE,
 };
 use revm::{
     context::{
@@ -77,7 +81,7 @@ fn transact_with_limits(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
@@ -106,7 +110,7 @@ fn try_transact(
     db: &mut MemoryDatabase,
     envs: &Envs,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context =
         MegaContext::new(db, spec).with_external_envs(envs.into()).with_tx_runtime_limits(
             EvmTxRuntimeLimits::from_spec(spec)
@@ -119,7 +123,7 @@ fn try_transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -177,7 +181,7 @@ fn transact_detention(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let r = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let detained = evm.ctx_ref().additional_limit.borrow().detained_compute_gas_limit();
@@ -211,7 +215,7 @@ fn test_rex6_new_authority_charges_salt_gas() {
     // The heavy bucket charges exactly `base * (multiplier - 1)` extra new-account gas.
     let expected_salt = constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE * (HEAVY_MULTIPLIER - 1);
     assert_eq!(
-        res_heavy.result.gas_used() - res_default.result.gas_used(),
+        res_heavy.result.tx_gas_used() - res_default.result.tx_gas_used(),
         expected_salt,
         "REX6 must charge exactly the heavy-bucket SALT gas for the new authority",
     );
@@ -242,7 +246,7 @@ fn test_rex6_authority_salt_gas_enforced_against_gas_limit() {
         tx_with_auths(auths.clone()),
     );
     assert!(res_default.result.is_success(), "default-bucket run should succeed: {res_default:?}");
-    let default_budget = res_default.result.gas_used();
+    let default_budget = res_default.result.tx_gas_used();
 
     // Same authorization, heavy bucket, but only the default run's budget: the heavy SALT pushes
     // initial_gas past gas_limit, so validation rejects before execution.
@@ -258,9 +262,9 @@ fn test_rex6_authority_salt_gas_enforced_against_gas_limit() {
     assert!(
         matches!(
             err,
-            EVMError::Transaction(MegaTransactionError::Base(
+            EVMError::Transaction(OpTxError(MegaTransactionError::Base(
                 InvalidTransaction::CallGasCostMoreThanGasLimit { .. }
-            ))
+            )))
         ),
         "expected CallGasCostMoreThanGasLimit from the unaffordable SALT gas, got {err:?}",
     );
@@ -737,8 +741,8 @@ fn test_rex6_authority_state_growth_overflow_forgoes_refund() {
     // The whole list is skipped in both, so the pre-existing authority's 12_500 refund is forgone:
     // gas_used is identical. Were it applied, only the existing-A run would drop by 12_500.
     assert_eq!(
-        res_existing.result.gas_used(),
-        res_fresh.result.gas_used(),
+        res_existing.result.tx_gas_used(),
+        res_fresh.result.tx_gas_used(),
         "skipping the whole auth list forgoes the pre-existing authority's EIP-7702 refund, so \
          gas_used must not differ on account of A's pre-existence",
     );
@@ -791,7 +795,7 @@ fn test_rex6_recipient_authority_not_double_charged() {
 
     // The with-auth tx adds only authorization overhead (intrinsic + per-auth), well under one
     // heavy SALT (~3.17M). A double charge would inflate gas_used by roughly a full heavy SALT.
-    let delta = res_with_auth.result.gas_used().saturating_sub(res_no_auth.result.gas_used());
+    let delta = res_with_auth.result.tx_gas_used().saturating_sub(res_no_auth.result.tx_gas_used());
     assert!(
         delta < 1_000_000,
         "the recipient authority's heavy SALT must be charged once, not twice (delta={delta})",

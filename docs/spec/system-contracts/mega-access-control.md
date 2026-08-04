@@ -106,6 +106,13 @@ Beneficiary-targeted account access covers two further cases beyond a direct ope
 
 Blocked volatile access MUST NOT update volatile-access tracking and MUST NOT tighten [gas detention](../evm/gas-detention.md).
 
+The blocked opcode never executes, so it MUST NOT consume any gas — neither its static cost nor any dynamic cost.
+The gas the reverting frame returns to its caller MUST equal the gas it held when the blocked opcode was reached.
+
+This holds regardless of how much gas the frame holds.
+A frame whose remaining gas is below the blocked opcode's static cost MUST still revert with `VolatileDataAccessDisabled` and keep that gas; it MUST NOT be halted out of gas.
+A blocked opcode is never charged, so its static cost is not a precondition for reaching it.
+
 For opcodes that are unconditionally volatile — block-environment reads such as `TIMESTAMP`, `NUMBER`, `COINBASE`, `DIFFICULTY` / `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `BLOCKHASH`, and `BLOBHASH` — the disabled-state revert is synthesized before operand validation.
 A malformed invocation of an operand-taking unconditionally volatile opcode (`BLOCKHASH`, `BLOBHASH`) with an insufficient stack therefore reverts with `VolatileDataAccessDisabled` instead of halting with the canonical stack-underflow error; this is intended MegaETH semantics.
 Conditionally volatile opcodes — `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the CALL family, and `SELFDESTRUCT`, which are volatile only when their operand resolves to the beneficiary — inspect their operands first and keep the canonical stack-underflow halt when the stack is malformed.

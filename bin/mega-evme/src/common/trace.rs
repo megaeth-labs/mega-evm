@@ -150,7 +150,7 @@ impl TraceArgs {
 
         // Generate the geth trace
         let geth_trace =
-            geth_builder.geth_traces(exec_result.gas_used(), Bytes::from(output), opts);
+            geth_builder.geth_traces(exec_result.tx_gas_used(), Bytes::from(output), opts);
 
         // Format as JSON
         serde_json::to_string_pretty(&geth_trace)
@@ -168,7 +168,8 @@ impl TraceArgs {
         debug!(config = ?config, "Generating call trace");
 
         // Generate the call trace
-        let call_frame: CallFrame = geth_builder.geth_call_traces(config, exec_result.gas_used());
+        let call_frame: CallFrame =
+            geth_builder.geth_call_traces(config, exec_result.tx_gas_used());
 
         // Format as JSON
         serde_json::to_string_pretty(&call_frame)

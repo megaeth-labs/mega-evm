@@ -23,9 +23,11 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, ACCOUNT_INFO_WRITE_SIZE, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
+    ACCOUNT_INFO_WRITE_SIZE, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH,
 };
 use op_revm::constants::BASE_FEE_RECIPIENT;
 use revm::{
@@ -72,8 +74,7 @@ const CALLER_BALANCE: u128 = 1_000_000_000_000_000_000; // 1 ETH
 // ============================================================================
 
 type TestEvm = MegaEvm<MemoryDatabase, revm::inspector::NoOpInspector, EmptyExternalEnv>;
-type TestEvmResult =
-    Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>>;
+type TestEvmResult = Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>>;
 
 /// Deploys a trivial `RETURN` bytecode at `TARGET_CONTRACT`.
 fn simple_return_contract() -> Bytes {
@@ -106,7 +107,7 @@ fn build_evm(spec: MegaSpecId, db: MemoryDatabase, basefee: u64) -> TestEvm {
 /// `BASE_FEE_RECIPIENT` is credited `basefee × gas_used > 0` — which
 /// materialises it when the account is absent from the DB.
 fn make_call_tx() -> MegaTransaction {
-    let mut tx = MegaTransaction {
+    let mut tx = OpTx(OpTransaction {
         base: TxEnv {
             caller: CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),
@@ -115,7 +116,7 @@ fn make_call_tx() -> MegaTransaction {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -140,7 +141,7 @@ fn transact_with_spec(
 /// A transaction with a 1-wei priority fee so the block beneficiary receives a non-zero
 /// credit: `effective_gas_price = BASEFEE + 1` → `coinbase_gas_price = 1` → `1 × gas_used`.
 fn make_tip_tx() -> MegaTransaction {
-    let mut tx = MegaTransaction {
+    let mut tx = OpTx(OpTransaction {
         base: TxEnv {
             caller: CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),
@@ -150,7 +151,7 @@ fn make_tip_tx() -> MegaTransaction {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     tx.enveloped_tx = Some(Bytes::new());
     tx
 }
@@ -158,7 +159,7 @@ fn make_tip_tx() -> MegaTransaction {
 /// An OP deposit-style transaction. A non-zero `source_hash` flips `tx_type` to deposit, and
 /// op-revm's `reward_beneficiary` early-returns for deposits — so no fee recipient is credited.
 fn make_deposit_tx() -> MegaTransaction {
-    let mut tx = MegaTransaction {
+    let mut tx = OpTx(OpTransaction {
         base: TxEnv {
             caller: CALLER,
             kind: TxKind::Call(TARGET_CONTRACT),
@@ -167,7 +168,7 @@ fn make_deposit_tx() -> MegaTransaction {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
     tx.deposit.mint = Some(0);
     tx.enveloped_tx = Some(Bytes::new());

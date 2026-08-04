@@ -19,11 +19,12 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
     constants::rex::NEW_ACCOUNT_STORAGE_GAS_BASE,
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     BucketId, EVMError, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs, MegaContext, MegaEvm,
-    MegaHaltReason, MegaSpecId, MegaTransaction, MegaTransactionError, SaltEnv, TestExternalEnvs,
-    MIN_BUCKET_SIZE,
+    MegaHaltReason, MegaSpecId, SaltEnv, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, STOP},
@@ -92,7 +93,7 @@ fn transact(
     callee: Address,
     value: U256,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context =
         MegaContext::new(db, spec).with_external_envs(external_envs.into()).with_tx_runtime_limits(
             EvmTxRuntimeLimits::no_limits()
@@ -112,7 +113,7 @@ fn transact(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -132,7 +133,7 @@ fn run_with_target_multiplier(spec: MegaSpecId, bytecode: Bytes, target_multipli
     let result = transact(spec, &mut db, &external_envs, CALLER, CALLEE, U256::ZERO, 10_000_000)
         .expect("transaction must succeed");
     assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
-    result.result.gas_used()
+    result.result.tx_gas_used()
 }
 
 // ============================================================================
@@ -206,7 +207,7 @@ fn test_rex5_callcode_from_eip7702_authority_no_storage_gas() {
         )
         .expect("transaction must succeed");
         assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
-        result.result.gas_used()
+        result.result.tx_gas_used()
     };
 
     let gas_baseline = run(1, 1);
@@ -313,7 +314,7 @@ fn transact_with_error_db(
     caller: Address,
     callee: Address,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, OpTxError>> {
     let external_envs = TestExternalEnvs::<Infallible>::new();
     let mut context =
         MegaContext::new(db, spec).with_external_envs(external_envs.into()).with_tx_runtime_limits(
@@ -334,7 +335,7 @@ fn transact_with_error_db(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -345,7 +346,7 @@ fn transact_with_failing_salt(
     caller: Address,
     callee: Address,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let envs: ExternalEnvs<(FailingSaltEnv, EmptyExternalEnv)> =
         ExternalEnvs { salt_env: FailingSaltEnv, oracle_env: EmptyExternalEnv };
     let mut context = MegaContext::new(db, spec).with_external_envs(envs).with_tx_runtime_limits(
@@ -366,7 +367,7 @@ fn transact_with_failing_salt(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

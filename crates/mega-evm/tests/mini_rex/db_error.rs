@@ -6,9 +6,9 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
-    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::CALL,
@@ -28,7 +28,10 @@ fn transact(
     data: Bytes,
     value: U256,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, MegaTransactionError>> {
+) -> Result<
+    ResultAndState<MegaHaltReason>,
+    EVMError<InjectedDbError, mega_evm::alloy_op_evm::OpTxError>,
+> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -43,7 +46,7 @@ fn transact(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }

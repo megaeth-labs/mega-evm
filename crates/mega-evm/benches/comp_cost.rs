@@ -14,9 +14,13 @@
 
 use alloy_primitives::{address, bytes, Address, Bytes, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+// Imported as the struct itself (not the `MegaTransaction` type alias) so the
+// tuple-struct constructor is usable — constructors cannot be called through a
+// type alias.
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::{ADD, ADDRESS, EXP, GAS, KECCAK256, POP, STATICCALL},
@@ -25,7 +29,7 @@ use revm::{
         tx::TxEnvBuilder,
     },
     precompile::{
-        blake2, bls12_381, bn128,
+        blake2, bls12_381, bn254,
         hash::{RIPEMD160, SHA256},
         kzg_point_evaluation, modexp,
         secp256k1::ECRECOVER,
@@ -71,18 +75,18 @@ fn execute_bytecode(
 
     let tx =
         TxEnvBuilder::new().caller(CALLER).call(CONTRACT).gas_limit(10_000_000_000u64).build_fill();
-    let mut mega_tx = MegaTransaction::new(tx);
+    let mut mega_tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     mega_tx.enveloped_tx = Some(Bytes::new());
 
     let r = evm.transact(mega_tx).expect("transaction should succeed");
     assert!(r.result.is_success(), "transaction should succeed: {:?}", r.result);
-    assert!(r.result.gas_used() > 21000, "transaction should spend more than 21000 gas");
+    assert!(r.result.tx_gas_used() > 21000, "transaction should spend more than 21000 gas");
     r
 }
 
 /// Execute bytecode with the given spec and return gas used.
 fn execute_and_get_gas(bytecode: &Bytes, spec: MegaSpecId) -> u64 {
-    execute_bytecode(bytecode, spec).result.gas_used()
+    execute_bytecode(bytecode, spec).result.tx_gas_used()
 }
 
 /// Run `bytecode` on vanilla revm at PRAGUE (has all precompiles incl. BLS12-381,
@@ -546,7 +550,7 @@ fn generate_ecadd_bytecode(iterations: usize) -> Bytes {
         builder = builder.push_number(128_u64); // retOffset
         builder = builder.push_number(128_u64); // argsSize (two points = 128 bytes)
         builder = builder.push_number(0_u64); // argsOffset
-        builder = builder.push_address(bn128::add::ADDRESS);
+        builder = builder.push_address(bn254::add::ADDRESS);
         builder = builder.append(GAS); // gas
         builder = builder.append(STATICCALL);
         // assert call success
@@ -590,7 +594,7 @@ fn generate_ecmul_bytecode(iterations: usize) -> Bytes {
         builder = builder.push_number(96_u64); // retOffset
         builder = builder.push_number(96_u64); // argsSize (point + scalar = 96 bytes)
         builder = builder.push_number(0_u64); // argsOffset
-        builder = builder.push_address(bn128::mul::ADDRESS);
+        builder = builder.push_address(bn254::mul::ADDRESS);
         builder = builder.append(GAS); // gas
         builder = builder.append(STATICCALL);
         // assert call success
@@ -657,7 +661,7 @@ fn generate_ecpairing_bytecode(iterations: usize) -> Bytes {
         builder = builder.push_number(input_size as u64 + 32); // retOffset
         builder = builder.push_number(input_size as u64); // argsSize
         builder = builder.push_number(0_u64); // argsOffset
-        builder = builder.push_address(bn128::pair::ADDRESS);
+        builder = builder.push_address(bn254::pair::ADDRESS);
         builder = builder.append(GAS); // gas (pairing needs more gas)
         builder = builder.append(STATICCALL);
         // assert call success

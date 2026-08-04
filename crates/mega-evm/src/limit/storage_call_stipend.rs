@@ -165,7 +165,7 @@ impl StorageCallStipendTracker {
             let original_limit = gas.limit().saturating_sub(self.stipend_amount);
             let burn = gas.remaining().saturating_sub(original_limit);
             if burn > 0 {
-                let _ = gas.record_cost(burn);
+                let _ = gas.record_regular_cost(burn);
             }
         }
     }

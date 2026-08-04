@@ -518,7 +518,7 @@ mod tests {
 
     use crate::{
         test_utils::{BytecodeBuilder, MemoryDatabase},
-        IMegaAccessControl, IMegaLimitControl, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+        IMegaAccessControl, IMegaLimitControl, MegaContext, MegaEvm, MegaSpecId,
         LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
     };
 
@@ -602,7 +602,7 @@ mod tests {
             .call(contract)
             .gas_limit(100_000_000)
             .build_fill();
-        let mut tx = MegaTransaction::new(tx);
+        let mut tx = alloy_op_evm::OpTx(op_revm::OpTransaction::new(tx));
         tx.enveloped_tx = Some(Bytes::new());
 
         let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();

@@ -20,8 +20,10 @@
 use alloy_primitives::{address, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use mega_evm::{
+    alloy_op_evm::OpTx,
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, MegaTransaction, TestExternalEnvs,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaSpecId, TestExternalEnvs,
     ACCOUNT_INFO_WRITE_SIZE, BASE_TX_SIZE, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX2,
 };
 use revm::{
@@ -108,7 +110,7 @@ fn run_with_oracle(
         .gas_limit(100_000_000)
         .build_fill();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
     use revm::handler::EvmTr;
@@ -143,7 +145,7 @@ fn run_direct_oracle_tx(
         .gas_limit(100_000_000)
         .build_fill();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
     use revm::handler::EvmTr;
@@ -567,7 +569,7 @@ fn test_rex5_hint_charge_persists_across_initiating_frame_revert() {
         .gas_limit(100_000_000)
         .build_fill();
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let envelope = alloy_evm::Evm::transact_raw(&mut evm, tx).expect("transact ok");
     use revm::handler::EvmTr;

@@ -6,12 +6,13 @@
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     constants,
     revm::context::result::ExecutionResult,
     sandbox::tests::{CREATE2_FACTORY_DEPLOYER, CREATE2_FACTORY_TX},
     test_utils::MemoryDatabase,
     EvmTxRuntimeLimits, IKeylessDeploy, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
+    TestExternalEnvs, KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{context::TxEnv, handler::EvmTr, inspector::NoOpInspector};
 
@@ -51,7 +52,7 @@ fn execute_keyless_deploy(
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);
@@ -142,7 +143,7 @@ fn test_rex3_keyless_deploy_exceeds_compute_gas_limit() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     // Set compute gas limit to 50K, which is below the 100K keyless deploy overhead

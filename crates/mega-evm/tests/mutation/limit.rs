@@ -15,9 +15,10 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
 use revm::{
     bytecode::opcode::*,
@@ -58,7 +59,7 @@ fn transact_with_kv_limit(
     db: &mut MemoryDatabase,
     kv_update_limit: u64,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, MegaSpecId::MINI_REX).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_kv_updates_limit(kv_update_limit),
     );
@@ -67,7 +68,7 @@ fn transact_with_kv_limit(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -95,9 +96,8 @@ fn test_before_frame_run_short_circuits_already_exceeded_create_frame() {
 
     let gas_used = match &result.result {
         ExecutionResult::Halt {
-            reason: MegaHaltReason::KVUpdateLimitExceeded { .. },
-            gas_used,
-        } => *gas_used,
+            reason: MegaHaltReason::KVUpdateLimitExceeded { .. }, gas, ..
+        } => gas.tx_gas_used(),
         other => panic!("expected KVUpdateLimitExceeded halt, got {other:?}"),
     };
     // Pinned `gas_used` with the constructor short-circuited at `before_frame_run`.

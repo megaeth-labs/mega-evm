@@ -3,10 +3,11 @@
 
 use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
+    alloy_op_evm::OpTx as MegaTransaction,
     constants::mini_rex::{ORACLE_ACCESS_COMPUTE_GAS, TX_COMPUTE_GAS_LIMIT},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockLimits, MegaContext, MegaEvm, MegaHaltReason, MegaHardforkConfig, MegaSpecId,
-    MegaTransaction, TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
+    TestExternalEnvs, ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{
@@ -53,7 +54,7 @@ fn execute_transaction<
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(inspector);
@@ -700,8 +701,8 @@ fn test_oracle_sload_determinism_between_oracle_env_and_state() {
     assert!(result1.is_success(), "Execution 1 (oracle_env) should succeed");
     assert!(result2.is_success(), "Execution 2 (state) should succeed");
     assert_eq!(
-        result1.gas_used(),
-        result2.gas_used(),
+        result1.tx_gas_used(),
+        result2.tx_gas_used(),
         "Gas used should be identical regardless of data source (oracle_env vs state)"
     );
 
@@ -864,7 +865,7 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
         "Transaction should fail due to volatile data access out of gas"
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
 
     // Key assertion: gas_used should be much less than gas_limit
     assert!(
@@ -916,7 +917,7 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
         "Transaction should fail due to volatile data access out of gas"
     );
 
-    let gas_used = result.gas_used();
+    let gas_used = result.tx_gas_used();
     // Key assertion: gas_used should be much less than gas_limit
     assert!(
         gas_used < 1_000_000_000,
@@ -957,7 +958,7 @@ fn test_mega_system_address_exempted_from_oracle_tracking() {
         gas_price: 0,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
 
     let mut evm = MegaEvm::new(context).with_inspector(NoOpInspector);

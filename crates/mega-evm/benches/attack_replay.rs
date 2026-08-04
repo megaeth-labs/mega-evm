@@ -51,8 +51,12 @@ use std::{
 
 use alloy_primitives::{hex, Address, Bytes, B256, U256};
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+// Imported as the struct itself (not the `MegaTransaction` type alias) so the
+// tuple-struct constructor is usable — constructors cannot be called through a
+// type alias.
 use mega_evm::{
-    test_utils::MemoryDatabase, EmptyExternalEnv, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    alloy_op_evm::OpTx as MegaTransaction, test_utils::MemoryDatabase, EmptyExternalEnv,
+    MegaContext, MegaEvm, MegaSpecId,
 };
 use revm::{
     context::{
@@ -61,9 +65,14 @@ use revm::{
         TxEnv,
     },
     interpreter::{interpreter::EthInterpreter, Interpreter},
-    primitives::TxKind,
+    primitives::{hardfork::SpecId, TxKind},
     Context, ExecuteEvm, InspectEvm, Inspector, MainBuilder, MainContext,
 };
+
+/// Cancun predates EIP-7825's `tx_gas_limit_cap` (2^24). The fixture uses a
+/// multi-gigagas `gas_limit`; revm 40's `mainnet()` defaults to Osaka and
+/// would reject the tx. Matches the `revm_pinned` subject baseline.
+const REVM_FORK: SpecId = SpecId::CANCUN;
 use serde_json::Value;
 
 /// Captured fixture; see `fixtures/known_attack_deploy.json` for provenance.
@@ -225,7 +234,7 @@ fn build_mega_tx(tx: &TxFixture) -> MegaTransaction {
         .value(tx.value)
         .chain_id(Some(tx.chain_id))
         .build_fill();
-    let mut mega_tx = MegaTransaction::new(inner);
+    let mut mega_tx = MegaTransaction(op_revm::OpTransaction::new(inner));
     // The handler expects `enveloped_tx` to be set for EIP-2718 typed txns,
     // but the value isn't consumed by the limit-check / EVM path. Use empty.
     mega_tx.enveloped_tx = Some(Bytes::new());
@@ -299,7 +308,7 @@ fn sanity_check_mega(
     let slot_count: usize = state.values().map(|a| a.storage.len()).sum();
     eprintln!(
         "sanity[{name}]: gas_used={}  variant={}  accounts={}  storage_slots={}",
-        result.gas_used(),
+        result.tx_gas_used(),
         variant,
         state.len(),
         slot_count,
@@ -334,6 +343,10 @@ fn sanity_check_pure_revm(
 ) {
     let mut evm = Context::mainnet()
         .modify_cfg_chained(|cfg| {
+            // Sets gas params along with the spec: revm 40 keeps per-spec
+            // `GasParams` in `CfgEnv`, so assigning `cfg.spec` alone would
+            // leave the default (Osaka) params — and the 2^24 gas cap — in place.
+            cfg.set_spec_and_mainnet_gas_params(REVM_FORK);
             cfg.chain_id = tx_fixture.chain_id;
             cfg.disable_balance_check = true;
             cfg.disable_base_fee = true;
@@ -357,7 +370,7 @@ fn sanity_check_pure_revm(
         ExecutionResult::Revert { output, .. } => format!("Revert(output_len={})", output.len()),
         ExecutionResult::Halt { reason, .. } => format!("Halt({reason:?})"),
     };
-    eprintln!("sanity[pure_revm]: gas_used={}  variant={}", res.gas_used(), variant);
+    eprintln!("sanity[pure_revm]: gas_used={}  variant={}", res.tx_gas_used(), variant);
     assert!(
         variant.starts_with("Success(Create"),
         "pure revm did not deploy successfully: {variant}",
@@ -408,6 +421,9 @@ fn bench_attack_replay(c: &mut Criterion) {
             || {
                 let evm = Context::mainnet()
                     .modify_cfg_chained(|cfg| {
+                        // See REVM_FORK: pin below Osaka so the fixture gas
+                        // limit is not rejected by EIP-7825's 2^24 cap.
+                        cfg.set_spec_and_mainnet_gas_params(REVM_FORK);
                         cfg.chain_id = tx_fixture.chain_id;
                         cfg.disable_balance_check = true;
                         cfg.disable_base_fee = true;

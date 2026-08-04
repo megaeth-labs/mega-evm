@@ -13,9 +13,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    alloy_op_evm::{OpTx, OpTxError},
+    op_revm::OpTransaction,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, ACCESS_CONTROL_ADDRESS,
+    ACCESS_CONTROL_ADDRESS,
 };
 use revm::{
     bytecode::opcode::*,
@@ -53,7 +55,7 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context =
         MegaContext::new(db, spec).with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
     context.modify_chain(|chain| {
@@ -61,7 +63,7 @@ fn transact(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -79,7 +81,7 @@ fn transact_with_compute(
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx).unwrap();
     let compute = evm.ctx_ref().additional_limit.borrow().get_usage().compute_gas;
@@ -93,14 +95,14 @@ fn transact_with_limits(
     db: &mut MemoryDatabase,
     tx: TxEnv,
     limits: EvmTxRuntimeLimits,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(limits);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
         chain.operator_fee_constant = Some(U256::from(0));
     });
     let mut evm = MegaEvm::new(context);
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -845,14 +847,16 @@ fn test_stipend_receiving_child_tx_level_rescue_rex5() {
     match &result.result {
         ExecutionResult::Halt {
             reason: MegaHaltReason::VolatileDataAccessOutOfGas { limit, .. },
-            gas_used,
+            gas,
+            ..
         } => {
+            let gas_used = gas.tx_gas_used();
             assert!(
                 *limit <= 1_000_000,
                 "detained limit should stay within the tx compute gas limit, got {limit}"
             );
             assert!(
-                *gas_used < 200_000,
+                gas_used < 200_000,
                 "REX5 rescue_gas must refund excess gas — gas_used {gas_used} indicates no \
                  refund occurred. Allowance must NOT inflate the rescued amount; it never \
                  entered gas.limit() on REX5"

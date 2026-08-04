@@ -2,8 +2,8 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    test_utils::MemoryDatabase, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction,
+    alloy_op_evm::OpTx, op_revm::OpTransaction, test_utils::MemoryDatabase, EvmTxRuntimeLimits,
+    MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
 use revm::{
     context::{result::ExecutionResult, tx::TxEnvBuilder},
@@ -48,13 +48,13 @@ pub(crate) fn transact(
     });
     let tx =
         TxEnvBuilder::default().caller(CALLER).call(CONTRACT).gas_limit(100_000_000).build_fill();
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = OpTx(OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     let mut evm = MegaEvm::new(context);
     let result =
         alloy_evm::Evm::transact_raw(&mut evm, tx).expect("tx should not surface EVMError");
     let usage = evm.ctx_ref().additional_limit.borrow().get_usage();
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     Outcome {
         result: result.result,
         compute_gas: usage.compute_gas,

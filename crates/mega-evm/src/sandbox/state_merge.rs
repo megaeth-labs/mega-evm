@@ -147,7 +147,10 @@ fn apply_sandbox_state_journaled_inner<DB: AlloyDatabase>(
         // Nonce diff (one NonceChange entry per increment for correct revert).
         let nonce_diff = sandbox_account.info.nonce - parent_nonce;
         for _ in 0..nonce_diff {
-            journal.inner.journal.push(JournalEntry::NonceChange { address: *address });
+            journal.inner.journal.push(JournalEntry::NonceChange {
+                address: *address,
+                previous_nonce: parent_nonce,
+            });
         }
         if nonce_diff > 0 {
             journal.inner.state.get_mut(address).unwrap().info.nonce = sandbox_account.info.nonce;
@@ -351,7 +354,7 @@ mod tests {
     use revm::{
         context_interface::journaled_state::JournalTr,
         database::EmptyDB,
-        state::{Account, AccountInfo, EvmStorageSlot},
+        state::{Account, AccountInfo, EvmStorageSlot, TransactionId},
         Database, DatabaseCommit,
     };
 
@@ -365,6 +368,7 @@ mod tests {
             nonce: 1,
             code_hash,
             code: Some(code),
+            account_id: None,
         });
         account.mark_touch();
         account.mark_created();
@@ -381,9 +385,10 @@ mod tests {
         let mut sandbox_state = EvmState::default();
         sandbox_state.insert(deploy_addr, {
             let mut account = sandbox_created_account(Bytes::from_static(&[0x60, 0x00]));
-            account
-                .storage
-                .insert(U256::from(0), EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0));
+            account.storage.insert(
+                U256::from(0),
+                EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), TransactionId::ZERO),
+            );
             account
         });
 
@@ -423,6 +428,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             });
             acc.mark_touch();
             acc
@@ -435,6 +441,7 @@ mod tests {
                 nonce: 1,
                 code_hash: getter_code_hash,
                 code: None,
+                account_id: None,
             });
             acc.mark_cold();
             acc
@@ -454,6 +461,7 @@ mod tests {
                 nonce: 1,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             });
             acc.mark_touch();
             acc
@@ -462,8 +470,10 @@ mod tests {
         // Deploy address: new account with code and storage.
         sandbox_state.insert(deploy_addr, {
             let mut acc = sandbox_created_account(Bytes::from_static(&[0x60, 0x00]));
-            acc.storage
-                .insert(U256::from(0), EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0));
+            acc.storage.insert(
+                U256::from(0),
+                EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), TransactionId::ZERO),
+            );
             acc
         });
         sandbox_state.insert(getter_addr, {
@@ -472,8 +482,10 @@ mod tests {
                 nonce: 1,
                 code_hash: getter_code_hash,
                 code: Some(getter_code),
+                account_id: None,
             });
-            acc.storage.insert(read_only_slot, EvmStorageSlot::new(read_only_value, 0));
+            acc.storage
+                .insert(read_only_slot, EvmStorageSlot::new(read_only_value, TransactionId::ZERO));
             acc
         });
 
@@ -602,6 +614,7 @@ mod tests {
                 nonce: 1,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             })
         });
         let journal_len_before = journal.inner.journal.len();
@@ -614,6 +627,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             });
             account.mark_touch();
             account
@@ -655,9 +669,10 @@ mod tests {
         let mut sandbox_state = EvmState::default();
         sandbox_state.insert(deploy_addr, {
             let mut account = sandbox_created_account(Bytes::from_static(&[0x60, 0x00]));
-            account
-                .storage
-                .insert(deployed_slot, EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), 0));
+            account.storage.insert(
+                deployed_slot,
+                EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), TransactionId::ZERO),
+            );
             account
         });
 
@@ -693,8 +708,11 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             });
-            account.storage.insert(storage_slot, EvmStorageSlot::new(original_storage, 0));
+            account
+                .storage
+                .insert(storage_slot, EvmStorageSlot::new(original_storage, TransactionId::ZERO));
             account
         });
         let checkpoint = JournalTr::checkpoint(journal);
@@ -764,6 +782,7 @@ mod tests {
                 nonce: 0,
                 code_hash: parent_code_hash,
                 code: Some(parent_code),
+                account_id: None,
             })
         });
 
@@ -777,6 +796,7 @@ mod tests {
                 nonce: 0,
                 code_hash: sandbox_code_hash,
                 code: Some(sandbox_code),
+                account_id: None,
             });
             acc.mark_touch();
             acc
@@ -806,6 +826,7 @@ mod tests {
                 // Non-empty code_hash but `code: None` — exactly the invariant violation.
                 code_hash: revm::primitives::keccak256([0x60u8, 0x00]),
                 code: None,
+                account_id: None,
             });
             acc.mark_touch();
             acc
@@ -833,6 +854,7 @@ mod tests {
                 nonce: 5,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             })
         });
 
@@ -891,6 +913,7 @@ mod tests {
                 nonce: 0,
                 code_hash: KECCAK_EMPTY,
                 code: None,
+                account_id: None,
             })
         });
 
