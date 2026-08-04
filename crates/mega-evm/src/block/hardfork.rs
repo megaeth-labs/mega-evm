@@ -611,6 +611,21 @@ mod tests {
     use crate::SequencerRegistryConfig;
 
     #[test]
+    fn test_variants_declaration_order_climbs_the_ladder() {
+        // The reverse scan in `hardfork()` and the skipped-rung rule in `validate_schedule`
+        // assume declaration order maps to strictly ascending spec rungs; this fails at a
+        // misplaced variant instead of two derived tests away.
+        for pair in MegaHardfork::VARIANTS.windows(2) {
+            assert!(
+                (pair[0].spec_id() as u8) < (pair[1].spec_id() as u8),
+                "{:?} -> {:?} must climb the spec ladder",
+                pair[0],
+                pair[1],
+            );
+        }
+    }
+
+    #[test]
     fn test_mega_hardfork_spec_ids_match_expected_specs() {
         // Note: MiniRex1 and MiniRex2 map to alias rungs whose behavior reverts to earlier specs.
         let cases = [

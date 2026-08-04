@@ -332,6 +332,32 @@ mod tests {
     /// always satisfies the property, so only rejection cases can detect a weakened guard
     /// inside the checker.
     #[test]
+    fn test_ladder_positions_are_pinned() {
+        // A downstream variant-index codec (bincode-style) of `MegaSpecId` — or of a
+        // container holding it — silently misreads old data if discriminants renumber.
+        // Pinning every position turns any future renumbering into a loud diff here,
+        // where the review attention is.
+        let pinned: [(MegaSpecId, u8); 12] = [
+            (MegaSpecId::EQUIVALENCE, 0),
+            (MegaSpecId::MINI_REX, 1),
+            (MegaSpecId::MINI_REX_1, 2),
+            (MegaSpecId::MINI_REX_2, 3),
+            (MegaSpecId::REX, 4),
+            (MegaSpecId::REX1, 5),
+            (MegaSpecId::REX2, 6),
+            (MegaSpecId::REX3, 7),
+            (MegaSpecId::REX4, 8),
+            (MegaSpecId::REX5, 9),
+            (MegaSpecId::REX6, 10),
+            (MegaSpecId::REX7, 11),
+        ];
+        assert_eq!(pinned.len(), MegaSpecId::ALL.len());
+        for (spec, position) in pinned {
+            assert_eq!(spec as u8, position, "{spec:?} moved on the ladder");
+        }
+    }
+
+    #[test]
     fn test_is_ladder_prefix_rejects_malformed_lists() {
         assert!(is_ladder_prefix(MegaSpecId::ALL));
         assert!(is_ladder_prefix(&[]), "the empty prefix is a ladder prefix");
