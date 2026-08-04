@@ -1016,9 +1016,6 @@ where
 
     let tx_hash = target_tx.inner.inner.tx_hash();
     let path = dir.join(format!("{tx_hash:#x}.json"));
-    // Refuse overwrite without the flag before carrying a ready draft, so the
-    // harvest path never has to re-check and a finish failure cannot be confused
-    // with an overwrite refusal.
     // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
     // harvest path never confuses a finish failure with an overwrite refusal.
     // Correctness against a concurrent creator is still enforced at materialize
