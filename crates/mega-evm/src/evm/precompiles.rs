@@ -271,6 +271,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
 }
 
 /// A builder function to build dynamic precompiles for a given [`MegaSpecId`].
+///
+/// The spec passed to the builder is the behavior projection and is never an alias spec:
+/// dynamic precompiles are execution semantics, so during an alias window the builder is
+/// invoked with the alias's behavior target (e.g. `EQUIVALENCE` while `MINI_REX_1` is the
+/// resolved spec).
 pub type DynPrecompilesBuilder =
     Arc<dyn Fn(MegaSpecId) -> HashMap<Address, DynPrecompile> + Send + Sync>;
 
