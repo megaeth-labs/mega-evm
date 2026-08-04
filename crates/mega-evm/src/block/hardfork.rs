@@ -43,7 +43,7 @@ hardfork! {
 impl MegaHardfork {
     /// Whether this fork introduces new behavior — its spec is not an alias. Alias forks
     /// (`MiniRex1`, `MiniRex2`) schedule a rung whose behavior belongs to an earlier spec.
-    pub(crate) fn introduces_spec(self) -> bool {
+    pub(crate) fn introduces_behavior(self) -> bool {
         !self.spec_id().is_alias()
     }
 
@@ -306,7 +306,7 @@ pub trait MegaHardforks: OpHardforks {
         }
 
         for fork in MegaHardfork::VARIANTS {
-            if !fork.introduces_spec() || scheduled(*fork) {
+            if !fork.introduces_behavior() || scheduled(*fork) {
                 continue;
             }
             if let Some(above) = MegaHardfork::VARIANTS
@@ -789,12 +789,13 @@ mod tests {
     /// every behavior-introducing fork, on every canonical schedule. This is what makes the
     /// position-projected predicates a no-op switch on well-formed ladders.
     ///
-    /// Forks that introduce no new spec — `MiniRex1` (rollback to `EQUIVALENCE`) and `MiniRex2`
-    /// (restoration to `MINI_REX`) — are not recoverable from a spec ordinal by construction, so
-    /// nothing may gate on them. The predicate is derived rather than hardcoded so a future
-    /// rollback fork is classified automatically.
+    /// Forks that introduce no new behavior — `MiniRex1` (rollback to `EQUIVALENCE`) and
+    /// `MiniRex2` (restoration to `MINI_REX`) — may be omitted from a schedule whose ladder
+    /// climbs past their rungs, so their activation events are not recoverable from position and
+    /// nothing may gate on them this way. The predicate is derived rather than hardcoded so a
+    /// future rollback fork is classified automatically.
     #[test]
-    fn test_floor_matches_per_fork_activation_for_spec_introducing_forks() {
+    fn test_position_matches_per_fork_activation_for_behavior_introducing_forks() {
         for hf in [
             crate::mainnet_hardforks(),
             crate::testnet_hardforks(),
@@ -810,7 +811,7 @@ mod tests {
             for ts in stamps {
                 let floor = hf.max_activated_spec_id(ts);
                 for fork in MegaHardfork::VARIANTS {
-                    if !fork.introduces_spec() {
+                    if !fork.introduces_behavior() {
                         continue;
                     }
                     assert_eq!(
