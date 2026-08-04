@@ -151,8 +151,10 @@ impl MegaSpecId {
     }
 
     /// Whether this spec is an alias — a rung whose behavior belongs to another spec.
+    /// Derived from [`behavior`](Self::behavior), so a future alias needs only its projection
+    /// arm; there is no second list to extend.
     pub const fn is_alias(self) -> bool {
-        matches!(self, Self::MINI_REX_1 | Self::MINI_REX_2)
+        self.behavior() as u8 != self as u8
     }
 
     /// Returns `true` if `other`'s BEHAVIOR is enabled under `self` — the gate for execution
