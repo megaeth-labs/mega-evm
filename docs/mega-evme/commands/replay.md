@@ -69,14 +69,14 @@ Replay every transaction of block `N`, given in decimal or `0x`-prefixed hex.
 
 Batch mode reports one summary per transaction and has no meaningful semantics for single-file fixture dumps, tracing, state dumps, or what-if knobs, so the following are rejected up front with an explanatory error rather than silently ignored:
 
-- `--dump-fixture` — use [`--dump-fixture-dir`](#dump-fixture-dir-dir) for batch sedimentation
+- `--dump-fixture` — use [`--dump-fixture-dir`](#--dump-fixture-dir-dir) for batch sedimentation
 - Transaction overrides (`--override.gas-limit`, `--override.value`, `--override.input`, `--override.input-file`)
 - `--override.spec` — each block's spec is auto-detected from its timestamp
 - All trace options (`--trace`, `--trace.output`, `--tracer`, `--trace.*`)
 - All state dump options (`--dump`, `--dump.output`)
 
 Single-transaction replay keeps accepting all of them.
-Batch mode additionally accepts [`--dump-fixture-dir`](#dump-fixture-dir-dir) for per-target fixture sedimentation.
+Batch mode additionally accepts [`--dump-fixture-dir`](#--dump-fixture-dir-dir) for per-target fixture sedimentation.
 
 ### Output
 
@@ -118,7 +118,7 @@ Without `--json`, each transaction is printed with a header naming its hash, blo
 A final one-line summary (transactions replayed, transactions failed, elapsed time) is logged at `INFO` level, so pass `-vvv` to see it.
 
 With [`--verify-receipt`](#receipt-verification), each result line additionally carries a `verification` object.
-With [`--dump-fixture-dir`](#dump-fixture-dir-dir), each result line additionally carries a `fixture` object (`path`, `skipped`, or `error`).
+With [`--dump-fixture-dir`](#--dump-fixture-dir-dir), each result line additionally carries a `fixture` object (`path`, `skipped`, or `error`).
 
 ### Exit Status
 
@@ -286,7 +286,7 @@ On subsequent runs the existing file is loaded, its entries are merged into the 
 The updated set of entries is persisted back to the same file on clean exit.
 
 The file also embeds an external-environment snapshot — currently the set of `--bucket-capacity` values in effect — so the captured fixture is self-contained.
-If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them (an intentional A→B refresh of an existing capture is accepted at persist when no concurrent writer changed the on-disk snapshot; a true concurrent conflict hard-errors and names the load-time, caller, and on-disk values — see [state management](../configuration/state-management.md#rpc-cache)).
+If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them (an intentional A→B refresh of an existing capture is accepted at persist when no concurrent writer changed the on-disk snapshot; a true concurrent conflict hard-errors and names the load-time, caller, and on-disk values — see [state management](../configuration/state-management.md#rpc-cache-and-retry)).
 
 The capture is written even when the replay itself failed — an execution or verification failure is exactly the case you want to debug offline.
 If the write fails, it is reported on stderr like any other failure, next to the run's own error; the run error keeps the exit code, since it is the root cause.
@@ -370,7 +370,7 @@ state-test ./fixtures/0xabc123.json
 
 Batch-only.
 Dump a self-validating fixture for every successfully replayed target into `<DIR>/<tx_hash>.json`.
-The fixture content and format match the single-transaction [`--dump-fixture`](#dump-fixture-file) path (same EEST schema, same sorted `megaEnv`, same self-validation via `state-test`).
+The fixture content and format match the single-transaction [`--dump-fixture`](#--dump-fixture-file) path (same EEST schema, same sorted `megaEnv`, same self-validation via `state-test`).
 The directory is created if it does not exist.
 Existing files are refused unless `--overwrite` is also set — a refused overwrite is a failed dump for that target, not a skip.
 

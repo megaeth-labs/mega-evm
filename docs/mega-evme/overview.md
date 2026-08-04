@@ -86,7 +86,7 @@ A batch run (`--tx-file` / `--block`) reports every target on its own line and t
 A target that never replayed was also never verified, which is why an infrastructure failure outranks a mismatch.
 
 On failure the run also prints a report: one `error: <message>` line per failure on stderr, plus — with `--json` — a structured object as the last line of stdout, so a machine-readable run never ends with empty output.
-A run reports more than one line when a secondary failure must not go unnoticed but does not own the exit code — an unwritable [`--rpc.capture-file`](commands/replay.md#rpccapture-file-path) behind an earlier replay failure, for instance.
+A run reports more than one line when a secondary failure must not go unnoticed but does not own the exit code — an unwritable [`--rpc.capture-file`](commands/replay.md#--rpccapture-file-path) behind an earlier replay failure, for instance.
 The structured object always carries the failure the exit code came from.
 
 ```json
