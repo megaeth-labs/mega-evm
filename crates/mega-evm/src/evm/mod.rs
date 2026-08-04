@@ -619,9 +619,10 @@ mod tests {
         // block budget. This preserves byte-level behavior of EIP-2935 / EIP-4788
         // pre-block calls across all specs.
         SystemCallEvm::system_call_one_with_caller(&mut evm, CALLER, CALLEE, Bytes::new()).unwrap();
-        // Literal, not `SYSTEM_CALL_GAS_LIMIT_FLOOR`: this assertion verifies revm's
-        // upstream hardcoded default. If upstream ever drifts from our floor, this
-        // test should fail loudly rather than be auto-aligned by our constant.
+        // Literal, not `PRE_REX5_SYSTEM_CALL_GAS_LIMIT`: the default entry overrides
+        // upstream's drifted constant with MegaETH's frozen 30M, and this assertion
+        // pins that value itself. If the constant is ever changed, this test should
+        // fail loudly rather than be auto-aligned by comparing against it.
         assert_eq!(evm.inner.ctx.tx.base.gas_limit, 30_000_000);
     }
 
