@@ -1,6 +1,6 @@
 ---
 description: MegaETH precompile gas overrides — KZG Point Evaluation and ModExp cost schedules diverging from standard Ethereum.
-spec: Rex5
+spec: Rex6
 ---
 
 # Precompiles
@@ -26,7 +26,11 @@ If multiple MegaETH specs share the same inherited upstream baseline, an impleme
 | ModExp               | `0x05`  | Uses the Osaka / [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) pricing schedule |
 
 For KZG Point Evaluation, if the supplied gas is less than `KZG_POINT_EVALUATION_GAS_COST`, the precompile MUST fail with `OutOfGas`.
-Otherwise the node MUST charge exactly `KZG_POINT_EVALUATION_GAS_COST` gas for the precompile.
+Otherwise the precompile runs, and on a successful return the node MUST charge exactly `KZG_POINT_EVALUATION_GAS_COST` gas for it.
+
+The fixed charge applies to a successful return only.
+If the precompile runs and then fails — for example on malformed input — the inherited EVM's precompile-failure semantics apply unchanged, and the caller loses the entire gas limit it forwarded rather than the fixed cost.
+The compute gas recorded for that failure is a separate amount; see [Compute Gas Accounting](compute-gas.md#precompiles).
 
 For ModExp, the node MUST use the Osaka / [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) pricing schedule instead of the earlier inherited pricing schedule.
 

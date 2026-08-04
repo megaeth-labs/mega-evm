@@ -73,7 +73,7 @@ Abstract
 ### 5. Spec Versioning
 
 - [ ] **Latest spec implicit**: Main content does not mention the latest spec name in Specification, Constants, or Motivation sections.
-- [ ] **Unstable content in `<details>`**: Unstable (not-yet-activated) spec content is wrapped in `<details>` blocks.
+- [ ] **Unstable content in `<details>`**: Content for the unstable spec (the one still open for change) is wrapped in `<details>` blocks. A frozen spec that no network has scheduled yet is NOT unstable — its content belongs in main prose, with its network status shown by the upgrade page's activation tabs.
 - [ ] **Spec History format**: Overview pages use simple lists; concept pages may use tables. Only list specs that changed relevant behavior.
 
 ### 6. Cross-Linking

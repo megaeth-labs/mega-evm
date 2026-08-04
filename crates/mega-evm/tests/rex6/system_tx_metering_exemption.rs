@@ -69,7 +69,7 @@ impl BucketHasher for SingleBucketHasher {
 
 fn rex6_chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default()
-        .with_all_activated()
+        .with_all_activated_through(MegaSpecId::REX6)
         .with_params(SequencerRegistryConfig {
             rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
             rex5_initial_admin: BOOTSTRAP_ADMIN,

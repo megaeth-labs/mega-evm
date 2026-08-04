@@ -7,6 +7,7 @@
 
 - [Overview](evm/overview.md)
 - [Dual Gas Model](evm/dual-gas-model.md)
+- [Compute Gas Accounting](evm/compute-gas.md)
 - [Resource Limits](evm/resource-limits.md)
 - [Resource Accounting](evm/resource-accounting.md)
 - [Gas Detention](evm/gas-detention.md)
@@ -38,6 +39,7 @@
 - [Rex4](upgrades/rex4.md)
 - [Rex5](upgrades/rex5.md)
 - [Rex6](upgrades/rex6.md)
+- [Rex7](upgrades/rex7.md)
 
 ## Reference
 

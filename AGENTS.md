@@ -55,14 +55,17 @@ Git submodules are required — clone with `--recursive` or run `git submodule u
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6`
+Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6` → `REX7`
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _`REX6` is the current unstable spec under active development._
+  - _`REX7` is the current unstable spec under active development._
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
+  - Frozen and activated are separate properties.
+    `REX6` is frozen but has no activation timestamp on mainnet or testnet, so both chains still execute `REX5`.
+    Freezing forbids further semantic change; scheduling is a later, separate decision.
   - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Multiple hardforks can map to one spec.
@@ -306,7 +309,8 @@ When the agent is requested to implement a new feature or bug fix, it should con
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **Do NOT modify behavior for existing stable specs.**
-  All specs through `REX5` are stable (frozen); `REX6` is the unstable spec under active development.
+  All specs through `REX6` are frozen; `REX7` is the unstable spec under active development.
+  A spec being frozen is independent of whether any network has scheduled it — `REX6` is frozen and unscheduled, and is still off-limits to behavior changes.
   New EVM behavior, gas cost changes, or opcode modifications for stable specs **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
   Never change what an existing stable spec does.
 - **System contract changes require a new spec.**

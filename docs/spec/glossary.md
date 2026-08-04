@@ -1,6 +1,6 @@
 ---
 description: MegaETH glossary — definitions of protocol terms including EVM blocks, mini-blocks, compute gas, storage gas, and gas detention.
-spec: Rex5
+spec: Rex6
 ---
 
 # Glossary
@@ -36,6 +36,8 @@ Standard EVM gas — identical to Ethereum (Optimism Isthmus / Ethereum Prague).
 Every opcode costs the same compute gas as it does on mainnet Ethereum (e.g., `ADD` = 3 gas, cold `SLOAD` = 2,100 gas).
 
 One of the two components of total gas cost in MegaETH's [dual gas model](evm/dual-gas-model.md).
+
+How much of an operation's inherited EVM gas is recorded as compute gas is defined in [Compute Gas Accounting](evm/compute-gas.md).
 
 ## Storage gas
 
@@ -161,7 +163,7 @@ A set of MegaETH verifiable behaviors: the complete definition of what a correct
 
 Captures the execution-layer semantics that determine node correctness.
 
-Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5`.
+Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`.
 
 See [Hardforks and Specs](hardfork-spec.md).
 

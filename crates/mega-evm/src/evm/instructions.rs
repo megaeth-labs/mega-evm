@@ -215,6 +215,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
                 EthInterpreter,
                 MegaContext<DB, ExtEnvs>,
             >()),
+            MegaSpecId::REX7 => EthInstructions::new(rex7::instruction_table::<
+                EthInterpreter,
+                MegaContext<DB, ExtEnvs>,
+            >()),
         };
         Self { spec, inner: instruction_table }
     }
@@ -408,6 +412,23 @@ mod rex6 {
         WIRE::Stack: StackInspectTr,
     {
         rex5::instruction_table::<WIRE, H>()
+    }
+}
+
+mod rex7 {
+    use super::*;
+
+    /// Returns the instruction table for the `REX7` spec.
+    ///
+    /// Changes from Rex6: none yet.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        rex6::instruction_table::<WIRE, H>()
     }
 }
 

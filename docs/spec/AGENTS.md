@@ -155,6 +155,14 @@ Optional, if it helps orient readers.
 - State edge cases explicitly as normative rules (e.g., "For state that does not yet exist, the node MUST...").
 - Do not leave behavior undefined — if the spec doesn't say what happens, implementers will guess differently.
 
+### Universal Claims
+
+A rule stated for "every X" is read as covering every X, so it must be checked against every X before it is written.
+Two habits keep that honest:
+
+- **Declare the page's lower bound.** A page whose rules do not apply from Equivalence onward MUST say where they start, once, before stating them — as `evm/compute-gas.md` does with "Compute gas metering begins at MiniRex." Without it, every later sentence on the page silently claims to cover Equivalence, which runs the unmodified upstream instruction table and therefore has none of MegaETH's wrappers, storage-gas charges, or resource lanes.
+- **Look for the counterexample before writing the quantifier.** For a claim spanning specs, resolve it through the per-spec instruction table selection; for one spanning opcodes or call schemes, check each named opcode's own wrapper. Where the implementation has an exception, name the exception in the rule rather than leaving the rule clean — an implementer following a rule mega-evm does not keep will diverge, and a halt reason or charge ordering is observable.
+
 ### Charging Lifecycle
 
 - For any cost or fee, specify WHEN it is charged: before execution, at the opcode, or post-execution.
@@ -162,18 +170,38 @@ Optional, if it helps orient readers.
 
 ### Spec Versioning
 
-- Main content in concept pages MUST describe the latest stable spec's behavior only.
+A spec has two independent properties, and they MUST NOT be conflated:
+
+- **Maturity** — `unstable` (semantics may still change) or `frozen` (semantics are fixed forever).
+  Exactly one spec is unstable at a time, and it is always the latest.
+- **Network status** — `not scheduled`, `scheduled`, or `active`, tracked **per network** (mainnet and testnet each have their own).
+  A frozen spec is not automatically live: it takes effect on a network only at the block where that network activates it.
+
+Documentation placement follows **maturity**, not network status:
+
+- Main content in concept pages MUST describe the latest **frozen** spec's behavior only.
   Previous spec behavior belongs in the Spec History table or upgrade pages.
   Unstable spec behavior MUST be placed in `<details>` blocks, never in main prose or tables.
 - **The latest spec is implicit.**
   Do not mention the latest spec name in the Specification, Constants, or Motivation sections.
-  The `spec` frontmatter field declares which spec the page describes.
+  The `spec` frontmatter field declares which spec the page describes; it names the latest frozen spec, whether or not that spec is live anywhere.
   Readers should be able to read the main content without encountering "as of Rex3" or "in Rex3" qualifiers.
   The Rationale section MAY reference spec names when explaining historical design decisions.
-- Wrap unstable (not-yet-activated) spec content in `<details>` blocks with a clear label (e.g., "SpecName (unstable): ...").
+- Wrap unstable spec content in `<details>` blocks with a clear label (e.g., "SpecName (unstable): ...").
 - Unstable content MUST still use normative language within the `<details>` block.
+- Do NOT use `<details>` to mark a frozen-but-unscheduled spec.
+  Its content belongs in main prose like any other frozen spec; network status is conveyed by the upgrade overview's activation tabs, not by hiding the specification.
+  Activation timestamps live in `upgrades/overview.md` alone — an individual upgrade page carries none, so there is one place to edit when a spec is scheduled.
 - **Glossary exception**: glossary entries for unstable-spec terms do not use `<details>` blocks.
   Instead, mark them with inline text (e.g., "_(SpecName, unstable)_") at the start of the definition.
+- **Roster-page exception**: a page whose subject is the spec ladder itself (`overview.md`, `hardfork-spec.md`, `upgrades/overview.md`, and the progression line in `glossary.md`) MUST carry the unstable spec in its progression and its per-spec summary, outside `<details>`.
+  A reader looking up which specs exist must not be shown a ladder that stops one short of reality, and a `<details>` block cannot express "this rung exists".
+  Every such entry MUST label the spec unstable where it is described, and MUST stay a summary — the normative text lives in the concept pages, still gated by `<details>` there.
+- **Replay-page exception**: a page whose subject is a cross-spec measurement that a replaying node must implement for every spec simultaneously (currently only `evm/compute-gas.md`) MAY carry per-frozen-spec behavior — spec-named rows, tables, and qualifiers — in its main Specification and Constants sections.
+  Such a page MUST state the current behavior first and derive historical behavior from it, MUST justify the departure in its Rationale section, and MUST still keep unstable-spec behavior in `<details>` blocks.
+  Spec names in its main content are linked on first use per page; repeats stay unlinked.
+
+**Sealing a spec** (moving it from unstable to frozen) is therefore a documentation operation: lift its `<details>` blocks into main prose, replacing the behavior they superseded; move that superseded behavior into each page's Spec History; advance every `spec:` frontmatter field; and record the new spec's activation status on its upgrade page.
 
 ## Motivation and Rationale Section Rules
 
@@ -313,8 +341,9 @@ The old `mega-evm/docs` content is transitional and may be removed.
 
 - Use tables for structured data (gas costs, opcode lists, resource limits, constants).
 - Use unambiguous table values. Write "Unlimited", "No limit", or "N/A" — never use bare dashes ("—") which are ambiguous (not applicable? unknown? unlimited?).
-- Use `<details>` blocks for unstable (not-yet-activated) features.
+- Use `<details>` blocks for unstable-spec features only — never for a frozen spec that is merely unscheduled.
 - Use `{% hint style="info" %}` sparingly — only for non-normative notes that help implementers understand design intent. Never for developer tips.
 - Use `{% hint style="warning" %}` for unstable spec warnings.
+  A frozen-but-unscheduled spec gets `{% hint style="info" %}` instead: it is a status note, not a caveat about correctness.
 - Do NOT use `{% hint style="success" %}` in spec pages — it implies developer guidance.
 - Do NOT use `{% hint style="danger" %}` for normative rules — normative rules belong in plain prose with MUST/MUST NOT. Reserve `{% hint style="danger" %}` only for deprecation notices.

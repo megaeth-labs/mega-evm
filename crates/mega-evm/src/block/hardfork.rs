@@ -35,6 +35,8 @@ hardfork! {
         Rex5,
         /// The tenth hardfork (sixth patch to Rex).
         Rex6,
+        /// The eleventh hardfork (seventh patch to Rex).
+        Rex7,
     }
 }
 
@@ -61,6 +63,7 @@ impl MegaHardfork {
             Self::Rex4 => MegaSpecId::REX4,
             Self::Rex5 => MegaSpecId::REX5,
             Self::Rex6 => MegaSpecId::REX6,
+            Self::Rex7 => MegaSpecId::REX7,
         }
     }
 }
@@ -275,6 +278,13 @@ pub trait MegaHardforks: OpHardforks {
         self.max_activated_spec_id(timestamp).reaches(MegaSpecId::REX6)
     }
 
+    /// Returns `true` once the activated-spec floor has reached [`MegaSpecId::REX7`], the spec
+    /// introduced by [`MegaHardfork::Rex7`]. Floor-projected — see the trait docs; for the raw
+    /// activation event use [`mega_fork_activation`](Self::mega_fork_activation).
+    fn is_rex_7_active_at_timestamp(&self, timestamp: BlockTimestamp) -> bool {
+        self.max_activated_spec_id(timestamp).reaches(MegaSpecId::REX7)
+    }
+
     /// Checks the schedule for well-formedness, i.e., that it describes a chain climbing the
     /// spec ladder rung by rung.
     ///
@@ -291,12 +301,10 @@ pub trait MegaHardforks: OpHardforks {
     ///   timestamp-scoped resolution here and would silently deactivate the fork.
     /// - Scheduled forks activate in declaration order: a later-declared fork must not activate
     ///   strictly before an earlier-declared one.
-    /// - No skipped rungs: a spec-introducing fork may be unscheduled only if no scheduled fork
-    ///   maps to an equal-or-higher spec. Patch forks are exempt — testnet legitimately never
-    ///   schedules `MiniRex1`/`MiniRex2`.
-    /// - No orphan patches: a scheduled patch fork requires the spec-introducing fork it patches to
-    ///   be scheduled. Rolling back or restoring a fork that never happened is a configuration
-    ///   mistake even though execution resolves it harmlessly.
+    /// - No skipped rungs: a behavior-introducing fork may be unscheduled only if no scheduled
+    ///   fork maps to an equal-or-higher rung. Alias forks are exempt as the *missing* side —
+    ///   testnet legitimately never schedules `MiniRex1`/`MiniRex2` — but an alias scheduled
+    ///   without its base is itself a skipped rung (the alias's rung sits above the base's).
     /// - Per-fork parameters required by a scheduled fork are present (`Rex5` requires
     ///   [`SequencerRegistryConfig`](crate::SequencerRegistryConfig), `Rex6` requires
     ///   [`SequencerRegistryRex6Config`](crate::SequencerRegistryRex6Config)). This surfaces a
@@ -647,6 +655,7 @@ mod tests {
             (MegaHardfork::Rex4, MegaSpecId::REX4),
             (MegaHardfork::Rex5, MegaSpecId::REX5),
             (MegaHardfork::Rex6, MegaSpecId::REX6),
+            (MegaHardfork::Rex7, MegaSpecId::REX7),
         ];
 
         for (hardfork, expected_spec) in cases {
@@ -1178,17 +1187,20 @@ mod tests {
             .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(100))
             .with(MegaHardfork::Rex4, ForkCondition::Timestamp(200))
             .with(MegaHardfork::Rex5, ForkCondition::Timestamp(300))
-            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(400));
+            .with(MegaHardfork::Rex6, ForkCondition::Timestamp(400))
+            .with(MegaHardfork::Rex7, ForkCondition::Timestamp(500));
 
         assert_eq!(config.hardfork(99), None);
         assert_eq!(config.hardfork(100), Some(MegaHardfork::MiniRex));
         assert_eq!(config.hardfork(200), Some(MegaHardfork::Rex4));
         assert_eq!(config.hardfork(300), Some(MegaHardfork::Rex5));
         assert_eq!(config.hardfork(400), Some(MegaHardfork::Rex6));
+        assert_eq!(config.hardfork(500), Some(MegaHardfork::Rex7));
         assert_eq!(config.spec_id(99), MegaSpecId::EQUIVALENCE);
         assert_eq!(config.spec_id(100), MegaSpecId::MINI_REX);
         assert_eq!(config.spec_id(200), MegaSpecId::REX4);
         assert_eq!(config.spec_id(300), MegaSpecId::REX5);
         assert_eq!(config.spec_id(400), MegaSpecId::REX6);
+        assert_eq!(config.spec_id(500), MegaSpecId::REX7);
     }
 }

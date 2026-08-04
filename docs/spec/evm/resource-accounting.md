@@ -1,6 +1,6 @@
 ---
 description: MegaETH resource accounting specification — counter semantics, revert behavior, and per-opcode metering for compute gas, data size, KV updates, and state growth.
-spec: Rex5
+spec: Rex6
 ---
 
 # Resource Accounting
@@ -46,54 +46,28 @@ Unless explicitly stated otherwise on this page, resource trackers MUST be [call
 - usage created within a child call frame MUST be discarded if that child frame reverts,
 - and usage created within a child call frame MUST be merged into the parent call frame if that child call frame succeeds.
 
-The sole stable exception is [compute gas](../glossary.md#compute-gas), which MUST accumulate globally and MUST NOT be reverted.
-
-<details>
-<summary>Rex6 (unstable): creator nonce-bump write booked to the parent frame</summary>
+The sole exception is [compute gas](../glossary.md#compute-gas), which MUST accumulate globally and MUST NOT be reverted.
 
 #### Creator Nonce-Bump Frame Attribution
 
-Every `CREATE` / `CREATE2` bumps the creator's nonce, and that account-info write is charged to the data-size and KV-update dimensions.
+A `CREATE` / `CREATE2` bumps the creator's nonce, and that account-info write is charged to the data-size and KV-update dimensions.
+The creator's nonce bump survives a revert of the created frame under EVM semantics, so its accounting MUST follow the same scope.
 
-Pre-Rex6, the charge is recorded in the **child** (created) frame's discardable lane, so it is discarded when the child `CREATE` reverts — even though the creator's nonce bump survives the revert under EVM semantics.
+A node MUST record the creator nonce-bump account-info write (`ACCOUNT_UPDATE_DATA_SIZE` bytes of data size and one KV update) in the **parent** frame's discardable lane, so that it is discarded only when the parent itself reverts.
 
-Under Rex6, a node MUST record the creator nonce-bump account-info write (`ACCOUNT_UPDATE_DATA_SIZE` bytes of data size and one KV update) in the **parent** frame's discardable lane, so that it is discarded only when the parent itself reverts, matching the nonce bump's actual revert scope.
-
-</details>
+A node MUST record the charge even for a creation rejected for exceeding the call-depth limit or for insufficient creator balance, where no nonce bump follows.
 
 ### Compute Gas
 
-#### Definition
+Compute gas accounting is specified in full on its own page: see [Compute Gas Accounting](compute-gas.md).
 
-A node MUST track compute gas as the cumulative gas consumed by EVM execution, independent of [storage gas](dual-gas-model.md).
+That page defines the measurement window that derives compute gas from inherited EVM gas, the per-opcode metering classes, the non-opcode recording sites, and the exceed behavior.
 
-#### Included Usage
+Two properties matter for this page's purposes:
 
-A node MUST include the following in compute gas usage:
-
-- gas consumed by EVM instruction execution,
-- memory expansion costs,
-- and precompile costs.
-
-#### Excluded Usage
-
-A node MUST NOT subtract gas refunds from compute gas usage.
-Refunds affect final gas settlement but do not reduce the tracked compute gas consumed during execution.
-
-#### Revert Behavior
-
-Compute gas usage MUST NOT be reverted when a child call frame reverts.
-All compute gas spent by all executed call frames contributes to the transaction's total compute gas usage.
-
-#### Enforcement Reference
-
-If `compute_gas_used > effective_compute_gas_limit`, the transaction MUST halt.
-The effective limit MAY be reduced by [gas detention](gas-detention.md).
-
-#### Contract Creation Code Deposit
-
-For any contract creation (`CREATE`, `CREATE2`, or a contract-creation transaction), the code-deposit compute gas (`code_length × 200`, the standard EVM per-byte code-deposit cost inherited from Ethereum) MUST be recorded atomically with the deployment commit: it is recorded when the deployment's pre-commit success conditions hold, at the same point the EVM charges the code-deposit gas and commits the created contract.
-A node MUST NOT additionally record this code-deposit compute gas during post-execution compute-gas accounting; double-counting it is prohibited.
+- A node MUST track compute gas as the sum of the amounts recorded at the sites [Compute Gas Accounting](compute-gas.md) defines, independent of [storage gas](dual-gas-model.md).
+  It is not simply all EVM gas consumed: gas consumed by an operation whose measurement window never closes is deliberately not recorded.
+- Compute gas MUST accumulate globally and MUST NOT be reverted — the sole exception to the [revert behavior](#revert-behavior) that governs the other three dimensions.
 
 ### Data Size
 
@@ -120,6 +94,7 @@ The following contributions MUST be tracked within call frames and MUST be disca
 
 | Data Type                        | Size                                | Trigger                                  |
 | -------------------------------- | ----------------------------------- | ---------------------------------------- |
+| Log base                         | `LOG_BASE_DATA_SIZE`                | `LOG0`–`LOG4`                            |
 | Log topics                       | `LOG_TOPIC_DATA_SIZE × topic_count` | `LOG0`–`LOG4`                            |
 | Log data                         | `log_data.len()`                    | `LOG0`–`LOG4`                            |
 | SSTORE new write                 | `ACCOUNT_UPDATE_DATA_SIZE`          | `original == present && original != new` |
@@ -133,58 +108,26 @@ The following contributions MUST be tracked within call frames and MUST be disca
 Within a single call frame, a node MUST count a given account update at most once for data-size tracking.
 If the same account is updated multiple times within the same call frame — including the caller account across multiple value-transferring sub-calls or creates — subsequent updates in that call frame MUST NOT add additional `ACCOUNT_UPDATE_DATA_SIZE` bytes.
 
-<details>
-<summary>Rex6 (unstable): EIP-7702 authority updates narrowed to applied authorizations (data size)</summary>
+#### Value Self-Transfer Deduplication for Data Size
+
+A value-transferring call whose target equals its caller touches a single account, but the per-call accounting otherwise records a caller-side and a target-side account update.
+
+When a value-transferring call's target equals its caller, a node MUST count the account update once: the target-side `ACCOUNT_UPDATE_DATA_SIZE` charge MUST be suppressed, leaving the caller-side charge (or, at the top level, the transaction-start caller record) as the single charge for the account.
+Calls with distinct caller and target, and zero-value calls, are unchanged.
 
 #### Applied-Authorization Narrowing for Data Size
 
-Pre-Rex6, a node counts one `ACCOUNT_UPDATE_DATA_SIZE` authority account update for every authorization whose authority address is recoverable, including authorizations that are later skipped by the chain-id, nonce, or code application gates.
-
-Under Rex6, a node MUST count the `ACCOUNT_UPDATE_DATA_SIZE` authority account update only for an _applied_ authorization — one that passes all application gates and therefore writes the authority account.
+A node MUST count the `ACCOUNT_UPDATE_DATA_SIZE` authority account update only for an _applied_ authorization — one that passes all application gates and therefore writes the authority account.
 A node MUST NOT count a skipped authorization toward `authority_update_count`.
-The per-record `AUTHORIZATION_DATA_SIZE × authorization_count` contribution is unchanged and still counts every authorization in the list.
+The per-record `AUTHORIZATION_DATA_SIZE × authorization_count` contribution counts every authorization in the list, applied or not.
 
 When multiple authorizations target the same authority, a node MUST evaluate them sequentially against the authority nonce and MUST count each applied authorization independently.
 
-</details>
-
-<details>
-<summary>Rex6 (unstable): Per-log data-size base</summary>
-
-#### Per-Log Base Cost
-
-Pre-Rex6, a log contributes `LOG_TOPIC_DATA_SIZE × topic_count + log_data.len()` to data size; the log address is not counted, so an empty `LOG0` (no topics, no data) contributes zero even though it produces a receipt log entry.
-
-Under Rex6, a node MUST additionally charge a fixed `LOG_BASE_DATA_SIZE` per emitted log for the log address, so each log contributes `LOG_BASE_DATA_SIZE + LOG_TOPIC_DATA_SIZE × topic_count + log_data.len()`.
-
-</details>
-
-<details>
-<summary>Rex6 (unstable): value self-transfer counted as one account update (data size)</summary>
-
-#### Value Self-Transfer Deduplication for Data Size
-
-A value-transferring call whose target equals its caller touches a single account, but the per-call accounting records a caller-side and a target-side account update.
-
-Pre-Rex6, both updates are charged, so the one account contributes `2 × ACCOUNT_UPDATE_DATA_SIZE` bytes.
-
-Under Rex6, when a value-transferring call's target equals its caller, a node MUST count the account update once: the target-side `ACCOUNT_UPDATE_DATA_SIZE` charge MUST be suppressed, leaving the caller-side charge (or, at the top level, the transaction-start caller record) as the single charge for the account.
-Calls with distinct caller and target, and zero-value calls, are unchanged.
-
-</details>
-
-<details>
-<summary>Rex6 (unstable): SELFDESTRUCT balance credit to an existing beneficiary (data size)</summary>
-
 #### SELFDESTRUCT Existing-Beneficiary Data Size
 
-Pre-Rex6, a `SELFDESTRUCT` whose balance credit goes to an already-existing beneficiary records no data size, because the credit does not flow through the frame-initialization or caller-deduplication paths; only a `SELFDESTRUCT` that materializes a new beneficiary is charged.
-
-Under Rex6, a node MUST record `ACCOUNT_UPDATE_DATA_SIZE` bytes of data size for a `SELFDESTRUCT` that transfers a **non-zero** balance to an existing account **distinct** from the executing contract.
+A node MUST record `ACCOUNT_UPDATE_DATA_SIZE` bytes of data size for a `SELFDESTRUCT` that transfers a **non-zero** balance to an existing account **distinct** from the executing contract.
 A `SELFDESTRUCT` of a zero-balance contract performs no balance credit and MUST record nothing.
-A `SELFDESTRUCT` whose target is the executing contract itself is an [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) balance no-op and MUST record nothing.
-
-</details>
+A `SELFDESTRUCT` whose target is the executing contract itself credits no other account and MUST record nothing — under [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) it is a balance no-op for a contract not created in the current transaction and burns the balance for one that was, and neither writes a distinct target account.
 
 ### KV Updates
 
@@ -196,10 +139,10 @@ A node MUST track KV updates as the number of state-modifying key-value updates 
 
 The following contributions MUST be counted at transaction scope and MUST NOT be reverted:
 
-| Operation                  | Count                 |
-| -------------------------- | --------------------- |
-| Transaction caller update  | `1`                   |
-| EIP-7702 authority updates | `authorization_count` |
+| Operation                  | Count                         |
+| -------------------------- | ----------------------------- |
+| Transaction caller update  | `1`                           |
+| EIP-7702 authority updates | `applied_authorization_count` |
 
 #### Discardable KV Updates
 
@@ -217,39 +160,22 @@ The following contributions MUST be tracked within call frames and MUST be disca
 Within a single call frame, a node MUST deduplicate caller account updates for KV-update tracking in the same way it does for data-size tracking.
 When a CALL with value or CREATE occurs, the caller's update MUST be counted only if it has not already been counted in the current call frame.
 
-<details>
-<summary>Rex6 (unstable): EIP-7702 authority updates narrowed to applied authorizations (KV updates)</summary>
+#### Value Self-Transfer Deduplication for KV Updates
+
+When a value-transferring call's target equals its caller, a node MUST count one KV update for the account instead of two, mirroring the data-size deduplication above.
+Calls with distinct caller and target, and zero-value calls, are unchanged.
 
 #### Applied-Authorization Narrowing for KV Updates
 
-Pre-Rex6, a node counts one authority KV update for every authorization with a recoverable authority, including authorizations that are skipped by the application gates.
-
-Under Rex6, a node MUST count one authority KV update only for each _applied_ authorization — one that passes the chain-id, nonce, and code gates and writes the authority account — mirroring the data-size narrowing above.
+A node MUST count one authority KV update only for each _applied_ authorization — one that passes the chain-id, nonce, and code gates and writes the authority account — mirroring the data-size narrowing above.
 A node MUST NOT count a skipped authorization.
 When multiple authorizations target the same authority, each applied authorization MUST be counted independently.
 
-</details>
-
-<details>
-<summary>Rex6 (unstable): value self-transfer counted as one account update (KV updates)</summary>
-
-#### Value Self-Transfer Deduplication for KV Updates
-
-Under Rex6, when a value-transferring call's target equals its caller, a node MUST count one KV update for the account instead of two, mirroring the data-size deduplication above.
-Calls with distinct caller and target, and zero-value calls, are unchanged.
-
-</details>
-
-<details>
-<summary>Rex6 (unstable): SELFDESTRUCT balance credit to an existing beneficiary (KV updates)</summary>
-
 #### SELFDESTRUCT Existing-Beneficiary KV Update
 
-Under Rex6, a node MUST record one KV update for a `SELFDESTRUCT` that transfers a **non-zero** balance to an existing account **distinct** from the executing contract, mirroring the data-size rule above.
+A node MUST record one KV update for a `SELFDESTRUCT` that transfers a **non-zero** balance to an existing account **distinct** from the executing contract, mirroring the data-size rule above.
 No state growth is recorded — the account already exists.
 A `SELFDESTRUCT` of a zero-balance contract, or to the executing contract itself, MUST record nothing.
-
-</details>
 
 ### State Growth
 
@@ -275,17 +201,10 @@ The table above means:
 - rewriting a slot already counted within the transaction MUST NOT change state growth further,
 - and slots that were already non-zero at transaction start MUST NOT contribute to state growth.
 
-<details>
-<summary>Rex6 (unstable): CREATE state growth only for net-new addresses</summary>
-
 #### Conditional CREATE State Growth
 
-Pre-Rex6, every `CREATE` / `CREATE2` frame records `+1` state growth unconditionally when the frame starts.
-
-Under Rex6, a node MUST record the `+1` state growth for a `CREATE` / `CREATE2` only when the created address is net-new — that is, the account at the derived address is empty under the state-clear rule when the frame starts.
-Deploying to an address that already exists (for example, an address previously funded with a balance) MUST NOT record state growth, mirroring the existing value-transfer rule that counts only newly materialized accounts.
-
-</details>
+A node MUST record the `+1` state growth for a `CREATE` / `CREATE2` only when the created address is net-new — that is, the account at the derived address is empty under the state-clear rule when the frame starts.
+Deploying to an address that already exists (for example, an address previously funded with a balance) MUST NOT record state growth, mirroring the value-transfer rule that counts only newly materialized accounts.
 
 #### SELFDESTRUCT Refund
 
@@ -297,23 +216,17 @@ See [SELFDESTRUCT — State Growth Refund](selfdestruct.md#state-growth-refund) 
 The state-growth counter MAY become negative during execution.
 The reported final state growth for limit enforcement MUST be clamped to a minimum of `0`.
 
-<details>
-<summary>Rex6 (unstable): post-execution fee-reward account writes</summary>
-
 ### Post-Execution Fee-Reward Accounting
 
 After execution, the protocol credits transaction fees to the block beneficiary and the protocol fee vaults (the L1-fee, base-fee, and operator-fee recipients).
-These writes happen after the per-transaction resource trackers have been finalized, so pre-Rex6 they escape resource accounting entirely.
+These writes happen after the per-transaction resource trackers have been finalized.
 
-Under Rex6, for each **distinct** fee-recipient account whose balance the fee-reward step changes, a node MUST record one account-info write — `ACCOUNT_UPDATE_DATA_SIZE` bytes of data size and one KV update — in the transaction-persistent lane.
+For each **distinct** fee-recipient account whose balance the fee-reward step changes, a node MUST record one account-info write — `ACCOUNT_UPDATE_DATA_SIZE` bytes of data size and one KV update — in the transaction-persistent lane.
 If the write materializes a previously non-existent account (empty before the credit, non-empty after), the node MUST additionally record `+1` state growth.
 
 A fee recipient that coincides with another (for example, a block beneficiary that is also a fee vault) MUST be counted once.
 This usage is recorded after the transaction's execution result is final: it feeds the transaction's reported usage and the block-level cumulative counters, and it MUST NOT retroactively change the transaction's outcome — a transaction-level limit crossed only by the fee-reward writes does not fail the transaction.
 Transactions that credit no fees (deposit transactions and sandboxed executions) record nothing in this step.
-The deposit-mint counterpart of this gap — a deposit materializing its sender — was already accounted in Rex5.
-
-</details>
 
 ## Constants
 
@@ -323,7 +236,7 @@ The deposit-mint counterpart of this gap — a deposit materializing its sender 
 | `AUTHORIZATION_DATA_SIZE`    | 101   | Bytes counted per EIP-7702 authorization                                          |
 | `ACCOUNT_UPDATE_DATA_SIZE`   | 40    | Bytes counted for an account update or storage-write record in data-size tracking |
 | `LOG_TOPIC_DATA_SIZE`        | 32    | Bytes counted per log topic in data-size tracking                                 |
-| `LOG_BASE_DATA_SIZE`         | 32    | Rex6+ per-log base counted for the log address in data-size tracking              |
+| `LOG_BASE_DATA_SIZE`         | 32    | Bytes counted per emitted log for the log address in data-size tracking           |
 
 ## Rationale
 
@@ -354,9 +267,9 @@ This page describes the current accounting behavior.
 
 - [Rex4](../upgrades/rex4.md) — introduced per-call-frame runtime budgets for all four resource dimensions.
 - [Rex5](../upgrades/rex5.md) — corrected caller-account update deduplication: pre-Rex5, the caller's `ACCOUNT_UPDATE_DATA_SIZE` (data size) and KV-update count were re-charged on every value-transferring sub-call or create from the same parent frame because the caller was never marked as already counted after the first charge; Rex5 marks the caller after the first charge so subsequent operations from the same parent frame do not re-count the caller account. Rex5 also records contract-creation code-deposit compute gas atomically with the deployment commit instead of during post-execution accounting.
-- Rex6 (**unstable**) — narrowed the EIP-7702 authority data-size and KV-update charges from every recoverable authorization to only _applied_ authorizations: pre-Rex6, the `ACCOUNT_UPDATE_DATA_SIZE` and KV update were charged for every authorization with a recoverable authority, including ones later skipped by the chain-id, nonce, or code application gates; Rex6 charges them only for authorizations that pass all gates and write the authority account.
-- Rex6 (**unstable**) — corrected two `CREATE`-frame accounting errors: the creator nonce-bump account-info write is booked to the parent frame's discardable lane instead of the child's, so it survives a child-`CREATE` revert correctly; and `CREATE` records `+1` state growth only when the created address is net-new instead of unconditionally.
-- Rex6 (**unstable**) — counted the account writes performed by op-revm's post-execution `reward_beneficiary` step toward resource accounting: pre-Rex6, fee-recipient writes performed after the `AdditionalLimit` trackers were finalized escaped accounting entirely; Rex6 records one account-info write (data size and KV update) per distinct fee recipient whose balance changes, plus `+1` state growth when the write materializes a previously non-existent account. The deposit-mint half was already closed in Rex5; Rex6 covers the remaining non-deposit fee-credit paths.
-- Rex6 (**unstable**) — counted the account-info write of a `SELFDESTRUCT` balance credit to an already-existing beneficiary: pre-Rex6 only a `SELFDESTRUCT` that created a new beneficiary was metered, so a balance credit to an existing beneficiary (which does not flow through the frame-initialization or caller-dedup path) recorded nothing; Rex6 records data size and a KV update — no state growth, since the account already exists — for a non-zero balance credit to an existing _distinct_ target, and records nothing for a zero-balance `SELFDESTRUCT` or for a `SELFDESTRUCT` to the executing contract itself (an [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780) balance no-op).
-- Rex6 (**unstable**) — added a per-log data-size base: pre-Rex6, an empty `LOG0` contributed zero data size because the log address was not counted; Rex6 charges `LOG_BASE_DATA_SIZE` per log for the address.
-- Rex6 (**unstable**) — deduplicated the value self-transfer account-info write: when a value-transferring call's target equals its caller, the caller-side and target-side writes refer to the same account, but pre-Rex6 the data-size (`ACCOUNT_UPDATE_DATA_SIZE`) and KV-update charges were recorded for both, double-counting the one account (an over-count of block-level usage; it never under-charges). Rex6 records the `caller == target` case as a single account-info write. This extends the Rex5 caller-account deduplication above to the self-transfer case.
+- [Rex6](../upgrades/rex6.md) — narrowed the EIP-7702 authority data-size and KV-update charges from every recoverable authorization to only _applied_ authorizations: through Rex5, the `ACCOUNT_UPDATE_DATA_SIZE` and KV update were charged for every authorization with a recoverable authority, including ones later skipped by the chain-id, nonce, or code application gates.
+- [Rex6](../upgrades/rex6.md) — corrected two `CREATE`-frame accounting errors: the creator nonce-bump account-info write is booked to the parent frame's discardable lane instead of the child's, so it survives a child-`CREATE` revert correctly, and a creation rejected for call depth or creator balance now keeps the charge where through Rex5 it was discarded with the child's lane; and `CREATE` records `+1` state growth only when the created address is net-new instead of unconditionally.
+- [Rex6](../upgrades/rex6.md) — counted the account writes performed by the post-execution fee-reward step toward resource accounting: through Rex5, fee-recipient writes performed after the resource trackers were finalized escaped accounting entirely. The deposit-mint half was already closed in Rex5; Rex6 covers the remaining non-deposit fee-credit paths.
+- [Rex6](../upgrades/rex6.md) — counted the account-info write of a `SELFDESTRUCT` balance credit to an already-existing beneficiary: through Rex5 only a `SELFDESTRUCT` that created a new beneficiary was metered, so a balance credit to an existing beneficiary (which does not flow through the frame-initialization or caller-dedup path) recorded nothing.
+- [Rex6](../upgrades/rex6.md) — added a per-log data-size base: through Rex5, an empty `LOG0` contributed zero data size because the log address was not counted.
+- [Rex6](../upgrades/rex6.md) — deduplicated the value self-transfer account-info write: when a value-transferring call's target equals its caller, the caller-side and target-side writes refer to the same account, but through Rex5 the data-size and KV-update charges were recorded for both, over-counting the one account (it never under-charges). This extends the Rex5 caller-account deduplication above to the self-transfer case.

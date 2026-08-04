@@ -279,6 +279,7 @@ BASELINE_ROW = "revm_pinned"
 ROW_ORDER = [
     "revm_pinned", "revm_latest", "op_revm_pinned", "op_revm_latest",
     "equivalence", "mini_rex", "rex", "rex1", "rex2", "rex3", "rex4", "rex5",
+    "rex6", "rex7",
 ]
 SPECS = set(ROW_ORDER)
 
@@ -339,6 +340,19 @@ def baseline_gap_section(feature) -> str:
             ns = rows[row]
             marker = " (baseline)" if row == BASELINE_ROW else ""
             out += f"| `{row}` | {format_time(ns)} | {ns / base:.2f}×{marker} |\n"
+
+    # A ROW_ORDER entry that no bench emitted is dropped silently by the filter above, so the
+    # table looks complete while a spec is missing from it. That is how `rex6` went unreported
+    # after it was added to the bench spec list but not here. Name the gap instead.
+    seen = {spec for rows in groups.values() for spec in rows}
+    missing = [row for row in ROW_ORDER if row not in seen]
+    if missing:
+        names = ", ".join(f"`{row}`" for row in missing)
+        out += (
+            f"\n> No benchmark emitted a row for {names}. "
+            f"Either add the spec to `SPEC_IDS` in `crates/mega-evm/benches/common/mod.rs`, "
+            f"or drop it from `ROW_ORDER` here.\n"
+        )
     return out
 
 
@@ -443,7 +457,7 @@ def render(comparisons, feature_rounds, feature_sha, baseline_sha, repo_url,
     if gap:
         gap_section = _details(
             "Baseline gap — each EVM layer vs <code>revm_pinned</code> (HEAD only)",
-            "_Read the highest `rex*` row (currently `rex5`, the latest spec) "
+            "_Read the highest `rex*` row present (the latest spec benchmarked) "
             'for the "user-visible mega gap"; the earlier `rex*` rows are prior '
             "specs. The non-`rex` rows are diagnostic: they show which layer "
             "adds cost._\n" + gap,

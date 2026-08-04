@@ -1,6 +1,6 @@
 ---
 description: MegaEVM specification index — dual gas model, resource limits, gas detention, system contracts, and per-spec behavioral history.
-spec: Rex5
+spec: Rex6
 ---
 
 # MegaEVM Overview
@@ -27,6 +27,9 @@ Every transaction is charged for both compute gas and storage gas, and the trans
 
 Storage-heavy operations such as state writes, code deposit, logs, and calldata therefore carry additional cost beyond inherited EVM compute gas.
 For the complete formulas, constants, SALT multiplier rules, and charging lifecycle, see [Dual Gas Model](dual-gas-model.md).
+
+Compute gas is not an independent gas schedule but a derived measurement of the inherited EVM gas.
+For the measurement window, the per-opcode metering classes, the non-opcode recording sites, and the exceed behavior, see [Compute Gas Accounting](compute-gas.md).
 
 ### Runtime Resource Limits and Accounting
 

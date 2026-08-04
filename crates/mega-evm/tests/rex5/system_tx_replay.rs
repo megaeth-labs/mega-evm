@@ -61,8 +61,9 @@ type PocExecutor<'a> = MegaBlockExecutor<
     OpAlloyReceiptBuilder,
 >;
 
+/// A chain running Rex5, matching the `CfgEnv.spec = REX5` these tests set.
 fn rex5_hardforks() -> MegaHardforkConfig {
-    // Rex6 is excluded: this suite pins Rex5 semantics (v1.0.0 registry, REX5 spec).
+    // Rex6+ is excluded: this suite pins Rex5 semantics (v1.0.0 registry, REX5 spec).
     MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX5).with_params(
         SequencerRegistryConfig {
             rex5_initial_sequencer: BOOTSTRAP_SEQUENCER,
