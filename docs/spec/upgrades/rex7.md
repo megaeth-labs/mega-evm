@@ -1,5 +1,5 @@
 ---
-description: Rex7 network upgrade — the current unstable spec, open for development and carrying no behavioral change over Rex6 yet.
+description: Rex7 network upgrade — the current unstable spec, adopting the full EIP-7883 ModExp pricing schedule.
 ---
 
 # Rex7 Network Upgrade
@@ -15,22 +15,27 @@ Anything recorded on this page may change before Rex7 is frozen, and nothing her
 ## Summary
 
 Rex7 is the spec currently open for development.
-It inherits every [Rex6](rex6.md) behavior and, as of this page, changes none of them: a transaction executed under Rex7 produces the same result as the same transaction executed under Rex6.
+It inherits every [Rex6](rex6.md) behavior and, as of this page, changes one of them: the ModExp precompile charges the full EIP-7883 formula cost for zero-length inputs that the frozen specs short-circuit to the flat minimum.
 
 Rex7 exists so that new behavior has somewhere to land.
 [Rex6](rex6.md) is frozen — its semantics are fixed and may no longer be modified — so any change to gas costs, opcode behavior, resource accounting, or a system contract must be introduced under Rex7.
 
 ## What Changed
 
-Nothing yet.
+Each change landed under Rex7 is recorded here as a **Previous behavior** / **New behavior** pair, in the order it is specified.
 
-Each change landed under Rex7 will be recorded here as a **Previous behavior** / **New behavior** pair, in the order it is specified.
+### ModExp charges the full EIP-7883 formula cost for zero-length inputs
+
+**Previous behavior**: a ModExp (`0x05`) call whose header declares `base_length = 0` and `modulus_length = 0` was charged the flat 500-gas minimum regardless of the declared exponent length — the behavior of the implementation the [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) schedule was adopted through, which returned the minimum before computing the formula cost.
+
+**New behavior**: these inputs are charged the EIP-7883 formula cost, as the EIP text specifies — the formula's multiplication complexity never falls below 16, so a large declared exponent length prices in the thousands.
+A call that forwards enough gas for the 500-gas minimum but not for the formula cost now halts with an out-of-gas failure, consuming the entire forwarded amount.
+See [Precompiles](../evm/precompiles.md) for the full pricing rule and the frozen-spec boundary.
 
 ## Developer Impact
 
-None.
-
-Rex7 is not scheduled on any network, and it is behaviorally identical to Rex6, so no contract, tool, or integration needs to do anything today.
+Contracts calling ModExp with degenerate zero-length headers — a shape with no computational use — pay the formula cost instead of the flat 500-gas minimum, and under-provisioned calls of that shape fail instead of succeeding.
+No other contract, tool, or integration is affected; Rex7 is not scheduled on any network.
 
 ## Safety and Compatibility
 
