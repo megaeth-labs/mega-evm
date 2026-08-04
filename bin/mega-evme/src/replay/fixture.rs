@@ -362,7 +362,10 @@ where
     // Test-only injection: the offline State cache reuses account basics already
     // loaded during execution, so doctoring the capture cannot force a draft-only
     // pre-state failure. Integration tests set this env var to exercise the
-    // construction-error path after a successful execution.
+    // construction-error path after a successful execution. Compiled out of
+    // production builds: only the test profile and the `test-utils` feature
+    // (enabled for the binary via the self dev-dependency) carry the hook.
+    #[cfg(any(test, feature = "test-utils"))]
     if std::env::var_os("MEGA_EVME_INJECT_FIXTURE_PRE_STATE_ERROR").is_some() {
         return Err(ReplayError::Other(
             "pre-state read for 0x0000000000000000000000000000000000000001: \
