@@ -238,6 +238,10 @@ This section exists because EIP-1 makes Security Considerations a blocking requi
 Upgrade pages under `upgrades/` are the authoritative record of what changed at each spec.
 They complement concept pages: concept pages describe the current behavior, upgrade pages describe the delta.
 
+Alias specs get no upgrade page of their own: an alias rung introduces no behavioral delta, so a dedicated page could only restate its target.
+The authoritative record of an alias hardfork is its entry in `overview.md` (activation timestamps and a one-line description) plus the alias section of `hardfork-spec.md` (semantics).
+Do not add per-alias pages such as `minirex1.md`.
+
 ### Required Structure
 
 Every upgrade page MUST follow this structure:

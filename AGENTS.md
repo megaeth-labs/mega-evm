@@ -66,7 +66,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → 
   - Frozen and activated are separate properties.
     `REX6` is frozen but has no activation timestamp on mainnet or testnet, so both chains still execute `REX5`.
     Freezing forbids further semantic change; scheduling is a later, separate decision.
-  - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
+  - Specifications of each behavior-introducing spec can be found in the upgrade pages under `docs/spec/upgrades/`; alias rungs have no page of their own and are recorded in the upgrade overview and `docs/spec/hardfork-spec.md`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
   Every hardfork schedules a spec rung of its own — the fork→spec mapping is 1:1.
   `MiniRex1` and `MiniRex2` schedule the alias specs `MINI_REX_1` and `MINI_REX_2`, whose `behavior()` projects to `EQUIVALENCE` and `MINI_REX` respectively.
