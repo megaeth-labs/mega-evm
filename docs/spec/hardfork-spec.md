@@ -19,24 +19,28 @@ Multiple hardforks can map to the same spec.
 A hardfork can also map to an older spec.
 For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
 
-### Executing Spec vs. Highest Spec Reached
+### Alias Specs: Behavior vs. Position
 
-Because a hardfork may roll the spec back, two distinct questions have to be answered separately at each block.
+Hardforks map one-to-one onto specs, so the spec resolved for a block — the latest activated hardfork's spec — only ever climbs.
+A rollback is expressed by an **alias spec**: a rung of its own whose behavior is defined to be identical to an earlier spec.
+`MiniRex1` maps to the alias spec `MINI_REX_1` (behavior: `EQUIVALENCE`), and `MiniRex2` maps to `MINI_REX_2` (behavior: `MINI_REX`).
 
-- **Executing spec** — which semantics the EVM applies in this block: the spec of the most recently activated hardfork.
-  This is reversible: during the `MiniRex1` window the executing spec is `EQUIVALENCE` again, and MegaEVM behaves accordingly.
-- **Highest spec reached** — the greatest spec among all hardforks activated at or before this block.
-  This is monotone and never decreases, even across a rollback.
+The one resolved spec is therefore read through two projections that answer different questions.
+
+- **Behavior** — which semantics the EVM applies in this block.
+  An alias spec executes exactly its target's semantics: during the `MiniRex1` window MegaEVM behaves as `EQUIVALENCE` again.
+- **Position** — how far the ladder has climbed.
+  This is monotone and never decreases; an alias rung stands above the specs whose behavior it rolls back.
 
 The distinction matters for chain setup that is one-way.
-System contracts predeployed under a hardfork remain deployed, and pre-block system calls remain in effect, even while a later hardfork rolls the executing semantics back to an earlier spec.
+System contracts predeployed under a hardfork remain deployed, and pre-block rules remain in effect, even while an alias rung rolls the executing semantics back.
 A rollback changes how transactions execute; it does not un-deploy a contract or retract a system call.
 
-A node MUST determine pre-block setup — system-contract predeploys, their bytecode versions, and the fail-closed rules on the pre-block EIP-2935/EIP-4788 system calls — from the highest spec reached.
-A node MUST determine all other behavior — opcode behavior, gas costs, resource limits, transaction classification — from the executing spec.
+A node MUST determine pre-block setup — system-contract predeploys, their bytecode versions, and the fail-closed rules on the pre-block EIP-2935/EIP-4788 system calls — from the resolved spec's position.
+A node MUST determine all other behavior — opcode behavior, gas costs, resource limits, transaction classification — from the resolved spec's behavior.
 
-A published hardfork schedule MUST climb the spec ladder rung by rung: a hardfork MUST NOT be scheduled unless every hardfork of a lower spec is scheduled, with two rules for patch hardforks — a network MAY omit a patch hardfork, but MUST NOT schedule a patch hardfork whose base hardfork is not scheduled.
-Execution is additionally robust to a malformed schedule: because setup derives from the highest spec reached, a scheduled hardfork implies its predecessors' setup even if they were never scheduled.
+A published hardfork schedule MUST climb the spec ladder rung by rung: a hardfork MUST NOT be scheduled unless every hardfork of a lower rung is scheduled, with one exception — a network MAY omit an alias hardfork, since an alias rung carries no setup of its own.
+Execution is additionally robust to a malformed schedule: because setup derives from position, a scheduled hardfork implies its predecessors' setup even if they were never scheduled.
 
 This documentation covers specs — the verifiable behavioral definitions that determine correctness of a MegaETH node.
 Protocol-level changes outside the verifiable execution layer (e.g., networking, peer discovery) that are part of a hardfork are not covered here.

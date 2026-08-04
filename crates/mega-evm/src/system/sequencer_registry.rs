@@ -197,7 +197,7 @@ pub fn transact_deploy_sequencer_registry<DB: Database>(
     transact_deploy_sequencer_registry_for(spec, rex6_config, current_block_number, db, config)
 }
 
-/// [`transact_deploy_sequencer_registry`] against an already-resolved activated-spec floor.
+/// [`transact_deploy_sequencer_registry`] against an already-resolved scheduled spec.
 ///
 /// The block executor resolves the floor once per block and calls this directly; the public
 /// wrapper above resolves it for callers that hold a hardfork config. Like the flat-registry
@@ -211,7 +211,7 @@ pub(crate) fn transact_deploy_sequencer_registry_for<DB: Database>(
     db: &mut State<DB>,
     config: &SequencerRegistryConfig,
 ) -> Result<Option<EvmState>, BlockExecutionError> {
-    // Gate and bytecode selection follow the activated-spec floor, not per-fork registration:
+    // Gate and bytecode selection follow the scheduled spec, not per-fork registration:
     // a registry once deployed stays deployed through a spec rollback, and a config that
     // schedules only a later fork must still get the Rex5 bootstrap.
     if !spec.reaches(crate::MegaSpecId::REX5) {
@@ -448,7 +448,7 @@ pub fn resolve_system_address<DB: Database>(
     };
 
     // Unreachable: deploy verifies the code hash before seeding storage. The expected version
-    // follows the activated-spec floor, matching what the pre-block deploy installed: the
+    // follows the scheduled spec, matching what the pre-block deploy installed: the
     // bytecode was already swapped to v2.0.0 at the Rex6 activation block, so an exact match
     // holds on every block.
     let expected_code_hash = if spec.reaches(crate::MegaSpecId::REX6) {

@@ -1,9 +1,10 @@
 //! End-to-end tests for pre-block setup on partial and rollback hardfork ladders.
 //!
 //! Pre-block setup (system-contract predeploys, the EIP-2935/EIP-4788 fail-closed checks, the
-//! `SequencerRegistry` bootstrap) is gated on the **activated-spec floor**
-//! (`MegaHardforks::max_activated_spec_id`), not on per-fork registration and not on the
-//! reversible executing spec. These tests pin both directions of that choice:
+//! `SequencerRegistry` bootstrap) is gated on the **scheduled spec**
+//! (`MegaHardforks::max_activated_spec_id`, position-compared via `reaches`), not on
+//! per-fork registration and not on the behavior projection. These tests pin both directions of
+//! that choice:
 //!
 //! - A *partial* ladder — a config scheduling a later fork without its predecessors — must still
 //!   run every lower fork's setup, rather than silently skipping it.
@@ -139,7 +140,7 @@ fn test_partial_ladder_runs_lower_fork_setup() {
     let chain_spec = rex6_only_chain_spec();
     // Precondition: this really is a partial ladder (no activation event below Rex6), and the
     // executing spec is Rex6. The `is_*_active_at_timestamp` predicates cannot state this — they
-    // project the activated-spec floor, which a partial ladder keeps high by design.
+    // project the scheduled spec, which a partial ladder keeps high by design.
     assert_eq!(chain_spec.mega_fork_activation(MegaHardfork::Rex5), ForkCondition::Never);
     assert_eq!(chain_spec.mega_fork_activation(MegaHardfork::MiniRex), ForkCondition::Never);
     assert_eq!(chain_spec.spec_id(0), MegaSpecId::REX6);

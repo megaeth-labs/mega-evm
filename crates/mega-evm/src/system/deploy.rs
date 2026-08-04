@@ -150,7 +150,7 @@ pub fn flat_system_contract_specs(
     flat_system_contract_specs_for(hardforks.max_activated_spec_id(block_timestamp))
 }
 
-/// [`flat_system_contract_specs`] against an already-resolved activated-spec floor.
+/// [`flat_system_contract_specs`] against an already-resolved scheduled spec.
 ///
 /// The block executor resolves the floor once per block
 /// ([`max_activated_spec_id`](crate::MegaHardforks::max_activated_spec_id)) and calls this

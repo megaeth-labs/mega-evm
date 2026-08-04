@@ -56,7 +56,7 @@ pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
 /// Builds the [`SystemContractSpec`] for the keyless-deploy contract active under
 /// `spec`, or `None` if `REX2` is not yet enabled.
 ///
-/// `spec` is the activated-spec floor — see
+/// `spec` is the scheduled spec, compared by position — see
 /// [`oracle_spec`](crate::system::oracle::oracle_spec).
 pub(crate) fn keyless_deploy_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
     spec.reaches(MegaSpecId::REX2).then(|| {

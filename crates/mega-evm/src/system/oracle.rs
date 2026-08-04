@@ -37,7 +37,7 @@ pub use mega_system_contracts::oracle::IOracle;
 /// Note that the database `db` is not modified in this function. The caller is responsible to
 /// commit the changes to database.
 ///
-/// The deployed bytecode depends on the activated-spec floor:
+/// The deployed bytecode depends on the scheduled spec:
 /// - Pre-Rex2: v1.0.0 bytecode (without `sendHint` function)
 /// - Rex2 to Rex4: v1.1.0 bytecode (with `sendHint` function for oracle hints)
 /// - Rex5+: v2.0.0 bytecode (reads the system address from the `SequencerRegistry`)
@@ -58,9 +58,8 @@ pub fn transact_deploy_oracle_contract<DB: Database>(
 /// semantics — shared by [`transact_deploy_oracle_contract`] and the deploy
 /// registry ([`flat_system_contract_specs`](crate::flat_system_contract_specs)).
 ///
-/// `spec` is the activated-spec floor
-/// ([`max_activated_spec_id`](crate::MegaHardforks::max_activated_spec_id)), not the executing
-/// spec: an Oracle already installed under `MINI_REX` stays installed through a spec rollback.
+/// `spec` is the scheduled spec, gated by position (`reaches`) rather than behavior: an Oracle
+/// already installed under `MINI_REX` stays installed through an alias (rollback) window.
 pub(crate) fn oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
     if !spec.reaches(MegaSpecId::MINI_REX) {
         return None;
@@ -117,7 +116,7 @@ pub fn transact_deploy_high_precision_timestamp_oracle<DB: Database>(
 /// Builds the [`SystemContractSpec`] for the high-precision timestamp Oracle
 /// active under `spec`, or `None` if `MINI_REX` is not yet enabled.
 ///
-/// `spec` is the activated-spec floor — see [`oracle_spec`].
+/// `spec` is the scheduled spec, compared by position — see [`oracle_spec`].
 pub(crate) fn high_precision_timestamp_oracle_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
     spec.reaches(MegaSpecId::MINI_REX).then(|| {
         SystemContractSpec::new(

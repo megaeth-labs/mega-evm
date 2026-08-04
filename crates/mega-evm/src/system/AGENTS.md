@@ -15,8 +15,8 @@ System contract integration layer with canonical addresses, deployment transacti
 
 ## KEY PATTERNS
 - Deployment helpers are idempotent and keyed by code hash equality.
-- Gating happens in each contract's `<name>_spec()` builder, which takes a resolved `MegaSpecId` and gates on `spec.is_enabled(...)`. Nothing in the deploy layer takes a hardfork config — the spec builders and the crate-private `*_for` helpers receive the resolved floor and typed params, so a per-fork activation gate cannot be reintroduced. The `pub` `transact_deploy_*` wrappers keep their `(hardforks, block_timestamp)` shape for external callers and resolve everything themselves.
-- The spec passed to a builder is the **activated-spec floor** (`MegaHardforks::max_activated_spec_id`), not the executing spec. Predeploys are one-way: a hardfork that rolls the spec back does not un-deploy them, and it must not change which bytecode version is expected to be installed.
+- Gating happens in each contract's `<name>_spec()` builder, which takes the resolved `MegaSpecId` and gates on `spec.reaches(...)` — POSITION comparison, so alias (rollback) windows do not retract deploys. Nothing in the deploy layer takes a hardfork config — the spec builders and the crate-private `*_for` helpers receive the resolved spec and typed params, so a per-fork activation gate cannot be reintroduced. The `pub` `transact_deploy_*` wrappers keep their `(hardforks, block_timestamp)` shape for external callers and resolve everything themselves.
+- Builders must never gate on `is_enabled` (behavior): predeploys are one-way, and a hardfork that rolls behavior back does not un-deploy them or change which bytecode version is expected to be installed.
 - Interceptors return `None` to fall through to on-chain bytecode on unknown selectors.
 - View/control interceptors reject non-zero transfer values with `NonZeroTransfer()`.
 - Synthetic interceptor results bypass normal child-frame init and require empty tracking frame push by caller.

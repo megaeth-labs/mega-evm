@@ -58,11 +58,11 @@ pub struct MegaBlockExecutor<H, E, R: OpReceiptBuilder> {
     receipt_builder: R,
     ctx: MegaBlockExecutionCtx,
     system_caller: SystemCaller<H>,
-    /// The activated-spec floor for this block's timestamp, resolved once at construction.
+    /// The scheduled spec for this block's timestamp, resolved once at construction.
     ///
-    /// Every pre-block setup gate derives from this single value, which is what keeps setup
-    /// additive by construction. It is deliberately NOT the executing spec: see
-    /// [`MegaHardforks::max_activated_spec_id`].
+    /// Every pre-block setup gate derives from this single value through `reaches` (position),
+    /// which keeps setup additive by construction and immune to alias windows — an alias rung
+    /// rolls back behavior, not the setup below it.
     ///
     /// Cached because the block env is fixed for an executor's lifetime — the constructor
     /// already reads `block().timestamp` for its hardfork-coherence asserts.
@@ -187,15 +187,12 @@ where
         // clear flag to true.
         self.evm.db_mut().set_state_clear_flag(true);
 
-        // Every pre-block gate below derives from the one floor resolved at construction, so
-        // setup stays additive by construction: a config that schedules only a later fork still
-        // gets every earlier fork's predeploys and fail-closed checks.
-        //
-        // This is the activated-spec floor, NOT `spec_id(block_timestamp)`. The two differ
-        // whenever a patch hardfork rolls the spec back (`MiniRex1` -> `EQUIVALENCE`, live on
-        // mainnet), and pre-block setup is one-way: a rollback does not un-deploy a predeploy.
-        // Gating setup on the reversible spec would drop the Oracle predeploys — and their
-        // read-only witness entries — from every block in such a window.
+        // Every pre-block gate below derives from the one scheduled spec resolved at
+        // construction, compared by POSITION (`reaches`): setup stays additive by construction
+        // — a config that schedules only a later fork still gets every earlier fork's
+        // predeploys and fail-closed checks, and an alias window (`MINI_REX_1`, live on
+        // mainnet) rolls back behavior without dropping the Oracle predeploys or their
+        // read-only witness entries.
         let setup_spec = self.setup_spec;
         let is_rex_5 = setup_spec.reaches(MegaSpecId::REX5);
 
@@ -692,10 +689,9 @@ where
 
         // After all pre-block outcomes are committed, resolve the system address for this block.
         // This reads _currentSystemAddress from the now-committed SequencerRegistry storage.
-        // The returned EvmState captures the read as a witness record.
-        // The executing spec gates whether dynamic resolution applies (semantics); the
-        // activated-spec floor selects the expected registry bytecode version, matching what
-        // the floor-gated pre-block deploy installed.
+        // The returned EvmState captures the read as a witness record. Inside the resolver the
+        // behavior projection gates whether dynamic resolution applies, and the position
+        // projection selects the expected registry bytecode version.
         let spec = self.evm.ctx().mega_spec();
         let (system_address, read_state) =
             resolve_system_address(&self.hardforks, spec, self.evm.db_mut())?;

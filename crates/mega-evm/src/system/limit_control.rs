@@ -37,7 +37,7 @@ pub fn transact_deploy_limit_control_contract<DB: Database>(
 /// Builds the [`SystemContractSpec`] for the `MegaLimitControl` contract active
 /// under `spec`, or `None` if `REX4` is not yet enabled.
 ///
-/// `spec` is the activated-spec floor — see
+/// `spec` is the scheduled spec, compared by position — see
 /// [`oracle_spec`](crate::system::oracle::oracle_spec).
 pub(crate) fn limit_control_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
     spec.reaches(MegaSpecId::REX4).then(|| {

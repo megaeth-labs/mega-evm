@@ -23,8 +23,7 @@ type TestExecutor<'a, 'db> =
 
 // Complete ladders topping out at the target fork. Expressing these as
 // `with_all_activated().without(Rex5)` instead would leave Rex6 activated, and pre-block setup
-// gates derive from the activated-spec floor — which would still report REX6 and open every
-// lower gate.
+// gates compare rung positions — which would still report REX6 and open every lower gate.
 fn rex4_chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4)
 }
