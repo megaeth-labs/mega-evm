@@ -164,6 +164,13 @@ A set of MegaETH verifiable behaviors: the complete definition of what a correct
 Captures the execution-layer semantics that determine node correctness.
 
 Progression: `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`.
+The [alias rungs](#alias-spec) `MINI_REX_1` and `MINI_REX_2` sit between `MINI_REX` and `REX`, executing `EQUIVALENCE` and `MINI_REX` behavior respectively.
+
+## Alias Spec
+
+A spec rung whose behavior is defined to be identical to an earlier spec.
+Alias specs express rollbacks while keeping the spec ladder monotone: `MINI_REX_1` (behavior: `EQUIVALENCE`) and `MINI_REX_2` (behavior: `MINI_REX`).
+The rung's position governs one-way chain setup; its behavior governs execution semantics.
 
 See [Hardforks and Specs](hardfork-spec.md).
 
@@ -173,7 +180,7 @@ A network upgrade event: when changes are activated on the chain.
 
 A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior).
 
-Multiple hardforks can map to the same spec (e.g., MiniRex1 → EQUIVALENCE, MiniRex2 → MINI_REX).
+Hardforks map one-to-one onto specs; a rollback hardfork schedules an [alias spec](#alias-spec) (e.g., MiniRex1 → MINI_REX_1, whose behavior is EQUIVALENCE).
 
 ## `MEGA_SYSTEM_ADDRESS`
 

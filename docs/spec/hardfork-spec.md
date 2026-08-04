@@ -15,9 +15,9 @@ The protocol distinguishes between two related concepts:
 - **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: _when_ changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior).
 - **[Spec](glossary.md#spec-megaspecid)** — A set of MegaETH verifiable behaviors: _what_ a correct node does. A spec captures the execution-layer semantics that determine node correctness.
 
-Multiple hardforks can map to the same spec.
-A hardfork can also map to an older spec.
-For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
+Hardforks map one-to-one onto specs: every hardfork schedules a spec rung of its own.
+A rollback is expressed by scheduling an alias spec — a rung whose behavior is identical to an earlier spec (see below).
+For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `MINI_REX_1` (behavior: `EQUIVALENCE`), `MiniRex2` → `MINI_REX_2` (behavior: `MINI_REX`).
 
 ### Alias Specs: Behavior vs. Position
 
