@@ -47,8 +47,8 @@ impl MegaPrecompiles {
             MegaSpecId::REX3 |
             MegaSpecId::REX4 |
             MegaSpecId::REX5 |
-            MegaSpecId::REX6 => rex(),
-            MegaSpecId::REX7 => rex7(),
+            MegaSpecId::REX6 |
+            MegaSpecId::REX7 => rex(),
         };
 
         Self { inner: EthPrecompiles { precompiles: inner, spec: spec.into_eth_spec() }, spec }
@@ -69,20 +69,6 @@ impl MegaPrecompiles {
 pub fn rex() -> &'static Precompiles {
     static INSTANCE: OnceBox<Precompiles> = OnceBox::new();
     INSTANCE.get_or_init(|| Box::new(mini_rex().clone()))
-}
-
-/// Precompiles for the `REX7` spec.
-pub fn rex7() -> &'static Precompiles {
-    static INSTANCE: OnceBox<Precompiles> = OnceBox::new();
-    INSTANCE.get_or_init(|| {
-        let mut precompiles = rex().clone();
-        // Rex7 adopts the final EIP-7883 ModExp schedule: upstream's implementation
-        // charges the computed formula cost for zero-base/zero-modulus inputs, where
-        // the frozen specs keep the historical 500-gas short-circuit (see
-        // [`modexp::OSAKA_LEGACY`]).
-        precompiles.extend([revm::precompile::modexp::OSAKA]);
-        Box::new(precompiles)
-    })
 }
 
 /// Precompiles for the `MINI_REX` spec.
@@ -106,9 +92,9 @@ pub fn mini_rex() -> &'static Precompiles {
 /// of 16, so a zero-base/zero-modulus call with a 64-byte exponent length prices in the
 /// thousands rather than 500).
 ///
-/// The frozen specs are pinned to the historical short-circuit for replay identity; `REX7`
-/// adopts the corrected schedule by installing upstream's implementation unwrapped (see
-/// [`rex7`]).
+/// Every spec is pinned to the historical short-circuit, so replaying a block reproduces the
+/// gas it was executed with. Charging the EIP-7883 formula cost for these inputs instead is a
+/// consensus change, and belongs to a spec that adopts it deliberately.
 pub mod modexp {
     use revm::{
         precompile::{

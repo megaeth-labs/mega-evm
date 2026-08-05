@@ -1,16 +1,20 @@
-//! `ModExp` pricing across the spec arc: the frozen legacy schedule vs Rex7's EIP-7883 adoption.
+//! `ModExp` pricing for zero-base/zero-modulus inputs across the whole spec arc.
 //!
 //! `MINI_REX` adopted the Osaka / EIP-7883 `ModExp` schedule through the revm implementation
 //! current at the time, which short-circuited zero-base/zero-modulus inputs to the 500-gas
 //! minimum before computing the formula cost. EIP-7883 as written has no such special case:
 //! its multiplication complexity floors at 16, so a zero-base/zero-modulus call with a
-//! 64-byte exponent length prices in the thousands. Later revm versions charge the formula
+//! 64-byte exponent length prices in the thousands. Later revm versions charge that formula
 //! cost, as the EIP specifies.
 //!
-//! The frozen specs (`MINI_REX` through REX6) stay pinned to the historical short-circuit for
-//! replay identity; REX7 adopts the corrected schedule. EQUIVALENCE uses the inherited
-//! Berlin schedule, whose formula collapses to the flat minimum for these inputs under
-//! either ordering, so it is structurally unaffected.
+//! Every spec keeps the historical short-circuit, so replaying a block reproduces the gas it
+//! was executed with. Charging the formula cost instead is a consensus change that has not
+//! been made, and these tests pin that: they fail the moment any spec starts pricing these
+//! inputs by the formula, so the change cannot land unnoticed.
+//!
+//! EQUIVALENCE uses the inherited Berlin schedule, whose formula collapses to the flat
+//! minimum for these inputs under either implementation ordering, so it is structurally
+//! unaffected either way.
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
@@ -28,11 +32,12 @@ const CALLER: Address = address!("0000000000000000000000000000000000700000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000700001");
 const MODEXP: Address = mega_evm::modexp::ADDRESS;
 
-/// The flat charge of the frozen zero-base/zero-modulus short-circuit.
+/// The flat charge of the zero-base/zero-modulus short-circuit.
 const LEGACY_MIN_GAS: u64 = mega_evm::modexp::MIN_GAS;
 
-/// All frozen specs that install the Osaka `ModExp` schedule.
-const FROZEN_OSAKA_SPECS: [MegaSpecId; 8] = [
+/// Every spec that installs the Osaka `ModExp` schedule — all of them except EQUIVALENCE,
+/// which stays on the inherited Berlin schedule.
+const OSAKA_SCHEDULE_SPECS: [MegaSpecId; 9] = [
     MegaSpecId::MINI_REX,
     MegaSpecId::REX,
     MegaSpecId::REX1,
@@ -41,6 +46,7 @@ const FROZEN_OSAKA_SPECS: [MegaSpecId; 8] = [
     MegaSpecId::REX4,
     MegaSpecId::REX5,
     MegaSpecId::REX6,
+    MegaSpecId::REX7,
 ];
 
 /// Wrapper contract: writes a 96-byte `ModExp` header (`base_len=0`, `exp_len`, `mod_len=0`,
@@ -96,13 +102,13 @@ fn stored_call_result(result: &ResultAndState<MegaHaltReason>) -> U256 {
         .unwrap_or_default()
 }
 
-/// Frozen specs charge the flat 500-gas short-circuit for zero-base/zero-modulus inputs:
-/// the total gas of a generously funded call equals that of one funded with exactly
-/// `MIN_GAS + 1`, which is only possible if the charge is flat (a formula charge would
-/// halt the underfunded variant, burning the full forwarded amount).
+/// Every Osaka-schedule spec charges the flat 500-gas short-circuit for zero-base/zero-modulus
+/// inputs: the total gas of a generously funded call equals that of one funded with exactly
+/// `MIN_GAS + 1`, which is only possible if the charge is flat (a formula charge would halt
+/// the underfunded variant, burning the full forwarded amount).
 #[test]
-fn test_frozen_specs_zero_base_mod_charge_flat_min_gas() {
-    for spec in FROZEN_OSAKA_SPECS {
+fn test_every_spec_charges_flat_min_gas_for_zero_base_mod() {
+    for spec in OSAKA_SCHEDULE_SPECS {
         let ample = transact(spec, zero_base_mod_wrapper(64, 10_000));
         let tight = transact(spec, zero_base_mod_wrapper(64, LEGACY_MIN_GAS + 1));
 
@@ -126,44 +132,57 @@ fn test_frozen_specs_zero_base_mod_charge_flat_min_gas() {
     }
 }
 
-/// REX7 charges the EIP-7883 formula cost: the exact difference from REX6 on an identical,
-/// generously funded transaction is `osaka_gas_calc(0, 64, 0, 0) - 500`.
+/// Rex7 prices these inputs exactly as Rex6 does. Rex7 is the unstable spec, so it is where an
+/// EIP-7883 adoption would land first; this pins that it has not happened.
 #[test]
-fn test_rex7_zero_base_mod_charges_eip7883_formula_cost() {
-    let expected = revm::precompile::modexp::osaka_gas_calc(0, 64, 0, &U256::ZERO);
-    assert!(expected > LEGACY_MIN_GAS, "the formula cost must exceed the legacy flat charge");
-
+fn test_rex7_prices_zero_base_mod_identically_to_rex6() {
     let rex6 = transact(MegaSpecId::REX6, zero_base_mod_wrapper(64, 50_000));
     let rex7 = transact(MegaSpecId::REX7, zero_base_mod_wrapper(64, 50_000));
 
     assert_eq!(stored_call_result(&rex6), U256::from(1), "REX6 call must succeed");
     assert_eq!(stored_call_result(&rex7), U256::from(1), "REX7 call must succeed");
     assert_eq!(
-        rex7.result.tx_gas_used() - rex6.result.tx_gas_used(),
-        expected - LEGACY_MIN_GAS,
-        "REX7 must charge exactly the EIP-7883 formula cost where the frozen specs charge \
-         the 500-gas short-circuit"
+        rex7.result.tx_gas_used(),
+        rex6.result.tx_gas_used(),
+        "REX7 must charge what REX6 charges — adopting the EIP-7883 formula cost is a \
+         deliberate spec change, not a side effect"
     );
 }
 
-/// The frozen-vs-REX7 window flip: a call forwarding more than 500 but less than the
-/// formula cost succeeds on frozen specs and halts with `PrecompileOOG` on REX7.
+/// Records what adopting the EIP-7883 formula would cost, so the size of the deviation stays
+/// visible: the formula prices a 64-byte exponent length well above the flat minimum the
+/// specs charge.
 #[test]
-fn test_rex7_underfunded_zero_base_mod_call_halts() {
-    let rex6 = transact(MegaSpecId::REX6, zero_base_mod_wrapper(64, 1_000));
-    let rex7 = transact(MegaSpecId::REX7, zero_base_mod_wrapper(64, 1_000));
+fn test_eip7883_formula_cost_exceeds_the_charged_flat_minimum() {
+    let formula_cost = revm::precompile::modexp::osaka_gas_calc(0, 64, 0, &U256::ZERO);
+    assert!(
+        formula_cost > LEGACY_MIN_GAS,
+        "the EIP-7883 formula cost ({formula_cost}) must exceed the flat charge \
+         ({LEGACY_MIN_GAS}) — otherwise the short-circuit would be unobservable"
+    );
+}
 
-    assert_eq!(
-        stored_call_result(&rex6),
-        U256::from(1),
-        "REX6: 1,000 forwarded gas covers the flat 500 charge"
+/// The sharpest input shape: a call forwarding more than the flat minimum but less than the
+/// EIP-7883 formula cost. Under the short-circuit it succeeds on every spec; under the
+/// formula it would halt and burn the entire forwarded amount.
+#[test]
+fn test_underfunded_zero_base_mod_call_succeeds_on_every_spec() {
+    let forwarded = 1_000;
+    assert!(
+        forwarded > LEGACY_MIN_GAS &&
+            forwarded < revm::precompile::modexp::osaka_gas_calc(0, 64, 0, &U256::ZERO),
+        "the forwarded amount must sit inside the flat-vs-formula window to be a real probe"
     );
-    assert_eq!(
-        stored_call_result(&rex7),
-        U256::from(0),
-        "REX7: 1,000 forwarded gas is below the EIP-7883 formula cost, so the precompile \
-         must halt"
-    );
+
+    for spec in OSAKA_SCHEDULE_SPECS {
+        let result = transact(spec, zero_base_mod_wrapper(64, forwarded));
+        assert_eq!(
+            stored_call_result(&result),
+            U256::from(1),
+            "{spec:?}: {forwarded} forwarded gas covers the flat charge, so the call must \
+             succeed"
+        );
+    }
 }
 
 /// EQUIVALENCE (inherited Berlin schedule) is structurally unaffected: the Berlin formula
@@ -184,11 +203,11 @@ fn test_equivalence_zero_base_mod_keeps_flat_berlin_charge() {
     );
 }
 
-/// The EIP-7823 input-size limit is checked before the legacy short-circuit, matching the
-/// historical implementation's order: an oversized exponent length fails even when base and
-/// modulus lengths are zero.
+/// The EIP-7823 input-size limit is checked before the short-circuit, matching the historical
+/// implementation's order: an oversized exponent length fails even when base and modulus
+/// lengths are zero.
 #[test]
-fn test_frozen_specs_eip7823_limit_precedes_short_circuit() {
+fn test_eip7823_limit_precedes_short_circuit() {
     let result = transact(MegaSpecId::MINI_REX, zero_base_mod_wrapper(2_000, 10_000));
     assert!(result.result.is_success(), "outer tx should succeed");
     assert_eq!(

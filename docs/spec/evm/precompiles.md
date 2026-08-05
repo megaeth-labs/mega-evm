@@ -34,10 +34,9 @@ The compute gas recorded for that failure is a separate amount; see [Compute Gas
 
 For ModExp, the node MUST use the Osaka / [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) pricing schedule instead of the earlier inherited pricing schedule.
 
-Under the frozen specs (MiniRex through Rex6), one input shape deviates from the EIP-7883 formula: a call whose header declares `base_length = 0` and `modulus_length = 0` MUST be charged the flat 500-gas minimum, regardless of the declared exponent length.
+One input shape deviates from the EIP-7883 formula: a call whose header declares `base_length = 0` and `modulus_length = 0` MUST be charged the flat 500-gas minimum, regardless of the declared exponent length.
 This preserves the behavior of the implementation the schedule was adopted through, which returned the minimum before computing the formula cost; EIP-7883 as written has no such special case, and its multiplication complexity never falls below 16, so the formula prices these inputs above the minimum whenever the exponent length is large.
 The [EIP-7823](https://eips.ethereum.org/EIPS/eip-7823) input-size limits MUST still be enforced before this short-circuit: an oversized declared length fails the call even when base and modulus lengths are zero.
-From [Rex7](../upgrades/rex7.md), the short-circuit is removed and these inputs MUST be charged the EIP-7883 formula cost — including the out-of-gas halt when the forwarded gas covers the 500-gas minimum but not the formula cost.
 
 All other precompiles MUST behave according to the inherited EVM baseline unless explicitly overridden elsewhere in this specification.
 
@@ -57,4 +56,3 @@ This page has no security considerations.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable overrides.
 - [Rex4](../upgrades/rex4.md) retains the same stable overrides; no change to KZG or ModExp pricing.
 - [Rex5](../upgrades/rex5.md) refines the KZG error-path compute-gas recording.
-- [Rex7](../upgrades/rex7.md) removes the zero-length ModExp short-circuit and charges the full EIP-7883 formula cost.
