@@ -1,16 +1,38 @@
 //! Offline integration tests for `mega-evme replay --block` / `--tx-file`.
 //!
-//! These run against an RPC capture envelope large enough to replay whole
-//! blocks, which is too big to commit; point `MEGA_EVME_TEST_ENVELOPE` at one
-//! and run them explicitly:
+//! Replaying whole blocks needs an RPC capture covering every transaction of
+//! each block, which is far larger than a single-transaction capture. The
+//! envelope is committed as a gzipped archive and extracted into a temporary
+//! directory once per test binary, so these run in CI without setup. They are
+//! the only tests that exercise the batch driver's multi-target paths: more
+//! than one target in a block, whole-block mode, grouping targets across
+//! blocks, sweeping targets on both sides of a mid-block abort, and
+//! block-global log indexing against real logs.
+//!
+//! Set `MEGA_EVME_TEST_ENVELOPE` to replay against a different capture instead.
+//!
+//! To regenerate the archive, capture both blocks into one envelope (the second
+//! run merges into the first) and repack it. `--verify-receipt` is what puts the
+//! receipts in the capture, which the verification and fixture-dump tests need:
 //!
 //! ```bash
-//! MEGA_EVME_TEST_ENVELOPE=<path> cargo test -p mega-evme -- --ignored
+//! for block in 22945844 22945853; do
+//!   mega-evme replay --rpc <URL> --rpc.capture-file replay_batch_blocks.cache.json \
+//!     --block "$block" --verify-receipt --json
+//! done
+//! tar -czf replay_batch_blocks.tar.gz replay_batch_blocks.cache.json
 //! ```
 //!
-//! They are `#[ignore]`d so CI, which has no envelope, skips them.
+//! The endpoint must serve state at those blocks; a pruning node fails every
+//! target with "state at block #N is pruned".
 
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    sync::OnceLock,
+};
+
+use tempfile::TempDir;
 
 mod common;
 
@@ -37,13 +59,41 @@ const OTHER_BLOCK: u64 = 22_945_853;
 const OTHER_BLOCK_TX: &str = "0x18302160f2395069a44e1654d173fa9eed95ead8f922f12bfe07b6bdcc0a14f2";
 const OTHER_BLOCK_TX_INDEX: u64 = 23;
 
-/// Path of the offline envelope, or a skip message when it is not configured.
+/// Path of the offline envelope.
+///
+/// The committed archive is extracted once per test binary into a temporary
+/// directory that lives for the whole run; `MEGA_EVME_TEST_ENVELOPE` overrides
+/// it with an already-extracted capture. Extraction shells out to `tar` rather
+/// than linking a decompressor, since every platform that runs these tests has
+/// one and the archive is only read here.
 fn envelope() -> String {
-    std::env::var("MEGA_EVME_TEST_ENVELOPE").expect(
-        "set MEGA_EVME_TEST_ENVELOPE to an RPC capture covering the replayed blocks; \
-         these tests are #[ignore]d precisely because that envelope is not committed",
-    )
+    if let Ok(path) = std::env::var("MEGA_EVME_TEST_ENVELOPE") {
+        return path;
+    }
+
+    static EXTRACTED: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+    let (_dir, capture) = EXTRACTED.get_or_init(|| {
+        let archive =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/replay_batch_blocks.tar.gz");
+        let dir = tempfile::tempdir().expect("failed to create a temp dir for the envelope");
+        let status = Command::new("tar")
+            .arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(dir.path())
+            .status()
+            .expect("failed to run tar");
+        assert!(status.success(), "failed to extract {}", archive.display());
+
+        let capture = dir.path().join(ENVELOPE_NAME);
+        assert!(capture.is_file(), "{} does not contain {ENVELOPE_NAME}", archive.display());
+        (dir, capture)
+    });
+    capture.display().to_string()
 }
+
+/// Name of the capture inside the committed archive.
+const ENVELOPE_NAME: &str = "replay_batch_blocks.cache.json";
 
 fn mega_evme() -> Command {
     Command::new(env!("CARGO_BIN_EXE_mega-evme"))
@@ -180,7 +230,6 @@ fn run_error(stdout: &str) -> serde_json::Value {
 /// `--block N --json` emits exactly one NDJSON line per transaction of the
 /// block, in transaction order, and exits 0.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_block_emits_one_ndjson_line_per_transaction() {
     let stdout = replay(&["--block", &BLOCK.to_string(), "--json"], true);
     let lines = ndjson(&stdout);
@@ -209,7 +258,6 @@ fn test_replay_block_emits_one_ndjson_line_per_transaction() {
 /// A batch line and a single-transaction replay of the same transaction must
 /// agree on the execution outcome.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_batch_matches_single_transaction_replay() {
     let batch = ndjson(&replay(&["--block", &BLOCK.to_string(), "--json"], true));
 
@@ -234,7 +282,6 @@ fn test_replay_batch_matches_single_transaction_replay() {
 /// `--tx-file` replays transactions from several blocks in one process and
 /// reports them ordered by (block, transaction index).
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_tx_file_spans_blocks_in_order() {
     // Deliberately unordered, with a comment, a blank line, and a duplicate.
     let list = format!(
@@ -272,7 +319,6 @@ fn test_replay_tx_file_spans_blocks_in_order() {
 /// targets still replay, and the process exits non-zero with the class of the
 /// failure — here an unanswered lookup against the offline envelope.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_tx_file_reports_unresolved_targets_and_exits_nonzero() {
     let unknown = "0x0000000000000000000000000000000000000000000000000000000000000001";
     let path =
@@ -300,27 +346,27 @@ fn test_replay_tx_file_reports_unresolved_targets_and_exits_nonzero() {
 /// exits non-zero.
 ///
 /// The development envelope is captured by replays, which do not fetch receipts,
-/// so this pins the endpoint-cannot-serve-the-receipt path end to end.
+/// `--block N --verify-receipt` verifies every transaction of the block against
+/// its on-chain receipt and exits 0 when they all reproduce.
+///
+/// This is the multi-target verification fan-out: one receipt fetch and one
+/// verdict per target, each carried on that target's own result line.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
-fn test_replay_block_verify_receipt_without_receipts_reports_rpc_errors() {
+fn test_replay_block_verify_receipt_reports_a_verdict_per_target() {
     let (stdout, code) =
         replay_with_code(&["--block", &BLOCK.to_string(), "--verify-receipt", "--json"]);
     let lines = ndjson(&stdout);
 
-    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is reported exactly once");
     for line in &lines {
+        assert!(line.get("error").is_none(), "a verified target is not an error entry: {line}");
         assert_eq!(
-            line["error"]["kind"].as_str(),
-            Some("rpc"),
-            "a receipt the envelope cannot serve is an infrastructure error: {line}"
+            line["verification"]["match"].as_bool(),
+            Some(true),
+            "every target must reproduce its on-chain receipt: {line}"
         );
-        assert!(line.get("verification").is_none(), "an unverified target carries no verdict");
     }
-
-    // Unverified targets are RPC-class failures, never mismatches.
-    assert_eq!(code, Some(3), "a run of unverified targets exits 3");
-    assert_eq!(run_error(&stdout)["error"]["kind"].as_str(), Some("rpc-failure"));
+    assert_eq!(code, Some(0), "a fully matching run exits 0");
 }
 
 /// An abort caused by one transaction of the block is not an answer about the
@@ -328,7 +374,6 @@ fn test_replay_block_verify_receipt_without_receipts_reports_rpc_errors() {
 /// `not_found`, and every target swept up behind it is reported as unanswered
 /// (`rpc`) with a message naming the transaction that aborted the block.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
     let (missing, missing_index) = BLOCK_TXS[1];
     let path = envelope_without_transaction("abort_block", missing);
@@ -379,7 +424,6 @@ fn test_replay_block_sweeps_targets_behind_an_abort_as_unanswered() {
 /// (intrinsic/call gas) and aborts the block — an execution-class error, not
 /// `TransactionNotFound`.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_block_sweeps_targets_behind_execution_abort_as_rpc() {
     let (aborting, aborting_index) = EXEC_ABORT_TX;
     let path = envelope_with_zero_gas_transaction("exec_abort_block", aborting);
@@ -426,7 +470,6 @@ fn test_replay_block_sweeps_targets_behind_execution_abort_as_rpc() {
 /// Targets swept up by an abort are reported in block transaction-index order,
 /// whatever order `--tx-file` listed them in.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_tx_file_sweeps_targets_in_block_order() {
     let missing = BLOCK_TXS[0].0;
     let path = envelope_without_transaction("abort_order", missing);
@@ -463,7 +506,6 @@ fn test_replay_tx_file_sweeps_targets_in_block_order() {
 
 /// Batch mode rejects the single-transaction-only flags before doing any work.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_batch_rejects_single_transaction_flags() {
     let envelope = envelope();
     for (extra, expected) in [
@@ -491,7 +533,6 @@ fn test_replay_batch_rejects_single_transaction_flags() {
 /// A parent block whose hash does not match the child block's `parentHash` is an
 /// infrastructure failure for every target of that block (reorg / divergent views).
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_block_rejects_mismatched_parent_hash() {
     let mut envelope: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
@@ -557,7 +598,6 @@ fn test_replay_block_rejects_mismatched_parent_hash() {
 /// outer block/tx identity and a block-global `logIndex` that starts above zero
 /// (preceding receipts already emitted logs).
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
 fn test_replay_receipt_inner_log_metadata_nonzero_preceding_offset() {
     // Last transaction of BLOCK: multi-log, with many preceding logs in-block.
     const LATE_TX: &str = "0xb6a0b7a302c741f64b8e46861a3dcb2d5c1047f6f2cb89a35b5c2183c96296b7";
@@ -589,15 +629,18 @@ fn test_replay_receipt_inner_log_metadata_nonzero_preceding_offset() {
 /// no receipts skips every target on the fidelity gate and still exits 0.
 ///
 /// Fixture skips are expected (not infrastructure failures); the development
-/// envelope is captured without receipts, so this pins the skip path end to end.
+/// `--block N --dump-fixture-dir` writes a fixture for every transaction it can
+/// express and skips the ones it cannot, without failing the run.
+///
+/// Every OP-stack block opens with a deposit, which the fixture format cannot
+/// represent. Reporting that as an error rather than a skip would make a
+/// whole-block sweep exit non-zero on every block, so this pins the
+/// classification end to end: 22 files written, the deposit skipped with its
+/// reason, nothing reported as an error, and exit 0.
 #[test]
-#[ignore = "requires MEGA_EVME_TEST_ENVELOPE"]
-fn test_replay_block_dump_fixture_dir_skips_without_receipts() {
-    let dir = std::env::temp_dir().join(format!(
-        "mega_evme_dump_dir_skip_{}_{}",
-        std::process::id(),
-        BLOCK
-    ));
+fn test_replay_block_dump_fixture_dir_writes_all_but_the_deposit() {
+    let dir = std::env::temp_dir()
+        .join(format!("mega_evme_dump_dir_sweep_{}_{BLOCK}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
     let stdout = replay(
@@ -605,24 +648,33 @@ fn test_replay_block_dump_fixture_dir_skips_without_receipts() {
         true,
     );
     let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is reported exactly once");
 
-    assert_eq!(lines.len(), BLOCK_TX_COUNT, "every target is still reported exactly once");
+    let mut written = 0;
+    let mut skipped = Vec::new();
     for line in &lines {
-        assert!(line.get("error").is_none(), "skips must not turn into error entries: {line}");
-        let skipped = line["fixture"]["skipped"]
-            .as_str()
-            .unwrap_or_else(|| panic!("every line must carry a fixture skip reason: {line}"));
-        assert!(
-            skipped.contains("fidelity-gate-unavailable"),
-            "expected fidelity-gate-unavailable skip, got: {skipped}"
-        );
-        assert!(line["fixture"].get("path").is_none(), "a skip must not report a path: {line}");
+        assert!(line.get("error").is_none(), "a sweep must not produce error entries: {line}");
+        if line["fixture"]["path"].is_string() {
+            written += 1;
+        } else {
+            skipped.push(
+                line["fixture"]["skipped"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a line reported neither path nor skip: {line}"))
+                    .to_string(),
+            );
+        }
     }
 
-    // No fixtures written: the directory may exist (create_dir_all) but be empty.
-    if dir.exists() {
-        let entries: Vec<_> = std::fs::read_dir(&dir).expect("read dump dir").collect();
-        assert!(entries.is_empty(), "fidelity skips must write no fixture files");
-    }
+    assert_eq!(skipped.len(), 1, "only the index-0 deposit is unsupported: {skipped:?}");
+    assert!(
+        skipped[0].contains("does not support deposit"),
+        "the skip must name the reason: {}",
+        skipped[0]
+    );
+    assert_eq!(written, BLOCK_TX_COUNT - 1, "every other transaction is dumped");
+
+    let on_disk = std::fs::read_dir(&dir).expect("read dump dir").count();
+    assert_eq!(on_disk, written, "each reported path is a file on disk");
     let _ = std::fs::remove_dir_all(&dir);
 }
