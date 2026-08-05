@@ -8,10 +8,14 @@
 //! executes each block exactly once while recording the result of every target it
 //! passes through.
 //!
-//! Every RPC call issued here has the same shape as the single-transaction path
-//! (`eth_getTransactionByHash`, `eth_getBlockByNumber` with hash-only bodies, and
-//! the state reads behind [`EvmeState::new_forked`]), so an offline envelope
-//! captured by single-transaction replays serves batch runs without a miss.
+//! Every RPC call issued by a plain batch replay has the same shape as the
+//! single-transaction path (`eth_getTransactionByHash`, `eth_getBlockByNumber`
+//! with hash-only bodies, and the state reads behind [`EvmeState::new_forked`]),
+//! so an offline envelope captured by single-transaction replays serves batch
+//! runs without a miss. `--verify-receipt` and `--dump-fixture-dir` are the
+//! exception: both fetch `eth_getTransactionReceipt` for *every* target of a
+//! block, including the non-targets a single-transaction capture never asked
+//! about. Offline, those come back as `rpc` entries and the run exits `3`.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -407,7 +411,16 @@ where
             let block = fetch_block(provider, *number).await?;
             let targets: Vec<B256> = block.transactions.hashes().collect();
             info!(block = number, tx_count = targets.len(), "Batch replay of a whole block");
-            vec![BlockJob { number: *number, block: Some(block), targets }]
+            if targets.is_empty() {
+                // Nothing failed, so this is a clean exit — but a silent one is
+                // indistinguishable from a run that produced no output for a bad
+                // reason, so say why stdout is empty. No job is queued: with no
+                // targets to report, forking the parent state would buy nothing.
+                eprintln!("Block {number} contains no transactions; nothing to replay");
+                vec![]
+            } else {
+                vec![BlockJob { number: *number, block: Some(block), targets }]
+            }
         }
         BatchMode::TxList(hashes) => {
             let (jobs, failures) = resolve_targets(provider, hashes).await;
@@ -1065,25 +1078,15 @@ fn materialize_deferred_fixture(deferred: DeferredFixture) -> FixtureReport {
 /// Unsupported shapes are expected in whole-block sweeps and must not fail the
 /// run. Endpoint/DB failures during construction mean the requested artifact
 /// could not be produced and fail the run as an execution-class fixture error.
-fn fixture_report_from_build_err(err: ReplayError) -> FixtureReport {
-    let message = err.to_string();
-    if is_unsupported_fixture_shape(&message) {
-        FixtureReport::skipped(message)
-    } else {
-        FixtureReport::error(format!("fixture construction failed: {message}"))
+/// The builder decides which is which at the point it knows, so rewording any of
+/// its messages cannot silently reclassify a sweep.
+fn fixture_report_from_build_err(err: fixture::FixtureBuildError) -> FixtureReport {
+    match err {
+        fixture::FixtureBuildError::Unsupported(reason) => FixtureReport::skipped(reason),
+        fixture::FixtureBuildError::Construction(err) => {
+            FixtureReport::error(format!("fixture construction failed: {err}"))
+        }
     }
-}
-
-/// Whether a `build_draft` error is an expected unsupported shape (skip) rather
-/// than a construction failure.
-fn is_unsupported_fixture_shape(message: &str) -> bool {
-    message.contains("does not support deposit")
-        || message.contains("does not support EIP-7702")
-        || message.contains("has no fixture mapping")
-        || message.contains("reports no gas price")
-        // Fidelity is normally gated before `build_draft`; keep the classification
-        // if a fidelity check inside the builder ever surfaces here.
-        || message.contains("does not reproduce on-chain execution")
 }
 
 /// Fetch the on-chain receipt of every target of a block.
@@ -1155,6 +1158,13 @@ fn classify(err: &ReplayError) -> BatchErrorKind {
 /// stop (unknown hash, RPC failure, executor/setup error on another
 /// transaction), a non-aborting swept target is unanswered (`rpc`). Only the
 /// transaction that caused the abort keeps its own classified kind.
+///
+/// The error is taken and ignored on purpose: the signature keeps the decision
+/// visible at the call site, so a future change that wants to classify by cause
+/// has to argue against this rule rather than silently add a parameter. Note the
+/// consequence — a deterministic execution failure in a *non-target* transaction
+/// sweeps every target as `rpc` (exit `3`, "retrying may help") even though
+/// retrying will not help.
 fn swept_kind(_err: &ReplayError) -> BatchErrorKind {
     BatchErrorKind::Rpc
 }
@@ -1485,46 +1495,38 @@ mod tests {
         assert!(parse_block_number("12.5").is_err());
     }
 
-    /// Unsupported shapes remain skips; database/construction failures become
-    /// fixture errors so the run exits non-zero.
+    /// Unsupported shapes remain skips; construction failures become fixture
+    /// errors so the run exits non-zero.
+    ///
+    /// Which builder rejection lands in which variant is decided inside
+    /// `build_draft` and pinned by the integration tests that drive the real
+    /// builder (deposit skip, injected pre-state failure); this test only pins
+    /// the variant-to-report mapping, which no rewording can move.
     #[test]
     fn test_fixture_build_err_classifies_skips_vs_construction_errors() {
-        let deposit = fixture_report_from_build_err(ReplayError::Other(
+        let unsupported = fixture_report_from_build_err(fixture::FixtureBuildError::Unsupported(
             "--dump-fixture does not support deposit transactions".into(),
         ));
-        assert!(deposit.skipped.is_some(), "deposit is a skip: {deposit:?}");
-        assert!(deposit.error.is_none());
+        assert!(unsupported.skipped.is_some(), "unsupported shape is a skip: {unsupported:?}");
+        assert!(unsupported.error.is_none());
+        assert_eq!(
+            unsupported.skipped.as_deref(),
+            Some("--dump-fixture does not support deposit transactions"),
+            "the builder's reason is reported verbatim"
+        );
 
-        let eip7702 = fixture_report_from_build_err(ReplayError::Other(
-            "--dump-fixture does not support EIP-7702 (set-code) transactions: the \
-             fixture builder does not serialize the authorization list"
-                .into(),
-        ));
-        assert!(eip7702.skipped.is_some(), "EIP-7702 is a skip: {eip7702:?}");
-
-        let unknown_spec = fixture_report_from_build_err(ReplayError::Other(
-            "--dump-fixture: spec Rex99 has no fixture mapping".into(),
-        ));
-        assert!(unknown_spec.skipped.is_some(), "unknown spec is a skip: {unknown_spec:?}");
-
-        let pre_state = fixture_report_from_build_err(ReplayError::Other(
-            "pre-state read for 0x00000000000000000000000000000000000000aa: database unavailable"
-                .into(),
+        let construction = fixture_report_from_build_err(fixture::FixtureBuildError::Construction(
+            ReplayError::Other(
+                "pre-state read for 0x00000000000000000000000000000000000000aa: \
+                     database unavailable"
+                    .into(),
+            ),
         ));
         assert!(
-            pre_state.error.as_ref().is_some_and(|m| m.contains("construction failed")),
-            "DB pre-state failure is a fixture error: {pre_state:?}"
+            construction.error.as_ref().is_some_and(|m| m.contains("construction failed")),
+            "construction failure is a fixture error: {construction:?}"
         );
-        assert!(pre_state.skipped.is_none());
-
-        let code_fetch = fixture_report_from_build_err(ReplayError::Other(
-            "code fetch for 0x1111: endpoint timeout".into(),
-        ));
-        assert!(
-            code_fetch.error.as_ref().is_some_and(|m| m.contains("construction failed")),
-            "code fetch failure is a fixture error: {code_fetch:?}"
-        );
-        assert!(code_fetch.skipped.is_none());
+        assert!(construction.skipped.is_none());
     }
 
     /// A pre-decided fixture report is never rewritten by materialization, so a
