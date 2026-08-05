@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""MegaETH domain mutator v0: spec-gate flips + gas-constant ±1.
+"""MegaETH domain mutator v0: domain-specific mutation operators.
+
+Operators:
+  - spec_gate: flip `.is_enabled(MegaSpecId::X)` to true/false
+  - gas_const: ±1 on constants in constants.rs
+  - adjacent_spec: replace MegaSpecId::X with predecessor/successor
+  - call_delete: delete statement-position protocol/recording calls
 
 Stdlib-only harness. Does not modify product code permanently: each mutant is
 applied as a text edit, tested, then restored via journal compare-and-restore
@@ -29,11 +35,44 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 SRC_ROOT = Path("crates/mega-evm/src")
 CONSTANTS_FILE = SRC_ROOT / "constants.rs"
+SPEC_RS = SRC_ROOT / "evm" / "spec.rs"
 DEFAULT_STATE = Path("tools/mutation/state.json")
 DEFAULT_REPORT = Path("tools/mutation/reports/report.md")
 LOG_DIR = Path("tools/mutation/logs")
 # Crash-recovery journal: written before each mutant apply, removed after restore.
 DEFAULT_JOURNAL = Path("tools/mutation/.mutate-journal.json")
+
+# Linear MegaSpecId order (must match crates/mega-evm/src/evm/spec.rs enum).
+# Enumeration hard-fails if the source enum diverges from this list.
+SPEC_ORDER: Tuple[str, ...] = (
+    "EQUIVALENCE",
+    "MINI_REX",
+    "REX",
+    "REX1",
+    "REX2",
+    "REX3",
+    "REX4",
+    "REX5",
+    "REX6",
+    "REX7",
+)
+
+# Statement-position protocol / recording calls eligible for call_delete.
+CALL_DELETE_CALLEES: Tuple[str, ...] = (
+    "check_limit",
+    "push_frame",
+    "pop_frame",
+    "push_empty_frame",
+    "before_frame_init",
+    "before_frame_return_result",
+    "on_sstore",
+    "on_log",
+    "record_oracle_hint_bytes",
+    "record_compute_gas_all_dims",
+)
+
+# call_delete scope: crates/mega-evm/src/{limit,evm,sandbox,system}/**.rs
+CALL_DELETE_SUBDIRS: Tuple[str, ...] = ("limit", "evm", "sandbox", "system")
 
 # Full-tree clean whitelist (`git status --porcelain`).
 # Only harness *runtime artifacts* may be dirty/untracked — never harness
@@ -87,13 +126,13 @@ class Mutant:
     """One concrete mutant (site × body)."""
 
     mid: str
-    operator: str  # "spec_gate" | "gas_const"
+    operator: str  # "spec_gate" | "gas_const" | "adjacent_spec" | "call_delete"
     file: str  # repo-relative path
     # 1-based line of the match start (for humans / filter).
     line: int
     # Human-readable site key (spec name or constant name).
     site: str
-    # Body label: "true"/"false" or "+1"/"-1".
+    # Body label: "true"/"false", "+1"/"-1", "pred=Y"/"succ=Y", or callee name.
     body: str
     # Exact original text span to replace (may span multiple lines).
     original: str
@@ -480,20 +519,109 @@ def in_assert_macro(text: str, pos: int) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Enumeration: spec-gate
+# Spec order (adjacent_spec) — verified against source
 # ---------------------------------------------------------------------------
 
 
-def enumerate_spec_gate(root: Path) -> Tuple[List[Mutant], List[str]]:
-    """Return (mutants, exclusion_notes).
+def parse_megaspec_variants(root: Path) -> List[str]:
+    """Parse `enum MegaSpecId` variant names from spec.rs in declaration order."""
+    path = root / SPEC_RS
+    if not path.is_file():
+        raise SystemExit(f"missing MegaSpecId source: {path}")
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r"pub\s+enum\s+MegaSpecId\s*\{", text)
+    if not m:
+        raise SystemExit(f"could not find `pub enum MegaSpecId` in {SPEC_RS}")
+    # Brace-match the enum body.
+    i = m.end() - 1  # position of '{'
+    depth = 0
+    end = None
+    for j in range(i, len(text)):
+        c = text[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = j
+                break
+    if end is None:
+        raise SystemExit(f"unclosed MegaSpecId enum in {SPEC_RS}")
+    body = text[i + 1 : end]
+    # Variant lines: optional docs/attrs then IDENT, or IDENT {
+    variants: List[str] = []
+    for line in body.splitlines():
+        s = line.strip()
+        if not s or s.startswith("//") or s.startswith("///") or s.startswith("#["):
+            continue
+        # Strip trailing comma and any inline comment.
+        s = s.split("//", 1)[0].strip().rstrip(",").strip()
+        if not s:
+            continue
+        # Skip nested items if any; take leading identifier.
+        vm = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\b", s)
+        if vm:
+            variants.append(vm.group(1))
+    return variants
 
-    Non-product sites are excluded:
+
+def verify_spec_order(root: Path) -> None:
+    """Hard-fail if SPEC_ORDER does not exactly match MegaSpecId in source."""
+    found = parse_megaspec_variants(root)
+    if found != list(SPEC_ORDER):
+        raise SystemExit(
+            "MegaSpecId order mismatch between harness SPEC_ORDER and "
+            f"{SPEC_RS}:\n"
+            f"  harness: {list(SPEC_ORDER)}\n"
+            f"  source:  {found}\n"
+            "Update SPEC_ORDER (and adjacent_spec) before enumerating."
+        )
+
+
+def adjacent_specs(name: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (predecessor, successor) for a MegaSpecId name, or None at ends."""
+    try:
+        idx = SPEC_ORDER.index(name)
+    except ValueError as e:
+        raise SystemExit(
+            f"unknown MegaSpecId variant in product gate: {name!r}. "
+            f"Known: {list(SPEC_ORDER)}"
+        ) from e
+    pred = SPEC_ORDER[idx - 1] if idx > 0 else None
+    succ = SPEC_ORDER[idx + 1] if idx + 1 < len(SPEC_ORDER) else None
+    return pred, succ
+
+
+# ---------------------------------------------------------------------------
+# Enumeration: shared is_enabled site inventory (spec_gate + adjacent_spec)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SpecGateSite:
+    """One product `.is_enabled(MegaSpecId::X)` site (shared by two operators)."""
+
+    file: str
+    line: int
+    spec_name: str
+    full_path: str  # MegaSpecId::X or crate::MegaSpecId::X
+    path_original: str  # exact bytes of full_path at the call
+    path_occurrence: int
+    expr_original: str  # full receiver.is_enabled(...)
+    expr_occurrence: int
+    site: str
+    note: str
+
+
+def find_spec_gate_sites(root: Path) -> Tuple[List[SpecGateSite], List[str]]:
+    """Walk product sources for is_enabled(MegaSpecId::X) sites.
+
+    Non-product sites are excluded (same rules for spec_gate and adjacent_spec):
     - `#[cfg(test)]` modules / items
-    - `is_enabled(...)` appearing as an argument to `assert!` / `debug_assert!` /
-      `assert_eq!` / `assert_ne!`
-    - comment lines and string literals (pre-existing)
+    - `is_enabled(...)` as an argument to assert!/debug_assert!/assert_eq!/assert_ne!
+    - comment lines and string literals
     """
-    mutants: List[Mutant] = []
+    sites: List[SpecGateSite] = []
     exclusions: List[str] = []
     src = root / SRC_ROOT
     if not src.is_dir():
@@ -508,8 +636,7 @@ def enumerate_spec_gate(root: Path) -> Tuple[List[Mutant], List[str]]:
         lines = text.splitlines(keepends=True)
         test_ranges = find_cfg_test_ranges(text)
 
-        # Precompute line start offsets.
-        offsets = []
+        offsets: List[int] = []
         acc = 0
         for ln in lines:
             offsets.append(acc)
@@ -538,7 +665,6 @@ def enumerate_spec_gate(root: Path) -> Tuple[List[Mutant], List[str]]:
                 )
                 continue
 
-            # Non-product: #[cfg(test)] modules / items.
             test_hit = next(
                 (label for a, b, label in test_ranges if a <= call_start < b),
                 None,
@@ -549,7 +675,6 @@ def enumerate_spec_gate(root: Path) -> Tuple[List[Mutant], List[str]]:
                 )
                 continue
 
-            # Non-product: assert!/debug_assert! arguments (including multi-line).
             assert_hit = in_assert_macro(text, call_start)
             if assert_hit is not None:
                 exclusions.append(
@@ -559,16 +684,24 @@ def enumerate_spec_gate(root: Path) -> Tuple[List[Mutant], List[str]]:
                 continue
 
             recv_start = find_receiver_start(text, call_start)
-            original = text[recv_start:call_end]
-            # Sanity: original must contain the match.
-            if ".is_enabled" not in original:
+            expr_original = text[recv_start:call_end]
+            if ".is_enabled" not in expr_original:
                 exclusions.append(
-                    f"receiver-walk-failed: {rel}:{line_idx + 1}: {text[call_start:call_end]!r}"
+                    f"receiver-walk-failed: {rel}:{line_idx + 1}: "
+                    f"{text[call_start:call_end]!r}"
                 )
                 continue
 
-            # Occurrence index among identical originals in this file.
-            occ = text[:recv_start].count(original)
+            # Exact path span inside the match (group 1).
+            path_start = m.start(1)
+            path_end = m.end(1)
+            path_original = text[path_start:path_end]
+            if path_original != full_path:
+                # Defensive: regex group should equal slice.
+                path_original = full_path
+
+            expr_occ = text[:recv_start].count(expr_original)
+            path_occ = text[:path_start].count(path_original)
 
             base_key = f"spec_gate:{rel}:{spec_name}"
             site_counter[base_key] = site_counter.get(base_key, 0) + 1
@@ -577,27 +710,427 @@ def enumerate_spec_gate(root: Path) -> Tuple[List[Mutant], List[str]]:
             if n > 1:
                 site = f"{site}#{n}"
 
-            for body, replacement in (("true", "true"), ("false", "false")):
-                mid = f"spec_gate:{rel}:{line_idx + 1}:{spec_name}:{body}"
-                # Disambiguate if same line has multiple (unlikely).
-                if any(x.mid == mid for x in mutants):
-                    mid = f"{mid}:occ{occ}"
-                mutants.append(
-                    Mutant(
-                        mid=mid,
-                        operator="spec_gate",
-                        file=rel,
-                        line=line_idx + 1,
-                        site=site,
-                        body=body,
-                        original=original,
-                        replacement=replacement,
-                        occurrence=occ,
-                        note=f"expr={original!r} path={full_path}",
-                    )
+            sites.append(
+                SpecGateSite(
+                    file=rel,
+                    line=line_idx + 1,
+                    spec_name=spec_name,
+                    full_path=full_path,
+                    path_original=path_original,
+                    path_occurrence=path_occ,
+                    expr_original=expr_original,
+                    expr_occurrence=expr_occ,
+                    site=site,
+                    note=f"expr={expr_original!r} path={full_path}",
+                )
+            )
+
+    return sites, exclusions
+
+
+def enumerate_spec_gate(root: Path) -> Tuple[List[Mutant], List[str]]:
+    """Return (mutants, exclusion_notes) for true/false flips of is_enabled sites."""
+    sites, exclusions = find_spec_gate_sites(root)
+    mutants: List[Mutant] = []
+    for s in sites:
+        for body, replacement in (("true", "true"), ("false", "false")):
+            mid = f"spec_gate:{s.file}:{s.line}:{s.spec_name}:{body}"
+            if any(x.mid == mid for x in mutants):
+                mid = f"{mid}:occ{s.expr_occurrence}"
+            mutants.append(
+                Mutant(
+                    mid=mid,
+                    operator="spec_gate",
+                    file=s.file,
+                    line=s.line,
+                    site=s.site,
+                    body=body,
+                    original=s.expr_original,
+                    replacement=replacement,
+                    occurrence=s.expr_occurrence,
+                    note=s.note,
+                )
+            )
+    return mutants, exclusions
+
+
+def enumerate_adjacent_spec(root: Path) -> Tuple[List[Mutant], List[str]]:
+    """Adjacent-spec replacement mutants for the same sites as spec_gate.
+
+    For each `is_enabled(MegaSpecId::X)` product site, emit up to two bodies:
+      - pred: replace X with its predecessor (skip if X is first)
+      - succ: replace X with its successor (skip if X is last)
+
+    mid: `adjacent_spec:<file>:<line>:<X>:<pred|succ>=<Y>`
+    """
+    verify_spec_order(root)
+    # Site inventory matches spec_gate; shared non-product filters are reported
+    # only once via enumerate_spec_gate exclusions.
+    sites, _shared_excl = find_spec_gate_sites(root)
+    exclusions: List[str] = []
+    mutants: List[Mutant] = []
+    for s in sites:
+        pred, succ = adjacent_specs(s.spec_name)
+        # Preserve crate:: prefix when present.
+        if s.path_original.startswith("crate::"):
+            path_prefix = "crate::MegaSpecId::"
+        else:
+            path_prefix = "MegaSpecId::"
+
+        for kind, target in (("pred", pred), ("succ", succ)):
+            if target is None:
+                exclusions.append(
+                    f"adjacent_spec-skip-end: {s.file}:{s.line}: "
+                    f"{s.spec_name} has no {kind}"
+                )
+                continue
+            body = f"{kind}={target}"
+            mid = f"adjacent_spec:{s.file}:{s.line}:{s.spec_name}:{body}"
+            if any(x.mid == mid for x in mutants):
+                mid = f"{mid}:occ{s.path_occurrence}"
+            mutants.append(
+                Mutant(
+                    mid=mid,
+                    operator="adjacent_spec",
+                    file=s.file,
+                    line=s.line,
+                    site=s.site,
+                    body=body,
+                    original=s.path_original,
+                    replacement=f"{path_prefix}{target}",
+                    occurrence=s.path_occurrence,
+                    note=f"{s.note} → {kind}={target}",
+                )
+            )
+    return mutants, exclusions
+
+
+# ---------------------------------------------------------------------------
+# Enumeration: call_delete (statement-position protocol calls)
+# ---------------------------------------------------------------------------
+
+
+# Callee name + optional turbofish + opening paren.
+_CALL_DELETE_OPEN = re.compile(
+    r"\b("
+    + "|".join(re.escape(c) for c in CALL_DELETE_CALLEES)
+    + r")\s*(?:::\s*<[^>]*>\s*)?\("
+)
+
+
+def _match_balanced_parens(text: str, open_paren: int) -> Optional[int]:
+    """Return index of matching `)` for `(` at open_paren, or None if unbalanced.
+
+    Skips simple string/char contents; good enough for statement-call args.
+    """
+    if open_paren < 0 or open_paren >= len(text) or text[open_paren] != "(":
+        return None
+    depth = 0
+    in_str = False
+    in_char = False
+    escape = False
+    for i in range(open_paren, len(text)):
+        c = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+            continue
+        if in_char:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == "'":
+                in_char = False
+            continue
+        if c == '"':
+            in_str = True
+            continue
+        if c == "'":
+            in_char = True
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def _line_start_at(text: str, pos: int) -> int:
+    nl = text.rfind("\n", 0, pos)
+    return 0 if nl < 0 else nl + 1
+
+
+def _find_call_expr_start(text: str, callee_start: int) -> int:
+    """Start of `recv.callee` / bare `callee` for a call whose name starts at callee_start.
+
+    Walks left over method-chain segments, allowing whitespace/newlines **only**
+    between a segment and a preceding `.` so multi-line receivers such as
+
+        let x = ctx
+            .foo
+            .bar();
+
+    resolve to `ctx` (then rejected as non-statements by the line-prefix check).
+    Does **not** cross statement boundaries (`;`, `{`, …).
+    Spec-gate's `find_receiver_start` is intentionally left unchanged.
+    """
+    # Optional whitespace then '.' before the callee name → method call.
+    j = callee_start - 1
+    while j >= 0 and text[j] in " \t":
+        j -= 1
+    if j < 0 or text[j] != ".":
+        return callee_start
+
+    # `dot` is the '.' immediately before the current segment name.
+    dot = j
+    while True:
+        # Consume one segment to the left of `dot`: ident, path, or call `ident(...)`.
+        k = dot - 1
+        while k >= 0 and text[k] in " \t\r\n":
+            k -= 1
+        if k < 0:
+            return dot
+
+        if text[k] == ")":
+            # Walk back over balanced `(...)` then the callee name of that call.
+            depth = 1
+            k -= 1
+            in_str = False
+            escape = False
+            while k >= 0 and depth > 0:
+                c = text[k]
+                if in_str:
+                    if escape:
+                        escape = False
+                    elif c == "\\":
+                        escape = True
+                    elif c == '"':
+                        in_str = False
+                    k -= 1
+                    continue
+                if c == '"':
+                    in_str = True
+                    k -= 1
+                    continue
+                if c == ")":
+                    depth += 1
+                elif c == "(":
+                    depth -= 1
+                k -= 1
+            # k is now just before '('. Optional turbofish / name before '('.
+            while k >= 0 and text[k] in " \t":
+                k -= 1
+            # Skip turbofish `::<...>` if present (walk back over it).
+            if k >= 0 and text[k] == ">":
+                depth_a = 1
+                k -= 1
+                while k >= 0 and depth_a > 0:
+                    if text[k] == ">":
+                        depth_a += 1
+                    elif text[k] == "<":
+                        depth_a -= 1
+                    k -= 1
+                while k >= 0 and text[k] in " \t":
+                    k -= 1
+                if k >= 1 and text[k - 1 : k + 1] == "::":
+                    k -= 2
+                while k >= 0 and text[k] in " \t":
+                    k -= 1
+            # Identifier / path before the call.
+            if k >= 0 and (text[k].isalnum() or text[k] == "_"):
+                while k >= 0 and (text[k].isalnum() or text[k] in "_"):
+                    k -= 1
+                if k >= 1 and text[k - 1 : k + 1] == "::":
+                    # rare: Type::method — keep walking path segments simply
+                    while k >= 1 and text[k - 1 : k + 1] == "::":
+                        k -= 2
+                        while k >= 0 and (text[k].isalnum() or text[k] in "_"):
+                            k -= 1
+            seg_start = k + 1
+        elif text[k].isalnum() or text[k] == "_":
+            while k >= 0 and (text[k].isalnum() or text[k] in "_"):
+                k -= 1
+            # Path prefix `Foo::`
+            while k >= 1 and text[k - 1 : k + 1] == "::":
+                k -= 2
+                while k >= 0 and (text[k].isalnum() or text[k] in "_"):
+                    k -= 1
+            seg_start = k + 1
+        else:
+            # Cannot parse a segment (e.g. hit `;`); start at the '.' we had.
+            return dot
+
+        # Can the chain continue further left via another '.'?
+        k = seg_start - 1
+        while k >= 0 and text[k] in " \t\r\n":
+            k -= 1
+        if k >= 0 and text[k] == ".":
+            # Do not chain into a `//` comment (e.g. `// ... budget.` above a call).
+            ls = _line_start_at(text, k)
+            line_head = text[ls : k + 1]
+            if re.search(r"//", line_head):
+                return seg_start
+            # Block-comment end on this line is rare in this codebase; keep simple.
+            dot = k
+            continue
+        return seg_start
+
+
+def enumerate_call_delete(
+    root: Path,
+) -> Tuple[List[Mutant], List[str], Dict[str, Dict[str, int]]]:
+    """Delete statement-position calls to curated protocol methods.
+
+    Only full statements whose value is discarded:
+      `recv.callee(...);`  (single-line or multi-line ending in `);`)
+    Expression-position uses (assignment, return, condition, `?`, method chain
+    continuation) are skipped.
+
+    Returns (mutants, exclusion_notes, per_callee stats:
+      {callee: {enumerated, skipped}}).
+    mid: `call_delete:<file>:<line>:<callee>`
+    """
+    mutants: List[Mutant] = []
+    exclusions: List[str] = []
+    stats: Dict[str, Dict[str, int]] = {
+        c: {"enumerated": 0, "skipped": 0} for c in CALL_DELETE_CALLEES
+    }
+
+    src = root / SRC_ROOT
+    if not src.is_dir():
+        raise SystemExit(f"missing source root: {src}")
+
+    files: List[Path] = []
+    for sub in CALL_DELETE_SUBDIRS:
+        d = src / sub
+        if d.is_dir():
+            files.extend(sorted(d.rglob("*.rs")))
+    files = sorted(set(files))
+
+    for fpath in files:
+        rel = str(fpath.relative_to(root))
+        text = fpath.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=True)
+        test_ranges = find_cfg_test_ranges(text)
+
+        offsets: List[int] = []
+        acc = 0
+        for ln in lines:
+            offsets.append(acc)
+            acc += len(ln)
+
+        for m in _CALL_DELETE_OPEN.finditer(text):
+            callee = m.group(1)
+            callee_start = m.start(1)
+            open_paren = m.end() - 1  # the '(' of the call
+            line_idx = line_number_at(text, callee_start) - 1
+            line_text = lines[line_idx] if 0 <= line_idx < len(lines) else ""
+
+            def skip(reason: str) -> None:
+                stats[callee]["skipped"] += 1
+                exclusions.append(
+                    f"call_delete-skip-{reason}: {rel}:{line_idx + 1}: {callee}: "
+                    f"{line_text.rstrip()[:100]}"
                 )
 
-    return mutants, exclusions
+            if line_is_comment(line_text):
+                skip("comment")
+                continue
+
+            col_in_line = callee_start - offsets[line_idx]
+            if in_string_literal(line_text, col_in_line):
+                skip("string")
+                continue
+
+            test_hit = next(
+                (label for a, b, label in test_ranges if a <= callee_start < b),
+                None,
+            )
+            if test_hit is not None:
+                skip("cfg-test")
+                continue
+
+            assert_hit = in_assert_macro(text, callee_start)
+            if assert_hit is not None:
+                skip("assert-macro")
+                continue
+
+            # Skip method / function definitions: `fn callee(` on this line.
+            header_start = _line_start_at(text, callee_start)
+            header_prefix = text[header_start:callee_start]
+            if re.search(r"\bfn\b", header_prefix):
+                skip("definition")
+                continue
+
+            close_paren = _match_balanced_parens(text, open_paren)
+            if close_paren is None:
+                skip("unbalanced-parens")
+                continue
+
+            # After `)`: only whitespace then `;` then whitespace to EOL.
+            # Reject `?`, method chaining `.`, assignment uses already handled by prefix.
+            j = close_paren + 1
+            while j < len(text) and text[j] in " \t":
+                j += 1
+            if j >= len(text) or text[j] != ";":
+                skip("not-statement")  # `?`, `.`, `,`, etc.
+                continue
+            semi = j
+            j = semi + 1
+            while j < len(text) and text[j] in " \t":
+                j += 1
+            # Must be end of line (or EOF).
+            if j < len(text) and text[j] not in "\r\n":
+                skip("trailing-junk")
+                continue
+
+            expr_start = _find_call_expr_start(text, callee_start)
+            stmt_line_start = _line_start_at(text, expr_start)
+            # Only whitespace between line start and expression start.
+            if text[stmt_line_start:expr_start].strip() != "":
+                skip("expr-position")  # e.g. `let x = ...`, `return ...`, `if ...`
+                continue
+
+            # Statement span: from line start through `;`, plus following newline if any.
+            end = semi + 1
+            if end < len(text) and text[end] == "\r":
+                end += 1
+            if end < len(text) and text[end] == "\n":
+                end += 1
+            original = text[stmt_line_start:end]
+            if not original.strip():
+                skip("empty")
+                continue
+
+            occ = text[:stmt_line_start].count(original)
+            mid = f"call_delete:{rel}:{line_idx + 1}:{callee}"
+            if any(x.mid == mid for x in mutants):
+                mid = f"{mid}:occ{occ}"
+
+            mutants.append(
+                Mutant(
+                    mid=mid,
+                    operator="call_delete",
+                    file=rel,
+                    line=line_idx + 1,
+                    site=f"{callee}@{rel}:{line_idx + 1}",
+                    body=callee,
+                    original=original,
+                    replacement="",  # delete the whole statement line(s)
+                    occurrence=occ,
+                    note="statement-delete",
+                )
+            )
+            stats[callee]["enumerated"] += 1
+
+    return mutants, exclusions, stats
 
 
 # ---------------------------------------------------------------------------
@@ -1373,12 +1906,13 @@ def write_report(
 
     sg = [m for m in mutants_all if m.operator == "spec_gate"]
     gc = [m for m in mutants_all if m.operator == "gas_const"]
-    # unique sites
-    sg_sites = len({(m.file, m.line, m.site.split("#")[0]) for m in sg}) // 1
-    # each site has 2 bodies
+    adj = [m for m in mutants_all if m.operator == "adjacent_spec"]
+    cd = [m for m in mutants_all if m.operator == "call_delete"]
+    # each spec_gate site has 2 bodies
     sg_points = len(sg) // 2
-    gc_consts = len(gc)  # each body is a mutant; count unique names
     gc_names = len({m.site for m in gc})
+    adj_sites = len({(m.file, m.line, m.site.split("#")[0]) for m in adj})
+    cd_sites = len(cd)
 
     parts = [
         f"# {title}",
@@ -1388,10 +1922,14 @@ def write_report(
         "## Summary",
         "",
         f"- Enumerated mutants (full): **{len(mutants_all)}** "
-        f"(spec_gate={len(sg)}, gas_const={len(gc)})",
+        f"(spec_gate={len(sg)}, gas_const={len(gc)}, "
+        f"adjacent_spec={len(adj)}, call_delete={len(cd)})",
         f"- Spec-gate sites (points × 2 bodies): **{sg_points}** points → {len(sg)} mutants",
         f"- Gas-const sites: **{gc_names}** constants → {len(gc)} mutants "
         f"(−1 skipped on literal 0)",
+        f"- Adjacent-spec sites: **{adj_sites}** points → {len(adj)} mutants "
+        f"(pred/succ; ends omit one body)",
+        f"- Call-delete sites: **{cd_sites}** statement deletions",
         f"- Subset run: **{len(results)}** mutants "
         f"(killed={killed}, survived={survived}, error={errors})",
         f"- Wall time (sum of mutant durations): **{total_time:.1f}s** "
@@ -1581,23 +2119,57 @@ def select_subset(
             continue
         add(m)
 
-    # Mix: alternate gas_const and spec_gate for diversity.
-    gas = [m for m in pool if m.operator == "gas_const" and m.mid not in seen]
-    spec = [m for m in pool if m.operator == "spec_gate" and m.mid not in seen]
-    # Prefer REX6/REX5 gates and STORAGE/SSTORE-ish constants for signal.
-    spec.sort(key=lambda m: (0 if "REX6" in m.site else 1 if "REX5" in m.site else 2, m.mid))
-    gas.sort(key=lambda m: (0 if "STIPEND" in m.site or "SSTORE" in m.site or "GAS" in m.site else 1, m.mid))
+    # Mix operators for diversity (legacy + new).
+    buckets: Dict[str, List[Mutant]] = {
+        "spec_gate": [m for m in pool if m.operator == "spec_gate" and m.mid not in seen],
+        "gas_const": [m for m in pool if m.operator == "gas_const" and m.mid not in seen],
+        "adjacent_spec": [
+            m for m in pool if m.operator == "adjacent_spec" and m.mid not in seen
+        ],
+        "call_delete": [
+            m for m in pool if m.operator == "call_delete" and m.mid not in seen
+        ],
+    }
+    # Prefer REX6/REX5 gates, STORAGE/SSTORE-ish constants, check_limit deletions.
+    buckets["spec_gate"].sort(
+        key=lambda m: (
+            0 if "REX6" in m.site else 1 if "REX5" in m.site else 2,
+            m.mid,
+        )
+    )
+    buckets["gas_const"].sort(
+        key=lambda m: (
+            0
+            if "STIPEND" in m.site or "SSTORE" in m.site or "GAS" in m.site
+            else 1,
+            m.mid,
+        )
+    )
+    buckets["adjacent_spec"].sort(
+        key=lambda m: (
+            0 if "REX6" in m.site else 1 if "REX5" in m.site else 2,
+            m.mid,
+        )
+    )
+    buckets["call_delete"].sort(
+        key=lambda m: (
+            0 if m.body == "check_limit" else 1 if "frame" in m.body else 2,
+            m.mid,
+        )
+    )
 
-    gi = si = 0
-    while len(selected) < limit and (gi < len(gas) or si < len(spec)):
-        if si < len(spec):
-            add(spec[si])
-            si += 1
-        if len(selected) >= limit:
-            break
-        if gi < len(gas):
-            add(gas[gi])
-            gi += 1
+    order = ("spec_gate", "gas_const", "adjacent_spec", "call_delete")
+    idxs = {k: 0 for k in order}
+    while len(selected) < limit and any(
+        idxs[k] < len(buckets[k]) for k in order
+    ):
+        for k in order:
+            if len(selected) >= limit:
+                break
+            i = idxs[k]
+            if i < len(buckets[k]):
+                add(buckets[k][i])
+                idxs[k] = i + 1
 
     # Fill remainder in inventory order
     if len(selected) < limit:
@@ -1611,7 +2183,10 @@ def select_subset(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
-        description="MegaETH domain mutator v0 (spec-gate flip + gas-const ±1)"
+        description=(
+            "MegaETH domain mutator v0 "
+            "(spec_gate, gas_const, adjacent_spec, call_delete)"
+        )
     )
     ap.add_argument("--list", action="store_true", help="Enumerate mutants and exit")
     ap.add_argument("--filter", type=str, default=None, help="Substring filter (file/const/spec)")
@@ -1671,8 +2246,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     sg_mutants, sg_excl = enumerate_spec_gate(root)
     gc_mutants, gc_excl = enumerate_gas_const(root)
-    all_mutants = sg_mutants + gc_mutants
-    exclusions = sg_excl + gc_excl
+    adj_mutants, adj_excl = enumerate_adjacent_spec(root)
+    cd_mutants, cd_excl, cd_stats = enumerate_call_delete(root)
+    all_mutants = sg_mutants + gc_mutants + adj_mutants + cd_mutants
+    exclusions = sg_excl + gc_excl + adj_excl + cd_excl
     inv_hash = inventory_fingerprint(all_mutants)
     head = git_head(root)
 
@@ -1685,11 +2262,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("# Domain mutator inventory")
         print(f"spec_gate: {len(sg_mutants)} bodies ({len(sg_mutants)//2} sites × 2)")
         print(f"gas_const: {len(gc_mutants)} bodies")
+        # adjacent_spec: up to 2 bodies per site; ends omit one.
+        adj_points = len({(m.file, m.line) for m in adj_mutants})
+        print(
+            f"adjacent_spec: {len(adj_mutants)} bodies "
+            f"({adj_points} sites, pred/succ; ends omit one body)"
+        )
+        print(f"call_delete: {len(cd_mutants)} bodies (1 per statement site)")
         print(f"total: {len(all_mutants)}")
         print(f"inventory_hash: {inv_hash}")
         print(f"HEAD: {head}")
         if args.filter:
             print(f"filter={args.filter!r} → {len(filtered)}")
+        # Per-operator file counts (top files).
+        print("\n# Per-operator body counts by file (top 10)")
+        for op_name, op_list in (
+            ("spec_gate", sg_mutants),
+            ("gas_const", gc_mutants),
+            ("adjacent_spec", adj_mutants),
+            ("call_delete", cd_mutants),
+        ):
+            by_file: Dict[str, int] = {}
+            for m in op_list:
+                by_file[m.file] = by_file.get(m.file, 0) + 1
+            top = sorted(by_file.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+            print(f"## {op_name} ({len(op_list)} total)")
+            for f, n in top:
+                print(f"  {n:4d}  {f}")
+        print("\n# call_delete per-callee (enumerated / skipped)")
+        for c in CALL_DELETE_CALLEES:
+            st = cd_stats[c]
+            print(f"  {c}: enumerated={st['enumerated']} skipped={st['skipped']}")
         print()
         print(format_list_table(filtered if args.filter else all_mutants))
         if exclusions:
@@ -1910,10 +2513,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "(mutants are restored after each body).",
                         "- Oracle is layered: L1 `cargo test -p mega-evm --quiet`, then L2 "
                         "`cargo test -p mega-state-test --quiet` if L1 survives.",
-                        "- Spec-gate sites in `#[cfg(test)]` modules and inside "
-                        "`assert!`/`debug_assert!` args are **excluded** (non-product).",
+                        "- Spec-gate / adjacent-spec sites in `#[cfg(test)]` modules and "
+                        "inside `assert!`/`debug_assert!` args are **excluded** "
+                        "(non-product).",
                         "- Spec-gate sites that use `is_enabled(SomeAssociatedConst)` "
                         "(not a `MegaSpecId::` path) remain out of scope for v0.",
+                        "- call_delete only removes statement-position calls; expression "
+                        "position (assign/return/condition/`?`) is skipped.",
                         "- State resume binds HEAD + inventory_hash + oracle_command; "
                         "mismatch → refuse with --fresh hint.",
                         "- Crash journal + regular restore share compare-and-restore "
@@ -1925,6 +2531,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         f"({len(sg_mutants)} bodies).",
                         f"- Enumerated gas constants: {len({m.site for m in gc_mutants})} "
                         f"({len(gc_mutants)} bodies).",
+                        f"- Enumerated adjacent-spec bodies: {len(adj_mutants)}.",
+                        f"- Enumerated call-delete bodies: {len(cd_mutants)} "
+                        f"(skipped sites logged in exclusions).",
                         f"- Total bodies: {len(all_mutants)}.",
                     ]
                 ),

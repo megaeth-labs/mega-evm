@@ -1,12 +1,16 @@
 # MegaETH domain mutator (v0)
 
-Minimal, **stdlib-only** mutation harness for two MegaETH-specific properties that
-generic mutation tools miss:
+Minimal, **stdlib-only** mutation harness for MegaETH-specific properties that
+generic mutation tools (e.g. `cargo-mutants`) miss or cannot express cleanly:
 
 1. **Spec gates** — expressions of the form `<recv>.is_enabled(MegaSpecId::X)`
    (also `crate::MegaSpecId::X`).
 2. **Gas / size constants** — `const NAME: T = <rhs>;` declarations in
    `crates/mega-evm/src/constants.rs`.
+3. **Adjacent-spec swaps** — replace `MegaSpecId::X` with its predecessor or
+   successor at the same gate sites (activation-boundary shifts).
+4. **Protocol call deletion** — delete statement-position frame/limit recording
+   calls that encode resource-limit and frame-alignment protocol.
 
 The tool lives entirely under `tools/mutation/`. It is **not** part of the Cargo
 workspace and has **zero CI impact**.
@@ -17,6 +21,8 @@ workspace and has **zero CI impact**.
 |----------|-------|-----------------|----------------|
 | `spec_gate` | `crates/mega-evm/src/**/*.rs` | 2 | whole expression → `true` / `false` |
 | `gas_const` | `constants.rs` `const` decls | 2 | RHS → `(RHS) + 1` / `(RHS) - 1` |
+| `adjacent_spec` | same inventory as `spec_gate` | up to 2 | `MegaSpecId::X` → pred / succ |
+| `call_delete` | `src/{limit,evm,sandbox,system}/**` | 1 | delete whole statement call |
 
 ### Spec-gate details
 
@@ -34,6 +40,50 @@ workspace and has **zero CI impact**.
 - Skips the `−1` body when RHS is the literal `0` (none today).
 - Includes `usize` size limits (`MAX_CONTRACT_SIZE`, …) — they are consensus values.
 - Does **not** mutate `pub use gas::{...}` re-exports.
+
+### Adjacent-spec details
+
+A `spec_gate` true/false flip moves behavior for **all** specs at once.
+An adjacent swap moves the activation boundary by **exactly one** spec, so a
+survivor pinpoints an untested boundary between two specific specs.
+
+- Same site inventory and exclusions as `spec_gate` (product gates only).
+- Spec order (must match `MegaSpecId` in `crates/mega-evm/src/evm/spec.rs`;
+  enumeration hard-fails if the source enum diverges):
+
+  `EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6 → REX7`
+
+- For each site with `MegaSpecId::X`:
+  - **pred**: replace with predecessor (skipped when `X` is first)
+  - **succ**: replace with successor (skipped when `X` is last)
+- Mutant id: `adjacent_spec:<file>:<line>:<X>:<pred|succ>=<Y>`
+- Preserves a `crate::` path prefix when present.
+
+### Call-delete details
+
+This operator executable-izes the resource-limit check protocol and frame
+alignment rules: a survivor means a forgotten latch or stack misalignment could
+ship silently.
+
+Curated callees (match `self.<name>(...)` / `<recv>.<name>(...)` as a **full
+statement** whose value is discarded):
+
+`check_limit`, `push_frame`, `pop_frame`, `push_empty_frame`,
+`before_frame_init`, `before_frame_return_result`, `on_sstore`, `on_log`,
+`record_oracle_hint_bytes`, `record_compute_gas_all_dims`
+
+- Scope: `crates/mega-evm/src/{limit,evm,sandbox,system}/**/*.rs`
+- Same non-product exclusions as `spec_gate` (`#[cfg(test)]`, assert macros,
+  comments, string literals).
+- Only statement position: single-line `…callee(…);` or a clearly delimited
+  multi-line call ending in `);`. Expression position (assigned, returned, in a
+  condition, `?`-propagated) is **skipped**.
+- Turbofish calls (`before_frame_return_result::<true>(…)`) are included when
+  statement-shaped.
+- Mutant id: `call_delete:<file>:<line>:<callee>`
+- Some deletions still fail to compile (e.g. `#[must_use]`); the harness treats
+  compile failure as killed, same as other operators. `--list` reports
+  enumerated vs skipped counts per callee.
 
 ## Oracle (layered)
 
@@ -64,12 +114,13 @@ Per-mutant cargo logs land in `tools/mutation/logs/`.
 ## CLI
 
 ```bash
-# Inventory only (~320 bodies)
+# Inventory only
 python3 tools/mutation/mutate.py --list
 
-# Filter by file / const / spec substring
+# Filter by file / const / spec / operator substring
 python3 tools/mutation/mutate.py --list --filter STORAGE_CALL_STIPEND
-python3 tools/mutation/mutate.py --list --filter REX6
+python3 tools/mutation/mutate.py --list --filter adjacent_spec
+python3 tools/mutation/mutate.py --list --filter call_delete
 
 # Run a subset (sentinels are prioritized by default)
 python3 tools/mutation/mutate.py --limit 40 \
@@ -118,7 +169,8 @@ python3 tools/mutation/mutate.py --limit 40 --resume \
 
 ## Spec-gate exclusions (non-product)
 
-Enumeration skips `is_enabled(...)` sites that are not product semantics:
+Enumeration skips `is_enabled(...)` sites that are not product semantics
+(also applied to `adjacent_spec` and, for test/assert filters, `call_delete`):
 
 - Inside `#[cfg(test)]` modules / items
 - Inside `assert!` / `debug_assert!` / `assert_eq!` / `assert_ne!` arguments
@@ -140,6 +192,9 @@ REX4 burn + rescue-exclusion), nor unit-test-only gates in `spec.rs`.
 If a chosen sentinel **survives**, the process exits with code 2 — treat as a
 harness bug (or re-evaluate the sentinel prediction).
 
+New operators (`adjacent_spec`, `call_delete`) should be smoke-checked with
+explicit `--filter` runs on known-kill sites before a full campaign.
+
 ## Design constraints
 
 - Python 3, **stdlib only** (no pip deps).
@@ -153,9 +208,13 @@ harness bug (or re-evaluate the sentinel prediction).
 
 | Class | Notes | Bodies (post M4 exclusions) |
 |-------|-------|-----------------------------|
-| Spec-gate points | product gates only | 103 points → 206 bodies |
-| Gas constants | `constants.rs` | 33 consts → 66 bodies |
-| **Total bodies** | | **272** |
+| Spec-gate points | product gates only | ~104 points → ~208 bodies |
+| Gas constants | `constants.rs` | ~33 consts → ~66 bodies |
+| Adjacent-spec | same sites; ends omit one body | ~180–210 bodies |
+| Call-delete | statement-position only | tens of bodies (see `--list`) |
+| **Total bodies** | | **see `--list` on HEAD** |
 
-Deltas vs the original ~322 survey come from excluding `cfg(test)` /
+Deltas vs early surveys come from excluding `cfg(test)` /
 `assert!`/`debug_assert!` sites plus comment/path filters.
+Exact adjacent-spec and call-delete counts depend on current product code;
+always re-run `--list` after a rebase.
