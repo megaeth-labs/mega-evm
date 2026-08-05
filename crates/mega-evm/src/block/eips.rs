@@ -9,7 +9,7 @@ use alloy_evm::{
 use alloy_primitives::{Address, B256, U256};
 use revm::{
     context_interface::result::ResultAndState,
-    state::{Account, EvmState},
+    state::{Account, EvmState, TransactionId},
     Database, Inspector,
 };
 
@@ -164,6 +164,15 @@ where
 
 /// Transacts the balance increments and returns the post evm state. Note that the changes are not
 /// committed to the given db.
+///
+/// This is [`revm::database_interface::DatabaseCommitExt::increment_balances`] with the commit
+/// removed: pre-block helpers return their state so the executor commits it through the one path
+/// the state hook is installed on. Everything else follows the upstream body, including how each
+/// account is built — an account that exists carries its pre-increment info as the original, and
+/// one that does not is marked as loaded-not-existing. `CacheState::apply_account_state` reads
+/// both when the account is not already cached, to decide the baseline it records for the block,
+/// so building them any other way would make the returned state describe a different prior state
+/// than the chain had.
 pub(crate) fn transact_balance_increments<DB: Database>(
     balances: impl IntoIterator<Item = (Address, u128)>,
     db: &mut DB,
@@ -175,9 +184,11 @@ pub(crate) fn transact_balance_increments<DB: Database>(
         if balance_increment == 0 {
             continue;
         }
-        let account_info = db.basic(address)?.unwrap_or_default();
-        let mut account = Account::default().with_info(account_info);
-        account.info.balance += U256::from(balance_increment);
+        let mut account = match db.basic(address)? {
+            Some(info) => Account::from(info),
+            None => Account::new_not_existing(TransactionId::ZERO),
+        };
+        account.info.balance = account.info.balance.saturating_add(U256::from(balance_increment));
         account.mark_touch();
         state.insert(address, account);
     }
@@ -190,11 +201,76 @@ mod tests {
     use super::*;
     use alloy_primitives::address;
     use revm::{
-        database::{InMemoryDB, State},
+        database::{states::AccountStatus, InMemoryDB, State},
         database_interface::DatabaseCommitExt,
         state::AccountInfo,
         DatabaseCommit,
     };
+
+    /// The returned state has to describe the chain's prior state on its own, because
+    /// `CacheState::apply_account_state` reads the account's original info and its
+    /// loaded-not-existing marker whenever the account is not already in the cache — the branch
+    /// the executor's own call never reaches, since it reads and commits through the same
+    /// `State`.
+    ///
+    /// Committing into a `State` that has never seen these accounts takes exactly that branch. An
+    /// account that held a balance must come out with that balance as its baseline, and one that
+    /// never existed must come out as not existing, rather than both collapsing to
+    /// "existed and was empty".
+    #[test]
+    fn test_returned_state_carries_the_prior_state_into_an_uncached_commit() {
+        let funded = address!("0x1000000000000000000000000000000000000001");
+        let absent = address!("0x3000000000000000000000000000000000000003");
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            funded,
+            AccountInfo { balance: U256::from(1000u64), nonce: 5, ..Default::default() },
+        );
+
+        // Read through one `State`, commit through another that has cached nothing.
+        let mut read_state = State::builder().with_database(&mut db).build();
+        let increments = vec![(funded, 100u128), (absent, 300u128)];
+        let produced = transact_balance_increments(increments, &mut read_state)
+            .expect("balance increments should succeed")
+            .expect("balance increments always produce a state");
+
+        let mut fresh_db = InMemoryDB::default();
+        let mut commit_state =
+            State::builder().with_database(&mut fresh_db).with_bundle_update().build();
+        commit_state.commit(produced);
+
+        let transitions = commit_state
+            .transition_state
+            .as_ref()
+            .expect("bundle updates record the transitions this assertion reads");
+
+        let funded_previous = transitions.transitions[&funded]
+            .previous_info
+            .as_ref()
+            .expect("an account that existed must keep its prior info as the baseline");
+        assert_eq!(
+            funded_previous.balance,
+            U256::from(1000u64),
+            "the baseline must be the balance before the increment, not an empty account",
+        );
+        assert_eq!(funded_previous.nonce, 5, "the baseline must carry the account's prior nonce");
+        assert_eq!(
+            transitions.transitions[&funded].previous_status,
+            AccountStatus::Loaded,
+            "an account that existed must not be recorded as previously empty",
+        );
+
+        assert_eq!(
+            transitions.transitions[&absent].previous_status,
+            AccountStatus::LoadedNotExisting,
+            "an account that never existed must not be recorded as previously empty",
+        );
+        assert!(
+            transitions.transitions[&absent].previous_info.is_none(),
+            "an account that never existed must not gain a prior state",
+        );
+    }
 
     #[test]
     fn test_balance_increment_commit_equivalence() {
