@@ -308,6 +308,10 @@ struct BlockJob {
     block: Option<Block<Transaction>>,
     /// Hashes of the transactions whose results are reported.
     targets: Vec<B256>,
+    /// Block hash the targets reported as their inclusion, when a resolution
+    /// step observed one (`--tx-file`). `None` for `--block`, whose targets come
+    /// from the block body itself and so cannot disagree with it.
+    inclusion_hash: Option<B256>,
 }
 
 /// Fixture work for one target, held until `finish()` succeeds.
@@ -419,7 +423,12 @@ where
                 eprintln!("Block {number} contains no transactions; nothing to replay");
                 vec![]
             } else {
-                vec![BlockJob { number: *number, block: Some(block), targets }]
+                vec![BlockJob {
+                    number: *number,
+                    block: Some(block),
+                    targets,
+                    inclusion_hash: None,
+                }]
             }
         }
         BatchMode::TxList(hashes) => {
@@ -488,7 +497,7 @@ async fn resolve_targets<P>(provider: &P, hashes: &[B256]) -> (Vec<BlockJob>, Ve
 where
     P: Provider<op_alloy_network::Optimism>,
 {
-    let mut grouped: BTreeMap<u64, Vec<B256>> = BTreeMap::new();
+    let mut grouped: BTreeMap<u64, (Vec<B256>, Option<B256>)> = BTreeMap::new();
     let mut failures = Vec::new();
 
     for hash in hashes {
@@ -504,7 +513,30 @@ where
                 message: "Transaction not found".to_string(),
             }),
             Ok(Some(tx)) => match tx.block_number {
-                Some(number) => grouped.entry(number).or_default().push(*hash),
+                Some(number) => {
+                    let (targets, inclusion) = grouped.entry(number).or_default();
+                    // Two targets resolving to the same number but different
+                    // block hashes means the endpoint served two views. Neither
+                    // can be trusted, so the disagreeing target is reported as
+                    // unanswered rather than silently replayed against one view.
+                    match (*inclusion, tx.block_hash) {
+                        (Some(seen), Some(theirs)) if seen != theirs => {
+                            failures.push(FailedTx {
+                                tx_hash: *hash,
+                                kind: BatchErrorKind::Rpc,
+                                message: format!(
+                                    "inclusion block hash {theirs} for block {number} differs \
+                                     from {seen} reported by an earlier target of the same \
+                                     block: the endpoint served divergent views"
+                                ),
+                            });
+                            continue;
+                        }
+                        (None, Some(theirs)) => *inclusion = Some(theirs),
+                        _ => {}
+                    }
+                    targets.push(*hash);
+                }
                 None => failures.push(FailedTx {
                     tx_hash: *hash,
                     kind: BatchErrorKind::Pending,
@@ -516,7 +548,12 @@ where
 
     let jobs = grouped
         .into_iter()
-        .map(|(number, targets)| BlockJob { number, block: None, targets })
+        .map(|(number, (targets, inclusion_hash))| BlockJob {
+            number,
+            block: None,
+            targets,
+            inclusion_hash,
+        })
         .collect();
     (jobs, failures)
 }
@@ -543,7 +580,7 @@ async fn replay_block<P>(
 where
     P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug,
 {
-    let BlockJob { number, block, targets } = job;
+    let BlockJob { number, block, targets, inclusion_hash } = job;
     let verify_receipt = report.verify_receipt;
     let dump_dir = report.dump_fixture_dir.as_deref();
     let overwrite = report.overwrite;
@@ -568,6 +605,14 @@ where
         }
     };
 
+    // Both guards below check the *headers* the endpoint served. The state
+    // reads behind the fork are still addressed by block number, so an endpoint
+    // that serves headers and state from different backends can still hand back
+    // state for a different block at this height. Anchoring state reads to the
+    // validated hash would need the fork to take a block hash rather than a
+    // number, and would change every cached RPC key (alloy hashes the block id
+    // into the cache key), invalidating every committed offline capture.
+    //
     // Parent/block linkage guard: across a reorg or a load-balanced endpoint
     // serving divergent views, `eth_getBlockByNumber(N-1)` can return a block
     // that is not the parent of the block being replayed. Forking from that
@@ -581,6 +626,22 @@ where
              or a load-balanced endpoint serving divergent views); retry once the chain settles"
         );
         return fail_all(&targets, BatchErrorKind::Rpc, &message);
+    }
+
+    // Inclusion guard: `--tx-file` resolved each target through
+    // `eth_getTransactionByHash`, which reported the block it belongs to. If the
+    // block fetched by that number is a different one, the endpoint served two
+    // views and the targets do not belong to what is about to be replayed.
+    if let Some(expected) = inclusion_hash {
+        let fetched = block.hash();
+        if fetched != expected {
+            let message = format!(
+                "block {number} has hash {fetched}, but its targets were resolved as included in \
+                 {expected}: the endpoint served divergent views of this block (reorg in \
+                 progress, or a load-balanced endpoint); retry once the chain settles"
+            );
+            return fail_all(&targets, BatchErrorKind::Rpc, &message);
+        }
     }
 
     // Fetch the on-chain receipts before the block runs. Needed for

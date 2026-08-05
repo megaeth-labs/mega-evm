@@ -502,6 +502,65 @@ fn test_replay_batch_rejects_single_transaction_flags() {
 }
 
 /// A parent block whose hash does not match the child block's `parentHash` is an
+/// A `--tx-file` target whose reported inclusion block is not the block fetched
+/// by that number is unanswered, not replayed.
+///
+/// The endpoint answers `eth_getTransactionByHash` and `eth_getBlockByNumber`
+/// separately, so a reorg or a load-balanced backend can serve two views. The
+/// resolution step records the inclusion hash so the mismatch is caught before
+/// the block runs, instead of replaying targets against a block they are not in.
+#[test]
+fn test_replay_tx_file_rejects_a_block_that_does_not_match_the_resolved_inclusion() {
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(envelope()).expect("read envelope"))
+            .expect("parse envelope");
+    let wrong_hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    let (target, _) = BLOCK_TXS[1];
+
+    // Rewrite only the transaction's own response: it now claims to belong to a
+    // block whose hash differs from the one `eth_getBlockByNumber` returns.
+    let marker = format!("\"hash\":\"{target}\"");
+    let mut doctored = 0;
+    for entry in envelope["cache"].as_array_mut().expect("cache entries").iter_mut() {
+        let value = entry["value"].as_str().expect("entry value is a string");
+        if !value.contains(&marker) {
+            continue;
+        }
+        let mut response: serde_json::Value =
+            serde_json::from_str(value).expect("parse transaction response");
+        let result = response.get_mut("result").expect("transaction result");
+        assert!(result.is_object(), "expected a transaction object");
+        result["blockHash"] = serde_json::Value::String(wrong_hash.into());
+        entry["value"] = serde_json::Value::String(response.to_string());
+        doctored += 1;
+    }
+    assert_eq!(doctored, 1, "exactly one response describes the target transaction");
+
+    let envelope_path =
+        std::env::temp_dir().join(format!("mega_evme_batch_inclusion_{}.json", std::process::id()));
+    std::fs::write(&envelope_path, envelope.to_string()).expect("write doctored envelope");
+    let list = std::env::temp_dir()
+        .join(format!("mega_evme_tx_list_inclusion_{}.txt", std::process::id()));
+    std::fs::write(&list, format!("{target}\n")).expect("write tx list");
+
+    let (stdout, code) =
+        replay_envelope_with_code(&envelope_path, &["--tx-file", list.to_str().unwrap(), "--json"]);
+    let lines = ndjson(&stdout);
+    assert_eq!(lines.len(), 1, "the single target is reported once: {stdout}");
+    assert_eq!(
+        lines[0]["error"]["kind"].as_str(),
+        Some("rpc"),
+        "divergent views are unanswered, not a wrong answer: {}",
+        lines[0]
+    );
+    let message = lines[0]["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("divergent views"), "message names the cause: {message}");
+    assert_eq!(code, Some(3), "an unanswered target exits 3");
+
+    let _ = std::fs::remove_file(&envelope_path);
+    let _ = std::fs::remove_file(&list);
+}
+
 /// infrastructure failure for every target of that block (reorg / divergent views).
 #[test]
 fn test_replay_block_rejects_mismatched_parent_hash() {
