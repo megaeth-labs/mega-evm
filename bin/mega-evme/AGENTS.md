@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## OVERVIEW
-CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`) with optional forking, tracing, and state dump workflows.
+CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`, `cache`) with optional forking, tracing, and state dump workflows.
 
 ## STRUCTURE
 - `src/main.rs`: CLI bootstrap and panic hook.
@@ -9,7 +9,8 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`) with optional f
 - `src/common/`: shared CLI args, state loading, tracing, tx parsing, output printers.
 - `src/run/`: bytecode execution command.
 - `src/tx/`: full transaction execution command with raw-tx override support.
-- `src/replay/`: RPC-backed historical transaction replay through block executor.
+- `src/replay/`: RPC-backed historical transaction replay through block executor, plus the batch driver.
+- `src/cache/`: cache-file merge utilities (provider-cache and capture-envelope JSON shapes) backing the `cache merge` subcommand and the lock-protected merge-on-persist.
 
 ## KEY PATTERNS
 - Shared argument groups are flattened from `run` argument structs into sibling commands.
@@ -31,3 +32,5 @@ CLI toolbox for direct MegaEVM execution (`run`, `tx`, `replay`) with optional f
 - Change state-forking or prestate merge semantics: `src/common/state.rs`.
 - Change replay hardfork/spec selection: `src/replay/{cmd.rs,hardforks.rs}`.
 - Change receipt/summary formatting: `src/common/outcome.rs` and printer helpers.
+- Change cache merge behavior (CLI or merge-on-persist): `src/cache/{mod.rs,merge.rs}`.
+- Change process exit classification: `src/common/exit.rs` — the single exit site for command results.

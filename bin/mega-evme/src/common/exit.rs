@@ -3,8 +3,9 @@
 //! Verification pipelines branch on the process status, so every failure the
 //! CLI can reach maps onto exactly one documented code, and every exit flows
 //! through this module: the binary hands its top-level result to
-//! [`report_command_result`] and returns the code it produces. No other code
-//! path calls `std::process::exit`.
+//! [`report_command_result`] and returns the code it produces. Every *command
+//! result* becomes a status here; the only other exit is the panic hook, which
+//! reports an execution error for a failure no command result can describe.
 //!
 //! | Code | Class                   | Meaning                                                                                                                                              |
 //! | ---- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
