@@ -51,7 +51,8 @@ A batch run builds a single provider and a single RPC cache, groups the requeste
 Each block is executed exactly once: state is forked at the parent block, pre-execution changes are applied, and every transaction of the block runs in order, with each requested transaction's result recorded before it is committed.
 The RPC cache is persisted once, on exit, even if some transactions failed — the captured responses are the artifact you need to debug the failure offline.
 
-Batch mode issues the same RPC calls as single-transaction replay, so an offline envelope captured by single-transaction runs serves a batch run without a cache miss.
+A plain batch replay issues the same RPC calls as single-transaction replay, so an offline envelope captured by single-transaction runs serves a batch run without a cache miss.
+`--verify-receipt` and `--dump-fixture-dir` are the exception: both fetch the receipt of every target in the block, including transactions a single-transaction capture never asked about, so an older envelope will miss them and the run exits `3`.
 
 ### `--tx-file <PATH>`
 
@@ -112,7 +113,8 @@ Execution outcomes are not errors: a reverted or halted transaction is a normal 
 A failure while running the block aborts it, because the executor state no longer matches the chain.
 The transaction the failure is about — the hash the endpoint denied, or the one the executor rejected — is reported with that failure's own kind.
 Every target behind it is reported as `rpc` with a message naming the aborting cause: nothing was established about those transactions, so they went unanswered rather than being unknown.
-Targets that never ran are still emitted in the block's transaction-index order, keeping the whole stream in ascending `(block, tx_index)` order; a hash the block does not contain is reported last, in input order, as `not_found`.
+Targets that never ran are still emitted in the block's transaction-index order, keeping the whole stream in ascending `(block, tx_index)` order; a hash the block does not contain is reported last within its block, in input order, as `not_found`.
+Hashes that could not be resolved to a block at all (unknown, pending, or an endpoint failure during resolution) are emitted before every block result, since the run cannot place them in the stream's order.
 
 Without `--json`, each transaction is printed with a header naming its hash, block, and index, followed by the same summary and receipt the single-transaction mode prints.
 A final one-line summary (transactions replayed, transactions failed, elapsed time) is logged at `INFO` level, so pass `-vvv` to see it.
@@ -125,6 +127,9 @@ With [`--dump-fixture-dir`](#--dump-fixture-dir-dir), each result line additiona
 A batch run exits `0` when every requested transaction produced an execution result and nothing the run was asked to do failed, and non-zero otherwise — see [Exit codes](../overview.md#exit-codes) for how the failure classes are ranked.
 Fixture skips (fidelity gate, BLOCKHASH readers, unsupported shapes) are not failures and do not fail the run; a fixture the run was asked to write and could not is an execution-class failure of its target.
 The NDJSON stream is written to stdout in both cases; diagnostics go to stderr.
+
+The exit code can understate a failure in one case: when the transaction that aborts a block is not itself a target, no target can claim the abort's own class, so every target is reported as `rpc` and the run exits `3` — "the question went unanswered" — even if the underlying cause was a deterministic execution failure that retrying will not fix.
+`--block 0` is rejected as invalid input; a block that genuinely holds no transactions produces no stdout lines, exits `0`, and says so on stderr.
 
 ### Examples
 
@@ -286,7 +291,7 @@ On subsequent runs the existing file is loaded, its entries are merged into the 
 The updated set of entries is persisted back to the same file on clean exit.
 
 The file also embeds an external-environment snapshot — currently the set of `--bucket-capacity` values in effect — so the captured fixture is self-contained.
-If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them (an intentional A→B refresh of an existing capture is accepted at persist when no concurrent writer changed the on-disk snapshot; a true concurrent conflict hard-errors and names the load-time, caller, and on-disk values — see [state management](../configuration/state-management.md#rpc-cache-and-retry)).
+If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them (an intentional A→B refresh of an existing capture is accepted at persist when no concurrent writer changed the on-disk snapshot, and a run that reused the previous values yields to a concurrent refresh rather than conflicting with it; only two writers changing the same snapshot differently hard-errors, naming the load-time, caller, and on-disk values — see [state management](../configuration/state-management.md#rpc-cache-and-retry)).
 
 The capture is written even when the replay itself failed — an execution or verification failure is exactly the case you want to debug offline.
 If the write fails, it is reported on stderr like any other failure, next to the run's own error; the run error keeps the exit code, since it is the root cause.

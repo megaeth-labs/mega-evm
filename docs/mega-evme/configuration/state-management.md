@@ -237,7 +237,9 @@ Capture envelopes (`--rpc.capture-file`) use the same lock + re-read-merge path,
 - The on-disk envelope `version` and `chain_id` must match this process's capture.
 - `external_env` uses optimistic concurrency against the snapshot observed when this process opened the capture file:
   - If the locked on-disk snapshot is absent, or still equals the load-time snapshot, the caller's intentional update wins (so a sequential refresh with `--bucket-capacity` on an existing capture is accepted).
-  - Persist hard-errors only when the on-disk snapshot changed since load **and** differs from this process's snapshot (true concurrent conflict).
+  - A run whose snapshot still equals the load-time one has not changed anything, whether it omitted `--bucket-capacity` or passed the values already in force: if another writer refreshed the on-disk snapshot meanwhile, that refresh is kept and this run's cache entries still merge.
+    Re-asserting the current values is therefore not a way to defend them against a concurrent refresh.
+  - Persist hard-errors only when this process changed the snapshot **and** the on-disk snapshot also changed since load, to a different value (true concurrent conflict).
     The error names all three values: loaded, ours, and on-disk.
   - Snapshots are canonicalized before comparison and write (deduplicate by bucket id with last-wins, then sort by id), so two workers with the same effective capacities in different CLI order do not conflict.
   - One-sided snapshots still merge: this process's snapshot is kept when set, otherwise the on-disk snapshot is propagated.
@@ -256,6 +258,16 @@ Provider-cache merge also rejects inputs (and `--output`) whose `rpc-cache-{chai
 | `--rpc.cache-dir <PATH>`      | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`.                                                                                                                          |
 | `--rpc.no-cache-file`         | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies.                                                                                                                                                              |
 | `--rpc.clear-cache`           | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                                                                                                                                |
+
+The in-memory cache layer is always installed on a forked or online run and cannot be turned off; `--rpc.no-cache-file` disables only on-disk persistence.
+At the default cap the cache index is preallocated to tens of MiB regardless of how many entries a run actually stores, which is the trade for never re-fetching during a long verification sweep.
+Set `--rpc.cache-max-entries` to a smaller value to reduce that footprint.
+
+#### Removed Flags
+
+| Removed                | Replacement                   | Note                                                                                                                                                                                                                                                                        |
+| ---------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--rpc.cache-size <N>` | `--rpc.cache-max-entries <N>` | `N > 0` carries over unchanged. `0` inverted meaning — it used to disable the cache, and now means "effectively unlimited" — so the old flag is rejected rather than aliased, and a script passing it fails loudly instead of silently doing the opposite of what it asked. |
 
 ### Retry Flags
 

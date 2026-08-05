@@ -258,16 +258,10 @@ pub(crate) fn merge_provider_lists(base: Vec<CacheKv>, overlay: Vec<CacheKv>) ->
 ///
 /// `external_env` uses optimistic concurrency against `loaded_external_env` — the
 /// snapshot observed when this process opened the capture file (or `None` when
-/// the file was absent / had no snapshot):
-///
-/// - If the locked on-disk snapshot is absent, or still equals the loaded one, nobody else changed
-///   it: the caller's intentional update wins (`ours`).
-/// - Hard-error only when the on-disk snapshot changed since load **and** differs from ours (true
-///   concurrent conflict). The error names all three values (loaded, ours, on-disk).
-///
-/// Snapshots are canonicalized (last-wins per bucket id, then sorted) before
-/// comparison and before writing, so CLI order alone cannot spuriously conflict.
-/// One-sided snapshots still merge: ours is kept when set, otherwise on-disk.
+/// the file was absent / had no snapshot). See
+/// [`resolve_external_env_for_persist`] for the full decision table; only a true
+/// concurrent conflict is a hard error, and the message then names all three
+/// values (loaded, ours, on-disk).
 pub(crate) fn merge_envelope_for_persist(
     on_disk: &EnvelopeDoc,
     ours: &EnvelopeDoc,
@@ -306,7 +300,34 @@ pub(crate) fn merge_envelope_for_persist(
 
 /// Resolve the envelope `external_env` under optimistic concurrency.
 ///
-/// See [`merge_envelope_for_persist`] for the accept / hard-error rules.
+/// Three inputs decide the outcome: `loaded` (the snapshot this process observed
+/// when it opened the file), `ours` (what this process would write), and
+/// `on_disk` (what the locked re-read found). All three are canonicalized first,
+/// so CLI ordering alone never decides anything.
+///
+/// | `ours` | `on_disk` | relation                     | result    | why                                                              |
+/// | ------ | --------- | ---------------------------- | --------- | ---------------------------------------------------------------- |
+/// | `None` | any       | —                            | `on_disk` | this run has no snapshot to contribute                           |
+/// | `Some` | `None`    | —                            | `ours`    | nothing on disk to disagree with                                 |
+/// | `Some` | `Some`    | equal                        | `ours`    | no decision to make                                              |
+/// | `Some` | `Some`    | differ, `ours == loaded`     | `on_disk` | this run changed nothing: sibling's refresh wins                 |
+/// | `Some` | `Some`    | differ, `on_disk == loaded`  | `ours`    | nobody wrote since load: our intentional refresh wins            |
+/// | `Some` | `Some`    | differ, neither              | `Err`     | true conflict: two runs changed the same snapshot differently    |
+///
+/// The last two conditions are mutually exclusive, so their order does not
+/// matter: if both held, `ours` and `on_disk` would each equal `loaded` and
+/// therefore each other, contradicting "differ".
+///
+/// Row four carries as much weight as row six. A capture run given no
+/// `--bucket-capacity` carries the previous snapshot forward verbatim, so
+/// `ours == loaded` means "changed nothing", not "chose this value". Calling
+/// that a conflict fails the persist — and because capture persistence is a
+/// hard error, that discards every RPC response the run captured, over metadata
+/// the run never had a stake in.
+///
+/// The predicate is value equality, not "was the flag passed": persist has no
+/// record of the caller's argv, so re-asserting the values already in force is
+/// indistinguishable from carrying them forward, and both yield.
 fn resolve_external_env_for_persist(
     ours: &Option<ExternalEnvDoc>,
     on_disk: &Option<ExternalEnvDoc>,
@@ -319,12 +340,11 @@ fn resolve_external_env_for_persist(
 
     match (&ours_c, &disk_c) {
         (Some(o), Some(d)) if o != d => {
-            // Differing non-null snapshots: accept only when the on-disk value
-            // is still the one this process observed at load (intentional A→B
-            // refresh). A third concurrent writer that changed the file since
-            // load is a true conflict.
-            let disk_unchanged = disk_c == loaded_c;
-            if disk_unchanged {
+            let ours_carried_forward = loaded_c.as_ref() == Some(o);
+            let disk_unchanged_since_load = loaded_c.as_ref() == Some(d);
+            if ours_carried_forward {
+                Ok(disk_c)
+            } else if disk_unchanged_since_load {
                 Ok(ours_c)
             } else {
                 Err(EvmeError::FixtureError(format!(
@@ -435,6 +455,10 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<(
     })?;
     tmp.write_all(bytes)?;
     tmp.flush()?;
+    // flush() only clears the userspace buffer. Without sync_all() a crash
+    // between write and rename can publish a truncated file under the target
+    // name — the rename is atomic, the contents are not.
+    tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| {
         std::io::Error::other(format!(
             "failed to rename temp file into {}: {}",
@@ -578,6 +602,57 @@ mod tests {
             merge_envelope_for_persist(&on_disk, &ours, Some(&loaded), Path::new("capture.json"))
                 .expect("intentional A→B refresh must succeed");
         assert_eq!(merged.external_env, Some(ours_ext.canonicalized()));
+        assert_eq!(merged.cache, vec![kv(1, "disk"), kv(2, "ours")]);
+    }
+
+    /// No opinion: loaded A, ours A (carried forward), disk now B → B wins and
+    /// our cache entries still merge. A run given no `--bucket-capacity` reaches
+    /// persist with `ours == loaded`; treating that as a conflict would fail the
+    /// persist and throw away everything the run captured.
+    #[test]
+    fn test_merge_envelope_for_persist_carried_forward_snapshot_yields_to_sibling_refresh() {
+        let loaded = ExternalEnvDoc { bucket_capacities: vec![(1, 10)] };
+        let disk_ext = ExternalEnvDoc { bucket_capacities: vec![(1, 20)] };
+        let on_disk = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![kv(1, "disk")],
+            external_env: Some(disk_ext.clone()),
+        };
+        // No `--bucket-capacity` on this run: the loaded snapshot is carried
+        // forward verbatim, so `ours` is byte-identical to `loaded`.
+        let ours = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![kv(2, "ours")],
+            external_env: Some(loaded.clone()),
+        };
+        let merged =
+            merge_envelope_for_persist(&on_disk, &ours, Some(&loaded), Path::new("capture.json"))
+                .expect("a run that expressed no opinion must not conflict");
+        assert_eq!(merged.external_env, Some(disk_ext.canonicalized()));
+        assert_eq!(merged.cache, vec![kv(1, "disk"), kv(2, "ours")]);
+    }
+
+    /// Table row one (`ours = None`): a run with no snapshot of its own keeps
+    /// the on-disk one and still merges its cache entries.
+    ///
+    /// This row was always correct; it is pinned so the table has a test per
+    /// row rather than only where a bug was found.
+    #[test]
+    fn test_merge_envelope_for_persist_no_snapshot_yields_to_sibling_refresh() {
+        let disk_ext = ExternalEnvDoc { bucket_capacities: vec![(1, 20)] };
+        let on_disk = EnvelopeDoc {
+            version: 1,
+            chain_id: 7,
+            cache: vec![kv(1, "disk")],
+            external_env: Some(disk_ext.clone()),
+        };
+        let ours =
+            EnvelopeDoc { version: 1, chain_id: 7, cache: vec![kv(2, "ours")], external_env: None };
+        let merged = merge_envelope_for_persist(&on_disk, &ours, None, Path::new("capture.json"))
+            .expect("a run with no snapshot must not conflict");
+        assert_eq!(merged.external_env, Some(disk_ext));
         assert_eq!(merged.cache, vec![kv(1, "disk"), kv(2, "ours")]);
     }
 
