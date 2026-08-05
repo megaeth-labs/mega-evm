@@ -192,11 +192,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // mismatched `Some(wrong_id)` is also accepted — same as revm 27.
         inner.cfg.tx_chain_id_check = false;
 
-        // Belt-and-braces with the other construction paths: today every `MegaSpecId` maps to a
-        // pre-Amsterdam op-spec so `CfgEnv::new_with_spec` leaves EIP-8037 off, but this
-        // constructor must not depend on that mapping staying put.
-        pin_amsterdam_eip8037_off(&mut inner.cfg);
-
         if spec.is_enabled(MegaSpecId::MINI_REX) {
             inner.cfg.limit_contract_code_size = Some(constants::mini_rex::MAX_CONTRACT_SIZE);
             inner.cfg.limit_contract_initcode_size = Some(constants::mini_rex::MAX_INITCODE_SIZE);
@@ -250,10 +245,6 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     ) -> Self {
         let mut inner = context;
 
-        // The caller assembled this `OpContext` itself, so its config never passed through the
-        // spec conversions. Apply the same EIP-8037 pin here.
-        pin_amsterdam_eip8037_off(&mut inner.cfg);
-
         // Spec in context must keep the same with parameter `spec`.
         // revm 40 keeps per-spec `GasParams` in `CfgEnv`, so update both together —
         // bare `cfg.spec = ...` would leave the caller's (e.g. BEDROCK) params in place.
@@ -263,10 +254,6 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
         if inner.cfg.spec != op_spec {
             inner.cfg.set_spec_and_mainnet_gas_params(op_spec);
         }
-
-        // Re-assert the pin: `set_spec_and_mainnet_gas_params` turns EIP-8037 back on for an
-        // Amsterdam-or-later spec.
-        pin_amsterdam_eip8037_off(&mut inner.cfg);
 
         // Same revm-27 pin as `new_with_shared_ext_envs`, applied unconditionally: this is a
         // compatibility entry point, and the chain-id gate revm 40 turned on by default is not
@@ -410,7 +397,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     ///
     /// Skipping that pin does not skip `MegaETH`'s own consensus pins:
     ///
-    /// - EIP-8037 (Amsterdam state gas) is forced off — see [`pin_amsterdam_eip8037_off`].
+    /// - EIP-8037 (Amsterdam state gas) is forced off before every transaction runs, wherever the
+    ///   configuration came from — see [`force_amsterdam_eip8037_off`].
     /// - Under `MINI_REX` and later, the contract size and initcode size limits fill in when the
     ///   configuration leaves them unset.
     ///
@@ -426,19 +414,12 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     }
 
     /// Shared body of [`with_cfg`](Self::with_cfg) and
-    /// [`with_cfg_unpinned`](Self::with_cfg_unpinned): both apply the same consensus pins, and
-    /// differ only in whether `tx_chain_id_check` is pinned to the revm-27 `false` or taken as
-    /// the caller provided it.
-    fn apply_cfg(mut self, mut cfg: CfgEnv<MegaSpecId>, intent: CfgIntent) -> Self {
-        // EIP-8037 is pinned off on every configuration that reaches the EVM; it is not a field
-        // the caller gets to choose.
-        pin_amsterdam_eip8037_off(&mut cfg);
-
+    /// [`with_cfg_unpinned`](Self::with_cfg_unpinned): both adopt the caller's configuration the
+    /// same way, and differ only in whether `tx_chain_id_check` is pinned to the revm-27 `false`
+    /// or taken as the caller provided it.
+    fn apply_cfg(mut self, cfg: CfgEnv<MegaSpecId>, intent: CfgIntent) -> Self {
         self.spec = cfg.spec;
         self.inner = self.inner.with_cfg(cfg.into_op_cfg());
-        // Re-assert the EIP-8037 pin on the config the EVM will actually run with, so it holds
-        // at this entry point regardless of how the conversion above is later rewired.
-        pin_amsterdam_eip8037_off(&mut self.inner.cfg);
         if intent == CfgIntent::Pinned {
             self.inner.cfg.tx_chain_id_check = false;
         }
@@ -714,6 +695,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// DB-dependent pre-frame usage may still be recorded later during pre-execution.
     pub(crate) fn on_new_tx(&mut self) {
+        force_amsterdam_eip8037_off(&mut self.inner.cfg);
+
         self.reset_volatile_data_access();
 
         // The additional-limit lifecycle (reset → intrinsic accounting) exists only for MINI_REX+.
@@ -827,15 +810,15 @@ enum CfgIntent {
     Declared,
 }
 
-/// Forces EIP-8037 (Amsterdam state gas) off in a configuration crossing between the `MegaETH`
-/// and `OpStack` shapes, whatever the caller set.
+/// Forces EIP-8037 (Amsterdam state gas) off on the configuration a transaction is about to run
+/// with, whatever a caller put there.
 ///
-/// `CfgEnv::enable_amsterdam_eip8037` is a free-standing switch in revm 40: the sites that split
-/// a charge into regular gas plus state gas — `SSTORE` on a fresh slot, the `CREATE` account and
+/// `CfgEnv::enable_amsterdam_eip8037` is a free-standing switch in revm 40: the sites that split a
+/// charge into regular gas plus state gas — `SSTORE` on a fresh slot, the `CREATE` account and
 /// code-deposit charge, the new-account cost of a value-bearing `CALL`, the EIP-7702 authority
 /// refund, and the transaction's initial gas / reservoir split — read the flag alone and do not
-/// also require an Amsterdam spec. An embedder could therefore turn the state-gas split on
-/// underneath a frozen `MegaSpecId` and change what that spec charges.
+/// also require an Amsterdam spec. Left alone, it would turn the state-gas split on underneath a
+/// frozen `MegaSpecId` and change what that spec charges.
 ///
 /// `MegaETH`'s gas accounting is built on there being no such split: per-opcode compute gas is
 /// recorded from the gas the opcode actually consumed, storage gas and the storage call stipend
@@ -843,10 +826,22 @@ enum CfgIntent {
 /// back onto the caller's one forwarded budget. Nothing in `MegaETH` charges against revm's
 /// state-gas reservoir, so a charge split off into it would escape `MegaETH`'s meters entirely.
 ///
-/// Enabling EIP-8037 on `MegaETH` is therefore a consensus change, and a consensus change belongs
-/// to a new `MegaSpecId` gate — not to a `CfgEnv` field an embedder can reach. Every conversion
-/// hands the EVM `false`, and hands `false` back out, so the flag can never become that switch.
-fn pin_amsterdam_eip8037_off<SPEC>(cfg: &mut CfgEnv<SPEC>) {
+/// Enabling EIP-8037 is therefore a consensus change, and belongs to a `MegaSpecId` gate rather
+/// than to a `CfgEnv` field a caller can set. It is also one `MegaETH` has no reason to want:
+/// storage gas already charges the same operations, scaled by SALT bucket occupancy rather than at
+/// a flat rate, and the state-growth tracker already bounds net new accounts and slots per
+/// transaction. Turning the split on would charge those operations a second time, and the second
+/// charge would land in a reservoir none of the four resource dimensions reads.
+///
+/// Called from [`MegaContext::on_new_tx`], which every execution path passes through — the
+/// transaction path via `MegaHandler::before_run`, system calls via `Handler::run_system_call` —
+/// and which runs before anything reads the flag. Forcing the value at the point of use rather
+/// than pinning it at each entry point is what makes the guarantee independent of how a
+/// configuration arrived: revm's own carriers propagate a set flag (`with_spec_and_gas_params`
+/// moves it across the spec relabel, `set_spec_and_mainnet_gas_params` ORs it back on for an
+/// Amsterdam-or-later spec), so a per-entry-point pin has to be re-derived every time one of them
+/// is rewired or a new path appears, and covers nothing a caller does to a live context.
+pub(crate) fn force_amsterdam_eip8037_off<SPEC>(cfg: &mut CfgEnv<SPEC>) {
     cfg.enable_amsterdam_eip8037 = false;
 }
 
@@ -878,8 +873,9 @@ impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
     /// Converts to `CfgEnv<OpSpecId>`.
     ///
     /// This method relabels the specification type and carries every other field of the
-    /// caller's configuration — the gas schedule included — into the `OpStack` shape. The one
-    /// exception is EIP-8037, which is pinned off by [`pin_amsterdam_eip8037_off`].
+    /// caller's configuration — the gas schedule included — into the `OpStack` shape. It is a
+    /// relabel and nothing more: the fields `MegaETH` does not let a caller choose are settled
+    /// where they are read, not here (EIP-8037 by [`force_amsterdam_eip8037_off`]).
     ///
     /// # Returns
     ///
@@ -893,9 +889,7 @@ impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
         // `with_spec_and_gas_params` is revm's own whole-struct carrier: it moves every field
         // (including the ones behind revm cargo features) into the new spec type, so fields
         // added upstream come along instead of being silently reset to their defaults.
-        let mut cfg = self.with_spec_and_gas_params(op_spec, gas_params);
-        pin_amsterdam_eip8037_off(&mut cfg);
-        cfg
+        self.with_spec_and_gas_params(op_spec, gas_params)
     }
 }
 
@@ -908,9 +902,9 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
     ///
     /// The inverse of [`IntoOpCfgEnv::into_op_cfg`]: it relabels the specification type with the
     /// given `spec` and carries every other field — the gas schedule included — unchanged, so a
-    /// configuration handed to the EVM reads back as the caller wrote it. EIP-8037 is the one
-    /// exception, pinned off by [`pin_amsterdam_eip8037_off`] on this leg too, so the flag a
-    /// caller reads back is the one the EVM ran with.
+    /// configuration handed to the EVM reads back as the caller wrote it. Reading back a
+    /// configuration the EVM has run at least one transaction with also reads back EIP-8037 off,
+    /// because [`force_amsterdam_eip8037_off`] settles it on the context itself.
     ///
     /// # Arguments
     ///
@@ -921,9 +915,7 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
     /// Returns a new `CfgEnv<SpecId>` with all fields moved from `self`.
     fn into_megaeth_cfg(self, spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
         let gas_params = self.gas_params.clone();
-        let mut cfg = self.with_spec_and_gas_params(spec, gas_params);
-        pin_amsterdam_eip8037_off(&mut cfg);
-        cfg
+        self.with_spec_and_gas_params(spec, gas_params)
     }
 }
 
@@ -979,8 +971,9 @@ mod tests {
 
     /// The `MegaSpecId` <-> `OpSpecId` config conversions relabel the spec type and nothing else:
     /// every other field — the gas schedule and the revm 40 switches included — belongs to the
-    /// caller and must survive both legs. The lone exception is EIP-8037, which
-    /// [`pin_amsterdam_eip8037_off`] forces off on both legs.
+    /// caller and must survive both legs, EIP-8037 included. What `MegaETH` does not let a caller
+    /// choose is settled where it is read (see `test_eip8037_is_forced_off_before_execution`), not
+    /// by a conversion quietly rewriting a field.
     #[test]
     fn test_cfg_conversion_carries_every_field_both_ways() {
         let cfg = fully_customized_cfg(MegaSpecId::REX6);
@@ -990,16 +983,16 @@ mod tests {
         assert_eq!(op_cfg.spec, MegaSpecId::REX6.into_op_spec());
         assert_eq!(op_cfg.gas_params, cfg.gas_params, "custom gas schedule must survive");
         assert!(op_cfg.disable_eip7623);
-        assert!(!op_cfg.enable_amsterdam_eip8037, "EIP-8037 is pinned off, not carried");
+        assert!(
+            op_cfg.enable_amsterdam_eip8037,
+            "a relabel carries every field, this one included"
+        );
         assert!(op_cfg.amsterdam_eip7708_disabled);
         assert!(op_cfg.amsterdam_eip7708_delayed_burn_disabled);
 
         // Whole-struct equality on the round trip: with every input field off its default, a
-        // field dropped on either leg reverts to a default and trips this assert. Only the
-        // pinned EIP-8037 flag is expected to come back off.
-        let mut expected = cfg;
-        expected.enable_amsterdam_eip8037 = false;
-        assert_eq!(op_cfg.into_megaeth_cfg(MegaSpecId::REX6), expected);
+        // field dropped on either leg reverts to a default and trips this assert.
+        assert_eq!(op_cfg.into_megaeth_cfg(MegaSpecId::REX6), cfg);
     }
 
     /// `with_cfg` is where an embedder's `CfgEnv` lands. It must reach the inner revm config
@@ -1082,9 +1075,9 @@ mod tests {
     }
 
     /// The escape hatch carries the caller's configuration verbatim: every field reaches the
-    /// inner revm config as written, EIP-8037 excepted.
+    /// inner revm config as written.
     #[test]
-    fn test_with_cfg_unpinned_carries_every_field_but_the_eip8037_pin() {
+    fn test_with_cfg_unpinned_carries_every_field() {
         let mut cfg = fully_customized_cfg(MegaSpecId::REX6);
         cfg.tx_chain_id_check = true;
 
@@ -1092,21 +1085,18 @@ mod tests {
             .with_cfg_unpinned(cfg.clone());
 
         assert!(context.inner.cfg.tx_chain_id_check);
-        assert!(!context.inner.cfg.enable_amsterdam_eip8037, "EIP-8037 is pinned off, not carried");
         assert_eq!(context.inner.cfg, cfg.into_op_cfg());
     }
 
-    /// The opt-in skips the chain-id pin, not `MegaETH`'s own pins: EIP-8037 stays
-    /// off, the spec is adopted, and the `MINI_REX` size limits still fill in when unset.
+    /// The opt-in skips the chain-id pin, not `MegaETH`'s other normalization: the spec is
+    /// adopted and the `MINI_REX` size limits still fill in when unset.
     #[test]
     fn test_with_cfg_unpinned_still_applies_mega_pins() {
-        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
-        cfg.enable_amsterdam_eip8037 = true;
+        let cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
 
         let context =
             MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg_unpinned(cfg);
 
-        assert!(!context.inner.cfg.enable_amsterdam_eip8037);
         assert_eq!(context.mega_spec(), MegaSpecId::REX5);
         assert_eq!(
             context.inner.cfg.limit_contract_code_size,
@@ -1120,58 +1110,51 @@ mod tests {
         assert!(context.inner.cfg.tx_chain_id_check);
     }
 
-    /// EIP-8037 is pinned off on every configuration that reaches the EVM: two configurations
-    /// differing only in that field must come out of `with_cfg` identical, down to
-    /// `tx_chain_id_check`.
+    /// EIP-8037 is settled where it is read, not where a configuration enters: the entry points
+    /// carry a caller's flag like any other field, and it is forced off on the way into execution.
+    ///
+    /// Both halves are asserted here. A caller's `true` survives `with_cfg` — that is what makes
+    /// this a real probe rather than one blind to a flag the entry point already cleared — and
+    /// `on_new_tx`, which `MegaHandler::before_run` and `Handler::run_system_call` both call
+    /// before anything reads the flag, clears it.
     #[test]
-    fn test_with_cfg_pins_eip8037_and_output_ignores_it() {
-        let plain = CfgEnv::new_with_spec(MegaSpecId::REX5);
-        let mut eip8037_on = plain.clone();
-        eip8037_on.enable_amsterdam_eip8037 = true;
+    fn test_eip8037_is_forced_off_before_every_transaction() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
+        cfg.enable_amsterdam_eip8037 = true;
 
-        let from_plain =
-            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(plain);
-        let from_eip8037_on =
-            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(eip8037_on);
-
-        assert_eq!(
-            from_plain.inner.cfg, from_eip8037_on.inner.cfg,
-            "a field pinned off must not decide any other field's outcome"
-        );
+        let mut context =
+            MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
         assert!(
-            !from_eip8037_on.inner.cfg.tx_chain_id_check,
-            "the default shape is re-pinned whichever way EIP-8037 arrived"
+            context.inner.cfg.enable_amsterdam_eip8037,
+            "the entry point carries the caller's field; clearing it here would make the pin \
+             below untestable",
         );
+
+        context.on_new_tx();
+        assert!(
+            !context.inner.cfg.enable_amsterdam_eip8037,
+            "every transaction runs with the state-gas split off",
+        );
+
+        // And it is forced every time, not just on the first transaction: a caller that sets the
+        // flag between transactions is cleared again.
+        context.inner.cfg.enable_amsterdam_eip8037 = true;
+        context.on_new_tx();
+        assert!(!context.inner.cfg.enable_amsterdam_eip8037);
     }
 
-    /// Same EIP-8037 normalization at the deprecated entry point.
-    #[allow(deprecated)]
+    /// Building the EVM settles the flag too, so the snapshot `alloy_evm::Evm::cfg_env` hands out
+    /// and everything read back through it describe what transactions will run with.
     #[test]
-    fn test_new_with_context_pins_eip8037_and_output_ignores_it() {
-        fn cfg_after_entry(enable_eip8037: bool) -> CfgEnv<OpSpecId> {
-            let mut inner: MegaInnerContext<EmptyDB> = revm::Context::op()
-                .with_tx(crate::MegaTransaction::default())
-                .with_db(EmptyDB::default());
-            inner.cfg.enable_amsterdam_eip8037 = enable_eip8037;
+    fn test_building_the_evm_forces_eip8037_off() {
+        let mut cfg = CfgEnv::new_with_spec(MegaSpecId::REX5);
+        cfg.enable_amsterdam_eip8037 = true;
 
-            MegaContext::new_with_context(
-                inner,
-                MegaSpecId::REX5,
-                ExternalEnvs::<EmptyExternalEnv>::default(),
-            )
-            .inner
-            .cfg
-        }
+        let context = MegaContext::new(EmptyDB::default(), MegaSpecId::EQUIVALENCE).with_cfg(cfg);
+        let evm = crate::MegaEvm::new(context);
 
-        assert_eq!(
-            cfg_after_entry(false),
-            cfg_after_entry(true),
-            "a field pinned off must not decide any other field's outcome"
-        );
-        assert!(
-            !cfg_after_entry(true).tx_chain_id_check,
-            "the default shape is re-pinned whichever way EIP-8037 arrived"
-        );
+        assert!(!evm.ctx.inner.cfg.enable_amsterdam_eip8037);
+        assert!(!alloy_evm::Evm::cfg_env(&evm).enable_amsterdam_eip8037);
     }
 
     /// The deprecated constructor re-derives the gas schedule only when it applies a different
