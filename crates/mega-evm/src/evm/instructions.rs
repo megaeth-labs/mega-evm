@@ -3045,4 +3045,20 @@ mod tests {
         assert_eq!(storage_gas_ext::create_opcode(false), opcode::CREATE);
         assert_eq!(storage_gas_ext::create_opcode(true), opcode::CREATE2);
     }
+
+    /// Pins `Debug` for `MegaInstructions` so a `fmt` body that returns `Ok(Default)`
+    /// (empty formatter write) fails.
+    #[test]
+    fn test_mega_instructions_debug_fmt_is_non_empty() {
+        let instructions = MegaInstructions::<
+            crate::test_utils::MemoryDatabase,
+            crate::EmptyExternalEnv,
+        >::new(MegaSpecId::REX5);
+        let rendered = format!("{instructions:?}");
+        assert!(!rendered.is_empty(), "Debug output must write at least one byte",);
+        assert!(
+            rendered.contains("MegaethInstructions") || rendered.contains("REX5"),
+            "Debug output must identify the type or the configured spec; got {rendered}",
+        );
+    }
 }

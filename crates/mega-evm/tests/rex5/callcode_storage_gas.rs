@@ -284,6 +284,65 @@ fn test_rex4_call_to_empty_charges_new_account_storage_gas() {
 }
 
 // ============================================================================
+// CALL + EIP-7702: pre-REX5 must follow delegation for emptiness (instructions.rs:1901)
+// ============================================================================
+
+/// Pre-REX5 `wrap_call_with_storage_gas!` resolves emptiness via
+/// `inspect_account_delegated`, then prices `new_account_storage_gas` against the
+/// **stack target** address (not the resolved account).
+///
+/// Setup: CALL value to a 7702 designator whose delegate is empty.
+/// - Emptiness follows the hop → empty → charge fires.
+/// - Pricing uses the designator's SALT bucket.
+///
+/// A forced REX5 non-delegating inspect sees the designator's EIP-7702 code
+/// (non-empty) and skips the charge, so gas becomes invariant under the
+/// designator bucket multiplier — that is the kill signal for
+/// `instructions.rs:1901:REX5:true`.
+#[test]
+fn test_rex4_call_to_eip7702_empty_delegate_charges_new_account_storage_gas() {
+    // Stack target is a 7702 designator whose delegate is the empty account.
+    const DESIGNATOR: Address = address!("5000000000000000000000000000000000000001");
+
+    let run = |designator_multiplier: u64| -> u64 {
+        let mut db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(1_000_000_000_000u64))
+            .account_balance(CALLEE, U256::from(1_000_000_000u64))
+            .account_code(CALLEE, call_bytecode(DESIGNATOR));
+        set_eip7702_delegation(&mut db, DESIGNATOR, EMPTY_TARGET);
+
+        let designator_bucket = TestExternalEnvs::<Infallible>::bucket_id_for_account(DESIGNATOR);
+        let external_envs = TestExternalEnvs::new().with_bucket_capacity(
+            designator_bucket,
+            MIN_BUCKET_SIZE as u64 * designator_multiplier,
+        );
+
+        let result = transact(
+            MegaSpecId::REX4,
+            &mut db,
+            &external_envs,
+            CALLER,
+            CALLEE,
+            U256::ZERO,
+            10_000_000,
+        )
+        .expect("transaction must succeed");
+        assert!(result.result.is_success(), "execution must succeed: {:?}", result.result);
+        result.result.tx_gas_used()
+    };
+
+    let gas_mult1 = run(1);
+    let gas_mult10 = run(10);
+    let expected_extra = NEW_ACCOUNT_STORAGE_GAS_BASE * 9;
+    assert_eq!(
+        gas_mult10 - gas_mult1,
+        expected_extra,
+        "REX4 CALL to EIP-7702 designator→empty must charge new-account storage gas \
+         (emptiness via delegated inspect; pricing against the designator address)",
+    );
+}
+
+// ============================================================================
 // Error-path tests — coverage for FatalExternalError branches in call_code
 // ============================================================================
 

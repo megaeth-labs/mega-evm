@@ -2,6 +2,7 @@
 
 mod access_control;
 mod beneficiary_detention;
+mod call_stipend_forwarding;
 mod create_safety;
 mod deployment;
 mod eip7702_delegation_cycle;

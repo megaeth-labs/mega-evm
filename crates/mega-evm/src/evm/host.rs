@@ -1961,4 +1961,214 @@ mod tests {
             );
         }
     }
+
+    /// Direct Host-trait pins for block-env accessors that only forward to the inner context.
+    ///
+    /// These kill cargo-mutants replacements that return `Default` / `None` for `difficulty`,
+    /// `blob_gasprice`, and `blob_hash`. Values are deliberately non-default so a silent
+    /// identity-to-zero mutation cannot hide behind `BlockEnv::default()`.
+    #[test]
+    fn test_host_block_env_accessors_forward_configured_values() {
+        use revm::context_interface::block::BlobExcessGasAndPrice;
+
+        const BLOB_HASH: B256 = B256::new([0xab; 32]);
+        let expected_difficulty = U256::from(0xdead_beef_u64);
+        let expected_blob_price = 12_345_u128;
+
+        let block = revm::context::BlockEnv {
+            difficulty: expected_difficulty,
+            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice {
+                excess_blob_gas: 1,
+                blob_gasprice: expected_blob_price,
+            }),
+            ..Default::default()
+        };
+        let mut ctx =
+            MegaContext::new(LazyCodeDatabase::default(), MegaSpecId::REX5).with_block(block);
+        // EIP-4844 blob_hash reads the transaction's versioned hashes, not the block env.
+        ctx.inner.tx.base.tx_type = 3; // TransactionType::Eip4844
+        ctx.inner.tx.base.blob_hashes = std::vec![BLOB_HASH];
+
+        assert_eq!(
+            Host::difficulty(&ctx),
+            expected_difficulty,
+            "Host::difficulty must forward the configured BlockEnv difficulty",
+        );
+        assert_eq!(
+            Host::blob_gasprice(&ctx),
+            U256::from(expected_blob_price),
+            "Host::blob_gasprice must forward the configured blob base fee",
+        );
+        assert_eq!(
+            Host::blob_hash(&ctx, 0),
+            Some(U256::from_be_bytes(BLOB_HASH.0)),
+            "Host::blob_hash(0) must return the configured versioned blob hash",
+        );
+        assert_eq!(
+            Host::blob_hash(&ctx, 1),
+            None,
+            "Host::blob_hash past the configured list must return None",
+        );
+
+        assert!(
+            ctx.volatile_data_tracker.borrow().get_block_env_accesses().has_block_env_access(),
+            "difficulty/blob accessors must mark block-env volatile access",
+        );
+    }
+
+    /// Pins `Host::load_account_code` / `Host::load_account_code_hash` against return-value
+    /// mutants (`None`, `Some(Default)`).
+    #[test]
+    fn test_host_load_account_code_and_hash_return_loaded_bytecode() {
+        const ADDR: Address = address!("00000000000000000000000000000000000000a1");
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x02, 0x01, 0x00]); // PUSH1 1 PUSH1 2 ADD STOP
+        let expected_hash = keccak256(&bytecode);
+
+        let db = LazyCodeDatabase::default().with_account_code(ADDR, bytecode.clone());
+        let mut ctx = MegaContext::new(db, MegaSpecId::REX5);
+
+        let loaded_code = Host::load_account_code(&mut ctx, ADDR)
+            .expect("load_account_code must return Some for a known contract");
+        assert_eq!(
+            loaded_code.data.as_ref(),
+            bytecode.as_ref(),
+            "load_account_code must return the account's bytecode bytes",
+        );
+
+        let loaded_hash = Host::load_account_code_hash(&mut ctx, ADDR)
+            .expect("load_account_code_hash must return Some for a known contract");
+        assert_eq!(
+            loaded_hash.data, expected_hash,
+            "load_account_code_hash must return the account's code hash",
+        );
+        assert_ne!(
+            loaded_hash.data,
+            B256::default(),
+            "code hash must not collapse to the Default/zero hash",
+        );
+    }
+
+    /// Pre-REX4 `inspect_account_delegated` walks the full EIP-7702 chain with cycle
+    /// detection. REX4+ resolves exactly one hop. Pinning multi-hop resolution on REX3
+    /// kills the `host.rs` REX4 gate mutant that forces the one-hop arm for every spec.
+    #[test]
+    fn test_inspect_account_delegated_pre_rex4_follows_multi_hop_chain() {
+        use revm::{context::JournalTr, database::InMemoryDB, state::AccountInfo};
+
+        const A: Address = address!("00000000000000000000000000000000000000a1");
+        const B: Address = address!("00000000000000000000000000000000000000a2");
+        const C: Address = address!("00000000000000000000000000000000000000a3");
+        let c_code = Bytes::from_static(&[0x5b, 0x00]); // JUMPDEST STOP
+
+        // Eager-code DB so pre-REX5 (load_code=false) still sees the 7702 designators.
+        let mut db = InMemoryDB::default();
+        let a_code = Bytecode::new_eip7702(B);
+        let b_code = Bytecode::new_eip7702(C);
+        let c_bytecode = Bytecode::new_raw(c_code.clone());
+        for (addr, code) in [(A, a_code), (B, b_code), (C, c_bytecode)] {
+            let hash = code.hash_slow();
+            db.insert_account_info(
+                addr,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 0,
+                    code_hash: hash,
+                    code: Some(code),
+                    account_id: None,
+                },
+            );
+        }
+
+        let mut journal = Journal::new(db);
+        let resolved = journal
+            .inspect_account_delegated(MegaSpecId::REX3, A)
+            .expect("multi-hop inspect must succeed on REX3");
+
+        let hydrated =
+            resolved.info.code.as_ref().expect("terminal account code must be present (eager DB)");
+        assert!(
+            !hydrated.is_eip7702(),
+            "REX3 recursive walk must land on the terminal non-delegating account C, not an \
+             intermediate EIP-7702 designator",
+        );
+        assert_eq!(
+            hydrated.original_bytes().as_ref(),
+            c_code.as_ref(),
+            "REX3 must follow A→B→C; a forced one-hop (REX4 mutant) would stop at B",
+        );
+    }
+
+    /// State-growth refund for same-TX SELFDESTRUCT counts only slots whose original value is
+    /// zero **and** present value is non-zero. A cleared slot (set then reset to zero) must not
+    /// contribute — killing the `&&` → `||` mutant that would count every original-zero slot.
+    #[test]
+    fn test_selfdestruct_state_growth_refund_ignores_cleared_slots() {
+        use revm::{
+            database::InMemoryDB,
+            state::{AccountInfo, AccountStatus, EvmStorageSlot, TransactionId},
+        };
+
+        const CREATED: Address = address!("00000000000000000000000000000000000000b1");
+        const BENEFICIARY: Address = address!("00000000000000000000000000000000000000b2");
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            CREATED,
+            AccountInfo {
+                balance: U256::from(1),
+                nonce: 1,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            },
+        );
+        db.insert_account_info(
+            BENEFICIARY,
+            AccountInfo {
+                balance: U256::from(1),
+                nonce: 0,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            },
+        );
+
+        let mut ctx = MegaContext::new(db, MegaSpecId::REX4)
+            .with_tx_runtime_limits(crate::EvmTxRuntimeLimits::no_limits());
+
+        // Seed the journal account as CreatedLocal (same-TX create) with two slots:
+        // - slot 1: original 0 → present 7  (counts toward refund)
+        // - slot 2: original 0 → present 0  (cleared; must NOT count)
+        {
+            let account = inspect_account(&mut ctx.inner.journaled_state, CREATED, false)
+                .expect("created account must load");
+            account.status |= AccountStatus::Created | AccountStatus::CreatedLocal;
+            let tid = TransactionId::ZERO;
+            account
+                .storage
+                .insert(U256::from(1), EvmStorageSlot::new_changed(U256::ZERO, U256::from(7), tid));
+            account
+                .storage
+                .insert(U256::from(2), EvmStorageSlot::new_changed(U256::ZERO, U256::ZERO, tid));
+        }
+
+        // Frame must exist: state-growth record/refund helpers no-op on an empty stack.
+        {
+            let mut limit = ctx.additional_limit.borrow_mut();
+            limit.push_empty_frame();
+            limit.state_growth.record_growth(10);
+        }
+
+        let _ = Host::selfdestruct(&mut ctx, CREATED, BENEFICIARY, false)
+            .expect("selfdestruct must succeed");
+
+        let growth = ctx.additional_limit.borrow().get_usage().state_growth;
+        // Refund = 1 (account) + 1 (only the non-zero present slot) → net 10 - 2 = 8.
+        // The || mutant would also count the cleared slot → refund 3 → net 7.
+        assert_eq!(
+            growth, 8,
+            "SELFDESTRUCT refund must be 1 + live new slots only (cleared original-zero \
+             slots must not count)",
+        );
+    }
 }

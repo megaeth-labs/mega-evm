@@ -981,6 +981,49 @@ mod tests {
     /// Pin known precompile addresses as true and a non-precompile as false under
     /// every MegaETH-relevant precompile table (`MINI_REX` / `REX` share the same
     /// Isthmus-era set for the classic 0x01-0x0a range plus KZG).
+    /// Direct pin of `MegaPrecompiles::set_spec` return value and rebuild behaviour.
+    ///
+    /// Kills cargo-mutants survivors that force the method to always return `false`,
+    /// always return `true`, or invert the `spec == self.spec` equality check.
+    ///
+    /// `MegaPrecompiles` is wired for contexts whose `Cfg::Spec = MegaSpecId`. `MegaContext`
+    /// itself stores `CfgEnv<OpSpecId>`, so the provider trait is exercised through a plain
+    /// revm `Context` with `CfgEnv<MegaSpecId>`.
+    #[test]
+    fn test_mega_precompiles_set_spec_return_value_and_rebuild() {
+        use revm::{
+            context::{BlockEnv, CfgEnv, Context, TxEnv},
+            database::EmptyDB,
+        };
+
+        type Ctx = Context<BlockEnv, TxEnv, CfgEnv<MegaSpecId>, EmptyDB>;
+
+        let mut precompiles = MegaPrecompiles::new_with_spec(MegaSpecId::MINI_REX);
+
+        // Same spec: must report no change and leave the table alone.
+        let changed_same =
+            PrecompileProvider::<Ctx>::set_spec(&mut precompiles, MegaSpecId::MINI_REX);
+        assert!(!changed_same, "set_spec(same) must return false — no rebuild needed");
+        assert_eq!(
+            precompiles.spec,
+            MegaSpecId::MINI_REX,
+            "set_spec(same) must leave the stored spec unchanged",
+        );
+
+        // Different spec: must report a change and rebuild.
+        let changed_diff = PrecompileProvider::<Ctx>::set_spec(&mut precompiles, MegaSpecId::REX5);
+        assert!(changed_diff, "set_spec(different) must return true — table was rebuilt");
+        assert_eq!(
+            precompiles.spec,
+            MegaSpecId::REX5,
+            "set_spec(different) must store the new spec",
+        );
+
+        // Idempotent second call with the new spec.
+        let changed_again = PrecompileProvider::<Ctx>::set_spec(&mut precompiles, MegaSpecId::REX5);
+        assert!(!changed_again, "set_spec(same after rebuild) must return false");
+    }
+
     #[test]
     fn test_precompiles_map_contains_known_and_unknown_addresses() {
         // Classic Ethereum precompiles present in every MegaETH table.

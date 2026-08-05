@@ -408,4 +408,81 @@ mod tests {
         let mut this = EvmState::default();
         merge_evm_state(&mut this, &other);
     }
+
+    /// Table-driven pin of `merge_account_status` (occupied-path status merge).
+    ///
+    /// Kills the five cargo-mutants survivors on the flag-stripping mask (`|` → `&`/`^`)
+    /// and the SelfDestructed∧Created clear (`&&` → `||`).
+    #[test]
+    fn test_merge_account_status_lattice() {
+        // (this_status, other_status, expected_status_bits_that_must_be_set,
+        //  expected_status_bits_that_must_be_clear)
+        let cases: &[(AccountStatus, AccountStatus, AccountStatus, AccountStatus)] = &[
+            // Local-only flags on `other` must be stripped before OR-merge.
+            (
+                AccountStatus::Touched,
+                AccountStatus::Touched |
+                    AccountStatus::CreatedLocal |
+                    AccountStatus::SelfDestructedLocal |
+                    AccountStatus::Cold,
+                AccountStatus::Touched,
+                AccountStatus::CreatedLocal |
+                    AccountStatus::SelfDestructedLocal |
+                    AccountStatus::Cold,
+            ),
+            // Cold on `this` is preserved; Cold on `other` is stripped so it cannot clear it.
+            (
+                AccountStatus::Cold | AccountStatus::Touched,
+                AccountStatus::Touched | AccountStatus::Created,
+                AccountStatus::Cold | AccountStatus::Touched | AccountStatus::Created,
+                AccountStatus::empty(),
+            ),
+            // SelfDestructed on `this` is cleared only when `other` carries Created.
+            (
+                AccountStatus::SelfDestructed | AccountStatus::Cold,
+                AccountStatus::Created | AccountStatus::CreatedLocal,
+                AccountStatus::Created | AccountStatus::Cold,
+                AccountStatus::SelfDestructed | AccountStatus::CreatedLocal,
+            ),
+            // Without Created on `other`, SelfDestructed on `this` must remain.
+            (
+                AccountStatus::SelfDestructed | AccountStatus::Touched,
+                AccountStatus::Touched,
+                AccountStatus::SelfDestructed | AccountStatus::Touched,
+                AccountStatus::empty(),
+            ),
+            // CreatedLocal alone on `other` must not survive the strip (kills `|` → `&` on the
+            // first mask arm, which would leave CreatedLocal in the residual).
+            (
+                AccountStatus::Touched,
+                AccountStatus::Created | AccountStatus::CreatedLocal,
+                AccountStatus::Touched | AccountStatus::Created,
+                AccountStatus::CreatedLocal,
+            ),
+            // SelfDestructedLocal alone on `other` must not survive (kills second `|` arm).
+            (
+                AccountStatus::Touched,
+                AccountStatus::Touched | AccountStatus::SelfDestructedLocal,
+                AccountStatus::Touched,
+                AccountStatus::SelfDestructedLocal,
+            ),
+        ];
+
+        for (i, (this_status, other_status, must_set, must_clear)) in cases.iter().enumerate() {
+            let mut this = EvmState::from_iter([(TEST_ADDRESS, account_with_status(*this_status))]);
+            let other = EvmState::from_iter([(TEST_ADDRESS, account_with_status(*other_status))]);
+            merge_evm_state(&mut this, &other);
+            let merged = this.get(&TEST_ADDRESS).unwrap().status;
+            assert_eq!(
+                merged & *must_set,
+                *must_set,
+                "case {i}: expected flags {must_set:?} set, got {merged:?}",
+            );
+            assert_eq!(
+                merged & *must_clear,
+                AccountStatus::empty(),
+                "case {i}: expected flags {must_clear:?} clear, got {merged:?}",
+            );
+        }
+    }
 }
