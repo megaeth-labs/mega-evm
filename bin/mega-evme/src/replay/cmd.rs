@@ -283,6 +283,16 @@ impl Cmd {
     fn validate_batch_args(&self) -> Result<()> {
         const MODE: &str = "batch replay (--tx-file / --block)";
 
+        // Genesis has no transactions and no parent to fork from. Without this
+        // the run would collect zero targets, emit nothing, and exit 0 — the
+        // block-0 rejection raised during replay never reaching the user.
+        if self.block == Some(0) {
+            return Err(ReplayError::Other(
+                "--block 0 cannot be replayed: the genesis block has no transactions \
+                 and no parent block to fork from"
+                    .to_string(),
+            ));
+        }
         if self.dump_fixture.is_some() {
             return Err(ReplayError::Other(format!(
                 "--dump-fixture is not supported by {MODE}; dump fixtures for a batch \
@@ -1149,6 +1159,19 @@ mod tests {
         // Batch validation rejects --dump-fixture first; either way both must not run.
         let message = cmd.validate().expect_err("both dump forms must be rejected").to_string();
         assert!(message.contains("--dump-fixture"), "unexpected rejection: {message}");
+    }
+
+    /// `--block 0` is rejected as input rather than replayed into an empty,
+    /// silent, exit-0 run.
+    #[test]
+    fn test_batch_rejects_block_zero() {
+        let err = parse(&["--block", "0"])
+            .expect("parse")
+            .validate()
+            .expect_err("genesis cannot be replayed");
+        let message = err.to_string();
+        assert!(message.contains("--block 0"), "message={message}");
+        assert!(message.contains("genesis"), "message={message}");
     }
 
     #[test]
