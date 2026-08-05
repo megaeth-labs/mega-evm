@@ -25,7 +25,6 @@ use std::{
 };
 
 use alloy_provider::layers::SharedCache;
-use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -41,9 +40,9 @@ use crate::{
 
 /// Clean-exit cache persistence handle.
 ///
-/// An `RpcCacheStore` may internally have nothing to persist — non-fork run,
-/// `--rpc.cache-size 0`, or `--rpc.no-cache-file`. In any of those cases
-/// `persist()` is a no-op. Callers do not and must not branch on whether
+/// An `RpcCacheStore` may internally have nothing to persist — a non-fork run,
+/// or `--rpc.no-cache-file`. In either case `persist()` is a no-op. Callers do
+/// not and must not branch on whether
 /// a given store is real or no-op; the whole point of this type is a single
 /// uniform persistence entry point.
 ///
@@ -254,7 +253,8 @@ fn acquire_exclusive_lock(target: &Path) -> std::io::Result<ExclusiveFileLock> {
     // truncate(false): the sidecar is only a flock target; keep any existing bytes.
     let file =
         OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&lock_path)?;
-    file.lock_exclusive()?;
+    // Blocking exclusive advisory lock.
+    file.lock()?;
     Ok(ExclusiveFileLock { _file: file })
 }
 
